@@ -81,12 +81,6 @@ void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_
                                 const float* expert_weights, const void* residual, void* output, int n_tokens,
                                 int d_model, int top_k, cudaStream_t stream = nullptr);
 
-// FP32-input variant for diagnostic IMP_GEMMA4_FP32_EXPERT_DOWN.
-// expert_output_fp32: [expanded, d_model] FP32 (down GEMM kept output in FP32).
-void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32, const int32_t* token_to_expanded,
-                                       const float* expert_weights, const void* residual, void* output,
-                                       int n_tokens, int d_model, int top_k, cudaStream_t stream = nullptr);
-
 // Fused weighted sum + FP16 output + optional residual add.
 // Combines expert weighted sum + residual add in one kernel. Only this fused
 // variant is used by run_moe_ffn; the older non-residual `moe_weighted_sum`

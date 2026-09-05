@@ -846,12 +846,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 experts_st_nvfp4 = false;
         }
         if (experts_st_nvfp4) {
-            IMP_LOG_INFO("MoE batch dequant + fp32_down buffers: skipped "
-                         "(ST-NVFP4 experts — CUTLASS grouped prefill needs neither)");
+            IMP_LOG_INFO(
+                "MoE batch dequant buffer: skipped "
+                "(ST-NVFP4 experts — CUTLASS grouped prefill does not need it)");
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
-            moe_.fp32_down_buf = nullptr;
-            moe_.fp32_down_buf_size = 0;
         } else
         // Batch dequant buffer: sized for a chunk of experts (L2-resident strategy).
         // We dequant a chunk of experts to FP16, then immediately GEMM while the
@@ -898,29 +897,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.batch_dequant_buf = nullptr;
                 moe_.batch_dequant_buf_size = 0;
             }
-            // Pre-allocate FP32 down-projection scratch (drops per-call
-            // cudaMallocAsync at executor_forward_moe.cu:1080). Worst-case sizing
-            // matches the per-call: expanded = max_tokens × top_k, d = d_model.
-            // Skipped if VRAM insufficient — forward pass falls back to lazy alloc.
-            {
-                size_t fp32_sz = static_cast<size_t>(max_tokens_) *
-                                 static_cast<size_t>(cfg.n_experts_active) *
-                                 static_cast<size_t>(d) * sizeof(float);
-                size_t free_bytes = 0, total_bytes = 0;
-                vram_budget_mem_get_info(&free_bytes, &total_bytes);
-                constexpr size_t kReserve = 256ULL * 1024 * 1024;
-                if (fp32_sz > 0 && free_bytes > fp32_sz + kReserve) {
-                    moe_.fp32_down_buf = vram_alloc(vram_alloc_, fp32_sz, "moe_fp32_down");
-                    if (moe_.fp32_down_buf) {
-                        moe_.fp32_down_buf_size = fp32_sz;
-                        IMP_LOG_INFO("MoE fp32_down scratch: %.2f MiB",
-                                     fp32_sz / (1024.0 * 1024.0));
-                    } else {
-                        moe_.fp32_down_buf = nullptr;
-                        moe_.fp32_down_buf_size = 0;
-                    }
-                }
-            }
+            // A max_tokens x top_k x d_model FP32 "moe_fp32_down" scratch was
+            // allocated here for the Gemma-4 fp32_expert_down bisect flag,
+            // which had no writer since #319 (AUDIT_arch_2026 G-7): VRAM held
+            // by every GGUF MoE load for a path that could not run.
         } else {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
             moe_.batch_dequant_buf = nullptr;

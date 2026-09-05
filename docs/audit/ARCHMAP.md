@@ -41,8 +41,10 @@ vision ──▶ compute/model        lora ──▶ runtime/model
   prior audit settled, do NOT split into runner classes), pre-dequant phases.
 - **runtime** — `Engine` + scheduler (`engine_scheduler.cpp`), CUDA-graph decode
   (`cuda_graph.cu`, `engine_graph_decode.cpp`), spec-ngram, `RuntimeConfig`.
-- **api** — `imp_api.cpp` C-ABI boundary (all entry points wrap try/catch →
-  `ImpError`; nothing throws across the ABI).
+- **api** — `imp_api.cpp` C-ABI boundary (every `ImpError` entry point runs
+  under `imp::api_guard()` or an inline try/catch; nothing throws across the
+  ABI). Gated by `tools/check_api_guard.py` since AUDIT_arch_2026 G-10, when 4
+  of 23 had no catch and this line said "all".
 - **tools/imp-server** — httplib server, `handlers.cpp` (~4600 LOC, OpenAI +
   Anthropic), `BatchingEngine` (the HTTP→GPU bridge).
 

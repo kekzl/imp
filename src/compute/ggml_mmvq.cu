@@ -258,38 +258,6 @@ static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict_
     yb->s = __float2half(d * sum);
 }
 
-// FP32 input variant: quantizes from FP32 instead of FP16.
-// This matches llama's precision where the residual stream is FP32.
-static __global__ void quantize_fp32_to_q8_1_ggml_kernel(const float* __restrict__ x,
-                                                         ggml_block_q8_1* __restrict__ y, int K) {
-    const int block_id = blockIdx.x * blockDim.x + threadIdx.x;
-    const int num_blocks = K / QK8_1;
-    if (block_id >= num_blocks)
-        return;
-
-    const float* xb = x + block_id * QK8_1;
-    ggml_block_q8_1* yb = y + block_id;
-
-    float amax = 0.0f;
-#pragma unroll
-    for (int i = 0; i < QK8_1; ++i) {
-        amax = fmaxf(amax, fabsf(xb[i]));
-    }
-
-    const float d = amax / 127.0f;
-    const float id = (d != 0.0f) ? (127.0f / amax) : 0.0f;
-
-    float sum = 0.0f;
-#pragma unroll
-    for (int i = 0; i < QK8_1; ++i) {
-        int8_t q = (int8_t)roundf(xb[i] * id);
-        yb->qs[i] = q;
-        sum += (float)q;
-    }
-
-    yb->d = __float2half(d);
-    yb->s = __float2half(d * sum);
-}
 
 // -------------------------------------------------------------------------
 // Q5_K: 256 elements per block, 176 bytes
@@ -559,31 +527,6 @@ void ggml_mmvq_q5_1(const void* W, const half* x, half* y, int M, int N, int K, 
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<MMVQTag::Q5_1><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-}
-
-// FP32 input variants — quantize FP32→Q8_1 (matches llama's FP32 residual stream)
-void ggml_mmvq_q4k_f32(const void* W, const float* x, half* y, int M, int N, int K, void* scratch,
-                       size_t scratch_size, cudaStream_t stream) {
-    const int num_q8_blocks = (K / QK8_1);
-    const int total_q8_blocks = M * num_q8_blocks;
-    size_t need = (size_t)total_q8_blocks * sizeof(ggml_block_q8_1);
-    if (need > scratch_size)
-        return;
-    ggml_block_q8_1* x_q8 = (ggml_block_q8_1*)scratch;
-
-    {
-        const int threads = 256;
-        const int nblk = (total_q8_blocks + threads - 1) / threads;
-        quantize_fp32_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-    {
-        constexpr int nwarps = 4;
-        dim3 block(WARP_SIZE, nwarps);
-        dim3 grid(N, M);
-        mmvq_kernel<MMVQTag::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }

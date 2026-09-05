@@ -28,6 +28,15 @@ there instead of retelling it.
 
 ### Changed
 
+- Six writer-less `ModelConfig::Overrides::Gemma4` bring-up flags and their
+  branches are gone (AUDIT_arch_2026 dispatch #15, G-7, #1917): the GGML
+  per-token MoE prefill arm (`GEMMA4_GGML`), the FP32 attention-output arm, the
+  FP32 expert-down scatter and the `max_tokens x top_k x d_model` FP32
+  "moe_fp32_down" scratch every GGUF MoE load allocated for it,
+  `Gemma4NoGraphs`, `no_decode_fast`, `no_post_ffw_1`; `force_mmvq` stays.
+  `build_config` / `load_model_into_state` lose the per-load JSON `overrides`
+  object every caller passed empty (G-12). Behaviour of every reachable path
+  unchanged; -570 lines.
 - `tools/imp-server/batching_engine.h` no longer includes `runtime/engine.h`. It
   used one symbol from it (`imp::Request`, which is in `runtime/request.h`) and
   reached 15 TUs through `handlers.h`, so the whole imp-server subtree rebuilt on
@@ -69,6 +78,17 @@ there instead of retelling it.
 
 ### Fixed
 
+- Config precedence and dead flags (AUDIT_arch_2026 dispatch #15, G-3 / G-4 /
+  G-5 / G-7 / G-8 / G-10 / G-12, #1917): `--max-seq-len` / a C-API value now
+  wins over `runtime.max_seq_len` (the key overwrote it, with a normal-looking
+  log line); `imp_context_create` refuses the 5 non-KV `ImpDType` values and any
+  out-of-range integer with `IMP_ERROR_INVALID_ARG` (they mapped to a QType the
+  FP16 kernel then read); a GGUF weight tensor stored as Q8_1 (an activation
+  format with no dequant, kernel or registry entry) refuses the file at parse;
+  every `ImpError` entry point is guarded (`imp::api_guard`, 4 were naked) and
+  `tools/check_api_guard.py` gates it (23/23, selftest 10/10). Tests:
+  `CApiContract` x3, `RuntimeConfigTest.MaxSeqLenBindsAndYieldsToTheCliValue`,
+  `GgufFaultInjection.Q8_1WeightTypeIsRefusedAtParse`.
 - GEMM registry cut to its 10 produced keys, and the dead kernel tree around
   it (AUDIT_arch_2026 dispatch #8, A1-1 / A1-2 / A1-4 / A1-5 / A1-6 / A1-7 /
   A1-8, #1916): the 9 registrations no dispatch site constructed (FP8, NVFP4

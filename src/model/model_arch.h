@@ -69,6 +69,13 @@ int kv_pin_context_cost_factor(ModelArch arch, QType pinned);
 // kv_pin_context_cost_factor's question.
 bool kv_dtype_is_explicit_pin(QType cli_dtype, const std::string& conf_dtype);
 
+// max_seq_len from its two operator surfaces: `preset` is what --max-seq-len
+// or a C-API embedder already put into EngineConfig, `file_key` is
+// `runtime.max_seq_len`. The rule config.h states for every such pair, "a CLI
+// value wins over the file": preset > 0 wins, else the key, else 0 (auto).
+// The resolver used to let the key overwrite the flag (AUDIT_arch_2026 G-5).
+int max_seq_len_operator_value(int preset, int file_key);
+
 // C API enum value for this architecture.
 int model_arch_c_api_id(ModelArch arch);
 

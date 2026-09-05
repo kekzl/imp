@@ -33,7 +33,8 @@ Code path exists, no gate proves it:
 - **Qwen3.6-35B-A3B vision**: shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and
   Qwen3-VL-4B-Instruct, never a 35B-A3B checkpoint.
 - **Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K**: dequant paths, no gate reads such a checkpoint. Q4_0,
-  Q8_0, Q4_K, Q5_K and Q6_K have one.
+  Q8_0, Q4_K, Q5_K and Q6_K have one. **Q8_1** (GGUF wire type 9, llama.cpp's activation
+  format) has no weight path at all and refuses the file at parse.
 - **`/v1/rerank` against llama.cpp**: cross-check opt-in behind `COMPARE_URL=`; default
   `make test-rerank` does not run it.
 - **`/admin/suspend`, `/admin/resume`, `server.model_swap`**: implemented, ungated.

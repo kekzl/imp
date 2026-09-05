@@ -1033,23 +1033,14 @@ private:
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
     // Gemma-4 ggml MMVQ per-token prefill: processes tokens individually via
-    // ggml Q4_K×Q8_1 dp4a kernels with FP32 norm output for full-precision
-    // routing. Writes directly to `h` (per-token weighted sum + residual).
-    // Returns true when path was taken; caller jumps to moe_after_experts.
-    bool try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
-                                         int top_k, QType up_qtype, float eps,
-                                         const MoeRoutingResult& routing, const Tensor& no,
-                                         const Tensor& norm_w, Tensor& h, const Tensor& r,
-                                         bool moe_use_fp32_residual, bool& residual_fused);
     // FP16 batch dequant + cublasGemmGroupedBatchedEx prefill: dequants all
     // experts to FP16 in one shot, runs a single grouped GEMM per projection.
     // One D2H sync per layer for offsets (unavoidable for grouped GEMM API).
     // Falls through to scatter (caller's responsibility); returns true when
     // path was taken.
-    bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
-                                        int ne, int expanded, bool non_gated_experts,
-                                        QType up_qtype, const MoeRoutingResult& routing,
-                                        bool fp32_down_active, void*& fp32_down_buf);
+    bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff, int ne,
+                                        int expanded, bool non_gated_experts, QType up_qtype,
+                                        const MoeRoutingResult& routing);
     // FP8 batch prefill: Q6_K → FP8 dequant, per-expert FP16→FP8 quantize,
     // cuBLAS FP8 grouped GEMM → FP16. Falls back to FP16 batch when scales
     // unavailable. Used when FP16 batch buffer can't fit but FP8 can.

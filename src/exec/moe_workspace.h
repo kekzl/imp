@@ -38,12 +38,6 @@ struct MoEWorkspace {
     void* batch_dequant_buf = nullptr;
     size_t batch_dequant_buf_size = 0;
 
-    // FP32 scratch for MoE prefill down-projection when fp32_down_active=true.
-    // Sized for max_tokens × top_k × d_model × sizeof(float). Pre-allocated once
-    // to eliminate per-call cudaMallocAsync at executor_forward_moe.cu:1080.
-    void* fp32_down_buf = nullptr;
-    size_t fp32_down_buf_size = 0;
-
     // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the
     // key names a path. [n_layers * n_experts] device counters, incremented once
     // per (token, k) routing decision. Answers "how skewed is expert selection",

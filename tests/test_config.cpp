@@ -188,6 +188,26 @@ TEST(RuntimeConfigTest, KvDtypeIsExplicitPin) {
     EXPECT_FALSE(kv_dtype_is_explicit_pin(QType::F16, "FP8"));
 }
 
+// runtime.max_seq_len binds, and yields to a value --max-seq-len / a C-API
+// embedder already put into EngineConfig (config.h: "a CLI value wins over the
+// file"). The resolver let the key overwrite the flag until AUDIT_arch_2026
+// G-5, with a log line that read like normal resolution.
+TEST(RuntimeConfigTest, MaxSeqLenBindsAndYieldsToTheCliValue) {
+    RuntimeConfig cfg;
+    EXPECT_EQ(cfg.runtime.max_seq_len, 0);
+    set_(cfg, {"runtime.max_seq_len=4096"});
+    EXPECT_EQ(cfg.runtime.max_seq_len, 4096);
+
+    // --max-seq-len 8192 with runtime.max_seq_len = 4096 resolves to 8192.
+    EXPECT_EQ(max_seq_len_operator_value(8192, cfg.runtime.max_seq_len), 8192);
+    // Nothing on the CLI: the key fills it.
+    EXPECT_EQ(max_seq_len_operator_value(0, cfg.runtime.max_seq_len), 4096);
+    EXPECT_EQ(max_seq_len_operator_value(-1, 4096), 4096);
+    // Neither surface set: 0 stays the auto-resolver's signal.
+    EXPECT_EQ(max_seq_len_operator_value(0, 0), 0);
+    EXPECT_EQ(max_seq_len_operator_value(0, -5), 0);
+}
+
 // The NO-HINT FP8-KV gate (kv_cache.dtype=auto on checkpoints without a
 // kv_cache_quant_algo hint — i.e. every GGUF). Stricter bar than the hint list:
 // the family must gate ~PPL-neutral at 16k context. See model.cpp for the

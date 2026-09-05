@@ -514,7 +514,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         }
         printf("[auto-load] Loading %s...\n", requested_model.c_str());
         fflush(stdout);
-        std::string error = load_model_into_state(state, path, json::object());
+        std::string error = load_model_into_state(state, path);
         if (!error.empty()) {
             res.status = 500;
             json err = {{"error", {{"message", "Auto-load failed: " + error}, {"type", "server_error"}}}};
@@ -561,14 +561,14 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
             fflush(stdout);
             // load_model_into_state owns the teardown of the previous model and
             // builds a fresh batching engine, so the paused worker goes with it.
-            std::string error = load_model_into_state(state, path, json::object());
+            std::string error = load_model_into_state(state, path);
             if (!error.empty()) {
                 // The previous model is already gone at this point. Put it back,
                 // or the server is left serving nothing — that (not the swap
                 // itself) is what made the historical auto-swap unsafe.
                 std::string restore = "not attempted";
                 if (!previous_path.empty()) {
-                    std::string rerr = load_model_into_state(state, previous_path, json::object());
+                    std::string rerr = load_model_into_state(state, previous_path);
                     restore = rerr.empty() ? "previous model restored" : "restore ALSO failed: " + rerr;
                 }
                 printf("[model-swap] failed: %s (%s)\n", error.c_str(), restore.c_str());
@@ -602,32 +602,26 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
     return false;
 }
 
-int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
-                           const nlohmann::json& overrides) {
-    const int cli_or_conf =
-        args.max_batch_size > 0 ? args.max_batch_size : runtime_cfg.runtime.max_batch_size;
-    return overrides.value("max_batch_size", cli_or_conf);
+int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg) {
+    return args.max_batch_size > 0 ? args.max_batch_size : runtime_cfg.runtime.max_batch_size;
 }
 
-// Build ImpConfig from default args + optional JSON overrides.
+// Build ImpConfig from the server args + imp.conf.
 // Engine auto-detects max_seq_len, max_batch_size, KV dtype, FP8 prefill, NVFP4 decode.
 ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
-                       const std::string& model_path, const json& overrides, ImpModel model = nullptr) {
+                       const std::string& model_path) {
     (void)model_path;
-    (void)model;
     ImpConfig config = imp_config_default();
 
     config.device_id = args.device;
 
     // max_seq_len / max_batch_size: 0 = auto-detect in engine.
-    // Precedence for the batch size: per-request JSON override > --max-batch CLI
-    // flag > [runtime] max_batch_size from imp.conf > 0 (engine auto-sizes from
-    // the model's weight footprint; a >20 GiB MoE auto-picks 1). The imp.conf
-    // value used to be dropped here — only the CLI arg seeded sizing — so
-    // `[runtime] max_batch_size` silently affected nothing but the decode cap.
-    if (overrides.contains("max_seq_len"))
-        config.max_seq_len = overrides.value("max_seq_len", 0);
-    config.max_batch_size = resolve_max_batch_size(args, runtime_cfg, overrides);
+    // Precedence for the batch size: --max-batch CLI flag > [runtime]
+    // max_batch_size from imp.conf > 0 (engine auto-sizes from the model's
+    // weight footprint; a >20 GiB MoE auto-picks 1). The imp.conf value used
+    // to be dropped here — only the CLI arg seeded sizing — so `[runtime]
+    // max_batch_size` silently affected nothing but the decode cap.
+    config.max_batch_size = resolve_max_batch_size(args, runtime_cfg);
 
     // Hard per-process VRAM cap for multi-server-per-GPU deployments.
     // Precedence: --vram-budget CLI flag > [runtime] vram_budget_mb from
@@ -641,39 +635,31 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     if (args.no_cuda_graphs)
         config.enable_cuda_graphs = 0;
 
-    // KV cache dtype: explicit overrides only (engine auto-detects FP8 on sm_90+)
-    bool kv_fp8 = overrides.value("kv_fp8", args.kv_fp8);
-    bool kv_int8 = overrides.value("kv_int8", args.kv_int8);
-    bool kv_int4 = overrides.value("kv_int4", args.kv_int4);
-    bool kv_nvfp4 = overrides.value("kv_nvfp4", args.kv_nvfp4);
-    bool kv_mxfp4 = overrides.value("kv_mxfp4", args.kv_mxfp4);
-    if (kv_fp8)
+    // KV cache dtype: explicit CLI pins only (engine resolves `auto` itself)
+    if (args.kv_fp8)
         config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
-    if (kv_int8)
+    if (args.kv_int8)
         config.kv_cache_dtype = IMP_DTYPE_INT8;
-    if (kv_int4)
+    if (args.kv_int4)
         config.kv_cache_dtype = IMP_DTYPE_INT4;
-    if (kv_nvfp4)
+    if (args.kv_nvfp4)
         config.kv_cache_dtype = IMP_DTYPE_NVFP4;
-    if (kv_mxfp4)
+    if (args.kv_mxfp4)
         config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
 
-    int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);
     // Default chunk = -1 → engine resolver picks per-arch default (512 for
     // full-attention + FP16/FP8 KV, 0 for Gemma-4 / hybrid / sub-byte KV).
     // Pass 0 via --prefill-chunk-size 0 to force single-chunk for all archs.
-    config.prefill_chunk_size = chunk;
+    config.prefill_chunk_size = args.prefill_chunk_size;
 
-    int nvfp4 = overrides.value("decode_nvfp4", args.decode_nvfp4);
-    config.use_nvfp4_decode = nvfp4;
+    config.use_nvfp4_decode = args.decode_nvfp4;
 
     if (args.mxfp4_prefill)
         config.use_mxfp4_prefill = 1;
     if (args.dual_path_quant)
         config.dual_path_quant = 1;
-    int min_kv = overrides.value("min_kv_tokens", args.min_kv_tokens);
-    if (min_kv > 0)
-        config.min_kv_tokens = min_kv;
+    if (args.min_kv_tokens > 0)
+        config.min_kv_tokens = args.min_kv_tokens;
 
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
@@ -698,7 +684,7 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
 
 // Load a model into ServerState. Caller must hold state.mtx.
 // Returns error message on failure, empty string on success.
-std::string load_model_into_state(ServerState& state, const std::string& path, const json& config_overrides) {
+std::string load_model_into_state(ServerState& state, const std::string& path) {
     // GET /ready answers 503 "swapping" for the whole of this function: the
     // resident engine goes away on the next lines and the new one is not up
     // until the last. Cleared on every exit path.
@@ -744,8 +730,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     // `--max-batch 1`, and reading only the flag left auto declining on it
     // (found by a peer conformance run, 2026-08-29: 88.1 -> 117.2 tok/s left
     // on the table for exactly that configuration).
-    state.resolved_max_batch_size =
-        resolve_max_batch_size(state.default_args, state.runtime_config, config_overrides);
+    state.resolved_max_batch_size = resolve_max_batch_size(state.default_args, state.runtime_config);
     int mtp_k = imp::tools::mtp_auto_request_k(state.runtime_config, state.resolved_max_batch_size);
     ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
                                      &state.model);
@@ -767,8 +752,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     // picks it up. The server may load a model at runtime (auto-load on first
     // request); each load rebuilds the Engine and consumes the pending slot.
     imp::set_pending_runtime_config(state.runtime_config);
-    ImpConfig config = build_config(state.default_args, state.runtime_config, path, config_overrides,
-                                    state.model);
+    ImpConfig config = build_config(state.default_args, state.runtime_config, path);
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {
         std::string msg = std::string("Failed to create context: ") + imp_error_string(err);
@@ -803,7 +787,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     state.tok = state.model->model->tokenizer();
     const imp::ChatTemplate& engine_tpl = state.ctx->engine->chat_template();
 
-    std::string chat_tpl_name = config_overrides.value("chat_template", state.default_args.chat_template);
+    std::string chat_tpl_name = state.default_args.chat_template;
     if (chat_tpl_name == "none") {
         // No template
     } else if (chat_tpl_name != "auto") {

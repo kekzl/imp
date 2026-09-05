@@ -339,6 +339,12 @@ int kv_pin_context_cost_factor(ModelArch arch, QType pinned) {
     }
 }
 
+int max_seq_len_operator_value(int preset, int file_key) {
+    if (preset > 0)
+        return preset;
+    return file_key > 0 ? file_key : 0;
+}
+
 bool kv_dtype_is_explicit_pin(QType cli_dtype, const std::string& conf_dtype) {
     if (cli_dtype != QType::F16)
         return true;  // the resolver only ever runs while this is still F16

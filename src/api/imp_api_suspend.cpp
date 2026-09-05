@@ -44,8 +44,10 @@ ImpError imp_weights_snapshot_capture(ImpModel model, size_t host_ram_headroom_m
 ImpError imp_weights_snapshot_arm(ImpWeightSnapshot snap) {
     if (!snap || !snap->snap)
         return IMP_ERROR_INVALID_ARG;
-    imp::weight_snapshot_arm(snap->snap.get());
-    return IMP_SUCCESS;
+    return imp::api_guard("imp_weights_snapshot_arm", [&]() -> ImpError {
+        imp::weight_snapshot_arm(snap->snap.get());
+        return IMP_SUCCESS;
+    });
 }
 
 void imp_weights_snapshot_free(ImpWeightSnapshot snap) {
@@ -65,24 +67,26 @@ int imp_weights_snapshot_hits(ImpWeightSnapshot snap) {
 }
 
 ImpError imp_gpu_release(int device_reset) {
-    cudaError_t sync = cudaDeviceSynchronize();
-    if (sync != cudaSuccess) {
-        IMP_LOG_WARN("imp_gpu_release: device sync failed (%s) — continuing", cudaGetErrorString(sync));
-        (void)cudaGetLastError();
-    }
-    imp::trim_device_mempool();
-    if (device_reset) {
-        // Free + re-arm every lazily-created module-static CUDA resource
-        // (cuBLAS handles, workspaces, scratch) while the context is still
-        // valid — their `if (!ptr)` guards would otherwise hand out dangling
-        // handles to the next engine after the reset.
-        imp::reset_static_cuda_state();
-        cudaError_t r = cudaDeviceReset();
-        if (r != cudaSuccess) {
-            IMP_LOG_ERROR("imp_gpu_release: cudaDeviceReset failed: %s", cudaGetErrorString(r));
-            return IMP_ERROR_CUDA;
+    return imp::api_guard("imp_gpu_release", [&]() -> ImpError {
+        cudaError_t sync = cudaDeviceSynchronize();
+        if (sync != cudaSuccess) {
+            IMP_LOG_WARN("imp_gpu_release: device sync failed (%s) — continuing", cudaGetErrorString(sync));
+            (void)cudaGetLastError();
         }
-        IMP_LOG_INFO("imp_gpu_release: CUDA primary context reset — process holds no GPU resources");
-    }
-    return IMP_SUCCESS;
+        imp::trim_device_mempool();
+        if (device_reset) {
+            // Free + re-arm every lazily-created module-static CUDA resource
+            // (cuBLAS handles, workspaces, scratch) while the context is still
+            // valid — their `if (!ptr)` guards would otherwise hand out dangling
+            // handles to the next engine after the reset.
+            imp::reset_static_cuda_state();
+            cudaError_t r = cudaDeviceReset();
+            if (r != cudaSuccess) {
+                IMP_LOG_ERROR("imp_gpu_release: cudaDeviceReset failed: %s", cudaGetErrorString(r));
+                return IMP_ERROR_CUDA;
+            }
+            IMP_LOG_INFO("imp_gpu_release: CUDA primary context reset — process holds no GPU resources");
+        }
+        return IMP_SUCCESS;
+    });
 }

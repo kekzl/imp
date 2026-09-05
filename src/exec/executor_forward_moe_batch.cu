@@ -470,11 +470,9 @@ bool GraphExecutor::try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream
     return true;
 }
 
-bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d,
-                                                   int eff, int ne, int expanded,
-                                                   bool non_gated_experts, QType up_qtype,
-                                                   const MoeRoutingResult& routing,
-                                                   bool fp32_down_active, void*& fp32_down_buf) {
+bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                                   int ne, int expanded, bool non_gated_experts,
+                                                   QType up_qtype, const MoeRoutingResult& routing) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
@@ -496,16 +494,6 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
     char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
     char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
-
-    if (fp32_down_active) {
-        size_t fp32_bytes = static_cast<size_t>(expanded) * d * sizeof(float);
-        // Prefer the pre-allocated persistent scratch (avoids per-call cudaMallocAsync).
-        if (moe_.fp32_down_buf && moe_.fp32_down_buf_size >= fp32_bytes) {
-            fp32_down_buf = moe_.fp32_down_buf;
-        } else {
-            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
-        }
-    }
 
     // MoE IMMA prefill (gemm.moe_imma_prefill): Q8_0/Q4_K expert tensors run
     // the grouped INT8 IMMA kernel - fused dequant, one launch over all
@@ -567,183 +555,10 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     debug_dump("L0_moe_swiglu_out", moe_.expert_swiglu.data, expanded, eff);
 
     char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-    char* down_target =
-        fp32_down_active ? static_cast<char*>(fp32_down_buf) : expert_down_base;
-    QType down_out_dtype = fp32_down_active ? QType::F32 : QType::F16;
-    batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype, down_act, down_target,
-                       eff, d, down_out_dtype);
-    if (!fp32_down_active) debug_dump("L0_moe_down_out", moe_.expert_down.data, expanded, d);
+    batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype, down_act, expert_down_base, eff, d,
+                       QType::F16);
+    debug_dump("L0_moe_down_out", moe_.expert_down.data, expanded, d);
 
-    return true;
-}
-
-// Persistent Q8_1 scratch + FP32 norm scratch for the ggml MMVQ prefill path
-// (lazily resized below; file-scope so the reset hook can free them).
-static void* s_q8_scratch = nullptr;
-static size_t s_q8_scratch_size = 0;
-static float* s_norm_fp32 = nullptr;
-static int s_norm_fp32_d = 0;
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void moe_batch_reset_static_cuda_state() {
-    if (s_q8_scratch) {
-        (void)cudaFree(s_q8_scratch);
-        s_q8_scratch = nullptr;
-    }
-    s_q8_scratch_size = 0;
-    if (s_norm_fp32) {
-        (void)cudaFree(s_norm_fp32);
-        s_norm_fp32 = nullptr;
-    }
-    s_norm_fp32_d = 0;
-}
-
-// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
-namespace {
-IMP_REGISTER_CUDA_STATIC_RESET(moe_batch_reset_static_cuda_state);
-}  // namespace
-
-bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d,
-                                                    int eff, int top_k, QType up_qtype, float eps,
-                                                    const MoeRoutingResult& routing,
-                                                    const Tensor& no, const Tensor& norm_w,
-                                                    Tensor& h, const Tensor& r,
-                                                    bool moe_use_fp32_residual,
-                                                    bool& residual_fused) {
-    const auto& cfg = model_->config();
-    const auto& ly = model_->layer(layer);
-
-    if (layer == 0)
-        IMP_LOG_INFO("MoE prefill: ggml MMVQ per-token path (n=%d, top_k=%d)", n, top_k);
-
-    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);
-    half* up_buf = static_cast<half*>(moe_.expert_up.data);
-    half* down_buf = static_cast<half*>(moe_.expert_down.data);
-
-    size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
-    size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
-    size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
-
-    // Persistent Q8_1 scratch + FP32 norm scratch (file-scope above, resized lazily).
-    size_t q8_needed = std::max(static_cast<size_t>((d + 31) / 32) * 36,
-                                static_cast<size_t>((eff + 31) / 32) * 36);
-    if (!s_q8_scratch || s_q8_scratch_size < q8_needed) {
-        if (s_q8_scratch) cudaFree(s_q8_scratch);
-        cudaMalloc(&s_q8_scratch, q8_needed);
-        s_q8_scratch_size = q8_needed;
-    }
-    if (!s_norm_fp32 || s_norm_fp32_d < d) {
-        if (s_norm_fp32) cudaFree(s_norm_fp32);
-        cudaMalloc(&s_norm_fp32, static_cast<size_t>(d) * sizeof(float));
-        s_norm_fp32_d = d;
-    }
-
-    // M2 from the phase-5 review §2.2 (archived in #604): batch the per-token expert-
-    // index D2H + sync into a single prefetch at function entry. Reduces
-    // 2 * n syncs (one per token, three GEMVs each) down to ONE sync per
-    // layer call. Restores the prefill graph-capture story up to (but not
-    // including) the grouped-mmvq kernel work that would eliminate the
-    // remaining sync - see follow-up: replacing this function with a
-    // device-indexed grouped mmvq lets the whole layer capture cleanly.
-    //
-    // top_k is bounded by FFN active-expert count (max 32 per kernel
-    // launch guard at line ~2154 in the old per-token form). Use a
-    // std::vector since n*top_k can exceed the old 32-entry stack array.
-    moe_host_args_capture_guard(stream);
-    std::vector<int32_t> h_all_experts(static_cast<size_t>(n) * top_k);
-    cudaMemcpyAsync(h_all_experts.data(), routing.expert_indices.data,
-                    static_cast<size_t>(n) * top_k * sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-
-    for (int t = 0; t < n; t++) {
-        const float* tok_weights = static_cast<const float*>(routing.expert_weights.data) +
-                                   static_cast<int64_t>(t) * top_k;
-
-        const float* tok_norm_f32 = s_norm_fp32;
-        if (fp32_accum_buf_ != nullptr) {
-            int64_t tok_shape[2] = {1, static_cast<int64_t>(d)};
-            Tensor fp32_tok(static_cast<float*>(fp32_hidden_.data) + static_cast<int64_t>(t) * d,
-                            QType::F32, 2, tok_shape, true);
-            rmsnorm_fp32_to_fp32(fp32_tok, norm_w, s_norm_fp32, 1, d, eps, stream, norm_w_off_);
-        } else {
-            tok_norm_f32 = nullptr;
-        }
-
-        // Per-token expert IDs: read from the pre-fetched host array (no D2H,
-        // no sync). Old form: stack `int32_t h_experts[32]` + per-token
-        // cudaMemcpyAsync + cudaStreamSynchronize - M2 batched both above.
-        const int32_t* h_experts = h_all_experts.data() + static_cast<size_t>(t) * top_k;
-
-        auto do_mmvq = [&](const uint8_t* w, half* out, QType qt, int rows, int cols) {
-            if (tok_norm_f32) {
-                ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, rows, cols, s_q8_scratch,
-                                  s_q8_scratch_size, stream);
-                return;
-            }
-            const half* tok_norm_fp16 = static_cast<const half*>(no.data) +
-                                        static_cast<int64_t>(t) * d;
-            switch (qt) {
-                case QType::Q8_0:
-                    ggml_mmvq_q8_0(w, tok_norm_fp16, out, 1, rows, cols, s_q8_scratch,
-                                   s_q8_scratch_size, stream);
-                    break;
-                case QType::Q4_K:
-                default:
-                    ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, rows, cols, s_q8_scratch,
-                                  s_q8_scratch_size, stream);
-                    break;
-            }
-        };
-        for (int k = 0; k < top_k; k++) {
-            int32_t eid = h_experts[k];
-            const uint8_t* gate_w = static_cast<const uint8_t*>(ly.expert_gate_packed.data) +
-                                    static_cast<size_t>(eid) * gate_stride;
-            const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data) +
-                                  static_cast<size_t>(eid) * up_stride;
-            do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff,
-                    ly.expert_gate_packed.qtype, eff, d);
-            do_mmvq(up_w, up_buf + static_cast<int64_t>(k) * eff, up_qtype, eff, d);
-        }
-
-        half* swiglu_buf = static_cast<half*>(moe_.expert_swiglu.data);
-        apply_expert_activation(gate_buf, up_buf, swiglu_buf, /*non_gated=*/false, top_k, eff,
-                                compute_dtype_, cfg.ffn_activation, stream);
-
-        for (int k = 0; k < top_k; k++) {
-            int32_t eid = h_experts[k];
-            const uint8_t* w_down = static_cast<const uint8_t*>(ly.expert_down_packed.data) +
-                                    static_cast<size_t>(eid) * down_stride;
-            half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
-            half* out_k = down_buf + static_cast<int64_t>(k) * d;
-            switch (ly.expert_down_packed.qtype) {
-                case QType::Q5_K:
-                    ggml_mmvq_q5k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                  stream); break;
-                case QType::Q8_0:
-                    ggml_mmvq_q8_0(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                   stream); break;
-                case QType::Q5_1:
-                    ggml_mmvq_q5_1(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                   stream); break;
-                case QType::Q4_K:
-                default:
-                    ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                  stream); break;
-            }
-        }
-
-        half* h_tok = static_cast<half*>(h.data) + static_cast<int64_t>(t) * d;
-        bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-        const void* res_ptr =
-            (has_shared_expert || moe_use_fp32_residual)
-                ? nullptr
-                : static_cast<const void*>(static_cast<const half*>(r.data) +
-                                           static_cast<int64_t>(t) * d);
-        moe_weighted_sum_residual(down_buf, tok_weights, res_ptr, h_tok, d, top_k, stream);
-    }
-    if (ly.w_up_shared.data == nullptr && !moe_use_fp32_residual)
-        residual_fused = true;
     return true;
 }
 
@@ -1396,8 +1211,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     if (model_->profile().is_gemma4) {
         sanitize_fp16(static_cast<__half*>(sh_down.data), static_cast<int64_t>(n) * d, stream);
     }
-    if (model_->profile().is_gemma4 && ly.ffn_post_norm_1.data != nullptr &&
-        !cfg.overrides.gemma4.no_post_ffw_1) {
+    if (model_->profile().is_gemma4 && ly.ffn_post_norm_1.data != nullptr) {
         rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
     }
 

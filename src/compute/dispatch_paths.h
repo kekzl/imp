@@ -59,7 +59,6 @@ enum class MoePrefillOuter {
     LEGACY,          // run_moe_legacy_fallback_
     FUSED_Q6K,       // try_run_moe_q6k_prefill (gemm.moe_imma_prefill=false only)
     FUSED_Q4K_DP4A,  // try_run_moe_q4k_prefill (gemm.moe_imma_prefill=false, eff <= 640)
-    GEMMA4_GGML,     // try_run_moe_gemma4_ggml_prefill (moe_imma_prefill=false + gemma4.ggml_prefill)
 };
 
 // Tiers inside try_run_moe_cutlass3x_nvfp4_prefill_

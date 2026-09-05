@@ -791,10 +791,6 @@ void Engine::init_resolve_quant_flags_() {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
-        // Gemma 4: CUDA graphs are fully enabled by default. The user can opt
-        // out via [gemma4] no_graphs = true for bisecting regressions.
-        if (model_->config().overrides.gemma4.no_graphs)
-            demote_graphs_(GraphDemotionReason::Gemma4NoGraphs);
         // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.
         if (!model_->config().overrides.gemma4.force_mmvq) {
@@ -831,8 +827,16 @@ void Engine::init_resolve_kv_block_size_() {
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
-        config_.max_seq_len = v;
-        IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
+        // config.h: a CLI value wins over the file. --max-seq-len / a C-API
+        // value is already in config_.max_seq_len here; the key fills only an
+        // unset one. This block overwrote it until AUDIT_arch_2026 G-5.
+        const int preset = config_.max_seq_len;
+        config_.max_seq_len = max_seq_len_operator_value(preset, v);
+        if (config_.max_seq_len == v)
+            IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
+        else
+            IMP_LOG_INFO("max_seq_len: --max-seq-len / C-API value %d wins over runtime.max_seq_len=%d",
+                         preset, v);
     }
     // Whoever set it before the auto resolver runs is the operator: the CLI
     // flag, runtime.max_seq_len, or a C-API embedding. Recorded here because

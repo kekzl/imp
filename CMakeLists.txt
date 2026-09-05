@@ -698,6 +698,10 @@ if(IMP_BUILD_TESTS)
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
         tests/test_c_api_enum_binding.cpp
+        # Hostile ImpConfig values through imp_context_create (AUDIT_arch_2026
+        # G-3/G-4). CPU-only: every case is refused before a model or the GPU is
+        # looked at, so the model handle is an empty ImpModel_T.
+        tests/test_c_api_contract.cpp
         # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
         # hand-maintained call list, so the new failure mode is an EMPTY registry.
         tests/test_cuda_static_reset.cpp
