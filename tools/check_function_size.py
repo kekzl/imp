@@ -107,6 +107,39 @@ def fragment_code_loc(rel, cache):
     return 0
 
 
+def _braces(line, in_comment):
+    """Net `{` minus `}` on one line, ignoring comments and string/char literals.
+
+    Returns (delta, in_block_comment) so a `/* ... */` spanning lines carries over.
+    """
+    delta, i, n = 0, 0, len(line)
+    while i < n:
+        if in_comment:
+            e = line.find("*/", i)
+            if e < 0:
+                return delta, True
+            i, in_comment = e + 2, False
+            continue
+        if line.startswith("//", i):
+            break
+        if line.startswith("/*", i):
+            in_comment, i = True, i + 2
+            continue
+        c = line[i]
+        if c in "\"'":
+            i += 1
+            while i < n and line[i] != c:
+                i += 2 if line[i] == "\\" else 1
+            i += 1
+            continue
+        if c == "{":
+            delta += 1
+        elif c == "}":
+            delta -= 1
+        i += 1
+    return delta, in_comment
+
+
 def functions_in(path, text, frag_cache):
     """Yield (name, start_line, code_loc, included_fragments) per top-level definition."""
     lines = text.split("\n")
@@ -136,15 +169,26 @@ def functions_in(path, text, frag_cache):
                 or ")" not in " ".join(sig):
             i += 1
             continue
+        # The body ends where the brace depth returns to zero, NOT at the first
+        # column-0 `}`: a dedented inner close (`}  // !done` at column 0 inside
+        # a 557-LOC body) made the gate read 176 and clear the hard limit
+        # (AUDIT_arch_2026 G-6). Braces inside comments and string literals do
+        # not count.
         body, frags = [], []
+        depth, in_comment = _braces(lines[k][lines[k].index("{") + 1:], False)
+        depth += 1
         j = k + 1
-        while j < len(lines) and not lines[j].startswith("}"):
+        while j < len(lines):
+            d, in_comment = _braces(lines[j], in_comment)
+            depth += d
+            if depth <= 0:
+                break
             m = INCLUDE_CU.match(lines[j])
             if m:
                 frags.append(m.group(1))
             body.append(lines[j])
             j += 1
-        if j >= len(lines):  # no closing brace in column 0 — not a top-level body
+        if j >= len(lines):  # never closed — not a top-level body
             i += 1
             continue
         n = code_loc("\n".join(body))[1]
@@ -214,6 +258,10 @@ def selftest():
          "struct S {\n    void m() {\n        g();\n    }\n};\n", []),
         ("lambda inside a body does not end it",
          "void f() {\n    auto l = [] {\n        g();\n    };\n    l();\n}\n", [4]),
+        ("column-0 close INSIDE a body does not end it (AUDIT_arch_2026 G-6)",
+         "void f() {\n    if (a) {\n        x();\n}\n    y();\n    z();\n}\n", [5]),
+        ("braces in strings and comments do not count",
+         "void f() {\n    s = \"}\";\n    // {\n    /* } */\n    g();\n}\n", [2]),
         ("included .cu fragment is expanded in place",
          'void f() {\n    a();\n#include "exec/frag.cu"\n    b();\n}\n', [3 + 40]),
         ("two functions in one file",

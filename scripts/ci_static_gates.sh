@@ -91,6 +91,15 @@ if want entrypoint; then
     run "docker-entrypoint.sh env -> argv"      bash tests/test_entrypoint.sh
 fi
 
+# The offline half of the dependency-pin check: cmake/imp-deps.cmake vs the
+# Dockerfile ARG defaults, sed/grep over two tracked files, no network. Until
+# 2026-09-05 it ran only as `--online` inside the advisory Lint job, so a
+# drifted pin merged with a red X (AUDIT_arch_2026 H-1). Lint keeps --online.
+if want deps; then
+    echo "== Dependency pins =="
+    run "cmake/imp-deps.cmake vs Dockerfile (offline)" bash scripts/check_dep_pins.sh
+fi
+
 if want alloc; then
     echo "== Alloc sites =="
     run "I1 allowlist gate"                     python3 tools/check_alloc_sites.py

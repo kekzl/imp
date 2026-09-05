@@ -326,12 +326,14 @@ else
         # lane. This asserts the filter still resolves to the frozen CPU set.
         # Fail-open: skips cleanly if the binary or script isn't locatable.
         _E2E_BIN="$(dirname "$TESTS_BIN")/test-e2e"
-        # DUPLICATE of _unit_e2e_filter in CMakeLists.txt (~line 607) — keep in
-        # sync. Can't source it here: the container path runs without a
-        # configured build/ dir, so ctest/CMake variables are unreachable.
-        # Going stale is caught by the primary ctest guard (guard_e2e_lane_split)
-        # plus the frozen EXPECTED list inside check_e2e_lane_split.sh itself.
-        _LANE_FILTER="BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
+        # DUPLICATE of _unit_e2e_filter in CMakeLists.txt — keep in sync. Can't
+        # source it here: the container path runs without a configured build/
+        # dir, so ctest/CMake variables are unreachable. Neither ctest guard
+        # reads THIS string, so it went stale for nine days after #1795 and
+        # every full `make verify` was red (AUDIT_arch_2026 I-3);
+        # guard_lane_filter_copy (scripts/check_lane_filter_copy.sh) now diffs
+        # the two literals in the CPU lane.
+        _LANE_FILTER="BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
         if [ -x "$_E2E_BIN" ] && [ -x scripts/check_e2e_lane_split.sh ]; then
             if scripts/check_e2e_lane_split.sh "$_E2E_BIN" "$_LANE_FILTER" >/tmp/imp_verify_lane.log 2>&1; then
                 pass "e2e unit/gpu lane split"
