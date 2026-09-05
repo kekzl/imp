@@ -1,11 +1,11 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-09-06
+commit: b5de0dd7
 -->
 
-# src/model — loaders, architectures, weight upload
+# src/model - loaders, architectures, weight upload
 
 GGUF and SafeTensors loading, the architecture registry, tensor-name mapping,
 and the upload/placement decisions that follow.
@@ -31,23 +31,22 @@ and the upload/placement decisions that follow.
 
 ## Entry points
 
-- `model_arch.h` — the architecture enum
-- `model.cpp` — string map, per-arch sampling defaults, KV-FP8 safety lists
-- `gguf_loader.cpp` / `safetensors_loader.cpp` — the two formats
-- `hf_config_loader.cpp` — `config.json` parsing, arch detection
-- `weight_map.cpp`, `tensor_kind_matcher.cpp` — tensor name → role
-- `weight_upload.cu` — device placement, expert offload decisions
-- `expert_placement.h` — the pure predicate deciding a servable MoE placement
+- `model_arch.h`: the architecture enum
+- `model.cpp`: string map, per-arch sampling defaults, KV-FP8 safety lists
+- `gguf_loader.cpp` / `safetensors_loader.cpp`: the two formats
+- `hf_config_loader.cpp`: `config.json` parsing, arch detection
+- `weight_map.cpp`, `tensor_kind_matcher.cpp`: tensor name -> role
+- `weight_upload.cu`: device placement, expert offload decisions
+- `expert_placement.h`: the pure predicate deciding a servable MoE placement
 
-## Build & test
+## Test
 
 ```
-make dev && make dev-test
 make test-vision            # the only lane that puts image bytes through a real checkpoint
 ```
 
 Model-level end-to-end work must run against the `make build` image, not
-`make dev`.
+`make dev`. Generic targets: root `CLAUDE.md`; lane rules: `tests/CLAUDE.md`.
 
 ## Pitfalls
 
@@ -58,8 +57,6 @@ Model-level end-to-end work must run against the `make build` image, not
   and refuse on a shortfall; 247 of 316 once "succeeded".
 - `IMP_LOG_DEBUG` is invisible at the default log level. A skip reported only
   there is not reported.
-- Test-model env vars that point at the wrong path make the battery skip
-  **silently**.
 
 ## Do not touch
 

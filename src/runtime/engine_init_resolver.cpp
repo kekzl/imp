@@ -733,7 +733,9 @@ void Engine::init_resolve_quant_flags_() {
     if (model_->profile().is_gemma4) {
         // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
-        // Only the MoE prefill path uses D2H sync, but prefill is never graph-captured.
+        // Only the legacy host-args MoE prefill path uses D2H sync; engine_prefill.cpp runs
+        // that path eager (moe_prefill_uncapturable, #874) while runtime.prefill_graph
+        // (default on since 2026-05-17) captures the rest.
         // FP8 prefill carve-out removed 2026-05-15. The 2026-05-09 measurement
         // showed -5..-19% prefill on Gemma-4 vs FP16; since then (PRs #177, #181)
         // the gap has closed. Re-measured 2026-05-15 on Q4_K_M:

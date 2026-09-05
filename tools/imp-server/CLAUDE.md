@@ -1,11 +1,11 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-03
-commit: c3e4db79
+verified: 2026-09-06
+commit: b5de0dd7
 -->
 
-# tools/imp-server — the HTTP surface
+# tools/imp-server - the HTTP surface
 
 OpenAI, Anthropic and OpenAI-Responses dialects over one engine. Thin wire-format
 adapters on a shared core; the engine lives in `src/runtime/`.
@@ -31,14 +31,14 @@ adapters on a shared core; the engine lives in `src/runtime/`.
 
 ## Entry points
 
-- `main.cpp` — route registration, CORS, auth
-- `handlers_chat.cpp` / `handlers_chat_stream.cpp` — OpenAI + the shared driver
-- `handlers_messages.cpp` — Anthropic wire format
-- `handlers_responses.cpp` — `/v1/responses`
-- `handlers_chat_params.cpp` — parameter parsing and validation
-- `webui/index.html` — embedded at build time by `cmake/embed_webui.cmake`
+- `main.cpp`: route registration, CORS, auth
+- `handlers_chat.cpp` / `handlers_chat_stream.cpp`: OpenAI + the shared driver
+- `handlers_messages.cpp`: Anthropic wire format
+- `handlers_responses.cpp`: `/v1/responses`
+- `handlers_chat_params.cpp`: parameter parsing and validation
+- `webui/index.html`: embedded at build time by `cmake/embed_webui.cmake`
 
-## Build & test
+## Test
 
 ```
 make dev-test            # CPU lane, includes the mock API battery

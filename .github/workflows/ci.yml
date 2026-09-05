@@ -507,6 +507,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # docs_lint.py reads git history for the L3 verified/commit headers
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"

@@ -1,17 +1,17 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-09-06
+commit: b5de0dd7
 -->
 
-# imp — Project Instructions
+# imp - Project Instructions
 
-From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. See [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md) (canonical narrative) and [`docs/internals/SM120.md`](docs/internals/SM120.md).
+From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. Narrative: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md). Hardware, including what sm_120 lacks against datacenter Blackwell: [`docs/internals/SM120.md`](docs/internals/SM120.md).
 
-**This file is the router, not the manual.** It holds what applies to every task; the playbooks live in the skills below and are loaded on demand. If something here is also in a skill, the skill is the copy that gets maintained.
+**This file is the router, not the manual.** It holds what applies to every task; playbooks live in the skills below and load on demand. Anything here that a skill also covers is maintained in the skill.
 
-## Where to start (task → entry point)
+## Where to start (task -> entry point)
 
 Match the task, invoke that skill first.
 
@@ -20,98 +20,47 @@ Match the task, invoke that skill first.
 | Build / run tests / CI red / dep bump | skill **building-and-testing** |
 | Write/optimize a CUDA kernel (sm_120a) | skill **sm120-cuda-expert** |
 | Benchmark, profile, refresh perf baseline | skill **benchmark-cuda** |
-| Verify output coherence after hot-path change | skill **check-degeneration** |
+| Touched the forward pass, MoE routing, KV cache, GDN state or graph capture: verify coherence | skill **check-degeneration** |
 | Quant formats / loaders / dequant (GGUF, NVFP4, FP8) | skill **quant-formats** |
 | imp-server / OpenAI+Anthropic HTTP API | skill **server-api** |
 | Add a new model architecture | skill **add-model-arch** |
 | Open/merge a PR, cut a release | skill **shipping-prs** |
-| Who calls / launches X, blast radius, "is this still used" | skill **code-graph** — ask the index before grepping the tree |
-| Structure audit / dead code / god-files | skill **codebase-audit** — read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) **before** forming hypotheses |
-| "Is this actually implemented?" — stub, ignored request field, dead kernel, test that asserts nothing | skill **find-stubs** — every rung ships its measured baseline |
+| Who calls / launches X, blast radius, "is this still used" | skill **code-graph**: ask the index before grepping the tree |
+| Structure audit / dead code / god-files / `File size` gate red | skill **codebase-audit**: read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) **before** forming hypotheses |
+| "Is this actually implemented?": stub, ignored request field, dead kernel, test that asserts nothing | skill **find-stubs** |
 | Keep docs in sync after a change | skill **docs-sync** |
 | Doc layer, header, PROV; `docs` / `citations` gate red | skill **docs-layers** |
 | VRAM / ownership / lifetime / "where did the memory go" | read [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md) **first** |
 
-**Read the `CLAUDE.md` in the directory you are editing first.** `src/compute/`,
-`src/runtime/`, `src/model/`, `tools/imp-server/` and `tests/` each carry their
-invariants, entry points, local build/test commands and known pitfalls. They hold
-no perf numbers, only a link to `docs/PERF.md`.
+**Read the `CLAUDE.md` in the directory you are editing first.** `src/compute/`, `src/runtime/`, `src/model/`, `tools/imp-server/` and `tests/` each carry their invariants, entry points, directory-specific test binaries and pitfalls. Generic build and test commands live only here.
 
-Docs are layered and gated by `scripts/docs_lint.py`: `README.md` L0,
-`docs/*.md` L1, `docs/internals/*.md` L2, the `CLAUDE.md` tree L3.
-
-Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/internals/SM120.md` (hardware), `docs/internals/MEMORY.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md` (which C++23 the tree uses; device pointers are not `std::span`).
-
-## Two facts about this box that mislead rather than fail
-
-- **A successful `cudaMalloc` proves nothing about free VRAM.** WDDM oversubscribes
-  into host memory and returns `cudaSuccess` — 28 GiB succeeds with 22.6 GiB
-  reported free. Measure *bandwidth* to tell resident from spilled: ~1530 vs
-  ~237 GB/s. That 6.5x cliff is the mechanism behind #1103 (55 vs 391 tok/s), so
-  "0 MiB free" is a correctness problem, not a tight fit.
-- **Free VRAM only ever decreases within a process.** WSL2/WDDM never returns a
-  process's peak commitment, however cleanly CUDA released it. Anything sized off
-  `cudaMemGetInfo` is reading a moving floor — which is why capacity is planned,
-  not discovered.
+Docs are layered and gated by `scripts/docs_lint.py`: `README.md` L0, `docs/*.md` L1, `docs/internals/*.md` L2, the `CLAUDE.md` tree L3 (root budget 2000 tokens, directory files 800; an L3 `verified:` header more than 14 days behind the file's last commit is an error). Other canonical references: `AGENTS.md` (subagent roles), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md` (which C++23 the tree uses).
 
 ## Build & test
 
-**Before any GPU job — tests, benchmarks, profiling, inference — check the card is free.** `nvidia-smi` must show no compute processes. A busy GPU corrupts numbers and can OOM. Re-check before *each* job, not once per session.
+**Before any GPU job (tests, benchmarks, profiling, inference) check that the card is free, and re-check before each job.** The criterion is load (utilization plus used VRAM), not the process list: WDDM tenants never appear in `docker ps`, and a container holding the card may be the operator's own server. The check is the user-level `gpu-stats` skill (`gpu-busy-check.sh`, exit 0 = free). Busy: report the output and ask; never wait in a loop, never start anyway.
 
-The host has **no CUDA toolkit** by design — build inside Docker. `build/` and `build-dev/` are root-owned by the container; remove them via `make dev-clean` or a throwaway container, never `sudo`.
+The host has **no CUDA toolkit** by design: build inside Docker. `build/` and `build-dev/` are root-owned by the container; remove them via `make dev-clean` or a throwaway container, never `sudo`.
 
 ```
-make dev / make dev-test   # incremental (seconds) + the real CI lane - iterate here
+make dev / make dev-test   # incremental (seconds) + the CI lane (ctest -L unit) - iterate here
 make build                 # full image (minutes) - the gate, benchmarks, pre-push
-make verify-fast           # pre-push gate (#1587)             make verify   # full
+make verify-fast           # pre-push gate (#1587), the only gate that runs a kernel against a check
+make verify                # full
 ```
 
-`make build` for anything you *measure* or push; `make dev` for everything else. `make test-unit` is a different binary from the CI lane — green there is not green in CI. Details, target list and CI job names: skill **building-and-testing**.
+`make build` for anything you *measure* or push; `make dev` for everything else. `make test-unit` is a different binary from the CI lane: green there is not green in CI. CI has no GPU. Target list and CI job names: skill **building-and-testing**.
 
-**Never run bare `make format`.** The repo is not uniformly clang-formatted, so formatting a whole file rewrites hundreds of lines you did not touch. CI checks *changed* lines only: format files you created, and for files you edited intersect the violation list with your own added lines rather than trusting a clean `format-check`.
+**Never run bare `make format`.** The repo is not uniformly clang-formatted and CI checks *changed* lines only: format files you created; in files you edited fix only your own added lines.
 
 ## Conventions
 
-- **The CHANGELOG is a changelog, not a journal.** One to three lines per entry:
-  what changed for the reader, plus the number that makes it checkable. The
-  investigation goes to `docs/` or `docs/MISSION_JOURNAL.md` and the entry links
-  there.
-- **English only in the repo.** PRs, commits, comments, docs, `.md` files. (Chat
-  replies to the user stay German — this covers artifacts that land in the repo
-  or on GitHub.)
-- **Always branch off `main` and `gh pr create --base main`.** Never stack PRs
-  (squash-merge + stacking caused recovery-PR cascades). Prefer fewer, batched PRs.
-- **Performance is gated.** `tests/perf_baseline.json` is canonical (8% decode /
-  8% prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change
-  intentionally moves perf, and say so in the PR.
-- Runtime config is `RuntimeConfig` in `src/runtime/config.h` (`imp.conf` +
-  `--config` + `--set`). Env vars seeded into it: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`,
-  `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING` (-> `diagnostics.*`);
-  don't reintroduce ad-hoc env reads.
-- Internal errors throw and are translated to `ImpError` at the
-  `src/api/imp_api.cpp` boundary — intentional, don't convert them to status returns.
+- **The CHANGELOG is a changelog, not a journal.** One to three lines per entry, plus the number that makes it checkable; the investigation goes to `docs/` and the entry links there.
+- **English only in the repo** (PRs, commits, comments, docs). Chat replies to the user stay German. No em dashes in the repo (skill **shipping-prs**, rule 7).
+- **Branch off `main`, `gh pr create --base main`, never stack PRs.** Fewer, batched PRs.
+- **Performance is gated.** `tests/perf_baseline.json` is canonical (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change intentionally moves perf, and say so in the PR.
+- **Runtime config is `RuntimeConfig`** (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). The only env vars seeded into it: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING` (the last four land in `diagnostics.*`). No ad-hoc env reads.
+- **Dependency pins** are single-sourced in `cmake/imp-deps.cmake`. Docker build cache must **not** use `--mount=type=cache` (silently invalidates test results).
+- **File size** is gated on recompile blast radius, not line count: per file, per function body (hard >500 code LOC) and per translation unit (an `#include`d `.cu` counts against its includer). Monolithic belongs in `[allow]` with a reason: `docs/audit/AUDIT_FILESIZE.md`.
+- **VRAM misleads rather than fails on this box.** A successful `cudaMalloc` proves nothing (WDDM oversubscribes into host memory; bandwidth tells resident from spilled, 1530 vs 237 GB/s, #1103), and free VRAM only ever decreases within a process. Capacity is planned, not discovered: `docs/internals/MEMORY.md`.
 - Match surrounding code style; simple and direct, no speculative abstraction.
-
-## File size
-
-The cost of an oversized file here is **recompile blast radius**, not line count: each `.cu` is one translation unit, so touching a kernel in a 1.5k-LOC `.cu` re-`ptxas`es the whole thing with no intra-file parallelism. One logical unit per file; split kernel / launch wrapper / explicit instantiations when recompiles bite.
-
-CI job `File size` gates *code* LOC three ways: per file (`tools/check_filesize.py`), per function body (`tools/check_function_size.py`, hard >500), and a `#include`d `.cu` counts against its includer — a file is neither a TU nor a function. Monolithic belongs in `[allow]` **with a reason**; don't split for splitting's sake. Rationale: `docs/audit/AUDIT_FILESIZE.md`.
-
-## Hardware reality (sm_120 ≠ datacenter Blackwell)
-
-- **No `tcgen05` / TMEM / wgmma.** The FP4 path is `mma.sync` `mxf4nvf4` with
-  FA2-style block-scaling. Ignore B200/`sm_100` designs unless porting.
-  **TMA-WS block-scaled GEMM ships** on sm_120a (#1543); only the
-  `compute_120f` PTX fallback loses it.
-- **No FP4 cuBLASLt kernels on sm_120** → CUTLASS is the primary GEMM path; FP8
-  prefill is unavailable. Dependency pins are single-sourced in
-  `cmake/imp-deps.cmake` — bump only that file.
-- For GGUF, weights become an NVFP4 decode cache at init (bandwidth win on the
-  decode hot path); prefill stays full-precision via source dequant.
-- Docker build cache must **not** use `--mount=type=cache` (silently invalidates
-  test results).
-
-## After hot-path changes
-
-Verify the model still produces coherent output (no repetition loops / token-stuck / state corruption) after touching the forward pass, MoE routing, KV cache, GDN state, or CUDA-graph capture. Skill **check-degeneration**.
