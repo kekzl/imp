@@ -649,7 +649,6 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-core SOURCES
         tests/test_cuda_errors.cpp
         tests/test_lora_dims.cpp
-        tests/test_spec_usage.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
@@ -807,6 +806,7 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
+            tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
             tests/test_tool_call.cpp

@@ -78,7 +78,10 @@ there instead of retelling it.
   prefill and two dead exports go too (-2645 lines); `kv_cache.dtype=mxfp4` on
   a head_dim-96 model is refused at init instead of throwing mid-decode;
   `gemm.moe_imma_prefill` keeps its three fallback arms with a re-measure date
-  and each arm names itself in the resolved-dispatch line
+  and each arm names itself in the resolved-dispatch line. Also moves
+  `tests/test_spec_usage.cpp` behind `IMP_BUILD_SERVER`: it includes
+  `httplib.h`, which turned the `Sanitizers` job (server off) red on `main`
+  with #1915
 - Serving signals a client or a scrape can act on (AUDIT_arch_2026 dispatch
   #7, C-1 / C-5 / C-6 / C-9, #1915): a decode that runs the KV pool dry ends
   `finish_reason: "capacity"` (503 `capacity_error` non-streaming) instead of
