@@ -367,6 +367,21 @@ Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
 as a typed message rather than a crash.
 
+### `GET /ready`
+
+Readiness as a status code. 200 `{"ready": true, ...}` only when an inference
+request would be taken right now; otherwise 503 with a stable `code`:
+
+| `code` | state |
+|---|---|
+| `no_model` | started model-less and nothing loaded yet |
+| `suspended` | `/admin/suspend` parked the weights; `POST /admin/resume` |
+| `swapping` | a model load or swap is in progress |
+| `draining` | the process received SIGTERM and is finishing in-flight work |
+
+`/health` stays liveness and answers 200 in all four (an orchestrator must not
+restart a server that is swapping or draining). Both routes need no API key.
+
 ### `GET /health`, and which 503 is worth retrying
 
 `/health` answers 200 with `status: "ok"` whenever the process can serve.

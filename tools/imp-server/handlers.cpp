@@ -1,6 +1,7 @@
 #include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "model_name_policy.h"
 #include "utils.h"
 #include "tool_call.h"
 #include "anthropic.h"
@@ -27,9 +28,14 @@
 
 // Graceful shutdown
 std::atomic<httplib::Server*> g_server{nullptr};
+std::atomic<bool> g_draining{false};
 
 void signal_handler(int /*sig*/) {
     fprintf(stderr, "\nShutting down...\n");
+    // Order matters: the flag first, so a request that httplib accepted before
+    // stop() lands gets a 503 from pre-routing rather than a generation that
+    // the teardown below will cancel.
+    g_draining.store(true, std::memory_order_relaxed);
     if (auto* svr = g_server.exchange(nullptr, std::memory_order_relaxed))
         svr->stop();
 }
@@ -147,6 +153,31 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         body["code"] = health_unservable_code(faulted, kv_floored && !can_grow);
         body["detail"] = unservable;
         res.status = 503;  // let orchestrators restart a wedged server (#874)
+    }
+    res.set_content(dump_safe(body), "application/json");
+}
+
+// Readiness is a status code, not a JSON field: an orchestrator probe keyed on
+// the code routed traffic to a server that answered 503 on every inference
+// route (model-less start, /admin/suspend, a swap in progress) because
+// /health said 200 for all three (AUDIT_arch_2026 E-5). No mutex here: the
+// swap holds it for the whole load, and that is exactly when this must answer.
+void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
+    const char* code = nullptr;
+    if (g_draining.load(std::memory_order_relaxed))
+        code = "draining";
+    else if (state.swapping.load())
+        code = "swapping";
+    else if (state.suspended.load())
+        code = "suspended";
+    else if (!state.model_status_snapshot().loaded)
+        code = "no_model";
+    json body = {{"ready", code == nullptr},
+                 {"model_loaded", state.model_status_snapshot().loaded},
+                 {"suspended", state.suspended.load()}};
+    if (code) {
+        body["code"] = code;
+        res.status = 503;
     }
     res.set_content(dump_safe(body), "application/json");
 }
@@ -403,25 +434,38 @@ void handle_info(const httplib::Request& /*req*/, httplib::Response& res, Server
     res.set_content(dump_safe(body), "application/json");
 }
 
-// Find a model by name in models_dir. Returns full path or empty string.
-// Supports both GGUF files and SafeTensors directories.
-// Also tries HuggingFace resolution if name looks like a repo ID (contains '/').
+// Find a model by name. Returns the full path or "" (which the callers turn
+// into a 404 / 503, never a load). The name is a basename looked up among
+// the entries of models_dir, or an "org/repo" HuggingFace id resolved from
+// the local HF cache; it is never used as a filesystem path
+// (model_name_policy.h, AUDIT_arch_2026 F2-1: `{"model": "/any/x.gguf"}`
+// used to load that file and evict the resident model).
 std::string find_model_path(const ServerState& state, const std::string& name) {
-    // First try local models directory
-    auto available = scan_model_files(state.models_dir);
-    for (const auto& [fname, fpath] : available) {
-        if (fname == name)
-            return fpath;
-    }
-
-    // If it looks like a HuggingFace repo ID (contains '/'), try resolving
-    if (name.find('/') != std::string::npos) {
-        ImpModelFormat fmt;
-        std::string resolved = imp::resolve_model_auto(name, fmt);
-        if (!resolved.empty())
+    using imp_server::ModelNameKind;
+    switch (imp_server::classify_model_name(name)) {
+        case ModelNameKind::Basename: {
+            auto available = scan_model_files(state.models_dir);
+            for (const auto& [fname, fpath] : available) {
+                if (fname == name)
+                    return fpath;
+            }
+            return "";
+        }
+        case ModelNameKind::HfRepoId: {
+            const std::string cache = imp::hf_cache_dir();
+            if (cache.empty())
+                return "";
+            ImpModelFormat fmt;
+            std::string resolved = imp::resolve_model_auto(name, fmt);
+            // resolve_model_path() tries the id as a local path first; a
+            // relative "org/repo" directory under the CWD would satisfy it.
+            if (resolved.empty() || !imp_server::path_within(cache, resolved))
+                return "";
             return resolved;
+        }
+        case ModelNameKind::Rejected:
+            return "";
     }
-
     return "";
 }
 
@@ -653,6 +697,15 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
 // Load a model into ServerState. Caller must hold state.mtx.
 // Returns error message on failure, empty string on success.
 std::string load_model_into_state(ServerState& state, const std::string& path, const json& config_overrides) {
+    // GET /ready answers 503 "swapping" for the whole of this function: the
+    // resident engine goes away on the next lines and the new one is not up
+    // until the last. Cleared on every exit path.
+    state.swapping.store(true);
+    struct SwapScope {
+        std::atomic<bool>& flag;
+        ~SwapScope() { flag.store(false); }
+    } swap_scope{state.swapping};
+
     // Stop batching engine before freeing context
     if (state.batching) {
         state.batching->stop();

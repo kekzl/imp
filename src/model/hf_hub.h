@@ -20,6 +20,12 @@ namespace imp {
 // returned — pre-stage the revision you want.
 std::string resolve_model_path(const std::string& model_id, const std::string& revision = "");
 
+// The HuggingFace hub cache root this resolver reads (HUGGINGFACE_HUB_CACHE,
+// HF_HOME/hub, $HOME/.cache/huggingface/hub), or "" when none applies. The
+// server's request-name policy uses it to confine an "org/repo" resolution to
+// the cache (a request field never names a filesystem path).
+std::string hf_cache_dir();
+
 // Find a single .gguf file in a directory. Returns its full path.
 // If multiple .gguf files exist, returns the largest one.
 // Returns empty string if no .gguf files found.

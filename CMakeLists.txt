@@ -817,6 +817,9 @@ if(IMP_BUILD_TESTS)
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
+            # The request `model` field is a name, never a path (AUDIT_arch_2026
+            # F2-1): the two pure policy functions behind find_model_path().
+            tests/test_model_name_policy.cpp
             tools/imp-server/rate_limit.cpp
             tools/imp-server/tracing.cpp
             tests/test_tracing.cpp

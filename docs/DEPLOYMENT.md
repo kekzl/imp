@@ -157,12 +157,15 @@ terminate TLS and enforce origin policy at a reverse proxy.
 A minimal nginx front:
 
 ```nginx
+limit_conn_zone $binary_remote_addr zone=imp_conn:1m;
+
 location / {
     proxy_pass         http://127.0.0.1:8080;
     proxy_http_version 1.1;
     proxy_set_header   Connection "";
     proxy_buffering    off;        # required: SSE must not be buffered
     proxy_read_timeout 3600s;      # a long generation is one long response
+    limit_conn         imp_conn 16; # per-peer connection cap, see below
 }
 ```
 
@@ -170,11 +173,18 @@ location / {
 responses arrive in one lump at the end and every client reports TTFT equal
 to total latency.
 
+`limit_conn` is the connection-level backpressure imp itself does not have:
+`--max-concurrent` and `--rate-limit` run after a request body is fully read,
+and the worker pool is `--max-concurrent + 8` threads with a 60 s read
+timeout, so a peer holding open connections that never finish a body ties up
+workers no imp-side guard can see. Cap connections per peer at the proxy.
+
 ## Health, metrics, lifecycle
 
 | endpoint | use |
 |---|---|
-| `GET /health` | liveness. Answers before a model is loaded |
+| `GET /health` | liveness. Answers before a model is loaded, and 200 while suspended or mid-swap |
+| `GET /ready` | readiness. 200 only when an inference request would be taken now; 503 with `code` `no_model`, `suspended`, `swapping` or `draining` otherwise. Point an orchestrator's readiness probe here, its liveness probe at `/health` |
 | `GET /metrics` | Prometheus. Latency histograms (request, TTFT, inter-token, queue), decode batch size, refusal and cancellation counters, and a memory breakdown that separates capacity from occupancy |
 | `GET /v1/models` | what is loaded, and what else is in the models directory |
 | `POST /admin/suspend` | park the weights in host RAM and free the GPU completely. Inference answers 503 while suspended |
@@ -182,6 +192,16 @@ to total latency.
 
 Suspend/resume frees the GPU temporarily without paying a cold load
 afterwards. Sessions and KV do not survive it; weights do.
+
+**Shutdown** (SIGTERM / SIGINT): the listener stops, requests already
+accepted answer 503, `/ready` reports `draining`, and in-flight generations
+get `server.model_swap_drain_ms` (60 s default) to finish before the engine
+is torn down. `docker-compose.yml` sets `stop_grace_period: 75s` to cover
+that; a bare `docker stop` with its 10 s default kills a draining server.
+
+While a model swap or `/admin/suspend` holds the engine lock, inference
+requests answer 503 (`overloaded_error`) within 250 ms instead of parking a
+worker thread until the swap completes.
 
 ### Which series answer which question
 

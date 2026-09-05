@@ -20,6 +20,29 @@ import conftest
 from mock_server import MOCK_MODEL_ID, run_server
 
 
+class TestReadiness:
+    """GET /ready is a status code, not a JSON field (AUDIT_arch_2026 E-5).
+
+    /health stays liveness (200 model-less, suspended, mid-swap); /ready is
+    200 only when an inference request would be taken right now, else 503
+    with a stable `code`.
+    """
+
+    def test_ready_matches_model_state(self, client, has_model):
+        r = client.get("/ready")
+        body = r.json()
+        assert "ready" in body
+        if has_model:
+            assert r.status_code == 200, r.text
+            assert body["ready"] is True
+        else:
+            # The model-less real-binary lane: liveness says 200, readiness 503.
+            assert r.status_code == 503, r.text
+            assert body["ready"] is False
+            assert body["code"] == "no_model"
+            assert client.get("/health").status_code == 200
+
+
 class TestOOMHandling:
     """Test server behavior under simulated OOM pressure.
     Only runs against mock server with OOM mode."""

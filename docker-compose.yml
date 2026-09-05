@@ -4,6 +4,10 @@ services:
       context: .
     image: imp:latest
     restart: unless-stopped
+    # SIGTERM drains in-flight generations for server.model_swap_drain_ms
+    # (60 s default) before the engine stops; the compose default of 10 s
+    # SIGKILLed a draining server (AUDIT_arch_2026 E-6).
+    stop_grace_period: 75s
     deploy:
       resources:
         reservations:
