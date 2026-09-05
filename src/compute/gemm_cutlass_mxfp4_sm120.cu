@@ -19,7 +19,6 @@
 // scale factor vs 16 for NVFP4, potentially allowing different scheduling.
 
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
-#include "compute/hadamard.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
 #include "core/cuda_static_reset.h"
@@ -371,70 +370,6 @@ void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, voi
                                                              static_cast<int>(N), static_cast<int>(K),
                                                              blocks_per_row);
     IMP_CUDA_CHECK_LAUNCH();
-}
-
-// Forward declaration (defined below in activation quantization section)
-__global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ input,
-                                                   uint8_t* __restrict__ packed_out,
-                                                   uint8_t* __restrict__ sf_out, int M, int K, int n_k_tiles);
-
-void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst, void* scratch_fp16,
-                                     int hadamard_block_size, cudaStream_t stream) {
-    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_mxfp4_hadamard: src.packed_data is null");
-    int64_t N = src.N;
-    int64_t K = src.K;
-    IMP_CHECK(K % kMxSFVecSize == 0, "convert_nvfp4_to_mxfp4_hadamard: K=%lld must be multiple of %d",
-              static_cast<long long>(K), kMxSFVecSize);
-    IMP_CHECK(K % hadamard_block_size == 0,
-              "convert_nvfp4_to_mxfp4_hadamard: K=%lld must be multiple of hadamard_block_size=%d",
-              static_cast<long long>(K), hadamard_block_size);
-
-    // 1. Dequant NVFP4 → FP16 into scratch
-    dequantize_nvfp4_to_fp16(src, scratch_fp16, stream);
-
-    // 2. Apply block-diagonal Hadamard along K dimension (in-place)
-    // Each row of K elements gets block-diagonal WHT applied.
-    // WHT is self-inverse and symmetric: H·H^T = N·I, so (H/√N)^2 = I.
-    hadamard_transform_fp16(reinterpret_cast<const half*>(scratch_fp16),
-                            reinterpret_cast<half*>(scratch_fp16), static_cast<int>(N), static_cast<int>(K),
-                            hadamard_block_size, stream);
-    IMP_LOG_DEBUG("mxfp4_hadamard: applied WHT bs=%d to weight [%lld, %lld]", hadamard_block_size,
-                  (long long)N, (long long)K);
-
-    // 3. Quantize rotated FP16 → MXFP4 (new packed data + new scales)
-    size_t packed_bytes = static_cast<size_t>(N) * (K / 2);
-    size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
-
-    void* d_packed = nullptr;
-    void* d_sf = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, packed_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_sf, sf_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
-
-    int K_groups = static_cast<int>(K) / kMxSFVecSize;
-    int total_mb = static_cast<int>(N) * K_groups;
-    int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
-
-    int threads = 256;
-    int blocks = (total_mb + threads - 1) / threads;
-    quantize_fp16_mxfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(scratch_fp16), reinterpret_cast<uint8_t*>(d_packed),
-        reinterpret_cast<uint8_t*>(d_sf), static_cast<int>(N), static_cast<int>(K), n_k_tiles);
-    IMP_CUDA_CHECK_LAUNCH();
-
-    dst.data = d_packed;
-    dst.scale_factors = d_sf;
-    dst.tensor_scale = 1.0f;
-    dst.N = N;
-    dst.K = K;
-    dst.sf_bytes = sf_bytes;
-    dst.owns_data = true;
-
-    IMP_LOG_DEBUG(
-        "convert_nvfp4_to_mxfp4_hadamard: N=%lld K=%lld had_bs=%d "
-        "packed=%.2f MiB sf=%.2f MiB",
-        (long long)N, (long long)K, hadamard_block_size, packed_bytes / (1024.0 * 1024.0),
-        sf_bytes / (1024.0 * 1024.0));
 }
 
 void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w) {

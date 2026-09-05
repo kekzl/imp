@@ -51,6 +51,13 @@ struct GEMM {
     // tensors; others (Q6_K down_proj) stay on dequant→cuBLAS. This is
     // lever #1 for the 2.4-2.6x GGUF-MoE prefill gap
     // (docs/archive/prefill_gap_2026_06_07.md §4.2). Default on.
+    // `false` re-enables the three per-expert arms (fused Q6_K WMMA,
+    // Q4_K/Q5_K dp4a, gemma-4 ggml: ~1000 LOC in gemm_moe_fused*.cu,
+    // gemm_q6k.cu, executor_forward_moe_batch.cu). Kept as the fallback for
+    // an expert shape mmq_imma_moe_gemm declines and as the A/B arm; no CI
+    // lane runs them. Decision AUDIT_arch_2026 A1-2 (dispatch #8,
+    // 2026-09-05): keep; re-measure against IMMA by 2026-12-01 and delete
+    // the arms if IMMA still wins on every shape it accepts.
     bool moe_imma_prefill = true;
     // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
     // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode

@@ -51,13 +51,15 @@ enum class AttnDecodePath {
 // MoE prefill: the outer 5-way chain in exec/executor_forward_moe.cu.
 enum class MoePrefillOuter {
     UNSET,
-    NONE,           // dense model — no MoE layers
-    FP16_BATCH,     // try_run_moe_fp16_batch_prefill
-    FP8_BATCH,      // try_run_moe_fp8_batch_prefill
-    CUTLASS3X,      // try_run_moe_cutlass3x_nvfp4_prefill_ → MoePrefillPath
-    NVFP4_DEQUANT,  // try_run_moe_nvfp4_dequant_batch_prefill_
-    LEGACY,         // run_moe_legacy_fallback_
-    FUSED_Q6K,      // fused Q6_K path (taken before the chain)
+    NONE,            // dense model — no MoE layers
+    FP16_BATCH,      // try_run_moe_fp16_batch_prefill
+    FP8_BATCH,       // try_run_moe_fp8_batch_prefill
+    CUTLASS3X,       // try_run_moe_cutlass3x_nvfp4_prefill_ → MoePrefillPath
+    NVFP4_DEQUANT,   // try_run_moe_nvfp4_dequant_batch_prefill_
+    LEGACY,          // run_moe_legacy_fallback_
+    FUSED_Q6K,       // try_run_moe_q6k_prefill (gemm.moe_imma_prefill=false only)
+    FUSED_Q4K_DP4A,  // try_run_moe_q4k_prefill (gemm.moe_imma_prefill=false, eff <= 640)
+    GEMMA4_GGML,     // try_run_moe_gemma4_ggml_prefill (moe_imma_prefill=false + gemma4.ggml_prefill)
 };
 
 // Tiers inside try_run_moe_cutlass3x_nvfp4_prefill_

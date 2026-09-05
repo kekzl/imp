@@ -106,7 +106,6 @@ Engine::~Engine() {
     }
 
     gemm_cleanup();
-    gemm_grouped_cleanup();
     sampling_cleanup();
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();

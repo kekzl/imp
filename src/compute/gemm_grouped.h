@@ -1,17 +1,9 @@
 #pragma once
 
 #include "core/tensor.h"
-#include <vector>
 #include <cuda_runtime.h>
 
 namespace imp {
-
-// No-op retained for API compatibility. Call at shutdown.
-void gemm_grouped_cleanup();
-
-// cuBLASLt Grouped GEMM for MoE expert parallelism
-void gemm_grouped(const std::vector<Tensor>& A, const std::vector<Tensor>& B, std::vector<Tensor>& C,
-                  cudaStream_t stream = nullptr);
 
 // Batched GEMM for MoE expert parallelism via cublasGemmBatchedEx.
 // All active experts are dispatched in a single cuBLAS call.

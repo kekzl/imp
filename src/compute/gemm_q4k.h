@@ -8,12 +8,6 @@ namespace imp {
 
 struct block_q8_1;
 
-// Fused Q4_K/Q5_K × FP16 scalar GEMM for MoE expert prefill.
-// Same interface as gemm_q6k_fused_moe_prefill. Uses FP16 activations directly.
-void gemm_q4k_fused_moe_prefill(const void* packed_weights, const void* activations, void* output,
-                                const int32_t* d_offsets, int N, int K, size_t expert_stride_bytes,
-                                int n_experts, cudaStream_t stream = nullptr);
-
 // Fused Q4_K/Q5_K × Q8_1 dp4a GEMM for MoE expert prefill.
 // Same interface as gemm_q6k_moe_fused. Activations must be pre-quantized to Q8_1.
 // Uses shared memory tiling for activation reuse across output columns.

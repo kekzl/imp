@@ -69,6 +69,19 @@ there instead of retelling it.
 
 ### Fixed
 
+- GEMM registry cut to its 10 produced keys, and the dead kernel tree around
+  it (AUDIT_arch_2026 dispatch #8, A1-1 / A1-2 / A1-4 / A1-5 / A1-6 / A1-7 /
+  A1-8, #1916): the 9 registrations no dispatch site constructed (FP8, NVFP4
+  GEMV/GEMM, MXFP4, FP16, Q4_K-IMMA; the FP8 copy ran W8A8 against the live
+  W8A16) go with their 900 test lines, `RegistryHoldsExactlyTheProducedKeys`
+  pins the count; the pre-Hopper split-K FP8/INT4 arms, the scalar Q4_K MoE
+  prefill and two dead exports go too (-2645 lines); `kv_cache.dtype=mxfp4` on
+  a head_dim-96 model is refused at init instead of throwing mid-decode;
+  `gemm.moe_imma_prefill` keeps its three fallback arms with a re-measure date
+  and each arm names itself in the resolved-dispatch line. Also moves
+  `tests/test_spec_usage.cpp` behind `IMP_BUILD_SERVER`: it includes
+  `httplib.h`, which turned the `Sanitizers` job (server off) red on `main`
+  with #1915
 - Serving signals a client or a scrape can act on (AUDIT_arch_2026 dispatch
   #7, C-1 / C-5 / C-6 / C-9, #1915): a decode that runs the KV pool dry ends
   `finish_reason: "capacity"` (503 `capacity_error` non-streaming) instead of

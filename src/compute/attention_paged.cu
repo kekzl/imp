@@ -1199,7 +1199,8 @@ bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim) {
     //   attention_paged_fp8.cu    64 96 128 256 512
     //   attention_paged_int8.cu   64 96 128 256
     //   attention_paged_int4.cu   64 96 128 256
-    //   attention_paged_nvfp4*.cu 64    128 256 512   (no 96)
+    //   attention_paged_nvfp4*.cu 64    128 256 512   (no 96; the MXFP4_KV
+    //                             launcher shares this template set, A1-5)
     switch (kv_dtype) {
         case QType::F16:
         case QType::FP8_E4M3:
@@ -1208,6 +1209,7 @@ bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim) {
         case QType::INT4:
             return head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256;
         case QType::NVFP4:
+        case QType::MXFP4_KV:
             return head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512;
         default:
             // Not checked here; do not refuse it.

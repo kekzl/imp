@@ -1,23 +1,18 @@
 #pragma once
 
-// GemmKernel registry — R5 first-domino cross-axis refactor (slice 1).
-//
-// Replaces the 21-parameter `gemm_dispatch_impl` god-dispatcher (phase-3
-// maintainability review §2 #1, archived in #604) with a single small args
-// struct and a (Strategy
-// -> function pointer) registry. Adding a new qtype/quantization tier
-// becomes a single-file change: register an entry; nothing else moves.
-//
-// Slice 1 scope: define the interface, register only the FP16 tier as
-// proof-of-concept. Live dispatch tries the registry first when the
-// runtime config flag `gemm.use_kernel_registry` is true and falls back
-// to the legacy `gemm_dispatch_impl` for tiers not yet registered.
-// Default flag is OFF so production behavior is unchanged.
-//
-// Future slices migrate FP8, NVFP4, CUTLASS_NVFP4, MXFP4 tiers one at a
-// time; once every dispatch site is covered the legacy path can be
-// deleted (the cross-axis maintainability + extensibility win from
-// phase-5 review §5, archived in #604).
+// GemmKernel registry: the (Strategy -> function pointer) table behind the
+// three production dispatch sites in executor_gemm_dispatch.cu:
+//   {FP16, NONE, false}          generic dequant catch-all (M>1, uncached weight)
+//   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq / dp4a / fused gemv), 8 qtypes
+//   {CUTLASS_NVFP4, F16, false}  CUTLASS NVFP4 prefill GEMM
+// Every registered key has one of those producers and every producer has a
+// key; GemmKernelRegistryTest.RegistryHoldsExactlyTheProducedKeys pins the
+// count at 10. The FP8 / NVFP4 GEMV+GEMM / MXFP4 / FP16 / Q4_K-IMMA arms of
+// `gemm_via_handle_` never moved onto the table (the R5 migration stopped at
+// slice 8; the FP8 copy had drifted to W8A8 against the live W8A16). Their
+// 9 unreachable registrations were retired in AUDIT_arch_2026 dispatch #8
+// (2026-09-05, decision (b) in docs/audit/SETTLED.md section H). A new tier
+// registers here only together with its dispatch site.
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"
@@ -29,8 +24,6 @@
 namespace imp {
 
 // Forward-declared payload structs (defined in their owning TUs).
-struct FP8CacheEntry;
-struct NvFP4QuantResult;
 struct CutlassNvFP4Weight;
 struct CutlassMxFP4Weight;
 
@@ -65,18 +58,14 @@ struct GemmKernelArgs {
     float beta = 0.0f;                    // residual-fused GEMM on FP16 paths only
 
     // Tier-specific weight handle. Casts:
-    //   FP16            -> const Tensor*
-    //   FP8             -> const FP8CacheEntry*
-    //   NVFP4           -> const NvFP4QuantResult*
+    //   FP16            -> const Tensor* (F16 weight or GGUF source tensor)
     //   CUTLASS_NVFP4   -> const CutlassNvFP4Weight*
-    //   MXFP4           -> const CutlassMxFP4Weight*
     const void* weight_payload = nullptr;
 
     // Workspace pointers — only some tiers consume them. nullptr means the
     // caller did not supply that workspace; the kernel must either degrade
     // (fall back to a non-workspace path) or fail loud via IMP_CHECK.
     void* dequant_scratch = nullptr;
-    size_t dequant_scratch_size = 0;
     void* cutlass_act_data = nullptr;
     void* cutlass_act_sf = nullptr;
     void* cutlass_workspace = nullptr;
@@ -94,15 +83,10 @@ struct GemmKernelArgs {
     // path directly. See cutlass_nvfp4_gemm_kernel in
     // gemm_kernel_cutlass_nvfp4.cu for the branching logic.
     const void* mxfp4_payload = nullptr;
-    void* fp8_act_buf = nullptr;
-    float* d_act_scale = nullptr;
-    float* d_fp8_block_maxes = nullptr;
-    float* d_fp8_absmax = nullptr;
-    int fp8_max_grid = 0;
 
-    // dp4a / Q8_1 activation quantization scratch (slice 7 — GGUF dp4a tier).
-    // Same role as fp8_act_buf + d_act_scale above: a per-call activation
-    // scratch pre-sized by engine init (QuantScratch::q8_1_buf / d8_buf).
+    // dp4a / Q8_1 activation quantization scratch (slice 7 — GGUF dp4a tier):
+    // a per-call activation scratch pre-sized by engine init
+    // (QuantScratch::q8_1_buf / d8_buf).
     // The dp4a kernels quantize the FP16 activation into `q8_1_buf` then run
     // dispatch_dp4a_gemv with the block scales in `d8_buf`. nullptr means the
     // caller did not supply scratch and the kernel must PreconditionFail so
@@ -174,18 +158,16 @@ private:
     GemmKernelRegistry(const GemmKernelRegistry&) = delete;
     GemmKernelRegistry& operator=(const GemmKernelRegistry&) = delete;
 
-    // Small-N linear scan — production table holds at most ~8 entries
-    // even after the full migration; std::vector + linear scan beats a
-    // hash map for this size and avoids the std::unordered_map alloc.
+    // Small-N linear scan: the production table holds 10 entries (see the
+    // file header); a linear scan beats a hash map at this size and avoids
+    // the std::unordered_map alloc.
     struct Entry {
         GemmStrategy strategy;
         GemmKernelFn fn;
     };
-    // Capacity sized for Slice 7: 8 entries through Slice 6 + 11 new GGUF
-    // strategies (4 mmvq qtypes + 7 dp4a qtypes) = 19; bumped to 32 for
-    // headroom (next slices may register additional GGUF qtype/backend
-    // combinations or the remaining Q4_1 / IQ4 paths).
-    Entry entries_[32] = {};
+    // 10 live entries + headroom for the GGUF qtypes not yet on the small-M
+    // path (Q4_1, IQ4). register_kernel IMP_CHECKs the capacity.
+    Entry entries_[16] = {};
     std::size_t count_ = 0;
 };
 

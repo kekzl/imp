@@ -207,7 +207,7 @@ def main():
     # AdapterIsAPrefixCacheKeyAndAnAdmissionBarrier (test_lora.cpp, model-backed).
     # 1091 -> 1094 (AUDIT_arch_2026 dispatch #7): ServingSignalsTest x3 (test_serving_signals.cpp,
     # model-backed: capacity cancel, queue split, speculation counters).
-    PINNED = 1094
+    PINNED = 1061
 
     text = CMAKE.read_text()
     mods = module_sources(text)

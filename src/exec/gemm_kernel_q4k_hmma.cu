@@ -3,11 +3,9 @@
 // =============================================================================
 //
 // Config-gated dispatch for the Q4_K x FP16 HMMA GEMM kernel. Called from
-// gemm_via_handle_ in executor_kernels.cu at the prefill (M>1) path,
-// gated on `gemm.q4k_hmma_enabled` (default false).
-//
-// Separate file so the kernel linkage + dispatch logic stays modular
-// (same pattern as gemm_kernel_q4k_imma.cu, gemm_kernel_fp8.cu, etc.).
+// gemm_via_handle_ in executor_gemm_dispatch.cu at the prefill (M>1) path,
+// gated on `gemm.q4k_hmma_enabled` (default false). A direct call, not a
+// GemmKernelRegistry entry.
 
 #include "compute/mmq_q4k_hmma.h"
 #include "core/logging.h"

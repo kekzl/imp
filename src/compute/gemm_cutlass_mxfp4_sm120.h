@@ -32,15 +32,6 @@ struct NvFP4QuantResult;  // forward
 void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst,
                                     cudaStream_t stream);
 
-// Convert NVFP4 weights to MXFP4 with Hadamard rotation:
-//   1. Dequant NVFP4 → FP16 (into scratch)
-//   2. Apply block-diagonal Hadamard along K dimension
-//   3. Requant FP16 → MXFP4 (E2M1 + UE8M0 scales, new allocation)
-// This changes the packed data (not borrowed) — weights are re-quantized.
-// scratch_fp16: pre-allocated [N, K] FP16 buffer on device.
-void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst, void* scratch_fp16,
-                                     int hadamard_block_size, cudaStream_t stream);
-
 void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w);
 
 // Unpack native MXFP4 GGUF blocks (17 bytes each: 16 data + 1 scale)
