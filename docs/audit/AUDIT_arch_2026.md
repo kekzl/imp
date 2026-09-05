@@ -3104,4 +3104,4 @@ carries the per-finding verdicts and must list the same closed set.
 
 | # | findings | status | landed | gate outcome | left out |
 |---|---|---|---|---|---|
-| 1 | B-1, B-2, B-3 | ✅ CLOSED | dispatch #1 PR | `SamplingTest.LogitBiasRearmsAfterStaticReset` + `GreedyScratchRearmsAfterStaticReset` green, red with the hook removed (mutation run); `tools/check_static_reset.py` 25/38 candidate TUs re-arm, 1 allowlisted, selftest 11/11; seven TUs re-arm (the six named plus `mmq_q4k_imma_tile.cu`'s weight-plane cache) | the two-model swap bit-identity test (needs two models in one `test-e2e` process); `s_h_normed` OOB asserted by the capacity field, not by a test |
+| 1 | B-1, B-2, B-3 | ✅ CLOSED | #1909 | `SamplingTest.LogitBiasRearmsAfterStaticReset` + `GreedyScratchRearmsAfterStaticReset` green, red with the hook removed (mutation run); `tools/check_static_reset.py` 25/38 candidate TUs re-arm, 1 allowlisted, selftest 11/11; seven TUs re-arm (the six named plus `mmq_q4k_imma_tile.cu`'s weight-plane cache) | the two-model swap bit-identity test (needs two models in one `test-e2e` process); `s_h_normed` OOB asserted by the capacity field, not by a test |
