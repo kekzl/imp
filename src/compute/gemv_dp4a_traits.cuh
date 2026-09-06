@@ -427,7 +427,10 @@ struct DequantTraits<DPQTag::Q3_K> {
         int half_idx = sub / 4;
         int shift = (sub % 4) * 2;
         const uint8_t* qs_base = qs + half_idx * 32;
-        const uint8_t* hm_base = hmask + sub * 4;  // 4 bytes = 32 bits
+        // The high bits are one bitplane per 32-element sub-block, not 4 bytes
+        // per sub-block: ggml's dequantize_row_q3_K reads BYTE (element % 32) at
+        // BIT (element / 32) = `sub`. The old `hmask + sub*4` reading agreed with
+        // it only for sub 0 elements 0..7 (AUDIT_arch_2026 D-5).
 
         // Unpack 16 6-bit scales from 12 packed bytes
         uint32_t aux0, aux1, aux2;
@@ -452,12 +455,10 @@ struct DequantTraits<DPQTag::Q3_K> {
             uint32_t qb4;
             memcpy(&qb4, qs_base + j * 4, 4);
             uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
-            // Extract 4 hmask bits → build subtraction mask
-            uint8_t hm_byte = hm_base[j / 2];
-            int bit_base = (j & 1) * 4;
-            uint32_t hm4 = ((hm_byte >> (bit_base + 0)) & 1) | (((hm_byte >> (bit_base + 1)) & 1) << 8) |
-                           (((hm_byte >> (bit_base + 2)) & 1) << 16) |
-                           (((hm_byte >> (bit_base + 3)) & 1) << 24);
+            // Four consecutive mask BYTES, one bit each: bit `sub` of every byte.
+            uint32_t hm_b4;
+            memcpy(&hm_b4, hmask + j * 4, 4);
+            uint32_t hm4 = (hm_b4 >> sub) & 0x01010101u;
             // q3 = q2 - 4*(1-hm): subtract 4 from each byte where hm=0
             uint32_t sub_mask = (hm4 ^ 0x01010101u) * 4;
             int q3i = __vsubss4(q2_4, sub_mask);
@@ -471,11 +472,9 @@ struct DequantTraits<DPQTag::Q3_K> {
             uint32_t qb4;
             memcpy(&qb4, qs_base + 16 + j * 4, 4);
             uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
-            uint8_t hm_byte = hm_base[2 + j / 2];
-            int bit_base = (j & 1) * 4;
-            uint32_t hm4 = ((hm_byte >> (bit_base + 0)) & 1) | (((hm_byte >> (bit_base + 1)) & 1) << 8) |
-                           (((hm_byte >> (bit_base + 2)) & 1) << 16) |
-                           (((hm_byte >> (bit_base + 3)) & 1) << 24);
+            uint32_t hm_b4;
+            memcpy(&hm_b4, hmask + 16 + j * 4, 4);
+            uint32_t hm4 = (hm_b4 >> sub) & 0x01010101u;
             uint32_t sub_mask = (hm4 ^ 0x01010101u) * 4;
             int q3i = __vsubss4(q2_4, sub_mask);
             sumi1 = __dp4a(q3i, xi[4 + j], sumi1);

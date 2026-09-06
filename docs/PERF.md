@@ -144,6 +144,45 @@ v0.36.0 image vs #1897:
 | goodput req/s (SLO attainment) | 1.09 / 1.10 (100 %) | 2.92 / 5.63 (100 %) | 9.90 / 17.82 (100 %) |
 | J per 1k output tokens | 1783 / 1800 | 545 / 259 | 164 / 82 |
 
+## Batch invariance
+
+What a request pays for being served next to 31 others, on the native NVFP4
+decode path. Teacher-forced: the same 64 corpus tokens are fed to the same
+engine at M=1 and at M=32, so the row under test has an identical history in
+both arms and no sampling divergence can enter. Row 0 is the measured
+sequence; rows 1..31 carry different content at different lengths.
+
+[PROV: commit=23262f83 date=2026-09-06 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.3.1
+ path=gemv_nvfp4_kpar+smallm_v2_a4 kv=fp8 cmd="make test-e2e (BatchInvarianceTest)" n=1
+ note=IMP_DETERMINISTIC=1, prefix cache off, CUDA graphs off, 24-token prompt, 64 decode steps]
+
+| arm | mean NLL | mean \|delta logprob\| | max | greedy top-1 |
+|---|---|---|---|---|
+| control M=1 vs M=1 | 3.440330 -> 3.440330 | 0 | 0 | 64/64 |
+| re-init M=1 vs M=1 | 3.440330 -> 3.440330 | 0 | 0 | 64/64 |
+| **M=1 vs M=32** | 3.440330 -> 3.488856 | 0.242 | 1.636 | **57/64** |
+| M=1 vs M=32, `gemm.nvfp4_smallm=false` | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
+| config change alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
+
+Three things the table settles:
+
+- **Batching is not a rounding-sized effect.** 7 of 64 greedy tokens change,
+  and mean NLL rises 1.4 %. The 0.22 % figure the docs carried came from a
+  2-layer FP16 synthetic harness that runs no quantized kernel.
+- **The activation format is not the cause.** `gemm.nvfp4_smallm=false` serves
+  2..32 rows as W4A16 instead of W4A4 and leaves the gap the same size (0.261
+  vs 0.242, 7 flips either way). The batch SHAPE is the term. That switch costs
+  about 11 % aggregate throughput at 32 streams and buys no numerical closeness.
+- **Two identical inits agree bit for bit**, so the numbers above are the batch
+  effect and not run-to-run noise. Flipping an unrelated config knob does not:
+  removing the small-M scratch from the engine arena moves solo decode by one
+  greedy token in 64 all by itself.
+
+The M=1 branch declines any weight that is not in the NVFP4 decode cache, and
+the small-M gate is `M <= 32`, not `2..32`, so such a weight takes the W4A4
+kernel even at batch 1. A 2 % scale error planted in that kernel shifted the
+M=1 NLL by 0.028, which is how the overlap was found.
+
 ## Reproducing any of this
 
 ```

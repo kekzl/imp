@@ -1,27 +1,22 @@
 // =============================================================================
 // TEST_AUDIT (retired) Phase 2.6 — Risk #8
-// GGUF Q4_K / Q6_K / Q8_0 dequant + MMVQ/dp4a-GEMV vs a format-derived,
-// INDEPENDENT fp64 reference.
+// Every GGUF dequant kernel, and the dp4a/MMVQ GEMVs on top of them, against
+// the format-derived fp64 reference in `gguf_format_ref.h`.
 //
 // WHY THIS EXISTS (audit §3 risk #8, §2 class-B critique):
 //   The existing tests/test_mmvq.cu compares imp's MMVQ kernel against imp's
 //   dp4a kernel (imp-vs-imp == class B tautology). All of GGUF serving
-//   (Q8_0 / Q6_K / Q4_K models) consumes these dequant + GEMV kernels, yet
-//   only INT4/INT8 toy refs existed. This file is the missing class-A anchor:
-//   it re-derives each block format's dequant ARITHMETIC in fp64 on the host
-//   from the ggml format definition (block layout = the format itself, taken
-//   from imp's headers; the dequant math is reconstructed and justified in
-//   comments against ggml-common.h / dequantize_row_q*), and compares imp's
-//   GPU kernels against it.
+//   consumes these dequant + GEMV kernels, yet only INT4/INT8 toy refs
+//   existed. This file is the class-A anchor: `gguf_format_ref.h` re-derives
+//   each block format's byte layout and dequant ARITHMETIC from the ggml
+//   definition, and this file launches imp's kernels against it. Six formats
+//   had no reference at all until AUDIT_arch_2026 D-5, and Q3_K turned out to
+//   be reading the wrong high-bit plane in both of its kernels.
 //
-// INDEPENDENCE (audit §4 — no tautologies):
-//   * Synthetic block bytes are built directly on the BYTE level via an LCG
-//     over the raw quant bytes + independently chosen scale halfs — NOT via
-//     imp's quantizer (which would make a quantize->dequant round-trip and
-//     prove nothing).
-//   * The reference dequant is a slow fp64 host loop, never a call into imp.
-//   * Edge cases (d = 0, all-63 / all-0 6-bit scales, max-magnitude scale
-//     halfs, and a NaN d-half) are exercised with a hard no-NaN/Inf guard.
+// INDEPENDENCE (audit §4 — no tautologies): stated in `gguf_format_ref.h`,
+//   which owns both halves. Edge cases (d = 0, all-63 / all-0 6-bit scales,
+//   max-magnitude scale halfs, a NaN d-half) come from its ScaleMode set and
+//   are exercised here with a hard no-NaN/Inf guard.
 //
 // TOLERANCES (audit §4 tolerance policy — derived per path):
 //   * Dequant kernel (pure decode, half-rounding only): the kernel computes
@@ -46,347 +41,19 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <cstring>
 #include <vector>
 
 #include "compute/gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "quant/dequant_gpu.h"
+#include "gguf_format_ref.h"
 
 namespace imp {
 namespace {
 
-// -----------------------------------------------------------------------------
-// Deterministic byte-level LCG (Numerical Recipes constants). Independent of
-// imp; used to fill raw quant bytes and to pick scale halfs.
-// -----------------------------------------------------------------------------
-struct Lcg {
-    uint32_t s;
-    explicit Lcg(uint32_t seed) : s(seed) {}
-    uint32_t next() {
-        s = s * 1664525u + 1013904223u;
-        return s;
-    }
-    uint8_t byte() { return static_cast<uint8_t>(next() >> 24); }
-    // Uniform in [-1, 1), multiply-only mapping (bit-stable, no libm).
-    float unit() { return (next() >> 8) * (1.0f / 8388608.0f) - 1.0f; }
-};
-
-// Host-side f16 helpers via the CUDA half type (host-callable).
-inline uint16_t f16_bits(half h) {
-    uint16_t b;
-    std::memcpy(&b, &h, 2);
-    return b;
-}
-inline half f16_from_bits(uint16_t b) {
-    half h;
-    std::memcpy(&h, &b, 2);
-    return h;
-}
-// fp64 value of an f16, computed via the half->float path the GPU also uses.
-inline double f16_to_f64(half h) { return static_cast<double>(__half2float(h)); }
-// Round an fp32 to f16 and back (the kernel's final-store rounding). Saturates
-// to ±Inf on overflow, matching __float2half on values > 65504.
-inline float __float2half_then_float(float f) { return __half2float(__float2half(f)); }
-
-// -----------------------------------------------------------------------------
-// fp64 REFERENCE DEQUANT — derived from the ggml format definition.
-// Layouts mirror imp's headers (= the format), arithmetic is reconstructed.
-// -----------------------------------------------------------------------------
-
-// Q8_0: 34 bytes / 32 elems. [ d:f16 | qs:int8[32] ]. val = d * q.
-// (ggml dequantize_row_q8_0: y = d * qs[j].)
-void ref_dequant_q8_0(const uint8_t* blk, double* out) {
-    half d;
-    std::memcpy(&d, blk, 2);
-    const int8_t* qs = reinterpret_cast<const int8_t*>(blk + 2);
-    double dd = f16_to_f64(d);
-    for (int i = 0; i < 32; ++i)
-        out[i] = dd * static_cast<double>(qs[i]);
-}
-
-// Q4_0: 18 bytes / 32 elems. [ d:f16 | qs:u8[16] ]. 4-bit symmetric quant
-// centered at 8. ggml dequantize_row_q4_0: for j in 0..15,
-//   y[j]    = d * ((qs[j] & 0xF) - 8)   (low nibble)
-//   y[j+16] = d * ((qs[j] >> 4)  - 8)   (high nibble)
-void ref_dequant_q4_0(const uint8_t* blk, double* out) {
-    half d;
-    std::memcpy(&d, blk, 2);
-    const uint8_t* qs = blk + 2;
-    double dd = f16_to_f64(d);
-    for (int j = 0; j < 16; ++j) {
-        out[j] = dd * (static_cast<double>(qs[j] & 0xF) - 8.0);
-        out[j + 16] = dd * (static_cast<double>((qs[j] >> 4) & 0xF) - 8.0);
-    }
-}
-
-// Q6_K: 210 bytes / 256 elems. [ ql:u8[128] | qh:u8[64] | scales:int8[16] | d:f16 ].
-// ggml dequantize_row_q6_K: for each of 2 groups of 128, four 32-quads:
-//   q = (high2<<4 | low4) - 32 ; val = d * scale[i/16] * q
-// (6-bit signed quant centered at 32; sub-block scale every 16 elems.)
-void ref_dequant_q6_k(const uint8_t* blk, double* out) {
-    const uint8_t* ql = blk;
-    const uint8_t* qh = blk + 128;
-    const int8_t* sc = reinterpret_cast<const int8_t*>(blk + 192);
-    half d;
-    std::memcpy(&d, blk + 208, 2);
-    double dd = f16_to_f64(d);
-    for (int i = 0; i < 256; ++i) {
-        int group = i >> 7;       // 0..1
-        int within = i & 127;     // 0..127
-        int quad = within >> 5;   // 0..3
-        int l = within & 31;      // 0..31
-        int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
-        int qh_idx = (group << 5) + l;
-        uint8_t ql_byte = ql[ql_idx];
-        uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xF) : (ql_byte & 0xF);
-        uint8_t high2 = (qh[qh_idx] >> (quad * 2)) & 0x3;
-        int q6 = static_cast<int>((high2 << 4) | low4) - 32;
-        out[i] = dd * static_cast<double>(sc[i >> 4]) * static_cast<double>(q6);
-    }
-}
-
-// Q4_K: 144 bytes / 256 elems. [ d:f16 | dmin:f16 | scales:u8[12] | qs:u8[128] ].
-// 8 sub-blocks of 32. 6-bit (scale,min) per sub-block packed per ggml
-// get_scale_min_k4. Quant nibbles: a 64-elem chunk uses 32 bytes, first 32
-// elems in low nibbles, next 32 in high nibbles of the SAME 32 bytes.
-//   val = d*scale*q4 - dmin*min   (ggml dequantize_row_q4_K).
-void ref_get_scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
-    if (j < 4) {
-        d = q[j] & 63;
-        m = q[j + 4] & 63;
-    } else {
-        d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
-        m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
-    }
-}
-void ref_dequant_q4_k(const uint8_t* blk, double* out) {
-    half d, dmin;
-    std::memcpy(&d, blk, 2);
-    std::memcpy(&dmin, blk + 2, 2);
-    const uint8_t* sc = blk + 4;
-    const uint8_t* qs = blk + 16;
-    double dd = f16_to_f64(d);
-    double dm = f16_to_f64(dmin);
-    for (int i = 0; i < 256; ++i) {
-        int sub = i / 32;
-        uint8_t scv, mnv;
-        ref_get_scale_min_k4(sub, sc, scv, mnv);
-        int qs_byte = (i / 64) * 32 + (i % 32);
-        int use_high = (i / 32) & 1;
-        uint8_t packed = qs[qs_byte];
-        int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
-        out[i] = dd * static_cast<double>(scv) * static_cast<double>(q4) -
-                 dm * static_cast<double>(mnv);
-    }
-}
-
-// Q5_K: 176 bytes / 256 elems. [ d:f16 | dmin:f16 | scales:u8[12] | qh:u8[32] |
-// qs:u8[128] ]. Same 6-bit (scale,min) packing as Q4_K. The 5th bit of
-// element i lives in qh[i % 32] at bit position sub = i/32 (ggml
-// dequantize_row_q5_K). val = d*scale*(q4 + 16*bit) - dmin*min.
-void ref_dequant_q5_k(const uint8_t* blk, double* out) {
-    half d, dmin;
-    std::memcpy(&d, blk, 2);
-    std::memcpy(&dmin, blk + 2, 2);
-    const uint8_t* sc = blk + 4;
-    const uint8_t* qh = blk + 16;
-    const uint8_t* qs = blk + 48;
-    double dd = f16_to_f64(d);
-    double dm = f16_to_f64(dmin);
-    for (int i = 0; i < 256; ++i) {
-        int sub = i / 32;
-        uint8_t scv, mnv;
-        ref_get_scale_min_k4(sub, sc, scv, mnv);
-        int qs_byte = (i / 64) * 32 + (i % 32);
-        int use_high = (i / 32) & 1;
-        uint8_t packed = qs[qs_byte];
-        int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
-        int q5 = q4 + (((qh[i % 32] >> sub) & 1) << 4);
-        out[i] = dd * static_cast<double>(scv) * static_cast<double>(q5) -
-                 dm * static_cast<double>(mnv);
-    }
-}
-
-// IQ4_NL: 18 bytes / 32 elems. [ d:f16 | qs:u8[16] ]. Non-linear 4-bit: the
-// nibble indexes a fixed signed codebook (ggml-common.h kvalues_iq4nl).
-// Element j (0..15) = low nibble of qs[j]; element j+16 = high nibble
-// (ggml dequantize_row_iq4_nl). val = d * codebook[nibble].
-static const int8_t kRefIq4nlValues[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
-                                           1,    13,   25,  38,  53,  69,  89,  113};
-void ref_dequant_iq4_nl(const uint8_t* blk, double* out) {
-    half d;
-    std::memcpy(&d, blk, 2);
-    const uint8_t* qs = blk + 2;
-    double dd = f16_to_f64(d);
-    for (int j = 0; j < 16; ++j) {
-        out[j] = dd * static_cast<double>(kRefIq4nlValues[qs[j] & 0xF]);
-        out[j + 16] = dd * static_cast<double>(kRefIq4nlValues[(qs[j] >> 4) & 0xF]);
-    }
-}
-
-// IQ4_XS: 136 bytes / 256 elems. [ d:f16 | scales_h:u16 | scales_l:u8[4] |
-// qs:u8[128] ]. 8 sub-blocks of 32, 6-bit scale per sub-block:
-//   ls = (scales_l[ib/2] >> 4*(ib%2)) & 0xF | ((scales_h >> 2*ib) & 3) << 4
-// Same codebook + nibble layout as IQ4_NL within each 16-byte sub-block
-// (ggml dequantize_row_iq4_xs). val = d * (ls - 32) * codebook[nibble].
-void ref_dequant_iq4_xs(const uint8_t* blk, double* out) {
-    half d;
-    std::memcpy(&d, blk, 2);
-    uint16_t scales_h;
-    std::memcpy(&scales_h, blk + 2, 2);
-    const uint8_t* scales_l = blk + 4;
-    const uint8_t* qs = blk + 8;
-    double dd = f16_to_f64(d);
-    for (int ib = 0; ib < 8; ++ib) {
-        int ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
-        double dl = dd * static_cast<double>(ls - 32);
-        for (int j = 0; j < 16; ++j) {
-            out[ib * 32 + j] = dl * static_cast<double>(kRefIq4nlValues[qs[ib * 16 + j] & 0xF]);
-            out[ib * 32 + j + 16] = dl * static_cast<double>(kRefIq4nlValues[(qs[ib * 16 + j] >> 4) & 0xF]);
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Synthetic block builders — raw bytes via LCG, scale halfs chosen separately.
-// scale_mode: 0 = "normal" random-ish scales; 1 = d=0 (degenerate);
-//             2 = max-magnitude finite scale half; 3 = NaN d-half (guard only).
-// 6-bit packed scales are filled to hit all-0 / all-63 extremes when forced.
-// -----------------------------------------------------------------------------
-enum ScaleMode { NORMAL = 0, ZERO_D = 1, MAXMAG = 2, NAN_D = 3 };
-
-half pick_d(Lcg& g, ScaleMode mode) {
-    switch (mode) {
-        case ZERO_D:
-            return __float2half(0.0f);
-        case MAXMAG:
-            // Largest finite normal f16 = 0x7BFF (65504). Stresses overflow.
-            return f16_from_bits(0x7BFF);
-        case NAN_D:
-            return f16_from_bits(0x7E00);  // quiet NaN
-        default:
-            return __float2half(0.005f + 0.02f * std::fabs(g.unit()));
-    }
-}
-
-void build_q8_0(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 32;
-    buf.resize((size_t)N * bpr * 34);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 34;
-            half d = pick_d(g, mode);
-            std::memcpy(bp, &d, 2);
-            for (int i = 0; i < 32; ++i)
-                bp[2 + i] = g.byte();  // int8 quants, full [-128,127] range
-        }
-}
-
-void build_q4_0(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 32;
-    buf.resize((size_t)N * bpr * 18);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 18;
-            half d = pick_d(g, mode);
-            std::memcpy(bp, &d, 2);
-            for (int i = 0; i < 16; ++i)
-                bp[2 + i] = g.byte();  // packed 4-bit nibbles, full range
-        }
-}
-
-void build_q6_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 256;
-    buf.resize((size_t)N * bpr * 210);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 210;
-            for (int i = 0; i < 192; ++i)
-                bp[i] = g.byte();  // ql[128] + qh[64]
-            for (int i = 0; i < 16; ++i)  // int8 sub-block scales
-                bp[192 + i] = (mode == MAXMAG) ? 127 : g.byte();
-            half d = pick_d(g, mode);
-            std::memcpy(bp + 208, &d, 2);
-        }
-}
-
-void build_q4_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 256;
-    buf.resize((size_t)N * bpr * 144);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 144;
-            half d = pick_d(g, mode);
-            half dmin = (mode == MAXMAG) ? f16_from_bits(0x7BFF)
-                                         : __float2half(0.002f + 0.01f * std::fabs(g.unit()));
-            if (mode == ZERO_D)
-                dmin = __float2half(0.0f);
-            if (mode == NAN_D)
-                dmin = f16_from_bits(0x7E00);
-            std::memcpy(bp, &d, 2);
-            std::memcpy(bp + 2, &dmin, 2);
-            // 6-bit packed scales: all-0 or all-63 extremes when MAXMAG, else LCG.
-            for (int i = 0; i < 12; ++i)
-                bp[4 + i] = (mode == MAXMAG) ? 0xFF : g.byte();  // 0xFF -> all 6-bit fields = 63
-            for (int i = 0; i < 128; ++i)
-                bp[16 + i] = g.byte();  // 4-bit quant nibbles
-        }
-}
-
-void build_q5_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 256;
-    buf.resize((size_t)N * bpr * 176);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 176;
-            half d = pick_d(g, mode);
-            half dmin = (mode == MAXMAG) ? f16_from_bits(0x7BFF)
-                                         : __float2half(0.002f + 0.01f * std::fabs(g.unit()));
-            if (mode == ZERO_D)
-                dmin = __float2half(0.0f);
-            if (mode == NAN_D)
-                dmin = f16_from_bits(0x7E00);
-            std::memcpy(bp, &d, 2);
-            std::memcpy(bp + 2, &dmin, 2);
-            for (int i = 0; i < 12; ++i)
-                bp[4 + i] = (mode == MAXMAG) ? 0xFF : g.byte();  // 6-bit scale fields
-            for (int i = 0; i < 32; ++i)
-                bp[16 + i] = g.byte();  // qh: 5th bits, full range
-            for (int i = 0; i < 128; ++i)
-                bp[48 + i] = g.byte();  // 4-bit quant nibbles
-        }
-}
-
-void build_iq4_nl(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 32;
-    buf.resize((size_t)N * bpr * 18);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 18;
-            half d = pick_d(g, mode);
-            std::memcpy(bp, &d, 2);
-            for (int i = 0; i < 16; ++i)
-                bp[2 + i] = g.byte();  // codebook indices, full nibble range
-        }
-}
-
-void build_iq4_xs(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
-    int bpr = K / 256;
-    buf.resize((size_t)N * bpr * 136);
-    for (int r = 0; r < N; ++r)
-        for (int b = 0; b < bpr; ++b) {
-            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 136;
-            half d = pick_d(g, mode);
-            std::memcpy(bp, &d, 2);
-            // scales_h + scales_l: all-1-bits hits every 6-bit scale = 63
-            // (max |ls-32| = 31) under MAXMAG, else LCG.
-            for (int i = 0; i < 6; ++i)
-                bp[2 + i] = (mode == MAXMAG) ? 0xFF : g.byte();
-            for (int i = 0; i < 128; ++i)
-                bp[8 + i] = g.byte();
-        }
-}
+using namespace gguf_ref;  // Lcg, ScaleMode, ref_dequant_*, build_*, kFormats, format_spec
 
 // -----------------------------------------------------------------------------
 // GPU helpers
@@ -417,47 +84,6 @@ bool any_nan_inf(const std::vector<half>& v) {
     return false;
 }
 
-// Reference dequant of a whole [N,K] weight buffer into fp64.
-void ref_dequant_all(const std::vector<uint8_t>& buf, int N, int K, QType qt,
-                     std::vector<double>& out) {
-    out.resize((size_t)N * K);
-    if (qt == QType::Q8_0) {
-        int bpr = K / 32;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_q8_0(buf.data() + ((size_t)r * bpr + b) * 34, &out[(size_t)r * K + b * 32]);
-    } else if (qt == QType::Q4_0) {
-        int bpr = K / 32;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_q4_0(buf.data() + ((size_t)r * bpr + b) * 18, &out[(size_t)r * K + b * 32]);
-    } else if (qt == QType::Q6_K) {
-        int bpr = K / 256;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_q6_k(buf.data() + ((size_t)r * bpr + b) * 210, &out[(size_t)r * K + b * 256]);
-    } else if (qt == QType::IQ4_NL) {
-        int bpr = K / 32;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_iq4_nl(buf.data() + ((size_t)r * bpr + b) * 18, &out[(size_t)r * K + b * 32]);
-    } else if (qt == QType::IQ4_XS) {
-        int bpr = K / 256;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_iq4_xs(buf.data() + ((size_t)r * bpr + b) * 136, &out[(size_t)r * K + b * 256]);
-    } else if (qt == QType::Q5_K) {
-        int bpr = K / 256;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_q5_k(buf.data() + ((size_t)r * bpr + b) * 176, &out[(size_t)r * K + b * 256]);
-    } else {  // Q4_K
-        int bpr = K / 256;
-        for (int r = 0; r < N; ++r)
-            for (int b = 0; b < bpr; ++b)
-                ref_dequant_q4_k(buf.data() + ((size_t)r * bpr + b) * 144, &out[(size_t)r * K + b * 256]);
-    }
-}
 
 // -----------------------------------------------------------------------------
 // (1) DEQUANT KERNEL vs fp64 reference. Tolerance: f16-rounding only (1e-3 rel).
@@ -465,20 +91,7 @@ void ref_dequant_all(const std::vector<uint8_t>& buf, int N, int K, QType qt,
 void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, double rel_tol) {
     Lcg g(0xC0FFEEu + static_cast<uint32_t>(qt) * 131 + mode * 977);
     std::vector<uint8_t> buf;
-    if (qt == QType::Q8_0)
-        build_q8_0(buf, N, K, g, mode);
-    else if (qt == QType::Q4_0)
-        build_q4_0(buf, N, K, g, mode);
-    else if (qt == QType::Q6_K)
-        build_q6_k(buf, N, K, g, mode);
-    else if (qt == QType::Q5_K)
-        build_q5_k(buf, N, K, g, mode);
-    else if (qt == QType::IQ4_NL)
-        build_iq4_nl(buf, N, K, g, mode);
-    else if (qt == QType::IQ4_XS)
-        build_iq4_xs(buf, N, K, g, mode);
-    else
-        build_q4_k(buf, N, K, g, mode);
+    format_spec(qt).build(buf, N, K, g, mode);
 
     void* dW = to_device(buf);
     half* dOut = nullptr;
@@ -618,23 +231,17 @@ struct QTypeTag {
 template <typename T>
 class GgufDequant : public ::testing::Test {};
 
-using GgufDequantFormats =
-    ::testing::Types<QTypeTag<QType::Q8_0>, QTypeTag<QType::Q4_0>, QTypeTag<QType::Q6_K>,
-                     QTypeTag<QType::Q5_K>, QTypeTag<QType::Q4_K>, QTypeTag<QType::IQ4_NL>,
-                     QTypeTag<QType::IQ4_XS>>;
+// Every QType `dequant_gpu_supported()` accepts. Six of them (Q4_1, Q5_0,
+// Q5_1, Q2_K, Q3_K, Q8_K) shipped a decode path with no numerical check at any
+// level until AUDIT_arch_2026 D-5; `DequantSupportedFormatsAllHaveAReference`
+// below fails if the loader ever accepts a seventh without one.
+using GgufDequantFormats = ::testing::Types<
+    QTypeTag<QType::Q8_0>, QTypeTag<QType::Q4_0>, QTypeTag<QType::Q4_1>, QTypeTag<QType::Q5_0>,
+    QTypeTag<QType::Q5_1>, QTypeTag<QType::Q2_K>, QTypeTag<QType::Q3_K>, QTypeTag<QType::Q4_K>,
+    QTypeTag<QType::Q5_K>, QTypeTag<QType::Q6_K>, QTypeTag<QType::Q8_K>, QTypeTag<QType::IQ4_NL>,
+    QTypeTag<QType::IQ4_XS>>;
 
-inline const char* qtype_name(QType qt) {
-    switch (qt) {
-        case QType::Q8_0: return "Q8_0";
-        case QType::Q4_0: return "Q4_0";
-        case QType::Q6_K: return "Q6_K";
-        case QType::Q5_K: return "Q5_K";
-        case QType::Q4_K: return "Q4_K";
-        case QType::IQ4_NL: return "IQ4_NL";
-        case QType::IQ4_XS: return "IQ4_XS";
-        default: return "?";
-    }
-}
+inline const char* qtype_name(QType qt) { return format_spec(qt).name; }
 
 TYPED_TEST_SUITE(GgufDequant, GgufDequantFormats);
 
@@ -648,6 +255,29 @@ TYPED_TEST(GgufDequant, AllScaleModes) {
     check_dequant(name, qt, 16, 256, ZERO_D, 1e-3);
     check_dequant(name, qt, 16, 256, MAXMAG, 1e-3);
     check_dequant(name, qt, 8, 256, NAN_D, 1e-3);  // no-crash / UB guard
+}
+
+// Two-way: the typed suite above covers exactly the formats `dequant_gpu`
+// serves. Accepting a format with no reference is how six of them shipped
+// unchecked (D-5); carrying a reference for a format the loader no longer
+// accepts is dead test weight. Both directions fail here.
+TEST(GgufDequantCoverage, EverySupportedFormatHasAReference) {
+    // Every wire-stable QType, whether or not imp dequantizes it.
+    const QType kAllWireTypes[] = {QType::F32,    QType::F16,  QType::Q4_0, QType::Q4_1, QType::Q5_0,
+                                   QType::Q5_1,   QType::Q8_0, QType::Q8_1, QType::Q2_K, QType::Q3_K,
+                                   QType::Q4_K,   QType::Q5_K, QType::Q6_K, QType::Q8_K, QType::IQ4_NL,
+                                   QType::IQ4_XS, QType::BF16, QType::MXFP4};
+    for (QType qt : kAllWireTypes) {
+        bool has_ref = false;
+        for (const FormatSpec& f : kFormats)
+            if (f.qt == qt)
+                has_ref = true;
+        EXPECT_EQ(dequant_gpu_supported(qt), has_ref)
+            << "QType " << static_cast<unsigned>(qt)
+            << ": dequant_gpu_supported=" << dequant_gpu_supported(qt) << " but reference=" << has_ref
+            << ". A dequant path without an independent reference is untested "
+               "numerics (AUDIT_arch_2026 D-5); a reference without a path is dead weight.";
+    }
 }
 
 // =============================================================================
@@ -719,21 +349,14 @@ TEST(GgufRef, Q6_K_GemvFp16) {
 // Tolerance: q8_1-activation band ~1-2%, asserted at 2.5e-2, MEASURED below.
 // =============================================================================
 namespace {
+
+using namespace gguf_ref;  // Lcg, ScaleMode, ref_dequant_*, build_*, kFormats, format_spec
 void run_dp4a_gemv(const char* name, QType qt, int N, int K,
                    void (*dp4a_fn)(const void*, const block_q8_1*, const float*, half*, int, int,
                                    cudaStream_t)) {
     Lcg g(0xD4A0u + static_cast<uint32_t>(qt));
     std::vector<uint8_t> buf;
-    if (qt == QType::Q8_0)
-        build_q8_0(buf, N, K, g, NORMAL);
-    else if (qt == QType::Q4_0)
-        build_q4_0(buf, N, K, g, NORMAL);
-    else if (qt == QType::Q6_K)
-        build_q6_k(buf, N, K, g, NORMAL);
-    else if (qt == QType::Q5_K)
-        build_q5_k(buf, N, K, g, NORMAL);
-    else
-        build_q4_k(buf, N, K, g, NORMAL);
+    format_spec(qt).build(buf, N, K, g, NORMAL);
     void* dW = to_device(buf);
     std::vector<half> hx;
     half* dx = random_x(K, g, hx);
@@ -831,6 +454,11 @@ TEST(GgufRef, Q4_0_GemvDp4a) { run_dp4a_gemv("Q4_0", QType::Q4_0, 256, 1024, gem
 TEST(GgufRef, Q6_K_GemvDp4a) { run_dp4a_gemv("Q6_K", QType::Q6_K, 256, 1024, gemv_q6k_q8_1); }
 TEST(GgufRef, Q4_K_GemvDp4a) { run_dp4a_gemv("Q4_K", QType::Q4_K, 256, 1024, gemv_q4_k_q8_1); }
 TEST(GgufRef, Q5_K_GemvDp4a) { run_dp4a_gemv("Q5_K", QType::Q5_K, 256, 1024, gemv_q5_k_q8_1); }
+// The two decode kernels D-5 found with no reference on either side: their
+// dequant sibling and their dp4a trait share the same layout reading, so
+// "dispatch == direct" would have agreed while both were wrong (Q3_K was).
+TEST(GgufRef, Q2_K_GemvDp4a) { run_dp4a_gemv("Q2_K", QType::Q2_K, 256, 1024, gemv_q2_k_q8_1); }
+TEST(GgufRef, Q3_K_GemvDp4a) { run_dp4a_gemv("Q3_K", QType::Q3_K, 256, 1024, gemv_q3_k_q8_1); }
 
 TEST(GgufRef, Q8_0_GemvMmvq) { run_mmvq_gemv("Q8_0", QType::Q8_0, 256, 1024, ggml_mmvq_q8_0); }
 TEST(GgufRef, Q4_K_GemvMmvq) { run_mmvq_gemv("Q4_K", QType::Q4_K, 256, 1024, ggml_mmvq_q4k); }

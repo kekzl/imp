@@ -221,6 +221,14 @@ test-e2e: build
 	docker run --rm --gpus all -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_LLAMA=/models/Llama-3.2-3B-Instruct-Q8_0.gguf \
 		$(DOCKER_IMG) test-e2e --gtest_filter="LoraHotSwap.*"
+	@# The batch-invariance instrument (AUDIT_arch_2026 D-2): teacher-forced
+	@# M=1 vs M=32 on a DENSE native-NVFP4 checkpoint, own container because it
+	@# needs ~14 GiB free and its own deterministic-mode process state.
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_NVFP4=$(BATCH_INVARIANCE_MODEL) \
+		$(DOCKER_IMG) test-e2e --gtest_filter="BatchInvarianceTest.*"
+
+BATCH_INVARIANCE_MODEL ?= /models/Qwen3-14B-NVFP4
 
 # Speculative capture fidelity (gate 3). Its own container because the check
 # runs a second full forward per verify step against a 20 GiB checkpoint: after

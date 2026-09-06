@@ -1036,6 +1036,7 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        tests/test_batch_invariance.cu
         tests/test_determinism_e2e.cpp
         tests/test_deepstack_inject.cu
         tests/test_vision_chunk_offset.cu

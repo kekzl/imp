@@ -82,6 +82,12 @@ inline constexpr const char* kEnvMmprojGemma4 = "IMP_TEST_MMPROJ_GEMMA4";
 inline constexpr const char* kEnvModelModeloptCoder = "IMP_TEST_MODEL_MODELOPT_CODER";
 inline constexpr const char* kEnvModelMistral = "IMP_TEST_MODEL_MISTRAL";
 
+// Dense native-NVFP4 checkpoint for the batch-invariance instrument
+// (AUDIT_arch_2026 D-2). Dense on purpose: MoE routing flips would sit on top
+// of the solo/batched numerics the test is there to price.
+// Default: /models/Qwen3-14B-NVFP4.
+inline constexpr const char* kEnvModelNvfp4 = "IMP_TEST_MODEL_NVFP4";
+
 // DeepSeek-V2/V3 directory for MLA config tests.
 // Expected: a HF model directory containing config.json.
 // Default: /models/DeepSeek-V2-Lite (Docker bind-mount path).
