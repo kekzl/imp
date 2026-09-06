@@ -487,7 +487,9 @@ nvfp4_device_args    = true
 # Opt-in smallM kernel branch for NVFP4 MoE prefill + its M threshold.
 nvfp4_smallM         = false
 nvfp4_smallM_threshold = 64
-# Rows-per-block for multi-row NVFP4 MoE decode GEMV (4|8|16|32).
+# Rows-per-block for multi-row NVFP4 MoE decode GEMV (4|8|16|32). Swept
+# 2026-09-06: 16 and 32 lose (-0.96 %, -5.15 % tg128), 4 is within noise of 8.
+# Single-sequence decode only, and bit-identical output across values.
 mr_nr                = 8
 # Pin host-resident experts in page-locked memory. Decode is unaffected (cache
 # hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not

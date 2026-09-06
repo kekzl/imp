@@ -36,6 +36,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `moe.mr_nr` swept and left at 8: 16 and 32 are measured losses (-0.96 %, -5.15 % tg128 on
+  Qwen3-Coder-30B-A3B-FP4) and are now settled; 4 led 8 of 9 paired runs but by less than this
+  host's noise floor. Comment carries the numbers so the sweep is not repeated (#1925)
 - NVFP4 K-par decode GEMVs drop their 12-CTA `__launch_bounds__` term (ptxas 40 -> 42 registers): tg128 Qwen3-8B-Q8_0
   +1.9 %, Qwen3-14B-NVFP4 +0.7 %, @32 Qwen3.8-27B +1.1 % (3/3 each); the single-sequence GDN scan runs the SPLIT=2 instance
   (+0.15 %, no spill); the batched LM-head GEMV is PDL-registered (@32 +0.8 %, 2/3) (dispatch #11, A2-2 / A2-3, #1923)
