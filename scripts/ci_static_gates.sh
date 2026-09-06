@@ -107,6 +107,7 @@ fi
 if want deps; then
     echo "== Dependency pins =="
     run "cmake/imp-deps.cmake vs Dockerfile (offline)" bash scripts/check_dep_pins.sh
+    run "that gate still names its violations"        bash scripts/check_dep_pins.sh --selftest
 fi
 
 if want alloc; then
