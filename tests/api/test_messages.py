@@ -118,6 +118,15 @@ class TestMessagesValidation:
         # converted to nothing at all.
         {"type": "image", "source": {"type": "file", "file_id": "f1"}},
         {"type": "image"},
+        # tool_result.content is itself an array the converter reads only `text`
+        # and `image` from. An unreadable block there left the tool body EMPTY,
+        # so the model was told the tool returned nothing and answered on it.
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "document", "source": {"type": "base64", "data": "x"}}]},
+        # And the image-source hole one level down, which used to inject
+        # "[1 image(s) ... follow]" into the prompt with no image following.
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "image", "source": {"type": "file", "file_id": "f1"}}]},
     ])
     def test_unreadable_content_block_is_refused(self, client, model, block):
         r = client.post("/v1/messages", json=_msg(
@@ -134,6 +143,11 @@ class TestMessagesValidation:
         {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
         {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
         {"type": "tool_result", "tool_use_id": "t1", "content": "42"},
+        {"type": "tool_result", "tool_use_id": "t1",
+         "content": [{"type": "text", "text": "42"}]},
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]},
         {"type": "thinking", "thinking": "hm"},
         {"type": "redacted_thinking", "data": "zz"},
     ])

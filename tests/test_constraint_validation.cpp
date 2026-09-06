@@ -323,6 +323,42 @@ TEST(AnthropicContentBlocks, ImageWithAnUnreadableSourceIsRefused) {
     EXPECT_TRUE(anth_refused(json::array({{{"type", "image"}}}), why));
 }
 
+// `tool_result.content` may itself be an array, and the converter reads only
+// `text` and `image` there. Accepting `tool_result` wholesale left that array
+// unguarded, and the cost is higher than a drop: an unreadable block leaves the
+// tool body empty, so the model is told the tool returned nothing.
+//
+// Worse, the image half used to count the block rather than the conversion, so
+// a `file` source injected "[1 image(s) ... follow]" into the prompt with no
+// image following - the prompt asserting an input the model never received.
+TEST(AnthropicContentBlocks, ToolResultInnerBlocksAreChecked) {
+    std::string why;
+    auto tr = [](const json& inner) {
+        return json::array({{{"type", "tool_result"}, {"tool_use_id", "t1"}, {"content", inner}}});
+    };
+
+    // The two shapes the converter reads.
+    EXPECT_FALSE(anth_refused(tr("42"), why)) << "a plain string result converts whole";
+    EXPECT_FALSE(anth_refused(tr(json::array({{{"type", "text"}, {"text", "42"}}})), why));
+    EXPECT_FALSE(anth_refused(
+        tr(json::array({{{"type", "image"},
+                         {"source", {{"type", "base64"}, {"media_type", "image/png"}, {"data", "AA"}}}}})),
+        why));
+
+    // A block the inner loop drops.
+    why.clear();
+    ASSERT_TRUE(
+        anth_refused(tr(json::array({{{"type", "document"}, {"source", {{"type", "base64"}}}}})), why));
+    EXPECT_NE(why.find("tool_result"), std::string::npos)
+        << "the message must say where the unreadable block was";
+
+    // The image-source hole, one level down.
+    why.clear();
+    ASSERT_TRUE(anth_refused(
+        tr(json::array({{{"type", "image"}, {"source", {{"type", "file"}, {"file_id", "f1"}}}}})), why));
+    EXPECT_NE(why.find("tool_result"), std::string::npos);
+}
+
 TEST(AnthropicContentBlocks, MissingTypeIsRefused) {
     std::string why;
     ASSERT_TRUE(anth_refused(json::array({{{"text", "hi"}}}), why));
