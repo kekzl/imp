@@ -72,6 +72,8 @@ void print_usage(const char* prog) {
             "deepseek_r1, phi\n"
             "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = single-chunk, default: per-arch)\n"
             "  --prefill-fp8         Use FP8 E4M3 weight cache for ~2x prefill throughput\n"
+            "  --token-trace         Emit a [tok=ID 'piece'] marker on stderr for every generated\n"
+            "                        token, not just the first ten decode steps\n"
             "  --mtp-spec-decode <k> MTP drafting for the verify loop, chain length k (sidecar or embedded mtp.* head)\n"
             "  --decode-nvfp4        Force mode 1 (additive: FP8 prefill + NVFP4 decode caches).\n"
             "                        Auto-default for dense Q*_K (6-8 bit GGUF) on sm_120 since\n"
@@ -177,6 +179,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.mtp_spec_decode_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefill-fp8") == 0) {
             args.prefill_fp8 = true;
+        } else if (std::strcmp(arg, "--token-trace") == 0) {
+            args.token_trace = true;
         } else if (std::strcmp(arg, "--prefix-caching") == 0) {
             args.prefix_caching = true;
         } else if (std::strcmp(arg, "--streaming-kv") == 0) {

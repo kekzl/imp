@@ -211,7 +211,13 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
                 hide_token = true;
             }
             std::string piece = tok->decode_token(token);
-            if (step < 10)
+            // The cap keeps stderr readable on a long run. It also made the
+            // marker stream a sample of the OPENING of a generation, not of the
+            // generation: `scripts/verify.sh`'s degeneration gate reads exactly
+            // this stream and treated the eleven markers it got as "the last 32
+            // tokens", so a repetition loop starting at step 11 was invisible
+            // to it. `--token-trace` lifts the cap for callers that measure.
+            if (args.token_trace || step < 10)
                 fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
             if (!hide_token) {
                 printf("%s", piece.c_str());
