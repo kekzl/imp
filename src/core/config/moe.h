@@ -123,6 +123,23 @@ struct MoE {
     // row, so threads-per-block = NR * 32. Higher NR amortizes block
     // launch overhead at the cost of fewer concurrent CTAs. Valid
     // values: 4, 8 (default), 16, 32. Other values fall back to 8.
+    //
+    // Swept 2026-09-06, interleaved arms, `imp-cli --bench` tg128, 3 rounds
+    // each. The knob only ever reaches single-sequence decode
+    // (`can_decode_fast` refuses n != 1) and greedy output is bit-identical
+    // across values (each row is one warp's own reduction), so it is a pure
+    // occupancy choice:
+    //   NR=16  -0.96 %   NR=32  -5.15 %  (Qwen3-Coder-30B-A3B-FP4, quiet host,
+    //                                     per-arm spread under 0.1 %)
+    // Those two are settled: do not re-litigate them. NR=4 is NOT settled. It
+    // led 8 of 9 paired runs (+0.67 % Coder-30B, +0.15 % Qwen3.6-35B), but a
+    // repeat an hour later spread +-1.5 % and handed one round to NR=8, which
+    // is larger than the whole claimed effect. A foreign GPU tenant (7-8 GiB,
+    // Windows-side, invisible to `docker ps`) was holding the card right after
+    // that repeat, so it cannot separate the knob from the host either way.
+    // The default stays at 8 until someone resolves 0.5 % against this host's
+    // noise floor; the 2026-07-13 sweep that read the class as refuted is not
+    // contradicted by what we have.
     int mr_nr = 8;
 };
 }  // namespace imp::cfg

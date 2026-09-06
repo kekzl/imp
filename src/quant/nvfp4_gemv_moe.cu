@@ -179,8 +179,10 @@ __global__ void gemv_nvfp4_moe_decode_mr_kernel(
 static bool use_moe_multirow(int K) { return (K / kMicroBlockSize) <= 512; }
 
 // Tile-tuning knob: read NR from RuntimeConfig, clamp to {4, 8, 16, 32}.
-// Default 8 = legacy behavior; 4/16/32 are A/B candidates for the perf
-// regression recovery work (see PR opening MoE NVFP4 decode tile sweep).
+// Default stays 8: the 2026-09-06 sweep settled 16 and 32 as losses (-0.96 %,
+// -5.15 % tg128) and left 4 unresolved — it led 8 of 9 paired runs but by less
+// than this host's noise floor once the card is busy. Numbers and method in
+// `src/core/config/moe.h`.
 static int resolve_mr_nr() {
     int v = imp::process_diag_moe_mr_nr();
     if (v == 4 || v == 8 || v == 16 || v == 32) return v;
