@@ -4,5 +4,5 @@
 # (inlining the sed in the Makefile breaks make's $(shell ...) paren matching).
 set -euo pipefail
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-sed -n 's/^set(IMP_DEP_\([A-Z_]*\)_TAG[ \t]*\([^ \t]*\).*/--build-arg IMP_DEP_\1_TAG=\2/p' \
+sed -n 's/^set(IMP_DEP_\([A-Z_]*\)_\(TAG\|SHA\)[ \t]*\([^ \t]*\).*/--build-arg IMP_DEP_\1_\2=\3/p' \
     "$dir/cmake/imp-deps.cmake"

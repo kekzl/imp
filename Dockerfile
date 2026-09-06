@@ -36,19 +36,30 @@ RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.co
 ENV CUDA_HOME=/usr/local/cuda
 
 # Pre-clone third-party deps into their own layer. Only invalidated when the
-# pinned tags below change — code-only edits keep this layer cached, saving
-# the FetchContent git-clone step (~30-60s) on every Docker rebuild.
-# Tags are authoritative in cmake/imp-deps.cmake; `make build` injects them as
+# pins below change - code-only edits keep this layer cached, saving the
+# FetchContent git-clone step (~30-60s) on every Docker rebuild.
+# Pins are authoritative in cmake/imp-deps.cmake; `make build` injects them as
 # --build-arg from that file. The defaults below keep a bare `docker build .`
 # working and MUST match cmake/imp-deps.cmake.
+# Fetched by COMMIT, not by tag (AUDIT_arch_2026 H-8): `git clone --branch` takes
+# a mutable ref, so an upstream re-tag silently changed what this layer contains.
+# GitHub serves a depth-1 fetch of any reachable SHA, so the pin costs nothing.
+# The tag is carried only as the human label and lands in /deps/PINS.
 ARG IMP_DEP_GOOGLETEST_TAG=v1.18.0
 ARG IMP_DEP_CUTLASS_TAG=v4.7.0
 ARG IMP_DEP_HTTPLIB_TAG=v0.53.0
 ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
-RUN git clone --depth=1 --branch ${IMP_DEP_GOOGLETEST_TAG} https://github.com/google/googletest.git /deps/googletest \
- && git clone --depth=1 --branch ${IMP_DEP_CUTLASS_TAG}    https://github.com/NVIDIA/cutlass.git    /deps/cutlass    \
- && git clone --depth=1 --branch ${IMP_DEP_HTTPLIB_TAG}    https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
- && git clone --depth=1 --branch ${IMP_DEP_NLOHMANN_JSON_TAG} https://github.com/nlohmann/json.git   /deps/json
+ARG IMP_DEP_GOOGLETEST_SHA=063de7e9578f82b369302001269680b4b1553359
+ARG IMP_DEP_CUTLASS_SHA=dcf215af68a2d08d305076c152a06f201728cd53
+ARG IMP_DEP_HTTPLIB_SHA=f00e476f1b2d519343e960f77f57a06c8a24f046
+ARG IMP_DEP_NLOHMANN_JSON_SHA=55f93686c01528224f448c19128836e7df245f72
+RUN set -eu; \
+    pin() { mkdir -p "$4"; git -C "$4" init -q; git -C "$4" fetch -q --depth=1 "$1" "$3"; \
+            git -C "$4" checkout -q FETCH_HEAD; printf '%s %s %s\n' "$1" "$2" "$3" >> /deps/PINS; }; \
+    pin https://github.com/google/googletest.git   ${IMP_DEP_GOOGLETEST_TAG}    ${IMP_DEP_GOOGLETEST_SHA}    /deps/googletest; \
+    pin https://github.com/NVIDIA/cutlass.git      ${IMP_DEP_CUTLASS_TAG}       ${IMP_DEP_CUTLASS_SHA}       /deps/cutlass; \
+    pin https://github.com/yhirose/cpp-httplib.git ${IMP_DEP_HTTPLIB_TAG}       ${IMP_DEP_HTTPLIB_SHA}       /deps/httplib; \
+    pin https://github.com/nlohmann/json.git       ${IMP_DEP_NLOHMANN_JSON_TAG} ${IMP_DEP_NLOHMANN_JSON_SHA} /deps/json
 
 FROM toolchain AS builder
 

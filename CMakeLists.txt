@@ -94,7 +94,7 @@ if(IMP_BUILD_TESTS)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG ${IMP_DEP_GOOGLETEST_TAG}
+        GIT_TAG ${IMP_DEP_GOOGLETEST_SHA}  # commit pin, cmake/imp-deps.cmake
     )
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
@@ -104,7 +104,7 @@ option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
 if(IMP_USE_CUTLASS)
     FetchContent_Declare(cutlass
         GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
-        GIT_TAG ${IMP_DEP_CUTLASS_TAG}
+        GIT_TAG ${IMP_DEP_CUTLASS_SHA}  # commit pin, cmake/imp-deps.cmake
         GIT_SHALLOW TRUE
         EXCLUDE_FROM_ALL
     )
@@ -531,14 +531,14 @@ endif()
 if(IMP_BUILD_SERVER)
     FetchContent_Declare(httplib
         GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-        GIT_TAG ${IMP_DEP_HTTPLIB_TAG}
+        GIT_TAG ${IMP_DEP_HTTPLIB_SHA}  # commit pin, cmake/imp-deps.cmake
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(httplib)
 
     FetchContent_Declare(nlohmann_json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG ${IMP_DEP_NLOHMANN_JSON_TAG}
+        GIT_TAG ${IMP_DEP_NLOHMANN_JSON_SHA}  # commit pin, cmake/imp-deps.cmake
         GIT_SHALLOW TRUE
     )
     set(JSON_BuildTests OFF CACHE BOOL "" FORCE)

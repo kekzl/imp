@@ -36,6 +36,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Third-party pins are commits, not mutable refs: the four `cmake/imp-deps.cmake` deps carry the SHA
+  the build fetches, all 35 workflow `uses:` are 40-hex pinned, and `check_dep_pins.sh` fails on an
+  upstream re-tag or an unpinned action (5 planted mutants red) (AUDIT_arch_2026 H-8 pin half, #1926)
 - `moe.mr_nr` swept and left at 8: 16 and 32 are measured losses (-0.96 %, -5.15 % tg128 on
   Qwen3-Coder-30B-A3B-FP4) and are now settled; 4 led 8 of 9 paired runs but by less than this
   host's noise floor. Comment carries the numbers so the sweep is not repeated (#1925)

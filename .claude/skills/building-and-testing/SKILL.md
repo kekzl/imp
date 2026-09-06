@@ -13,7 +13,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 | 2 | `build/` and `build-dev/` are root-owned | `make dev-clean`, or `docker run --rm -v $PWD:/src -w /src ubuntu rm -rf build`. Never `sudo`. |
 | 3 | No `--mount=type=cache` in the Dockerfile | Silently invalidates test results. |
 | 4 | `models/` in the repo is a symlink farm | Custom `docker run` mounts `$HOME/models:/models`; Makefile targets already do. |
-| 5 | Dependency pins live ONLY in `cmake/imp-deps.cmake` | CUTLASS, GTest, httplib, nlohmann/json. `make build` injects them via `scripts/dep_build_args.sh`. `Lint` runs `scripts/check_dep_pins.sh --online` (blocking inside Lint, Lint itself advisory). |
+| 5 | Dependency pins live ONLY in `cmake/imp-deps.cmake` | CUTLASS, GTest, httplib, nlohmann/json, each a TAG plus the SHA the build fetches. `make build` injects both via `scripts/dep_build_args.sh`. `check_dep_pins.sh` runs offline in the `deps` gate (drift, missing SHA, unpinned `uses:`) and `--online` in `Lint` (tag must still resolve to the pinned commit). |
 | 6 | CI has no GPU runner | `Test` job skipped unless repo var `HAS_GPU_RUNNER=true`. GPU correctness and perf are gated LOCALLY: pre-commit (`make test-gpu`), pre-push (`make verify-fast`). |
 | 7 | Required check = `Build`, ruleset 14716423 | Static gates run as its FIRST step (`scripts/ci_static_gates.sh`, unfiltered) and block the merge since #1527. Rename the job without the ruleset and every PR sits at `mergeStateStatus=BLOCKED`. |
 | 8 | `main`'s CI status is stale by default | Auto-merge squashes with `GITHUB_TOKEN`, which starts no workflow run. Judge a fix by the PR run or the file; refresh with `gh workflow run CI --ref main`. |
