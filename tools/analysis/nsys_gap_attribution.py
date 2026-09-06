@@ -74,7 +74,12 @@ def main():
     rows = load_intervals(db, set(args.kinds.split(",")))
     if not rows:
         sys.exit("no device intervals found")
-    t0 = rows[0][0]
+    # The window is documented as seconds from the first KERNEL, and that is
+    # what a serving profile needs: the weight upload runs as memcpy for ~11 s
+    # before the first kernel, so anchoring on the first interval of any kind
+    # shifts every window by that much and silently analyses the wrong part of
+    # the run (measured 2026-09-06: 10.77 s offset on a Qwen3.8-27B server).
+    t0 = min((r[0] for r in rows if not r[2].startswith("[")), default=rows[0][0])
     if args.window:
         lo = t0 + int(args.window[0] * 1e9)
         hi = t0 + int(args.window[1] * 1e9)
@@ -139,6 +144,23 @@ def main():
     print("\ntop 12 device intervals by total time:")
     for name, (tot, n) in sorted(by_name.items(), key=lambda kv: -kv[1][0])[:12]:
         print(f"  {tot / 1e6:9.1f} ms  n={n:>7}  avg {tot / n / 1e3:7.1f} us  {name}")
+
+    # Launch census. "Fewer launches, not faster ones" (roadmap Open 1) needs
+    # the count per decode step, and a class that is cheap in time can still be
+    # expensive in launches: the ranking by time above answers a different
+    # question than the ranking by count below. Steps are counted by the
+    # sampler kernel that ends one.
+    step_key = next((k for k in ("argmax_reduce_rows", "sample_rows", "argmax")
+                     if any(k in n for _, _, n in rows)), None)
+    steps = sum(1 for _, _, n in rows if step_key and step_key in n)
+    if not steps:
+        return
+    print(f"\nlaunch census: {len(rows)} intervals over {steps} decode steps "
+          f"(delimiter: {step_key}), {len(rows) / steps:.0f} per step")
+    print(f"  {'class':<52}{'per step':>9}{'share':>7}{'us/step':>9}")
+    for name, (tot, n) in sorted(by_name.items(), key=lambda kv: -kv[1][1])[:14]:
+        print(f"  {name[:52]:<52}{n / steps:>9.1f}{100.0 * n / len(rows):>6.1f}%"
+              f"{tot / steps / 1e3:>9.1f}")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `nsys_gap_attribution.py` anchors `--window` on the first kernel (the weight upload runs as
+  memcpy ~11 s before it, so every window was shifted) and prints a launch census per decode step;
+  roadmap Open 1 re-priced from ~8 % to ~2 % headroom on that measurement (#TBD)
 - Everything the build downloads names the bytes it expects: base images carry an `@sha256:`
   digest, the CMake installer and `git-clang-format` (now a commit, not `release/18.x`) a
   `sha256sum -c`, pip a hash-pinned lock file; 9 planted mutants red (H-6, #1927)
