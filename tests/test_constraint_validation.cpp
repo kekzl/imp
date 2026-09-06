@@ -359,6 +359,67 @@ TEST(AnthropicContentBlocks, ToolResultInnerBlocksAreChecked) {
     EXPECT_NE(why.find("tool_result"), std::string::npos);
 }
 
+// The `system` field was outside the walk entirely: it keys on "messages".
+// `flatten_system` reads a string, or an array from which it keeps `text`
+// blocks, and returns "" for everything else - so the whole system prompt
+// vanished and the model answered without its instructions. Measured on the
+// model-less binary before this: a bare object, a number and an array carrying
+// an image all reached the model lookup.
+TEST(AnthropicContentBlocks, SystemFieldIsChecked) {
+    std::string why;
+    auto sys = [](const json& v) { return json{{"messages", json::array()}, {"system", v}}; };
+
+    // What flatten_system can actually fold.
+    EXPECT_FALSE(anthropic_unreadable_block(sys("you are terse"), why));
+    EXPECT_FALSE(anthropic_unreadable_block(sys(json::array({{{"type", "text"}, {"text", "s"}}})), why));
+    EXPECT_FALSE(anthropic_unreadable_block(sys(json(nullptr)), why));
+    // cache_control rides on a text block and must stay accepted (#1046).
+    EXPECT_FALSE(anthropic_unreadable_block(
+        sys(json::array({{{"type", "text"}, {"text", "s"}, {"cache_control", {{"type", "ephemeral"}}}}})),
+        why));
+
+    // The shapes that folded to "".
+    why.clear();
+    ASSERT_TRUE(anthropic_unreadable_block(sys(json{{"type", "text"}, {"text", "s"}}), why))
+        << "a bare object is not an array, so flatten_system returns \"\"";
+    EXPECT_NE(why.find("system"), std::string::npos);
+    EXPECT_TRUE(anthropic_unreadable_block(sys(json(42)), why));
+    why.clear();
+    ASSERT_TRUE(anthropic_unreadable_block(
+        sys(json::array({{{"type", "image"}, {"source", {{"type", "base64"}, {"data", "AA"}}}}})), why));
+    EXPECT_NE(why.find("image"), std::string::npos);
+}
+
+// A LEADING `role: "system"` message is folded through flatten_system too, and
+// `leading_system++` consumes it whether or not anything survived. It therefore
+// carries the system field's narrower allowlist. A system message after the
+// first turn is NOT folded: it reaches push_user_turn and keeps its images, so
+// refusing it would be a false refusal. The boundary is read off the converter.
+TEST(AnthropicContentBlocks, LeadingSystemMessageUsesTheSystemAllowlist) {
+    const json txt = {{"type", "text"}, {"text", "s"}};
+    const json img = {{"type", "image"}, {"source", {{"type", "base64"}, {"data", "AA"}}}};
+    const json user = {{"role", "user"}, {"content", "hi"}};
+    std::string why;
+
+    // Leading, and unfoldable: refused.
+    ASSERT_TRUE(anthropic_unreadable_block(
+        json{{"messages", json::array({{{"role", "system"}, {"content", json::array({txt, img})}}, user})}},
+        why));
+
+    // Leading and foldable, in both content shapes.
+    why.clear();
+    EXPECT_FALSE(anthropic_unreadable_block(
+        json{{"messages", json::array({{{"role", "system"}, {"content", json::array({txt})}}, user})}}, why));
+    EXPECT_FALSE(anthropic_unreadable_block(
+        json{{"messages", json::array({{{"role", "system"}, {"content", "be terse"}}, user})}}, why));
+
+    // Not leading: the image survives the transform, so it must not be refused.
+    EXPECT_FALSE(anthropic_unreadable_block(
+        json{{"messages", json::array({user, {{"role", "system"}, {"content", json::array({txt, img})}}})}},
+        why))
+        << "a later system message is not folded; refusing it would be a false refusal";
+}
+
 TEST(AnthropicContentBlocks, MissingTypeIsRefused) {
     std::string why;
     ASSERT_TRUE(anth_refused(json::array({{{"text", "hi"}}}), why));

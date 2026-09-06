@@ -308,7 +308,9 @@ body capped at 32 MiB, 10 s read timeout. Residual:
 Three deliberate refusals:
 
 - A content part or block this server cannot read is a `400` naming it, on all
-  three dialects. `/v1/chat/completions` and `/v1/responses` read `text` and
+  three dialects. On `/v1/messages` that includes the `system` field, which takes
+  a string or an array of `text` blocks: every other shape folded to an empty
+  system prompt and the model answered without its instructions. `/v1/chat/completions` and `/v1/responses` read `text` and
   `image_url`; `/v1/messages` reads `text`, `image` (base64 or url source),
   `tool_use`, `tool_result` and `thinking`. Anything else would be deleted on
   the way in and answered around.

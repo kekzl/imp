@@ -80,6 +80,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- `/v1/messages` refuses a `system` field it cannot fold instead of dropping the whole system
+  prompt and answering without it. A bare object, a number and an array holding a non-text block
+  all reached the model before; a leading `role: "system"` message is folded the same way (#1931)
 - `/v1/responses` carries `text.format` `regex` and `grammar`, which already worked on
   `/v1/chat/completions`. The transform mapped only `json_object` and `json_schema`, so the same
   request was constrained on one endpoint and free text at 200 on the other (#1930)
