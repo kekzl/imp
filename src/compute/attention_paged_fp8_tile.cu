@@ -20,6 +20,7 @@
 
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -275,6 +276,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
             o_reg[i] *= inv_l;
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     __syncthreads();
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_tile_fp8), m_w, l_w, o_reg, warp_id,
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
@@ -498,6 +500,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
         cur = (cur + 1) % kGqaStages;
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the partial store
     // Direct per-warp partial write: (m, l, O unnormalized at m) — o_reg is
     // already the exp-weighted sum, which is the partial format the split-K
     // reduce kernel expects (no /l + *l round-trip, no cross-warp merge).

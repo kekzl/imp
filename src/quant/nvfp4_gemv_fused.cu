@@ -18,7 +18,7 @@ namespace imp {
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 // Grid: (q_rows + k_rows + v_rows) blocks.
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_qkv_fused_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
     const uint8_t* __restrict__ packed_q, const uint8_t* __restrict__ ms_q, float ts_q,
     const uint8_t* __restrict__ packed_k, const uint8_t* __restrict__ ms_k, float ts_k,
     const uint8_t* __restrict__ packed_v, const uint8_t* __restrict__ ms_v, float ts_v,
@@ -69,7 +69,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_qkv_fused_kernel(
 // Fused Gate+Up: 2 weight matrices, shared input, separate outputs
 // Grid: 2 * rows blocks. First half = gate, second half = up.
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_gate_up_fused_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_gate_up_fused_kernel(
     const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
     const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
     const half* __restrict__ x, half* __restrict__ yg, half* __restrict__ yu, int rows, int K) {

@@ -25,6 +25,7 @@
 // HPC sharing removes that factor.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -245,6 +246,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
                                                first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     st.normalise();
     extern __shared__ char smem_f16_mt[];
 #pragma unroll
@@ -326,6 +328,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
                                                first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     st.normalise();
     extern __shared__ char smem_f16_sk_mt[];
 #pragma unroll

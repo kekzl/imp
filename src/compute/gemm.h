@@ -308,9 +308,10 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                       size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
                                       cudaStream_t stream = nullptr);
 
-// Register all dp4a GEMV kernel template instantiations with PDL.
-// Called from GraphExecutor::init() when PDL is enabled.
-void gemv_pdl_register();
+// Max-L1 SMEM carveout on every dp4a GEMV kernel template instantiation.
+// Called from GraphExecutor::init(), independent of PDL: the kernels carry no
+// pdl_wait() and are not registered (AUDIT_arch_2026 A1-3 / A2-1).
+void gemv_dp4a_set_l1_carveout();
 
 // dp4a-accelerated GEMV with FP32 output: W_quant @ x_q8_1 → y[M] float.
 // Designed for the LM head projection where FP32 logits are needed for sampling.

@@ -254,6 +254,29 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 
 }  // namespace
 
+// PDL registration + MaxL1 carveout for the batched-M kernels that production
+// reaches: gemv_nvfp4_kpar_mb_fp32_kernel<1..4> behind
+// gemv_nvfp4_kpar_batched_fp32 (the batched decode LM head,
+// executor_forward.cu). The kernel waits before its first global read and
+// triggers after its last, which is the registration contract (core/pdl.h);
+// until AUDIT_arch_2026 A2-2 it was instrumented and never registered, so
+// pdl::launch fell through to <<<>>> and its graph edge stayed a default edge.
+// gemv_nvfp4_multirow_mb_kernel and gemv_nvfp4_kpar_mb_fp16_kernel (behind
+// gemm_nvfp4_batched / _acc) run only as test oracles and stay unregistered.
+void nvfp4_gemv_batched_pdl_register() {
+#define NVFP4_MB_REGISTER(kern)                                                    \
+    do {                                                                           \
+        pdl::enable_kernel(kern);                                                  \
+        cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, \
+                             cudaSharedmemCarveoutMaxL1);                          \
+    } while (0)
+    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<1>);
+    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<2>);
+    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<3>);
+    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<4>);
+#undef NVFP4_MB_REGISTER
+}
+
 // Batched-M FP32 GEMV for the LM head at batch>1: y[n_act, N_out] = x[n_act,K] @ A^T.
 // Reads the weight matrix ONCE per launch (vs once per activation row in the old
 // per-row M=1 loop). n_act is processed in power-of-two MR chunks so each launch

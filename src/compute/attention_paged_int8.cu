@@ -1,5 +1,6 @@
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -250,6 +251,7 @@ __global__ void paged_attention_splitk_int8_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     // ---- Cross-warp reduction ----
     extern __shared__ char smem_sk_int8[];
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_sk_int8), m_w, l_w, o_reg, warp_id,
@@ -463,6 +465,7 @@ __global__ void paged_attention_decode_int8_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     // ---- Cross-warp reduction ----
     extern __shared__ char smem_int8[];
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_int8), m_w, l_w, o_reg, warp_id,

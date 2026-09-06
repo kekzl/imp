@@ -37,7 +37,4 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream = nullptr);
 void shared_expert_gate_scale(const void* x_fp16, const void* W_fp16, void* y_fp16_inout, int n, int d_model,
                               int d, cudaStream_t stream = nullptr);
 
-// Register activation kernels for PDL tail/head overlap.
-void activation_pdl_register();
-
 }  // namespace imp

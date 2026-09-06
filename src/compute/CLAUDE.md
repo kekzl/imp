@@ -54,7 +54,8 @@ binary, not with `ctest -R`. Filter and lane pitfalls: `tests/CLAUDE.md`.
 
 - `build-dev/` carries the branch last compiled in it; `git checkout` does not
   rebuild.
-- `__launch_bounds__` measured **-4.5 % to -20 %** here. Never add one blind;
+- `__launch_bounds__` measured **-4.5 % to -20 %** here; removing a min-blocks term
+  read +1.9 % (NVFP4 K-par GEMV, ptxas 40 -> 42 registers). Never add one blind;
   pair-measure it (`make verify-ab`).
 - `compute-sanitizer` is dead on this WSL2 host; `make asan` is host-code only.
 

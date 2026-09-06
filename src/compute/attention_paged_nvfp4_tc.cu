@@ -1,5 +1,6 @@
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -607,6 +608,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     // crosswarp reduce smem starts AFTER the per-warp TC scratch region
     // (NUM_WARPS * WARP_TC_HALVES halves = NUM_WARPS * 1024 bytes).
     char* crosswarp_smem = tc_smem_raw + NUM_WARPS * WARP_TC_HALVES * sizeof(__half);
@@ -757,6 +759,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     extern __shared__ char smem_sk_nvfp4[];
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_sk_nvfp4), m_w, l_w, o_reg, warp_id,
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
@@ -997,6 +1000,8 @@ __global__ void paged_attention_residual_reduce_kernel(
     const float m_res = s_m_res;
     const float l_res = s_l_res;
 
+    pdl_trigger();  // partials + residual read; the dependent o_proj may be scheduled during the merge + O
+                    // store
     // Step 3: combined merge (paged + residual) per dim, parallelized across threads.
     float m_global, w_paged, w_res, inv_l;
     if (res_active > 0) {

@@ -323,6 +323,8 @@ void nvfp4_gemv_pdl_register() {
                          cudaSharedmemCarveoutMaxL1);
     cudaFuncSetAttribute(gemv_nvfp4_moe_gate_up_fused_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
                          cudaSharedmemCarveoutMaxL1);
+    // Batched-M LM-head GEMV (its instantiations live in nvfp4_gemv_batched.cu).
+    nvfp4_gemv_batched_pdl_register();
 
 #undef NVFP4_REGISTER
 }

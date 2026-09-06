@@ -1,5 +1,6 @@
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -245,6 +246,7 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     // ---- Cross-warp reduction ----
     __syncthreads();
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_pipe_fp8), m_w, l_w, o_reg, warp_id,
@@ -395,6 +397,7 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     // ---- Cross-warp reduction ----
     extern __shared__ char smem_fp8[];
     __syncthreads();

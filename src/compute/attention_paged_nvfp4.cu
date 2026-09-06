@@ -391,6 +391,7 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     extern __shared__ char smem_sk_nvfp4[];
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_sk_nvfp4), m_w, l_w, o_reg, warp_id,
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,

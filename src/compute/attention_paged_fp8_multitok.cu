@@ -15,6 +15,7 @@
 // every other shape stays on the plain kernel.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -183,6 +184,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
         for (int e = 0; e < ELEMS; e++)
             o_reg[e] *= inv_l;
     }
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     extern __shared__ char smem_fp8_mt[];
     __syncthreads();
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8_mt), m_w, l_w, o_reg, warp_id,

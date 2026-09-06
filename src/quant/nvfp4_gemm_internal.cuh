@@ -18,6 +18,13 @@ namespace imp {
 static constexpr int kMicroBlockSize = 16;
 static constexpr int kKparWarps = 4;
 static constexpr int kKparThreads = kKparWarps * 32;  // 128
+// The K-par decode GEMVs carry __launch_bounds__(kKparThreads) with NO
+// min-blocks term. The former (kKparThreads, 12) filled the 1536-thread SM
+// exactly and forced ptxas to 40 registers; without it the kernels allocate 42
+// (10 CTAs per SM instead of 12) and decode reads +1.9 % on Qwen3-8B-Q8_0,
+// +0.7 % on Qwen3-14B-NVFP4, +1.1 % at 32 streams on Qwen3.8-27B, 3/3 pairs
+// each (AUDIT_arch_2026 dispatch #11). (kKparThreads, 16) is infeasible on
+// this SM and compiles to the same SASS; do not write it back.
 
 // Multi-row kernel: 8 warps, NR rows per block for small-K models.
 // Reduces launch overhead and improves SM occupancy.

@@ -347,7 +347,11 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     }
 
     // SMEM carveout: maximize L1 for bandwidth-bound GEMV kernels (independent of PDL).
+    // The dp4a family lost its carveout when its PDL registration was withdrawn
+    // (#1833); it is a launch attribute, not a wait promise, so it returns here
+    // (AUDIT_arch_2026 A1-3 / A2-1, dispatch #11).
     mxfp4_gemv_set_l1_carveout();
+    gemv_dp4a_set_l1_carveout();
 
     // Precompute YaRN correction dimensions if enabled
     if (cfg.yarn_ext_factor > 0.0f) {

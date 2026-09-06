@@ -17,7 +17,7 @@ namespace imp {
 // ---------------------------------------------------------------------------
 // Basic GEMV: y[row] = A_nvfp4[row,:] @ x
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ x, half* __restrict__ y, int M, int K) {
     const int row = blockIdx.x;
@@ -41,7 +41,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_kernel(
 }
 
 // FP32 output variant for LM head projection (sampling needs float logits).
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_fp32_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ x, float* __restrict__ y, int M, int K) {
     const int row = blockIdx.x;
@@ -62,7 +62,6 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_fp32_kernel(
     if (tid == 0)
         y[row] = total;
 }
-
 
 // ---------------------------------------------------------------------------
 // Multi-row GEMV: NR rows per block, 256 threads (8 warps).
@@ -132,7 +131,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
 // ---------------------------------------------------------------------------
 // GEMV with residual: y[row] = A_nvfp4[row,:] @ x + residual[row]
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_residual_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ x, half* __restrict__ y, const half* __restrict__ residual, int M, int K) {
     const int row = blockIdx.x;
@@ -161,7 +160,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_residual_kernel(
 // Eliminates the separate SwiGLU kernel launch.
 // ---------------------------------------------------------------------------
 
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_swiglu_residual_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_swiglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ gate, const half* __restrict__ up, half* __restrict__ y,
     const half* __restrict__ residual, int M, int K) {
@@ -191,7 +190,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_swiglu_residual_k
 // ---------------------------------------------------------------------------
 // Fused GeGLU + GEMV + residual (for Gemma-3 and similar)
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_geglu_residual_kernel(
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_geglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ gate, const half* __restrict__ up, half* __restrict__ y,
     const half* __restrict__ residual, int M, int K) {
