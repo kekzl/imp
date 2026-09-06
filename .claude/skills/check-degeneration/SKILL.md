@@ -25,7 +25,10 @@ Run the battery after touching the forward pass, graph capture, MoE routing, KV 
 
 ## Pass criteria
 
-1. No token repeats >4x in a row, no 3-gram repeats >3x.
+1. No token repeats >4x in a row; at most 70 % of the output made of repeated 3-grams.
+   (The old "no 3-gram more than 3x" failed a correct list answer and passed a 10-token
+   phrase on a loop; `scripts/degen_verdict.sh` carries the calibrated set, exercised by
+   `guard_degen_thresholds` in the CPU lane.)
 2. >=10 generated tokens before any stop (unless single-word factual).
 3. stderr clean (grep below).
 4. Decode within 30% of the model's row in `tests/perf_baseline.json` (>30% drop = graphs fell back silently).

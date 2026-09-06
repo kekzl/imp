@@ -1139,6 +1139,17 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_lane_filter_copy.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
+    # The degeneration thresholds in scripts/degen_verdict.sh, exercised against
+    # known token streams. They had never been exercised at all: verify.sh read
+    # imp-cli's [tok=...] markers, imp-cli capped them at the first ten decode
+    # steps, and the gate judged those eleven and called them "the last 32
+    # tokens". The first run that could see a whole generation failed CORRECT
+    # output on two of the three thresholds. No GPU: the verdict is a function
+    # of the stream.
+    add_test(NAME guard_degen_thresholds
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_degen_thresholds.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     # No skipped test in the three lanes above. DEPENDS only orders: a lane
     # that crashed leaves its previous report behind, and is red on its own.
     add_test(NAME guard_unit_skips
@@ -1149,6 +1160,7 @@ if(IMP_BUILD_TESTS)
                          guard_det_suite_filter guard_cancel_teardown
                          guard_verify_filter guard_precommit_filter guard_unit_skips
                          guard_makefile_filters guard_lane_filter_copy
+                         guard_degen_thresholds
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

@@ -80,6 +80,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- The degeneration gate in `scripts/verify.sh` judged eleven tokens of every run and called them
+  "the last 32": imp-cli caps its `[tok=]` markers at ten decode steps. New `--token-trace` lifts
+  the cap and the gate uses it, so a repetition loop starting at step 11 is now visible (#1933)
+- Degeneration thresholds recalibrated against real streams and put under a CPU-lane guard
+  (`guard_degen_thresholds`). The flat "3-gram more than 3 times" failed a correct list answer;
+  a 10-token phrase on a loop passed. `make verify` is green again, red since 2026-08-27 (#1933)
 - The GGUF loader names what it skipped, grouped by tensor-name family, instead of one DEBUG line
   per tensor that is invisible at the default log level. Same report the SafeTensors side got in
   #1929 (#1932)

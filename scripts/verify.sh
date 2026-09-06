@@ -757,75 +757,53 @@ smoke_prompt() {
     fi
     model_gate_ran
     local ERR; ERR=$(mktemp)
-    OUT=$("$BIN" --model "$MODELS/$model" --prompt "$prompt" \
+    # --token-trace is load-bearing, not cosmetic. Without it imp-cli caps the
+    # markers at the first ten decode steps (mode_oneshot.cpp), so this gate read
+    # eleven tokens out of a 64-token run and called them "the last 32": every
+    # check below ran on the OPENING of the generation, and a repetition loop
+    # starting at step 11 was invisible to the detector built to catch it. It
+    # also made the distinct-token count fail a correct short answer, which is
+    # what had `make verify` red on Qwen3.5-4B MXFP4 since 2026-08-27.
+    OUT=$("$BIN" --model "$MODELS/$model" --prompt "$prompt" --token-trace \
           --max-tokens 64 --temperature 0 --chat-template none 2>"$ERR")
     # Token markers '[tok=NNNN ' word']' land on stderr.
-    TOKS=$(grep -oP '\[tok=\K[0-9]+' "$ERR" | tail -32)
-    DISTINCT=$(echo "$TOKS" | sort -u | wc -l)
-    # Generated word stream (stripped of token id prefix) for NaN/Inf scan
-    WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
-    # The repetition and early-abort checks below read the WHOLE run, not the
-    # trailing window. Derived here so the temp file is gone before any of the
-    # early returns below - they used to be the only `rm` and adding checks in
-    # front of it would have leaked one file per failed smoke run.
     ALL_TOKS=$(grep -oP '\[tok=\K[0-9]+' "$ERR")
+    WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
     rm -f "$ERR"
-    N_TOKS=$(printf '%s\n' "$ALL_TOKS" | grep -c .)
-    RUNMAX=$(printf '%s\n' "$ALL_TOKS" | uniq -c | awk '{if($1>m)m=$1}END{print m+0}')
-    GRAMMAX=$(printf '%s\n' "$ALL_TOKS" | awk '{a[NR]=$0} END{
-        for(i=1;i+2<=NR;i++){k=a[i]" "a[i+1]" "a[i+2]; c[k]++; if(c[k]>m)m=c[k]}
-        print m+0}')
 
+    # NaN/Inf first: it is a different failure from degeneration and the verdict
+    # script only sees ids, not pieces.
+    #
     # Herestrings, not `echo ... | grep -q`: grep -q leaves at the first match and
     # closes the pipe, echo dies of EPIPE, and `set -o pipefail` (:40) turns that
     # into a non-zero pipeline even though grep MATCHED. Here that would swallow a
     # NaN report; three lines down, where the test is negated, it fails a smoke
-    # run whose output was correct. $OUT carries the whole cli log, so it is well
-    # past the point where the producer writes in one block.
+    # run whose output was correct.
     if grep -qiE ' (nan|inf|-inf|-nan) ' <<< " $WORDS "; then
         fail "$label — NaN/Inf token in output"
         echo "  words: $WORDS"
         return
     fi
-    if [ "$DISTINCT" -lt 8 ]; then
-        fail "$label — degenerate (only $DISTINCT distinct tokens in last 32)"
-        echo "  tokens: $(echo "$TOKS" | tr '\n' ' ')"
-        return
-    fi
-    # The distinct-token count is one shape of degeneration, and the skill this
-    # gate stands in for names three more (#1573). Two of them are checkable
-    # here, from output this gate already collects, with the skill's own
-    # thresholds:
-    #
-    #   1. verbatim repetition — no token more than 4 times in a row, no 3-gram
-    #      more than 3 times. "a b c a b c a b c a b c" has 3 distinct tokens
-    #      per window and passes the count above; it is the shape #1248 had.
-    #   2. early abort — at least 10 generated tokens. A 3-token answer to a
-    #      sentence-completion prompt is a stop-condition defect, and it also
-    #      makes every check above vacuous: 3 tokens cannot fail a 32-token
-    #      window.
-    if [ "$RUNMAX" -gt 4 ]; then
-        fail "$label — a token repeats $RUNMAX times in a row (skill limit: 4)"
+
+    # The thresholds live in scripts/degen_verdict.sh so the CPU lane can
+    # exercise them without a GPU (guard_degen_thresholds). They never had been:
+    # this gate used to judge the eleven markers imp-cli printed and call them
+    # "the last 32 tokens".
+    local VERDICT
+    VERDICT=$(printf '%s\n' "$ALL_TOKS" | bash "$ROOT/scripts/degen_verdict.sh" "$min_toks" 2>&1)
+    if [ "${VERDICT#OK}" = "$VERDICT" ]; then
+        fail "$label — ${VERDICT#FAIL }"
         echo "  tokens: $(printf '%s ' $ALL_TOKS)"
         return
     fi
-    if [ "$GRAMMAX" -gt 3 ]; then
-        fail "$label — a 3-gram repeats $GRAMMAX times (skill limit: 3)"
-        echo "  tokens: $(printf '%s ' $ALL_TOKS)"
-        return
-    fi
-    if [ "$N_TOKS" -lt "$min_toks" ]; then
-        fail "$label — stopped after $N_TOKS tokens (limit: $min_toks)"
-        echo "  words: $WORDS"
-        return
-    fi
+
     # Generated text appears interleaved with logs on stdout — substring match works
     if ! grep -q "$expect" <<< "$OUT$WORDS"; then
         fail "$label — expected '$expect' in output"
         echo "  words: $WORDS"
         return
     fi
-    pass "$label (distinct=$DISTINCT, tokens=$N_TOKS, max-run=$RUNMAX, max-3gram=$GRAMMAX, contains '$expect')"
+    pass "$label (${VERDICT#OK }, contains '$expect')"
 }
 
 smoke_prompt "Qwen3-4B Q8_0 (dense)" \
