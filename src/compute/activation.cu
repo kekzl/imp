@@ -525,12 +525,4 @@ void shared_expert_gate_scale(const void* x_fp16, const void* W_fp16, void* y_fp
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// --------------------------------------------------------------------------
-// PDL registration
-// --------------------------------------------------------------------------
-void activation_pdl_register() {
-    pdl::enable(reinterpret_cast<const void*>(&swiglu_fp16_kernel));
-    pdl::enable(reinterpret_cast<const void*>(&geglu_fp16_kernel));
-}
-
 }  // namespace imp

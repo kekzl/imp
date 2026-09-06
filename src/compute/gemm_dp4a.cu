@@ -657,8 +657,14 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                               q8_1_stride, d8_stride, top_k, stream);
 }
 // ---------------------------------------------------------------------------
-// PDL registration for all dp4a GEMV kernel template instantiations.
-// Called from GraphExecutor::init() when PDL is enabled.
+// L1 carveout for the dp4a GEMV kernel template instantiations. Called from
+// GraphExecutor::init() next to mxfp4_gemv_set_l1_carveout(), PDL or not.
+//
+// This was gemv_pdl_register(): pdl::enable_kernel + SET_MAXL1 per kernel.
+// #1833 withdrew the call because these kernels carry no pdl_wait() and
+// registering them raced (DegenerationTest.GreedyDeterminism), and the
+// carveout went with it (AUDIT_arch_2026 A1-3 / A2-1). Registration stays
+// out until the kernels wait; the carveout is a scheduler hint and stays.
 // ---------------------------------------------------------------------------
 // GEMV kernels are bandwidth-bound with minimal SMEM: maximize L1 cache.
 // Variadic to handle template commas: SET_MAXL1(kernel<A, B, C>)
@@ -666,126 +672,42 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
     cudaFuncSetAttribute(__VA_ARGS__, cudaFuncAttributePreferredSharedMemoryCarveout, \
                          cudaSharedmemCarveoutMaxL1)
 
-void gemv_pdl_register() {
-// Kernel #1: basic + residual
-#define REG1(QT, NR)                                     \
-    pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, true>);  \
-    pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, false>); \
-    SET_MAXL1(gemv_dp4a_kernel<QT, NR, true>);           \
-    SET_MAXL1(gemv_dp4a_kernel<QT, NR, false>)
-    REG1(Q6_K_Traits, 1);
-    REG1(Q6_K_Traits, 2);
-    REG1(Q8_0_Traits, 1);
-    REG1(Q8_0_Traits, 2);
-    REG1(Q8_0_Traits, 4);
-    REG1(Q4_0_Traits, 1);
-    REG1(Q4_0_Traits, 2);
-    REG1(Q4_0_Traits, 4);
-    REG1(Q4_K_Traits, 1);
-    REG1(Q4_K_Traits, 2);
-    REG1(Q4_K_Traits, 4);
-    REG1(Q5_K_Traits, 1);
-    REG1(Q5_K_Traits, 2);
-    REG1(Q5_K_Traits, 4);
-    REG1(Q2_K_Traits, 1);
-    REG1(Q2_K_Traits, 2);
-    REG1(Q2_K_Traits, 4);
-    REG1(Q3_K_Traits, 1);
-    REG1(Q3_K_Traits, 2);
-#undef REG1
-
-// Kernel #2: FP32 output
-#define REG2(QT, NR)                                   \
-    pdl::enable_kernel(gemv_dp4a_fp32_kernel<QT, NR>); \
-    SET_MAXL1(gemv_dp4a_fp32_kernel<QT, NR>)
-    REG2(Q6_K_Traits, 1);
-    REG2(Q6_K_Traits, 2);
-    REG2(Q8_0_Traits, 1);
-    REG2(Q8_0_Traits, 2);
-    REG2(Q8_0_Traits, 4);
-    REG2(Q4_0_Traits, 1);
-    REG2(Q4_0_Traits, 2);
-    REG2(Q4_0_Traits, 4);
-    REG2(Q4_K_Traits, 1);
-    REG2(Q4_K_Traits, 2);
-    REG2(Q4_K_Traits, 4);
-    REG2(Q5_K_Traits, 1);
-    REG2(Q5_K_Traits, 2);
-    REG2(Q5_K_Traits, 4);
-    REG2(Q2_K_Traits, 1);
-    REG2(Q2_K_Traits, 2);
-    REG2(Q2_K_Traits, 4);
-    REG2(Q3_K_Traits, 1);
-    REG2(Q3_K_Traits, 2);
-#undef REG2
-
-// Kernel #3: QKV fused
-#define REG3(QT, NR)                                  \
-    pdl::enable_kernel(gemv_dp4a_qkv_kernel<QT, NR>); \
-    SET_MAXL1(gemv_dp4a_qkv_kernel<QT, NR>)
-    REG3(Q6_K_Traits, 1);
-    REG3(Q6_K_Traits, 2);
-    REG3(Q8_0_Traits, 1);
-    REG3(Q8_0_Traits, 2);
-    REG3(Q8_0_Traits, 4);
-    REG3(Q4_0_Traits, 1);
-    REG3(Q4_0_Traits, 2);
-    REG3(Q4_0_Traits, 4);
-    REG3(Q4_K_Traits, 1);
-    REG3(Q4_K_Traits, 2);
-    REG3(Q4_K_Traits, 4);
-    REG3(Q5_K_Traits, 1);
-    REG3(Q5_K_Traits, 2);
-    REG3(Q5_K_Traits, 4);
-    REG3(Q2_K_Traits, 1);
-    REG3(Q2_K_Traits, 2);
-    REG3(Q2_K_Traits, 4);
-    REG3(Q3_K_Traits, 1);
-    REG3(Q3_K_Traits, 2);
-#undef REG3
-
-// Kernel #4: gate+up fused
-#define REG4(QT, NR)                                      \
-    pdl::enable_kernel(gemv_dp4a_gate_up_kernel<QT, NR>); \
+void gemv_dp4a_set_l1_carveout() {
+// Kernels #1..#4 per (quant type, NR): basic + residual, FP32 output, QKV
+// fused, gate+up fused.
+#define REG(QT, NR)                             \
+    SET_MAXL1(gemv_dp4a_kernel<QT, NR, true>);  \
+    SET_MAXL1(gemv_dp4a_kernel<QT, NR, false>); \
+    SET_MAXL1(gemv_dp4a_fp32_kernel<QT, NR>);   \
+    SET_MAXL1(gemv_dp4a_qkv_kernel<QT, NR>);    \
     SET_MAXL1(gemv_dp4a_gate_up_kernel<QT, NR>)
-    REG4(Q6_K_Traits, 1);
-    REG4(Q6_K_Traits, 2);
-    REG4(Q8_0_Traits, 1);
-    REG4(Q8_0_Traits, 2);
-    REG4(Q8_0_Traits, 4);
-    REG4(Q4_0_Traits, 1);
-    REG4(Q4_0_Traits, 2);
-    REG4(Q4_0_Traits, 4);
-    REG4(Q4_K_Traits, 1);
-    REG4(Q4_K_Traits, 2);
-    REG4(Q4_K_Traits, 4);
-    REG4(Q5_K_Traits, 1);
-    REG4(Q5_K_Traits, 2);
-    REG4(Q5_K_Traits, 4);
-    REG4(Q2_K_Traits, 1);
-    REG4(Q2_K_Traits, 2);
-    REG4(Q2_K_Traits, 4);
-    REG4(Q3_K_Traits, 1);
-    REG4(Q3_K_Traits, 2);
-#undef REG4
-
-// Kernels #5 and #6 (MoE decode/gate+up): NOT registered with PDL.
-// MoE kernels are small (top_k=2, few blocks per expert) and launched
-// frequently (23 MoE layers × 3 kernels = 69 per decode step on Nemotron).
-// cudaLaunchKernelEx overhead outweighs PDL tail/head overlap benefit
-// for these tiny kernels.
-
-// K-parallel kernels (all types)
-#define REG_KPAR(QT)                                       \
-    pdl::enable_kernel(gemv_dp4a_kpar_kernel<QT, true>);   \
-    pdl::enable_kernel(gemv_dp4a_kpar_kernel<QT, false>);  \
-    pdl::enable_kernel(gemv_dp4a_kpar_fp32_kernel<QT>);    \
-    pdl::enable_kernel(gemv_dp4a_kpar_qkv_kernel<QT>);     \
-    pdl::enable_kernel(gemv_dp4a_kpar_gate_up_kernel<QT>); \
-    SET_MAXL1(gemv_dp4a_kpar_kernel<QT, true>);            \
-    SET_MAXL1(gemv_dp4a_kpar_kernel<QT, false>);           \
-    SET_MAXL1(gemv_dp4a_kpar_fp32_kernel<QT>);             \
-    SET_MAXL1(gemv_dp4a_kpar_qkv_kernel<QT>);              \
+    REG(Q6_K_Traits, 1);
+    REG(Q6_K_Traits, 2);
+    REG(Q8_0_Traits, 1);
+    REG(Q8_0_Traits, 2);
+    REG(Q8_0_Traits, 4);
+    REG(Q4_0_Traits, 1);
+    REG(Q4_0_Traits, 2);
+    REG(Q4_0_Traits, 4);
+    REG(Q4_K_Traits, 1);
+    REG(Q4_K_Traits, 2);
+    REG(Q4_K_Traits, 4);
+    REG(Q5_K_Traits, 1);
+    REG(Q5_K_Traits, 2);
+    REG(Q5_K_Traits, 4);
+    REG(Q2_K_Traits, 1);
+    REG(Q2_K_Traits, 2);
+    REG(Q2_K_Traits, 4);
+    REG(Q3_K_Traits, 1);
+    REG(Q3_K_Traits, 2);
+#undef REG
+    // Kernels #5 and #6 (MoE decode / gate+up) take no carveout, as before.
+    // K-parallel kernels (all types)
+#define REG_KPAR(QT)                             \
+    SET_MAXL1(gemv_dp4a_kpar_kernel<QT, true>);  \
+    SET_MAXL1(gemv_dp4a_kpar_kernel<QT, false>); \
+    SET_MAXL1(gemv_dp4a_kpar_fp32_kernel<QT>);   \
+    SET_MAXL1(gemv_dp4a_kpar_qkv_kernel<QT>);    \
     SET_MAXL1(gemv_dp4a_kpar_gate_up_kernel<QT>)
     REG_KPAR(Q6_K_Traits);
     REG_KPAR(Q8_0_Traits);

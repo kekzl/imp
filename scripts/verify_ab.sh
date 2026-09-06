@@ -18,6 +18,9 @@
 #   MODELS_DIR=$HOME/models    where the pin's model lives
 #   IMP_VERIFY_BASELINE        pin to read model + threshold from
 #   IMP_VERIFY_CHUNK_SIZE=0    prefill chunk, as in verify.sh
+#   AB_MODEL=<file>            bench this model (under MODELS_DIR) instead of the pin's
+#   AB_EXTRA="--set k=v ..."   extra imp-cli args, applied to BOTH arms (an ad-hoc
+#                              A/B of a path the pin's default config does not take)
 # Exit 1 when the mean paired decode delta is below -threshold; prefill warns.
 set -uo pipefail
 
@@ -35,10 +38,11 @@ RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'; RST=$'\033[0m'
 
 command -v jq >/dev/null 2>&1 || { echo "verify-ab: jq not installed" >&2; exit 2; }
 [ -f "$BASELINE" ] || { echo "verify-ab: no $BASELINE" >&2; exit 2; }
-MODEL="$(jq -r '.model' "$BASELINE")"
+MODEL="${AB_MODEL:-$(jq -r '.model' "$BASELINE")}"
+EXTRA="${AB_EXTRA:-}"
 THR="${AB_THRESHOLD_PCT:-$(jq -r '.thresholds.paired_decode_regression_pct // empty' "$BASELINE")}"
 [ -n "$THR" ] || { echo "verify-ab: no thresholds.paired_decode_regression_pct in $BASELINE and no AB_THRESHOLD_PCT" >&2; exit 2; }
-[ -f "$MODELS_DIR/$MODEL" ] || { echo "verify-ab: model $MODELS_DIR/$MODEL not present" >&2; exit 2; }
+[ -e "$MODELS_DIR/$MODEL" ] || { echo "verify-ab: model $MODELS_DIR/$MODEL not present" >&2; exit 2; }
 for img in "$IMG_A" "$IMG_B"; do
     docker image inspect "$img" >/dev/null 2>&1 || { echo "verify-ab: image $img missing (make build / scripts/ab_base_image.sh)" >&2; exit 2; }
 done
@@ -50,7 +54,7 @@ TS="$(date -u +%Y%m%d_%H%M%S)"
 LOG="${AB_LOG_DIR:-${TMPDIR:-/tmp}}/verify_ab_${TS}.log"
 ERR="$(mktemp)"
 echo
-echo "${YLW}== paired A/B: A=$IMG_A  B=$IMG_B  pairs=$PAIRS  model=$MODEL  threshold=-${THR}% ==${RST}"
+echo "${YLW}== paired A/B: A=$IMG_A  B=$IMG_B  pairs=$PAIRS  model=$MODEL  threshold=-${THR}%${EXTRA:+  extra=$EXTRA} ==${RST}"
 echo "  log: $LOG"
 
 # One bench process of one arm. Prints "<tg> <pp>"; the line is verify.sh's
@@ -60,7 +64,7 @@ bench_arm() {  # $1 = image
     out="$(docker run --rm --gpus all -v "$MODELS_DIR":/models "$1" \
         imp-cli --model "/models/$MODEL" --bench --bench-pp 512 --bench-reps $REPS \
         --prefill-chunk-size "$CHUNK" --max-tokens 128 --temperature 0 --json \
-        --set speculative.ngram=false 2>>"$ERR")" || return 1
+        --set speculative.ngram=false $EXTRA 2>>"$ERR")" || return 1
     local tg pp
     tg="$(jq -er '.decode_tps' <<<"$out" 2>/dev/null)" || return 1
     pp="$(jq -er '.prefill_tps' <<<"$out" 2>/dev/null)" || return 1

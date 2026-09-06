@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <string>
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -239,6 +240,7 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     if (!active)
         return;
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     // ---- Cross-warp reduction within each Q head group ----
     float* red_max = reinterpret_cast<float*>(smem_gqa);
     float* red_l = red_max + total_warps;
@@ -418,6 +420,7 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     extern __shared__ char smem[];
     float* warp_max = reinterpret_cast<float*>(smem);
     float* warp_l = warp_max + NUM_WARPS;
@@ -570,6 +573,7 @@ __global__ void paged_attention_decode_kernel_generic(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     extern __shared__ char smem[];
     float* warp_max = reinterpret_cast<float*>(smem);
     float* warp_l = warp_max + NUM_WARPS;
@@ -828,6 +832,7 @@ __global__ void paged_attention_splitk_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     // ---- Cross-warp reduction within this block ----
     extern __shared__ char smem_sk[];
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_sk), m_w, l_w, o_reg, warp_id, lane_id,
@@ -1048,6 +1053,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
         }
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     // ---- Cross-warp reduction ----
     // Reuse pipe smem as reduction buffer (it's no longer needed)
     __syncthreads();  // guard smem reuse from pipelined loads

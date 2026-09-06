@@ -15,6 +15,7 @@
 // word) instances, E4M3 scales; other shapes stay on the scalar kernels.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "compute/attention_paged_nvfp4_multitok.cuh"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -177,6 +178,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_mu
         for (int e = 0; e < ELEMS; e++)
             o_reg[e] *= inv_l;
     }
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     extern __shared__ char smem_nvfp4_mt[];
     __syncthreads();
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_nvfp4_mt), m_w, l_w, o_reg, warp_id,
@@ -256,6 +258,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
         for (int e = 0; e < ELEMS; e++)
             o_reg[e] *= inv_l;
     }
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     extern __shared__ char smem_sk_nvfp4_mt[];
     __syncthreads();
     crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_sk_nvfp4_mt), m_w, l_w, o_reg, warp_id,

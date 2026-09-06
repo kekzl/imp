@@ -122,6 +122,9 @@ void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate, const NvFP4Mo
 
 // PDL registration for all NVFP4 GEMV kernels (called at init when PDL enabled).
 void nvfp4_gemv_pdl_register();
+// The batched LM-head GEMV instantiations (nvfp4_gemv_batched.cu); called by
+// nvfp4_gemv_pdl_register().
+void nvfp4_gemv_batched_pdl_register();
 
 // Set the pre-allocated dequant scratch buffer for the gemm_nvfp4 fallback
 // path (M>1 dequant→FP16→cuBLAS). When set and large enough, gemm_nvfp4

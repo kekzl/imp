@@ -137,6 +137,11 @@ One row per lever: verdict, headline number, ref. Measurement narrative in
 | penalties walk the history, not the vocabulary | SHIPPED | per launch at 32 rows: 300-token history 197.1 -> 10.7-23.3 us, 4096-token 2659.3 -> 18.6-34.3 us; @32 3/3 positive, logits bit-identical | `sampling_penalties.cu`, 2026-09-02 |
 | conv1d decode, float4 state and one weight load | SHIPPED | 9.61 -> 4.97 us per launch (273.4 -> 144.2 ms of a 10.4 s window), 3/3 positive, bit-exact | `src/compute/ssm.cu`, 2026-09-02 |
 | PDL device half (`griddepcontrol`) | SHIPPED default-on | @32 3/3 positive (+1.3% median), M=1 +1.7% median, idle 13.6 -> 10.8% | `runtime.no_pdl` |
+| PDL registration for the batched LM-head GEMV (`gemv_nvfp4_kpar_mb_fp32_kernel`, instrumented since #1833, never registered) | SHIPPED | @32 +1.49 / +1.20 / -0.18 % (mean +0.84 %) | AUDIT_arch_2026 A2-2, #NNNN |
+| `pdl_trigger()` after the KV walk in the 24 remaining paged decode / split-K kernels | SHIPPED, NEUTRAL | @32 +0.84 / -0.40 / -1.23 %, M=1 -0.02 % (Qwen3.8-27B) | AUDIT_arch_2026 A2-5, #NNNN |
+| NVFP4 K-par GEMV `__launch_bounds__(128)` without the 12-CTA min-blocks term (ptxas 40 -> 42 registers, 12 -> 10 CTAs/SM; the `(128, 16)` the #10 lead used is infeasible on the 1536-thread SM and compiles to the same SASS) | SHIPPED | @32 +1.19 / +2.12 / +0.08 %; M=1 Qwen3-8B-Q8_0 +1.96 / +1.97 / +1.71 %, Qwen3-14B-NVFP4 +0.65 / +0.61 / +0.79 % | #NNNN |
+| dp4a GEMV MaxL1 carveout restored (lost with the PDL registration in #1833) | SHIPPED | M=1 Qwen3-8B-Q8_0 on the source-precision path (`diagnostics.no_nvfp4_decode_cache`) 145.3 -> 157.3 tok/s, +8.24 / +8.20 / +8.25 % | AUDIT_arch_2026 A1-3, #NNNN |
+| single-sequence GDN scan on the SPLIT=2 instance (no spill, 255 -> 180 registers) | SHIPPED | M=1 Qwen3.8-27B +0.12 / +0.20 / +0.12 % | AUDIT_arch_2026 A2-3, #NNNN |
 | one-H2D decode-step staging | NEUTRAL, closed unmerged | 2/3 pairs negative (-0.2 / -1.1 / +0.6%) | branch `perf/decode-step-staging` |
 | graph prewarm | RETIRED as throughput, SHIPPED as latency | wave-1 aggregate unmoved (629-650 vs 627), wave-1 p50 -3-12% | #1761, `runtime.graph_prewarm` |
 | batch=1 async-loop recapture fix | ITL fix, not a lever | FRESH captures 128 -> 7 per ~200-token burst, +0.2% throughput | 2026-08-27 |

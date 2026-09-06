@@ -30,6 +30,11 @@ there instead of retelling it.
 
 ### Changed
 
+- NVFP4 K-par decode GEMVs drop their 12-CTA `__launch_bounds__` term (ptxas 40 -> 42 registers): tg128 Qwen3-8B-Q8_0
+  +1.9 %, Qwen3-14B-NVFP4 +0.7 %, @32 Qwen3.8-27B +1.1 % (3/3 each); the single-sequence GDN scan runs the SPLIT=2 instance
+  (+0.15 %, no spill); the batched LM-head GEMV is PDL-registered (@32 +0.8 %, 2/3) (dispatch #11, A2-2 / A2-3, #NNNN)
+- Every paged decode kernel calls `pdl_trigger()` after its KV walk (24 kernels; measured neutral,
+  @32 -0.3 % and M=1 -0.02 % on Qwen3.8-27B); `activation_pdl_register()` deleted (dispatch #11, A2-5, #NNNN)
 - `CLAUDE.md` tree and `AGENTS.md` deduplicated against the skills and each other: root 1997 -> 1539
   tokens of the 2000 budget, one GPU-free criterion instead of three, 66 em dashes -> 0; an L3
   `verified:` header more than 14 days behind the file's last commit is now a `docs` gate error (#1921)
@@ -57,6 +62,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- The dp4a GEMV family's max-L1 carveout, dropped with its PDL registration in #1833, is back
+  (`gemv_dp4a_set_l1_carveout()`): Qwen3-8B-Q8_0 decode on the source-precision path
+  (`diagnostics.no_nvfp4_decode_cache`) 145.3 -> 157.3 tok/s, +8.2 % paired 3/3 (dispatch #11, A1-3 / A2-1, #NNNN)
 - Config precedence and dead flags (dispatch #15, #1917): `--max-seq-len` wins over
   `runtime.max_seq_len`; `imp_context_create` refuses the 5 non-KV `ImpDType` values; a Q8_1
   weight tensor is refused at parse; all 23 `ImpError` entry points guarded (`tools/check_api_guard.py`)

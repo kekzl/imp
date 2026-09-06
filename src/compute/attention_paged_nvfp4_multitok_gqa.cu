@@ -13,6 +13,7 @@
 // with one division at the end so the shared merges are unchanged.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/pdl_device.cuh"
 #include "compute/attention_paged_nvfp4_multitok.cuh"
 #include "core/logging.h"
 
@@ -226,6 +227,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_mu
                                                    softcap, st);
     }
 
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     st.normalise();
     extern __shared__ char smem_nvfp4_gqa[];
 #pragma unroll
@@ -311,6 +313,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
                                                    softcap, st);
     }
 
+    pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     st.normalise();
     extern __shared__ char smem_nvfp4_sk_gqa[];
 #pragma unroll
