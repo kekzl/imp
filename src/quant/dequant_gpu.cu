@@ -557,8 +557,13 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
     int qs_idx = half_idx * 32 + in_grp;
     int q2 = (qs[qs_idx] >> shift) & 3;
 
-    // Extract high bit from hmask
-    int hm_bit = (hmask[i / 8] >> (i % 8)) & 1;
+    // Extract high bit from hmask. The 256 high bits are NOT stored in output
+    // order: ggml walks one bitplane per 32-element sub-block (dequantize_row_q3_K
+    // holds m = 1 << (4*n + j) across the whole super-block while the byte index
+    // runs 0..31 within the row). Element i therefore reads BIT i/32 of BYTE
+    // i%32, not bit i%8 of byte i/8 — the two agree only for i < 8, which is why
+    // this survived every by-eye check (AUDIT_arch_2026 D-5).
+    int hm_bit = (hmask[i % 32] >> (i / 32)) & 1;
     int q3 = q2 - (hm_bit ? 0 : 4);
 
     // Unpack 6-bit scale for this sub-block (16 sub-blocks of 16 elements)

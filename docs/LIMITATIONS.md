@@ -171,9 +171,14 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
          n=1 note=single greedy run per arm; resident arm is the same command
          without the --set. Cold cache, short prompt — not a benchmark figure]
 
-- **Batched and solo decode are not bit-identical.** Joining a batch costs rounding, 0.22 % of the
-  logit range, identical greedy argmax. A neighbour's content provably cannot reach another row.
-  No flag makes the two bit-equal; pin batch composition if needed.
+- **Batched and solo decode disagree on roughly one greedy token in nine.** Measured
+  teacher-forced on Qwen3-14B-NVFP4, M=1 vs M=32: 7 of 64 argmax tokens differ, mean NLL
+  3.4403 -> 3.4889 ([`PERF.md`](PERF.md) "Batch invariance"). The older "rounding only, identical
+  argmax" figure came from a 2-layer FP16 harness that runs no quantized kernel. Turning off the
+  small-M activation quantization (`gemm.nvfp4_smallm=false`) does not shrink it — the batch
+  SHAPE is the term, not the activation format — so it costs throughput for nothing here.
+  A neighbour's content provably cannot reach another row. No flag makes the two bit-equal;
+  pin batch composition or serve at batch 1 if you need it.
 
 - **Identical seeds can diverge in default mode.** The live sources are cuBLASLt's timing-based
   algo selection (`runtime.deterministic_gemm` removes it), the sampler's cross-block FP

@@ -207,7 +207,9 @@ def main():
     # AdapterIsAPrefixCacheKeyAndAnAdmissionBarrier (test_lora.cpp, model-backed).
     # 1091 -> 1094 (AUDIT_arch_2026 dispatch #7): ServingSignalsTest x3 (test_serving_signals.cpp,
     # model-backed: capacity cancel, queue split, speculation counters).
-    PINNED = 1061
+    # 1061 -> 1065 (AUDIT_arch_2026 dispatch #12): BatchInvarianceTest (model-backed) plus
+    # GgufDequantCoverage and the Q2_K / Q3_K dp4a GEMV goldens (GPU, no model).
+    PINNED = 1065
 
     text = CMAKE.read_text()
     mods = module_sources(text)

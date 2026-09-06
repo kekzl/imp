@@ -24,6 +24,12 @@ there instead of retelling it.
 - `tools/check_config_keys.py` and `tools/check_changelog_form.py` join the `docs` gate:
   every bound `imp.conf` key is in `imp.conf.example` (31 of 223 were not) and every
   `[Unreleased]` entry is at most 3 lines (AUDIT_arch_2026 dispatch #13, J-2 / J-8, #1919)
+- `BatchInvarianceTest`: teacher-forced M=1 vs M=32, the first instrument reaching the
+  batched-decode-only path. Qwen3-14B-NVFP4: 7 of 64 greedy tokens differ, mean NLL 3.4403 ->
+  3.4889 ([`PERF.md`](docs/PERF.md) "Batch invariance"; dispatch #12, D-2, #1924)
+- fp64 dequant goldens for the six GGUF formats that had none (Q4_1, Q5_0, Q5_1, Q2_K, Q3_K,
+  Q8_K) plus dp4a GEMV goldens for Q2_K and Q3_K; a two-way gate fails if `dequant_gpu` ever
+  serves a format with no reference (dispatch #12, D-5, #1924)
 - `THIRD_PARTY_LICENSES.md`: the Apache-2.0 text and SageAttention notice behind
   `src/compute/nvfp4_quant_hw.cu`, shipped in the image at `/usr/share/doc/imp/`, OCI label
   `MIT AND Apache-2.0`, `check-release.sh` gates all of it (AUDIT_arch_2026 dispatch #9, H-7, #1920)
@@ -62,6 +68,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- Q3_K read the wrong high-bit plane in both its dequant kernel and its dp4a GEMV (mask byte
+  `i % 32` bit `i / 32`, not byte `i / 8` bit `i % 8`): about half of every Q3_K weight was off
+  by 4 scale steps, max rel error 4.0 vs the ggml reference (dispatch #12, D-5, #1924)
 - The dp4a GEMV family's max-L1 carveout, dropped with its PDL registration in #1833, is back
   (`gemv_dp4a_set_l1_carveout()`): Qwen3-8B-Q8_0 decode on the source-precision path
   (`diagnostics.no_nvfp4_decode_cache`) 145.3 -> 157.3 tok/s, +8.2 % paired 3/3 (dispatch #11, A1-3 / A2-1, #1923)

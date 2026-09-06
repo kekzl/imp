@@ -120,16 +120,22 @@ it, both asserted by
    under test. This is the hard guarantee; a mask fault, a padding leak or a
    block-table mixup (the #1044/#1045 class) breaks it, and the test kills a
    mutant that makes one row read its neighbour's KV blocks.
-2. **Joining a batch may cost rounding, and only rounding.** Solo and batched
-   runs of the same sequence genuinely hand the GEMMs different shapes, so they
-   are not bitwise equal. Measured on the synthetic 2-layer harness: max
-   |delta| 3.1e-3 over a logit range of 1.41 (0.22 %), identical greedy argmax.
-   The gate allows 1 % of the range.
+2. **Joining a batch changes the answer, not just its last digits.** Solo and
+   batched runs of the same sequence genuinely hand the GEMMs different shapes,
+   so they are not bitwise equal. The size of that difference was long quoted
+   from the synthetic 2-layer FP16 harness (max |delta| 3.1e-3 over a logit
+   range of 1.41, 0.22 %, identical greedy argmax), which runs no quantized
+   kernel. On a real NVFP4 checkpoint it is far larger: teacher-forced on
+   Qwen3-14B-NVFP4, M=1 against M=32, **7 of 64 greedy tokens pick a different
+   argmax** and mean NLL moves 3.4403 -> 3.4889. Numbers, method and the
+   control arms: [`PERF.md`](PERF.md) "Batch invariance", instrument
+   `BatchInvarianceTest.NativeNvfp4DecodeSoloVsBatched` (`make test-e2e`).
 
 Property 2 is why the end-to-end symptom exists: on a near-tie that margin
 decides the token, and one flipped token forks the continuation. For output
 independent of concurrent traffic: pin batch composition or serve at batch 1.
-No flag makes batched and solo bit-equal.
+No flag makes batched and solo bit-equal — `gemm.nvfp4_smallm=false` does not,
+and it is measured not to shrink the gap (same PERF.md section).
 
 `deterministic_gemm`'s decode cost, measured the way `bench_gate.sh` measures (discarded warm-up
 run per process, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, `--prefill-chunk-size 0`),
