@@ -132,6 +132,15 @@ struct ModelConfig {
     // would change behaviour for every text-only model of that family.
     bool multimodal_wrapper = false;
 
+    // The checkpoint declares an audio encoder. imp has no audio path at all:
+    // no encoder, no input type, no tokenizer route for the audio token, so
+    // this is a whole missing modality rather than a degraded one. Read from
+    // `audio_config` being a JSON OBJECT, not from the key merely existing:
+    // Gemma-4-26B writes `"audio_config": null` and carries no audio tensor,
+    // while Gemma-4-12B writes the object (`model_type` `gemma4_unified_audio`)
+    // and ships `model.embed_audio.embedding_projection.weight`.
+    bool has_audio_config = false;
+
     bool is_nvfp4_prequant = false;
     int nvfp4_group_size = 16;
     // llm-compressor NVFP4 format: weight_global_scale is a divisor, not a multiplier.

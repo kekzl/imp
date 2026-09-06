@@ -144,6 +144,60 @@ bool validate_content_parts(const json& body, httplib::Response& res) {
     return true;
 }
 
+// The same rule for the Anthropic dialect, in the Anthropic spelling.
+//
+// `/v1/messages` converts to an OpenAI body first (`anthropic_to_openai_body`)
+// and only then reaches `validate_content_parts`. The converter's block loop
+// has no `else`, so a block it does not know is deleted and the transformed
+// body arrives clean: the check meant to catch the problem stands behind a gate
+// that already removed the evidence (the #1384 shape). Measured on the
+// model-less server: `input_audio` and `video_url` were 400 on
+// /v1/chat/completions and /v1/responses, and fell through /v1/messages.
+//
+// The allowlist is the set `anthropic.cpp` can actually convert, read off its
+// own loops: `text` and `image` (convert_message_content), `tool_use` and
+// `thinking` (push_assistant_turn), `tool_result` (the user-turn split).
+// `redacted_thinking` carries no input and rides along. Anything else - a
+// `document`, a `search_result`, an audio block - is content the caller
+// believes was read.
+//
+// Returns true when a block is unreadable, with `why` describing it. The caller
+// owns the response because the Anthropic error envelope differs from OpenAI's.
+bool anthropic_unreadable_block(const json& body, std::string& why) {
+    if (!body.contains("messages") || !body["messages"].is_array())
+        return false;
+    for (const auto& msg : body["messages"]) {
+        if (!msg.is_object() || !msg.contains("content") || !msg["content"].is_array())
+            continue;
+        for (const auto& block : msg["content"]) {
+            if (!block.is_object())
+                continue;
+            const std::string type = block.value("type", "");
+            if (type == "text" || type == "tool_use" || type == "tool_result" || type == "thinking" ||
+                type == "redacted_thinking")
+                continue;
+            if (type == "image") {
+                // The image branch drops just as quietly one level down: only
+                // `base64` and `url` sources are converted, and a block with any
+                // other source pushes nothing.
+                const std::string src = block.contains("source") && block["source"].is_object()
+                                            ? block["source"].value("type", "")
+                                            : "";
+                if (src == "base64" || src == "url")
+                    continue;
+                why = "image block with source type \"" + (src.empty() ? std::string("(missing)") : src) +
+                      "\": this endpoint reads \"base64\" and \"url\" image sources";
+                return true;
+            }
+            why = "unsupported content block \"" + (type.empty() ? std::string("(missing type)") : type) +
+                  "\": this endpoint reads \"text\", \"image\", \"tool_use\", \"tool_result\" and "
+                  "\"thinking\" blocks";
+            return true;
+        }
+    }
+    return false;
+}
+
 // `tool_choice` naming a tool that is not in `tools`, or demanding a tool call
 // with no tools at all, is a CONTRADICTORY request rather than a loose one —
 // unlike a tool whose schema simply cannot be enforced, which legitimately

@@ -344,6 +344,13 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     int skipped = 0;
     int mtp_sidecar = 0;  // read by the MTP loader, not a miss here
 
+    // `skipped` stays the total, but a total is not a finding. Dropping a whole
+    // modality and dropping an unreadable layer name are different events, and
+    // folded together neither is greppable: Gemma-4-12B lost 1 audio tensor and
+    // 10 vision-embedder tensors into one number that says "skipped 11".
+    // Counted per class here and named in the summary below.
+    SkipStats stats{};
+
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
     const bool is_gemma4_moe = is_gemma4 && (model.config_.n_experts > 0);
     const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
@@ -360,7 +367,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         if (needs_multimodal_strip) {
             const std::string vt_prefix = "model.vision_tower.";
             if (name.compare(0, vt_prefix.size(), vt_prefix) == 0) {
-                ++skipped;  // silently skip vision encoder weights
+                ++skipped;  // not an LM weight; routed by the vision mapper when there is a tower
+                ++stats.vision;
                 continue;
             }
             // Qwen3.6-VL also ships a separate visual tower under
@@ -372,19 +380,28 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 // Routed into the vision tower below when there is one; still
                 // skipped here either way, since these are not LM weights.
                 ++skipped;
+                ++stats.vision;
                 continue;
             }
             // Gemma-4 unified multimodal: audio/vision embedders ship under
             // model.embed_{audio,vision}.* (not under language_model/vision_tower).
-            // Not part of the text LM — skip.
-            if (name.compare(0, 18, "model.embed_audio.") == 0 ||
-                name.compare(0, 19, "model.embed_vision.") == 0) {
+            // Not part of the text LM, so skipped, but counted apart: the audio
+            // half has no encoder anywhere in imp, so it is a lost modality and
+            // not a lost tensor.
+            if (name.compare(0, 18, "model.embed_audio.") == 0) {
                 ++skipped;
+                ++stats.audio;
+                continue;
+            }
+            if (name.compare(0, 19, "model.embed_vision.") == 0) {
+                ++skipped;
+                ++stats.vision;
                 continue;
             }
             if (name.compare(0, 4, "mtp.") == 0 ||
                 name.compare(0, 10, "model.mtp.") == 0) {
                 ++skipped;
+                ++stats.mtp;
                 continue;
             }
             const std::string lm_prefix = "model.language_model.";
@@ -540,6 +557,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         if (parts.size() < 4 || parts[0] != "model" || parts[1] != "layers") {
             IMP_LOG_WARN("WeightMap: unrecognised weight name: %s", name.c_str());
             ++skipped;
+            ++stats.unrecognised;
             continue;
         }
 
@@ -547,10 +565,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         if (layer_idx < 0) {
             IMP_LOG_WARN("WeightMap: bad layer index in: %s", name.c_str());
             ++skipped;
+            ++stats.unrecognised;
             continue;
         }
         if (!ensure_layer(model, layer_idx)) {
             ++skipped;
+            ++stats.unrecognised;
             continue;
         }
         TransformerLayer& layer = model.layers_[layer_idx];
@@ -1325,6 +1345,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         } else {
             IMP_LOG_WARN("WeightMap: unrecognised layer weight: %s", name.c_str());
             ++skipped;
+            ++stats.unrecognised;
         }
     }
 
@@ -1339,6 +1360,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         }
     }
 
+    stats.total = skipped;
+    skip_stats_ = stats;
+
     if (mtp_sidecar > 0)
         IMP_LOG_INFO(
             "WeightMap (%s): assigned %d tensors, skipped %d, %d MTP sidecar (own loader), "
@@ -1350,6 +1374,24 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             "WeightMap (%s): assigned %d tensors, skipped %d, "
             "layers=%d, experts=%d",
             model_arch_name(arch_), assigned, skipped, model.config_.n_layers, model.config_.n_experts);
+
+    // The breakdown of that "skipped" number, so the modality drops are
+    // greppable instead of arithmetic. Printed only when something was
+    // dropped, so a text-only load stays as quiet as it was.
+    if (skipped > 0)
+        IMP_LOG_INFO("  skipped: %d vision, %d audio, %d MTP head, %d unrecognised", stats.vision,
+                     stats.audio, stats.mtp, stats.unrecognised);
+
+    // Audio is the one class with no owner downstream. Vision tensors are
+    // either routed by the vision mapper below or already announced by the
+    // config loader's "vision tower will be skipped" warning; `mtp.*` has its
+    // own loader. An `model.embed_audio.*` tensor is read by nothing in imp,
+    // so the drop is the whole modality and it gets said out loud once.
+    if (stats.audio > 0)
+        IMP_LOG_WARN(
+            "WeightMap: %d audio tensor(s) dropped (model.embed_audio.*). imp has no audio "
+            "encoder; this checkpoint runs as a text model and audio input cannot be sent.",
+            stats.audio);
 
     // Vision tower, when the config loader recognised one. Its weights ride in
     // the same shard map as the LM's — that is why Model owns it — but they are

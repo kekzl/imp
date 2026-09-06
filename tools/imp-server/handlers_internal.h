@@ -260,6 +260,12 @@ bool validate_constraints(const json& body, httplib::Response& res);
 // image_url part) instead of answering as if it had been understood.
 bool validate_content_parts(const json& body, httplib::Response& res);
 
+// The same rule for `/v1/messages`, checked on the Anthropic body BEFORE
+// anthropic_to_openai_body deletes the offending block and leaves
+// validate_content_parts nothing to find. True = unreadable, `why` describes it;
+// the caller sends the Anthropic error envelope.
+bool anthropic_unreadable_block(const json& body, std::string& why);
+
 // Rejects a tool_choice that contradicts the request (names a tool that is not
 // there, or demands a call with no tools).
 bool validate_tool_choice(const json& body, httplib::Response& res);

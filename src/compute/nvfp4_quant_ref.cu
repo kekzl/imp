@@ -2,10 +2,18 @@
 // nvfp4_quant_ref.cu -- Reference NVFP4 quantization (round-trip validation)
 // =============================================================================
 //
-// Port of SageAttention3's scaled_fp4_quant_kernel, simplified to a linear
-// storage layout. Used to validate that the FP16→NVFP4 quant math
-// produces sensible values before Project B's Stage-3 integration
-// into the actual FMHA kernel (which needs the HW scale-interleaving).
+// Follows thu-ml/SageAttention's scaled_fp4_quant_kernel (Apache-2.0, subtree
+// sageattention3_blackwell), simplified to a linear storage layout. Used to
+// validate that the FP16→NVFP4 quant math produces sensible values before
+// Project B's Stage-3 integration into the actual FMHA kernel (which needs the
+// HW scale-interleaving).
+//
+// What is inherited is the `cvt.rn.satfinite.e2m1x2.f32` packing idiom below
+// and the E2M1 code layout; the group loop, the FP8 scale round-trip and the
+// storage are imp's. This file is compiled into `libimp` and therefore into the
+// published image, so it is listed in THIRD_PARTY_LICENSES.md next to
+// nvfp4_quant_hw.cu rather than carrying an attribution the licence file does
+// not cover.
 //
 // Key PTX instruction: cvt.rn.satfinite.e2m1x2.f32
 //   (sm_120 + CUDA 13.2 — verified by probe commit b9ec21a)

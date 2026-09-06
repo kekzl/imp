@@ -9,7 +9,7 @@ distribution has to carry and the attribution notices it has to reproduce.
 
 | Component | Where in imp | Licence | Copyright |
 |---|---|---|---|
-| SageAttention: `thu-ml/SageAttention`, `sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu` at upstream commit `e08749b2` (2025-09-25) | `src/compute/nvfp4_quant_hw.cu`, adapted; the modifications are listed in the file header (Apache-2.0 section 4(b)) | Apache-2.0 | 2025 SageAttention team (file); 2024 Jintao Zhang, Haofeng Huang (repository LICENSE appendix) |
+| SageAttention: `thu-ml/SageAttention`, `sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu` at upstream commit `e08749b2` (2025-09-25) | `src/compute/nvfp4_quant_hw.cu`, adapted; the modifications are listed in the file header (Apache-2.0 section 4(b)). `src/compute/nvfp4_quant_ref.cu` follows the same kernel on a linear layout and inherits its `cvt.rn.satfinite.e2m1x2.f32` packing idiom; it is compiled into `libimp` too | Apache-2.0 | 2025 SageAttention team (file); 2024 Jintao Zhang, Haofeng Huang (repository LICENSE appendix) |
 | stb: `stb_image.h`, `stb_image_resize2.h` | `third_party/stb/`, unmodified | MIT or public domain at the user's choice; the grant is at the end of each file | Sean Barrett |
 
 ## SageAttention

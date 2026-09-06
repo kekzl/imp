@@ -257,6 +257,97 @@ TEST(ContentParts, EveryMessageIsChecked) {
 }
 
 // ---------------------------------------------------------------------------
+// The same rule in the Anthropic spelling.
+//
+// `/v1/messages` runs anthropic_to_openai_body FIRST, and that converter's
+// block loop has no `else`: an unknown block is deleted, so the OpenAI body
+// reaching validate_content_parts above is clean and the check finds nothing.
+// Measured on the model-less binary before the fix: `input_audio` was 400 on
+// /v1/chat/completions and /v1/responses, and fell through /v1/messages.
+//
+// The allowlist has to be exactly what the converter handles, or a legitimate
+// replay starts getting refused. These tests pin both edges.
+// ---------------------------------------------------------------------------
+
+namespace {
+json anth_body(const json& blocks) {
+    return json{{"messages", json::array({{{"role", "user"}, {"content", blocks}}})}};
+}
+bool anth_refused(const json& blocks, std::string& why) {
+    return anthropic_unreadable_block(anth_body(blocks), why);
+}
+}  // namespace
+
+TEST(AnthropicContentBlocks, ConvertibleBlocksAreAccepted) {
+    std::string why;
+    EXPECT_FALSE(anth_refused(json::array({{{"type", "text"}, {"text", "hi"}}}), why));
+    EXPECT_FALSE(anth_refused(
+        json::array({{{"type", "image"},
+                      {"source", {{"type", "base64"}, {"media_type", "image/png"}, {"data", "AA"}}}}}),
+        why));
+    EXPECT_FALSE(anth_refused(
+        json::array({{{"type", "image"}, {"source", {{"type", "url"}, {"url", "https://x/y.png"}}}}}), why));
+    EXPECT_FALSE(anth_refused(
+        json::array({{{"type", "tool_use"}, {"id", "t1"}, {"name", "f"}, {"input", json::object()}}}), why));
+    EXPECT_FALSE(
+        anth_refused(json::array({{{"type", "tool_result"}, {"tool_use_id", "t1"}, {"content", "42"}}}),
+                     why));
+    EXPECT_FALSE(anth_refused(json::array({{{"type", "thinking"}, {"thinking", "hm"}}}), why));
+    // Carries no input of its own; the converter ignoring it costs nothing.
+    EXPECT_FALSE(anth_refused(json::array({{{"type", "redacted_thinking"}, {"data", "zz"}}}), why));
+}
+
+TEST(AnthropicContentBlocks, UnknownBlockIsRefusedAndNamed) {
+    std::string why;
+    ASSERT_TRUE(
+        anth_refused(json::array({{{"type", "input_audio"}, {"input_audio", {{"data", "AA"}}}}}), why));
+    EXPECT_NE(why.find("input_audio"), std::string::npos)
+        << "the message must name the block it could not read";
+
+    why.clear();
+    EXPECT_TRUE(
+        anth_refused(json::array({{{"type", "document"}, {"source", {{"type", "base64"}, {"data", "x"}}}}}),
+                     why));
+}
+
+// The image branch drops one level further down: only `base64` and `url`
+// sources convert, and any other source pushed nothing at all.
+TEST(AnthropicContentBlocks, ImageWithAnUnreadableSourceIsRefused) {
+    std::string why;
+    ASSERT_TRUE(
+        anth_refused(json::array({{{"type", "image"}, {"source", {{"type", "file"}, {"file_id", "f1"}}}}}),
+                     why));
+    EXPECT_NE(why.find("file"), std::string::npos);
+
+    why.clear();
+    EXPECT_TRUE(anth_refused(json::array({{{"type", "image"}}}), why));
+}
+
+TEST(AnthropicContentBlocks, MissingTypeIsRefused) {
+    std::string why;
+    ASSERT_TRUE(anth_refused(json::array({{{"text", "hi"}}}), why));
+    EXPECT_NE(why.find("missing type"), std::string::npos);
+}
+
+// The common shapes must be untouched: a plain string body, and no messages.
+TEST(AnthropicContentBlocks, StringContentAndEmptyBodyAreUntouched) {
+    std::string why;
+    json body = {{"messages", json::array({{{"role", "user"}, {"content", "plain text"}}})}};
+    EXPECT_FALSE(anthropic_unreadable_block(body, why));
+    EXPECT_FALSE(anthropic_unreadable_block(json::object(), why));
+}
+
+TEST(AnthropicContentBlocks, EveryMessageIsChecked) {
+    json body = {
+        {"messages",
+         json::array({{{"role", "user"}, {"content", "fine"}},
+                      {{"role", "assistant"}, {"content", json::array({{{"type", "text"}, {"text", "ok"}}})}},
+                      {{"role", "user"}, {"content", json::array({{{"type", "video"}, {"video", "x"}}})}}})}};
+    std::string why;
+    EXPECT_TRUE(anthropic_unreadable_block(body, why));
+}
+
+// ---------------------------------------------------------------------------
 // tool_choice contradictions. Distinct from a tool whose SCHEMA cannot be
 // enforced — that legitimately degrades to prompt-hint choice, because `tools`
 // offers capabilities rather than promising a shape. Naming a tool that is not

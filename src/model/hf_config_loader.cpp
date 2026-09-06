@@ -801,6 +801,28 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         }
     }
 
+    // Audio modality. The vision path above says out loud that it degrades to
+    // text-only; audio said nothing at all, so an omni checkpoint loaded, ran,
+    // and never mentioned the modality it had lost (roadmap Open 8).
+    //
+    // The test is OBJECT, not presence: Gemma-4-26B-A4B ships
+    // `"audio_config": null` alongside a real `vision_config` and carries no
+    // audio tensor, so keying off the key would warn on every Gemma-4. Both
+    // checkpoints also set `audio_token_id` (258881) whether or not there is
+    // an encoder, so that field is not a signal either.
+    const JValue* ac = jobj_find(root, "audio_config");
+    if (ac && ac->type == JType::OBJECT) {
+        cfg.has_audio_config = true;
+        std::string audio_type;
+        jobj_get_string(*ac, "model_type", audio_type);
+        IMP_LOG_WARN(
+            "Audio modality present (audio_config, model_type='%s') and unsupported. imp has no "
+            "audio encoder: `model.embed_audio.*` tensors are dropped at load and audio input "
+            "cannot be sent. The model loads as text%s only (roadmap Open 8).",
+            audio_type.empty() ? "?" : audio_type.c_str(),
+            (out_vision_tower && *out_vision_tower) ? "+vision" : "");
+    }
+
     if (cfg.arch == ModelArch::GENERIC) {
         cfg.arch_inferred_fallback = true;
     }

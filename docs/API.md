@@ -298,8 +298,13 @@ cloud metadata address), RFC1918, CGNAT or ULA; redirects are not followed,
 body capped at 32 MiB, 10 s read timeout. Residual:
 [`LIMITATIONS.md`](LIMITATIONS.md).
 
-Two deliberate refusals:
+Three deliberate refusals:
 
+- A content part or block this server cannot read is a `400` naming it, on all
+  three dialects. `/v1/chat/completions` and `/v1/responses` read `text` and
+  `image_url`; `/v1/messages` reads `text`, `image` (base64 or url source),
+  `tool_use`, `tool_result` and `thinking`. Anything else would be deleted on
+  the way in and answered around.
 - An `image_url` that cannot be read is a `400`, not a skipped picture:
   dropping one would slide every later image onto the wrong placeholder. The
   message is the same whatever went wrong and does not echo the URL, so the

@@ -80,6 +80,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- A dropped modality is named, not counted: `WeightMap` splits `skipped` into vision / audio /
+  MTP / unrecognised and an `audio_config` object warns at load. Gemma-4-12B-NVFP4 lost 1 audio
+  and 10 vision-embedder tensors as "skipped 11" (roadmap Open 8)
+- `/v1/messages` refuses a content block it cannot read (`document`, an audio block, an image
+  with a non-base64/url source) instead of deleting it in the Anthropic-to-OpenAI transform and
+  answering from the rest of the message. The other two dialects already refused
 - Q3_K read the wrong high-bit plane in both its dequant kernel and its dp4a GEMV (mask byte
   `i % 32` bit `i / 32`, not byte `i / 8` bit `i % 8`): about half of every Q3_K weight was off
   by 4 scale steps, max rel error 4.0 vs the ggml reference (dispatch #12, D-5, #1924)

@@ -439,6 +439,14 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     std::string anth_model = anth_body.value("model", "");
     const bool want_stream = anth_body.value("stream", false);
 
+    // Before the transform, not after: the transform is what makes an
+    // unreadable block invisible, so checking the OpenAI body downstream finds
+    // a clean request. Refusing beats answering from the blocks that survived.
+    if (std::string why; anthropic_unreadable_block(anth_body, why)) {
+        send_anthropic_error(res, 400, "invalid_request_error", why, request_id);
+        return;
+    }
+
     // Transform -> OpenAI body.
     json oai_body;
     try {
