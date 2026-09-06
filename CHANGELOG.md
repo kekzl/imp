@@ -36,6 +36,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Everything the build downloads names the bytes it expects: base images carry an `@sha256:`
+  digest, the CMake installer and `git-clang-format` (now a commit, not `release/18.x`) a
+  `sha256sum -c`, pip a hash-pinned lock file; 9 planted mutants red (H-6, #1927)
 - Third-party pins are commits, not mutable refs: the four `cmake/imp-deps.cmake` deps carry the SHA
   the build fetches, all 35 workflow `uses:` are 40-hex pinned, and `check_dep_pins.sh` fails on an
   upstream re-tag or an unpinned action (5 planted mutants red) (AUDIT_arch_2026 H-8 pin half, #1926)

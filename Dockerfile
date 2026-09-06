@@ -18,7 +18,11 @@
 # INCREMENTAL ninja build against a persistent build dir, so a one-file edit
 # costs seconds instead of the full-image rebuild's minutes. The final image is
 # byte-for-byte what it was — `builder` still starts from exactly these layers.
-FROM nvidia/cuda:13.3.1-devel-ubuntu26.04 AS toolchain
+# Digest-pinned (AUDIT_arch_2026 H-6): a tag is a mutable ref, so the same
+# Dockerfile built two different base layers on two different days. Refresh
+# with `docker buildx imagetools inspect nvidia/cuda:<tag>` (the index digest,
+# not a per-platform one) and keep the five ci.yml `image:` lines in step.
+FROM nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466 AS toolchain
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -28,6 +32,7 @@ RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.co
     && apt-get install -y --no-install-recommends \
         g++ git ninja-build ca-certificates python3 wget \
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
+    && echo '85947732c8eb85fbc8eb56ff950e4f3db8fc36bf4259b89b74fc947d23534e4a  /tmp/cmake.sh' | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
     && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
@@ -108,7 +113,7 @@ RUN cmake -B build -G Ninja \
 # Native CUDA 13.3 runtime image already ships the matching cudart + cuBLAS
 # (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
 # entrypoint/healthcheck helpers need adding.
-FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04
+FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04@sha256:71b55b93449973f2ee6d8024d6dd34853d338a1f007fe07adaaf9a35fd591794
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here

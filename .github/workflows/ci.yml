@@ -49,7 +49,7 @@ jobs:
       # out of the box (matches the Dockerfile builder). No apt toolkit install.
       # Ubuntu 26.04 → GCC 15.2, so CI compiles on the same libstdc++ 15 as the
       # release image and catches missing-include regressions (#903) here.
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -267,7 +267,7 @@ jobs:
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
     env:
       CUDA_VERSION: "13.3"
     steps:
@@ -372,7 +372,7 @@ jobs:
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -386,8 +386,13 @@ jobs:
       - name: Install python
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip
-          pip install --break-system-packages -r tests/api/requirements.txt
+          apt-get install -y --no-install-recommends python3 python3-pip python3-venv
+          # A venv rather than --break-system-packages: the lock file pins the
+          # whole transitive set, and pip cannot replace Debian's own copy of
+          # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
+          python3 -m venv /tmp/api-venv
+          /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
+          echo "/tmp/api-venv/bin" >> "$GITHUB_PATH"
 
       - name: Run the API contract against imp-server
         run: |
@@ -432,9 +437,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-format git curl ca-certificates
+          # Pinned to a commit, not to the release/18.x branch, and verified:
+          # this file is made executable on a runner that holds GITHUB_TOKEN
+          # (AUDIT_arch_2026 H-6). The commit is llvmorg-18.1.8, matching the
+          # clang-format apt installs above.
           if ! command -v git-clang-format >/dev/null; then
-            sudo curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/release/18.x/clang/tools/clang-format/git-clang-format \
-              -o /usr/local/bin/git-clang-format && sudo chmod +x /usr/local/bin/git-clang-format
+            curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/clang/tools/clang-format/git-clang-format \
+              -o /tmp/git-clang-format
+            echo '8097d93cc4021768521a591d8107e11c9c593f226b580a65323ea17cbed6bce4  /tmp/git-clang-format' | sha256sum -c -
+            sudo install -m 0755 /tmp/git-clang-format /usr/local/bin/git-clang-format
           fi
       - name: clang-format (changed lines)
         run: |
@@ -566,7 +577,7 @@ jobs:
     name: PTX fallback
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
     defaults:
       run:
         shell: bash
@@ -667,7 +678,7 @@ jobs:
     name: Sanitizers
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
     # This image ships no bash, so GitHub picks `sh -e {0}` and any bashism is a
     # syntax error at step start. The first version used a here-string and the
     # job died in 1m15s before building anything - with `Build` the only

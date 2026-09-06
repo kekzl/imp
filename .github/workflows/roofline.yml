@@ -35,7 +35,9 @@ jobs:
           python-version: "3.14"
 
       - name: Install plot deps
-        run: pip install matplotlib==3.11.0
+        # Hash-pinned lock file, shared with tools/roofline/Dockerfile.plot
+        # (AUDIT_arch_2026 H-6). One --hash puts pip in --require-hashes mode.
+        run: pip install -r tools/roofline/requirements.txt
 
       - name: Regression gate vs pinned baseline
         run: |
