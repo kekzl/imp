@@ -503,6 +503,28 @@ TEST(AnthropicMessages, ToolResultImageRehomedToUserTurn) {
     EXPECT_TRUE(has_image) << "the image must survive on the user turn";
 }
 
+// The marker counted the block, not the conversion. convert_message_content
+// pushes nothing for a source that is neither base64 nor url, so a `file`
+// source produced "[1 image(s) ... follow in the next user message]" with no
+// image following: the prompt asserted an input the model never received, which
+// is worse than the silent drop it sat next to. Such a request is refused at
+// admission now (anthropic_unreadable_block); this pins the counter itself, so
+// the marker cannot go back to over-promising if that allowlist widens first.
+TEST(AnthropicMessages, ToolResultImageMarkerCountsOnlyWhatSurvives) {
+    json img = json{{"type", "image"}, {"source", json{{"type", "file"}, {"file_id", "file_abc"}}}};
+    json tr = json{{"type", "tool_result"},
+                   {"tool_use_id", "tu_img"},
+                   {"content", json::array({tblk("screenshot taken"), img})}};
+    json msgs = anthropic_to_openai_body(one_user(json::array({tr})))["messages"];
+
+    ASSERT_GE(msgs.size(), 1u);
+    EXPECT_EQ(msgs[0]["role"], "tool");
+    const std::string body = msgs[0]["content"].get<std::string>();
+    EXPECT_NE(body.find("screenshot taken"), std::string::npos);
+    EXPECT_EQ(body.find("image(s)"), std::string::npos)
+        << "no image was re-homed, so the prompt must not announce one: " << body;
+}
+
 // ---- openai_to_anthropic_response (reverse transform) ----------------------
 
 // Wrap an OpenAI assistant message + finish_reason into a chat.completion.

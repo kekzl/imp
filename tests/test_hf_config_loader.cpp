@@ -603,4 +603,96 @@ TEST_F(RopeScalingConfigTest, Llama3DegenerateConfigSkipped) {
     EXPECT_TRUE(cfg.rope_long_factor.empty());
 }
 
+// ---------------------------------------------------------------------------
+// audio_config: an unsupported modality has to be detected from the object, not
+// from the key.
+//
+// Gemma-4-12B-NVFP4 writes `audio_config` as an object (model_type
+// `gemma4_unified_audio`) and ships `model.embed_audio.*`.
+// Gemma-4-26B-A4B-it-NVFP4 writes `"audio_config": null` and ships no audio
+// tensor. Both set `audio_token_id` 258881, so that field is not a signal.
+// Keying off presence would warn on every Gemma-4; keying off the token id
+// would warn on both too.
+// ---------------------------------------------------------------------------
+
+class AudioConfigTest : public ::testing::Test {
+protected:
+    std::filesystem::path tmp_dir_;
+
+    void SetUp() override {
+        tmp_dir_ = std::filesystem::temp_directory_path() / ("imp_test_audio_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(tmp_dir_);
+    }
+
+    void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
+
+    void write_config(const std::string& json) {
+        std::ofstream f(tmp_dir_ / "config.json");
+        f << json;
+    }
+};
+
+// Gemma-4-12B-NVFP4's shape.
+TEST_F(AudioConfigTest, ObjectMarksTheModalityUnsupported) {
+    write_config(R"({
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4_unified",
+        "audio_token_id": 258881,
+        "audio_config": {
+            "model_type": "gemma4_unified_audio",
+            "audio_embed_dim": 640
+        },
+        "text_config": {
+            "hidden_size": 3840,
+            "intermediate_size": 15360,
+            "num_attention_heads": 16,
+            "num_hidden_layers": 48,
+            "num_key_value_heads": 8
+        }
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_TRUE(cfg.has_audio_config);
+}
+
+// Gemma-4-26B-A4B-it-NVFP4's shape: the key is there and null. This is the
+// false positive the object test exists to avoid.
+TEST_F(AudioConfigTest, NullDoesNotMarkTheModality) {
+    write_config(R"({
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4",
+        "audio_token_id": 258881,
+        "audio_config": null,
+        "text_config": {
+            "hidden_size": 2816,
+            "intermediate_size": 11264,
+            "num_attention_heads": 16,
+            "num_hidden_layers": 62,
+            "num_key_value_heads": 4
+        }
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_FALSE(cfg.has_audio_config);
+}
+
+// Every text-only checkpoint: no key, no flag, no warning.
+TEST_F(AudioConfigTest, AbsentKeyDoesNotMarkTheModality) {
+    write_config(R"({
+        "architectures": ["Qwen3ForCausalLM"],
+        "model_type": "qwen3",
+        "hidden_size": 4096,
+        "intermediate_size": 12288,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 36,
+        "num_key_value_heads": 8
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_FALSE(cfg.has_audio_config);
+}
+
 }  // namespace

@@ -169,10 +169,20 @@ void push_user_turn(json& out, const json& anth_msg) {
                         } else if (ptype == "image" && p.contains("source")) {
                             json tmp = json::array({p});
                             auto converted = convert_message_content(tmp);
+                            // Count what was actually re-homed, not what was
+                            // offered. convert_message_content pushes nothing
+                            // for a source that is neither base64 nor url, so
+                            // counting the block announced "1 image(s) follow"
+                            // into the prompt with no image following: the
+                            // prompt asserted an input the model never got.
+                            // Such a block is refused at admission now
+                            // (anthropic_unreadable_block); this keeps the
+                            // count honest if the allowlist ever widens first.
                             if (converted.is_array())
-                                for (const auto& img : converted)
+                                for (const auto& img : converted) {
                                     other_parts.push_back(img);
-                            n_images++;
+                                    n_images++;
+                                }
                         }
                     }
                 }

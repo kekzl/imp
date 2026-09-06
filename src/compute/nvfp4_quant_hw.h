@@ -10,8 +10,11 @@ namespace imp {
 // NVFP4 quantization — HW-consumption layout
 // =========================================================================
 //
-// Adapted from thu-ml/SageAttention3 (Apache-2.0), specifically
-// scaled_fp4_quant_kernel in sageattention3_blackwell/.../fp4_quantization_4d.cu.
+// Adapted from thu-ml/SageAttention (Apache-2.0), specifically
+// scaled_fp4_quant_kernel in
+// sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu.
+// The repository is `SageAttention`; `SageAttention3` is the method, and the
+// subtree carrying it. THIRD_PARTY_LICENSES.md names the same path.
 // This is the layout required by
 //   mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
 // for the `sfa`/`sfb` scale operand. Unlike nvfp4_quant_ref (linear), here

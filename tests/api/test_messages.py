@@ -104,6 +104,60 @@ class TestMessagesValidation:
         r = client.post("/v1/messages/nope", json={})
         _assert_anthropic_error(r, 404, err_type="not_found_error")
 
+    # A content block this server cannot read used to reach generation on this
+    # endpoint alone. `anthropic_to_openai_body` runs first and its block loop
+    # has no `else`, so the block was deleted and the OpenAI-side check found a
+    # clean body: the gate stood in front of the check. Measured against the
+    # model-less binary, `input_audio` was 400 on /v1/chat/completions and
+    # /v1/responses and fell through here.
+    @pytest.mark.parametrize("block", [
+        {"type": "input_audio", "input_audio": {"data": "AA", "format": "wav"}},
+        {"type": "video_url", "video_url": {"url": "x"}},
+        {"type": "document", "source": {"type": "base64", "data": "x"}},
+        # The image branch drops one level down: any source but base64/url
+        # converted to nothing at all.
+        {"type": "image", "source": {"type": "file", "file_id": "f1"}},
+        {"type": "image"},
+        # tool_result.content is itself an array the converter reads only `text`
+        # and `image` from. An unreadable block there left the tool body EMPTY,
+        # so the model was told the tool returned nothing and answered on it.
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "document", "source": {"type": "base64", "data": "x"}}]},
+        # And the image-source hole one level down, which used to inject
+        # "[1 image(s) ... follow]" into the prompt with no image following.
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "image", "source": {"type": "file", "file_id": "f1"}}]},
+    ])
+    def test_unreadable_content_block_is_refused(self, client, model, block):
+        r = client.post("/v1/messages", json=_msg(
+            model=model,
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}, block]}],
+        ))
+        _assert_anthropic_error(r, 400)
+
+    # The other edge: the allowlist is exactly what the converter handles, so a
+    # legitimate replay must not start getting refused. Not a 400 - these reach
+    # the model lookup, which is a 404/503 on a server with no weights.
+    @pytest.mark.parametrize("block", [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}},
+        {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+        {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
+        {"type": "tool_result", "tool_use_id": "t1", "content": "42"},
+        {"type": "tool_result", "tool_use_id": "t1",
+         "content": [{"type": "text", "text": "42"}]},
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]},
+        {"type": "thinking", "thinking": "hm"},
+        {"type": "redacted_thinking", "data": "zz"},
+    ])
+    def test_convertible_block_is_not_refused(self, client, model, block):
+        r = client.post("/v1/messages", json=_msg(
+            model=model,
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}, block]}],
+        ))
+        assert r.status_code != 400, r.text
+
 
 @pytest.mark.nomodel
 class TestMessagesLeniency:

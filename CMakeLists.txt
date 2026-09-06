@@ -773,6 +773,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mrope_positions.cpp
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
+        tests/test_weight_map_modality_skips.cpp
         tests/test_checkpoint_limits.cpp
         tests/test_exit_codes.cpp
         # imp-quantize's tensor-selection rule. The tool is not otherwise
