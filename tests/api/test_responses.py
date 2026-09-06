@@ -82,6 +82,45 @@ class TestResponsesNonStream:
             })
             assert r.status_code == 400
 
+    # The transform used to write nothing for a field it could not map, so the
+    # chat parser's own 400 never saw it and the reply came back at 200 with the
+    # constraint or the forced call quietly gone. Model-less, like the above.
+    @pytest.mark.nomodel
+    @pytest.mark.parametrize("body", [
+        {"text": {"format": {"type": "nonsense_value"}}},
+        {"tool_choice": {"type": "allowed_tools", "mode": "required",
+                         "tools": [{"type": "function", "name": "f"}]},
+         "tools": [{"type": "function", "name": "f",
+                    "parameters": {"type": "object", "properties": {}}}]},
+        {"tool_choice": {"type": "mcp", "server_label": "s"}},
+    ])
+    def test_unmappable_field_is_refused(self, model, body):
+        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
+            r = c.post("/v1/responses", json={"model": model, "input": "x", **body})
+            assert r.status_code == 400, r.text
+
+    # The other edge: everything the transform can carry must still get through
+    # to the model lookup, which is a 404/503 on a server with no weights.
+    # `regex` and `grammar` are the two this PR added, and they are exactly the
+    # ones /v1/chat/completions already accepted.
+    @pytest.mark.nomodel
+    @pytest.mark.parametrize("body", [
+        {"text": {"format": {"type": "text"}}},
+        {"text": {"format": {"type": "json_object"}}},
+        {"text": {"format": {"type": "regex", "regex": "a+"}}},
+        {"text": {"format": {"type": "grammar", "grammar": 'root ::= "a"'}}},
+        {"tool_choice": "required",
+         "tools": [{"type": "function", "name": "f",
+                    "parameters": {"type": "object", "properties": {}}}]},
+        {"tool_choice": {"type": "function", "name": "f"},
+         "tools": [{"type": "function", "name": "f",
+                    "parameters": {"type": "object", "properties": {}}}]},
+    ])
+    def test_mappable_field_is_not_refused(self, model, body):
+        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
+            r = c.post("/v1/responses", json={"model": model, "input": "x", **body})
+            assert r.status_code != 400, r.text
+
 
 class TestResponsesStream:
     def test_event_sequence(self, model):

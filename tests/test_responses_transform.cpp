@@ -98,6 +98,68 @@ TEST(ResponsesTransform, TextFormatAndKnobs) {
     EXPECT_EQ(oai["response_format"]["json_schema"]["strict"], true);
 }
 
+// `regex` and `grammar` are imp's own response_format extensions and both work
+// on /v1/chat/completions. This transform carried neither, so the SAME request
+// was constrained on one endpoint and free text on the other, at 200 with no
+// reason. Measured on the model-less binary: `{"type":"nonsense_value"}` was 400
+// on /v1/chat/completions (naming the known set) and 503 on /v1/responses, i.e.
+// the chat parser's own check never saw the field the transform had dropped.
+TEST(ResponsesTransform, RegexAndGrammarFormatsReachTheChatBody) {
+    json rx = responses_to_openai_body(
+        json{{"model", "m"}, {"input", "x"}, {"text", {{"format", {{"type", "regex"}, {"regex", "a+"}}}}}});
+    ASSERT_TRUE(rx.contains("response_format")) << "regex was dropped, so nothing constrained the reply";
+    EXPECT_EQ(rx["response_format"]["type"], "regex");
+    EXPECT_EQ(rx["response_format"]["regex"], "a+");
+
+    json gr = responses_to_openai_body(
+        json{{"model", "m"},
+             {"input", "x"},
+             {"text", {{"format", {{"type", "grammar"}, {"grammar", "root ::= \"a\""}}}}}});
+    ASSERT_TRUE(gr.contains("response_format"));
+    EXPECT_EQ(gr["response_format"]["type"], "grammar");
+    EXPECT_EQ(gr["response_format"]["grammar"], "root ::= \"a\"");
+}
+
+// "text" and an absent format both mean unconstrained, which chat/completions
+// expresses by having no response_format at all. Refusing here would break the
+// SDKs that always send the field.
+TEST(ResponsesTransform, PlainTextFormatWritesNoResponseFormat) {
+    json oai = responses_to_openai_body(
+        json{{"model", "m"}, {"input", "x"}, {"text", {{"format", {{"type", "text"}}}}}});
+    EXPECT_FALSE(oai.contains("response_format"));
+    json bare = responses_to_openai_body(json{{"model", "m"}, {"input", "x"}});
+    EXPECT_FALSE(bare.contains("response_format"));
+}
+
+TEST(ResponsesTransform, UnknownTextFormatIsRefused) {
+    EXPECT_THROW(responses_to_openai_body(json{{"model", "m"},
+                                               {"input", "x"},
+                                               {"text", {{"format", {{"type", "nonsense_value"}}}}}}),
+                 std::invalid_argument);
+}
+
+// A tool_choice object the transform cannot map wrote nothing at all, so the
+// chat parser applied its own default "auto". A caller demanding a call -
+// `{"type":"allowed_tools","mode":"required"}`, the shape the Agents SDK emits -
+// got a fluent 200 with no call. `validate_tool_choice` could not catch it: it
+// runs on the transformed body, where the field no longer existed.
+TEST(ResponsesTransform, UnmappableToolChoiceIsRefused) {
+    auto with = [](const json& tc) {
+        return json{{"model", "m"},
+                    {"input", "x"},
+                    {"tools", json::array({{{"type", "function"}, {"name", "f"}}})},
+                    {"tool_choice", tc}};
+    };
+    for (const char* t : {"allowed_tools", "mcp", "custom", "file_search", "nonsense_value"})
+        EXPECT_THROW(responses_to_openai_body(with(json{{"type", t}})), std::invalid_argument) << t;
+
+    // The two shapes that do map must keep working.
+    EXPECT_EQ(responses_to_openai_body(with(json("required")))["tool_choice"], "required");
+    EXPECT_EQ(responses_to_openai_body(
+                  with(json{{"type", "function"}, {"name", "f"}}))["tool_choice"]["function"]["name"],
+              "f");
+}
+
 TEST(ResponsesTransform, StatefulFieldsRejected) {
     EXPECT_THROW(
         responses_to_openai_body(json{{"input", "x"}, {"previous_response_id", "resp_1"}}),
