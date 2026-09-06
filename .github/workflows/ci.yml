@@ -75,7 +75,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git python3
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # full history so the base SHA is present for `git diff`
 
@@ -145,7 +145,7 @@ jobs:
       # saves the slow nvcc ptxas pass for sm_120a.
       - name: Restore ccache
         if: steps.changes.outputs.code == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache
           key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
@@ -165,7 +165,7 @@ jobs:
       # ccache provides per-TU hits even when the build cache misses.
       - name: Cache build directory
         if: steps.changes.outputs.code == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build
           key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
@@ -236,7 +236,7 @@ jobs:
 
       - name: Upload build artifacts
         if: steps.changes.outputs.code == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: imp-build
           path: |
@@ -271,7 +271,7 @@ jobs:
     env:
       CUDA_VERSION: "13.3"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
       - name: Install deps
@@ -279,7 +279,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends cmake g++ git python3 clang-tidy
       - name: Restore build dir (compile_commands.json + _deps)
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build
           key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
@@ -342,9 +342,9 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -375,10 +375,10 @@ jobs:
       image: nvidia/cuda:13.3.1-devel-ubuntu26.04
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: imp-build
           path: build
@@ -423,7 +423,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install clang-format
@@ -470,8 +470,8 @@ jobs:
     name: File size
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: File-size smells (advisory, non-blocking)
@@ -490,8 +490,8 @@ jobs:
     name: Test lanes
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Test-lane gate (blocking)
@@ -506,10 +506,10 @@ jobs:
     name: Docs
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # docs_lint.py reads git history for the L3 verified/commit headers
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Doc gates (blocking)
@@ -519,7 +519,7 @@ jobs:
     name: Release hygiene
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release hygiene gate (blocking)
         run: bash scripts/ci_static_gates.sh hygiene
 
@@ -527,8 +527,8 @@ jobs:
     name: Alloc sites
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Alloc-site gates (blocking)
@@ -538,8 +538,8 @@ jobs:
     name: Launch guards
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Launch-guard gate (blocking)
@@ -583,7 +583,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -610,7 +610,7 @@ jobs:
 
       - name: Restore ccache
         if: steps.scope.outputs.run == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache-ptx
           key: ${{ runner.os }}-cuda13.3-ccache-ptx-${{ github.sha }}
@@ -682,7 +682,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends bash git python3 cmake ninja-build ca-certificates
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -709,16 +709,20 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         run: |
           # Two separate traps, both hit on the way here. The pin line is
-          #   set(IMP_DEP_GOOGLETEST_TAG    v1.18.0  CACHE STRING "...")
+          #   set(IMP_DEP_GOOGLETEST_SHA    063de7e9...  CACHE STRING "...")
           # with RUN-LENGTH whitespace, so a pattern with one space matches
           # nothing, grep exits 1 and `-e` kills the step with no message at
           # all. And `grep | head -1` under `-o pipefail` is #1499: head closes
           # the pipe, grep dies of EPIPE, the pipeline is non-zero even on a
           # hit. `\s+` fixes the first, `-m1` instead of a pipe the second.
-          GT="$(grep -m1 -oP 'IMP_DEP_GOOGLETEST_TAG\s+\K[^ )]+' cmake/imp-deps.cmake)"
+          # By commit, not by tag: same pin as the Dockerfile (H-8).
+          GT="$(grep -m1 -oP 'IMP_DEP_GOOGLETEST_SHA\s+\K[^ )]+' cmake/imp-deps.cmake)"
           test -n "$GT" || { echo "googletest pin not found in cmake/imp-deps.cmake"; exit 1; }
           echo "googletest pin: $GT"
-          git clone --depth=1 --branch "$GT" https://github.com/google/googletest.git /deps/googletest
+          mkdir -p /deps/googletest
+          git -C /deps/googletest init -q
+          git -C /deps/googletest fetch -q --depth=1 https://github.com/google/googletest.git "$GT"
+          git -C /deps/googletest checkout -q FETCH_HEAD
 
       # No tools, no bench, no server: the same configuration `make asan` uses,
       # which is also why the five unconditional fuzz targets must not live in
@@ -804,10 +808,10 @@ jobs:
     runs-on: [self-hosted, gpu, cuda]
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download build
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: imp-build
           path: build/

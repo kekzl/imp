@@ -35,7 +35,8 @@ Rules with no other home:
 - **Scope:** `CMakeLists.txt`, `cmake/`, `CMakePresets.json`, `Dockerfile`, `Makefile`, dependency pins, `.github/workflows/`.
 - **Allowed tools:** edit (build/CI files), bash (configure/build).
 - **MUST:** keep the build green; clean-reconfigure after a build-system change; bump both dep-pin sites
-  (CMake + Dockerfile) together; keep the single-arch gencode block intact.
+  (CMake + Dockerfile) and both halves of a pin (tag + commit SHA) together; keep every workflow
+  `uses:` on a 40-hex SHA; keep the single-arch gencode block intact.
 - **MAY NOT:** touch kernel/algorithm logic; add multi-arch paths; rename the `Build` CI job (branch-ruleset
   required check); introduce `--mount=type=cache` in the Docker build; collapse the Dockerfile's
   `toolchain`/`builder` split (`make dev` compiles in the `toolchain` stage) or let the two build paths

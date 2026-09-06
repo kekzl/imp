@@ -1,2 +1,6 @@
-httpx>=0.28.1
-pytest>=9.1.1
+# Exact pins: `>=` with no upper bound is a mutable pin, so two CI runs of the
+# same commit could install two different suites (AUDIT_arch_2026 H-8).
+# Bumped by Dependabot (pip ecosystem, /tests/api). Hashes are the next step up
+# and need the transitive set, which no lock file here produces yet.
+httpx==0.28.1
+pytest==9.1.1
