@@ -142,6 +142,13 @@ assertion keywords imp does not enforce. Which ones, and the three shapes that
 are accepted with a weaker guarantee than asked for, are listed in
 [`LIMITATIONS.md`](LIMITATIONS.md#known-bad-and-known-limited-behaviour).
 
+All four forms are carried by `/v1/responses` as `text.format` too. Until #1930
+that transform mapped only `json_object` and `json_schema` and wrote nothing for
+the rest, so the same `regex` or `grammar` request was constrained on
+`/v1/chat/completions` and free text on `/v1/responses`, at 200. A `text.format`
+or a `tool_choice` shape the transform cannot map is now a `400` naming it,
+rather than a field deleted before the parser's own check could see it.
+
 Schema, regex and grammar inputs are bounded: nesting past 64 levels, a `{n,m}`
 repeat above 1024, or a pattern needing more than 100k NFA states is a `400`
 rather than a stack overflow or an allocation storm (#1608, #1609).

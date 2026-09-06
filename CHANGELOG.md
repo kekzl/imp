@@ -80,6 +80,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- `/v1/responses` carries `text.format` `regex` and `grammar`, which already worked on
+  `/v1/chat/completions`. The transform mapped only `json_object` and `json_schema`, so the same
+  request was constrained on one endpoint and free text at 200 on the other (#1930)
+- A `text.format` or `tool_choice` shape `/v1/responses` cannot map is a `400` naming it, not a
+  deleted field. `{"type":"allowed_tools","mode":"required"}` (the Agents SDK shape) fell back to
+  `auto`, so a caller demanding a tool call got a fluent answer with none (#1930)
 - A dropped modality is named, not counted: `WeightMap` splits `skipped` into vision / audio /
   MTP / unrecognised and an `audio_config` object warns at load. Gemma-4-12B-NVFP4 lost 1 audio
   and 10 vision-embedder tensors as "skipped 11" (roadmap Open 8)

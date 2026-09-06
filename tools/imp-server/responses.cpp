@@ -142,6 +142,17 @@ json responses_to_openai_body(const json& rsp) {
             // Flat {type:"function", name} -> nested chat shape.
             oai["tool_choice"] = {{"type", "function"},
                                   {"function", {{"name", tc.value("name", "")}}}};
+        } else {
+            // Neither arm matching wrote nothing at all, and the chat parser
+            // then applied its own default "auto". A caller demanding a tool
+            // call - `{"type":"allowed_tools","mode":"required",...}`, the shape
+            // the Agents SDK emits - got a fluent 200 with no call and no
+            // reason. `validate_tool_choice` could not catch it either: it runs
+            // on the transformed body, where the field no longer exists.
+            const std::string tct = tc.is_object() ? tc.value("type", "") : "";
+            throw std::invalid_argument("unsupported tool_choice " +
+                                        (tct.empty() ? std::string("shape") : "type: \"" + tct + "\"") +
+                                        " (a string, or {\"type\":\"function\",\"name\":...})");
         }
     }
     if (rsp.contains("parallel_tool_calls"))
@@ -151,7 +162,11 @@ json responses_to_openai_body(const json& rsp) {
     if (rsp.contains("text") && rsp["text"].is_object() && rsp["text"].contains("format")) {
         const json& fmt = rsp["text"]["format"];
         std::string ftype = fmt.value("type", "text");
-        if (ftype == "json_object") {
+        if (ftype == "text") {
+            // The Responses default and an explicit "text" both mean
+            // unconstrained; chat/completions expresses that by having no
+            // response_format at all.
+        } else if (ftype == "json_object") {
             oai["response_format"] = {{"type", "json_object"}};
         } else if (ftype == "json_schema") {
             json js = {{"name", fmt.value("name", "response")}};
@@ -160,6 +175,19 @@ json responses_to_openai_body(const json& rsp) {
             if (fmt.contains("strict"))
                 js["strict"] = fmt["strict"];
             oai["response_format"] = {{"type", "json_schema"}, {"json_schema", std::move(js)}};
+        } else if (ftype == "regex" || ftype == "grammar") {
+            // Both are imp's own extensions and both work on
+            // /v1/chat/completions; only this transform did not carry them, so
+            // the same request was constrained on one endpoint and free text on
+            // the other. Passed through whole: the chat parser owns the field
+            // names and refuses an uncompilable pattern with its own message.
+            oai["response_format"] = fmt;
+        } else {
+            // Anything else wrote no response_format, so the chat parser's
+            // "unknown response_format.type" 400 never fired and the reply came
+            // back unconstrained at 200. Same shape as tool_choice above.
+            throw std::invalid_argument("unknown \"text.format.type\": \"" + ftype +
+                                        "\" (known: text, json_object, json_schema, regex, grammar)");
         }
     }
 
