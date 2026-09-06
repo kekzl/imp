@@ -129,4 +129,9 @@ bool gguf_tensor_in_bounds(const GGUFTensorInfo& info);
 
 bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype);
 
+// The reportable family of a tensor name: its first path segment with digit runs
+// collapsed to N, so a whole dropped subtree is one log line rather than one per
+// tensor. Exposed for the CPU lane.
+std::string gguf_name_family(const std::string& name);
+
 }  // namespace imp
