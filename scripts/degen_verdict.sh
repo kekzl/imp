@@ -51,9 +51,12 @@ DISTINCT_MIN=$(( WINDOW / 4 ))
 #    in check_degen_thresholds.sh:
 #
 #      healthy dense prose  37 %      "a b c" loop            100 %
-#      healthy GDN list     31 %      stuck single token      100 %
-#      short correct answer  0 %      two-token alternation   100 %
-#                                     10-token phrase on loop 100 %
+#      healthy GDN, 64 tok  45 %      stuck single token      100 %
+#      healthy GDN, 49 tok  31 %      two-token alternation   100 %
+#      short correct answer  0 %      10-token phrase on loop 100 %
+#
+#    45 % is the worst healthy observation and is what sets the distance to the
+#    threshold; the loops leave no room for argument at 100 %.
 #
 #    The top-3-gram share, which is the obvious metric, does NOT work: a
 #    10-token phrase repeated six times spreads over ten different 3-grams, so

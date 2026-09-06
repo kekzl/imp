@@ -72,6 +72,10 @@ check "dense-capitals" OK 5 \
 check "gdn-list" OK 5 \
   "11751 13 32 13 2503 33 13 3557 271 785 6722 315 9856 374 25 4230 13 19846 425 13 21718 356 13 24081 422 13 7148 271 785 6722 315 17689 374 25 4230 13 21718 425 13 24081 356 13 19846 422 13 7148 271 785 6722"
 
+# The same GDN model over a full 64-token run: the worst healthy observation in
+# the set at 45 % repeated 3-grams, which is what sets the distance to the
+# 70 % threshold. Captured from the shipped gate on 2026-09-07.
+check "gdn-64tok" OK 5 "11751 13 198 32 13 2912 198 33 13 3439 198 15666 25 198 32 271 22365 314 279 2614 369 4045 264 3478 14367 303 279 3516 4042 30 198 32 13 27509 198 33 13 23607 198 34 13 14935 198 35 13 26097 35317 198 15666 25 198 35 271 22365 314 279 2614 369 4045 264 3478 14367 303 279"
 # A short but correct answer: the window is 11, so the distinct threshold has to
 # scale or this reads as degenerate.
 check "short-correct" OK 5 "11751 13 198 32 13 2912 198 33 13 3439 198"
