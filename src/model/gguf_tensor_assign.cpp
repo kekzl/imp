@@ -202,14 +202,30 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
             // Mark fused by leaving expert_up_packed null — executor detects this.
             assign_quant(layer.expert_gate_packed, tensor);
         }
-        // FFN
-        else if (field == "ffn_gate")
+        // FFN. The suffix test matters here for the same reason it does on the
+        // `attn_*` arms above and the `_exps` arms below: without it a
+        // `blk.N.ffn_up.bias` would be assign_quant'd straight into `w_up` and
+        // CLOBBER the weight, since assign_quant is a plain assignment. imp
+        // carries no dense FFN bias (only the per-expert ones), so the right
+        // answer is to leave it unassigned and let it be reported, not to
+        // overwrite a weight with a bias vector.
+        //
+        // Latent: no local GGUF ships one. gpt-oss, the family that does have
+        // FFN biases, spells them `ffn_{gate,up,down}_exps.bias` and hits the
+        // guarded arms below.
+        else if (field == "ffn_gate") {
+            if (suffix == "bias")
+                return false;
             assign_quant(layer.w_gate, tensor);
-        else if (field == "ffn_up")
+        } else if (field == "ffn_up") {
+            if (suffix == "bias")
+                return false;
             assign_quant(layer.w_up, tensor);
-        else if (field == "ffn_down")
+        } else if (field == "ffn_down") {
+            if (suffix == "bias")
+                return false;
             assign_quant(layer.w_down, tensor);
-        else if (field == "ffn_norm")
+        } else if (field == "ffn_norm")
             layer.ffn_norm = tensor;
         else if (field == "ffn_gate_inp") {
             // Distinguish .weight (the gate matrix) from .scale (per-channel multiplier).

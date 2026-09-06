@@ -352,6 +352,24 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         else if (rope_type == "dynamic") {
             cfg.rope_freq_scale = 1.0f / factor;
         }
+        // The chain had no final arm, so an unhandled spelling left
+        // `rope_freq_scale` at 1.0 and the model loaded reporting its full
+        // declared context while rotating unscaled: coherent near the native
+        // window, degrading past it, at exit code 0. Older Phi-3 exports spell
+        // LongRoPE `su` / `su_scaled` (the handled `longrope` is the rename),
+        // and `dynamic_ntk` / `ntk` appear in the wild too.
+        //
+        // "default" and "none" mean no scaling, which is what falling through
+        // already does, so they are silent on purpose: Qwen3-VL-4B declares
+        // `"rope_type": "default"` and warning on it would cry wolf.
+        else if (!rope_type.empty() && rope_type != "default" && rope_type != "none") {
+            cfg.rope_scaling_unhandled = true;
+            IMP_LOG_WARN(
+                "rope_scaling type \"%s\" is not one of linear/yarn/longrope/llama3/dynamic: "
+                "ignored, so this model rotates UNSCALED and will degrade past its native "
+                "context window (declared max_position_embeddings=%d, factor=%.3f)",
+                rope_type.c_str(), cfg.max_seq_len, factor);
+        }
     }
 
     // Sliding window attention

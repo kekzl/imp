@@ -678,6 +678,65 @@ TEST_F(AudioConfigTest, NullDoesNotMarkTheModality) {
     EXPECT_FALSE(cfg.has_audio_config);
 }
 
+// ---------------------------------------------------------------------------
+// rope_scaling: an unhandled spelling left the chain with no final arm, so
+// `rope_freq_scale` stayed 1.0 and the model loaded reporting its full declared
+// context while rotating UNSCALED. Older Phi-3 exports spell LongRoPE `su` (the
+// handled `longrope` is the rename), and `dynamic_ntk` appears in the wild.
+//
+// Latent: the one local checkpoint that falls through is Qwen3-VL-4B with
+// `"rope_type": "default"`, which means no scaling and wants exactly that -
+// hence the silent exemption the third test pins.
+// ---------------------------------------------------------------------------
+
+TEST_F(RopeScalingConfigTest, UnhandledTypeIsFlagged) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "max_position_embeddings": 131072,
+        "rope_theta": 10000.0,
+        "rope_scaling": {"type": "su", "factor": 8.0}
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_TRUE(cfg.rope_scaling_unhandled);
+    EXPECT_FLOAT_EQ(cfg.rope_freq_scale, 1.0f) << "nothing was applied, which is the point";
+}
+
+TEST_F(RopeScalingConfigTest, HandledTypeIsNotFlagged) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "rope_scaling": {"type": "linear", "factor": 4.0}
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_FALSE(cfg.rope_scaling_unhandled);
+}
+
+// Qwen3-VL-4B's shape. "default" and "none" mean no scaling, so falling through
+// is correct and must stay silent; flagging it would cry wolf on a working
+// model, the failure mode #1929's audio check was built to avoid.
+TEST_F(RopeScalingConfigTest, DefaultAndNoneAreNotFlagged) {
+    for (const char* t : {"default", "none"}) {
+        write_config(std::string(R"({
+            "architectures": ["Qwen3VLForConditionalGeneration"],
+            "hidden_size": 2560,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 36,
+            "rope_scaling": {"rope_type": ")") +
+                     t + R"("}
+        })");
+        imp::ModelConfig cfg;
+        ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg)) << t;
+        EXPECT_FALSE(cfg.rope_scaling_unhandled) << t;
+    }
+}
+
 // Every text-only checkpoint: no key, no flag, no warning.
 TEST_F(AudioConfigTest, AbsentKeyDoesNotMarkTheModality) {
     write_config(R"({

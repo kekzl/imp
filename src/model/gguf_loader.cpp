@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -42,6 +43,28 @@
 #include <utility>
 
 namespace imp {
+
+// The reportable family of a tensor name: its first path segment, with any
+// digit run collapsed to N. `v.blk.12.attn_q.weight` and `v.blk.13.…` both
+// become `v`, so a dropped subtree is one line instead of hundreds. A name with
+// no dot is its own family.
+std::string gguf_name_family(const std::string& name) {
+    const size_t dot = name.find('.');
+    std::string head = (dot == std::string::npos) ? name : name.substr(0, dot);
+    std::string out;
+    bool in_digits = false;
+    for (char c : head) {
+        if (c >= '0' && c <= '9') {
+            if (!in_digits)
+                out += 'N';
+            in_digits = true;
+        } else {
+            out += c;
+            in_digits = false;
+        }
+    }
+    return out.empty() ? std::string("(empty)") : out;
+}
 
 // Host half/bf16 <-> float helpers for the gpt-oss 2^-4 residual rescale live in
 // core/fp_bits.h, the tree's single copy of them (see test_fp_bits.cpp).
@@ -666,6 +689,19 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
 
     int assigned = 0, skipped = 0;
+    // What was skipped, grouped by name family, so a whole dropped subtree is
+    // one greppable line rather than 355 DEBUG lines nobody sees at the default
+    // level. `src/model/CLAUDE.md` names this exact failure: "A silently
+    // skipped tensor is the failure mode here", and "a skip reported only [at
+    // DEBUG] is not reported". The SafeTensors side got its breakdown in #1929;
+    // this is the same report on the GGUF path.
+    //
+    // Latent rather than live on anything present: a GGUF header parse over all
+    // 15 local checkpoints finds zero unassigned tensors in every text model and
+    // exactly one in the reranker (`cls.output.weight`), which imp is right to
+    // ignore because /v1/rerank scores from the yes/no token logits and never
+    // reads a classification head.
+    std::map<std::string, int> skipped_families;
 
     for (const auto& info : tensor_infos) {
         // Reject tensors whose [offset, offset+size) window escapes the mapped
@@ -705,6 +741,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             IMP_LOG_DEBUG("Unassigned tensor: %s [%s] shape=[%ld,%ld,%ld,%ld]", info.name.c_str(),
                           gguf_type_name(info.type), (long)info.dims[0], (long)info.dims[1],
                           (long)info.dims[2], (long)info.dims[3]);
+            skipped_families[gguf_name_family(info.name)]++;
             skipped++;
         }
     }
@@ -750,6 +787,18 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
 
     IMP_LOG_INFO("Weights: %d assigned, %d skipped", assigned, skipped);
+    if (!skipped_families.empty()) {
+        std::string families;
+        for (const auto& [fam, n] : skipped_families) {
+            if (!families.empty())
+                families += ", ";
+            families += fam + " x" + std::to_string(n);
+        }
+        IMP_LOG_WARN(
+            "  skipped, by name family: %s. These tensors are in the checkpoint and imp "
+            "reads none of them.",
+            families.c_str());
+    }
 
     // 7b. Tensor validation and shared expert detection
     //     Inspect actual loaded tensors to detect capabilities, remap shared

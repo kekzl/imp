@@ -141,6 +141,12 @@ struct ModelConfig {
     // and ships `model.embed_audio.embedding_projection.weight`.
     bool has_audio_config = false;
 
+    // The checkpoint declared a `rope_scaling.type` this loader does not
+    // implement, so no scaling was applied and the model rotates unscaled while
+    // still reporting its declared context window. Not set for `default` and
+    // `none`, which mean exactly that.
+    bool rope_scaling_unhandled = false;
+
     bool is_nvfp4_prequant = false;
     int nvfp4_group_size = 16;
     // llm-compressor NVFP4 format: weight_global_scale is a divisor, not a multiplier.

@@ -80,6 +80,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- The GGUF loader names what it skipped, grouped by tensor-name family, instead of one DEBUG line
+  per tensor that is invisible at the default log level. Same report the SafeTensors side got in
+  #1929 (#1932)
+- A dense `blk.N.ffn_{gate,up,down}.bias` is left unassigned instead of being written into the
+  weight slot, which a plain assignment would have clobbered. The neighbouring `attn_*` and
+  `_exps` arms already tested the suffix; these three did not (#1932)
+- A `rope_scaling.type` this loader does not implement warns and is flagged on `ModelConfig`
+  instead of loading silently unscaled while reporting the declared context window. `default` and
+  `none` stay silent, since falling through is what they mean (#1932)
 - `/v1/messages` refuses a `system` field it cannot fold instead of dropping the whole system
   prompt and answering without it. A bare object, a number and an array holding a non-text block
   all reached the model before; a leading `role: "system"` message is folded the same way (#1931)
