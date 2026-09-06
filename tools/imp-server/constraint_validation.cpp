@@ -212,11 +212,66 @@ bool anthropic_tool_result_unreadable(const json& block, std::string& why) {
 
 }  // namespace
 
+// The `system` field, which the block walk below never reached: it keys on
+// "messages" only. `flatten_system` (anthropic.cpp) reads a string, or an array
+// from which it keeps `text` blocks; every other shape returns "" and the whole
+// system prompt is gone. Measured on the model-less binary before this: a bare
+// object, a number, and an array carrying an image block all reached the model
+// lookup, so with weights the model would have answered without its
+// instructions and said nothing about it.
+//
+// The allowlist is `flatten_system`'s own capability, which is also what the
+// upstream API allows in this field. `cache_control` rides on a `text` block and
+// is unaffected.
+bool anthropic_system_unreadable(const json& system_field, std::string& why) {
+    if (system_field.is_null() || system_field.is_string())
+        return false;
+    if (!system_field.is_array()) {
+        why = "\"system\" must be a string or an array of text blocks";
+        return true;
+    }
+    for (const auto& block : system_field) {
+        if (!block.is_object()) {
+            why = "\"system\" array holds a non-object entry; it takes text blocks";
+            return true;
+        }
+        const std::string type = block.value("type", "");
+        if (type == "text")
+            continue;
+        why = "unsupported \"system\" block \"" + (type.empty() ? std::string("(missing type)") : type) +
+              "\": this field takes \"text\" blocks only";
+        return true;
+    }
+    return false;
+}
+
 bool anthropic_unreadable_block(const json& body, std::string& why) {
+    if (body.contains("system") && anthropic_system_unreadable(body["system"], why))
+        return true;
     if (!body.contains("messages") || !body["messages"].is_array())
         return false;
+    // The Messages API has no `system` role, but clients ported from the OpenAI
+    // dialect send one and imp folds the LEADING run of them into the system
+    // prompt through flatten_system (anthropic.cpp), consuming each one whether
+    // or not anything survived the fold. Those carry the system field's narrower
+    // allowlist. A system message AFTER the first turn is not folded; it reaches
+    // push_user_turn and keeps its images, so it is checked as an ordinary
+    // message. Getting this boundary wrong in either direction is a false
+    // refusal or a silent drop, so it is read off the converter's own loop.
+    bool still_leading = true;
     for (const auto& msg : body["messages"]) {
-        if (!msg.is_object() || !msg.contains("content") || !msg["content"].is_array())
+        const bool is_leading_system = still_leading && msg.is_object() &&
+                                       msg.value("role", "user") == "system";
+        if (!is_leading_system)
+            still_leading = false;
+        if (!msg.is_object() || !msg.contains("content"))
+            continue;
+        if (is_leading_system) {
+            if (anthropic_system_unreadable(msg["content"], why))
+                return true;
+            continue;
+        }
+        if (!msg["content"].is_array())
             continue;
         for (const auto& block : msg["content"]) {
             if (!block.is_object())

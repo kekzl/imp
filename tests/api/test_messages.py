@@ -158,6 +158,41 @@ class TestMessagesValidation:
         ))
         assert r.status_code != 400, r.text
 
+    # The `system` field sat outside the block walk entirely, so every shape
+    # flatten_system cannot fold reached the model and the system prompt was
+    # gone. A LEADING role:"system" message goes through the same fold.
+    @pytest.mark.parametrize("body", [
+        {"system": {"type": "text", "text": "s"}},
+        {"system": 42},
+        {"system": [{"type": "image",
+                     "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]},
+        {"messages": [{"role": "system", "content": [
+            {"type": "text", "text": "s"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]},
+            {"role": "user", "content": "hi"}]},
+    ])
+    def test_unfoldable_system_is_refused(self, client, model, body):
+        r = client.post("/v1/messages", json=_msg(model=model, **body))
+        _assert_anthropic_error(r, 400)
+
+    # Everything flatten_system can fold must still pass, including the
+    # cache_control marker (#1046) and a system message that is NOT leading,
+    # which keeps its images through push_user_turn.
+    @pytest.mark.parametrize("body", [
+        {"system": "you are terse"},
+        {"system": [{"type": "text", "text": "s"}]},
+        {"system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}]},
+        {"messages": [{"role": "system", "content": "be terse"},
+                      {"role": "user", "content": "hi"}]},
+        {"messages": [{"role": "user", "content": "hi"},
+                      {"role": "system", "content": [
+                          {"type": "text", "text": "s"},
+                          {"type": "image",
+                           "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]}]},
+    ])
+    def test_foldable_system_is_not_refused(self, client, model, body):
+        r = client.post("/v1/messages", json=_msg(model=model, **body))
+        assert r.status_code != 400, r.text
 
 @pytest.mark.nomodel
 class TestMessagesLeniency:
