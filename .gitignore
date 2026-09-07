@@ -123,6 +123,10 @@ calib*.json
 
 # make dev: persistent incremental build dir (root-owned, container-written)
 build-dev/
+# make check-alloc-interpose: the --wrap measurement build, same ownership.
+# Untracked and unignored, the directory vanished between two gate runs on
+# 2026-09-07 (cause not established), which cost a 10-minute rebuild.
+build-interpose/
 
 # CodeGraph: local code-index for AI agents (DB + local-only project config).
 # Evaluation in progress; if it stays, codegraph.json becomes tracked config.

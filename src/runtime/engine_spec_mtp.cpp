@@ -25,7 +25,6 @@
 #include "memory/backend.h"
 #include "compute/layernorm.h"
 #include "compute/mtp_forward.h"
-#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "model/model.h"
@@ -36,23 +35,6 @@
 #include <algorithm>
 
 namespace imp {
-
-// Post-norm scratch for mtp_feed_pairs_: n_pairs is the prefill feed length,
-// so it grows on demand (cudaMalloc staircase, capacity-checked). File-scope
-// with a reset hook: as a function-local static it was never freed and dangled
-// after imp_gpu_release(1) (AUDIT_arch_2026 B-2).
-namespace {
-void* s_norm_scratch = nullptr;
-size_t s_norm_cap = 0;
-
-void engine_spec_mtp_reset_static_cuda_state() {
-    if (s_norm_scratch)
-        (void)cudaFree(s_norm_scratch);
-    s_norm_scratch = nullptr;
-    s_norm_cap = 0;
-}
-IMP_REGISTER_CUDA_STATIC_RESET(engine_spec_mtp_reset_static_cuda_state);
-}  // namespace
 
 void Engine::mtp_unbind_(const char* why) {
     if (mtp_bound_req_ >= 0 && !mtp_stale_logged_) {
@@ -116,22 +98,21 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     // cache itself was still built from pre-norm rows, which is why the old
     // A/B read exactly 0. Now it covers every fed pair.
     if (runtime_config_.diagnostics.mtp_prenorm_h) {
-        const size_t need = static_cast<size_t>(n_pairs) * hidden_dim * sizeof(__half);
-        if (need > s_norm_cap) {
-            if (s_norm_scratch) cudaFree(s_norm_scratch);
-            if (cudaMalloc(&s_norm_scratch, need) != cudaSuccess) {
-                s_norm_scratch = nullptr;
-                s_norm_cap = 0;
-                return false;
-            }
-            s_norm_cap = need;
+        // ws->d_prenorm_rows is sized once at enable time (the executor's
+        // token cap, which bounds every prefill feed); a feed past it fails
+        // the same way the old on-demand allocation failed, the caller
+        // unbinds drafting for the request.
+        if (!ws->d_prenorm_rows || n_pairs > ws->prenorm_rows_cap) {
+            IMP_LOG_WARN("mtp-spec: feed of %d rows exceeds the post-norm scratch (%d rows)", n_pairs,
+                         ws->prenorm_rows_cap);
+            return false;
         }
         int64_t shape[2] = {n_pairs, hidden_dim};
         Tensor in_v(const_cast<void*>(d_hidden_rows), QType::F16, 2, shape, true);
-        Tensor out_v(s_norm_scratch, QType::F16, 2, shape, true);
+        Tensor out_v(ws->d_prenorm_rows, QType::F16, 2, shape, true);
         imp::rmsnorm(in_v, model_->output_norm(), out_v, model_->config_.rms_norm_eps,
                      decode_stream(), model_->config_.norm_weight_offset);
-        d_hidden_rows = s_norm_scratch;
+        d_hidden_rows = ws->d_prenorm_rows;
     }
     const char* base = static_cast<const char*>(d_hidden_rows);
     int pred = -1;
@@ -523,6 +504,24 @@ bool Engine::enable_mtp_spec_decode(int k) {
         delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
+    }
+    // Post-norm feed scratch (diagnostics.mtp_prenorm_h), inside the same
+    // labelled init scope: the widest feed a prefill chunk can hand
+    // mtp_feed_pairs_ is the executor's token cap. It used to be a file-static
+    // that re-grew with every longer feed while serving, the one call the I2
+    // gate's phase A still pinned.
+    if (runtime_config_.diagnostics.mtp_prenorm_h) {
+        const int rows = std::max(1, executor_ ? executor_->max_tokens() : mtp_kv_max);
+        const size_t bytes = static_cast<size_t>(rows) * hidden_dim * sizeof(__half);
+        if (cudaMalloc(&ws->d_prenorm_rows, bytes) == cudaSuccess) {
+            ws->prenorm_rows_cap = rows;
+        } else {
+            ws->d_prenorm_rows = nullptr;
+            IMP_LOG_WARN(
+                "enable_mtp_spec_decode: post-norm feed scratch (%d rows, %.1f MiB) failed; "
+                "feeds will refuse and drafting unbinds",
+                rows, bytes / (1024.0 * 1024.0));
+        }
     }
     // Configure RoPE for the MTP attention (Phase 2.2.Attn+RoPE).
     // Qwen3.5/3.6 uses partial rope (factor 0.25 → rope_dim=64 of head_dim=256),

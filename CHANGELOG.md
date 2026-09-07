@@ -19,6 +19,8 @@ there instead of retelling it.
 - The per-request upload family (ragged prefill, graph-loop block tables, constrained pipeline, banned
   tokens, M-RoPE positions) is one pool sized at init; `make check-alloc-interpose` runs two phases and
   its serving-allocation pin drops 19 -> 1 (+3 once-per-process constrainer tables in the new phase) (#1939)
+- MTP post-norm feed scratch allocated once at enable time instead of re-growing per feed while
+  serving; `make check-alloc-interpose` phase A pins 0 serving allocations (#1940)
 
 ### Fixed
 

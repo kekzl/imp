@@ -211,6 +211,15 @@ struct MtpDraftWorkspace {
     void* d_b_gate     = nullptr;  // [rows, d_ff]
     void* d_b_up       = nullptr;  // [rows, d_ff]
     void* d_b_act      = nullptr;  // [rows, d_ff]
+
+    // ---- Post-norm feed scratch (diagnostics.mtp_prenorm_h) ----
+    // [prenorm_rows_cap, H] FP16: the fed hidden rows after the target's
+    // final norm. Sized once at enable time (engine_spec_mtp.cpp) to the
+    // widest feed a prefill chunk can produce. It used to be a file-static
+    // cudaMalloc staircase that re-grew with every longer feed while serving:
+    // the last pinned call in the I2 gate's phase A.
+    void* d_prenorm_rows = nullptr;
+    int prenorm_rows_cap = 0;
 };
 
 // Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
