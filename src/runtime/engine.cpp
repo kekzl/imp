@@ -117,13 +117,13 @@ Engine::~Engine() {
     // addresses into memory that is about to go away. The pool logs that as an
     // error rather than letting it pass silently.
     graph_slot_pool().close();
-    if (async_d_block_tables_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
-        async_d_block_tables_ = nullptr;
-    }
-    if (async_d_block_tables_swa_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
-        async_d_block_tables_swa_ = nullptr;
+    release_async_block_tables_();
+    // The constrained pipeline's pinned landing and event outlive one
+    // pipeline (teardown keeps them); this is their one release.
+    cpipe_.h_token.reset();
+    if (cpipe_.ev) {
+        IMP_CUDA_CHECK_LOG(cudaEventDestroy(cpipe_.ev));
+        cpipe_.ev = nullptr;
     }
     if (swa_snap_slab_) {
         IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));

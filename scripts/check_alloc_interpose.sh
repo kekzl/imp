@@ -34,7 +34,8 @@ docker run -d --name interpose --gpus all -p $PORT:8080 \
     --set runtime.max_batch_size=4 \
     --set kv_cache.dtype=nvfp4 \
     --set kv_cache.bitdecoding_residual_tokens=128 \
-    --set speculative.mtp_k=1 >/dev/null
+    --set speculative.mtp_k=1 \
+    --set diagnostics.log_level=debug >/dev/null
 trap 'docker rm -f interpose >/dev/null 2>&1' EXIT
 
 for _ in $(seq 1 200); do
@@ -55,6 +56,24 @@ for round in 1 2 3 4 5; do
     wait
 done
 
+# Ragged prefill (engine_prefill_ragged.cpp) needs two or more prompts in the
+# SAME prefill step, which the 15-token prompts above never give: each is
+# prefilled before the next curl lands (the 19-call pin never saw the six
+# per-wave allocations of AUDIT_arch_2026 B-4). Four ~1.5k-token prompts at
+# once do. The constrained pipeline (cpipe_), the other per-launch allocator
+# of that family, is NOT reachable here: engine_scheduler.cpp routes json
+# requests to it only with MTP off, and this config runs an MTP chain. It is
+# measured by hand (same binary, --set speculative.mtp_k=0, one json_object
+# request), not pinned.
+long=$(seq 1 150 | sed 's/^/Fact number & about the system under test is recorded here. /' | tr -d '\n')
+for slot in 1 2 3 4; do
+    jq -cn --arg m "$(basename "$MODEL")" --arg p "$long Summarise the above in one sentence ($slot)." \
+        '{model:$m,messages:[{role:"user",content:$p}],max_tokens:48,temperature:0}' |
+        curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
+            -d @- >/dev/null &
+done
+wait
+
 # Clean shutdown: the report is a static destructor, so SIGKILL loses it.
 docker stop -t 60 interpose >/dev/null 2>&1
 docker logs interpose > "$LOG" 2>&1
@@ -71,6 +90,12 @@ if ! grep -q 'residual buffer enabled' "$LOG"; then
     exit 1
 fi
 
+if ! grep -qE 'Ragged prefill: [2-9] seqs' "$LOG"; then
+    echo "FATAL: no ragged prefill wave with 2+ members in the log, so the run did not" >&2
+    echo "       exercise engine_prefill_ragged.cpp. Check runtime.prefill_batch and"    >&2
+    echo "       that the four long prompts were admitted together."                     >&2
+    exit 1
+fi
 CLEAN=$(grep -c 'alloc-interpose\] steady state clean' "$LOG")
 VIOL=$(grep -c 'alloc-interpose\] I2 VIOLATIONS' "$LOG")
 

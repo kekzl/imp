@@ -214,12 +214,17 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         h_soff[n_seq] = col;
     }
 
-    // Device metadata: per-step stream-ordered allocs. Prefill is never
-    // graph-captured, so the pool amortises these (same acknowledged
-    // exception as the chunked-prefill gather scratch). RAII, not a manual
-    // cleanup call: forward_logits and the sampling epilogue below can throw
-    // (n_tokens guard, CUDA errors translated at the API boundary), and the
-    // frees must run on that unwind too.
+    // Device metadata from the serving metadata pool (engine_kv_cache_init.cpp):
+    // fixed regions for max_seq_len rows and max_batch_size tables, so a wave
+    // uploads without allocating (invariant I2; this path used to be six
+    // cudaMallocAsync per wave, AUDIT_arch_2026 B-4). The wave is bounded by
+    // the row budget and the batch size, so the stream-ordered allocs below
+    // are the fallback for a pool that failed at init, not for an oversized
+    // wave. RAII either way, not a manual cleanup call: forward_logits and
+    // the sampling epilogue below can throw (n_tokens guard, CUDA errors
+    // translated at the API boundary), and the frees must run on that unwind.
+    const bool pooled = d_rg_token_ids_ != nullptr && total <= rg_rows_cap_ && n_seq <= rg_seq_cap_ &&
+                        static_cast<int>(max_blocks) <= pool_bt_cap_;
     struct RaggedMeta {
         int32_t* d_tok = nullptr;
         int* d_pos = nullptr;
@@ -228,8 +233,11 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         int* d_soff = nullptr;
         int* d_slots = nullptr;
         cudaStream_t stream;
-        explicit RaggedMeta(cudaStream_t s) : stream(s) {}
+        bool pooled;
+        RaggedMeta(cudaStream_t s, bool p) : stream(s), pooled(p) {}
         ~RaggedMeta() {
+            if (pooled)
+                return;
             for (void* p :
                  {static_cast<void*>(d_tok), static_cast<void*>(d_pos), static_cast<void*>(d_bt),
                   static_cast<void*>(d_ctx), static_cast<void*>(d_soff), static_cast<void*>(d_slots)})
@@ -238,20 +246,30 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         }
         RaggedMeta(const RaggedMeta&) = delete;
         RaggedMeta& operator=(const RaggedMeta&) = delete;
-    } meta(stream);
+    } meta(stream, pooled);
     auto& d_tok = meta.d_tok;
     auto& d_pos = meta.d_pos;
     auto& d_bt = meta.d_bt;
     auto& d_ctx = meta.d_ctx;
     auto& d_soff = meta.d_soff;
     auto& d_slots = meta.d_slots;
-    bool alloc_ok = cudaMallocAsync(&d_tok, h_tok.size() * sizeof(int32_t), stream) == cudaSuccess &&
-                    cudaMallocAsync(&d_pos, h_pos.size() * sizeof(int), stream) == cudaSuccess &&
-                    cudaMallocAsync(&d_bt, std::max<size_t>(h_bt.size(), 1) * sizeof(int), stream) ==
-                        cudaSuccess &&
-                    cudaMallocAsync(&d_ctx, h_ctx.size() * sizeof(int), stream) == cudaSuccess &&
-                    cudaMallocAsync(&d_soff, h_soff.size() * sizeof(int), stream) == cudaSuccess &&
-                    cudaMallocAsync(&d_slots, h_slots.size() * sizeof(int), stream) == cudaSuccess;
+    bool alloc_ok = true;
+    if (pooled) {
+        d_tok = d_rg_token_ids_;
+        d_pos = d_rg_positions_;
+        d_bt = d_rg_block_tables_;
+        d_ctx = d_rg_context_lens_;
+        d_soff = d_rg_seq_offsets_;
+        d_slots = d_rg_ssm_slots_;
+    } else {
+        alloc_ok = cudaMallocAsync(&d_tok, h_tok.size() * sizeof(int32_t), stream) == cudaSuccess &&
+                   cudaMallocAsync(&d_pos, h_pos.size() * sizeof(int), stream) == cudaSuccess &&
+                   cudaMallocAsync(&d_bt, std::max<size_t>(h_bt.size(), 1) * sizeof(int), stream) ==
+                       cudaSuccess &&
+                   cudaMallocAsync(&d_ctx, h_ctx.size() * sizeof(int), stream) == cudaSuccess &&
+                   cudaMallocAsync(&d_soff, h_soff.size() * sizeof(int), stream) == cudaSuccess &&
+                   cudaMallocAsync(&d_slots, h_slots.size() * sizeof(int), stream) == cudaSuccess;
+    }
     if (!alloc_ok) {
         IMP_LOG_ERROR("prefill_batch: metadata allocation failed — cancelling %d requests", n_seq);
         for (auto& g : geoms) {

@@ -19,6 +19,8 @@
 #include "memory/kv_cache.h"
 #include "core/logging.h"
 #include "compute/mmq_q8_imma.h"  // mmq_q8_imma_set_plane_budget
+#include "compute/sampling.h"     // SAMPLE_SCRATCH_BYTES (constrained-pipeline region)
+#include "runtime/serving_metadata_layout.h"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -1007,39 +1009,8 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // Pre-allocate prefill metadata pool (avoids per-request cudaMallocAsync)
     {
-        size_t tok_bytes = config_.max_seq_len * sizeof(int32_t);
-        size_t pos_bytes = config_.max_seq_len * sizeof(int);
-        // A single request's block_table can grow to the entire KV cache
-        // pool (max_blocks), not just max_seq_len/block_size. Size from
-        // max_blocks so the H2D copy at the prefill metadata upload site
-        // doesn't overflow on long-cumulative-KV requests.
-        //
-        // And from the CEILING when the pool is growable, because "the entire
-        // pool" is then a moving number. Sizing this from the initial commit
-        // produced exactly the overflow the line above warns about: the pool
-        // grew to serve a 25 222-token prompt and the upload then failed with
-        // `prefill memcpy block_tables failed: invalid argument`. It is four
-        // bytes per block of a pool that may never exist, which is nothing.
-        size_t bt_bytes = static_cast<size_t>(std::max(max_blocks, kv_ceiling_effective)) * sizeof(int);
-        size_t swa_bt_bytes = swa_sizing_active_ ? bt_bytes : 0;
-        size_t cl_bytes = sizeof(int);
-        prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + swa_bt_bytes + cl_bytes;
-        prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
-        if (prefill_pool_) {
-            auto* base = static_cast<char*>(prefill_pool_);
-            d_pf_token_ids_ = reinterpret_cast<int32_t*>(base);
-            d_pf_positions_ = reinterpret_cast<int*>(base + tok_bytes);
-            d_pf_block_tables_ = reinterpret_cast<int*>(base + tok_bytes + pos_bytes);
-            if (swa_sizing_active_)
-                d_pf_block_tables_swa_ =
-                    reinterpret_cast<int*>(base + tok_bytes + pos_bytes + bt_bytes);
-            d_pf_context_lens_ =
-                reinterpret_cast<int*>(base + tok_bytes + pos_bytes + bt_bytes + swa_bt_bytes);
-        } else {
-            IMP_LOG_WARN("Failed to pre-allocate prefill pool, will use per-request malloc");
-        }
+        init_serving_metadata_pool_(max_blocks, kv_ceiling_effective, kv_bs);
 
         // Pinned host staging buffers for prefill
         // T5b: an empty buffer means "no staging", which the prefill path already
@@ -1066,5 +1037,67 @@ bool Engine::init_kv_cache() {
     return true;
 }
 
+// Serving metadata pool: the per-chunk / per-request int arrays every forward
+// path uploads (token ids, positions, block tables, context lengths), one
+// allocation at init carved into a fixed region per path, so no path allocates
+// while serving (invariant I2, MEMORY.md A3.2). Each region is the worst case
+// its path can reach:
+//   serial prefill      one chunk of max_seq_len rows, one block table
+//   ragged prefill      max_seq_len rows in total, max_batch_size tables
+//   graph loops         one block table each for the sync loop, the async
+//                       loop and the constrained pipeline, plus the
+//                       pipeline's sampled token, position and context
+// The regions are disjoint on purpose: the async loop keeps its table across
+// scheduler steps (parked rearm), so it cannot share with a ragged prefill
+// that runs in between. Layout: runtime/serving_metadata_layout.h.
+void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effective, int kv_bs) {
+    // A block table can grow to the entire KV pool (max_blocks), to the
+    // CEILING of a growable pool ("the entire pool" is then a moving number:
+    // sized from the initial commit, the pool grew to serve a 25 222-token
+    // prompt and the upload failed with `prefill memcpy block_tables failed:
+    // invalid argument`), and the async loop sizes its table from the
+    // request's max_tokens ceiling, which max_seq_len bounds and the pool does
+    // not. Four bytes per block of a pool that may never exist, which is
+    // nothing.
+    const int bt_cap = std::max(
+        {max_blocks, kv_ceiling_effective, (config_.max_seq_len + kv_bs - 1) / kv_bs});
+    const int seq_cap = std::max(1, config_.max_batch_size);
+    const auto lay = ServingMetadataLayout::compute(config_.max_seq_len, seq_cap, bt_cap, swa_sizing_active_,
+                                                    SAMPLE_SCRATCH_BYTES);
+    prefill_pool_size_ = lay.total;
+    prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
+    if (!prefill_pool_) {
+        IMP_LOG_WARN("Failed to pre-allocate the serving metadata pool, will use per-request malloc");
+        return;
+    }
+    auto* base = static_cast<char*>(prefill_pool_);
+    auto ints = [base](size_t o) { return reinterpret_cast<int*>(base + o); };
+    d_pf_token_ids_ = reinterpret_cast<int32_t*>(base + lay.pf_tok);
+    d_pf_positions_ = ints(lay.pf_pos);
+    d_pf_block_tables_ = ints(lay.pf_bt);
+    d_pf_context_lens_ = ints(lay.pf_ctx);
+    d_rg_token_ids_ = reinterpret_cast<int32_t*>(base + lay.rg_tok);
+    d_rg_positions_ = ints(lay.rg_pos);
+    d_rg_block_tables_ = ints(lay.rg_bt);
+    d_rg_context_lens_ = ints(lay.rg_ctx);
+    d_rg_seq_offsets_ = ints(lay.rg_soff);
+    d_rg_ssm_slots_ = ints(lay.rg_slots);
+    d_gl_block_tables_ = ints(lay.gl_bt);
+    d_agl_block_tables_ = ints(lay.agl_bt);
+    d_cp_block_tables_ = ints(lay.cp_bt);
+    d_cp_token_ = reinterpret_cast<int32_t*>(base + lay.cp_token);
+    d_cp_pos_ = ints(lay.cp_pos);
+    d_cp_ctx_ = ints(lay.cp_ctx);
+    if (swa_sizing_active_) {
+        d_pf_block_tables_swa_ = ints(lay.pf_bt_swa);
+        d_gl_block_tables_swa_ = ints(lay.gl_bt_swa);
+        d_agl_block_tables_swa_ = ints(lay.agl_bt_swa);
+    }
+    pool_bt_cap_ = bt_cap;
+    rg_rows_cap_ = config_.max_seq_len;
+    rg_seq_cap_ = seq_cap;
+    IMP_LOG_INFO("Serving metadata pool: %.1f MiB (rows %d, %d tables x %d blocks)",
+                 prefill_pool_size_ / (1024.0 * 1024.0), config_.max_seq_len, seq_cap + 4, bt_cap);
+}
 
 }  // namespace imp

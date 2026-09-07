@@ -326,6 +326,11 @@ void Engine::build_banned_token_list() {
             IMP_LOG_INFO("  banned: %s", bl.c_str());
         }
     }
+    // Upload once, here in the loading phase: the graph paths and the
+    // constrained pipeline read this one engine-owned copy, and a first-use
+    // upload while serving was a counted I2 violation
+    // (scripts/check_alloc_interpose.sh).
+    (void)banned_tokens_device_(decode_stream());
 }
 
 // What the first forward pass actually claimed, against what the plan charged.
