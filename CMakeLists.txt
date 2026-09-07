@@ -798,6 +798,9 @@ if(IMP_BUILD_TESTS)
         # chunk clamp must answer 'can this head_dim skip the S-matrix' the
         # same way, or nothing bounds the chunk and cuBLAS aborts.
         tests/test_attention_dispatch_rules.cpp
+        # The serving metadata pool's byte layout (invariant I2): every region
+        # 256-aligned, disjoint and inside the one allocation the paths share.
+        tests/test_serving_metadata_layout.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's

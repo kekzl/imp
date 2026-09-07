@@ -549,6 +549,13 @@ private:
     int async_parked_req_id_ = -1;
     int async_bt_capacity_ = 0;  // block-table slots baked into the graph
     int* async_d_block_tables_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
+    // The tables point into the serving metadata pool (d_agl_block_tables_*)
+    // unless the pool is absent; only the fallback allocation is freed.
+    bool async_bt_pooled_ = false;
+    // Drops the async loop's block tables: nulls the pool pointers, frees the
+    // fallback. The one release for the three teardown sites (scheduler,
+    // rearm rebuild, ~Engine).
+    void release_async_block_tables_();
 
     // Pipelined constrained decode (json_mode / json_schema, single sequence).
     // Constrained requests can't run the conditional graph loop (the grammar
@@ -570,7 +577,10 @@ private:
         int* d_ctx = nullptr;        // [1] current context length
         int* d_bt = nullptr;         // uploaded block table
         int* d_bt_swa = nullptr;     // SWA-group mirror (kv_cache.swa_sizing)
-        int32_t* d_banned = nullptr; // banned token ids (device)
+        // d_bt / d_token / d_pos / d_ctx point into the serving metadata pool
+        // (d_cp_*) unless the pool is absent; only the fallback is freed.
+        bool pooled = false;
+        int32_t* d_banned = nullptr;  // banned token ids (engine-owned d_banned_tokens_, not freed here)
         PinnedBuffer h_token;  // pinned landing for the sampled token (T5b)
         cudaEvent_t ev = nullptr;    // sampled-token-ready event
         int budget = 0;              // tokens coverable by pre-allocated KV
@@ -796,6 +806,28 @@ private:
     int* d_pf_block_tables_ = nullptr;
     int* d_pf_block_tables_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_pf_context_lens_ = nullptr;
+    // The same pool carries every other per-chunk / per-request int array
+    // the serving paths upload, one fixed region per path, so none of them
+    // allocates while serving (invariant I2). Sized in engine_kv_cache_init.cpp
+    // from max_seq_len, max_batch_size and the block-table ceiling.
+    void init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effective, int kv_bs);
+    int pool_bt_cap_ = 0;                // ints per block-table region
+    int rg_rows_cap_ = 0;                // ragged prefill: rows per wave
+    int rg_seq_cap_ = 0;                 // ragged prefill: members per wave
+    int32_t* d_rg_token_ids_ = nullptr;  // ragged prefill (engine_prefill_ragged.cpp)
+    int* d_rg_positions_ = nullptr;
+    int* d_rg_block_tables_ = nullptr;  // [rg_seq_cap_ x pool_bt_cap_]
+    int* d_rg_context_lens_ = nullptr;
+    int* d_rg_seq_offsets_ = nullptr;  // [rg_seq_cap_ + 1]
+    int* d_rg_ssm_slots_ = nullptr;
+    int* d_gl_block_tables_ = nullptr;  // try_graph_loop_decode
+    int* d_gl_block_tables_swa_ = nullptr;
+    int* d_agl_block_tables_ = nullptr;  // try_launch_async_graph_loop
+    int* d_agl_block_tables_swa_ = nullptr;
+    int* d_cp_block_tables_ = nullptr;  // constrained pipeline (cpipe_)
+    int32_t* d_cp_token_ = nullptr;     // SAMPLE_SCRATCH_BYTES
+    int* d_cp_pos_ = nullptr;
+    int* d_cp_ctx_ = nullptr;
     PinnedBuffer h_pf_positions_;  // pinned host staging (T5b)
     PinnedBuffer h_pf_token_ids_;  // pinned host staging (T5b)
     // Guards reuse of the pinned staging above: records after the H2D copies

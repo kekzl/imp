@@ -36,6 +36,18 @@ const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
     return d_banned_tokens_.get();
 }
 
+void Engine::release_async_block_tables_() {
+    if (!async_bt_pooled_) {
+        if (async_d_block_tables_)
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
+        if (async_d_block_tables_swa_)
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
+    }
+    async_d_block_tables_ = nullptr;
+    async_d_block_tables_swa_ = nullptr;
+    async_bt_pooled_ = false;
+}
+
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
@@ -167,24 +179,37 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
-    int* d_block_tables = nullptr;
-    if (cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream) != cudaSuccess)
+    // Block table from the serving metadata pool; the stream-ordered alloc
+    // stays as the fallback for a pool that failed at init (invariant I2).
+    const bool pooled = d_gl_block_tables_ != nullptr && max_blocks_per_seq <= pool_bt_cap_ &&
+                        (!swa_sizing_active_ || d_gl_block_tables_swa_ != nullptr);
+    int* d_block_tables = pooled ? d_gl_block_tables_ : nullptr;
+    int* d_block_tables_swa = nullptr;
+    if (!pooled && cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream) != cudaSuccess)
         return {};
+    auto release = [&]() {
+        if (pooled)
+            return;
+        if (d_block_tables_swa)
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+    };
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, full_bt.data(), max_blocks_per_seq * sizeof(int),
                                        cudaMemcpyHostToDevice, stream));
-    int* d_block_tables_swa = nullptr;
     if (swa_sizing_active_) {
         const auto& swa_bt = kv_manager_->swa_block_table(req->id);
-        if (static_cast<int>(swa_bt.size()) == max_blocks_per_seq &&
-            cudaMallocAsync(&d_block_tables_swa, max_blocks_per_seq * sizeof(int), stream) ==
-                cudaSuccess) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_swa, swa_bt.data(),
-                                               max_blocks_per_seq * sizeof(int),
-                                               cudaMemcpyHostToDevice, stream));
-        } else {
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+        bool swa_ok = static_cast<int>(swa_bt.size()) == max_blocks_per_seq;
+        if (swa_ok && pooled)
+            d_block_tables_swa = d_gl_block_tables_swa_;
+        else if (swa_ok)
+            swa_ok = cudaMallocAsync(&d_block_tables_swa, max_blocks_per_seq * sizeof(int), stream) ==
+                     cudaSuccess;
+        if (!swa_ok) {
+            release();
             return {};
         }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_swa, swa_bt.data(),
+                                           max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream));
     }
 
     (void)executor_->resize_workspace(1, stream);
@@ -212,22 +237,16 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
 
     CudaGraphConditionalRunner runner;
     if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_block_tables_swa)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+        release();
         return {};
     }
     if (!runner.launch(stream)) {
-        if (d_block_tables_swa)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+        release();
         return {};
     }
 
     auto tokens = runner.wait_and_get_tokens(stream);
-    if (d_block_tables_swa)
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+    release();
     IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop", tokens.size());
     runner.cleanup();
     return tokens;
@@ -304,14 +323,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         // Rearm impossible (table outgrew capacity / context past ceiling /
         // upload failure) — tear down and rebuild below.
         async_graph_runner_.cleanup();
-        if (async_d_block_tables_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
-            async_d_block_tables_ = nullptr;
-        }
-        if (async_d_block_tables_swa_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
-            async_d_block_tables_swa_ = nullptr;
-        }
+        release_async_block_tables_();
         async_parked_req_id_ = -1;
     }
 
@@ -334,8 +346,13 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         bt_ctx_ceiling = std::min(bt_ctx_ceiling, max_seq_len());
     const int bt_capacity = std::max(max_blocks_per_seq, (bt_ctx_ceiling + bt_kv_bs - 1) / bt_kv_bs);
 
-    int* d_bt = nullptr;
-    if (cudaMalloc(&d_bt, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess)
+    // Table from the serving metadata pool, a stable address the captured
+    // graph can bake; cudaMalloc stays as the fallback for a pool that failed
+    // at init (invariant I2).
+    const bool pooled = d_agl_block_tables_ != nullptr && bt_capacity <= pool_bt_cap_ &&
+                        (!swa_sizing_active_ || d_agl_block_tables_swa_ != nullptr);
+    int* d_bt = pooled ? d_agl_block_tables_ : nullptr;
+    if (!pooled && cudaMalloc(&d_bt, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess)
         return false;
     // The tail past the live table is never read (the kernels iterate over
     // max_context_len and use max_blocks_per_seq as the row stride), but a
@@ -347,9 +364,14 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     int* d_bt_swa = nullptr;
     if (swa_sizing_active_) {
         const auto& swa_bt = kv_manager_->swa_block_table(req->id);
-        if (static_cast<int>(swa_bt.size()) != max_blocks_per_seq ||
-            cudaMalloc(&d_bt_swa, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+        bool swa_ok = static_cast<int>(swa_bt.size()) == max_blocks_per_seq;
+        if (swa_ok && pooled)
+            d_bt_swa = d_agl_block_tables_swa_;
+        else if (swa_ok)
+            swa_ok = cudaMalloc(&d_bt_swa, static_cast<size_t>(bt_capacity) * sizeof(int)) == cudaSuccess;
+        if (!swa_ok) {
+            if (!pooled)
+                IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
             return false;
         }
         IMP_CUDA_CHECK_LOG(
@@ -405,22 +427,27 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     gcfg.step_limit = step_limit;
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_bt_swa)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+        if (!pooled) {
+            if (d_bt_swa)
+                IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+        }
         return false;
     }
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
-        if (d_bt_swa)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+        if (!pooled) {
+            if (d_bt_swa)
+                IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+        }
         return false;
     }
 
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_d_block_tables_swa_ = d_bt_swa;
+    async_bt_pooled_ = pooled;
     async_bt_capacity_ = bt_capacity;
     async_parked_req_id_ = -1;
     IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens", state_template.n_d_banned_tokens);
@@ -458,16 +485,29 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
     auto& p = cpipe_;
-    if (cudaMalloc(&p.d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
-        return false;
-    bool ok = cudaMalloc(&p.d_token, SAMPLE_SCRATCH_BYTES) == cudaSuccess &&
-              cudaMalloc(&p.d_pos, sizeof(int)) == cudaSuccess &&
-              cudaMalloc(&p.d_ctx, sizeof(int)) == cudaSuccess &&
-              [&] {
-                  p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
-                  return !p.h_token.empty();
-              }() &&
-              cudaEventCreateWithFlags(&p.ev, cudaEventDisableTiming) == cudaSuccess;
+    // Device state from the serving metadata pool; cudaMalloc stays as the
+    // fallback for a pool that failed at init (invariant I2). The pinned
+    // landing and the event outlive one pipeline: acquired on the first
+    // launch, kept across teardowns, released by ~Engine.
+    p.pooled = d_cp_block_tables_ != nullptr && max_blocks_per_seq <= pool_bt_cap_;
+    bool ok = true;
+    if (p.pooled) {
+        p.d_bt = d_cp_block_tables_;
+        p.d_token = d_cp_token_;
+        p.d_pos = d_cp_pos_;
+        p.d_ctx = d_cp_ctx_;
+    } else {
+        if (cudaMalloc(&p.d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
+            return false;
+        ok = cudaMalloc(&p.d_token, SAMPLE_SCRATCH_BYTES) == cudaSuccess &&
+             cudaMalloc(&p.d_pos, sizeof(int)) == cudaSuccess &&
+             cudaMalloc(&p.d_ctx, sizeof(int)) == cudaSuccess;
+    }
+    if (ok && p.h_token.empty())
+        p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
+    ok = ok && !p.h_token.empty();
+    if (ok && !p.ev)
+        ok = cudaEventCreateWithFlags(&p.ev, cudaEventDisableTiming) == cudaSuccess;
     if (!ok) {
         teardown_constrained_pipeline(/*synchronize=*/false);
         return false;
@@ -483,13 +523,9 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_pos, &pos, sizeof(int), cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice, stream));
 
-    if (!banned_token_ids_.empty()) {
-        if (cudaMalloc(&p.d_banned, banned_token_ids_.size() * sizeof(int32_t)) == cudaSuccess) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_banned, banned_token_ids_.data(),
-                                               banned_token_ids_.size() * sizeof(int32_t),
-                                               cudaMemcpyHostToDevice, stream));
-        }
-    }
+    // The engine-owned copy, uploaded at init (build_banned_token_list); the
+    // pipeline used to upload and free a private one per launch.
+    p.d_banned = const_cast<int32_t*>(banned_tokens_device_(stream));
 
     // Decode workspace (mirrors step_decode_forward's single-seq path).
     // Without a dedicated decode workspace (no green contexts on sm_120),
@@ -876,13 +912,23 @@ void Engine::teardown_constrained_pipeline(bool synchronize) {
     if (synchronize)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream()));
     p.runner.invalidate();
-    if (p.d_bt) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_bt)); p.d_bt = nullptr; }
-    if (p.d_token) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_token)); p.d_token = nullptr; }
-    if (p.d_pos) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_pos)); p.d_pos = nullptr; }
-    if (p.d_ctx) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_ctx)); p.d_ctx = nullptr; }
-    if (p.d_banned) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_banned)); p.d_banned = nullptr; }
-    p.h_token.reset();
-    if (p.ev) { IMP_CUDA_CHECK_LOG(cudaEventDestroy(p.ev)); p.ev = nullptr; }
+    if (!p.pooled) {
+        if (p.d_bt)
+            IMP_CUDA_CHECK_LOG(cudaFree(p.d_bt));
+        if (p.d_token)
+            IMP_CUDA_CHECK_LOG(cudaFree(p.d_token));
+        if (p.d_pos)
+            IMP_CUDA_CHECK_LOG(cudaFree(p.d_pos));
+        if (p.d_ctx)
+            IMP_CUDA_CHECK_LOG(cudaFree(p.d_ctx));
+    }
+    p.d_bt = nullptr;
+    p.d_token = nullptr;
+    p.d_pos = nullptr;
+    p.d_ctx = nullptr;
+    p.pooled = false;
+    p.d_banned = nullptr;  // engine-owned (d_banned_tokens_)
+    // h_token and ev stay for the next pipeline; ~Engine releases them.
     if (p.d_frows) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_frows)); p.d_frows = nullptr; }
     p.req = nullptr;
     p.active = false;
