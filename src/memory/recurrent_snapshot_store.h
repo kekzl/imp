@@ -44,6 +44,10 @@ struct RecurrentSnapshotEntry {
 // reuses the device buffer), and find() serves host-tier entries with
 // on_host = true; the restore copies them back with cudaMemcpyDefault. Host
 // entries are never promoted back: a restore is one H2D of one slab.
+// A save that finds every device slab held by an in-flight restore goes
+// straight into the host tier (save_to_host_): with 8 sessions on 3 slabs
+// the device tier is held for whole generations, and a dropped save costs
+// the session its next turn's prefix.
 class RecurrentSnapshotStore {
 public:
     ~RecurrentSnapshotStore();
@@ -67,10 +71,15 @@ public:
 
         // Copy entry_bytes from `src` (device) into the store on `stream`.
     // Evicts the LRU entry if at capacity (into the host tier when one is
-    // configured, the D2H issued on `stream`). Returns false when no buffer
-    // is available (all entries held by in-flight requests) or on alloc
-    // failure.
+    // configured, the D2H issued on `stream`). When every device slab is held
+    // by an in-flight request the save goes straight into the host tier
+    // instead (one D2H on `stream`). Returns false only when no slab of
+    // either tier is free or on a copy failure.
     bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream);
+    // Saves that landed in the host tier because no device slab was free, and
+    // saves dropped because no slab of either tier was.
+    int host_direct_saves() const { return host_direct_saves_; }
+    int dropped_saves() const { return dropped_saves_; }
 
     // Drop all entries (context reset). Outstanding request-held entries
     // stay valid until released.
@@ -88,6 +97,9 @@ private:
     void* acquire_buffer_(cudaStream_t stream);
     void* acquire_host_buffer_();
     void evict_device_lru_(cudaStream_t stream);
+    bool save_to_host_(size_t key, int n_tokens, const void* src, cudaStream_t stream);
+    int host_direct_saves_ = 0;
+    int dropped_saves_ = 0;
     std::shared_ptr<RecurrentSnapshotEntry> make_entry_(size_t key, int n_tokens, void* buf, bool on_host);
 
     std::shared_ptr<BufferPool> pool_;
