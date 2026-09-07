@@ -617,6 +617,17 @@ directions, so this list is a work queue with a gate behind it rather than a not
 | 1 | ~0 | `Engine::banned_tokens_device_`, `src/runtime/engine_graph_decode.cpp:29` | Lazy first-use upload of a list that is known at engine init. The cheapest of the five. |
 | 1 | 0.001 MiB | `imp::VRAMAllocator::allocate` | The engine arena growing after the phase flip. Whether that is a defect or a plan one slab short is its own question. |
 
+**2026-09-07, #1939:** rows 1, 3 and 4 closed. The upload family (graph-loop and async-loop block
+tables, the pipeline's `d_bt`/`d_token`/`d_pos`/`d_ctx`, banned tokens, ragged prefill's six
+per-wave arrays, M-RoPE positions) is one T2 allocation at init
+(`Engine::init_serving_metadata_pool_`, `runtime/serving_metadata_layout.h`). The gate now runs
+two phases: A (this config) pins 1 call, `Engine::mtp_feed_pairs_` -> `s_norm_scratch` (0.22 MiB,
+`engine_spec_mtp.cpp`, grown on demand; a T2 take sized from the feed cap closes it); B (`mtp_k=0`,
+ragged prefill + constrained pipeline, unreachable in A) pins 3 calls, `JsonConstrainer::init`
+once per process (0.71 MiB). Row 2 (`chunk_eager_k_/_v_`) fired in neither phase and stays open.
+The interposer prints two caller frames per site, which is how the 24 KB `VRAMAllocator::allocate`
+resolved to `bind_mrope_`.
+
 Two things the first run got wrong, both worth keeping because both are the campaign's
 recurring shape:
 
