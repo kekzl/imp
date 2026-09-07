@@ -96,6 +96,28 @@ Model::~Model() {
 #endif
 }
 
+size_t Model::release_weight_pages() {
+#ifdef __linux__
+    size_t advised = 0;
+    auto drop = [&advised](void* p, size_t n) {
+        if (!p || n == 0)
+            return;
+        // Page-aligned by construction (mmap returns aligned addresses), and
+        // MADV_DONTNEED on a PROT_READ MAP_PRIVATE file mapping discards the
+        // resident pages only: a later read refaults from the page cache, so
+        // every pointer into the mapping stays valid and correct.
+        if (madvise(p, n, MADV_DONTNEED) == 0)
+            advised += n;
+    };
+    drop(mmap_base_, mmap_size_);
+    for (auto& [ptr, sz] : split_mmaps_)
+        drop(ptr, sz);
+    return advised;
+#else
+    return 0;
+#endif
+}
+
 void Model::release_gpu_allocation(void* ptr) {
     if (!ptr)
         return;

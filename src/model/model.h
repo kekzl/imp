@@ -160,6 +160,23 @@ public:
     // sidecars. Empty for GGUF and non-NVFP4 SafeTensors models.
     std::unordered_map<std::string, NvFP4PreQuantWeight> nvfp4_scratch_;
 
+    // Drop the resident pages of the weight-file mappings without unmapping
+    // them. The loaders map with MAP_POPULATE + MADV_WILLNEED, which is right
+    // for the load itself and pointless afterwards: once a tensor is uploaded
+    // its `data` is the device pointer (weight_upload.cu), so nothing reads
+    // those pages again unless the placement left weights on host, and then
+    // they refault from the page cache as minor faults.
+    //
+    // MADV_DONTNEED, not munmap: a host-resident expert or an offloaded layer
+    // still holds a pointer INTO the mapping, and there is no tensor iterator
+    // to prove otherwise field by field. Dropping pages keeps every pointer
+    // valid; unmapping would turn a missed field into a crash.
+    //
+    // Measured on Qwen3.8-27B-NVFP4-vllm: RssFile 18.48 GiB of a 21.53 GiB
+    // VmRSS before. Returns the bytes it advised away, 0 if there is nothing
+    // mapped.
+    size_t release_weight_pages();
+
     void* mmap_base_ = nullptr;
     size_t mmap_size_ = 0;
     std::vector<std::pair<void*, size_t>> split_mmaps_;  // additional shard mmaps

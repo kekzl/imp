@@ -403,6 +403,23 @@ bool Engine::init_weights() {
         }
     }
 
+    // Every phase that reads the checkpoint has run. The loaders faulted the
+    // whole weight file in (MAP_POPULATE + MADV_WILLNEED) and nothing dropped
+    // it again, so a serving process held the file resident for its whole life:
+    // measured 18.48 GiB of file-backed RSS out of 21.53 GiB total on
+    // Qwen3.8-27B-NVFP4-vllm, against 3.2 GiB in `docker stats`, which reports
+    // the cgroup and not this. It cost another session two OOM-killed
+    // background jobs.
+    //
+    // Pages only, not the mapping: host-resident experts and offloaded layers
+    // still point into it, and they refault from the page cache.
+    const size_t dropped = model_->release_weight_pages();
+    if (dropped > 0)
+        IMP_LOG_INFO(
+            "weight file pages released after upload: %.2f GiB advised away "
+            "(host-resident weights refault on demand)",
+            static_cast<double>(dropped) / (1024.0 * 1024.0 * 1024.0));
+
     return true;
 }
 
