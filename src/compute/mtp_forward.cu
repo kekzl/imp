@@ -558,6 +558,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_post_norm);
     frfn(ws.d_expert_gate_up);
     frfn(ws.d_expert_act);
+    frfn(ws.d_prenorm_rows);
+    ws.prenorm_rows_cap = 0;
     frfn(ws.d_expert_outputs);
     frfn(ws.d_moe_out);
     frfn(ws.d_shared_gate);

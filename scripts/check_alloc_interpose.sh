@@ -124,15 +124,12 @@ verdict() {
 # extra steps. Each entry is a work item, not a blessing;
 # docs/audit/DEBT_LEDGER_2026_08_21.md section (g) tracks them.
 #
-# Phase A (was 19 until 2026-09-07: 15 async graph-loop tables, 2 chunk_eager,
-# 1 banned-token upload, 1 arena; the metadata family moved into the serving
-# metadata pool, engine_kv_cache_init.cpp):
-#   1 call, 0.22 MiB   Engine::mtp_feed_pairs_ -> s_norm_scratch
-#                      src/runtime/engine_spec_mtp.cpp (file-static, grows on
-#                      demand with the feed length: 23 rows x d_model 5120 x
-#                      F16 here, re-grown by every longer feed). A T2 take
-#                      sized from the MTP feed cap at enable time closes it.
-PINNED_A=1
+# Phase A: 0. Was 19 until 2026-09-07 (15 async graph-loop tables, 2
+# chunk_eager, 1 banned-token upload, 1 arena; the metadata family moved into
+# the serving metadata pool, engine_kv_cache_init.cpp), then 1 (the MTP
+# post-norm feed scratch, a file-static that re-grew per feed length; sized
+# once at enable time since #1940).
+PINNED_A=0
 # Phase B:
 #   3 calls, 0.7 MiB   JsonConstrainer::init (src/compute/constrain_device_buffers.h)
 #                      the constrainer's device tables, built per json request
