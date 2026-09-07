@@ -2,6 +2,7 @@
 #include "memory/backend.h"
 #include "memory/vram_allocator.h"
 #include "memory/mem_account.h"
+#include "memory/vram_query.h"
 #include "core/graph_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -596,13 +597,48 @@ int KVCache::commit_blocks_(int blocks) {
 
 size_t KVCache::committed_bytes() const { return region_ ? region_.committed() : 0; }
 
+size_t KVCache::bytes_per_block() const {
+    size_t total = 0;
+    for (int l = 0; l < n_layers_; l++) {
+        const size_t bb = layer_block_bytes_.empty() ? block_bytes_
+                                                     : layer_block_bytes_[static_cast<size_t>(l)];
+        total += 2 * bb;  // K and V
+    }
+    return total;
+}
+
 int KVCache::try_grow_to(int wanted) {
     const int have = blocks_.num_blocks();
     if (!growable_ || wanted <= have)
         return have;
-    const int target = std::min(wanted, max_blocks_);
+    int target = std::min(wanted, max_blocks_);
     if (target <= have)
         return have;
+    // The ceiling was sized from post-weight VRAM at init, before the library
+    // reserve and the forward scratch were claimed (Qwen3.8-27B-NVFP4: a
+    // 6726-block ceiling, 3783 MiB, against 1384 MiB actually spare above the
+    // allocator headroom after warmup). A VMM commit does not fail when the
+    // card is full, it spills into host memory at a fraction of the bandwidth
+    // (#1103), so growth is capped at what is free above the headroom NOW.
+    // This reading only ever refuses blocks; the planned commit stays the
+    // floor and nothing is sized from it.
+    size_t free_now = 0, total_now = 0;
+    const size_t per_block = bytes_per_block();
+    if (per_block > 0 && vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
+        const size_t headroom = vram_allocator_headroom(total_now);
+        const size_t spare = free_now > headroom ? free_now - headroom : 0;
+        const size_t affordable = static_cast<size_t>(have) + spare / per_block;
+        if (affordable < static_cast<size_t>(target)) {
+            IMP_LOG_INFO(
+                "KV cache: growth capped %d -> %d blocks by free VRAM (%.0f MiB free, %.0f MiB "
+                "allocator headroom kept)",
+                target, static_cast<int>(affordable), free_now / (1024.0 * 1024.0),
+                headroom / (1024.0 * 1024.0));
+            target = static_cast<int>(affordable);
+        }
+        if (target <= have)
+            return have;
+    }
     const int got = commit_blocks_(target);
     if (got <= have)
         return have;

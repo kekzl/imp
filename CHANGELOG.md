@@ -11,6 +11,12 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- `kv_cache.growable` defaults to on, the pool grows before the prefix cache is reclaimed, and
+  every growth is capped at free VRAM above the allocator headroom. Qwen3.8-27B-NVFP4, 8 sessions x
+  3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/roadmap.md#lever-ledger))
+
 ### Fixed
 
 - Hybrid prefix caching: a recurrent-state snapshot was dropped silently whenever every device

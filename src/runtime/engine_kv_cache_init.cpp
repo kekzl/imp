@@ -450,7 +450,13 @@ bool Engine::init_kv_cache() {
     // admission pressure - without this max() the plan's clamp was also the
     // ceiling and kv_cache.growable was a no-op on planned loads (measured:
     // 32x8k stuck at 2046 blocks with a 6483-block live sizing and ~6 GB idle).
-    const int kv_blocks_planned = std::max(max_blocks, vram_budget.kv_max_blocks);
+    // An operator pin (kv_cache.max_blocks) is a ceiling, not a floor: with the
+    // pool growable by default a pinned pool must not grow past the pin (the
+    // exhaustion tests pin 16 blocks and expect the typed refusal, and a pin
+    // only ever caps what auto would have granted).
+    const int kv_blocks_planned = config_.kv_cache_max_blocks > 0
+                                      ? max_blocks
+                                      : std::max(max_blocks, vram_budget.kv_max_blocks);
     if (per_block_total_bytes > 0) {
         size_t free_now = 0, total_now = 0;
         vram_budget_mem_get_info(&free_now, &total_now);
