@@ -11,6 +11,12 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Hybrid prefix caching: a recurrent-state snapshot was dropped silently whenever every device
+  slab was held by an in-flight restore; it now lands in the host tier. Qwen3.8-27B, 8 sessions x 3
+  turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/roadmap.md#lever-ledger))
+
 ## [0.38.0] - 2026-09-07
 
 ### Added

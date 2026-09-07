@@ -193,7 +193,7 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
         return true;  // identical prefix already snapshotted (either tier)
     void* buf = acquire_buffer_(stream);
     if (!buf)
-        return false;
+        return save_to_host_(key, n_tokens, src, stream);
     if (cudaMemcpyAsync(buf, src, entry_bytes_, cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
         std::lock_guard<std::mutex> lk(pool_->mu);
         pool_->free_bufs.push_back(buf);
@@ -202,6 +202,38 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
     entries_[key] = make_entry_(key, n_tokens, buf, /*on_host=*/false);
     lru_.push_back(key);
     lru_map_[key] = std::prev(lru_.end());
+    return true;
+}
+
+// Every device slab is held by an in-flight restore. That is the steady state
+// of concurrent multi-turn sessions (3 slabs on Qwen3.8-27B, 8 sessions each
+// holding its restore until its generation finishes), and dropping the save
+// here cost every session its next-turn prefix: measured 2026-09-07, 8 sessions
+// x 3 turns x 3.8k tokens, turn 2 restored the turn-0 boundary (3776 tokens) or
+// nothing, never the 7584-token turn-1 boundary. The host tier had 25 free
+// slots the whole time. Save straight into it: the same one-slab D2H an
+// eviction issues, and find() already serves host entries.
+bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void* src, cudaStream_t stream) {
+    void* hbuf = host_capacity_ > 0 ? acquire_host_buffer_() : nullptr;
+    if (!hbuf) {
+        ++dropped_saves_;
+        if (dropped_saves_ == 1)
+            IMP_LOG_WARN(
+                "RecurrentSnapshotStore: snapshot dropped, every device slab is held by an "
+                "in-flight request and no host slab is free (%d device / %d host slots); the "
+                "next turn of this session prefills its whole history",
+                capacity_, host_capacity_);
+        return false;
+    }
+    if (cudaMemcpyAsync(hbuf, src, entry_bytes_, cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        std::lock_guard<std::mutex> lk(pool_->mu);
+        pool_->free_host_bufs.push_back(hbuf);
+        return false;
+    }
+    host_entries_[key] = make_entry_(key, n_tokens, hbuf, /*on_host=*/true);
+    host_lru_.push_back(key);
+    host_lru_map_[key] = std::prev(host_lru_.end());
+    ++host_direct_saves_;
     return true;
 }
 

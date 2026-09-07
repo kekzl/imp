@@ -209,7 +209,9 @@ def main():
     # model-backed: capacity cancel, queue split, speculation counters).
     # 1061 -> 1065 (AUDIT_arch_2026 dispatch #12): BatchInvarianceTest (model-backed) plus
     # GgufDequantCoverage and the Q2_K / Q3_K dp4a GEMV goldens (GPU, no model).
-    PINNED = 1065
+    # 1065 -> 1066: RecurrentSnapshotStoreTest.SaveLandsInHostTierWhileEveryDeviceSlabIsHeld
+    # (test-kv, GPU, no model).
+    PINNED = 1066
 
     text = CMAKE.read_text()
     mods = module_sources(text)

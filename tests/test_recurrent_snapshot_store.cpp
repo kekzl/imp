@@ -165,6 +165,54 @@ TEST(RecurrentSnapshotStoreTest, HeldEntrySurvivesEvictionThenRecycles) {
     EXPECT_EQ(ReadEntry(*e2), std::vector<uint8_t>(kEntryBytes, 0x22));
 }
 
+// Concurrent multi-turn sessions hold their restore entry for the whole
+// generation, so with more sessions than device slabs every device slab is
+// held while the next prefill wants to save. Without a host tier that save
+// fails (the test above); with one it must land in the host tier, byte-exact,
+// and be served by find() like any evicted entry.
+TEST(RecurrentSnapshotStoreTest, SaveLandsInHostTierWhileEveryDeviceSlabIsHeld) {
+    SKIP_IF_NO_CUDA();
+    RecurrentSnapshotStore store;
+    store.init(kEntryBytes, kEntryBytes, 2 * kEntryBytes);  // 1 device slab, 2 host slabs
+    ASSERT_EQ(store.capacity(), 1);
+    ASSERT_EQ(store.host_capacity(), 2);
+
+    DeviceSrc a(0x11), b(0x22), c(0x33);
+    ASSERT_TRUE(store.save(1, 16, a.d, nullptr));
+    auto held = store.find(1);  // an in-flight restore holds the only device slab
+    ASSERT_NE(held, nullptr);
+
+    EXPECT_TRUE(store.save(2, 32, b.d, nullptr)) << "a free host slab must take the save";
+    EXPECT_EQ(store.host_direct_saves(), 1);
+    EXPECT_EQ(store.dropped_saves(), 0);
+    cudaStreamSynchronize(nullptr);
+    auto e2 = store.find(2);
+    ASSERT_NE(e2, nullptr);
+    EXPECT_TRUE(e2->on_host);
+    EXPECT_EQ(e2->n_tokens, 32);
+    EXPECT_EQ(ReadEntry(*e2), std::vector<uint8_t>(kEntryBytes, 0x22));
+    EXPECT_EQ(ReadEntry(*held), std::vector<uint8_t>(kEntryBytes, 0x11)) << "held slab untouched";
+
+    // The second host slab takes the next save the same way.
+    EXPECT_TRUE(store.save(3, 48, c.d, nullptr));
+    EXPECT_EQ(store.host_direct_saves(), 2);
+    cudaStreamSynchronize(nullptr);
+    auto e3 = store.find(3);
+    ASSERT_NE(e3, nullptr);
+    EXPECT_TRUE(e3->on_host);
+    EXPECT_EQ(ReadEntry(*e3), std::vector<uint8_t>(kEntryBytes, 0x33));
+
+    // Every slab of both tiers held by a request: the save is dropped, counted,
+    // and the held entries stay byte-exact (evicted from the maps, not freed).
+    DeviceSrc d(0x44);
+    EXPECT_FALSE(store.save(4, 64, d.d, nullptr));
+    EXPECT_EQ(store.dropped_saves(), 1);
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(ReadEntry(*e2), std::vector<uint8_t>(kEntryBytes, 0x22));
+    EXPECT_EQ(ReadEntry(*e3), std::vector<uint8_t>(kEntryBytes, 0x33));
+    held.reset();
+}
+
 TEST(RecurrentSnapshotStoreTest, ClearDropsEntriesButHeldBufferStaysValid) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
