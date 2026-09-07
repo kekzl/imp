@@ -41,8 +41,6 @@ namespace imp {
 // instead of a silently under-sized arena.
 static_assert(kExecBlockQ81Bytes == sizeof(block_q8_1),
               "exec_t2_demand's block_q8_1 stride drifted from compute/gemm.h");
-static_assert(kExecKVBlockSize == kKVBlockSize,
-              "exec_t2_demand's KV block size drifted from memory/kv_cache.h");
 static_assert(kExecCublasWorkspaceBytes == kGemmCublasWorkspaceBytes,
               "exec_t2_demand's cuBLASLt workspace drifted from compute/gemm.h");
 static_assert(kExecBenchScratchBytes == kGemmBenchScratchBytes,
@@ -428,7 +426,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // GQA tile kernel runs grid.y = n_kv_heads instead of n_heads and
         // recovers parallelism through the split count — see
         // paged_attention_decode_fp8).
-        int max_context_blocks = (max_tokens_ + kKVBlockSize - 1) / kKVBlockSize;
+        // The resolved block size (set_kv_block_size), which exec_t2_demand
+        // charged this from; kKVBlockSize would size it for the wrong geometry
+        // on n_kv_heads <= 4 models and under kv_cache.block_size (B-7).
+        int max_context_blocks = (max_tokens_ + kv_block_size_ - 1) / kv_block_size_;
         int max_splits = std::min(128, std::max(1, max_context_blocks));
         int partial_stride = 2 + hd;
         int max_batch = max_logit_tokens_;  // = max_batch_size

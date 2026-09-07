@@ -87,8 +87,10 @@ struct EngineConfig {
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
 
-    // KV cache block size (tokens per block). 0 = auto-select based on model.
-    // Larger blocks (32, 64) improve coalescing for GQA models with few KV heads.
+    // KV cache block size (tokens per block). 0 = auto = 16 (the n_kv_heads <= 4
+    // -> 32 rule was measured a loss on 2026-09-07), or imp.conf
+    // kv_cache.block_size. Explicit values are checked by kv_block_size_error()
+    // at init and refused, not rounded.
     int kv_block_size = 0;
 
     // Chunked prefill
@@ -131,7 +133,7 @@ struct EngineConfig {
     bool streaming_kv_auto = true;   // auto-enable StreamingLLM when KV cache >90% full
     int streaming_kv_n_sinks = 4;    // # initial tokens to always attend
     int streaming_kv_window = 0;     // 0 = derive from ModelConfig::sliding_window
-    int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2*kKVBlockSize
+    int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2 * the resolved KV block size
 };
 
 // Apply the imp.conf [rope] runtime override to a loaded ModelConfig (see

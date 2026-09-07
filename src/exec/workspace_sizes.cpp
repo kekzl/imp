@@ -374,7 +374,8 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // max_logit_tokens, not max_batch_size, so it inherits the floor of 8.
     if (shape.n_heads > 0) {
         const int hd = shape.head_dim > 0 ? shape.head_dim : (shape.d_model / shape.n_heads);
-        const int ctx_blocks = (t + kExecKVBlockSize - 1) / kExecKVBlockSize;
+        const int kv_bs = shape.kv_block_size > 0 ? shape.kv_block_size : 16;
+        const int ctx_blocks = (t + kv_bs - 1) / kv_bs;
         const int splits = std::min(128, std::max(1, ctx_blocks));
         const int stride = 2 + hd;
         const int batch = std::max(shape.max_batch_size, 8);
@@ -496,13 +497,14 @@ int exec_max_tokens(const Model& model, int max_seq_len) {
 
 int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
 
-ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
-                            bool use_fp8_prefill, bool mla_absorb, int capture_ctx_cap) {
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
+                            bool mla_absorb, int capture_ctx_cap, int kv_block_size) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
     shape.use_fp8_prefill = use_fp8_prefill;
     shape.mla_absorb = mla_absorb;
     shape.capture_ctx_cap = capture_ctx_cap;
+    shape.kv_block_size = kv_block_size;
     return exec_t2_demand(shape, max_seq_len);
 }
 

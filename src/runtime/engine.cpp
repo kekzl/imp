@@ -635,6 +635,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.library_reserve_mb = runtime_config_.vram.library_reserve_mb;
     if (config_.kv_cache_max_blocks == 0 && runtime_config_.kv_cache.max_blocks > 0)
         config_.kv_cache_max_blocks = runtime_config_.kv_cache.max_blocks;
+    if (config_.kv_block_size == 0 && runtime_config_.kv_cache.block_size > 0)
+        config_.kv_block_size = runtime_config_.kv_cache.block_size;
 
     // Install the process-wide VRAM budget view BEFORE any sizing runs —
     // every cudaMemGetInfo-based decision below (weight upload gates, cache
@@ -751,7 +753,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                     : 0;
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
                                       config_.use_fp8_prefill, runtime_config_.attention.mla_absorb,
-                                      capture_cap);
+                                      capture_cap, config_.kv_block_size);
         // The Qwen3-VL tower is engine-lifetime and an arena tenant, but it uploads
         // during warmup — long after this point — so its demand has to be read off
         // the model's shapes here or the arena is sized without it. Gemma's mmproj

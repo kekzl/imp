@@ -122,6 +122,18 @@ struct KVCache {
     // rather than only through the C API.
     int max_blocks = 0;
 
+    // Tokens per KV block. 0 = auto = 16 for every model (since 2026-09-07;
+    // the 2026-03-23 rule "32 when n_kv_heads <= 4" was measured for the
+    // first time that day and lost 1.5 to 4.3 % tg128 on the 4-KV-head model
+    // it was meant for, docs/audit/PERF_LOG.md). An explicit value must be a
+    // multiple of 16 in [16, 256]: 16 is the
+    // token tile of the FP8 tensor-core decode kernel and the WMMA tile of
+    // the NVFP4 TC path; a block is also the prefix cache's reuse granularity
+    // and the smallest footprint a sequence can have, so larger blocks
+    // coarsen every prefix hit. Refused at load when outside that set, not
+    // silently rounded (AUDIT_arch_2026 B-5).
+    int block_size = 0;
+
     SwaSizingMode swa_sizing_mode() const {
         if (swa_sizing == "auto")
             return SwaSizingMode::Auto;

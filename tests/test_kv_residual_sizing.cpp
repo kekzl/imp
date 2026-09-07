@@ -25,6 +25,19 @@ constexpr size_t kMiB = 1024ULL * 1024ULL;
 // 32, 2 KV heads, head_dim 256, FP16 -> 640 KiB per block.
 constexpr size_t k35bPerBlock = 640ULL * 1024ULL;
 
+// kv_cache.block_size is refused at resolve time, not rounded at dispatch:
+// the FP8 tile kernel would silently fall back on 24, and 8 would put a
+// 16-token WMMA tile across two blocks (AUDIT_arch_2026 B-5).
+TEST(KvBlockSize, MultiplesOfSixteenUpTo256AreServed) {
+    for (int bs : {16, 32, 48, 64, 128, 256})
+        EXPECT_EQ(kv_block_size_error(bs), nullptr) << bs;
+}
+
+TEST(KvBlockSize, AnythingElseIsRefusedWithAReason) {
+    for (int bs : {1, 8, 15, 24, 100, 272, 512})
+        EXPECT_NE(kv_block_size_error(bs), nullptr) << bs;
+}
+
 TEST(KvResidualSizing, PlanFitsSoNothingIsClamped) {
     const auto s = kv_blocks_from_residual(8192 * kMiB, 1630 * kMiB, k35bPerBlock, 4096, 16);
     EXPECT_EQ(s.blocks, 4096);

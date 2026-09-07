@@ -430,8 +430,17 @@ not, so a caller can check a prompt against server capacity without scraping
 {"status": "unhealthy", "code": "kv_pool_floored",
  "model_loaded": true, "queue_depth": 0, "suspended": false,
  "kv_blocks_total": 16, "kv_block_size": 32, "kv_capacity_tokens": 512,
- "kv_ceiling_blocks": 16, "kv_pool_growable": false}
+ "kv_ceiling_blocks": 16, "kv_pool_growable": false, "kv_pool_bandwidth_gbps": 1554.0}
 ```
+
+`kv_pool_bandwidth_gbps` is a device-to-device copy timed inside the pool at
+init, GB/s counting read plus write (also `imp_kv_pool_bandwidth_gbps` on
+`/metrics`). On WSL2/WDDM a successful allocation proves nothing: a pool the
+driver spilled into host memory serves at a sixth of the bandwidth with every
+other signal reading ok. Resident memory on the reference card reads ~1500,
+a spilled pool ~240; below 500 the server logs a WARN at load and keeps
+serving (the threshold is one driver on one card, so it is a gauge, not a
+refusal). 0 = not measured (a pool too small to time).
 
 `kv_ceiling_blocks` is what the pool may still grow to: equal to
 `kv_blocks_total` = fixed pool at final size; greater = growable, not there

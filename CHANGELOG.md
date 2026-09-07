@@ -11,8 +11,22 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- `kv_cache.block_size`: tokens per KV block as an operator key (0 = auto: 32 for `n_kv_heads <= 4`,
+  else 16), refused at load outside multiples of 16 in [16, 256]; `imp-bench decode-attn` sweeps 16/32/64 and
+  `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_arch_2026 B-5](docs/audit/AUDIT_arch_2026.md))
+- KV pool residency probe at load: `KV cache: pool copy bandwidth N GB/s` (WARN below 500),
+  `kv_pool_bandwidth_gbps` on `/health`, `imp_kv_pool_bandwidth_gbps` on `/metrics`; a 256 MiB resident
+  pool reads 1287 GB/s, mapped pinned host memory 130-139 ([AUDIT_arch_2026 B-6](docs/audit/AUDIT_arch_2026.md))
+
 ### Changed
 
+- KV block size auto = 16 for every model: the 2026-03-23 "32 when `n_kv_heads <= 4`" rule, measured for
+  the first time, never won and lost 1.5-4.3 % tg128 on Qwen3.8-27B-NVFP4 (4 KV heads), the class it was
+  meant for; Qwen3-8B-Q8_0 (8 heads) -0.0 to -1.8 % at 32 ([PERF_LOG](docs/audit/PERF_LOG.md))
+- The split-K attention partials and the executor workspace are sized from the resolved KV block size
+  instead of a replicated 16 ([AUDIT_arch_2026 B-7](docs/audit/AUDIT_arch_2026.md))
 - `kv_cache.growable` defaults to on, the pool grows before the prefix cache is reclaimed, and
   every growth is capped at free VRAM above the allocator headroom. Qwen3.8-27B-NVFP4, 8 sessions x
   3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/roadmap.md#lever-ledger))

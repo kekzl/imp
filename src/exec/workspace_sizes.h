@@ -102,12 +102,16 @@ struct ExecShape {
     // min(speculative.capture_ctx_cap, max_seq_len) as engine_spec_capture.cpp
     // computes it. 0 = the captured-verify path is off, charge nothing.
     int capture_ctx_cap = 0;
+    // The RESOLVED KV block size (Engine::init_resolve_kv_block_size_), not
+    // kKVBlockSize: the two differ on n_kv_heads <= 4 models and under
+    // kv_cache.block_size, and the split-K partials are sized in blocks
+    // (AUDIT_arch_2026 B-7). 0 = 16.
+    int kv_block_size = 0;
 };
 
 // Replicated constants, pinned against their definitions by static_asserts in
 // executor_workspace_buffers.cu. They live here so this stays CUDA-free.
 constexpr size_t kExecBlockQ81Bytes = 48;  // sizeof(block_q8_1), compute/gemm.h
-constexpr int kExecKVBlockSize = 16;       // kKVBlockSize, memory/kv_cache.h
 // kGemmCublasWorkspaceBytes + kGemmBenchScratchBytes, compute/gemm.h.
 constexpr size_t kExecCublasWorkspaceBytes = 64ull << 20;
 constexpr size_t kExecBenchScratchBytes = 32ull << 20;
@@ -210,9 +214,8 @@ int exec_max_weight_k(const Model& model);
 // runtime-config facts, not model facts, and three tenants are sized from them —
 // so the caller passes them rather than this header reaching for a global (there
 // is no process-global RuntimeConfig; it is per-Engine by design).
-ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
-                            bool use_fp8_prefill, bool mla_absorb = false,
-                            int capture_ctx_cap = 0);
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
+                            bool mla_absorb = false, int capture_ctx_cap = 0, int kv_block_size = 0);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).

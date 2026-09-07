@@ -38,8 +38,11 @@ In order of likelihood:
 4. **VRAM spilled to host.** A successful allocation proves nothing on
    WSL2/WDDM: the driver oversubscribes into host memory and returns success.
    The tell is bandwidth, roughly 1530 GB/s resident against 237 GB/s spilled,
-   so the symptom is a ~6.5x cliff rather than an error. Reduce
-   `runtime.max_seq_len` or the KV dtype.
+   so the symptom is a ~6.5x cliff rather than an error. Since 2026-09-07 the
+   server measures it once at load: `KV cache: pool copy bandwidth N GB/s` in
+   the log (a WARN below 500), `kv_pool_bandwidth_gbps` on `/health`,
+   `imp_kv_pool_bandwidth_gbps` on `/metrics`. Reduce `runtime.max_seq_len`,
+   the KV dtype, or pin a smaller pool with `kv_cache.max_blocks`.
 5. **You are comparing against a number that was measured differently.** The
    prefill pin changed meaning on 2026-07-26 when one-shot runs stopped hitting
    the prefix cache. See [`PERF.md`](PERF.md).

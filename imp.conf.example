@@ -225,6 +225,14 @@ swa_snapshot_mb             = 0
 # small for a prompt returns HTTP 503 `capacity_error` rather than a 200 with
 # an empty completion.
 max_blocks                  = 0
+# Tokens per KV block. 0 = auto = 16 for every model. Explicit values must be
+# a multiple of 16 in [16, 256] and are refused at load otherwise (the FP8 tile
+# decode kernel tiles 16 tokens). A block is the prefix cache's reuse
+# granularity, so larger blocks coarsen every prefix hit. Measured 2026-09-07
+# (docs/audit/PERF_LOG.md): 32 never won and lost 1.5-4.3 % tg128 on the
+# 4-KV-head model the old "32 when n_kv_heads <= 4" rule was meant for; the
+# key exists so the next model class can be measured, not guessed.
+block_size                  = 0
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its

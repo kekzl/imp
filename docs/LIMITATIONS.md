@@ -774,7 +774,10 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
 
 - **A successful `cudaMalloc` proves nothing about free VRAM on WSL2.** The driver oversubscribes
   into host memory and returns success; 28 GiB allocates with 22.6 GiB reported free. Tell:
-  bandwidth, ~1530 vs ~237 GB/s; symptom: a 6.5x throughput cliff.
+  bandwidth, ~1530 vs ~237 GB/s; symptom: a 6.5x throughput cliff. The KV pool is the one
+  allocation that measures itself (2026-09-07): one copy inside the pool at load, a WARN below
+  500 GB/s, `kv_pool_bandwidth_gbps` on `/health` and `/metrics`. Weights and caches are not
+  probed; a spill there still shows only as the cliff.
 - **Free VRAM only ever decreases within a process** on WSL2/WDDM, however cleanly CUDA released
   it. Anything sized from `cudaMemGetInfo` reads a moving floor.
 - **No `/health` field separates a server started beside another process from a healthy one.** It

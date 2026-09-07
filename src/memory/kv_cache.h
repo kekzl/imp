@@ -15,6 +15,13 @@ class VRAMAllocator;  // forward declaration
 
 static constexpr int kKVBlockSize = 16;  // default tokens per block
 
+// Copy bandwidth (GB/s, read plus write) below which a KV pool is taken to
+// have been spilled into host memory by the WDDM driver. Between the two
+// readings this box was characterised with, ~1530 resident and ~237 spilled
+// (#1103), with room for a partial spill. One driver on one card: it feeds a
+// WARN and a gauge, never a refusal (AUDIT_arch_2026 B-6).
+static constexpr double kKvPoolSpillGbps = 500.0;
+
 // NVFP4 / MXFP4_KV micro-block size: 16 FP4 elements share one scale byte.
 // All imp model head_dims (64/128/256/512) are multiples of 16.
 static constexpr int kNVFP4Group = 16;
@@ -109,6 +116,19 @@ public:
     // one. What the pool actually costs right now, as opposed to the address
     // space it reserved.
     size_t committed_bytes() const;
+    // Copy bandwidth measured inside the pool by probe_residency(), GB/s
+    // counting read plus write; 0 until probed, or when the pool holds no
+    // memory. Below kKvPoolSpillGbps the pool has most likely been spilled
+    // into host memory: the platform fact the tree repeats most often, and
+    // until 2026-09-07 the one it never checked.
+    double residency_gbps() const { return residency_gbps_; }
+    // Measure it: one timed pass of copies spanning the pool, layer by layer
+    // through the committed prefix of each K and V region, up to 512 MiB
+    // copied (1 GiB of traffic, past the 96 MB L2 that a single slice would
+    // read from). Copies the first half of each region onto its second half,
+    // which is why it belongs at init, on a pool that is still all zero:
+    // there the copy changes nothing. A pool under ~100 MiB reads the L2.
+    double probe_residency();
     // K plus V bytes one block commits across every attention layer (the
     // scale planes are allocated for the ceiling up front and cost nothing at
     // growth). What try_grow_to() prices a block at against free VRAM.
@@ -239,6 +259,7 @@ private:
     Region region_;
     bool growable_ = false;
     std::atomic<uint64_t> growths_{0};
+    double residency_gbps_ = 0.0;  // probe_residency() result, 0 = not probed
     int committed_blocks_ = 0;  // blocks whose memory is backed in every layer
     // What may be handed out. Mirrored here rather than read from the block
     // pool because admission asks per pending request per step, and the pool's

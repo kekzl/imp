@@ -4,6 +4,65 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-09-07 · KV block size as an operator key; the pool probes its own residency (AUDIT_arch_2026 B-5/B-6/B-7)
+
+Build: `make dev` (`build-dev/`, `imp:toolchain`), branch `mem/kv-block-size-residency` on 79e4cb1f.
+
+**Residency probe** (`KVCache::probe_residency()`, `device_copy_bandwidth_gbps()`): one timed
+pass of device-to-device copies spanning up to 512 MiB of the pool, GB/s counting read plus
+write, after a 300 ms warm-up of the same set. `KVCacheTest.ResidencyProbeSeparatesDeviceFromHostResidentMemory`,
+two runs:
+
+| memory | copied | GB/s |
+|---|---:|---:|
+| 256 MiB KV pool (2 layers x 2048 blocks, F16, 8 heads x 128) | 128 MiB | 1287 / 1288 |
+| mapped pinned host memory (`cudaHostAllocMapped`, PCIe) | 32 MiB | 139 / 130 |
+| Qwen3.8-27B-NVFP4-vllm KV pool at load (`imp-cli`, the shipped path) | 512 MiB | 1554 |
+
+Two readings that were NOT residency, recorded so the routine is not "simplified" back into them:
+
+| variant | GB/s | why |
+|---|---:|---|
+| one untimed copy, then best of 3 over a 32 MiB slice | 4681 | the slice sits in the 96 MB L2 after the first pass |
+| single pass, no warm-up, 128 MiB spanning the pool | 280 | floor clocks on an idle card (benchmark-cuda STOP #3) |
+
+Threshold `kKvPoolSpillGbps` = 500: between the host reading and the resident one with room for a
+partial spill; a WARN and a gauge, not a refusal (one driver, one card).
+
+**Block size 16 vs 32, end to end.** `tools/analysis/kv_block_size_ab.sh 16 32` on `imp:test`
+(this branch, auto rule still 32 for `n_kv_heads <= 4`): one binary, `--set kv_cache.block_size`,
+`--bench --bench-pp <ctx> --bench-reps 3 --max-tokens 128 --set speculative.ngram=false`, 3
+alternating rounds, median tg128 tok/s, "pairs" = rounds in which 32 was at least as fast.
+
+| model (KV heads, old auto) | ctx | bs=16 | bs=32 | delta | pairs 32>=16 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-8B-Q8_0 (8, auto 16) | 2048 | 270.47 | 265.60 | -1.80 % | 1/3 |
+| | 8192 | 238.16 | 236.03 | -0.89 % | 0/3 |
+| | 32768 | 172.92 | 172.90 | -0.01 % | 1/3 |
+| Qwen3.8-27B-NVFP4-vllm (2, auto 32) | 2048 | 93.07 | 89.05 | -4.32 % | 0/3 |
+| | 8192 | 89.01 | 87.67 | -1.51 % | 1/3 |
+| | 32768 | 85.99 | 84.70 | -1.50 % | 0/3 |
+
+Verdict: 32 never wins, and the model class the 2026-03-23 rule raised to 32 is where it loses
+most. **Auto is 16 for every model from this commit**; the key stays for the next class.
+The old rule's justification ("improves coalescing for GQA models with few KV heads") was never
+measured; the decode kernels take the block size at runtime and the split-K count, not the block,
+is what they parallelise over.
+
+**Kernel-level sweep, `imp-bench decode-attn` (build-dev, FP16 paged decode, batch 1, 20 warmup /
+50 timed).** The instrument B-5 asked for, recorded with its limits: the isolated kernel at 4k
+sits in the 96 MB L2 (benchmark-cuda STOP #10), shapes cool to floor clocks between runs (the
+97 GB/s and 150 GB/s cells are that, STOP #3), and Qwen3.8 decodes NVFP4 KV, not this kernel. It
+explains the old rule (fewer KV heads, longer context: 32 walks a shorter table) without
+overturning the e2e verdict above.
+
+| shape | ctx | bs=16 us | bs=32 us | bs=64 us |
+|---|---:|---:|---:|---:|
+| MHA-32h nkv=32 | 4096 / 32768 / 131072 | 47.9 / 336.2 / 2625.2 | 47.6 / 332.9 / 2598.3 | 47.8 / 332.2 / 1536.4 |
+| GQA-32q/8kv | 4096 / 32768 / 131072 | 25.6 / 111.7 / 758.6 | 38.4 / 96.7 / 711.9 | 26.8 / 95.8 / 694.1 |
+| GQA-32q/4kv | 4096 / 32768 / 131072 | 86.3 / 113.4 / 448.0 | 21.5 / 99.4 / 372.5 | 26.3 / 112.8 / 375.0 |
+| GQA-28q/4kv | 4096 / 32768 / 131072 | 25.0 / 113.2 / 401.5 | 22.9 / 112.2 / 403.3 | 56.0 / 116.8 / 404.7 |
+
 ## 2026-07-29 · A7 step 9b — the library reserve makes `--vram-budget` bind; peak-VRAM gate
 
 Build: `make build` defaults · Qwen3-8B-Q8_0 · gate protocol.
