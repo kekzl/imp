@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-09-07
+
 ### Added
 
 - `make verify-ab`: paired perf gate against `origin/main` (`scripts/verify_ab.sh`), red
