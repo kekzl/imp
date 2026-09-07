@@ -72,7 +72,13 @@ struct KVCache {
     // the pool is fixed and everything behaves exactly as before. Growth costs
     // one driver mapping call per layer (measured 1.18 ms per 256 MiB) and
     // happens at most once per growth event, not per step.
-    bool growable = false;
+    //
+    // Default on since 2026-09-07: the pool grows before the prefix cache is
+    // reclaimed, and every growth is capped at what is free above the
+    // allocator headroom at that moment (KVCache::try_grow_to), so it cannot
+    // overshoot into a WDDM spill. Qwen3.8-27B-NVFP4 plans 2301 blocks with
+    // 3013 MiB still free after warmup; the growth is what reaches them.
+    bool growable = true;
     // Percent of the planned pool to COMMIT at startup when growable. 100 keeps
     // today's behaviour: commit whatever the residual clamp allowed, and grow
     // only if that was less than planned.

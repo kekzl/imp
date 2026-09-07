@@ -703,6 +703,22 @@ BlockRef KVCacheManager::allocate_block_ref_with_eviction() {
     if (ref)
         return ref;
 
+    // A growable pool below its ceiling grows BEFORE the prefix cache is
+    // reclaimed. Reclaiming first emptied the cache while the pool sat at its
+    // planned commit: the LRU front is the oldest chain's prefix block, so one
+    // reclaim breaks that whole chain, and the pool only grew once nothing was
+    // left to reclaim (Qwen3.8-27B, 8 sessions x 3 turns: 2 growths and 5 of 8
+    // sessions re-prefilled their history). Coarse steps, one driver mapping
+    // per growth; try_grow_to() refuses what is not free above the headroom.
+    if (cache_->growable() && cache_->ceiling_blocks() > cache_->total_blocks()) {
+        const int have = cache_->total_blocks();
+        if (cache_->try_grow_to(have + std::max(64, have / 4)) > have) {
+            ref = cache_->acquire_block_ref();
+            if (ref)
+                return ref;
+        }
+    }
+
     // Try reclaiming cached blocks (cheaper than evicting a sequence).
     while (!cached_blocks_lru_.empty()) {
         if (reclaim_cached_block() < 0)

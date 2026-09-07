@@ -1397,5 +1397,15 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksRetainsKernelWindowStart) {
         EXPECT_GE(table[b], 0) << "window block " << b << " evicted";
 }
 
+// What try_grow_to() prices one block at: K plus V over every attention
+// layer, scale planes excluded (allocated for the ceiling up front).
+TEST(KVCacheTest, BytesPerBlockIsKPlusVOverAllLayers) {
+    auto cache = KVCache::for_accounting(/*n_layers=*/3, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16,
+                                         /*max_blocks=*/8);
+    // 3 layers x 2 (K, V) x 16 tokens x 4 heads x 64 dims x 2 bytes.
+    EXPECT_EQ(cache->bytes_per_block(), 3u * 2 * 16 * 4 * 64 * 2);
+    EXPECT_EQ(cache->bytes_per_block(), 3u * 2 * cache->block_bytes());
+}
+
 }  // namespace
 }  // namespace imp

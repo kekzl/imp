@@ -211,7 +211,9 @@ def main():
     # GgufDequantCoverage and the Q2_K / Q3_K dp4a GEMV goldens (GPU, no model).
     # 1065 -> 1066: RecurrentSnapshotStoreTest.SaveLandsInHostTierWhileEveryDeviceSlabIsHeld
     # (test-kv, GPU, no model).
-    PINNED = 1066
+    # 1066 -> 1068: KVCacheManagerGrowTest.GrowsBeforeReclaimingCachedBlocks and
+    # KVCacheGrowTest.GrowthStopsAtTheAllocatorHeadroom (test-kv, GPU + VMM, no model).
+    PINNED = 1068
 
     text = CMAKE.read_text()
     mods = module_sources(text)

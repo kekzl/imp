@@ -8,6 +8,7 @@
 
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
+#include "memory/vram_query.h"
 #include "core/tensor.h"
 
 #include <cstdint>
@@ -509,6 +510,54 @@ TEST(KVCacheManagerTest, SwaSnapshotRestoreExhaustionRollsBack) {
     cudaFree(slab);
     mgr.free_sequence(0);
     mgr.free_sequence(1);
+}
+
+// A growable pool below its ceiling grows before the prefix cache is
+// reclaimed. Reclaim-first emptied the cache at the planned commit while GiBs
+// sat free (Qwen3.8-27B, 8 sessions x 3 turns: 5 of 8 re-prefilled).
+TEST(KVCacheManagerGrowTest, GrowsBeforeReclaimingCachedBlocks) {
+    SKIP_IF_NO_CUDA();
+    // 8 committed blocks, 32-block ceiling.
+    auto cache = std::make_unique<KVCache>(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16,
+                                           /*max_blocks=*/8, /*block_size=*/16, /*alloc=*/nullptr,
+                                           /*ceiling_blocks=*/32);
+    if (!cache->growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    KVCache* kvc = cache.get();
+    KVCacheManager mgr(std::move(cache));
+    mgr.set_prefix_caching_enabled(true);
+    // Seq 0: 6 full blocks, hashed, freed: 6 cached, 2 free.
+    MakePinnedFreedSeq(&mgr, 0, 6, 1000, /*pin=*/false);
+    ASSERT_EQ(mgr.num_cached_blocks(), 6);
+    ASSERT_EQ(mgr.num_free_blocks(), 2);
+    // Seq 1 needs 4 fresh blocks: 2 free, 2 short. The pool grows for them
+    // instead of reclaiming 2 cached blocks.
+    ASSERT_TRUE(mgr.allocate_blocks(1, 4));
+    EXPECT_EQ(mgr.num_cached_blocks(), 6) << "the prefix cache must survive while the pool can grow";
+    EXPECT_GE(kvc->growths(), 1u);
+    EXPECT_GT(kvc->total_blocks(), 8);
+    mgr.free_sequence(1);
+}
+
+// Growth is priced against free VRAM above the allocator headroom, not
+// against the ceiling: the ceiling was sized before the library reserve and
+// the forward scratch were claimed, and a VMM commit past what is free spills
+// silently on WDDM. A 4 MiB virtual card (vram_budget) with 32 KiB blocks
+// (2 layers x K+V x 16 tokens x 4 heads x 64 dims x 2 bytes) affords 121
+// blocks above its 5 % headroom (3.8 MiB / 32 KiB).
+TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
+    SKIP_IF_NO_CUDA();
+    KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
+                  /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/512);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    ASSERT_EQ(cache.bytes_per_block(), 32u * 1024);
+    vram_budget_install(4);
+    const int got = cache.try_grow_to(512);
+    vram_budget_install(0);
+    EXPECT_GT(got, 8);
+    EXPECT_LE(got, 8 + 121);
+    EXPECT_LT(got, 512) << "growth must stop at the headroom, not at the ceiling";
 }
 
 }  // namespace

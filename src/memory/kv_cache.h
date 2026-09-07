@@ -109,6 +109,10 @@ public:
     // one. What the pool actually costs right now, as opposed to the address
     // space it reserved.
     size_t committed_bytes() const;
+    // K plus V bytes one block commits across every attention layer (the
+    // scale planes are allocated for the ceiling up front and cost nothing at
+    // growth). What try_grow_to() prices a block at against free VRAM.
+    size_t bytes_per_block() const;
 
     // Commit memory for at least `wanted` blocks and make them allocatable.
     // Returns the capacity afterwards, which is what the caller must believe:
