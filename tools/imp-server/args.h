@@ -48,6 +48,7 @@ struct ServerArgs : CommonArgs {
     int max_n = 8;              // --max-n: cap on `n` (chat/completions)
     int max_batch_items = 512;  // --max-batch-items: cap on rerank `documents` / embeddings `input`
     int max_logit_bias = 1024;  // --max-logit-bias: cap on logit_bias entries (#1617)
+    int max_images = 8;         // --max-images-per-request: cap on image parts (AUDIT_arch_2026 F2-4)
     // Connection-level limits. Everything here was whatever the build-time
     // cpp-httplib happened to default to (#1622).
     int read_timeout = 60;     // --http-read-timeout: seconds

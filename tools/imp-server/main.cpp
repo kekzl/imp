@@ -204,6 +204,7 @@ int main(int argc, char** argv) {
     state.max_n = args.max_n;
     state.max_batch_items = args.max_batch_items;
     state.max_logit_bias = args.max_logit_bias;
+    state.max_images = args.max_images;
 
     // --trusted-proxy a,b,c
     {

@@ -55,7 +55,7 @@ public:
     }
 
     bool read_fixed32(uint32_t* out) {
-        if (data_ + 4 > end_) {
+        if (end_ - data_ < 4) {
             fail("truncated fixed32");
             return false;
         }
@@ -69,7 +69,10 @@ public:
         uint64_t len = 0;
         if (!read_varint(&len))
             return false;
-        if (data_ + len > end_) {
+        // Compare against the bytes left, never `data_ + len`: a 64-bit
+        // varint near 2^64 wraps the sum below `end_` and the cursor walks
+        // backwards (AUDIT_arch_2026 F1-8). Same form as gguf_loader_internal.h.
+        if (len > static_cast<uint64_t>(end_ - data_)) {
             fail("length-delim past end");
             return false;
         }
@@ -87,7 +90,7 @@ public:
                 return read_varint(&v);
             }
             case 1: {  // fixed64
-                if (data_ + 8 > end_) {
+                if (end_ - data_ < 8) {
                     fail("skip fixed64 past end");
                     return false;
                 }
@@ -100,7 +103,7 @@ public:
                 return read_length_delim(&p, &n);
             }
             case 5: {  // fixed32
-                if (data_ + 4 > end_) {
+                if (end_ - data_ < 4) {
                     fail("skip fixed32 past end");
                     return false;
                 }

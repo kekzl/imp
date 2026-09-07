@@ -145,6 +145,7 @@ ask for many units of it):
 | `--max-n` | 8 | `n` completions per chat request |
 | `--max-batch-items` | 512 | rerank `documents`, embeddings `input` |
 | `--max-logit-bias` | 1024 | `logit_bias` entries |
+| `--max-images-per-request` | 8 | `image_url` parts; each is decoded at full resolution on a worker, a side is capped at 16384 px in the decoder |
 | `--http-read-timeout` | 60 s | socket read |
 | `--http-write-timeout` | 600 s | socket write, must outlast a stream |
 | `--http-keep-alive-max` | 100 | requests per connection |

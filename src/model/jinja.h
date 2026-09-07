@@ -158,7 +158,9 @@ public:
     bool parse(const std::string& source);
 
     // Render the parsed template with the given context.
-    // Returns the rendered string, or empty string on error.
+    // Returns the rendered string, or empty string on error. A render that
+    // exceeds the evaluation budget (macro call depth, loop iterations) is an
+    // error, not a crash: error() names the budget.
     std::string render(const Context& ctx) const;
 
     // Last error message (set on parse/render failure)
@@ -166,7 +168,7 @@ public:
 
 private:
     std::vector<std::unique_ptr<detail::Node>> nodes_;
-    std::string error_;
+    mutable std::string error_;  // render() is const and still reports
 };
 
 }  // namespace imp::jinja

@@ -420,6 +420,17 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     text_parts += part.value("text", "");
                 } else if (type == "image_url" && part.contains("image_url")) {
                     std::string url = part["image_url"].value("url", "");
+                    // Each part is decoded at full resolution on a worker
+                    // thread, so the count is bounded before the bytes are
+                    // read (AUDIT_arch_2026 F2-4); the mmproj path's one-image
+                    // rule applies on top of this.
+                    if (state.max_images > 0 &&
+                        static_cast<int>(ctx.params.images.size()) >= state.max_images) {
+                        send_json_error(res, 400, "invalid_request_error",
+                                        "request carries more than " + std::to_string(state.max_images) +
+                                            " images, the server limit (--max-images-per-request)");
+                        return false;
+                    }
                     // One slot per part, appended before it is filled: if the
                     // fetch below fails the request is rejected, so a half-read
                     // list never reaches the prompt builder.

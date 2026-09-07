@@ -708,7 +708,11 @@ jobs:
               # Fail-open: an unreadable diff runs the job.
               # grep -q exits at the first match and pipefail turns the
               # producer EPIPE into a non-zero pipeline (#1499): here-string.
-              if ! grep -qE '^(fuzz/|tests/test_fuzz_corpus|src/compute/json_schema|src/compute/gbnf|src/model/(safetensors_loader|tokenizer|json_util)|tools/imp-server/tool_stream_filter|CMakeLists.txt|\.github/workflows/ci\.yml)' <<< "$files"; then
+              # The list is the untrusted-input surface, not only the files
+              # with a fuzz target (AUDIT_arch_2026 F2-8): request bytes also
+              # go through utils.cpp (base64, nesting depth), the stb decoder,
+              # the GGUF parsers and the chat parameter parser.
+              if ! grep -qE '^(fuzz/|tests/test_fuzz_corpus|src/compute/json_schema|src/compute/gbnf|src/model/(safetensors_loader|tokenizer|json_util|gguf_|sentencepiece_loader|jinja|hf_config_loader)|src/vision/image_|src/memory/weight_cache_file|tools/imp-server/(tool_stream_filter|utils|handlers_chat_params)|CMakeLists.txt|\.github/workflows/ci\.yml)' <<< "$files"; then
                 run=false
               fi
             fi

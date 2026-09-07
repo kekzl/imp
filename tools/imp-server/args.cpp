@@ -58,6 +58,7 @@ void print_server_usage(const char* prog) {
             "  --max-n <n>            Cap on `n` completions per request (default 8, 0=unlimited)\n"
             "  --max-batch-items <n>  Cap on rerank documents / embeddings input (default 512)\n"
             "  --max-logit-bias <n>   Cap on logit_bias entries per request (default 1024)\n"
+            "  --max-images-per-request <n>  Cap on image parts per request (default 8, 0=unlimited)\n"
             "  --http-read-timeout <s>     Socket read timeout (default 60)\n"
             "  --http-write-timeout <s>    Socket write timeout (default 600)\n"
             "  --http-keep-alive-max <n>   Requests per connection (default 100)\n"
@@ -121,6 +122,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.max_batch_items = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--max-logit-bias") == 0 && i + 1 < argc) {
             args.max_logit_bias = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-images-per-request") == 0 && i + 1 < argc) {
+            args.max_images = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--http-read-timeout") == 0 && i + 1 < argc) {
             args.read_timeout = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--http-write-timeout") == 0 && i + 1 < argc) {

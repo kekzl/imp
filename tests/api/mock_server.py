@@ -305,6 +305,26 @@ class MockHandler(BaseHTTPRequestHandler):
         if not messages:
             self._send_error(400, "messages array is required and must not be empty")
             return
+        # The server's per-request caps at their defaults (handlers_chat_params.cpp:
+        # kMaxMessages, --max-logit-bias, --max-images-per-request). The nomodel
+        # lane asserts them on both ends (AUDIT_arch_2026 F2-5).
+        if len(messages) > 10000:
+            self._send_error(400, "messages array exceeds maximum of 10000 entries")
+            return
+        logit_bias = body.get("logit_bias")
+        if isinstance(logit_bias, dict) and len(logit_bias) > 1024:
+            self._send_error(400, "logit_bias has too many entries, above the server limit of 1024 (--max-logit-bias)")
+            return
+        n_images = sum(
+            1
+            for m in messages
+            if isinstance(m, dict) and isinstance(m.get("content"), list)
+            for p in m["content"]
+            if isinstance(p, dict) and p.get("type") == "image_url"
+        )
+        if n_images > 8:
+            self._send_error(400, "request carries more than 8 images, the server limit (--max-images-per-request)")
+            return
 
         model = body.get("model", "")
         if not model:

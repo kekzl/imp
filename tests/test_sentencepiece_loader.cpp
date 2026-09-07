@@ -203,6 +203,23 @@ TEST(SentencePieceLoader, RejectsLengthDelimPastEnd) {
     EXPECT_FALSE(err.empty());
 }
 
+TEST(SentencePieceLoader, RejectsLengthDelimThatWrapsThePointer) {
+    // Field 1, wire 2, claimed length 2^64 - 100 over 8 real bytes. The old
+    // guard computed `data_ + len`, which wraps to a pointer below `end_`,
+    // passed, and left the cursor before the buffer: the field loop then
+    // never reached the end (AUDIT_arch_2026 F1-8).
+    std::vector<uint8_t> blob;
+    put_tag(blob, 1, 2);
+    put_varint(blob, uint64_t{0} - 100);
+    for (int i = 0; i < 8; i++)
+        blob.push_back('x');
+
+    SentencePieceModel m;
+    std::string err;
+    EXPECT_FALSE(parse_sentencepiece_model(blob.data(), blob.size(), &m, &err));
+    EXPECT_NE(err.find("past end"), std::string::npos) << err;
+}
+
 TEST(SentencePieceLoader, SkipsUnknownFields) {
     // Real .model files have lots of fields we don't parse (NormalizerSpec,
     // SelfTestData). Verify they don't break the parse.

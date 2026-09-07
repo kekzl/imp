@@ -295,7 +295,8 @@ never replayed.
 ## Images
 
 ✅ on `/v1/chat/completions`, as `image_url` content parts. Several images in one
-request are encoded in prompt order.
+request are encoded in prompt order, at most `--max-images-per-request` of them
+(default 8); a picture wider or taller than 16384 px is a `400` from the decoder.
 
 **A data URI works out of the box; an `http(s)` URL does not.** Fetching one
 opens a server-side connection to a caller-named host with an unauthenticated

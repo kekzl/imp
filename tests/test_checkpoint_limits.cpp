@@ -356,5 +356,151 @@ TEST(CheckpointLimits, DeepChatTemplateIsRejectedRatherThanOverflowingTheStack) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// AUDIT_arch_2026 F1-9 - the evaluation side of the same template
+// ---------------------------------------------------------------------------
+
+TEST(CheckpointLimits, RecursiveMacroIsRefusedRatherThanOverflowingTheStack) {
+    LogLevelPin log_pin;
+    jinja::Template t;
+    ASSERT_TRUE(t.parse("{% macro f() %}{{ f() }}{% endmacro %}{{ f() }}"));
+    jinja::Context ctx;
+    EXPECT_EQ(t.render(ctx), "");
+    EXPECT_NE(t.error().find("call depth"), std::string::npos) << t.error();
+
+    // A macro chain of ordinary depth still renders.
+    jinja::Template ok;
+    ASSERT_TRUE(ok.parse(
+        "{% macro g(x) %}<{{ x }}>{% endmacro %}{% macro f(x) %}{{ g(x) }}{% endmacro %}{{ f(1) }}"));
+    EXPECT_EQ(ok.render(ctx), "<1>") << ok.error();
+}
+
+TEST(CheckpointLimits, HugeLoopsAreRefusedRatherThanExhaustingMemory) {
+    LogLevelPin log_pin;
+    jinja::Context ctx;
+    {
+        jinja::Template t;
+        ASSERT_TRUE(t.parse("{% for i in range(10000000000) %}x{% endfor %}"));
+        EXPECT_EQ(t.render(ctx), "");
+        EXPECT_NE(t.error().find("range length"), std::string::npos) << t.error();
+    }
+    {
+        // The budget is per render, so nesting cannot dodge the range cap.
+        jinja::Template t;
+        ASSERT_TRUE(t.parse("{% for i in range(2000) %}{% for j in range(2000) %}x{% endfor %}{% endfor %}"));
+        EXPECT_EQ(t.render(ctx), "");
+        EXPECT_NE(t.error().find("loop iterations"), std::string::npos) << t.error();
+    }
+    {
+        jinja::Template t;
+        ASSERT_TRUE(t.parse(
+            "{% for i in range(3) %}{{ i }}{% endfor %}{% for i in range(5, 1, -2) %}{{ i }}{% endfor %}"));
+        EXPECT_EQ(t.render(ctx), "01253") << t.error();
+        EXPECT_TRUE(t.error().empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT_arch_2026 F1-10 - the shared JSON parser and the config.json dims
+// ---------------------------------------------------------------------------
+
+TEST(CheckpointLimits, MalformedJsonNumbersAreParseErrorsNotExceptions) {
+    // ("1." is accepted: from_chars takes the C grammar, the same as before.)
+    for (const char* doc : {R"({"a": -})", R"({"a": 1e999})", "[-]", "[1e]"}) {
+        JsonParser p(doc);
+        EXPECT_NO_THROW((void)p.parse()) << doc;
+        EXPECT_FALSE(p.ok()) << doc;
+    }
+    JsonParser fine(R"({"a": -1.5e3, "b": 42})");
+    JValue v = fine.parse();
+    ASSERT_TRUE(fine.ok());
+    EXPECT_DOUBLE_EQ(jobj_find(v, "a")->num_val, -1500.0);
+    EXPECT_EQ(jobj_find(v, "b")->as_int(), 42);
+}
+
+TEST(CheckpointLimits, JsonNodeBudgetRefusesATreeThatWouldNotFit) {
+    // 200 nodes under a 100-node budget: refused. The production budget is
+    // 8M; the constructor seam keeps the test at microseconds.
+    std::string doc = "[";
+    for (int i = 0; i < 199; i++)
+        doc += "0,";
+    doc += "0]";
+    {
+        JsonParser p(doc, 100);
+        (void)p.parse();
+        EXPECT_FALSE(p.ok());
+    }
+    {
+        JsonParser p(doc, 1000);
+        JValue v = p.parse();
+        EXPECT_TRUE(p.ok());
+        EXPECT_EQ(v.arr.size(), 200u);
+    }
+}
+
+TEST(CheckpointLimits, DeclaredPerDimensionCountsAreRefusedNotSized) {
+    ModelConfig cfg;
+    std::string err;
+    cfg.n_layers = 126;
+    cfg.n_heads = 128;
+    cfg.n_kv_heads = 8;
+    cfg.head_dim = 512;
+    cfg.d_model = 16384;
+    cfg.d_ff = 53248;
+    cfg.vocab_size = 262144;
+    EXPECT_TRUE(validate_declared_dimensions(cfg, &err)) << err;
+
+    cfg.head_dim = 2147483647;  // two 8.6 GiB rope-factor tables before the fix
+    EXPECT_FALSE(validate_declared_dimensions(cfg, &err));
+    EXPECT_NE(err.find("head_dim"), std::string::npos) << err;
+
+    cfg.head_dim = 128;
+    cfg.vocab_size = -5;
+    EXPECT_FALSE(validate_declared_dimensions(cfg, &err));
+    EXPECT_NE(err.find("vocab size"), std::string::npos) << err;
+
+    cfg.vocab_size = 32000;
+    cfg.d_ff = 1 << 21;
+    EXPECT_FALSE(validate_declared_dimensions(cfg, &err));
+    EXPECT_NE(err.find("intermediate size"), std::string::npos) << err;
+}
+
+TEST(CheckpointLimits, AConfigDeclaringAGiantHeadDimIsRefused) {
+    LogLevelPin log_pin;
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "imp_huge_head_dim_test";
+    fs::remove_all(root);
+    fs::create_directories(root);
+
+    {
+        const std::string header =
+            R"({"model.embed_tokens.weight":{"dtype":"F16","shape":[4,2],"data_offsets":[0,16]}})";
+        std::ofstream st(root / "model.safetensors", std::ios::binary);
+        const uint64_t hdr = header.size();
+        st.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        st << header;
+        const std::vector<char> data(16, 0);
+        st.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    {
+        // The Llama-3 rope_scaling branch sizes two vectors from head_dim / 2.
+        std::ofstream cfg(root / "config.json");
+        cfg << R"({"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 8,
+                   "num_attention_heads": 1, "vocab_size": 8, "head_dim": 2147483647,
+                   "rope_scaling": {"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
+                                    "high_freq_factor": 4.0, "original_max_position_embeddings": 8192}})";
+    }
+
+    testing::internal::CaptureStderr();
+    auto model = load_safetensors(root.string());
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(model, nullptr);
+    EXPECT_NE(log.find("head_dim"), std::string::npos) << log;
+    EXPECT_NE(log.find("exceeds the limit"), std::string::npos) << log;
+
+    fs::remove_all(root);
+}
+
 }  // namespace
 }  // namespace imp

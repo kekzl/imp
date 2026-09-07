@@ -34,6 +34,15 @@ namespace imp {
 
 inline constexpr int kMaxModelLayers = 1024;
 inline constexpr int kMaxModelExperts = 4096;
+// Per-dimension ceilings (AUDIT_arch_2026 F1-10): `head_dim` sizes the RoPE
+// factor tables, the rest size scratch and the vocabulary. Largest today:
+// head_dim 512 (Gemma-4), hidden 16384 (Llama-3.1-405B), intermediate 53248,
+// vocab 262144 (Gemma), 128 heads.
+inline constexpr int kMaxHeadDim = 4096;
+inline constexpr int kMaxModelDim = 1 << 17;
+inline constexpr int kMaxFfnDim = 1 << 20;
+inline constexpr int kMaxVocabSize = 1 << 22;
+inline constexpr int kMaxHeads = 4096;
 
 // Parse a non-negative decimal index out of a tensor-name component.
 // Returns -1 for empty input, a non-digit, or a value that does not fit an int.
@@ -66,6 +75,23 @@ inline bool validate_declared_dimensions(const ModelConfig& cfg, std::string* er
         return fail("declared layer count", cfg.n_layers, kMaxModelLayers);
     if (cfg.n_experts < 0 || cfg.n_experts > kMaxModelExperts)
         return fail("declared expert count", cfg.n_experts, kMaxModelExperts);
+    // 0 is "not declared, infer later" for every field below.
+    if (cfg.n_heads < 0 || cfg.n_heads > kMaxHeads)
+        return fail("declared head count", cfg.n_heads, kMaxHeads);
+    if (cfg.n_kv_heads < 0 || cfg.n_kv_heads > kMaxHeads)
+        return fail("declared KV head count", cfg.n_kv_heads, kMaxHeads);
+    if (cfg.head_dim < 0 || cfg.head_dim > kMaxHeadDim)
+        return fail("declared head_dim", cfg.head_dim, kMaxHeadDim);
+    if (cfg.rope_dim < 0 || cfg.rope_dim > kMaxHeadDim)
+        return fail("declared rope_dim", cfg.rope_dim, kMaxHeadDim);
+    if (cfg.d_model < 0 || cfg.d_model > kMaxModelDim)
+        return fail("declared hidden size", cfg.d_model, kMaxModelDim);
+    if (cfg.d_ff < 0 || cfg.d_ff > kMaxFfnDim)
+        return fail("declared intermediate size", cfg.d_ff, kMaxFfnDim);
+    if (cfg.expert_d_ff < 0 || cfg.expert_d_ff > kMaxFfnDim)
+        return fail("declared expert intermediate size", cfg.expert_d_ff, kMaxFfnDim);
+    if (cfg.vocab_size < 0 || cfg.vocab_size > kMaxVocabSize)
+        return fail("declared vocab size", cfg.vocab_size, kMaxVocabSize);
     return true;
 }
 

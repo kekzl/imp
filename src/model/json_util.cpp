@@ -1,13 +1,15 @@
 #include "model/json_util.h"
 #include "core/logging.h"
 
+#include <charconv>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace imp {
 
-JsonParser::JsonParser(std::string_view data) : data_(data.data()), len_(data.size()), pos_(0) {}
+JsonParser::JsonParser(std::string_view data, size_t max_nodes)
+    : data_(data.data()), len_(data.size()), pos_(0), max_nodes_(max_nodes) {}
 
 char JsonParser::peek() const {
     if (pos_ >= len_)
@@ -92,7 +94,7 @@ JValue JsonParser::parse() {
 
 JValue JsonParser::parse_value() {
     DepthGuard guard(*this);
-    if (depth_ > kMaxDepth) {
+    if (depth_ > kMaxDepth || ++nodes_ > max_nodes_) {
         error_ = true;
         return {};
     }
@@ -209,8 +211,13 @@ JValue JsonParser::parse_number() {
         while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
             advance();
     }
-    std::string num_str(data_ + start, pos_ - start);
-    v.num_val = std::stod(num_str);
+    // from_chars, not std::stod: "-" alone threw invalid_argument and 1e999
+    // out_of_range through every loader that shares this parser.
+    auto [ptr, ec] = std::from_chars(data_ + start, data_ + pos_, v.num_val);
+    if (ec != std::errc{} || ptr != data_ + pos_) {
+        error_ = true;
+        return {};
+    }
     return v;
 }
 

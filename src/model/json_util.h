@@ -31,9 +31,18 @@ struct JValue {
 
 class JsonParser {
 public:
+    // The depth cap bounds the stack, not the heap: a JValue is ~104 bytes
+    // (string + double + two vectors) against 2 bytes of `0,` text, so the
+    // 128 MiB SafeTensors header cap alone admits ~6.6 GiB of tree
+    // (AUDIT_arch_2026 F1-10). 8M nodes is ~870 MiB; the largest real input,
+    // a 151k-vocab tokenizer.json, is ~0.4M.
+    static constexpr size_t kMaxNodes = size_t{1} << 23;
+
     // A view, not (pointer, length): every caller already had both halves of
     // one object and had to spell the pair out.
-    explicit JsonParser(std::string_view data);
+    // `max_nodes` is the seam the node-budget test uses; production callers
+    // take the default.
+    explicit JsonParser(std::string_view data, size_t max_nodes = kMaxNodes);
 
     JValue parse();
     bool ok() const { return !error_; }
@@ -44,6 +53,8 @@ private:
     size_t pos_;
     bool error_ = false;
     int depth_ = 0;
+    size_t nodes_ = 0;
+    size_t max_nodes_;
 
     // Recursion is bounded because the input is not: a SafeTensors header may
     // declare up to 128 MiB, and every '[' is one `parse_value` frame at ~240

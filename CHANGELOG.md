@@ -19,6 +19,9 @@ there instead of retelling it.
 - KV pool residency probe at load: `KV cache: pool copy bandwidth N GB/s` (WARN below 500),
   `kv_pool_bandwidth_gbps` on `/health`, `imp_kv_pool_bandwidth_gbps` on `/metrics`; a 256 MiB resident
   pool reads 1287 GB/s, mapped pinned host memory 130-139 ([AUDIT_arch_2026 B-6](docs/audit/AUDIT_arch_2026.md))
+- `--max-images-per-request` (default 8) on every chat dialect, and the image decoder refuses a side
+  above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
+  `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_arch_2026 F2-4, F2-9](docs/audit/AUDIT_arch_2026.md))
 
 ### Changed
 
@@ -38,6 +41,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- Parsers, round two: the warm weight cache bounds-checks every record index (an out-of-table `data_alloc`
+  became a device pointer), SentencePiece lengths no longer wrap a pointer sum, Jinja caps macro depth (256) and
+  loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_arch_2026 F1-3, F1-8, F1-9, F1-10](docs/audit/AUDIT_arch_2026.md))
 - Hybrid prefix caching: a recurrent-state snapshot was dropped silently whenever every device
   slab was held by an in-flight restore; it now lands in the host tier. Qwen3.8-27B, 8 sessions x 3
   turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/roadmap.md#lever-ledger))

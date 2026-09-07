@@ -1,5 +1,6 @@
 #include "model/hf_config_loader.h"
 #include "model/json_util.h"
+#include "model/model_limits.h"
 #include "vision/qwen3vl_vision_config.h"
 #include "vision/vision_model.h"
 #include "model/llm_compressor_loader.h"
@@ -183,6 +184,17 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         cfg.n_kv_heads = cfg.n_heads;
     }
 
+    // Every count above came out of the file and `head_dim` sizes the RoPE
+    // factor tables further down (AUDIT_arch_2026 F1-10); the SafeTensors
+    // loader checks again once the config is complete.
+    {
+        std::string dim_err;
+        if (!validate_declared_dimensions(cfg, &dim_err)) {
+            IMP_LOG_ERROR("config.json: %s", dim_err.c_str());
+            return false;
+        }
+    }
+
     // Norm epsilon: try rms_norm_eps first, then layer_norm_eps
     if (!jobj_get_float(eff, "rms_norm_eps", cfg.rms_norm_eps)) {
         jobj_get_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
@@ -312,6 +324,13 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             int hd = cfg.head_dim > 0 ? cfg.head_dim
                                       : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
             int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            // rope_dim is head_dim scaled by a file-supplied
+            // partial_rotary_factor, so it gets its own ceiling here.
+            if (rd < 0 || rd > kMaxHeadDim) {
+                IMP_LOG_ERROR("config.json: rope dimension is %d, which exceeds the limit of %d", rd,
+                              kMaxHeadDim);
+                return false;
+            }
             int pairs = rd / 2;
             if (pairs > 0 && orig_max_pos > 0 && factor > 1.0f &&
                 high_freq_factor > low_freq_factor) {

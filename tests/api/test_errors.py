@@ -276,3 +276,58 @@ class TestCompletionsEndpoint:
             "n": 3,
         })
         assert r.status_code == 400
+
+
+@pytest.mark.nomodel
+class TestPerRequestCaps:
+    """The per-request work caps (#1616, #1617, --max-images-per-request) had
+    no test in any lane (AUDIT_arch_2026 F2-5). Defaults: n 8, messages 10000,
+    logit_bias 1024, images 8, rerank documents 512. Every check runs before
+    the server looks for a model, so the model-less lane sees the 400.
+    """
+
+    def test_n_above_max_n(self, client, model):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "n": 1000,
+        })
+        assert r.status_code == 400
+        assert '"n"' in r.json()["error"]["message"]
+
+    def test_messages_above_cap(self, client, model):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "x"}] * 20000,
+        })
+        assert r.status_code == 400
+        assert "messages" in r.json()["error"]["message"]
+
+    def test_logit_bias_above_cap(self, client, model):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "logit_bias": {str(i): 1 for i in range(5000)},
+        })
+        assert r.status_code == 400
+        assert "logit_bias" in r.json()["error"]["message"]
+
+    def test_images_above_cap(self, client, model):
+        part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": [part] * 9}],
+        })
+        assert r.status_code == 400
+        assert "images" in r.json()["error"]["message"]
+
+    def test_rerank_documents_above_cap(self, client, model, is_mock):
+        if is_mock:
+            pytest.skip("the mock has no /rerank")
+        r = client.post("/rerank", json={
+            "model": model,
+            "query": "q",
+            "documents": ["d"] * 1000,
+        })
+        assert r.status_code == 400
+        assert "documents" in r.json()["error"]["message"]

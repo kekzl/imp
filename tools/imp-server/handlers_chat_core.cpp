@@ -434,6 +434,15 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     const bool force_thinking = ctx.params.enable_thinking_set && ctx.params.enable_thinking_requested &&
                                 ctx.snap.enable_thinking;
 
+    // The byte bound before any render or merge walk: --max-input-tokens is
+    // checked on the token count below, which exists only after the cost has
+    // been paid (AUDIT_arch_2026 F2-9). count_tokens takes this path too.
+    size_t prompt_bytes = 0;
+    for (const auto& m : ctx.params.chat_msgs)
+        prompt_bytes += m.content.size();
+    if (!prompt_within_input_budget(res, prompt_bytes, state.max_input_tokens, "messages"))
+        return false;
+
     // Tokenize with chat template (with image tokens if vision is active)
     if (ctx.snap.have_template && !ctx.snap.qwen_patches.empty()) {
         // The chat template renders one <|image_pad|> per block — at template

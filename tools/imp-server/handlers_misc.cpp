@@ -62,6 +62,12 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
         return;
     }
 
+    // --max-input-tokens applies here as on every prompt-taking route
+    // (AUDIT_arch_2026 F2-9): the byte bound refuses before the merge walk,
+    // the token check after it.
+    if (!prompt_within_input_budget(res, content.size(), state.max_input_tokens, "content"))
+        return;
+
     // Size the token buffer from the model's context (min 256k): agentic
     // prompts run 10k-200k tokens; the previous fixed 32768 silently failed
     // above that.
@@ -75,6 +81,13 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
                        {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
                         {"type", "server_error"}}}};
         res.set_content(dump_safe(error), "application/json");
+        return;
+    }
+    if (state.max_input_tokens > 0 && n_tokens > state.max_input_tokens) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "content exceeds --max-input-tokens (" + std::to_string(n_tokens) + " > " +
+                            std::to_string(state.max_input_tokens) + ")",
+                        "content", "context_length_exceeded");
         return;
     }
 
@@ -124,6 +137,14 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
                      {{"message", "tokens array exceeds maximum of 1000000 entries"},
                       {"type", "invalid_request_error"}}}};
         res.set_content(dump_safe(err), "application/json");
+        return;
+    }
+    // The operator's prompt bound holds on the way out as well (F2-9).
+    if (state.max_input_tokens > 0 && static_cast<int>(body["tokens"].size()) > state.max_input_tokens) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "tokens array exceeds --max-input-tokens (" + std::to_string(body["tokens"].size()) +
+                            " > " + std::to_string(state.max_input_tokens) + ")",
+                        "tokens", "context_length_exceeded");
         return;
     }
 
