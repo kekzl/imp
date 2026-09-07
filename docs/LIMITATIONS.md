@@ -724,6 +724,19 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
 
 ## Model-specific blockers
 
+- **Audio is blocked on weights, not on work.** Gemma-4 declares the modality and imp says so at
+  load (roadmap Open 8, #1929), but no local checkpoint carries an encoder to run. Counted from
+  the shard indices: Gemma-4-12B-NVFP4 ships exactly one audio tensor,
+  `model.embed_audio.embedding_projection.weight` (BF16 [3840, 640], 4.69 MiB), which is the
+  bridge from `audio_embed_dim` 640 into the LM, and nothing that produces those 640 dimensions
+  from a waveform. Its `audio_config` describes no encoder either: `architectures: null`, no layer
+  count, no head count, no mel parameters, only `audio_embed_dim`, `rms_norm_eps` and
+  `PretrainedConfig` defaults. The same export carries 10 `model.embed_vision.*` tensors and zero
+  `model.vision_tower.*`, against 355 tower tensors in Gemma-4-26B-A4B-it-NVFP4, so this
+  quantisation dropped both towers rather than audio being special. Implementing an encoder with
+  no weights to load is not a port. What would unblock it is a checkpoint carrying the audio
+  tower, the way `--mmproj` supplies the vision one; imp downloads nothing itself
+  (`scripts/stage-model.sh`).
 - **Qwen3.5-27B MXFP4**: blocked on a checkpoint imp can decode, not a bug; no MXFP4 SafeTensors
   decode path exists outside gpt-oss.
 - **Gemma-4 on the FP8-KV quality gate**: baseline perplexity on the gate corpus is broken; stays

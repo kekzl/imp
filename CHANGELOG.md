@@ -36,6 +36,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Roadmap Open 8 "no audio" is now stated as blocked on a checkpoint rather than on work: the only
+  audio tensor in any local model is Gemma-4-12B-NVFP4's 640 -> 3840 `embed_audio` projection, and
+  its `audio_config` declares no encoder (`architectures: null`). Evidence in `LIMITATIONS.md`
 - `nsys_gap_attribution.py` anchors `--window` on the first kernel (the weight upload runs as
   memcpy ~11 s before it, so every window was shifted) and prints a launch census per decode step;
   roadmap Open 1 re-priced from ~8 % to ~2 % headroom on that measurement (#1928)
