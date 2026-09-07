@@ -80,6 +80,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- imp-server released the weight-file pages after upload instead of holding the whole checkpoint
+  resident for its lifetime. Qwen3.8-27B-NVFP4-vllm host RSS 21.53 -> 4.04 GiB (file-backed
+  18.48 -> 0.98 GiB); paired A/B against main: decode +0.04 %, prefill -0.50 % (#1934)
 - The degeneration gate in `scripts/verify.sh` judged eleven tokens of every run and called them
   "the last 32": imp-cli caps its `[tok=]` markers at ten decode steps. New `--token-trace` lifts
   the cap and the gate uses it, so a repetition loop starting at step 11 is now visible (#1933)

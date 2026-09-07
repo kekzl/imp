@@ -234,6 +234,15 @@ Size the deployment from the model plus the KV pool you intend to serve; pin
 `runtime.max_seq_len` rather than auto-fitting against a moving number. Tier
 model and invariants: [`internals/MEMORY.md`](internals/MEMORY.md).
 
+**Host RAM: read `RssAnon`, not `VmRSS`.** The loader maps the checkpoint and
+faults it in, and imp drops those pages again once the weights are on the GPU
+(#1934). Before that it held the whole file resident for the process lifetime:
+Qwen3.8-27B-NVFP4-vllm read 21.53 GiB of `VmRSS`, of which 18.48 GiB was the
+mapping and 1.01 GiB was actually anonymous. `docker stats` showed 3.2 GiB
+throughout, because the cgroup does not account a shared file mapping the way
+`ps` does, so the two disagree by design. Weights left on host by an offload
+placement refault on demand and are counted again while they are being read.
+
 ## Serving more than one model
 
 One GPU holds one model. `server.model_swap` (default on): a request naming a
