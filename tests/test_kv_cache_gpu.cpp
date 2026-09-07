@@ -560,5 +560,56 @@ TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
     EXPECT_LT(got, 512) << "growth must stop at the headroom, not at the ceiling";
 }
 
+// The residency probe (AUDIT_arch_2026 B-6). A pool the WDDM driver spilled
+// into host memory cannot be produced on demand, so the falsifier is the
+// copy routine itself over memory that IS host-resident: mapped pinned host
+// memory, reached over PCIe. The same routine over the device pool has to
+// read far above the spill threshold, and the host reading far below it,
+// or the probe could not tell the two apart on a real spill either.
+TEST(KVCacheTest, ResidencyProbeSeparatesDeviceFromHostResidentMemory) {
+    SKIP_IF_NO_CUDA();
+    // 2 layers x 2048 blocks x 32 KiB per K/V block = 256 MiB; each K region
+    // is 64 MiB, so the probe copies 32 MiB per sampled layer.
+    KVCache cache(2, 8, 128, QType::F16, 2048);
+    ASSERT_EQ(cache.residency_gbps(), 0.0) << "0 until probed";
+    const double device_gbps = cache.probe_residency();
+    EXPECT_EQ(cache.residency_gbps(), device_gbps);
+    EXPECT_GT(device_gbps, kKvPoolSpillGbps) << "a resident pool must read above the spill threshold";
+
+    void* h = nullptr;
+    if (cudaHostAlloc(&h, 64u << 20, cudaHostAllocMapped) != cudaSuccess) {
+        (void)cudaGetLastError();
+        GTEST_SKIP() << "no mapped pinned host memory on this device";
+    }
+    void* d = nullptr;
+    ASSERT_EQ(cudaHostGetDevicePointer(&d, h, 0), cudaSuccess);
+    const double host_gbps = device_copy_bandwidth_gbps(static_cast<char*>(d) + (32u << 20), d, 32u << 20);
+    cudaFreeHost(h);
+    printf("residency probe: device pool %.0f GB/s, mapped host memory %.0f GB/s\n", device_gbps, host_gbps);
+    EXPECT_GT(host_gbps, 0.0);
+    EXPECT_LT(host_gbps, kKvPoolSpillGbps) << "host-resident memory must read as spilled";
+    EXPECT_GT(device_gbps, 4.0 * host_gbps) << "device " << device_gbps << " host " << host_gbps;
+}
+
+TEST(KVCacheTest, ResidencyProbeReadsZeroWithoutMemory) {
+    SKIP_IF_NO_CUDA();
+    auto acc = KVCache::for_accounting(2, 8, 128, QType::F16, 64);
+    EXPECT_EQ(acc->probe_residency(), 0.0);
+    EXPECT_EQ(acc->residency_gbps(), 0.0);
+    // Too small to time: 1 layer x 8 blocks x 4 KiB -> a 16 KiB K region.
+    KVCache tiny(1, 1, 128, QType::F16, 8);
+    EXPECT_EQ(tiny.probe_residency(), 0.0);
+}
+
+TEST(KVCacheTest, ResidencyProbeCoversTheCommittedPrefixOfAGrowablePool) {
+    SKIP_IF_NO_CUDA();
+    // 512 of 2048 blocks committed: the probe may only touch the committed
+    // prefix of each layer region, 16 MiB of the 64 MiB reserved.
+    KVCache cache(2, 8, 128, QType::F16, 512, 16, nullptr, 2048);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    EXPECT_GT(cache.probe_residency(), kKvPoolSpillGbps);
+}
+
 }  // namespace
 }  // namespace imp

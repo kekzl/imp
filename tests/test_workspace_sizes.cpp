@@ -450,6 +450,24 @@ TEST(ExecT2Demand, SplitkFollowsHeadsBatchAndContextAndCapsAt128Splits) {
     // It follows the batch, with the floor of 8 shared with the sampling scratch.
     s.max_batch_size = 16;
     EXPECT_EQ(exec_t2_demand(s, 1024).splitk_scratch, expect * 2 - 256);
+}
+
+// The split count is a block count, so the term reads the RESOLVED block size
+// (n_kv_heads <= 4 models run 32, kv_cache.block_size can set any multiple of
+// 16), not a replicated kKVBlockSize. Before B-7 it was sized for 16 whatever
+// the executor allocated with (AUDIT_arch_2026 B-7).
+TEST(ExecT2Demand, SplitkReadsTheResolvedKvBlockSize) {
+    ExecShape s = dense_shape();
+    s.n_heads = 32;
+    s.head_dim = 128;
+    s.max_batch_size = 1;
+    // ctx 1024 at 32 tokens per block -> 32 splits, half the 16-block term.
+    s.kv_block_size = 32;
+    const size_t expect32 = 8ull * 32 * 32 * (2 + 128) * sizeof(float) + 256;
+    EXPECT_EQ(exec_t2_demand(s, 1024).splitk_scratch, expect32);
+    s.kv_block_size = 0;  // 0 = 16, the pre-B-7 arithmetic
+    const size_t expect16 = 8ull * 32 * 64 * (2 + 128) * sizeof(float) + 256;
+    EXPECT_EQ(exec_t2_demand(s, 1024).splitk_scratch, expect16);
 
     // A shape with no attention heads asks for nothing rather than dividing by zero.
     ExecShape headless = dense_shape();

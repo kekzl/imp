@@ -181,6 +181,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
     I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
     I("kv_cache.max_blocks", cfg.kv_cache.max_blocks);
+    I("kv_cache.block_size", cfg.kv_cache.block_size);
 
     // [rope]
     S("rope.scaling", cfg.rope.scaling);

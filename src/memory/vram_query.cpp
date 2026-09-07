@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 
 namespace imp {
 
@@ -69,6 +70,47 @@ size_t vram_own_used_bytes() {
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess)
         return 0;
     return baseline > free_b ? baseline - free_b : 0;
+}
+
+double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_ms) {
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (copies[i].dst == nullptr || copies[i].src == nullptr)
+            return 0.0;
+        total += copies[i].bytes;
+    }
+    if (total == 0)
+        return 0.0;
+    cudaEvent_t t0 = nullptr, t1 = nullptr;
+    if (cudaEventCreate(&t0) != cudaSuccess)
+        return 0.0;
+    if (cudaEventCreate(&t1) != cudaSuccess) {
+        cudaEventDestroy(t0);
+        return 0.0;
+    }
+    auto issue = [&]() {
+        for (size_t i = 0; i < n; i++)
+            if (cudaMemcpyAsync(copies[i].dst, copies[i].src, copies[i].bytes, cudaMemcpyDeviceToDevice,
+                                nullptr) != cudaSuccess)
+                return false;
+        return true;
+    };
+    // Warm the clocks: repeat the set until warm_ms of wall time has passed.
+    bool ok = true;
+    const auto warm_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(0, warm_ms));
+    for (int iter = 0; ok && iter < 100000 && std::chrono::steady_clock::now() < warm_end; iter++)
+        ok = issue() && cudaStreamSynchronize(nullptr) == cudaSuccess;
+    ok = ok && cudaEventRecord(t0, nullptr) == cudaSuccess && issue();
+    float ms = 0.0f;
+    ok = ok && cudaEventRecord(t1, nullptr) == cudaSuccess && cudaEventSynchronize(t1) == cudaSuccess &&
+         cudaEventElapsedTime(&ms, t0, t1) == cudaSuccess;
+    cudaEventDestroy(t0);
+    cudaEventDestroy(t1);
+    if (!ok || ms <= 0.0f) {
+        (void)cudaGetLastError();  // leave nothing sticky for the next caller
+        return 0.0;
+    }
+    return 2.0 * static_cast<double>(total) / (static_cast<double>(ms) * 1e-3) / 1e9;
 }
 
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes) {

@@ -8,6 +8,8 @@
 #include "runtime/engine.h"
 
 #include <set>
+#include <stdexcept>
+#include <string>
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
@@ -819,10 +821,25 @@ void Engine::init_resolve_quant_flags_() {
 // few functions up: a decision that lived in init_kv_cache and was needed
 // earlier. Resolving here makes init_kv_cache a reader.
 void Engine::init_resolve_kv_block_size_() {
-    if (config_.kv_block_size > 0)
-        return;  // explicit imp.conf / --set value wins
     const auto& mcfg = model_->config();
-    config_.kv_block_size = (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) ? 32 : kKVBlockSize;
+    if (config_.kv_block_size > 0) {
+        // Explicit kv_cache.block_size (or EngineConfig from the C++ API).
+        // Refused here, at load, rather than at dispatch: the FP8 tile kernel
+        // silently falls back on a block it cannot tile, and a value the
+        // kernels never see would otherwise measure the fallback.
+        if (const char* why = kv_block_size_error(config_.kv_block_size))
+            throw std::runtime_error("kv_cache.block_size=" + std::to_string(config_.kv_block_size) + " " +
+                                     why);
+        IMP_LOG_INFO("KV block size: %d (kv_cache.block_size, n_kv_heads=%d)", config_.kv_block_size,
+                     mcfg.n_kv_heads);
+        return;
+    }
+    // 16 for every model since 2026-09-07. The 2026-03-23 rule (32 when
+    // n_kv_heads <= 4, "improves coalescing") was measured for the first time
+    // with tools/analysis/kv_block_size_ab.sh: 32 never won, and lost 1.5 to
+    // 4.3 % tg128 on Qwen3.8-27B-NVFP4 (4 KV heads), the class it was meant
+    // for (docs/audit/PERF_LOG.md 2026-09-07). kv_cache.block_size overrides.
+    config_.kv_block_size = kKVBlockSize;
     IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
 }
 

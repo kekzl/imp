@@ -213,7 +213,9 @@ def main():
     # (test-kv, GPU, no model).
     # 1066 -> 1068: KVCacheManagerGrowTest.GrowsBeforeReclaimingCachedBlocks and
     # KVCacheGrowTest.GrowthStopsAtTheAllocatorHeadroom (test-kv, GPU + VMM, no model).
-    PINNED = 1068
+    # 1068 -> 1071 (AUDIT_arch_2026 B-6): KVCacheTest.ResidencyProbe* x3 (test-kv, GPU, no
+    # model: the device-vs-mapped-host bandwidth discriminator needs a real card).
+    PINNED = 1071
 
     text = CMAKE.read_text()
     mods = module_sources(text)

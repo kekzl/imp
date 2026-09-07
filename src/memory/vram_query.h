@@ -141,6 +141,51 @@ inline int kv_blocks_per_sequence(int max_seq_len, int block_size) {
     return (max_seq_len + block_size - 1) / block_size;
 }
 
+// Why an explicit kv_cache.block_size cannot be served, nullptr when it can.
+// Every paged kernel takes the block size at runtime, but two tile it: the
+// FP8 split-K decode kernel dispatches on block_size % 16 == 0
+// (attention_paged_fp8_tile.cu) and the NVFP4 TC path maps one 16-token
+// WMMA tile per block chunk. Above 256 a block, which is the prefix cache's
+// reuse granularity and a sequence's minimum footprint, no longer buys
+// anything the split-K count did not already have (AUDIT_arch_2026 B-5).
+inline const char* kv_block_size_error(int block_size) {
+    if (block_size < 16)
+        return "is below 16, the token tile of the FP8 and NVFP4 tensor-core decode kernels";
+    if (block_size % 16 != 0)
+        return "is not a multiple of 16 (attention_paged_fp8_tile.cu dispatches on block_size % 16 == 0)";
+    if (block_size > 256)
+        return "is above 256; a block is the prefix cache's reuse granularity and a sequence's minimum "
+               "footprint";
+    return nullptr;
+}
+
+// Time `n` device-to-device copies issued back to back on the legacy default
+// stream, one event pair around the batch, and return the bandwidth in GB/s
+// counting every byte twice (read plus write). 0 when a copy cannot run.
+//
+// This is the residency test the platform needs: on WSL2/WDDM a successful
+// allocation proves nothing, and a pool the driver spilled into host memory
+// serves at a sixth of the bandwidth with no error anywhere. Measured with
+// this routine on the RTX 5090 (2026-09-07): mapped pinned host memory over
+// PCIe 130-139 GB/s, a 256 MiB resident pool 1287 GB/s, with #1103's 1530
+// vs 237 at the throughput cliff as the original characterisation.
+//
+// The same set is copied for `warm_ms` first: an idle card sits at its
+// floor clocks and a cold single pass read 280 GB/s on resident VRAM, which
+// would be reported as a spill. What the warm-up cannot fix is a set whose
+// traffic fits the 96 MB L2 (a 32 MiB slice re-read at 4681 GB/s): span
+// enough memory to exceed it, or read the result as "resident, L2-served".
+struct DeviceCopy {
+    void* dst;
+    const void* src;
+    size_t bytes;
+};
+double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_ms = 300);
+inline double device_copy_bandwidth_gbps(void* dst, const void* src, size_t bytes, int warm_ms = 300) {
+    const DeviceCopy c{dst, src, bytes};
+    return device_copy_bandwidth_gbps(&c, 1, warm_ms);
+}
+
 // What the operator has to be told about the pool this sizing produced.
 //
 // `Floored` has had its own message since #1251: nothing was left to size

@@ -278,9 +278,9 @@ bool bench_attention() {
 // for MHA and GQA head configurations. Reports µs, effective bandwidth,
 // and whether split-K was activated.
 
-static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, cudaStream_t stream) {
+static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, cudaStream_t stream,
+                                       int block_size = 16) {
     const int batch = 1;
-    const int block_size = 16;  // kKVBlockSize
     const float attn_scale = 1.0f / sqrtf(static_cast<float>(cfg.head_dim));
     const int warmup_iters = 20;
     const int timed_iters = 50;
@@ -330,9 +330,9 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
     int h_ctx = ctx_len;
     cudaMemcpy(d_context_lens, &h_ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    // Split-K scratch buffer (generous)
+    // Split-K scratch buffer: the split count caps at 128 (workspace_sizes.cpp)
     void* d_scratch = nullptr;
-    size_t scratch_size = (size_t)batch * cfg.n_heads * 32 * (2 + cfg.head_dim) * sizeof(float);
+    size_t scratch_size = (size_t)batch * cfg.n_heads * 128 * (2 + cfg.head_dim) * sizeof(float);
     cudaMalloc(&d_scratch, scratch_size);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
 
@@ -439,6 +439,27 @@ bool bench_paged_attention() {
                 kernel = "GQA";
 
             printf("  %8d  %7.1f us  %7.1f GB/s  %s\n", ctx_len, avg_us, bw_gbs, kernel);
+        }
+        printf("\n");
+    }
+
+    // Block-size sweep (AUDIT_arch_2026 B-5): the same kernel at 16, 32 and 64
+    // tokens per block, the values kv_cache.block_size can set. The engine's
+    // auto rule picks 32 for n_kv_heads <= 4 and 16 otherwise; this is the
+    // instrument that rule never had.
+    printf("=== Paged Attention Decode: block-size sweep (FP16 KV) ===\n");
+    printf("batch=1, warmup=20, iters=50\n\n");
+    for (const auto& cfg : configs) {
+        printf("%-18s  nh=%2d nkv=%2d hd=%3d\n", cfg.name, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
+        printf("  %8s  %4s  %10s  %10s\n", "ctx_len", "bs", "latency", "eff BW");
+        for (int ctx_len : {4096, 32768, 131072}) {
+            for (int bs : {16, 32, 64}) {
+                float avg_ms = bench_paged_decode_kernel(cfg, ctx_len, stream, bs);
+                double kv_bytes = 2.0 * ctx_len * cfg.n_kv_heads * cfg.head_dim * 2.0;
+                double qo_bytes = 2.0 * cfg.n_heads * cfg.head_dim * 2.0;
+                double bw_gbs = (kv_bytes + qo_bytes) / (avg_ms * 1e-3) / 1e9;
+                printf("  %8d  %4d  %7.1f us  %7.1f GB/s\n", ctx_len, bs, avg_ms * 1000.0f, bw_gbs);
+            }
         }
         printf("\n");
     }

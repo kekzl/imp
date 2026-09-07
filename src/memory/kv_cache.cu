@@ -597,6 +597,40 @@ int KVCache::commit_blocks_(int blocks) {
 
 size_t KVCache::committed_bytes() const { return region_ ? region_.committed() : 0; }
 
+double KVCache::probe_residency() {
+    if (accounting_only_ || pool_ == nullptr)
+        return 0.0;
+    // A fixed pool is backed end to end; a growable one only in the committed
+    // prefix of every layer region, and that is the only part it may touch.
+    const int backed = growable_ ? committed_blocks_ : max_blocks_;
+    constexpr size_t kMinHalf = 1u << 20;   // below this a copy is launch latency
+    constexpr size_t kMaxHalf = 64u << 20;  // per region; spread over layers instead
+    constexpr size_t kBudget = 512u << 20;  // copied bytes: 1 GiB of traffic, past the 96 MB L2
+    // Layer by layer, K then V region, first half onto second half, until the
+    // budget is spent: the copies span the pool rather than one corner of it,
+    // and together they exceed the L2, which a single region would not.
+    std::vector<DeviceCopy> copies;
+    size_t total = 0;
+    for (int l = 0; l < n_layers_ && total < kBudget; l++) {
+        const size_t bb = block_bytes(l);
+        if (bb == 0)
+            continue;  // a non-attention layer in a hybrid holds no KV
+        const size_t blocks = std::min(static_cast<size_t>(std::max(backed, 0)), layer_capacity_(l));
+        size_t half = (blocks * bb / 2) & ~(kMinHalf - 1);
+        if (half < kMinHalf)
+            continue;
+        half = std::min(half, kMaxHalf);
+        for (char* base : {static_cast<char*>(k_ptr(l, 0)), static_cast<char*>(v_ptr(l, 0))}) {
+            copies.push_back(DeviceCopy{base + half, base, half});
+            total += half;
+        }
+    }
+    if (copies.empty())
+        return 0.0;
+    residency_gbps_ = device_copy_bandwidth_gbps(copies.data(), copies.size());
+    return residency_gbps_;
+}
+
 size_t KVCache::bytes_per_block() const {
     size_t total = 0;
     for (int l = 0; l < n_layers_; l++) {

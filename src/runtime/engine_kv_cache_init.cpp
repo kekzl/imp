@@ -104,7 +104,7 @@ bool Engine::init_kv_cache() {
     // value, not kKVBlockSize. The fallback keeps this function correct if it
     // is ever reached on a path that skipped the resolver.
     if (config_.kv_block_size <= 0)
-        config_.kv_block_size = (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) ? 32 : kKVBlockSize;
+        config_.kv_block_size = kKVBlockSize;
     const int kv_bs = config_.kv_block_size;
     int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
 
@@ -707,6 +707,25 @@ bool Engine::init_kv_cache() {
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
+    // Is the pool where the driver says it is? A successful allocation proves
+    // nothing on WSL2/WDDM: the pool can sit in host memory and serve at a
+    // sixth of the bandwidth with /health ok and nothing logged (#1103,
+    // AUDIT_arch_2026 B-6). One copy inside the fresh, all-zero pool, a few
+    // hundred microseconds once; a WARN and a gauge, never a refusal, because
+    // the threshold is one driver on one card.
+    {
+        const double gbps = kv_cache_raw_->probe_residency();
+        if (gbps > 0.0 && gbps < kKvPoolSpillGbps) {
+            IMP_LOG_WARN(
+                "KV cache: pool copy bandwidth %.0f GB/s, below %.0f GB/s: the pool has most likely "
+                "spilled into host memory (WDDM oversubscription) and decode will run at a fraction of "
+                "the card's bandwidth. Free the VRAM other processes hold, or pin a smaller pool with "
+                "kv_cache.max_blocks",
+                gbps, kKvPoolSpillGbps);
+        } else if (gbps > 0.0) {
+            IMP_LOG_INFO("KV cache: pool copy bandwidth %.0f GB/s (resident)", gbps);
+        }
+    }
     if (swa_sizing_active_) {
         kv_manager_->enable_swa_sizing(swa_window_max_, swa_slack_tokens_);
         swa_sizing_active_ = kv_manager_->swa_sizing_enabled();

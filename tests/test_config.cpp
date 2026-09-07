@@ -42,6 +42,15 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     EXPECT_EQ(cfg.diagnostics.exit_layer, -1);
 }
 
+// kv_cache.block_size: the operator surface AUDIT_arch_2026 B-5 found missing.
+// 0 = auto stays the default; the value binds through --set like every key.
+TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
+    RuntimeConfig cfg;
+    EXPECT_EQ(cfg.kv_cache.block_size, 0);
+    set_(cfg, {"kv_cache.block_size=32"});
+    EXPECT_EQ(cfg.kv_cache.block_size, 32);
+}
+
 // kv_cache.swa_sizing tri-state: "auto"/"on"/"off" plus legacy bool literals
 // (the key was a bool until 2026-07-24 — existing imp.conf files keep parsing).
 TEST(RuntimeConfigTest, SwaSizingTriState) {

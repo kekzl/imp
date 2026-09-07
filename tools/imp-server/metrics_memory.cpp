@@ -73,6 +73,14 @@ if (state.ctx && state.ctx->engine) {
         out += "# HELP imp_kv_blocks_total KV pool capacity in blocks\n";
         out += "# TYPE imp_kv_blocks_total gauge\n";
         out += "imp_kv_blocks_total " + std::to_string(total_blocks) + "\n";
+        // Residency, the platform fact that had no runtime check (B-6): a
+        // device-to-device copy inside the pool at init. ~1500 GB/s resident,
+        // ~240 spilled into host memory by the WDDM driver; 0 = not measured.
+        out +=
+            "# HELP imp_kv_pool_bandwidth_gbps Copy bandwidth measured inside the KV pool at init, "
+            "GB/s read plus write; a spilled pool reads a sixth of a resident one\n";
+        out += "# TYPE imp_kv_pool_bandwidth_gbps gauge\n";
+        out += "imp_kv_pool_bandwidth_gbps " + std::to_string(kv->residency_gbps()) + "\n";
         out += "# HELP imp_kv_blocks_used KV blocks held by anything — live sequences, the "
                "prefix cache, pins\n";
         out += "# TYPE imp_kv_blocks_used gauge\n";

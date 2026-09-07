@@ -75,6 +75,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     int kv_block_size = -1;
     int kv_ceiling = -1;
     bool kv_growable = false;
+    double kv_bandwidth = 0.0;
     std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
     if (lock.owns_lock()) {
         loaded = state.model_loaded();
@@ -93,6 +94,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
                 kv_block_size = kv->block_size();
                 kv_ceiling = kv->ceiling_blocks();
                 kv_growable = kv->growable();
+                kv_bandwidth = kv->residency_gbps();
             }
         }
         lock.unlock();
@@ -124,6 +126,11 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         // card frees, the other never will. Say which, rather than leaving the
         // caller to derive it from a pair that cannot express it.
         body["kv_pool_growable"] = kv_growable;
+        // Copy bandwidth measured inside the pool at init, GB/s (read plus
+        // write). Resident memory on this card reads ~1500; a pool the WDDM
+        // driver spilled into host memory reads ~240 and serves at that
+        // fraction with everything else reporting ok. 0 = not measured.
+        body["kv_pool_bandwidth_gbps"] = kv_bandwidth;
     }
     // #1537: the checkpoint carries an MTP head this load did not take. Since
     // the mtp_k auto default that is normally a REGIME decision (a serving
