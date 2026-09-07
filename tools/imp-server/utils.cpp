@@ -160,6 +160,17 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
     res.set_content(dump_safe(err), "application/json");
 }
 
+bool prompt_within_input_budget(httplib::Response& res, size_t bytes, int max_input_tokens,
+                                const char* param) {
+    if (!prompt_bytes_exceed_input_budget(bytes, max_input_tokens))
+        return true;
+    send_json_error(res, 400, "invalid_request_error",
+                    std::string(param) + " carries " + std::to_string(bytes) + " bytes, above what " +
+                        std::to_string(max_input_tokens) + " tokens can hold (--max-input-tokens)",
+                    param, "context_length_exceeded");
+    return false;
+}
+
 int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_tokens) {
     if (kv_capacity_tokens <= 0 || kv_capacity_tokens >= planned_max_seq_len)
         return planned_max_seq_len;

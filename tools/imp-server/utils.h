@@ -106,6 +106,21 @@ size_t utf8_chunk_len(const std::string& s, size_t off, size_t max);
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
                      const char* param = nullptr, const char* code = nullptr);
 
+// --max-input-tokens is checked after tokenizing, and tokenizing is the cost:
+// the BPE merge walk over a 100 MiB body runs on a worker thread before the
+// count exists (AUDIT_arch_2026 F2-9). This refuses a body that cannot pass
+// the token check anyway. 16 bytes per token is a bound, not an estimate:
+// English averages ~4, code ~3, and only a run of whitespace longer than a
+// vocabulary's longest whitespace token beats 16. Off when the flag is 0.
+inline constexpr size_t kMaxPromptBytesPerToken = 16;
+inline bool prompt_bytes_exceed_input_budget(size_t bytes, int max_input_tokens) {
+    return max_input_tokens > 0 && bytes > static_cast<size_t>(max_input_tokens) * kMaxPromptBytesPerToken;
+}
+// The check plus the 400 for it, so every prompt-taking handler spends one line.
+// `param` names the request field in the envelope.
+bool prompt_within_input_budget(httplib::Response& res, size_t bytes, int max_input_tokens,
+                                const char* param);
+
 // What a client may actually send, in tokens: the smaller of what the resolver
 // planned and what the KV pool ended up holding. The two differ whenever the
 // pool is clamped after planning - 97204 against 52256 on Qwen3.8-27B-NVFP4 -

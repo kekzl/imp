@@ -234,6 +234,7 @@ struct ServerState {
     int max_n = 8;             // cap on `n` completions (0=unlimited)
     int max_batch_items = 512;  // cap on rerank documents / embeddings input (0=unlimited)
     int max_logit_bias = 1024;  // cap on logit_bias entries (0=unlimited)
+    int max_images = 8;         // cap on image parts per request (0=unlimited)
 
     // Rate limiting lives in its own unit so the CPU lane can test it
     // (#1614); ServerState cannot be constructed there.

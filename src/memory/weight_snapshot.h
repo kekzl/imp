@@ -86,6 +86,54 @@ struct WeightUploadRecord {
     bool raw_from_source = false;
 };
 
+// Everything the restore dereferences out of a warm-cache record is
+// file-supplied (AUDIT_arch_2026 F1-3): the alloc indices, the byte offsets
+// and the Tensor POD itself, out of a file another process may have replaced
+// (the directory falls back to /tmp when HOME is unset). The reader has
+// already checked `allocs[i].bytes` against the mapping; this checks what
+// indexes into them. Refuses, never clamps: one bad record is the whole cache
+// falling back to a cold load.
+inline bool weight_record_indices_ok(const WeightUploadRecord& rec, std::string* why) {
+    auto fail = [why](std::string msg) {
+        if (why)
+            *why = std::move(msg);
+        return false;
+    };
+    const int n_allocs = static_cast<int>(rec.allocs.size());
+    if (rec.data_alloc < 0 || rec.data_alloc >= n_allocs)
+        return fail("data_alloc " + std::to_string(rec.data_alloc) + " outside " + std::to_string(n_allocs) +
+                    " allocs");
+    const size_t data_bytes = rec.allocs[static_cast<size_t>(rec.data_alloc)].bytes;
+    if (rec.data_off >= data_bytes)
+        return fail("data_off " + std::to_string(rec.data_off) + " past a " + std::to_string(data_bytes) +
+                    "-byte alloc");
+    if (rec.scales_alloc != -1) {
+        if (rec.scales_alloc < 0 || rec.scales_alloc >= n_allocs)
+            return fail("scales_alloc " + std::to_string(rec.scales_alloc) + " outside " +
+                        std::to_string(n_allocs) + " allocs");
+        if (rec.scales_off >= rec.allocs[static_cast<size_t>(rec.scales_alloc)].bytes)
+            return fail("scales_off " + std::to_string(rec.scales_off) + " past its alloc");
+    }
+    if (rec.tensor.ndim < 0 || rec.tensor.ndim > kMaxDims)
+        return fail("ndim " + std::to_string(rec.tensor.ndim) + " outside [0, " + std::to_string(kMaxDims) +
+                    "]");
+    int64_t numel = rec.tensor.ndim == 0 ? 0 : 1;
+    for (int i = 0; i < rec.tensor.ndim; ++i) {
+        const int64_t d = rec.tensor.shape[i];
+        if (d < 0)
+            return fail("negative shape[" + std::to_string(i) + "]");
+        if (d > 0 && numel > INT64_MAX / d)
+            return fail("shape product overflows");
+        numel *= d;
+    }
+    // Block-quantised qtypes report 0 element bytes and are not sized here;
+    // the plain ones must fit behind their offset.
+    if (rec.tensor.nbytes() > data_bytes - rec.data_off)
+        return fail("tensor bytes " + std::to_string(rec.tensor.nbytes()) + " past the alloc at offset " +
+                    std::to_string(rec.data_off));
+    return true;
+}
+
 class WeightUploadLog {
 public:
     // Called from checked_cuda_malloc so record() can resolve byte sizes.

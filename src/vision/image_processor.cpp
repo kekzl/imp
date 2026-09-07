@@ -1,3 +1,10 @@
+// stb's default is 1 << 24 per side, bounded only by w*h*3 <= INT_MAX: a
+// 700 KB PNG of a 26000x26000 flat image decodes to ~2 GiB of host RGB per
+// request part before any resize looks at it (AUDIT_arch_2026 F2-4). 16384
+// is far above every tower's useful input (Qwen3-VL smart_resize tops out
+// around 1000 patches of 32 px); a larger picture is refused by stbi_load
+// before the allocation.
+#define STBI_MAX_DIMENSIONS 16384
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 

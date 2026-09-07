@@ -800,6 +800,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         snap_max_seq_len = state.max_seq_len;
     }
 
+    // The byte bound first: the merge walk over the prompt is the cost the
+    // token check below arrives too late for (AUDIT_arch_2026 F2-9).
+    if (!prompt_within_input_budget(res, prompt.size(), state.max_input_tokens, "prompt"))
+        return;
+
     // Tokenize raw prompt (no chat template)
     std::vector<int32_t> tokens = snap_tok->encode(prompt);
     int n_prompt_tokens = static_cast<int>(tokens.size());

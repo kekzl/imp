@@ -310,6 +310,12 @@ std::unique_ptr<WeightSnapshot> weight_cache_load(const std::string& cache_path,
             cur += bytes;
             rec.allocs.push_back({nullptr, static_cast<size_t>(bytes)});  // device ptr set at restore
         }
+        std::string why;
+        if (!weight_record_indices_ok(rec, &why)) {
+            IMP_LOG_WARN("Warm cache: %s record %u: %s. Ignoring (cold load)", cache_path.c_str(), i,
+                         why.c_str());
+            return nullptr;
+        }
         snap->builder_add_views(std::move(rec), std::move(views));
     }
 

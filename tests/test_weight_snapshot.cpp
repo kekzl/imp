@@ -186,4 +186,48 @@ TEST(WeightSnapshotArmSlotTest, ArmTakeDisarm) {
     EXPECT_EQ(imp::weight_snapshot_take_armed(), fake);
 }
 
+// AUDIT_arch_2026 F1-3: every index a warm-cache record carries into the
+// restore comes out of the file. The record here is what the reader hands
+// to the builder: two allocs of known size, a 4x4 F16 tensor at offset 32.
+TEST(WeightRecordIndicesTest, FileSuppliedIndicesAreBoundsChecked) {
+    imp::WeightUploadRecord rec;
+    rec.allocs.push_back({nullptr, 1024});
+    rec.allocs.push_back({nullptr, 64});
+    int64_t shape[4] = {4, 4, 0, 0};
+    rec.tensor = Tensor(nullptr, QType::F16, 2, shape, true);
+    rec.data_alloc = 0;
+    rec.data_off = 32;
+    rec.scales_alloc = -1;
+
+    std::string why;
+    EXPECT_TRUE(imp::weight_record_indices_ok(rec, &why)) << why;
+    rec.scales_alloc = 1;
+    rec.scales_off = 16;
+    EXPECT_TRUE(imp::weight_record_indices_ok(rec, &why)) << why;
+
+    auto refused = [&](auto mutate, const char* what) {
+        imp::WeightUploadRecord r = rec;
+        mutate(r);
+        std::string reason;
+        EXPECT_FALSE(imp::weight_record_indices_ok(r, &reason)) << what;
+        EXPECT_FALSE(reason.empty()) << what;
+    };
+    refused([](imp::WeightUploadRecord& r) { r.data_alloc = 0x7fffffff; }, "data_alloc past the table");
+    refused([](imp::WeightUploadRecord& r) { r.data_alloc = -1; }, "negative data_alloc");
+    refused([](imp::WeightUploadRecord& r) { r.data_off = 1024; }, "data_off at the end of the alloc");
+    refused([](imp::WeightUploadRecord& r) { r.data_off = 1024 - 16; }, "tensor bytes run past the alloc");
+    refused([](imp::WeightUploadRecord& r) { r.scales_alloc = 2; }, "scales_alloc past the table");
+    refused([](imp::WeightUploadRecord& r) { r.scales_alloc = -7; }, "negative scales_alloc");
+    refused([](imp::WeightUploadRecord& r) { r.scales_off = 64; }, "scales_off at the end of its alloc");
+    refused([](imp::WeightUploadRecord& r) { r.tensor.ndim = 99; }, "ndim past kMaxDims");
+    refused([](imp::WeightUploadRecord& r) { r.tensor.ndim = -1; }, "negative ndim");
+    refused([](imp::WeightUploadRecord& r) { r.tensor.shape[0] = -4; }, "negative shape");
+    refused(
+        [](imp::WeightUploadRecord& r) {
+            r.tensor.shape[0] = int64_t{1} << 40;
+            r.tensor.shape[1] = int64_t{1} << 40;
+        },
+        "shape product overflows int64");
+}
+
 }  // namespace

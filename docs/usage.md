@@ -365,7 +365,8 @@ Server-only flags (not on `imp-cli`):
 | `--reasoning-format <f>` | `deepseek` (default) or `none` — controls `<think>` channel handling |
 | `--think-budget <f>` | Fraction of `max_tokens` reserved for reasoning (default 0.5, 0 = disabled) |
 | `--request-timeout <s>` | Per-request timeout in seconds (default 300, 0 = unlimited) |
-| `--max-input-tokens <n>` | Reject prompts longer than n tokens with HTTP 400 (default 0 = unlimited) |
+| `--max-input-tokens <n>` | Reject prompts longer than n tokens with HTTP 400 (default 0 = unlimited). Holds on `/tokenize`, `/detokenize` and `/v1/messages/count_tokens` too; a body above 16 bytes per allowed token is refused before it is tokenized |
+| `--max-images-per-request <n>` | Cap on `image_url` parts per request (default 8, 0 = unlimited); a side above 16384 px is refused by the decoder |
 | `--prefix-cache <path>` | Persist the prefix cache to `<path>` across restarts |
 
 ```bash

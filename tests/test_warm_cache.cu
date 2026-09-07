@@ -125,6 +125,41 @@ TEST(WarmCacheTest, ColdLoadWritesCacheWarmBootTokenIdentical) {
     warm.down();
 }
 
+// AUDIT_arch_2026 F1-3: a record whose data_alloc indexes past the alloc
+// table must not restore. Layout (weight_cache_file.cpp, version 1):
+// FileHeader is 48 bytes, RecordHeader follows, data_alloc is its int32 at
+// byte 24. The value read back before the flip is asserted to look like an
+// alloc index, so a layout change fails here instead of passing vacuously.
+TEST(WarmCacheTest, HostileAllocIndexFallsBackToColdLoad) {
+    SKIP_IF_NO_MODEL();
+    const std::string cache = imp::weight_cache_path_for(get_model_path(), kCacheDir);
+    CacheCleanup cleanup(cache);
+    {
+        Cycle cold;
+        ASSERT_TRUE(cold.up(get_model_path()));
+        cold.down();
+    }
+    ASSERT_TRUE(std::filesystem::exists(cache));
+    {
+        constexpr std::streamoff kDataAllocOffset = 48 + 24;
+        std::fstream f(cache, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f.is_open());
+        int32_t before = -1;
+        f.seekg(kDataAllocOffset);
+        f.read(reinterpret_cast<char*>(&before), sizeof(before));
+        ASSERT_GE(before, 0) << "offset does not point at data_alloc";
+        ASSERT_LT(before, 16) << "offset does not point at data_alloc";
+        const int32_t hostile = 0x7fffffff;
+        f.seekp(kDataAllocOffset);
+        f.write(reinterpret_cast<const char*>(&hostile), sizeof(hostile));
+    }
+    Cycle c;
+    ASSERT_TRUE(c.up(get_model_path()));
+    EXPECT_EQ(c.model->model->last_warm_hits(), 0) << "a record indexing past the alloc table restored";
+    ASSERT_TRUE(c.generate_greedy());
+    c.down();
+}
+
 TEST(WarmCacheTest, CorruptCacheIsIgnored) {
     SKIP_IF_NO_MODEL();
     const std::string cache = imp::weight_cache_path_for(get_model_path(), kCacheDir);

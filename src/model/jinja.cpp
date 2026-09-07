@@ -12,6 +12,7 @@
 #include <cmath>
 #include <ctime>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -1648,8 +1649,27 @@ private:
 // Evaluator
 // ============================================================================
 
+// Evaluation is bounded the way parsing is (Parser::kMaxParseDepth). The AST
+// depth caps every recursion except one: a macro calling itself goes
+// eval_call -> call_macro -> render_node -> eval -> eval_call with no node
+// depth to stop it, and `range(10000000000)` materialises one Value per
+// element. Both arrive in `tokenizer.chat_template`, i.e. out of the
+// checkpoint (AUDIT_arch_2026 F1-9). Jinja2 raises on Python's recursion
+// limit and minja caps loop iterations; here the evaluator throws and
+// Template::render turns it into the documented empty string plus error().
+struct EvalBudgetExceeded : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 class Evaluator {
 public:
+    // 256 mirrors the parse cap; the deepest macro chain in the zoo is 3.
+    static constexpr int kMaxCallDepth = 256;
+    // Iterations across every loop of one render, and the longest `range`.
+    // The largest real template loops over messages (< 10 000, the server's
+    // cap) times a handful of tools.
+    static constexpr int64_t kMaxLoopIterations = int64_t{1} << 20;
+
     explicit Evaluator(const Context& ctx) {
         // Push root scope
         scopes_.emplace_back();
@@ -1668,6 +1688,38 @@ public:
 
 private:
     using Scope = std::map<std::string, Value>;
+
+    int call_depth_ = 0;
+    int64_t loop_iterations_ = 0;
+
+    struct CallDepthGuard {
+        Evaluator& e;
+        explicit CallDepthGuard(Evaluator& ev) : e(ev) {
+            if (e.call_depth_ >= kMaxCallDepth)
+                throw EvalBudgetExceeded("macro call depth exceeds " + std::to_string(kMaxCallDepth));
+            ++e.call_depth_;
+        }
+        ~CallDepthGuard() { --e.call_depth_; }
+    };
+
+    void count_iteration() {
+        if (++loop_iterations_ > kMaxLoopIterations)
+            throw EvalBudgetExceeded("loop iterations exceed " + std::to_string(kMaxLoopIterations));
+    }
+
+    // Length of range(start, end, step) without materialising it; the
+    // subtraction is done unsigned so INT64_MIN..INT64_MAX cannot overflow.
+    static uint64_t range_length(int64_t start, int64_t end, int64_t step) {
+        if (step > 0 && end > start)
+            return (static_cast<uint64_t>(end) - static_cast<uint64_t>(start) - 1) /
+                       static_cast<uint64_t>(step) +
+                   1;
+        if (step < 0 && start > end)
+            return (static_cast<uint64_t>(start) - static_cast<uint64_t>(end) - 1) /
+                       (uint64_t{0} - static_cast<uint64_t>(step)) +
+                   1;
+        return 0;
+    }
 
     void push_scope() { scopes_.emplace_back(); }
     void pop_scope() {
@@ -1743,6 +1795,7 @@ private:
             int64_t len = static_cast<int64_t>(obj.size());
             push_scope();
             for (auto& [key, val] : obj) {
+                count_iteration();
                 // Loop variables
                 auto loop = Value::make_object();
                 loop.set("index", Value(idx + 1));
@@ -1789,6 +1842,7 @@ private:
         int64_t len = static_cast<int64_t>(arr.size());
         push_scope();
         for (int64_t i = 0; i < len; i++) {
+            count_iteration();
             auto loop = Value::make_object();
             loop.set("index", Value(i + 1));
             loop.set("index0", Value(i));
@@ -2276,6 +2330,7 @@ private:
     void register_macro(const MacroNode& node) { macros_[node.name] = &node; }
 
     Value call_macro(const MacroNode& macro, const CallExpr& call) {
+        CallDepthGuard depth(*this);
         push_scope();
         // Bind positional args
         for (size_t i = 0; i < macro.params.size(); i++) {
@@ -2325,14 +2380,20 @@ private:
             }
             if (var->name == "range") {
                 Value::Array arr;
+                int64_t start = 0, end = 0, step = 1;
                 if (call.args.size() == 1) {
-                    int64_t n = eval(*call.args[0]).as_int();
-                    for (int64_t i = 0; i < n; i++)
+                    end = eval(*call.args[0]).as_int();
+                } else if (call.args.size() >= 2) {
+                    start = eval(*call.args[0]).as_int();
+                    end = eval(*call.args[1]).as_int();
+                    step = (call.args.size() >= 3) ? eval(*call.args[2]).as_int() : 1;
+                }
+                if (range_length(start, end, step) > static_cast<uint64_t>(kMaxLoopIterations))
+                    throw EvalBudgetExceeded("range length exceeds " + std::to_string(kMaxLoopIterations));
+                if (call.args.size() == 1) {
+                    for (int64_t i = 0; i < end; i++)
                         arr.push_back(Value(i));
                 } else if (call.args.size() >= 2) {
-                    int64_t start = eval(*call.args[0]).as_int();
-                    int64_t end = eval(*call.args[1]).as_int();
-                    int64_t step = (call.args.size() >= 3) ? eval(*call.args[2]).as_int() : 1;
                     if (step > 0) {
                         for (int64_t i = start; i < end; i += step)
                             arr.push_back(Value(i));
@@ -2824,7 +2885,13 @@ bool Template::parse(const std::string& source_in) {
 
 std::string Template::render(const Context& ctx) const {
     detail::Evaluator eval(ctx);
-    return eval.render(nodes_);
+    try {
+        return eval.render(nodes_);
+    } catch (const detail::EvalBudgetExceeded& e) {
+        error_ = e.what();
+        IMP_LOG_WARN("jinja: render refused: %s", e.what());
+        return std::string();
+    }
 }
 
 }  // namespace imp::jinja
