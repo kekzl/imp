@@ -628,6 +628,11 @@ once per process (0.71 MiB). Row 2 (`chunk_eager_k_/_v_`) fired in neither phase
 The interposer prints two caller frames per site, which is how the 24 KB `VRAMAllocator::allocate`
 resolved to `bind_mrope_`.
 
+**2026-09-07, #1940:** phase A at 0. The MTP post-norm feed scratch is a workspace field sized
+once at enable time (`MtpDraftWorkspace::d_prenorm_rows`, rows = the executor's token cap) under
+the same Planning scope as the workspace; the file-static and its reset hook are gone. Phase B
+keeps its 3 pinned constrainer tables.
+
 Two things the first run got wrong, both worth keeping because both are the campaign's
 recurring shape:
 
