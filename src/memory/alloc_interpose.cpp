@@ -31,11 +31,13 @@
 #include <cuda_runtime_api.h>
 
 #include <dlfcn.h>
+#include <execinfo.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <mutex>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -70,6 +72,11 @@ struct Site {
     const void* ret = nullptr;
     uint64_t calls = 0;
     uint64_t bytes = 0;
+    // Two frames above `ret`, taken on first sight. The site alone names the
+    // cudaMalloc, not the path: `VRAMAllocator::allocate` was a 24 KB serving
+    // allocation with no way to say who asked. backtrace() unwinds through
+    // .eh_frame, so no frame pointers are needed.
+    const void* up[2] = {nullptr, nullptr};
 };
 constexpr size_t kMaxSites = 32;
 std::mutex g_site_mu;
@@ -86,10 +93,34 @@ void tally_site(const void* ret, size_t bytes) {
         }
     }
     if (g_sites.size() < kMaxSites) {
-        g_sites.push_back(Site{ret, 1, bytes});
+        Site s{ret, 1, bytes};
+        void* bt[8];
+        const int n = backtrace(bt, 8);
+        for (int i = 0; i < n; ++i) {
+            if (bt[i] != ret)
+                continue;
+            for (int j = i + 1, k = 0; j < n && k < 2; ++j, ++k)
+                s.up[k] = bt[j];
+            break;
+        }
+        g_sites.push_back(s);
         return;
     }
     g_sites_overflow_calls++;
+}
+
+// "<object> +0x<offset>" for one return address, the form addr2line takes.
+std::string site_str(const void* p) {
+    if (!p)
+        return "?";
+    Dl_info info{};
+    if (dladdr(p, &info) && info.dli_fbase) {
+        char buf[512];
+        std::snprintf(buf, sizeof buf, "%s +0x%llx", info.dli_fname ? info.dli_fname : "?",
+                      (unsigned long long)((const char*)p - (const char*)info.dli_fbase));
+        return buf;
+    }
+    return "?";
 }
 
 void print_sites() {
@@ -98,17 +129,11 @@ void print_sites() {
         return;
     std::sort(g_sites.begin(), g_sites.end(),
               [](const Site& a, const Site& b) { return a.calls > b.calls; });
-    IMP_LOG_DEBUG("    by call site (addr2line -e <binary> <offset>):");
+    IMP_LOG_DEBUG("    by call site (addr2line -e <binary> <offset>; site <- caller <- caller):");
     for (const auto& s : g_sites) {
-        Dl_info info{};
-        const char* obj = "?";
-        unsigned long long off = 0;
-        if (dladdr(s.ret, &info) && info.dli_fbase) {
-            obj = info.dli_fname ? info.dli_fname : "?";
-            off = (unsigned long long)((const char*)s.ret - (const char*)info.dli_fbase);
-        }
-        IMP_LOG_DEBUG("      %8llu calls  %9.3f MiB   %s +0x%llx", (unsigned long long)s.calls,
-                      s.bytes / (1024.0 * 1024.0), obj, off);
+        IMP_LOG_DEBUG("      %8llu calls  %9.3f MiB   %s <- %s <- %s", (unsigned long long)s.calls,
+                      s.bytes / (1024.0 * 1024.0), site_str(s.ret).c_str(), site_str(s.up[0]).c_str(),
+                      site_str(s.up[1]).c_str());
     }
     if (g_sites_overflow_calls)
         IMP_LOG_DEBUG("      %8llu calls  (further sites, table full)",

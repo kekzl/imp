@@ -234,7 +234,7 @@ Confirmed against A1.7. Three corrections the inventory forced:
 
 No tier for the library reservation (F4): it is not imp's memory, it is a **charge** the planner subtracts before distributing anything (A4).
 
-One entry straddles tiers: the per-request `cudaMallocAsync` traffic in `engine_graph_decode.cpp` / `engine_scheduler.cpp` is logically T4 but implemented as driver calls on the hot path. That is the I2 violation; moving it to T4 is the fix.
+One entry used to straddle tiers: the per-request `cudaMallocAsync` traffic in `engine_graph_decode.cpp` / `engine_scheduler.cpp` was logically T4 but implemented as driver calls on the hot path. Since 2026-09-07 that family (serial and ragged prefill metadata, the sync and async graph-loop block tables, the constrained pipeline's table/token/pos/ctx) is one T2 allocation at init, `Engine::init_serving_metadata_pool_()` carved by `runtime/serving_metadata_layout.h`; the driver calls remain only as the fallback for a pool that failed to allocate.
 
 ---
 

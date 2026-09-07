@@ -1022,6 +1022,12 @@ bool Engine::init_kv_cache() {
             static_cast<size_t>(config_.max_seq_len) * sizeof(int32_t));
         if (cudaEventCreateWithFlags(&pf_staging_evt_, cudaEventDisableTiming) != cudaSuccess)
             pf_staging_evt_ = nullptr;
+        // The constrained pipeline's pinned landing for the sampled token and
+        // its ready event: engine-lifetime, so a first json request does not
+        // allocate while serving (I2 gate phase B counted the lazy acquire).
+        cpipe_.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
+        if (cudaEventCreateWithFlags(&cpipe_.ev, cudaEventDisableTiming) != cudaSuccess)
+            cpipe_.ev = nullptr;
     }
 
     // Report memory
@@ -1096,6 +1102,21 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     pool_bt_cap_ = bt_cap;
     rg_rows_cap_ = config_.max_seq_len;
     rg_seq_cap_ = seq_cap;
+    // The M-RoPE position uploads (engine_qwen3vl.cpp) are the same family
+    // and grew on demand: the first 2k-row chunk took 24 KB from the arena
+    // while serving (I2 gate phase B). Sized once here to what bind_mrope_
+    // can be asked for: prefill rows up to the executor's chunk ceiling,
+    // decode rows up to the batch ceiling. bind_mrope_ never regrows a
+    // buffer that fits.
+    if (model_->config_.has_mrope()) {
+        const int rows = std::max(1, executor_ ? executor_->max_tokens() : config_.max_seq_len);
+        d_mrope_prefill_ = static_cast<int32_t*>(
+            vram_alloc_.allocate(static_cast<size_t>(3) * rows * sizeof(int32_t), "mrope_positions"));
+        mrope_prefill_cap_ = d_mrope_prefill_ ? rows : 0;
+        d_mrope_decode_ = static_cast<int32_t*>(
+            vram_alloc_.allocate(static_cast<size_t>(seq_cap) * sizeof(int32_t), "mrope_delta"));
+        mrope_decode_cap_ = d_mrope_decode_ ? seq_cap : 0;
+    }
     IMP_LOG_INFO("Serving metadata pool: %.1f MiB (rows %d, %d tables x %d blocks)",
                  prefill_pool_size_ / (1024.0 * 1024.0), config_.max_seq_len, seq_cap + 4, bt_cap);
 }
