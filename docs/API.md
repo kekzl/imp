@@ -91,7 +91,7 @@ the server log (#1640, #1641):
 | `imp_requests_timed_out_total` | the server ended a request at `--request-timeout`. The client sees `finish_reason: "length"`, which is also what a spent token budget produces - this counter is the only way to tell them apart |
 | `imp_kv_pressure_rejections_total` | a request was cancelled because the KV pool could not give it blocks (admission or mid-decode). Not incremented for a failed metadata allocation or a snapshot mismatch, which are different faults |
 | `imp_kv_pool_growths_total` | the growable pool committed more memory. A pool that keeps growing under load is the signal that arrives before it stops being able to |
-| `imp_streaming_kv_auto_enables_total` | the KV pool ran nearly full on an F16-KV model and StreamingLLM eviction switched itself on. The same event demotes CUDA graphs one-way for the rest of the process. `usage.prompt_tokens_details.evicted_tokens` is the per-request size, this is the rate |
+| `imp_streaming_kv_auto_enables_total` | the KV pool ran nearly full on an F16-KV model and StreamingLLM eviction switched itself on. The same event demotes CUDA graphs; both are lifted again once a fifth of the pool is free, unless a sequence was actually evicted, which pins them for the rest of the process. `usage.prompt_tokens_details.evicted_tokens` is the per-request size, this is the rate |
 | `imp_prefix_cache_evictions_total` | a cached prefix block was reclaimed for a new allocation. Rising while `imp_tokens_cached_total` stalls means the pool is smaller than the working set |
 
 `imp_requests_cancelled_total` remains client-disconnect only.

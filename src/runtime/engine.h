@@ -356,10 +356,19 @@ public:
     // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
     uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
     // StreamingLLM auto-enable events (pool >90% full). Each one also demotes
-    // CUDA graphs one-way for the rest of the process, so it is the
+    // CUDA graphs until the pressure clears (promote_graphs_), so it is the
     // preemption signal an operator wants as a counter, not as a WARN line.
     uint64_t streaming_kv_auto_enables() const noexcept {
         return streaming_kv_auto_enables_.load(std::memory_order_relaxed);
+    }
+    // Blocks StreamingLLM actually evicted from live sequences. Non-zero pins
+    // the demotion for the rest of the process (graph_eligibility.h).
+    uint64_t streaming_kv_evicted_blocks() const noexcept {
+        return streaming_kv_evicted_blocks_.load(std::memory_order_relaxed);
+    }
+    // Times the mid-run demotion was lifted again.
+    uint64_t graph_repromotions() const noexcept {
+        return graph_repromotions_.load(std::memory_order_relaxed);
     }
     // Counted by the manager (the reclaim is decided there), read here so
     // /metrics needs no manager handle.
@@ -431,6 +440,8 @@ private:
     bool kv_pool_floored_ = false;     // the pool is the rescue floor, not a size
     std::atomic<uint64_t> kv_pressure_rejections_{0};
     std::atomic<uint64_t> streaming_kv_auto_enables_{0};
+    std::atomic<uint64_t> streaming_kv_evicted_blocks_{0};
+    std::atomic<uint64_t> graph_repromotions_{0};
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
     CudaStream stream_;
@@ -1279,6 +1290,7 @@ private:
     void log_resolved_dispatch_once_();
 
     void init_resolve_kv_dtype_policy_();
+    void init_resolve_prefill_graph_();
     void init_resolve_ssm_dtype_();
     void init_resolve_fp8_prefill_();
     void init_resolve_quant_flags_();
@@ -1413,6 +1425,8 @@ private:
     // one format. Idempotent: calling it once graphs are already off keeps the
     // original reason and logs nothing further.
     void demote_graphs_(GraphDemotionReason reason);
+    // Lifts a mid-run demotion (engine_scheduler.cpp). Init-time reasons stay.
+    void promote_graphs_();
 
     // Returns: 0 = no async graph active, 1 = still running (step returns true),
     //         -1 = graph exhausted/generation done (check scheduler for more work)

@@ -701,6 +701,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     init_apply_debug_raw_overrides_();
     init_apply_rope_override_();
     init_resolve_kv_dtype_policy_();
+    init_resolve_prefill_graph_();
     init_resolve_ssm_dtype_();
     init_resolve_fp8_prefill_();
     init_resolve_quant_flags_();

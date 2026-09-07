@@ -215,7 +215,11 @@ def main():
     # KVCacheGrowTest.GrowthStopsAtTheAllocatorHeadroom (test-kv, GPU + VMM, no model).
     # 1068 -> 1071 (AUDIT_arch_2026 B-6): KVCacheTest.ResidencyProbe* x3 (test-kv, GPU, no
     # model: the device-vs-mapped-host bandwidth discriminator needs a real card).
-    PINNED = 1072
+    # 1071 -> 1072 (AUDIT_arch_2026 F1-3, #1942): WarmCacheTest.HostileAllocIndexFallsBackToColdLoad
+    # (test-e2e, GPU + Qwen3-8B: a real cache file with one record index flipped).
+    # 1072 -> 1073 (AUDIT_arch_2026 C-3): ServingSignalsTest.GraphsComeBackWhenThePressureClearsWithoutEvictions
+    # (test-e2e, GPU + Qwen3-8B: the valve fires on a real pool and the replay after re-promotion is the proof).
+    PINNED = 1073
 
     text = CMAKE.read_text()
     mods = module_sources(text)

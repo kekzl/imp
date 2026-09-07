@@ -13,6 +13,7 @@
 #include "batching_engine.h"
 #include "model/model.h"
 #include "model/tokenizer.h"
+#include "runtime/config.h"
 #include "runtime/engine.h"
 #include "test_models.h"
 #include <chrono>
@@ -79,16 +80,25 @@ struct Loaded {
         if (model)
             imp_model_free(model);
     }
-    bool open(int max_batch_size, size_t kv_blocks) {
+    bool open(int max_batch_size, size_t kv_blocks, bool streaming_kv_auto = false) {
         if (imp_model_load(model_path(), IMP_FORMAT_GGUF, &model) != IMP_SUCCESS)
             return false;
+        if (streaming_kv_auto) {
+            // The valve only arms on an F16 pool, and the resolver picks FP8
+            // KV for Qwen3 on its own ("auto"): pin F16 the way an operator
+            // would, or the valve never fires and the test says nothing.
+            imp::RuntimeConfig rc;
+            rc.kv_cache.dtype = "fp16";
+            imp::set_pending_runtime_config(rc);
+        }
         ImpConfig config = imp_config_default();
         config.max_seq_len = 1024;
         config.max_batch_size = max_batch_size;
         config.kv_cache_max_blocks = kv_blocks;
         // The F16-KV eviction valve would answer pressure by dropping context
         // instead of cancelling; the typed cancel is what this file tests.
-        config.streaming_kv_auto = 0;
+        // The one test of the valve itself opts in.
+        config.streaming_kv_auto = streaming_kv_auto ? 1 : 0;
         config.streaming_kv_enabled = 0;
         return imp_context_create(model, &config, &ctx) == IMP_SUCCESS;
     }
@@ -118,6 +128,46 @@ TEST(ServingSignalsTest, MidDecodeKvExhaustionFinishesAsCapacity) {
     EXPECT_GT(r.tokens, 0) << "the pool did not even hold the prompt; the cancel must come mid-decode";
     EXPECT_EQ(r.finish, "capacity");
     EXPECT_EQ(r.sr->request->cancel_reason, imp::CancelReason::KvCapacity);
+    be.stop();
+}
+
+// AUDIT_arch_2026 C-3: the KV-pressure valve used to be a latch. A 35-block
+// pool (560 tokens) holds one request of ~120 prompt + 400 generated tokens
+// (33 blocks); near its end the pool is under a tenth free, StreamingLLM arms
+// itself and graphs are demoted. Nothing is evicted (the eviction threshold
+// is sinks + window = 4100 tokens, above max_seq_len), so once the request is
+// gone the next decode step finds a fifth of the pool free and lifts both.
+// The second request then decodes with graphs back on, which is the replay
+// this recovery has to survive.
+TEST(ServingSignalsTest, GraphsComeBackWhenThePressureClearsWithoutEvictions) {
+    if (!model_exists())
+        GTEST_SKIP() << "Model not found: " << model_path();
+    Loaded m;
+    ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/35, /*streaming_kv_auto=*/true));
+    BatchingEngine be;
+    be.start(m.ctx);
+    auto* engine = m.ctx->engine.get();
+    ASSERT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::None)
+        << "the model must be graph-eligible for this test to say anything";
+
+    Served a{make_request(m.ctx, long_prompt(), 400, 1.0f)};
+    be.submit(a.sr);
+    ASSERT_TRUE(drain(a, 180000)) << "the first request never finished";
+    EXPECT_EQ(a.finish, "length")
+        << "33 of 35 blocks must fit; a capacity cancel means the pool sizing moved";
+    EXPECT_EQ(engine->streaming_kv_auto_enables(), 1u)
+        << "the valve did not fire: the pool never ran under a tenth free";
+    EXPECT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::StreamingKvKvPressure);
+    EXPECT_EQ(engine->streaming_kv_evicted_blocks(), 0u);
+
+    Served b{make_request(m.ctx, "The capital of France is", 8, 0.0f)};
+    be.submit(b.sr);
+    ASSERT_TRUE(drain(b, 60000)) << "the second request never finished";
+    EXPECT_EQ(b.finish, "length");
+    EXPECT_EQ(engine->graph_repromotions(), 1u);
+    EXPECT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::None)
+        << "the demotion outlived the pressure that caused it";
+    EXPECT_EQ(engine->executor()->streaming_window(), 0) << "StreamingLLM stayed armed";
     be.stop();
 }
 
