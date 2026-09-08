@@ -124,6 +124,13 @@ struct GEMM {
     // LM head (for_each_lm_head_batch_ allow_cutlass=false) never take
     // this path. Set false for maximum batched-serving coherence.
     bool nvfp4_lm_head_cutlass = true;
+    // Batched-decode LM head at n <= 32 on the small-M mxf4nvf4 kernel
+    // (gemm_nvfp4_smallm_v2_a4_f32, FP32 logits from the accumulators, the
+    // final norm fuses the activation quantize) ahead of the CUTLASS 128-row
+    // tile: Qwen3-14B-NVFP4 at 32 streams the CUTLASS launch read 365 us per
+    // step against a 268 us weight floor (437 MB). Same W4A4 numerics family
+    // as the CUTLASS path; set false to take that path again.
+    bool nvfp4_lm_head_smallm = true;
     // Small-M (<=32) NVFP4 GEMM for batched decode (impl selected below).
     // History: the W4A16 dequant+HMMA v1 won isolated (23.9 vs CUTLASS's
     // 41.4 us in-situ on N=5120) and LOST the real 32-stream step (45.8 us,

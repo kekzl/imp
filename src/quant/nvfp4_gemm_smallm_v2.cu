@@ -33,6 +33,7 @@
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
+#include <type_traits>
 #include "core/pdl_device.cuh"
 #include "core/pdl.h"
 
@@ -141,11 +142,13 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 // n_base); the single-tensor and pair kernels differ only in how they resolve
 // them from blockIdx. Everything from barrier init through the epilogue is
 // identical to the shipped single-tensor kernel.
-template <int kStages>
+// OutT: half (activations) or float (the batched LM head's logits, read as
+// float by the samplers; single-stripe shapes only).
+template <int kStages, typename OutT>
 __device__ __forceinline__ void smallm_v2_cta_body(
     const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
     const uint8_t* __restrict__ xq_packed, const uint8_t* __restrict__ xq_scales,
-    float* __restrict__ ws_partials, half* __restrict__ y, float ts, int acc_flag, int M, int N_out, int K,
+    float* __restrict__ ws_partials, OutT* __restrict__ y, float ts, int acc_flag, int M, int N_out, int K,
     int stripes, int n_base, int stripe, uint8_t* smem, uint64_t* bar_full, uint64_t* bar_empty) {
     const int tid = threadIdx.x;
     const int warp = tid / 32;
@@ -338,7 +341,10 @@ __device__ __forceinline__ void smallm_v2_cta_body(
                 continue;
             const int n = i % kNR;
             const int64_t o = static_cast<int64_t>(m) * N_out + n_base + n;
-            y[o] = __float2half(ts * s_out[i] + (acc_flag ? __half2float(y[o]) : 0.0f));
+            if constexpr (std::is_same_v<OutT, float>)
+                y[o] = ts * s_out[i] + (acc_flag ? y[o] : 0.0f);
+            else
+                y[o] = __float2half(ts * s_out[i] + (acc_flag ? __half2float(y[o]) : 0.0f));
         }
         return;
     }
@@ -356,18 +362,19 @@ __device__ __forceinline__ void smallm_v2_cta_body(
 // grid = (N/kNR, stripes). Each CTA walks a contiguous stripe of K-tiles for
 // its n-tile and writes one FP32 partial plane per stripe (stripe-exclusive
 // -> deterministic reduce). Dynamic smem: kStages * kStageBytes.
-template <int kStages>
+template <int kStages, typename OutT>
 __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed,
                                             const uint8_t* __restrict__ w_scales,
                                             const uint8_t* __restrict__ xq_packed,
                                             const uint8_t* __restrict__ xq_scales,
-                                            float* __restrict__ ws_partials, half* __restrict__ y, float ts,
+                                            float* __restrict__ ws_partials, OutT* __restrict__ y, float ts,
                                             int acc_flag, int M, int N_out, int K, int stripes) {
     extern __shared__ uint8_t smem[];
     __shared__ uint64_t bar_full[kStages];
     __shared__ uint64_t bar_empty[kStages];
-    smallm_v2_cta_body<kStages>(w_packed, w_scales, xq_packed, xq_scales, ws_partials, y, ts, acc_flag, M,
-                                N_out, K, stripes, blockIdx.x * kNR, blockIdx.y, smem, bar_full, bar_empty);
+    smallm_v2_cta_body<kStages, OutT>(w_packed, w_scales, xq_packed, xq_scales, ws_partials, y, ts, acc_flag,
+                                      M, N_out, K, stripes, blockIdx.x * kNR, blockIdx.y, smem, bar_full,
+                                      bar_empty);
 }
 
 // Sibling variant: two or three weight tensors sharing ONE quantized
@@ -405,9 +412,9 @@ __global__ void gemm_nvfp4_smallm_v2_multi_kernel(SmallMV2MultiArgs a, const uin
     half* y = t2 ? a.y[2] : (t1 ? a.y[1] : a.y[0]);
     const float ts = t2 ? a.ts[2] : (t1 ? a.ts[1] : a.ts[0]);
     const int N = t2 ? a.N[2] : (t1 ? a.N[1] : a.N[0]);
-    smallm_v2_cta_body<kStages>(w, s, xq_packed, xq_scales, /*ws_partials=*/nullptr, y, ts, /*acc_flag=*/0, M,
-                                N, K, /*stripes=*/1, (nt - first) * kNR, /*stripe=*/0, smem, bar_full,
-                                bar_empty);
+    smallm_v2_cta_body<kStages, half>(w, s, xq_packed, xq_scales, /*ws_partials=*/nullptr, y, ts,
+                                      /*acc_flag=*/0, M, N, K, /*stripes=*/1, (nt - first) * kNR,
+                                      /*stripe=*/0, smem, bar_full, bar_empty);
 }
 
 // Reduce the stripe partial planes into FP16 y, applying the combined tensor
@@ -460,11 +467,11 @@ size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K) {
 // only need M rows.
 namespace {
 
-template <int kStages>
-bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M, int N_out, int K,
+template <int kStages, typename OutT>
+bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, OutT* y, int M, int N_out, int K,
                       void* d_workspace, cudaStream_t stream, bool accumulate, int stripes) {
     static const bool smem_ok = [] {
-        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_kernel<kStages>,
+        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_kernel<kStages, OutT>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     kStages * kStageBytes) == cudaSuccess;
     }();
@@ -472,27 +479,33 @@ bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, hal
         return false;
     const dim3 grid(N_out / kNR, stripes);
     const float ts = W.tensor_scale * Xq.tensor_scale;
-    pdl::enable_kernel(gemm_nvfp4_smallm_v2_kernel<kStages>);
-    pdl::launch(gemm_nvfp4_smallm_v2_kernel<kStages>, grid, dim3(kThreads), kStages * kStageBytes, stream,
-        reinterpret_cast<const uint8_t*>(W.packed_data), reinterpret_cast<const uint8_t*>(W.micro_scales),
-        reinterpret_cast<const uint8_t*>(Xq.packed_data), reinterpret_cast<const uint8_t*>(Xq.micro_scales),
-        static_cast<float*>(d_workspace), y, ts, accumulate ? 1 : 0, M, N_out, K, stripes);
+    pdl::enable_kernel(gemm_nvfp4_smallm_v2_kernel<kStages, OutT>);
+    pdl::launch(gemm_nvfp4_smallm_v2_kernel<kStages, OutT>, grid, dim3(kThreads), kStages * kStageBytes,
+                stream, reinterpret_cast<const uint8_t*>(W.packed_data),
+                reinterpret_cast<const uint8_t*>(W.micro_scales),
+                reinterpret_cast<const uint8_t*>(Xq.packed_data),
+                reinterpret_cast<const uint8_t*>(Xq.micro_scales), static_cast<float*>(d_workspace), y, ts,
+                accumulate ? 1 : 0, M, N_out, K, stripes);
     IMP_CUDA_CHECK_LAUNCH();
     if (stripes == 1)
         return true;
-    const int total = M * N_out;
-    if (accumulate) {
-        pdl::enable_kernel(smallm_v2_reduce_kernel<true>);
-        pdl::launch(smallm_v2_reduce_kernel<true>, dim3((total + 255) / 256), dim3(256), size_t(0), stream,
-                    static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
-        IMP_CUDA_CHECK_LAUNCH();
+    if constexpr (std::is_same_v<OutT, float>) {
+        return false;  // no FP32 reduce path: callers refuse striped shapes up front
     } else {
-        pdl::enable_kernel(smallm_v2_reduce_kernel<false>);
-        pdl::launch(smallm_v2_reduce_kernel<false>, dim3((total + 255) / 256), dim3(256), size_t(0), stream,
-                    static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
-        IMP_CUDA_CHECK_LAUNCH();
+        const int total = M * N_out;
+        if (accumulate) {
+            pdl::enable_kernel(smallm_v2_reduce_kernel<true>);
+            pdl::launch(smallm_v2_reduce_kernel<true>, dim3((total + 255) / 256), dim3(256), size_t(0),
+                        stream, static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
+            pdl::enable_kernel(smallm_v2_reduce_kernel<false>);
+            pdl::launch(smallm_v2_reduce_kernel<false>, dim3((total + 255) / 256), dim3(256), size_t(0),
+                        stream, static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        return true;
     }
-    return true;
 }
 
 bool smallm_v2_args_ok(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, int M, int N_out, int K,
@@ -512,7 +525,17 @@ bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& 
     const int stripes = gemm_nvfp4_smallm_v2_stripes(N_out, K);
     if (!smallm_v2_args_ok(W, Xq, M, N_out, K, d_workspace, stripes))
         return false;
-    return launch_smallm_v2<kDefaultStages>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
+    return launch_smallm_v2<kDefaultStages, half>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate,
+                                                  stripes);
+}
+
+bool gemm_nvfp4_smallm_v2_a4_f32(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, float* y, int M,
+                                 int N_out, int K, cudaStream_t stream) {
+    if (gemm_nvfp4_smallm_v2_stripes(N_out, K) != 1 ||
+        !smallm_v2_args_ok(W, Xq, M, N_out, K, /*d_workspace=*/nullptr, /*stripes=*/1))
+        return false;
+    return launch_smallm_v2<kDefaultStages, float>(W, Xq, y, M, N_out, K, /*d_workspace=*/nullptr, stream,
+                                                   /*accumulate=*/false, /*stripes=*/1);
 }
 
 // Two or three sibling tensors (same K, same quantized activation), one
@@ -578,13 +601,13 @@ bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantRe
         return false;
     switch (stages) {
         case 2:
-            return launch_smallm_v2<2>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
+            return launch_smallm_v2<2, half>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
         case 3:
-            return launch_smallm_v2<3>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
+            return launch_smallm_v2<3, half>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
         case 4:
-            return launch_smallm_v2<4>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
+            return launch_smallm_v2<4, half>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
         case 6:
-            return launch_smallm_v2<6>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
+            return launch_smallm_v2<6, half>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
         default:
             return false;
     }

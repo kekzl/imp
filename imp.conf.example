@@ -585,6 +585,10 @@ nvfp4_cutlass_streamk = 1
 # @16; PPL +1.9-2.1% on MoE/hybrid, +0.2-0.5% (noise-level) on dense. Default ON
 # since 2026-07-12; single-stream and spec-verify are unaffected (bit-identical).
 nvfp4_lm_head_cutlass = true
+# Batched-decode LM head at n <= 32 on the small-M mxf4nvf4 kernel (FP32 logits,
+# norm-fused activation quantize) ahead of the CUTLASS 128-row tile: Qwen3-14B
+# at 32 streams 365 us per step on CUTLASS against a 268 us weight floor.
+nvfp4_lm_head_smallm = true
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false

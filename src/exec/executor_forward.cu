@@ -31,6 +31,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_quant.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/hadamard.h"
 #include "core/cuda_errors.h"
@@ -897,13 +898,50 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 nvfp4_lm_r.K = cfg.d_model;
             }
             Tensor no_final = view_tokens(norm_out_, n);
-            rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             bool lm_done = false;
+            bool normed = false;
+            // Small-M path first (n <= 32, gemm.nvfp4_lm_head_smallm): the
+            // smallm v2 kernel at one stripe (a vocab-sized N tiles the card
+            // many times over) streams the weight once at the sibling-launch
+            // bandwidth and writes FP32 logits straight from its accumulators;
+            // the final norm fuses the activation quantize into the small-M
+            // scratch. Declines fall through to the CUTLASS / GEMV chain.
+            if (dispatch_policy().gemm.nvfp4_lm_head_smallm && n <= 32 && (cfg.d_model % 256) == 0 &&
+                (cfg.vocab_size % 64) == 0) {
+                const int K = cfg.d_model;
+                const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
+                ensure_smallm_xq_(xq_need, stream);
+                if (smallm_xq_bytes_ >= xq_need) {
+                    uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
+                    uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
+                    if (!rmsnorm_nvfp4(h_final, model_->output_norm(), no_final, xq_packed, xq_scales,
+                                       cfg.rms_norm_eps, stream, norm_w_off_)) {
+                        rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream,
+                                norm_w_off_);
+                        quantize_fp16_to_nvfp4_into(no_final.data, n, K, xq_packed, xq_scales,
+                                                    /*tensor_scale=*/1.0f, stream);
+                    }
+                    normed = true;
+                    // The scratch now holds the final-norm rows, not a layer input.
+                    smallm_xq_src_ = nullptr;
+                    smallm_xq_from_producer_ = false;
+                    NvFP4QuantResult xq;
+                    xq.packed_data = xq_packed;
+                    xq.micro_scales = xq_scales;
+                    xq.tensor_scale = 1.0f;
+                    xq.N = n;
+                    xq.K = K;
+                    lm_done = gemm_nvfp4_smallm_v2_a4_f32(nvfp4_lm_r, xq, static_cast<float*>(lg.data), n,
+                                                          cfg.vocab_size, K, stream);
+                }
+            }
+            if (!normed)
+                rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             // Tensor-core path: one CUTLASS NVFP4 GEMM (M=n) reads the LM-head
             // weight ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (the
             // samplers read float logits). Falls back to the GEMV if disabled or
             // the kernel declines the shape.
-            if (lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
+            if (!lm_done && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
                 qscratch_.cutlass_act_sf != nullptr) {
                 quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data,
                                                qscratch_.cutlass_act_sf, n, cfg.d_model, stream);
