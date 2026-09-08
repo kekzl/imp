@@ -7,6 +7,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
+#include "runtime/prefill_pacing.h"
 #include "runtime/config.h"
 #include "core/buffer.h"
 #include "compute/mtp_forward.h"
@@ -58,8 +59,18 @@ void Engine::step_prefill(cudaStream_t stream) {
     // the chunk while decoders are active so their inter-token latency stays
     // bounded during another session's ingest; the full chunk (and its
     // better weight-traffic amortization) returns as soon as nobody decodes.
-    const int decode_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
-    if (decode_cap > 0 && !sched_decode_batch_.empty() && effective_chunk > decode_cap) {
+    // With runtime.prefill_cap_fairness the cap scales by waiting / decoding
+    // (prefill_pacing.h): a burst's 30 waiters are not paced behind its 2
+    // first finishers. 0 when nobody decodes.
+    const int configured_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
+    const int decode_cap = paced_prefill_cap(configured_cap, effective_chunk,
+                                             static_cast<int>(sched_prefill_batch_.size()),
+                                             static_cast<int>(sched_decode_batch_.size()),
+                                             runtime_config_.runtime.prefill_cap_fairness);
+    if (decode_cap > configured_cap)
+        IMP_LOG_DEBUG("Prefill pacing: %zu waiting / %zu decoding, cap %d -> %d", sched_prefill_batch_.size(),
+                      sched_decode_batch_.size(), configured_cap, decode_cap);
+    if (decode_cap > 0 && effective_chunk > decode_cap) {
         int capped = decode_cap;
         if (kv_manager_) {
             int bs = kv_manager_->kv_cache()->block_size();
@@ -90,7 +101,8 @@ void Engine::step_prefill(cudaStream_t stream) {
     // the token budget below, not by the count).
     const bool forward_capped = batch_cap > 0 && !sched_decode_batch_.empty();
     constexpr int kPrefillForwardFloorTokens = 256;
-    const bool budgeted = decode_cap > 0 && !sched_decode_batch_.empty();
+    // decode_cap is already 0 when nobody decodes (paced_prefill_cap).
+    const bool budgeted = decode_cap > 0;
     int token_budget = budgeted ? std::max(decode_cap, kPrefillForwardFloorTokens) : 0;
 
     // Rotation is by request ID, not by index: requests LEAVE the batch as
