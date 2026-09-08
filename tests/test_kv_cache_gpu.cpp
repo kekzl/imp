@@ -603,9 +603,15 @@ TEST(KVCacheTest, ResidencyProbeReadsZeroWithoutMemory) {
 
 TEST(KVCacheTest, ResidencyProbeCoversTheCommittedPrefixOfAGrowablePool) {
     SKIP_IF_NO_CUDA();
-    // 512 of 2048 blocks committed: the probe may only touch the committed
-    // prefix of each layer region, 16 MiB of the 64 MiB reserved.
-    KVCache cache(2, 8, 128, QType::F16, 512, 16, nullptr, 2048);
+    // 4096 of 8192 blocks committed: the probe may only touch the committed
+    // prefix of each layer region, 128 MiB of the 256 MiB reserved per
+    // region (a copy past the prefix would fault). Committed that much on
+    // purpose: at 512 blocks the four copies moved 32 MiB in total, which is
+    // four launches' worth of latency, and the pre-push gate read 429.9 GB/s
+    // on resident VRAM after 170 FA2 tests had run in the same process
+    // (2026-09-08). A set past the 96 MB L2 and past launch latency is what
+    // the probe is specified for (kv_cache.cu probe_residency).
+    KVCache cache(2, 8, 128, QType::F16, 4096, 16, nullptr, 8192);
     if (!cache.growable())
         GTEST_SKIP() << "no VMM backend on this device";
     EXPECT_GT(cache.probe_residency(), kKvPoolSpillGbps);

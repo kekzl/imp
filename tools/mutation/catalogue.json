@@ -513,6 +513,96 @@
    "focus": "test-core",
    "find": "                case SchemaType::OBJECT:\n                    // Depth cap: recursive $ref schemas allow unbounded nesting;\n                    // refuse to open deeper than ~96 levels (any finite nesting\n                    // still satisfies the schema, so this only forces closure).\n                    if (c == '{') {\n                        if (stk.size() >= kMaxSchemaStackDepth)\n                            return false;\n                        f.phase = SchemaPhase::OBJECT_OPEN;",
    "replace": "                case SchemaType::OBJECT:\n                    // Depth cap: recursive $ref schemas allow unbounded nesting;\n                    // refuse to open deeper than ~96 levels (any finite nesting\n                    // still satisfies the schema, so this only forces closure).\n                    if (c == '{') {\n                        // [MUTANT] schema depth cap removed\n                        f.phase = SchemaPhase::OBJECT_OPEN;"
+  },
+  {
+   "id": "M57",
+   "category": "scheduling",
+   "file": "src/runtime/graph_eligibility.h",
+   "desc": "KV-pressure trigger counts only the free list: reclaimable prefix-cache blocks read as exhausted (the #1879 shape, 40% of decode lost for the process).",
+   "focus": "test-core",
+   "find": "    return pool_total > 0 && free_blocks + reclaimable_blocks < pool_total / 10;",
+   "replace": "    return pool_total > 0 && free_blocks < pool_total / 10;  // [MUTANT] reclaimable dropped"
+  },
+  {
+   "id": "M58",
+   "category": "scheduling",
+   "file": "src/runtime/graph_eligibility.h",
+   "desc": "Graph re-promotion ignores evictions: a block table with -1 sentinels would be replayed by a captured graph (the #948 IMA class).",
+   "focus": "test-core",
+   "find": "    return evicted_blocks == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;",
+   "replace": "    return pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;  // [MUTANT] eviction pin dropped"
+  },
+  {
+   "id": "M59",
+   "category": "scheduling",
+   "file": "src/runtime/scheduler.cpp",
+   "desc": "An aged request that cannot get its KV blocks no longer holds the queue: shorter requests that fit keep passing it (AUDIT_arch_2026 C-2).",
+   "focus": "test-e2e",
+   "find": "                    // Otherwise: not enough memory right now. An aged head\n                    // keeps the queue; anyone else lets smaller requests by.\n                    if (aged)\n                        break;\n                    ++it;",
+   "replace": "                    // Otherwise: not enough memory right now. An aged head\n                    // keeps the queue; anyone else lets smaller requests by.\n                    // [MUTANT] aged hold removed\n                    ++it;"
+  },
+  {
+   "id": "M60",
+   "category": "loader",
+   "file": "src/memory/weight_snapshot.h",
+   "desc": "Warm-cache record index unchecked: a file-supplied data_alloc indexes past the alloc table and the garbage becomes a device pointer (AUDIT_arch_2026 F1-3).",
+   "focus": "test-core",
+   "find": "    if (rec.data_alloc < 0 || rec.data_alloc >= n_allocs)",
+   "replace": "    if (false)  // [MUTANT] data_alloc range check removed"
+  },
+  {
+   "id": "M61",
+   "category": "loader",
+   "file": "src/model/sentencepiece_loader.cpp",
+   "desc": "SentencePiece length guard back to the pointer-sum form: a 64-bit length near 2^64 wraps below end_ and passes (AUDIT_arch_2026 F1-8).",
+   "focus": "test-core",
+   "find": "        if (len > static_cast<uint64_t>(end_ - data_)) {",
+   "replace": "        if (data_ + len > end_) {  // [MUTANT] wrapping pointer sum"
+  },
+  {
+   "id": "M62",
+   "category": "loader",
+   "file": "src/model/jinja.cpp",
+   "desc": "Jinja macro call depth unbounded: a self-calling macro in a chat template recurses until SIGSEGV (AUDIT_arch_2026 F1-9).",
+   "focus": "test-core",
+   "find": "        CallDepthGuard depth(*this);\n        push_scope();",
+   "replace": "        // [MUTANT] call depth guard removed\n        push_scope();"
+  },
+  {
+   "id": "M63",
+   "category": "loader",
+   "file": "src/model/json_util.cpp",
+   "desc": "JSON node budget removed: a 128 MiB header of `0,` expands to ~6.6 GiB of tree (AUDIT_arch_2026 F1-10).",
+   "focus": "test-core",
+   "find": "    if (depth_ > kMaxDepth || ++nodes_ > max_nodes_) {",
+   "replace": "    if (depth_ > kMaxDepth) {  // [MUTANT] node budget removed"
+  },
+  {
+   "id": "M64",
+   "category": "loader",
+   "file": "src/model/json_util.cpp",
+   "desc": "JSON number parse errors ignored: `-` and `1e999` parse as 0 instead of failing the document.",
+   "focus": "test-core",
+   "find": "    if (ec != std::errc{} || ptr != data_ + pos_) {",
+   "replace": "    if (false) {  // [MUTANT] number parse error ignored"
+  },
+  {
+   "id": "M65",
+   "category": "loader",
+   "file": "src/model/model_limits.h",
+   "desc": "head_dim ceiling removed: a config.json head_dim of 2^31-1 sizes two 8.6 GiB rope tables before any check (AUDIT_arch_2026 F1-10).",
+   "focus": "test-core",
+   "find": "    if (cfg.head_dim < 0 || cfg.head_dim > kMaxHeadDim)",
+   "replace": "    if (false)  // [MUTANT] head_dim ceiling removed"
+  },
+  {
+   "id": "M66",
+   "category": "config",
+   "file": "src/runtime/config.cpp",
+   "desc": "Trailing garbage on an integer key accepted again: `--set speculative.k=16k` binds 16 and says nothing (#1627).",
+   "focus": "test-core",
+   "find": "        int out = std::stoi(v, &used);\n        // stoi stops at the first non-digit, so \"16k\" and \"1,2\" parsed as 16\n        // and 1 without complaint. Trailing garbage is a bad value.\n        if (used != v.size() && ok)\n            *ok = false;\n        return out;",
+   "replace": "        int out = std::stoi(v, &used);\n        // [MUTANT] trailing garbage accepted\n        return out;"
   }
  ]
 }

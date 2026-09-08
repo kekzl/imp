@@ -72,8 +72,13 @@ Absent instruments: nothing in the tree produces the number, so no threshold can
   `tools/imp-server/metrics_memory.cpp:56`, `tests/test_memory_backend.cpp:223`,
   `src/memory/alloc_interpose.cpp:129`. Leaks, KV-pool fragmentation and handle exhaustion surface
   in production.
+- **No device-memory checker has run against the kernels in any automated lane**
+  (AUDIT_arch_2026 F2-7). The CI `test` job's memcheck step sits behind `HAS_GPU_RUNNER` (unset)
+  and is `continue-on-error`; `make sanitize` fails to initialise on WSL2 (verified 2026-06-04);
+  `scripts/verify.sh` never calls it. `make asan` and the `Sanitizers` job cover host code only.
+  Fixing it needs a native-Linux GPU box, the same blocker as the GPU CI lane.
 
-Both need a GPU runner or a long-running machine with a card; CI has neither.
+All three need a GPU runner or a long-running machine with a card; CI has neither.
 
 ## Known-bad and known-limited behaviour
 

@@ -306,7 +306,15 @@ else
         # four months, in the subsystem with the most kernel churn in the tree.
         # check_verify_filter.sh now fails when any pattern here matches
         # nothing.
-        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*"
+        # `*Attention*` covers the paged decode family and none of the FMHA
+        # prefill fixtures (AUDIT_arch_2026 I-2). The default-path FA2
+        # fixtures are added by name; measured on the RTX 5090 they cost
+        # ~40 s (FmhaFA2Test 36 tests 20.7 s, FmhaFA2Hd256Test 11.9 s,
+        # FmhaFA2PvF16Test 6.5 s, the rest under 1 s). Left out on purpose:
+        # FmhaSm120Test (legacy tier, 120 s), FmhaFP8Test (opt-in tier,
+        # 105 s), FmhaFA2Dense2CtaTest (40 s), FmhaFA2Hd256Bkv32Test (opt-in
+        # bkv=32, 12.5 s); `make test-gpu` runs them.
+        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*:FmhaFA2Test.*:FmhaFA2Hd256Test.*:FmhaFA2PvF16Test.*:FmhaHd512Test.*:FmhaFA2HeavyFirstTest.*:FmhaFA2Fp8ScaledTest.*:FhmaMxFP4Test.*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
         else

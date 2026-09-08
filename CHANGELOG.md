@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `make verify-fast` runs the default-path FA2 prefill fixtures (~40 s more); `make test-quantize` round-trips
+  Qwen3-0.6B through `imp-quantize`; DRY, mirostat and `logit_bias` have kernel tests; ten mutation anchors
+  outside the kernel slice; a nightly libFuzzer job ([AUDIT_arch_2026 I-2, I-4, I-5, I-6, F2-6](docs/audit/AUDIT_arch_2026.md))
 - `--max-concurrent` admits on an atomic in-flight counter (the queue-depth read raced its own
   submit) and httplib's job queue is bounded at one pool's worth, so connections past it are closed
   at once instead of hanging without a timer ([AUDIT_arch_2026 E-2](docs/audit/AUDIT_arch_2026.md))

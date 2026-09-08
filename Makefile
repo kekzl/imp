@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -243,6 +243,12 @@ test-spec-fidelity: build
 		$(DOCKER_IMG) test-e2e --gtest_filter="SpecCaptureFidelityTest.CachedGraphMatchesEagerForward"
 
 SPEC_FIDELITY_MODEL ?= /models/Qwen3.8-27B-NVFP4-vllm
+
+# imp-quantize round trip (AUDIT_arch_2026 I-6): BF16 SafeTensors -> NVFP4
+# with the shipped tool, loaded back through imp-cli, one greedy answer.
+# Opt-in like test-server; skips without $(HOME)/models/Qwen3-0.6B.
+test-quantize: build
+	bash scripts/test_quantize.sh
 
 # Vision GPU golden (R9 / #583): SigLIP + gemma4v encoder + projector tail.
 # Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.
