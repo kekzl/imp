@@ -539,6 +539,23 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 }
 
+// `runtime.prefill_graph` is default-on, but the capture gate in
+// engine_prefill.cpp needs the F16 KV append: every quantized append runs a
+// dynamic-scale reduction with a host absmax sync per chunk, which aborts a
+// capture. So on every quantized KV dtype the flag was read, stored and could
+// never fire, and the first prefill logged "not capturing" with seven flags
+// to decode (AUDIT_arch_2026 C-10). Resolve it here and say why, once, the
+// way the other policies do. Runs after the KV dtype is final.
+void Engine::init_resolve_prefill_graph_() {
+    if (!runtime_config_.runtime.prefill_graph || config_.kv_cache_dtype == QType::F16)
+        return;
+    runtime_config_.runtime.prefill_graph = false;
+    IMP_LOG_INFO(
+        "prefill graph: off, the %s KV append syncs its scale to the host per chunk and cannot "
+        "be captured (F16 KV captures; runtime.prefill_graph resolved to false)",
+        qtype_name(config_.kv_cache_dtype));
+}
+
 // Auto-detect SSM state dtype for hybrid models. Nemotron-H and similar
 // Mamba models: use FP16 (~50% VRAM savings). GDN models (Qwen3.5/3.6)
 // MUST keep FP32: the delta-rule scan kernel writes FP32 (float) into

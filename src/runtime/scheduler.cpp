@@ -81,6 +81,15 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         auto it = pending_.begin();
         while (it != pending_.end() && static_cast<int>(active_.size()) < max_batch_size_) {
             auto& req = *it;
+            // Aging lifted this request to the head of its class; the
+            // allocator half of the guarantee is that nothing behind it is
+            // admitted in a round where it could not get its blocks. Without
+            // the hold, a stream of shorter requests that each fit kept
+            // passing an aged one on a pool that was nearly but never quite
+            // full (AUDIT_arch_2026 C-2). Only the aged head holds the queue:
+            // the infeasible case below still cancels, and a request that has
+            // not aged still yields to what fits.
+            const bool aged = now - req->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
 
             // Memory-aware check: estimate KV blocks needed for this request
             if (kv_manager_) {
@@ -167,7 +176,10 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         it = pending_.erase(it);
                         continue;
                     }
-                    // Otherwise: not enough memory right now, try smaller requests
+                    // Otherwise: not enough memory right now. An aged head
+                    // keeps the queue; anyone else lets smaller requests by.
+                    if (aged)
+                        break;
                     ++it;
                     continue;
                 }
@@ -189,6 +201,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens,
                                                                           max_reuse, req->prefix_salt);
                     if (reused < 0) {
+                        if (aged)
+                            break;
                         ++it;
                         continue;
                     }
@@ -206,6 +220,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         req->recurrent_restore.reset();
                         kv_manager_->free_sequence(req->id);
                         if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
+                            if (aged)
+                                break;
                             ++it;
                             continue;
                         }
@@ -239,6 +255,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     }
                 } else {
                     if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
+                        if (aged)
+                            break;
                         ++it;
                         continue;
                     }

@@ -944,5 +944,74 @@ TEST(SchedulerTest, AgingStillBoundsStarvationWithinAClass) {
     EXPECT_TRUE(long_admitted);
 }
 
+// AUDIT_arch_2026 C-2: aging fixed the sort order, not the allocator. A
+// 4-block pool holds one decoding request (1 block + 1 reserved); a 48-token
+// request needs 4 and cannot fit while it runs, a 16-token one needs 2 and
+// can. A fresh short request every round kept the long one waiting for as
+// long as the traffic lasted. Once aged, the long one holds the queue: no
+// short request is admitted past it, and it goes first when the blocks come
+// back.
+TEST(SchedulerTest, AnAgedRequestHoldsTheQueueUntilItsBlocksAreFree) {
+    auto cache = KVCache::for_accounting(
+        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+    Scheduler sched(4);
+    sched.set_kv_manager(mgr.get());
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+
+    auto running = std::make_shared<Request>();
+    running->id = 1;
+    running->input_tokens.assign(16, 1);
+    running->max_tokens = 0;
+    sched.add_request(running);
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    running->status = RequestStatus::DECODING;  // holds 1 block + 1 reserved from here on
+
+    auto long_req = std::make_shared<Request>();
+    long_req->id = 2;
+    long_req->input_tokens.assign(48, 1);  // 3 blocks + 1 reserved = 4: the whole pool
+    long_req->max_tokens = 0;
+    sched.add_request(long_req);
+
+    int next_id = 100;
+    int shorts_admitted_before_aging = 0;
+    std::shared_ptr<Request> pending_short;
+    for (int round = 0; round < Scheduler::kAgingRounds; round++) {
+        pending_short = std::make_shared<Request>();
+        pending_short->id = next_id++;
+        pending_short->input_tokens.assign(16, 1);  // 1 block + 1 reserved = 2: fits beside `running`
+        pending_short->max_tokens = 0;
+        sched.add_request(pending_short);
+        sched.schedule(prefill, decode);
+        ASSERT_EQ(std::find(prefill.begin(), prefill.end(), long_req), prefill.end())
+            << "the long request cannot fit while `running` holds the pool";
+        for (auto& r : prefill) {
+            shorts_admitted_before_aging++;
+            mgr->free_sequence(r->id);
+            r->status = RequestStatus::FINISHED;
+        }
+    }
+    EXPECT_GT(shorts_admitted_before_aging, 0) << "the shorts must have been passing the long request";
+
+    // Aged now. The short that arrives this round fits, and is held anyway.
+    pending_short = std::make_shared<Request>();
+    pending_short->id = next_id++;
+    pending_short->input_tokens.assign(16, 1);
+    pending_short->max_tokens = 0;
+    sched.add_request(pending_short);
+    sched.schedule(prefill, decode);
+    EXPECT_TRUE(prefill.empty()) << "an aged head that cannot get its blocks holds the queue";
+    EXPECT_EQ(long_req->status, RequestStatus::PENDING) << "held, not cancelled: the pool can hold it";
+
+    // The blocks come back: the aged request goes first, the short waits.
+    mgr->free_sequence(running->id);
+    running->status = RequestStatus::FINISHED;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0], long_req);
+    EXPECT_TRUE(sched.has_pending()) << "the short is still queued behind it";
+}
+
 }  // namespace
 }  // namespace imp

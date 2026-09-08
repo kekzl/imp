@@ -74,3 +74,24 @@ TEST(GraphEligibility, NoneIsNotMidRunAndNamesItself) {
     EXPECT_FALSE(graph_demotion_is_mid_run(GraphDemotionReason::None));
     EXPECT_STREQ(graph_demotion_reason_name(GraphDemotionReason::None), "none");
 }
+
+// The decision itself, not only the enum (AUDIT_arch_2026 C-4). The #1879
+// shape: a 3000-block pool with 0 free and 984 reclaimable is NOT exhausted.
+TEST(GraphEligibility, KvPressureCountsReclaimableBlocksAsFree) {
+    EXPECT_FALSE(kv_pressure_demotes_graphs(/*free=*/0, /*reclaimable=*/984, /*total=*/3000));
+    EXPECT_TRUE(kv_pressure_demotes_graphs(0, 0, 3000));
+    EXPECT_TRUE(kv_pressure_demotes_graphs(299, 0, 3000));
+    EXPECT_FALSE(kv_pressure_demotes_graphs(300, 0, 3000)) << "a tenth exactly is not under a tenth";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 0)) << "no pool, no pressure";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 9)) << "total/10 == 0 can never be undercut";
+}
+
+// The way back (C-3): a fifth free lifts it, an eviction pins it.
+TEST(GraphEligibility, KvPressureLiftsAtAFifthUnlessSomethingWasEvicted) {
+    EXPECT_FALSE(kv_pressure_repromotes_graphs(299, 0, 3000, 0)) << "still under the trigger";
+    EXPECT_FALSE(kv_pressure_repromotes_graphs(599, 0, 3000, 0)) << "between the two lines: hysteresis";
+    EXPECT_TRUE(kv_pressure_repromotes_graphs(600, 0, 3000, 0));
+    EXPECT_TRUE(kv_pressure_repromotes_graphs(0, 600, 3000, 0)) << "reclaimable counts on the way back too";
+    EXPECT_FALSE(kv_pressure_repromotes_graphs(3000, 0, 3000, 1)) << "one evicted block pins the demotion";
+    EXPECT_FALSE(kv_pressure_repromotes_graphs(0, 0, 0, 0));
+}

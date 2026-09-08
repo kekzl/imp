@@ -25,6 +25,12 @@ there instead of retelling it.
 
 ### Changed
 
+- The KV-pressure graph demotion is no longer a latch: once a fifth of the pool is free again and
+  StreamingLLM evicted nothing, graphs and the auto-arm come back (`imp_streaming_kv_auto_enables_total`
+  keeps counting the arms; an eviction still pins it) ([AUDIT_arch_2026 C-3](docs/audit/AUDIT_arch_2026.md))
+- An aged request that cannot get its KV blocks holds the admission queue for that round instead of
+  being passed by shorter requests that fit; `runtime.prefill_graph` resolves to off on quantized KV
+  with one log line ([AUDIT_arch_2026 C-2, C-10](docs/audit/AUDIT_arch_2026.md))
 - KV block size auto = 16 for every model: the 2026-03-23 "32 when `n_kv_heads <= 4`" rule, measured for
   the first time, never won and lost 1.5-4.3 % tg128 on Qwen3.8-27B-NVFP4 (4 KV heads), the class it was
   meant for; Qwen3-8B-Q8_0 (8 heads) -0.0 to -1.8 % at 32 ([PERF_LOG](docs/audit/PERF_LOG.md))

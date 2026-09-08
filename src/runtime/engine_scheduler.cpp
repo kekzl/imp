@@ -226,7 +226,22 @@ void Engine::demote_graphs_(GraphDemotionReason reason) {
     config_.use_cuda_graphs = false;
     graph_demotion_ = reason;
     IMP_LOG_INFO("CUDA graphs disabled: %s%s", graph_demotion_reason_name(reason),
-                 graph_demotion_is_mid_run(reason) ? " (mid-run, one-way)" : "");
+                 graph_demotion_is_mid_run(reason) ? " (mid-run, lifted when the pressure clears)" : "");
+}
+
+// The mid-run demotion was a latch on a transient signal (AUDIT_arch_2026
+// C-3). Only that reason is lifted: the init-time ones describe the model.
+// The captured decode graphs were left in place by demote_graphs_, and the
+// pool grows inside its reserved address range, so the pointers they bake are
+// still the pointers; the caller has cleared StreamingLLM first, so no block
+// table carries a sentinel a replay could read.
+void Engine::promote_graphs_() {
+    if (config_.use_cuda_graphs || !graph_demotion_is_mid_run(graph_demotion_))
+        return;
+    config_.use_cuda_graphs = true;
+    graph_repromotions_.fetch_add(1, std::memory_order_relaxed);
+    IMP_LOG_INFO("CUDA graphs re-enabled: %s cleared", graph_demotion_reason_name(graph_demotion_));
+    graph_demotion_ = GraphDemotionReason::None;
 }
 
 // One-shot summary of the kernels this model ACTUALLY resolved to (#1205).
@@ -931,7 +946,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
             const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
                                                  : st.total_blocks + st.free_blocks + st.cached_blocks;
-            if (pool_total > 0 && st.free_blocks + reclaimable < pool_total / 10) {
+            if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
                 if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
                     config_.streaming_kv_enabled = true;
                     streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
@@ -947,6 +962,28 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                         st.free_blocks, reclaimable, pool_total, n_sinks, win);
                     demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
                 }
+            }
+        } else if (config_.streaming_kv_enabled &&
+                   graph_demotion_ == GraphDemotionReason::StreamingKvKvPressure) {
+            // The way back (AUDIT_arch_2026 C-3): the valve above armed
+            // StreamingLLM and dropped graphs on a pool that was momentarily
+            // full. Once a fifth of it is free again and no live sequence was
+            // ever evicted (a sentinel in a block table would be read by a
+            // replayed graph), both are undone. Runs only while the auto-arm
+            // is the demotion reason, so a configured StreamingLLM stays.
+            auto st = kv_manager_->stats();
+            const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
+            const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
+                                                 : st.total_blocks + st.free_blocks + st.cached_blocks;
+            if (kv_pressure_repromotes_graphs(st.free_blocks, reclaimable, pool_total,
+                                              streaming_kv_evicted_blocks_.load(std::memory_order_relaxed))) {
+                config_.streaming_kv_enabled = false;
+                executor_->set_streaming_kv(0, 0);
+                IMP_LOG_INFO(
+                    "KV cache pressure cleared (%d free + %d reclaimable of %d blocks, nothing "
+                    "evicted) - StreamingLLM auto-enable lifted",
+                    st.free_blocks, reclaimable, pool_total);
+                promote_graphs_();
             }
         }
 
@@ -965,8 +1002,13 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     // streamed, so accumulating gives the total context this
                     // request lost — which is what the caller is told.
                     const int freed = kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
-                    if (freed > 0)
+                    if (freed > 0) {
                         req->evicted_kv_tokens += freed * kv_bs;
+                        // Pins the graph demotion: a sentinel now sits in a
+                        // live block table (graph_eligibility.h).
+                        streaming_kv_evicted_blocks_.fetch_add(static_cast<uint64_t>(freed),
+                                                               std::memory_order_relaxed);
+                    }
                 }
             }
         }
