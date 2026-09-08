@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- The last async-loop burst of a request rearms the parked graph instead of recapturing (step cap clamped to
+  the tokens left: 3 recaptures per 3 requests -> 0); `[spec-capture]` prices capture, instantiate and launch;
+  the burst-boundary gap measured closed: 57 rearm boundaries at max ITL 12-13 ms vs a 10.7 ms step ([roadmap](docs/roadmap.md))
 - `generation.lm_dequant_fp16` is `diagnostics.lm_dequant_fp16` (a bisect, never a serving knob); the
   `beta != 0` uncached GEMM fallback warns once when it starts dequantising a whole weight per token;
   the refuted MXFP4 attention family has its ledger row ([AUDIT_arch_2026 A2-9, A2-8, A1-9](docs/audit/AUDIT_arch_2026.md))

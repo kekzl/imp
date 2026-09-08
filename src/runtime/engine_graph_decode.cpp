@@ -266,6 +266,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     int remaining = prepare_graph_loop(req, step_limit);
     if (remaining <= 0)
         return false;
+    step_limit = burst_launch_step_limit(step_limit, remaining);
 
     // Fast relaunch: a parked runner from a previous burst of the SAME
     // request keeps its captured graph — reseed device state instead of
