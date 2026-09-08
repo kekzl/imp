@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Fused QK-norm + RoPE (`qknorm_rope_fused`, one CTA per head x token) now serves batched decode rows (n <= 64,
+  full-head norm weights) instead of n == 1 only: q-norm, k-norm and rope were three launches per layer at 32 streams.
+  Qwen3-14B-NVFP4 32 streams +0.8/+0.7/-0.3%, Qwen3.8-27B +0.2/+0.2/+0.2%; batched rows share the single-stream numerics ([roadmap](docs/roadmap.md))
 - `rope_forward`, `elementwise_add_store` and the FP8 KV write are PDL-registered (wait, then trigger) like the other
   decode-chain kernels: Qwen3.8-27B-NVFP4 at 32 streams +2.7/+0.4/+1.7% aggregate (3/3), Qwen3-14B neutral
   (+0.1/-0.1/-0.9%); the eager form (trigger before the wait, whole chain resident) measured -1..-5% and stays out ([roadmap](docs/roadmap.md), #1956)

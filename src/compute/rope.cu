@@ -226,9 +226,13 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     int head_dim, float eps, float theta, float inv_scaling, int rope_pairs, bool neox, float weight_offset,
     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
     const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
+    // grid = (max_heads, n_tokens): one CTA per (head, token). Batched decode
+    // (n <= 64) runs here too since 2026-09-08; before that only n == 1 did and
+    // the batched path paid q-norm + k-norm + rope as three launches per layer.
     const int head_idx = blockIdx.x;
+    const int token_idx = blockIdx.y;
     pdl_wait();  // positions and Q/K are the previous kernels' outputs
-    const int pos_text = positions[0];
+    const int pos_text = positions[token_idx];
 
     extern __shared__ float smem[];
     float* reduce_buf = smem;
@@ -236,7 +240,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
     // --- Process Q head ---
     if (head_idx < n_heads) {
-        __half* q_head = Q + head_idx * head_dim;
+        __half* q_head = Q + (static_cast<int64_t>(token_idx) * n_heads + head_idx) * head_dim;
 
         float sum_sq = 0.0f;
         for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
@@ -260,8 +264,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         __syncthreads();
 
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
-            // Decode runs one token, so the axis rows are single entries.
-            const int pos = mrope_position(mrope, pos_text, pair, 0);
+            const int pos = mrope_position(mrope, pos_text, pair, token_idx);
             float cos_val, sin_val;
             if (longrope_inv_freqs) {
                 // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
@@ -300,7 +303,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
     // --- Process K head ---
     if (head_idx < n_kv_heads) {
-        __half* k_head = K + head_idx * head_dim;
+        __half* k_head = K + (static_cast<int64_t>(token_idx) * n_kv_heads + head_idx) * head_dim;
 
         float sum_sq = 0.0f;
         for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
@@ -324,8 +327,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         __syncthreads();
 
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
-            // Decode runs one token, so the axis rows are single entries.
-            const int pos = mrope_position(mrope, pos_text, pair, 0);
+            const int pos = mrope_position(mrope, pos_text, pair, token_idx);
             float cos_val, sin_val;
             if (longrope_inv_freqs) {
                 // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
@@ -361,9 +363,9 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
                        int n_kv_heads, int head_dim, float eps, const int* positions, float theta,
                        float scaling, int rope_dim, bool neox, cudaStream_t stream, float weight_offset,
                        float ext_factor, float attn_factor, const float* corr_dims,
-                       const float* longrope_inv_freqs, MRopeParams mrope) {
+                       const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens) {
     const int max_heads = (n_heads > n_kv_heads) ? n_heads : n_kv_heads;
-    if (max_heads == 0 || head_dim == 0)
+    if (max_heads == 0 || head_dim == 0 || n_tokens <= 0)
         return;
 
     const int effective_rope_dim = (rope_dim > 0) ? rope_dim : head_dim;
@@ -379,8 +381,8 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
     const int block_size = 128;
     const int smem_bytes = (8 + head_dim) * sizeof(float);
 
-    pdl::launch(qknorm_rope_fused_fp16_kernel, dim3(max_heads), dim3(block_size), smem_bytes, stream,
-                reinterpret_cast<__half*>(Q), reinterpret_cast<__half*>(K),
+    pdl::launch(qknorm_rope_fused_fp16_kernel, dim3(max_heads, n_tokens), dim3(block_size), smem_bytes,
+                stream, reinterpret_cast<__half*>(Q), reinterpret_cast<__half*>(K),
                 reinterpret_cast<const __half*>(q_norm_weight),
                 reinterpret_cast<const __half*>(k_norm_weight), positions, n_heads, n_kv_heads, head_dim, eps,
                 theta, inv_scaling, rope_pairs, neox, weight_offset, ext_factor, attn_factor, cd0, cd1,
