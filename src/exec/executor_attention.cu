@@ -416,16 +416,24 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = dispatch_policy().attention.no_qknorm_fused;
-        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
-            // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
-            // Keeps norm intermediate values in FP32 shared memory.
+        // Fused QK-norm + RoPE covers the batched-decode rows too (n <= 64,
+        // one CTA per head x token): the separate path below ran q-norm,
+        // k-norm and rope as three launches per layer at 32 streams. The
+        // fused kernel applies the norm weight over the full head, so the
+        // sub-head norm layouts (norm dim < head_dim) stay on the separate path.
+        const bool full_head_norm = ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr &&
+                                    ly.attn_q_norm.shape[0] == hd && ly.attn_k_norm.shape[0] == hd;
+        if (has_qk_norm && n <= 64 && (n == 1 || full_head_norm) && qv.qtype == QType::F16 &&
+            !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
+            // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
+            // intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                               static_cast<const half*>(ly.attn_q_norm.data),
                               static_cast<const half*>(ly.attn_k_norm.data), nh, nkv, hd, eps,
                               state.positions, layer_rope_theta, layer_rope_freq_scale, fused_rope_dim,
                               cfg.rope_neox, stream, norm_w_off_, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
                               cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, longrope_freqs,
-                              state.mrope);
+                              state.mrope, n);
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
             const int effective_rope_dim = fused_rope_dim;
