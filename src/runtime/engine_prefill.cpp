@@ -59,9 +59,9 @@ void Engine::step_prefill(cudaStream_t stream) {
     // the chunk while decoders are active so their inter-token latency stays
     // bounded during another session's ingest; the full chunk (and its
     // better weight-traffic amortization) returns as soon as nobody decodes.
-    // With runtime.prefill_cap_fairness the cap scales by waiting / decoding
-    // (prefill_pacing.h): a burst's 30 waiters are not paced behind its 2
-    // first finishers. 0 when nobody decodes.
+    // With runtime.prefill_cap_fairness = W the cap scales by W x waiting /
+    // decoding (prefill_pacing.h): a burst's 30 waiters are not paced behind
+    // its 2 first finishers. 0 when nobody decodes.
     const int configured_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
     const int decode_cap = paced_prefill_cap(configured_cap, effective_chunk,
                                              static_cast<int>(sched_prefill_batch_.size()),
