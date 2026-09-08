@@ -1,6 +1,7 @@
 #include "compute/activation.h"
 #include "quant/nvfp4_pack.cuh"
 #include "core/pdl.h"
+#include "core/pdl_device.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -318,6 +319,8 @@ __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const 
                                          __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
                                          uint8_t* __restrict__ xq_scales, int64_t total_mb) {
     const int64_t mb = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    pdl_wait();     // gate/up are the gate|up GEMM's outputs
+    pdl_trigger();  // scheduling only: the down GEMM prefetches its weights during this grid
     if (mb >= total_mb)
         return;
     const int64_t base = mb * 16;
@@ -391,9 +394,11 @@ bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, ui
     const int64_t total_mb = n >> 4;
     const int block = 256;
     const int grid = static_cast<int>((total_mb + block - 1) / block);
+    pdl::enable_kernel(swiglu_fp16_nvfp4_kernel);
     pdl::launch(swiglu_fp16_nvfp4_kernel, dim3(grid), dim3(block), size_t(0), stream,
                 static_cast<const __half*>(gate.data), static_cast<const __half*>(up.data),
                 static_cast<__half*>(out.data), xq_packed, xq_scales, total_mb);
+    IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
 

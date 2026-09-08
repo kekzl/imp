@@ -4,6 +4,8 @@
 #include "quant/nvfp4_pack.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
+#include "core/pdl.h"
+#include "core/pdl_device.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -237,6 +239,11 @@ __global__ void quantize_nvfp4_kernel(const half* __restrict__ input,      // [N
     const int64_t total_mb = N * num_mb_per_row;
 
     int64_t mb_idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    // PDL (no-ops on a plain launch): the decode-step activation quantize
+    // reads the previous kernel's output; the dependent small-M GEMM
+    // prefetches its weights during this grid.
+    pdl_wait();
+    pdl_trigger();
     if (mb_idx >= total_mb)
         return;
 
@@ -421,8 +428,9 @@ void quantize_fp16_to_nvfp4_into(const void* d_input_fp16, int M, int K, uint8_t
     // for the small-M A4 GEMM's per-step activation quantize.
     const int64_t total_micro_blocks = (int64_t)M * (K / kMicroBlockSize);
     const int num_blocks = (int)((total_micro_blocks + kBlockSize - 1) / kBlockSize);
-    quantize_nvfp4_kernel<<<num_blocks, kBlockSize, 0, stream>>>(d_input, d_packed, d_micro_scales,
-                                                                 tensor_scale, M, K);
+    pdl::enable_kernel(quantize_nvfp4_kernel);
+    pdl::launch(quantize_nvfp4_kernel, dim3(num_blocks), dim3(kBlockSize), size_t(0), stream, d_input,
+                d_packed, d_micro_scales, tensor_scale, (int64_t)M, (int64_t)K);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

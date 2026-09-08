@@ -67,11 +67,20 @@ bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& 
 bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                                    int N_out, int K, void* d_workspace, cudaStream_t stream,
                                    bool accumulate, int stages, int stripes);
-// Sibling-pair variant: two weights with the same K sharing one quantized
-// activation (FFN gate|up, GDN in|z) in ONE launch. stripes==1 shapes only
-// (both Ns >= 5120), fresh outputs (no accumulate); returns false otherwise
-// and the caller falls back to two single calls. Bit-identical per tensor to
-// the single-tensor kernel (same CTA body, same tile order).
+// Sibling variant: two or three weights with the same K sharing one quantized
+// activation (FFN gate|up, GDN in|z, attention q|k|v) in ONE launch. The
+// single-stripe policy is applied to the COMBINED n-tile count (>= 80 tiles),
+// fresh outputs (no accumulate); returns false otherwise and the caller falls
+// back to the single calls. Bit-identical per tensor to the single-tensor
+// kernel at stripes=1 (same CTA body, same tile order).
+constexpr int kSmallMV2MaxSiblings = 3;
+struct SmallMV2Sibling {
+    const NvFP4QuantResult* w;
+    half* y;
+    int N;
+};
+bool gemm_nvfp4_smallm_v2_multi_a4(const SmallMV2Sibling* t, int count, const NvFP4QuantResult& Xq, int M,
+                                   int K, cudaStream_t stream);
 bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
                                   const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
                                   int K, cudaStream_t stream);

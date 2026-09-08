@@ -95,6 +95,16 @@ __device__ __forceinline__ void cp_async_mbar_arrive(uint64_t* bar) {
     asm volatile("cp.async.mbarrier.arrive.noinc.shared.b64 [%0];" ::"r"(a));
 }
 
+// Track-only form (no .noinc): the pending count is incremented first and
+// the async arrive decrements it, so the phase cannot complete before this
+// thread's prior cp.async land while the expected count stays untouched.
+// Lets a helper warp contribute copies to a stage without changing the
+// barrier's arrival accounting.
+__device__ __forceinline__ void cp_async_mbar_track(uint64_t* bar) {
+    const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+    asm volatile("cp.async.mbarrier.arrive.shared.b64 [%0];" ::"r"(a));
+}
+
 // 16-byte global->shared async copy, zero-filling when src_bytes == 0
 // (activation rows >= M: nibbles AND scales land as 0, so the padded rows
 // contribute exactly nothing).
@@ -149,9 +159,13 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         }
     }
     __syncthreads();
-    // PDL: everything above is smem/index work; the first global read (the
-    // producer warp's cp.async of W and Xq) is below.
-    pdl_wait();
+    // PDL: trigger at CTA start. The dependent grid launches once every CTA
+    // of this grid has triggered or exited, so on a multi-wave grid it
+    // launches when the last wave has started (no pending CTA of this grid
+    // loses a slot) and on a single-wave grid it takes the idle SMs at once.
+    // Either way the dependent's producer warps fill their rings with
+    // weights while this grid still runs (the prefetch below).
+    pdl_trigger();
 
     // Stripe of K-tiles owned by this CTA.
     const int k_tiles = K / kKT;
@@ -162,35 +176,48 @@ __device__ __forceinline__ void smallm_v2_cta_body(
 
     auto stage_base = [&](int s) { return smem + s * kStageBytes; };
 
+    // Per-lane chunk assignments are fixed; only the K offset advances.
+    // w nibbles: 64 rows x 8 16B-chunks = 512 -> 16/lane
+    // x nibbles: 32 rows x 8         = 256 -> 8/lane
+    // w scales:  64 rows x 1 16B     = 64  -> 2/lane
+    // x scales:  32 rows x 1         = 32  -> 1/lane
+    const int64_t w_row_bytes = static_cast<int64_t>(K) / 2;
+    const int64_t sf_row_bytes = static_cast<int64_t>(K) / kMicroBlockSize;
+    const int pre = min(kStages, iters);
+    // Weight copies of one stage: the same per-lane mapping whichever warp
+    // issues them (the producer in steady state, consumer warp 0 for the
+    // ring prefetch below).
+    auto issue_w = [&](int i) {
+        uint8_t* base = stage_base(i % kStages);
+        uint8_t* s_wn = base;
+        uint8_t* s_wsf = base + kWNibBytes + kXNibBytes;
+        const int kt = kt0 + i;
+        const int64_t k_nib_off = static_cast<int64_t>(kt) * (kKT / 2);
+        const int64_t k_sf_off = static_cast<int64_t>(kt) * (kKT / kMicroBlockSize);
+#pragma unroll
+        for (int v = 0; v < 16; ++v) {
+            const int c = lane + v * 32;
+            const int r = c / 8, j = c % 8;
+            cp_async16(s_wn + r * kNibStride + j * 16,
+                       w_packed + (n_base + r) * w_row_bytes + k_nib_off + j * 16, 16);
+        }
+#pragma unroll
+        for (int v = 0; v < 2; ++v) {
+            const int r = lane + v * 32;
+            cp_async16(s_wsf + r * kSfStride, w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
+        }
+    };
+
     if (warp == 4) {
         // ---- producer warp: fill the ring, never compute ----
-        // Per-lane chunk assignments are fixed; only the K offset advances.
-        // w nibbles: 64 rows x 8 16B-chunks = 512 -> 16/lane
-        // x nibbles: 32 rows x 8         = 256 -> 8/lane
-        // w scales:  64 rows x 1 16B     = 64  -> 2/lane
-        // x scales:  32 rows x 1         = 32  -> 1/lane
-        const int64_t w_row_bytes = static_cast<int64_t>(K) / 2;
-        const int64_t sf_row_bytes = static_cast<int64_t>(K) / kMicroBlockSize;
-        for (int i = 0; i < iters; ++i) {
+        auto issue_x = [&](int i) {
             const int s = i % kStages;
-            const int use = i / kStages;
-            if (i >= kStages)
-                mbar_wait(&bar_empty[s], (use - 1) & 1);
             uint8_t* base = stage_base(s);
-            uint8_t* s_wn = base;
             uint8_t* s_xn = base + kWNibBytes;
-            uint8_t* s_wsf = base + kWNibBytes + kXNibBytes;
-            uint8_t* s_xsf = s_wsf + kWSfBytes;
+            uint8_t* s_xsf = base + kWNibBytes + kXNibBytes + kWSfBytes;
             const int kt = kt0 + i;
             const int64_t k_nib_off = static_cast<int64_t>(kt) * (kKT / 2);
             const int64_t k_sf_off = static_cast<int64_t>(kt) * (kKT / kMicroBlockSize);
-#pragma unroll
-            for (int v = 0; v < 16; ++v) {
-                const int c = lane + v * 32;
-                const int r = c / 8, j = c % 8;
-                cp_async16(s_wn + r * kNibStride + j * 16,
-                           w_packed + (n_base + r) * w_row_bytes + k_nib_off + j * 16, 16);
-            }
 #pragma unroll
             for (int v = 0; v < 8; ++v) {
                 const int c = lane + v * 32;
@@ -198,17 +225,46 @@ __device__ __forceinline__ void smallm_v2_cta_body(
                 cp_async16(s_xn + r * kNibStride + j * 16, xq_packed + r * w_row_bytes + k_nib_off + j * 16,
                            r < M ? 16 : 0);
             }
-#pragma unroll
-            for (int v = 0; v < 2; ++v) {
-                const int r = lane + v * 32;
-                cp_async16(s_wsf + r * kSfStride, w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
-            }
             cp_async16(s_xsf + lane * kSfStride, xq_scales + lane * sf_row_bytes + k_sf_off,
                        lane < M ? 16 : 0);
+            // One async-arrive per lane covers every cp.async this lane issued
+            // for the stage, the weights before the grid dependency included.
             cp_async_mbar_arrive(&bar_full[s]);
+        };
+        // Weights are immutable, so they may stream in BEFORE
+        // griddepcontrol.wait, i.e. while the predecessor grid still runs;
+        // only Xq (the predecessor's output) waits for the dependency. Stage
+        // 0's W comes from this warp ahead of its wait; stages 1..pre-1 come
+        // from consumer warp 0 (below) in parallel, so a CTA that launched
+        // late (dependency already resolved) still sees X0 queued right
+        // behind W0 and stage 0 lands as early as the unprefetched order did.
+        issue_w(0);
+        pdl_wait();
+        for (int i = 0; i < pre; ++i)
+            issue_x(i);
+        for (int i = pre; i < iters; ++i) {
+            const int s = i % kStages;
+            const int use = i / kStages;
+            mbar_wait(&bar_empty[s], (use - 1) & 1);
+            issue_w(i);
+            issue_x(i);
         }
     } else {
         // ---- consumer warps: wait, MMA, release ----
+        if (warp == 0) {
+            // Ring prefetch: W for stages 1..pre-1 before the grid
+            // dependency. The track-only arrive keeps each stage's full
+            // barrier from completing before these copies land, without
+            // touching its expected count (32 producer arrivals).
+            for (int i = 1; i < pre; ++i) {
+                issue_w(i);
+                cp_async_mbar_track(&bar_full[i]);
+            }
+        }
+        // No global access before the epilogue (y read/write), which the
+        // full-barrier chain orders after the producer's post-wait copies;
+        // the explicit wait keeps the contract literal per thread.
+        pdl_wait();
         // Warp tile: M16 x N32. warp_m in {0,1}, warp_n in {0,1}.
         const int warp_m = warp & 1;
         const int warp_n = warp >> 1;
@@ -271,9 +327,6 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     if (warp == 4)
         __syncthreads();  // producer joins the consumers' staging barrier
     __syncthreads();
-    // PDL: all global reads are done (ring drained); the dependent grid may
-    // be scheduled while this CTA writes its epilogue.
-    pdl_trigger();
 
     const float* s_out = reinterpret_cast<const float*>(smem);
     if (stripes == 1) {
@@ -317,27 +370,43 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
                                 N_out, K, stripes, blockIdx.x * kNR, blockIdx.y, smem, bar_full, bar_empty);
 }
 
-// Pair variant: two weight tensors sharing ONE quantized activation, one
-// launch. grid.x covers the n-tiles of W1 then W2; each CTA resolves which
-// tensor it owns and runs the shared body unchanged. stripes == 1 only (every
-// call-site N is >= 5120, where the stripe policy is 1), so there is no
-// workspace and no reduce. Saves one launch's fixed cost + one tail wave per
-// sibling pair (FFN gate|up, GDN in|z) per layer per batched-decode step.
+// Sibling variant: two or three weight tensors sharing ONE quantized
+// activation, one launch. grid.x covers the n-tiles of the tensors back to
+// back; each CTA resolves which tensor it owns from the tile prefix sums and
+// runs the shared body unchanged. stripes == 1 for every member (the policy
+// is applied to the COMBINED tile count), so there is no workspace and no
+// reduce. Saves the launch fixed cost + tail wave per sibling per layer per
+// batched-decode step (FFN gate|up, GDN in|z), and folds the striped k/v
+// projections (16 tiles each, kernel + reduce) into q's single-stripe wave.
+struct SmallMV2MultiArgs {
+    const uint8_t* w[kSmallMV2MaxSiblings];
+    const uint8_t* s[kSmallMV2MaxSiblings];
+    half* y[kSmallMV2MaxSiblings];
+    float ts[kSmallMV2MaxSiblings];
+    int N[kSmallMV2MaxSiblings];
+    int tiles_end[kSmallMV2MaxSiblings];  // inclusive prefix sums of n-tiles
+    int count;
+};
+
 template <int kStages>
-__global__ void gemm_nvfp4_smallm_v2_pair_kernel(
-    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ s1, half* __restrict__ y1, float ts1,
-    int n_tiles1, int N1, const uint8_t* __restrict__ w2, const uint8_t* __restrict__ s2,
-    half* __restrict__ y2, float ts2, int N2, const uint8_t* __restrict__ xq_packed,
-    const uint8_t* __restrict__ xq_scales, int M, int K) {
+__global__ void gemm_nvfp4_smallm_v2_multi_kernel(SmallMV2MultiArgs a, const uint8_t* __restrict__ xq_packed,
+                                                  const uint8_t* __restrict__ xq_scales, int M, int K) {
     extern __shared__ uint8_t smem[];
     __shared__ uint64_t bar_full[kStages];
     __shared__ uint64_t bar_empty[kStages];
+    // Resolve the owning tensor with constant indices (a runtime-indexed
+    // parameter array would put the struct on the local stack).
     const int nt = blockIdx.x;
-    const bool second = nt >= n_tiles1;
-    smallm_v2_cta_body<kStages>(second ? w2 : w1, second ? s2 : s1, xq_packed, xq_scales,
-                                /*ws_partials=*/nullptr, second ? y2 : y1, second ? ts2 : ts1,
-                                /*acc_flag=*/0, M, second ? N2 : N1, K, /*stripes=*/1,
-                                (second ? nt - n_tiles1 : nt) * kNR, /*stripe=*/0, smem, bar_full,
+    const bool t1 = nt >= a.tiles_end[0];
+    const bool t2 = a.count > 2 && nt >= a.tiles_end[1];
+    const int first = t2 ? a.tiles_end[1] : (t1 ? a.tiles_end[0] : 0);
+    const uint8_t* w = t2 ? a.w[2] : (t1 ? a.w[1] : a.w[0]);
+    const uint8_t* s = t2 ? a.s[2] : (t1 ? a.s[1] : a.s[0]);
+    half* y = t2 ? a.y[2] : (t1 ? a.y[1] : a.y[0]);
+    const float ts = t2 ? a.ts[2] : (t1 ? a.ts[1] : a.ts[0]);
+    const int N = t2 ? a.N[2] : (t1 ? a.N[1] : a.N[0]);
+    smallm_v2_cta_body<kStages>(w, s, xq_packed, xq_scales, /*ws_partials=*/nullptr, y, ts, /*acc_flag=*/0, M,
+                                N, K, /*stripes=*/1, (nt - first) * kNR, /*stripe=*/0, smem, bar_full,
                                 bar_empty);
 }
 
@@ -446,38 +515,56 @@ bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& 
     return launch_smallm_v2<kDefaultStages>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
 }
 
-// Two sibling tensors (same K, same quantized activation), one launch. Only
-// the stripes==1 regime (both Ns >= 5120) — a caller with a striped shape gets
-// `false` and falls back to two single launches. No workspace, no accumulate:
-// every pair call site writes fresh outputs (beta = 0).
-bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
-                                  const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
-                                  int K, cudaStream_t stream) {
-    if (gemm_nvfp4_smallm_v2_stripes(N1, K) != 1 || gemm_nvfp4_smallm_v2_stripes(N2, K) != 1)
+// Two or three sibling tensors (same K, same quantized activation), one
+// launch. The single-stripe policy applies to the combined n-tile count (the
+// k/v projections at 16 tiles each ride in q's 80-tile wave); a set below the
+// threshold gets `false` and the caller issues the single launches. No
+// workspace, no accumulate: every sibling call site writes fresh outputs.
+bool gemm_nvfp4_smallm_v2_multi_a4(const SmallMV2Sibling* t, int count, const NvFP4QuantResult& Xq, int M,
+                                   int K, cudaStream_t stream) {
+    if (count < 2 || count > kSmallMV2MaxSiblings)
         return false;
-    if (!smallm_v2_args_ok(W1, Xq, M, N1, K, /*d_workspace=*/nullptr, /*stripes=*/1) ||
-        !smallm_v2_args_ok(W2, Xq, M, N2, K, /*d_workspace=*/nullptr, /*stripes=*/1))
+    int total_tiles = 0;
+    for (int i = 0; i < count; ++i) {
+        if (t[i].w == nullptr || t[i].y == nullptr ||
+            !smallm_v2_args_ok(*t[i].w, Xq, M, t[i].N, K, /*d_workspace=*/nullptr, /*stripes=*/1))
+            return false;
+        total_tiles += t[i].N / kNR;
+    }
+    if (gemm_nvfp4_smallm_v2_stripes(total_tiles * kNR, K) != 1)
         return false;
     static const bool smem_ok = [] {
-        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages>,
+        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_multi_kernel<kDefaultStages>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     kDefaultStages * kStageBytes) == cudaSuccess;
     }();
     if (!smem_ok)
         return false;
-    const int n_tiles1 = N1 / kNR;
-    const dim3 grid(n_tiles1 + N2 / kNR);
-    pdl::enable_kernel(gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages>);
-    pdl::launch(gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages>, grid, dim3(kThreads),
-                kDefaultStages * kStageBytes, stream,
-        reinterpret_cast<const uint8_t*>(W1.packed_data), reinterpret_cast<const uint8_t*>(W1.micro_scales),
-        y1, W1.tensor_scale * Xq.tensor_scale, n_tiles1, N1,
-        reinterpret_cast<const uint8_t*>(W2.packed_data), reinterpret_cast<const uint8_t*>(W2.micro_scales),
-        y2, W2.tensor_scale * Xq.tensor_scale, N2,
-        reinterpret_cast<const uint8_t*>(Xq.packed_data), reinterpret_cast<const uint8_t*>(Xq.micro_scales),
-        M, K);
+    SmallMV2MultiArgs a{};
+    a.count = count;
+    int end = 0;
+    for (int i = 0; i < count; ++i) {
+        a.w[i] = reinterpret_cast<const uint8_t*>(t[i].w->packed_data);
+        a.s[i] = reinterpret_cast<const uint8_t*>(t[i].w->micro_scales);
+        a.y[i] = t[i].y;
+        a.ts[i] = t[i].w->tensor_scale * Xq.tensor_scale;
+        a.N[i] = t[i].N;
+        end += t[i].N / kNR;
+        a.tiles_end[i] = end;
+    }
+    pdl::enable_kernel(gemm_nvfp4_smallm_v2_multi_kernel<kDefaultStages>);
+    pdl::launch(gemm_nvfp4_smallm_v2_multi_kernel<kDefaultStages>, dim3(total_tiles), dim3(kThreads),
+                kDefaultStages * kStageBytes, stream, a, reinterpret_cast<const uint8_t*>(Xq.packed_data),
+                reinterpret_cast<const uint8_t*>(Xq.micro_scales), M, K);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
+}
+
+bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
+                                  const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
+                                  int K, cudaStream_t stream) {
+    const SmallMV2Sibling t[2] = {{&W1, y1, N1}, {&W2, y2, N2}};
+    return gemm_nvfp4_smallm_v2_multi_a4(t, 2, Xq, M, K, stream);
 }
 
 // Tuning hook for the isolated sweep (tests only): explicit stage depth and
