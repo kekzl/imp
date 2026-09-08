@@ -25,6 +25,8 @@ there instead of retelling it.
 
 ### Changed
 
+- AUDIT_arch_2026 campaign closed: 24 dispatch rows (#1909-#1927, #1939-#1946), 0 open findings, every ID with a
+  verdict in [SETTLED H](docs/audit/SETTLED.md); the P5 dispatch log names PRs, not branches ([AUDIT_arch_2026](docs/audit/AUDIT_arch_2026.md), #1949)
 - Prompts under `server.snapshot_min_prompt_tokens` (256) take no prefix-cache snapshot and no prefill split at the
   block boundary: 35-token prompt on Qwen3.8-27B-NVFP4, client TTFT floor 48 -> 35 ms, medians 63/54 -> 36/48 over
   2 x 12 waves; log timestamps carry milliseconds, the `/v1/completions` log line `ttft=` and `queue=` ([roadmap](docs/roadmap.md))

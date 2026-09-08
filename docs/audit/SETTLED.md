@@ -658,10 +658,11 @@ report's status lines so the fourth occurrence fails CI instead of costing a day
 
 ## H — AUDIT_arch_2026 dispatch queue: what closed and on what evidence
 
-The 2026-09-05 audit ([`AUDIT_arch_2026.md`](AUDIT_arch_2026.md), P3) is a 15-item
-dependency-ordered queue. One row per finding as it closes; the report's own
-"P5 - Dispatch log" carries the same state, and the two must agree. A finding
-not listed here is still open in the queue.
+The 2026-09-05 audit ([`AUDIT_arch_2026.md`](AUDIT_arch_2026.md), P3) was a 15-item
+dependency-ordered queue, worked as 24 dispatch rows (#1909-#1927, #1939-#1946). One row
+per finding as it closed; the report's own "P5 - Dispatch log" carries the same state, and
+the two must agree. Queue CLOSED 2026-09-08: every finding of the audit has a row here or
+a P2 kill-list verdict; nothing is open in the queue.
 
 | Finding | Verdict | Anchor | Landed |
 |---|---|---|---|
