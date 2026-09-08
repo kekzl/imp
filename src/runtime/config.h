@@ -156,6 +156,18 @@ struct RuntimeConfig {
         // session's large ingest (the #1643 measurement) — raise it when the
         // workload is burst-shaped rather than mixed.
         int prefill_chunk_decode_cap = 1024;
+        // Scale the cap above by (requests waiting for prefill / requests
+        // decoding) when the waiters outnumber the decoders, clamped to the
+        // full chunk (prefill_pacing.h). The cap protects a decoder's
+        // inter-token gap; on a burst arrival the protected decoders are the
+        // wave's own first finishers and the cap makes the other 30 wait one
+        // capped chunk per step. The protection scenario (many decoders, one
+        // ingest) is unchanged by construction: the ratio is below 1 there.
+        // Measured (Qwen3-14B-NVFP4, 32 x 982-token burst, 3 trials): aggregate
+        // +3.0..+4.2 %, TTFT p50 1009-1085 -> 827-839 ms, ITL max 106 -> 139 ms;
+        // 31 short streams + a 4.4k-token ingest: their ITL during the ingest
+        // p95 62.5 / max 65 ms on both arms (docs/roadmap.md, Server and latency).
+        bool prefill_cap_fairness = true;
         // Cap the NUMBER of prefill chunk forwards per engine step while other
         // sequences are DECODING (#1643). The size cap above bounds ONE chunk;
         // with k concurrent ingests the step loop still runs k of them between

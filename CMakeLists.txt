@@ -721,6 +721,10 @@ if(IMP_BUILD_TESTS)
         # what makes "graphs=0(reason)" readable, and a new reason without a
         # name would silently print "?".
         tests/test_graph_eligibility.cpp
+        # Prefill pacing under decode (runtime.prefill_cap_fairness). CPU-only:
+        # the cap-by-ratio table, with the many-decoders-one-ingest schedule
+        # pinned unchanged.
+        tests/test_prefill_pacing.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
