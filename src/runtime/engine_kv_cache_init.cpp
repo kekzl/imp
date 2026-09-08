@@ -294,8 +294,11 @@ bool Engine::init_kv_cache() {
         probe.kv_block_bytes_per_layer =
             kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
 
-        const PlanResult plan = plan_memory(shadow_plan_input(probe));
+        PlanResult plan = plan_memory(shadow_plan_input(probe));
         IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
+
+        if (!plan.ok)
+            clamp_max_batch_to_plan_(probe, plan, ssm_reserved_slots, vram_budget.kv_max_blocks);
 
         if (config_.kv_cache_max_blocks > 0) {
             max_blocks = config_.kv_cache_max_blocks;  // operator pin wins over both

@@ -20,6 +20,9 @@
 #include "core/tensor.h"
 #include "memory/vram_query.h"
 #include "memory/kv_cache.h"
+#include "memory/plan.h"
+#include "runtime/plan_shadow.h"
+#include "runtime/scheduler.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -962,6 +965,46 @@ void Engine::init_compute_max_seq_len_() {
             config_.max_seq_len, model_ctx, max_by_vram, kAutoMaxSeqLenCap, kv_bytes_per_token,
             kv_layer_count, mcfg.n_layers);
     }
+}
+
+// The SSM/GDN state is batch-shaped and mandatory, and the live pass never
+// charged it. Falling back on a plan rejection therefore served max_batch_size
+// slots the card could not hold: Qwen3.8-27B at 64 slots (2026-09-08)
+// allocated 5088 MiB of state past the headroom, the library reserve claimed
+// at the first forward oversubscribed the device and the pool probe read
+// 528 GB/s (spilled) at a 15% slower step. Clamp the batch to what the plan
+// fits instead: capacity is planned, not discovered (MEMORY.md I4, D14).
+// Mutates probe/plan (re-planned at the clamped batch), config_, the runtime
+// config and the scheduler's admission cap.
+void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
+                                      int live_kv_blocks) {
+    if (probe.ssm_state_bytes == 0 || probe.max_batch_size <= 1)
+        return;
+    const size_t per_slot = probe.ssm_state_bytes /
+                            static_cast<size_t>(probe.max_batch_size + std::max(0, ssm_reserved_slots));
+    PlanInput fit_in = shadow_plan_input(probe);
+    // An operator KV pin owns the pool question; only the fixed charges decide
+    // the batch then.
+    if (config_.kv_cache_max_blocks > 0)
+        fit_in.limits.min_kv_tokens = 0;
+    const int fit = plan_fitting_batch(fit_in, per_slot);
+    if (fit < 1 || fit >= probe.max_batch_size)
+        return;
+    IMP_LOG_WARN(
+        "max_batch_size clamped %d -> %d: the memory plan cannot fit the SSM/GDN state "
+        "for %d slots (%.0f MiB, over by %.0f MiB). Set runtime.max_batch_size=%d to "
+        "silence this, or free VRAM to raise it.",
+        probe.max_batch_size, fit, probe.max_batch_size, probe.ssm_state_bytes / (1024.0 * 1024.0),
+        plan.failure.over_by / (1024.0 * 1024.0), fit);
+    probe.ssm_state_bytes -= per_slot * static_cast<size_t>(probe.max_batch_size - fit);
+    probe.max_batch_size = fit;
+    config_.max_batch_size = fit;
+    if (runtime_config_.runtime.max_batch_size > fit)
+        runtime_config_.runtime.max_batch_size = fit;
+    if (scheduler_)
+        scheduler_->clamp_max_batch_size(fit);
+    plan = plan_memory(shadow_plan_input(probe));
+    IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, live_kv_blocks).c_str());
 }
 
 }  // namespace imp

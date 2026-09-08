@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime/request.h"
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 #include <deque>
@@ -32,6 +33,9 @@ public:
 
     // Memory-aware scheduling: set KV cache manager to check budget
     void set_kv_manager(KVCacheManager* mgr) { kv_manager_ = mgr; }
+    // Lower the admission cap after construction (the memory plan clamps
+    // max_batch_size once the post-weight budget is known). Never raises it.
+    void clamp_max_batch_size(int n) { max_batch_size_ = std::min(max_batch_size_, std::max(1, n)); }
 
     // Hybrid (SSM/GDN) prefix caching: cap on reusable prefix blocks for a
     // request being admitted. The engine's hook finds the longest recurrent-
