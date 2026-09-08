@@ -45,6 +45,7 @@
 #include "exec/executor.h"
 #include "runtime/engine.h"
 
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -266,6 +267,11 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         }
     };
 
+    // Permanent telemetry (ConditionalRunner precedent): the first-use gap of
+    // a bucket is the largest inter-token gap a warm server still shows
+    // (39-93 ms on Qwen3.8-27B-NVFP4 against 10.7 ms steps), and only a
+    // server log prices it without CUPTI inflation.
+    const auto t_cap0 = std::chrono::steady_clock::now();
     cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
     if (err != cudaSuccess) {
         IMP_LOG_WARN("[spec-capture] begin capture failed: %s", cudaGetErrorString(err));
@@ -301,6 +307,7 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         doom_check("capture");
         return false;
     }
+    const auto t_inst0 = std::chrono::steady_clock::now();
     cudaGraphExec_t raw_exec = nullptr;
     err = cudaGraphInstantiate(&raw_exec, graph, 0);
     CudaGraphExec exec;
@@ -312,6 +319,7 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         doom_check("instantiate");
         return false;
     }
+    const auto t_launch0 = std::chrono::steady_clock::now();
     err = cudaGraphLaunch(exec, stream);
     if (err != cudaSuccess) {
         IMP_LOG_WARN("[spec-capture] first launch failed: %s", cudaGetErrorString(err));
@@ -321,8 +329,14 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
     }
     slot.exec = std::move(exec);
     spec_capture_failures_ = 0;
-    IMP_LOG_INFO("[spec-capture] verify chunk graph cached (n_tokens=%d, ctx_tier=%d, rec_slot=%d)",
-                 state.n_tokens, state.ctx_capacity, rec_slot);
+    const auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    IMP_LOG_INFO(
+        "[spec-capture] verify chunk graph cached (n_tokens=%d, ctx_tier=%d, rec_slot=%d): "
+        "capture %.1f ms, instantiate %.1f ms, launch %.1f ms",
+        state.n_tokens, state.ctx_capacity, rec_slot, ms(t_cap0, t_inst0), ms(t_inst0, t_launch0),
+        ms(t_launch0, std::chrono::steady_clock::now()));
     return true;
 }
 

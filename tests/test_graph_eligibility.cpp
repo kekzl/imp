@@ -95,3 +95,15 @@ TEST(GraphEligibility, KvPressureLiftsAtAFifthUnlessSomethingWasEvicted) {
     EXPECT_FALSE(kv_pressure_repromotes_graphs(3000, 0, 3000, 1)) << "one evicted block pins the demotion";
     EXPECT_FALSE(kv_pressure_repromotes_graphs(0, 0, 0, 0));
 }
+
+// The last burst of a request: 7 tokens left under a miss_burst of 8 must
+// launch 7 steps, or the parked runner refuses the rearm (76 + 8 > 83) and
+// recaptures. The KV-starved shape (3 reserved under 8) is the same clamp.
+TEST(GraphEligibility, BurstStepLimitNeverExceedsTheTokensTheBurstHas) {
+    EXPECT_EQ(burst_launch_step_limit(8, 7), 7);
+    EXPECT_EQ(burst_launch_step_limit(8, 3), 3) << "KV reserved for 3 tokens bounds the launch";
+    EXPECT_EQ(burst_launch_step_limit(8, 12), 8) << "a wider reservation keeps the burst";
+    EXPECT_EQ(burst_launch_step_limit(8, 8), 8);
+    EXPECT_EQ(burst_launch_step_limit(0, 5), 0) << "0 stays unbounded (the loop runs to max_steps)";
+    EXPECT_EQ(burst_launch_step_limit(8, 0), 8) << "nothing to clamp against";
+}

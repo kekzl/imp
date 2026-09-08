@@ -75,4 +75,17 @@ inline bool kv_pressure_repromotes_graphs(int free_blocks, int reclaimable_block
     return evicted_blocks == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;
 }
 
+// Per-launch step cap of a bounded async-loop burst against the tokens the
+// burst actually has (`prepare_graph_loop`: max_tokens left, capped by the KV
+// blocks it could reserve). A cap wider than that made the parked runner
+// refuse the rearm on the last burst of every request (the captured ceiling
+// is initial_context + max_tokens; 76 + 8 > 83) and recapture for the final
+// 2-7 tokens, and would let a KV-starved burst decode past its reserved
+// blocks. 0 keeps its meaning: unbounded, the loop runs to max_steps.
+inline int burst_launch_step_limit(int step_limit, int remaining) {
+    if (step_limit <= 0 || remaining <= 0)
+        return step_limit;
+    return step_limit < remaining ? step_limit : remaining;
+}
+
 }  // namespace imp
