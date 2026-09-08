@@ -59,6 +59,20 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
         if (qs->dequant != nullptr && dequant_gpu_supported(qtype) && !weight.dropped_source) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
+            // The one degradation that lands on the per-token path was the
+            // silent one (AUDIT_arch_2026 A2-8): every decode step here
+            // dequantises and copies the whole weight before the GEMM. Said
+            // once per process, with the size, so a trace can be read.
+            static bool s_warned_full_dequant = false;
+            if (!s_warned_full_dequant) {
+                s_warned_full_dequant = true;
+                IMP_LOG_WARN(
+                    "gemm_dispatch_uncached_fallback: beta=%.3f on a %s weight without a cached FP16 "
+                    "copy: the whole %d x %d weight (%.1f MiB dequantised) is materialised per "
+                    "call from here on, on the decode path",
+                    ctx.beta, qtype_name(qtype), rows, cols,
+                    static_cast<double>(rows) * cols * 2.0 / (1024.0 * 1024.0));
+            }
             dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
             Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
             gemm(input, w_fp16, output, 1.0f, ctx.beta, ctx.stream);

@@ -53,6 +53,16 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
 
 // AUDIT_arch_2026 E-4: the agent-path SCAN hold was a constant in
 // stream_driver.cpp; it is the whole TTFT of a prose reply on tool requests.
+// AUDIT_arch_2026 A2-9: the LM-head bisect lives under diagnostics now; the
+// old generation.* spelling is an unknown key, which `--set` rejects.
+TEST(RuntimeConfigTest, LmDequantBisectBindsUnderDiagnosticsOnly) {
+    RuntimeConfig cfg;
+    EXPECT_FALSE(cfg.diagnostics.lm_dequant_fp16);
+    set_(cfg, {"diagnostics.lm_dequant_fp16=true"});
+    EXPECT_TRUE(cfg.diagnostics.lm_dequant_fp16);
+    EXPECT_EQ(cfg.apply_overrides({"generation.lm_dequant_fp16=true"}).size(), 1u);
+}
+
 TEST(RuntimeConfigTest, AgentScanLimitBindsAndDefaultsTo256) {
     RuntimeConfig cfg;
     EXPECT_EQ(cfg.server.agent_scan_limit, 256);

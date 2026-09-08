@@ -25,6 +25,11 @@ there instead of retelling it.
 
 ### Changed
 
+- `generation.lm_dequant_fp16` is `diagnostics.lm_dequant_fp16` (a bisect, never a serving knob); the
+  `beta != 0` uncached GEMM fallback warns once when it starts dequantising a whole weight per token;
+  the refuted MXFP4 attention family has its ledger row ([AUDIT_arch_2026 A2-9, A2-8, A1-9](docs/audit/AUDIT_arch_2026.md))
+- `IMP_DEVICE_LTO` CMake option, off: device link-time optimization measured neutral (paired decode 0.00 %,
+  prefill -0.41 % over 5 pairs on Qwen3-8B-Q8_0) ([AUDIT_arch_2026 H-10](docs/audit/AUDIT_arch_2026.md))
 - `make verify-fast` runs the default-path FA2 prefill fixtures (~40 s more); `make test-quantize` round-trips
   Qwen3-0.6B through `imp-quantize`; DRY, mirostat and `logit_bias` have kernel tests; ten mutation anchors
   outside the kernel slice; a nightly libFuzzer job ([AUDIT_arch_2026 I-2, I-4, I-5, I-6, F2-6](docs/audit/AUDIT_arch_2026.md))

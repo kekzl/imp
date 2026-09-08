@@ -2,7 +2,7 @@
 // on the NVFP4 cache poisons the CUDA context asynchronously right after the
 // first decode step (sticky 700 surfaces at sample_single_from_logits;
 // bisected: NVFP4 decode cache ON + per-layer GEMVs — LM head exonerated via
-// generation.lm_dequant_fp16, graphs exonerated via --no-cuda-graphs, and
+// diagnostics.lm_dequant_fp16, graphs exonerated via --no-cuda-graphs, and
 // diagnostics.no_nvfp4_decode_cache makes the model fully coherent).
 //
 // Exercises every NVFP4 decode-GEMV entry the engine dispatches for a

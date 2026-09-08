@@ -26,7 +26,7 @@ namespace imp::cfg {
 
 struct Generation {
     bool no_logit_softcap = false;
-    bool lm_dequant_fp16 = false;
+    // lm_dequant_fp16 moved to diagnostics.lm_dequant_fp16 (AUDIT_arch_2026 A2-9).
     bool force_bos = false;
     // Disable banned-token list (debug).
     bool no_ban = false;

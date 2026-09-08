@@ -45,7 +45,32 @@ message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 # CMake < 3.31 doesn't parse the 'a'/'f' suffix in CMAKE_CUDA_ARCHITECTURES,
 # so we pass gencode directly.
 option(IMP_DISABLE_120F_FALLBACK "Skip compute_120f PTX fallback (RTX 5090-only fatbin)" OFF)
-set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
+# Device link-time optimization (AUDIT_arch_2026 H-10). Every kernel TU is
+# compiled -rdc for the PDL device-side launches, which pays separable
+# compilation's cost with none of the recovery unless the device link runs
+# LTO. Measured 2026-09-08 on the RTX 5090, Qwen3-8B-Q8_0, imp:test vs an
+# LTO image, 5 alternating pairs: paired decode mean 0.00 % (+0.03 / -0.01 /
+# -0.61 / +0.03 / +0.56), paired prefill -0.41 % (4 of 5 negative), the
+# verify-fast gtest filter green on the LTO image. NEUTRAL: the hot kernels
+# do not cross TU boundaries, so there is nothing for the device link to
+# inline. Off; kept as the switch that records the trial.
+option(IMP_DEVICE_LTO "Device link-time optimization: LTO IR (code=lto_120a) per TU, SASS produced at the device link" OFF)
+if(IMP_DEVICE_LTO)
+    # nvcc refuses `-dlto` next to an explicit -gencode ("use code=lto_<arch>
+    # instead"): the LTO request is the code= target, and the device link
+    # asks for sm_120a SASS from the IR.
+    set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=lto_120a")
+    # LTO IR needs -rdc on every CUDA TU, including the tools that were whole
+    # program before (imp-quantize's awq.cu: "Cannot use '-arch=lto_<arch>'
+    # unless '-rdc=true'").
+    set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+    # $<COMMA>: a bare comma ends the genex argument and nvcc then sees
+    # "arch=compute_120a, missing code".
+    add_link_options("$<DEVICE_LINK:--generate-code=arch=compute_120a$<COMMA>code=sm_120a>")
+    message(STATUS "CUDA device LTO: on (lto_120a at compile, sm_120a SASS at the device link)")
+else()
+    set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
+endif()
 if(NOT IMP_DISABLE_120F_FALLBACK)
     set(IMP_SM120_FLAGS "${IMP_SM120_FLAGS} --generate-code=arch=compute_120f,code=compute_120f")
     message(STATUS "CUDA architectures: sm_120a (SASS, RTX 5090 / RTX PRO 6000) + compute_120f (PTX, RTX 5080 / 5070 Ti)")
