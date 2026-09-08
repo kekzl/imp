@@ -362,6 +362,17 @@ struct RuntimeConfig {
         // How long a swap waits for in-flight generations to finish before
         // giving up and keeping the current model (503, nothing torn down).
         int model_swap_drain_ms = 60000;
+        // Tokens the streaming driver holds back on a TOOL request while it is
+        // still unknown whether the model is reasoning: a tool request renders
+        // a pre-closed think block, a model that reasons anyway emits only the
+        // closer, and the held prefix is what keeps that chain of thought from
+        // streaming as the answer (stream_driver.cpp). The hold is the whole
+        // TTFT of a prose reply on the agent path: 8 tokens measured ~85 ms on
+        // Qwen3.8-27B, so 256 is ~2.7 s at that rate, paid only when the reply
+        // is prose rather than a call (AUDIT_arch_2026 E-4). Lower it on a
+        // model that never reasons; plain chat requests hold 8 and release on
+        // the first word regardless.
+        int agent_scan_limit = 256;
         // Device budget (MiB) for recurrent-state snapshots — what makes
         // prefix caching work on hybrid (SSM/GDN) models: KV blocks alone
         // cannot skip prefill there, the recurrent state at the skip boundary

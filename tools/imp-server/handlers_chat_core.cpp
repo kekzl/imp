@@ -1182,15 +1182,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
     IMP_LOG_INFO("[%s] %d prompt + %d completion tokens (%d choices), %.1f ms", comp_id.c_str(),
                  ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
-    state.metrics.requests_total++;
-    state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
-    state.metrics.tokens_completion_total += total_output_tokens;
-    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-    state.metrics.request_duration.observe(ms / 1000.0);
-    if (ttft_ms >= 0.0) {
-        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
-        state.metrics.ttft.observe(ttft_ms / 1000.0);
-    }
+    state.metrics.record_completion(ctx.log_endpoint, ms, ttft_ms, ctx.snap.n_prompt_tokens,
+                                    total_output_tokens);
 
     json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
                   {"completion_tokens", total_output_tokens},

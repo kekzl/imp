@@ -11,8 +11,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -321,6 +324,47 @@ TEST(LatencyLadder, NegativeObservationsClampToZero) {
     h.observe(-1.0);
     EXPECT_EQ(h.buckets[0].load(), 1);
     EXPECT_EQ(h.sum_us.load(), 0);
+}
+
+// AUDIT_arch_2026 E-2: --max-concurrent admitted on a queue-depth read with
+// nothing between the read and the submit. The gate is one atomic.
+TEST(InflightGate, RefusesTheLimitPlusOneAndAdmitsAgainAfterLeave) {
+    InflightGate g;
+    EXPECT_TRUE(g.try_enter(2));
+    EXPECT_TRUE(g.try_enter(2));
+    EXPECT_FALSE(g.try_enter(2)) << "the third must be refused";
+    EXPECT_EQ(g.inflight(), 2) << "a refused entry must not be counted";
+    g.leave();
+    EXPECT_TRUE(g.try_enter(2));
+    EXPECT_TRUE(g.try_enter(0)) << "0 means unlimited";
+    EXPECT_TRUE(g.try_enter(-1)) << "negative means unlimited";
+}
+
+TEST(InflightGate, ConcurrentEntriesNeverExceedTheLimit) {
+    // 64 threads race for 8 slots: exactly 8 get in, and the count reads 8
+    // while they hold, 0 once they leave. The depth-read version of this
+    // check admitted every racer.
+    InflightGate g;
+    constexpr int kLimit = 8, kThreads = 64;
+    std::atomic<int> admitted{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> ts;
+    for (int i = 0; i < kThreads; i++) {
+        ts.emplace_back([&] {
+            while (!go.load())
+                std::this_thread::yield();
+            if (g.try_enter(kLimit))
+                admitted.fetch_add(1);
+        });
+    }
+    go.store(true);
+    for (auto& t : ts)
+        t.join();
+    EXPECT_EQ(admitted.load(), kLimit);
+    EXPECT_EQ(g.inflight(), kLimit);
+    for (int i = 0; i < kLimit; i++)
+        g.leave();
+    EXPECT_EQ(g.inflight(), 0);
 }
 
 }  // namespace

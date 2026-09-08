@@ -108,6 +108,17 @@ void push_assistant_turn(json& out, const json& anth_msg) {
             // reasoning_content so a prior assistant turn's chain of
             // thought round-trips through the OpenAI code path.
             std::string th = block.value("thinking", "");
+            // The signature is the digest of the text this server emitted
+            // with the block (thinking_signature). It was never read on the
+            // way back in, so an edited or fabricated chain of thought was
+            // replayed as the model's own (AUDIT_arch_2026 E-8). A block that
+            // carries one must still match it; a block without one is taken
+            // as-is (clients that strip the field lose nothing but the check).
+            const std::string sig = block.value("signature", "");
+            if (!sig.empty() && sig != thinking_signature(th))
+                throw std::runtime_error(
+                    "thinking block signature does not match its text (the block was edited after the "
+                    "server produced it; resend it unchanged or drop the signature)");
             if (!th.empty()) {
                 if (oai_msg.contains("reasoning_content"))
                     oai_msg["reasoning_content"] =

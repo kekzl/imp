@@ -32,6 +32,11 @@ static bool is_inference_endpoint(const std::string& path) {
            path == "/rerank";
 }
 
+// Set by the pre-routing hook when it entered the in-flight gate for this
+// request, cleared by the post-routing hook; httplib runs both on the worker
+// thread that serves the request (AUDIT_arch_2026 E-2).
+static thread_local bool t_inflight_entered = false;
+
 // What the RATE limit covers is a wider set, and the difference is the defect
 // in #1615: --max-concurrent protects the engine, so it belongs on the routes
 // that queue work, but --rate-limit is there to stop a client from hammering
@@ -187,8 +192,15 @@ int main(int argc, char** argv) {
     // requests arriving at the scheduler 4-7 s late with TTFT at wave-end
     // while the engine sat ready (2026-08-25). +8 covers health checks and
     // admin routes while every stream slot is held.
+    // Connections beyond the pool used to queue in httplib's job list with no
+    // response and no timer (the read timeout starts when a worker picks the
+    // socket up): at 10x the intended concurrency 9 of 10 hung instead of
+    // seeing the documented 429 (AUDIT_arch_2026 E-2). The queue is bounded
+    // at one pool's worth; past that httplib closes the connection at once,
+    // which a client reads as "overloaded" rather than as a stall.
     svr.new_task_queue = [&args] {
-        return new httplib::ThreadPool(static_cast<size_t>(args.max_concurrent) + 8);
+        const size_t workers = static_cast<size_t>(args.max_concurrent) + 8;
+        return new httplib::ThreadPool(workers, /*max_n=*/0, /*mqr=*/workers);
     };
 
     // Store API key and limits in state
@@ -293,6 +305,16 @@ int main(int argc, char** argv) {
                                    "Server overloaded, too many concurrent requests");
                 return httplib::Server::HandlerResponse::Handled;
             }
+            // The depth read above is check-then-submit: N workers that read
+            // "63 in flight" at once were all admitted (AUDIT_arch_2026 E-2).
+            // The gate counts admitted handlers atomically; the post-routing
+            // hook on this same worker thread leaves it.
+            if (!state.inflight.try_enter(state.max_concurrent)) {
+                send_dialect_error(res, req.path, 429, "rate_limit_error", "overloaded_error",
+                                   "Server overloaded, too many concurrent requests");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            t_inflight_entered = true;
         }
 
         // Enforce API key if configured. The constant-time compare lives in
@@ -459,6 +481,13 @@ int main(int argc, char** argv) {
 
     // Track failed requests via post-routing
     svr.set_post_routing_handler([&state](const httplib::Request& req, httplib::Response& res) {
+        // Leave the in-flight gate the pre-routing hook entered on this
+        // thread (E-2). Conditional on the flag, not on the path: a request
+        // the hook refused before entering must not be counted out.
+        if (t_inflight_entered) {
+            t_inflight_entered = false;
+            state.inflight.leave();
+        }
         // Trace propagation (roadmap "no distributed tracing", the id half):
         // a client-sent X-Request-Id is echoed on EVERY response, including
         // refusals, so an agent framework can join its own trace to this

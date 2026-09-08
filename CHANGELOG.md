@@ -25,6 +25,12 @@ there instead of retelling it.
 
 ### Changed
 
+- `--max-concurrent` admits on an atomic in-flight counter (the queue-depth read raced its own
+  submit) and httplib's job queue is bounded at one pool's worth, so connections past it are closed
+  at once instead of hanging without a timer ([AUDIT_arch_2026 E-2](docs/audit/AUDIT_arch_2026.md))
+- `/metrics`: `imp_endpoint_*` request counter and latency ladders labelled `endpoint`, `imp_model_loaded{model}`;
+  an Anthropic `thinking` block whose signature does not match its text is a 400; `server.agent_scan_limit`
+  (default 256) is the tool-request first-token hold ([AUDIT_arch_2026 E-4, E-7, E-8](docs/audit/AUDIT_arch_2026.md))
 - The KV-pressure graph demotion is no longer a latch: once a fifth of the pool is free again and
   StreamingLLM evicted nothing, graphs and the auto-arm come back (`imp_streaming_kv_auto_enables_total`
   keeps counting the arms; an eviction still pins it) ([AUDIT_arch_2026 C-3](docs/audit/AUDIT_arch_2026.md))

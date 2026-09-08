@@ -10,6 +10,7 @@
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
 
+#include "runtime/engine.h"
 #include "runtime/request.h"
 
 #include <chrono>
@@ -86,8 +87,12 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // is waiting for a tool call, not rendering partial prose, and the fallback
     // is still a bounded flush — whereas streaming chain-of-thought as the
     // answer is wrong in a way the caller cannot undo.
-    constexpr int kAgentScanLimit = 256;
-    const int scan_limit = has_tools ? kAgentScanLimit : 8;
+    // 256 by default; `server.agent_scan_limit` for a model that never
+    // reasons, where the hold is pure TTFT (AUDIT_arch_2026 E-4).
+    const int agent_scan_limit = (state.ctx && state.ctx->engine)
+                                     ? state.ctx->engine->runtime_config().server.agent_scan_limit
+                                     : 256;
+    const int scan_limit = has_tools ? std::max(agent_scan_limit, 1) : 8;
     imp::server::StreamReasoningSplitter think_split(think_start_phase, ctx.snap.think_start_id,
                                                      ctx.snap.think_end_id, scan_limit);
     // Without tools the hold is 8 tokens and buys almost nothing (a chain of
@@ -332,10 +337,10 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 const double q = server_req->queue_ms.load(std::memory_order_relaxed);
                 ctx.trace.queue_ms = q;  // the span's `queue` child
                 if (q >= 0.0)
-                    state.metrics.queue_time.observe(q / 1000.0);
+                    state.metrics.record_queue_wait(ctx.log_endpoint, q / 1000.0);
             } else {
-                state.metrics.inter_token.observe(
-                    std::chrono::duration<double>(t_tok - t_prev_token).count());
+                state.metrics.record_inter_token(ctx.log_endpoint,
+                                                 std::chrono::duration<double>(t_tok - t_prev_token).count());
             }
             t_prev_token = t_tok;
         }
@@ -670,15 +675,8 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
     IMP_LOG_INFO("[%s] %s%d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, cached=%d)", req_id.c_str(),
                  label, n_prompt_tokens, out.n_output_tokens, ms, out.ttft_ms, cached);
-    state.metrics.requests_total++;
-    state.metrics.tokens_prompt_total += n_prompt_tokens;
-    state.metrics.tokens_completion_total += out.n_output_tokens;
-    state.metrics.tokens_cached_total += cached;
-    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-    state.metrics.last_ttft_ms = static_cast<int64_t>(out.ttft_ms);
-    state.metrics.request_duration.observe(ms / 1000.0);
-    if (out.n_output_tokens > 0)
-        state.metrics.ttft.observe(out.ttft_ms / 1000.0);
+    state.metrics.record_completion(ctx.log_endpoint, ms, out.n_output_tokens > 0 ? out.ttft_ms : -1.0,
+                                    n_prompt_tokens, out.n_output_tokens, cached);
 
     // Inter-token latency is observed per token inside the loop (#1577).
 

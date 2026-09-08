@@ -110,6 +110,81 @@ struct LatencyHistogram {
 
 // Server-wide metrics (atomics for lock-free reads from /metrics endpoint)
 struct ServerMetrics {
+    // Per-endpoint series (AUDIT_arch_2026 E-7): the same request counter and
+    // latency ladders as the totals below, emitted as
+    // `imp_endpoint_*{endpoint="..."}` so a dashboard can tell /v1/messages
+    // from /v1/completions and an error rate per dialect exists. The
+    // unlabelled totals stay what they are (the Grafana panels read them).
+    enum Endpoint { kChat = 0, kCompletions, kMessages, kResponses, kEmbeddings, kRerank, kEndpointCount };
+    static const char* endpoint_name(int e) {
+        static const char* const names[kEndpointCount] = {"chat_completions", "completions", "messages",
+                                                          "responses",        "embeddings",  "rerank"};
+        return (e >= 0 && e < kEndpointCount) ? names[e] : "other";
+    }
+    // -1 for a path that is not a generation route (count_tokens, tokenize).
+    static int endpoint_index(const std::string& path) {
+        if (path == "/v1/chat/completions")
+            return kChat;
+        if (path == "/v1/completions")
+            return kCompletions;
+        if (path == "/v1/messages")
+            return kMessages;
+        if (path == "/v1/responses")
+            return kResponses;
+        if (path == "/v1/embeddings")
+            return kEmbeddings;
+        if (path == "/v1/rerank" || path == "/rerank")
+            return kRerank;
+        return -1;
+    }
+    struct EndpointSeries {
+        std::atomic<int64_t> requests_total{0};
+        LatencyHistogram request_duration;
+        LatencyHistogram ttft;
+        LatencyHistogram queue_time;
+        LatencyHistogram inter_token{LatencyHistogram::kItlBounds};
+    };
+    EndpointSeries endpoint_series[kEndpointCount];
+    EndpointSeries& series(Endpoint e) { return endpoint_series[e]; }
+    // nullptr for a path that is not a generation route.
+    EndpointSeries* series_for(const std::string& path) {
+        const int i = endpoint_index(path);
+        return i < 0 ? nullptr : &endpoint_series[i];
+    }
+    // One completed generation: the totals and the endpoint's own series.
+    // ttft_ms < 0 means no token was produced. The six handler sites used to
+    // spell the same nine lines each.
+    void record_completion(const std::string& endpoint_path, double ms, double ttft_ms, int prompt_tokens,
+                           int completion_tokens, int cached = 0) {
+        requests_total++;
+        tokens_prompt_total += prompt_tokens;
+        tokens_completion_total += completion_tokens;
+        tokens_cached_total += cached;
+        last_request_duration_ms = static_cast<int64_t>(ms);
+        request_duration.observe(ms / 1000.0);
+        auto* es = series_for(endpoint_path);
+        if (es) {
+            es->requests_total++;
+            es->request_duration.observe(ms / 1000.0);
+        }
+        if (ttft_ms >= 0.0) {
+            last_ttft_ms = static_cast<int64_t>(ttft_ms);
+            ttft.observe(ttft_ms / 1000.0);
+            if (es)
+                es->ttft.observe(ttft_ms / 1000.0);
+        }
+    }
+    void record_queue_wait(const std::string& endpoint_path, double seconds) {
+        queue_time.observe(seconds);
+        if (auto* es = series_for(endpoint_path))
+            es->queue_time.observe(seconds);
+    }
+    void record_inter_token(const std::string& endpoint_path, double seconds) {
+        inter_token.observe(seconds);
+        if (auto* es = series_for(endpoint_path))
+            es->inter_token.observe(seconds);
+    }
+
     std::atomic<int64_t> requests_total{0};
     std::atomic<int64_t> requests_failed{0};
     std::atomic<int64_t> tokens_prompt_total{0};
@@ -239,6 +314,9 @@ struct ServerState {
     // Rate limiting lives in its own unit so the CPU lane can test it
     // (#1614); ServerState cannot be constructed there.
     RateLimiter rate_limiter;
+    // Admitted inference handlers right now (E-2); entered in pre-routing,
+    // left in post-routing.
+    InflightGate inflight;
 
     std::string rate_limit_key(const std::string& remote_addr, const std::string& xff) const {
         return rate_limiter.key(remote_addr, xff);
