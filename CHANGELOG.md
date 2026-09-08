@@ -27,7 +27,7 @@ there instead of retelling it.
 
 - `rope_forward`, `elementwise_add_store` and the FP8 KV write are PDL-registered (wait, then trigger) like the other
   decode-chain kernels: Qwen3.8-27B-NVFP4 at 32 streams +2.7/+0.4/+1.7% aggregate (3/3), Qwen3-14B neutral
-  (+0.1/-0.1/-0.9%); the eager form (trigger before the wait, whole chain resident) measured -1..-5% and stays out ([roadmap](docs/roadmap.md))
+  (+0.1/-0.1/-0.9%); the eager form (trigger before the wait, whole chain resident) measured -1..-5% and stays out ([roadmap](docs/roadmap.md), #1956)
 - Batched-decode LM head at n <= 32 runs on the small-M mxf4nvf4 kernel with FP32 logits and a norm-fused activation
   quantize (`gemm.nvfp4_lm_head_smallm`, default on) instead of the CUTLASS 128-row tile: Qwen3-14B-NVFP4 at 32 streams
   +1.2/+2.2/+0.2%, Qwen3.8-27B +0.6/+0.4/+2.6% aggregate (3/3 each); isolated 437 MB LM head 314 us vs 365 in situ before ([roadmap](docs/roadmap.md), #1955)
