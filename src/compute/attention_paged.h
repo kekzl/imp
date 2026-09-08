@@ -104,6 +104,20 @@ void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_c
                                                int sliding_window, float softcap, const half* attn_sinks,
                                                cudaStream_t stream);
 
+// HD=128 FP8 decode with 16 lanes per KV row and heads_per_cta Q heads per
+// CTA sharing the KV loads (attention_paged_fp8_multitok_gqa.cu). Called by
+// paged_attention_decode_fp8 before the four-token kernel when the knob is
+// on and split-K is off; heads_per_cta 0 = auto (largest of 5/4/3/2/1
+// dividing the GQA ratio). Returns false for unsupported shapes (HD != 128,
+// ratio > 16).
+bool paged_attention_fp8_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+                                             half* O, const int* block_tables, const int* context_lens,
+                                             int batch_size, int n_heads, int n_kv_heads, int head_dim,
+                                             int block_size, float scale, float kv_scale, int max_num_blocks,
+                                             int sliding_window, float softcap, const half* attn_sinks,
+                                             int heads_per_cta, cudaStream_t stream);
+int paged_attention_fp8_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested);
+
 // F16 decode with four tokens per warp iteration and heads_per_cta Q heads per
 // CTA sharing the KV loads (attention.paged_f16_multitok,
 // attention_paged_f16_multitok.cu), HD=128/256, GQA ratio 1..8. Called by

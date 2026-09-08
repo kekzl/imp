@@ -47,7 +47,7 @@ machines. Both are better at those jobs than imp is, and imp does not try to
 be. On one 5090 the picture depends on the model: on the Qwen3.8-27B hybrid
 imp leads vLLM by 25 % at 32 concurrent streams and by 16 % at 8 on the same
 checkpoint and client; on a dense NVFP4 checkpoint (Qwen3-14B) imp leads by
-8 % at 8 streams and by 3 % at 32, and vLLM by 1.3x at 32 with ~1000-token
+8 % at 8 streams and by 3 % at 32, and reads parity at 32 with ~1000-token
 prompts (table with provenance in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
 "re-measured on one client").
 
@@ -171,7 +171,7 @@ figure; with it off that row reads 284.6, still +78 %.
 **Serving on one card.** The same checkpoint served by imp and by vLLM
 (0.27.1, Marlin NVFP4) to one client, fresh server per arm, three alternating
 trials, aggregate tok/s as the median of three waves. Qwen3.8-27B (a
-Gated-DeltaNet hybrid) unless noted; the dense row is where vLLM leads:
+Gated-DeltaNet hybrid) unless noted; the dense rows are Qwen3-14B-NVFP4:
 
 | streams | prompt | imp | vLLM 0.27.1 | |
 |---|---|---:|---:|---|
@@ -180,7 +180,7 @@ Gated-DeltaNet hybrid) unless noted; the dense row is where vLLM leads:
 | 32 | 1082 tokens | **873.4** | 497.8 | +75 % |
 | 8, dense Qwen3-14B-NVFP4 | 36 tokens | **1085.4** | 1005.8 | +8 % |
 | 32, dense Qwen3-14B-NVFP4 | 38 tokens | **3948.9** | 3817.6 | +3 % |
-| 32, dense Qwen3-14B-NVFP4 | 982 tokens | 1845.0 | **2478.0** | -26 % |
+| 32, dense Qwen3-14B-NVFP4 | 982 tokens | **2491.2** | 2490.9 | +0 % |
 
 [PROV: commit=a44298cb date=2026-09-02 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm
        quant=NVFP4 cuda=13.3 path=server-api cmd=`tools/analysis/vllm_conc_ab.sh`
@@ -188,7 +188,8 @@ Gated-DeltaNet hybrid) unless noted; the dense row is where vLLM leads:
        --gpu-memory-utilization 0.90 --max-model-len 16384 --max-num-seqs N;
        imp --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096
        --set kv_cache.max_blocks=2387; vLLM 0.28.0 reads 1410.7 at 32 streams;
-       dense rows 2026-09-03 imp 6281802f (attention.paged_fp8_multitok=4), model=Qwen3-14B-NVFP4
+       dense rows 2026-09-03 imp 6281802f (attention.paged_fp8_multitok=4), model=Qwen3-14B-NVFP4,
+       the 982-token row 2026-09-08 with the grouped FP8 decode attention (#1953, BENCHMARKS run 10),
        quant=NVFP4-Modelopt, --set kv_cache.max_blocks=8192]
 
 Per-model history with dates, commits and exact commands:

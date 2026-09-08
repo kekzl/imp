@@ -552,6 +552,18 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                 break;
             case 128:
                 if (process_diag_paged_fp8_multitok() > 1) {
+                    // The grouped kernel first (hpc -1 = the per-head
+                    // four-token kernel below, for tests), the four-token
+                    // kernel for the shapes it does not serve.
+                    if (process_diag_paged_fp8_hpc() >= 0 &&
+                        paged_attention_fp8_multitok_gqa_launch(
+                            reinterpret_cast<const half*>(Q.data),
+                            reinterpret_cast<const uint8_t*>(K_cache.data),
+                            reinterpret_cast<const uint8_t*>(V_cache.data), reinterpret_cast<half*>(O.data),
+                            block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size,
+                            scale, kv_scale, max_num_blocks, sliding_window, softcap, sinks_h,
+                            process_diag_paged_fp8_hpc(), stream))
+                        break;
                     paged_attention_decode_fp8_multitok_hd128(reinterpret_cast<const half*>(Q.data),
                                                               reinterpret_cast<const uint8_t*>(K_cache.data),
                                                               reinterpret_cast<const uint8_t*>(V_cache.data),

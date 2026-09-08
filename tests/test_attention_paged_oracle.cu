@@ -853,45 +853,68 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
 TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    const int n_heads = 32, n_kv_heads = 8, head_dim = 128;
+    const int head_dim = 128;
     const float scale = 1.0f / std::sqrt((float)head_dim);
     process_diag_set_force_splitk_fallback(true);
-    for (int kv_len : {16, 64, 333, 1024}) {
-        const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        const size_t q_elems = (size_t)n_heads * head_dim;
-        const size_t kv_elems = (size_t)kv_len * n_kv_heads * head_dim;
-        std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
-        lcg_fill(Qh, 0x4D71u + kv_len, 2.0f);
-        lcg_fill(Kh, 0x4D72u + kv_len, 2.0f);
-        lcg_fill(Vh, 0x4D73u + kv_len, 1.0f);
-        std::vector<double> ref;
-        ref_decode_f64(Qh, Kh, Vh, ref, kv_len, n_heads, n_kv_heads, head_dim, scale);
-        std::vector<int> bt(num_blocks);
-        for (int i = 0; i < num_blocks; i++)
-            bt[i] = i;
-        int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
-        int ctx = kv_len;
-        int* d_ctx = (int*)up(&ctx, sizeof(int));
-        void* d_q = up(Qh.data(), q_elems * sizeof(half));
-        void* d_o = nullptr;
-        cudaMalloc(&d_o, q_elems * sizeof(half));
-        PathCtx c{stream, kv_len,  n_heads, n_kv_heads, head_dim, num_blocks,
-                  scale,  q_elems, &Kh,     &Vh,        &ref,     f16_tensor(d_q, {1, 1, n_heads, head_dim}),
-                  d_o,    d_bt,    d_ctx};
-        process_diag_set_paged_fp8_multitok(1);
-        ErrStats e_plain = PathFP8::run(c);
-        process_diag_set_paged_fp8_multitok(4);
-        ErrStats e_mt = PathFP8::run(c);
-        EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
-        EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len;
-        EXPECT_LT(e_plain.max_rel, PathFP8::envelope()) << "plain kv_len " << kv_len << ": " << e_plain.str();
-        EXPECT_LT(e_mt.max_rel, PathFP8::envelope()) << "multitok kv_len " << kv_len << ": " << e_mt.str();
-        printf("PagedFp8Multitok kv_len=%d: plain %s | multitok %s\n", kv_len, e_plain.str().c_str(),
-               e_mt.str().c_str());
-        cudaFree(d_q);
-        cudaFree(d_o);
-        cudaFree(d_bt);
-        cudaFree(d_ctx);
+    // 32/8 (ratio 4: Qwen3-8B, Llama) and 40/8 (ratio 5: Qwen3-14B). hpc -1 is
+    // the per-head four-token kernel; every hpc 1..5 that divides the ratio
+    // runs the grouped kernel (attention_paged_fp8_multitok_gqa.cu).
+    for (int n_heads : {32, 40}) {
+        const int n_kv_heads = 8;
+        const int ratio = n_heads / n_kv_heads;
+        for (int kv_len : {16, 64, 333, 1024}) {
+            const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            const size_t q_elems = (size_t)n_heads * head_dim;
+            const size_t kv_elems = (size_t)kv_len * n_kv_heads * head_dim;
+            std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
+            lcg_fill(Qh, 0x4D71u + kv_len, 2.0f);
+            lcg_fill(Kh, 0x4D72u + kv_len, 2.0f);
+            lcg_fill(Vh, 0x4D73u + kv_len, 1.0f);
+            std::vector<double> ref;
+            ref_decode_f64(Qh, Kh, Vh, ref, kv_len, n_heads, n_kv_heads, head_dim, scale);
+            std::vector<int> bt(num_blocks);
+            for (int i = 0; i < num_blocks; i++)
+                bt[i] = i;
+            int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+            int ctx = kv_len;
+            int* d_ctx = (int*)up(&ctx, sizeof(int));
+            void* d_q = up(Qh.data(), q_elems * sizeof(half));
+            void* d_o = nullptr;
+            cudaMalloc(&d_o, q_elems * sizeof(half));
+            PathCtx c{stream,   kv_len,     n_heads, n_kv_heads,
+                      head_dim, num_blocks, scale,   q_elems,
+                      &Kh,      &Vh,        &ref,    f16_tensor(d_q, {1, 1, n_heads, head_dim}),
+                      d_o,      d_bt,       d_ctx};
+            process_diag_set_paged_fp8_multitok(1);
+            ErrStats e_plain = PathFP8::run(c);
+            EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
+            EXPECT_LT(e_plain.max_rel, PathFP8::envelope())
+                << "plain " << n_heads << "/8 kv_len " << kv_len << ": " << e_plain.str();
+            process_diag_set_paged_fp8_multitok(4);
+            process_diag_set_paged_fp8_hpc(-1);
+            ErrStats e_mt = PathFP8::run(c);
+            EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len;
+            EXPECT_LT(e_mt.max_rel, PathFP8::envelope())
+                << "multitok " << n_heads << "/8 kv_len " << kv_len << ": " << e_mt.str();
+            printf("PagedFp8Multitok %d/8 kv_len=%d: plain %s | multitok %s\n", n_heads, kv_len,
+                   e_plain.str().c_str(), e_mt.str().c_str());
+            for (int hpc = 1; hpc <= 5; hpc++) {
+                if (ratio % hpc != 0)
+                    continue;
+                process_diag_set_paged_fp8_hpc(hpc);
+                ErrStats e_g = PathFP8::run(c);
+                EXPECT_EQ(e_g.nan_count, 0) << "grouped hpc " << hpc << " kv_len " << kv_len;
+                EXPECT_LT(e_g.max_rel, PathFP8::envelope())
+                    << "grouped " << n_heads << "/8 hpc " << hpc << " kv_len " << kv_len << ": " << e_g.str();
+                printf("PagedFp8Multitok %d/8 kv_len=%d: grouped hpc=%d %s\n", n_heads, kv_len, hpc,
+                       e_g.str().c_str());
+            }
+            process_diag_set_paged_fp8_hpc(0);
+            cudaFree(d_q);
+            cudaFree(d_o);
+            cudaFree(d_bt);
+            cudaFree(d_ctx);
+        }
     }
     process_diag_set_force_splitk_fallback(false);
     process_diag_set_paged_fp8_multitok(4);
@@ -1297,7 +1320,9 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
     const int n_kv_heads = env_int("IMP_ATTN_BENCH_KV_HEADS", 8);
     const int head_dim = 128;
     const int multitok = env_int("IMP_ATTN_BENCH_MULTITOK", 4);  // 1 = plain kernel, 4 = multitok
+    const int hpc = env_int("IMP_ATTN_BENCH_HPC", 0);  // 0 = auto grouping, -1 = per-head four-token
     process_diag_set_paged_fp8_multitok(multitok);
+    process_diag_set_paged_fp8_hpc(hpc);
     const float scale = 1.0f / std::sqrt((float)head_dim);
     const int blocks_per_seq = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const int num_blocks = batch * blocks_per_seq;
@@ -1344,17 +1369,22 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
         paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, 1.0f, kv_len, 0, 0.0f, stream,
                                    blocks_per_seq);
     };
-    // Warm >1 s (idle downclock ramps in ~1 s on this box).
+    // Warm >1 s (idle downclock ramps in ~1 s on this box): batches of 500
+    // launches until a second has passed, whatever the kernel's speed.
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
     cudaEventCreate(&t1);
-    cudaEventRecord(t0, stream);
-    for (int i = 0; i < 2000; i++)
-        launch();
-    cudaEventRecord(t1, stream);
-    cudaEventSynchronize(t1);
     float warm_ms = 0.0f;
-    cudaEventElapsedTime(&warm_ms, t0, t1);
+    while (warm_ms < 1000.0f) {
+        cudaEventRecord(t0, stream);
+        for (int i = 0; i < 500; i++)
+            launch();
+        cudaEventRecord(t1, stream);
+        cudaEventSynchronize(t1);
+        float batch_ms = 0.0f;
+        cudaEventElapsedTime(&batch_ms, t0, t1);
+        warm_ms += batch_ms;
+    }
     ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "FP8 paged decode launch";
     const int iters = 200;
     cudaEventRecord(t0, stream);
@@ -1367,11 +1397,11 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
     const double us = 1000.0 * ms / iters;
     const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * head_dim;  // K + V read once
     printf(
-        "PagedFp8Decode serving shape: multitok=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, KV "
-        "%.1f MB, "
-        "%.0f GB/s (warm %.2f s)\n",
-        multitok, batch, kv_len, n_heads, n_kv_heads, head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9,
-        warm_ms / 1000.0);
+        "PagedFp8Decode serving shape: multitok=%d hpc=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, "
+        "KV %.1f MB, %.0f GB/s (warm %.2f s)\n",
+        multitok, hpc, batch, kv_len, n_heads, n_kv_heads, head_dim, us, bytes / 1e6,
+        bytes / (us * 1e-6) / 1e9, warm_ms / 1000.0);
+    process_diag_set_paged_fp8_hpc(0);
     std::vector<float> Oh = read_o(d_o, q_elems);
     size_t nonfinite = 0;
     for (float h : Oh)
