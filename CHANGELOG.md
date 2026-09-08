@@ -92,7 +92,7 @@ there instead of retelling it.
 
 - Small-M NVFP4 GEMM (`gemm_nvfp4_smallm_v2`, M <= 32): the #1954 weight prefetch raced its stage barrier on
   multi-wave grids (gate|up sibling launch, 544 CTAs), a 24-token prefill differed per run and `runtime.deterministic`
-  did not hold (isolated 126 of 200 launches bit-different, now 0; gate `NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable`)
+  did not hold (isolated 126 of 200 launches bit-different, now 0; gate `NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable`) (#1958)
 - Parsers, round two: the warm weight cache bounds-checks every record index (an out-of-table `data_alloc`
   became a device pointer), SentencePiece lengths no longer wrap a pointer sum, Jinja caps macro depth (256) and
   loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_arch_2026 F1-3, F1-8, F1-9, F1-10](docs/audit/AUDIT_arch_2026.md))
