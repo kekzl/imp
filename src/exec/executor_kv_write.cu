@@ -202,11 +202,12 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
         dim3 fp8_grid(n, 2);
-        write_kv_cache_fp8_fused_kernel<<<fp8_grid, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
-            block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride, row_elems,
-            kv_block_size, n, wr_max_blocks, wr_n_seq);
+        pdl::enable_kernel(write_kv_cache_fp8_fused_kernel);
+        pdl::launch(write_kv_cache_fp8_fused_kernel, fp8_grid, dim3(threads), size_t(0), stream,
+                    static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
+                    block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
+                    static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride,
+                    row_elems, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Standard FP16 KV cache write path — fused K+V in single launch.
