@@ -32,11 +32,11 @@ Detail records: [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lev
 | axis | state |
 |---|---|
 | GDN hybrid @32 vs vLLM | AHEAD. Qwen3.8-27B 1807.9 vs 1447.8 tok/s (+24.9%, vLLM 0.27.1), 1833.8 vs 1410.7 (+30.0%, 0.28.0), @8 573.0 vs 495.8 (+15.6%), @32 x 1082-token prompts 873.4 vs 497.8 (+75.5%), 3/3 each |
-| dense NVFP4 @32 vs vLLM | MIXED. Qwen3-14B 38-token prompts 3948.9 vs 3817.6 (+3.4%), 982-token prompts 1845.0 vs 2478.0 (0.75x) |
+| dense NVFP4 @32 vs vLLM | PARITY OR AHEAD (2026-09-08). Qwen3-14B 38-token prompts 3948.9 vs 3817.6 (+3.4%, 2026-09-03); 982-token prompts 2491.2/2515.5/2482.6 vs 2485.9/2490.9/2497.7 (+0.2/+1.0/-0.6%, 2 of 3; was 1845.0 vs 2478.0 = 0.75x before the grouped FP8 decode attention, #1953) |
 | batch=1 | 87.4 tok/s spec-off = 78% of the ~112 tok/s roofline (14.5 GB/token at 1628 GB/s resident); past it only through the MTP verify |
 | raw-speed half of [`GOAL.md`](GOAL.md) | MET: batch=1 decode +13-48% vs llama.cpp on every hero (2026-07-12 re-sweep), MoE prefill leads vLLM single-seq, cross-engine PPL parity measured. Everything open below is the agentic half |
 | admission at fan-out | `auto` resolves 28 vs a pinned 32 (630 vs 936): admission, not rotation, and 28 sustain full rate under continuous arrival |
-| next engine-side post | launch-coupled idle (~8%) and the paced serving prefill on dense models |
+| next engine-side post | the dense decode step at 32 streams after the grouped FP8 attention (ledger 2026-09-08): the small-M GEMM class at ~67% of bandwidth (attribution 2026-09-03), and the prefill forward at 80% of the FP4 peak (Open 2) |
 
 Both engines measured on one client (`tools/analysis/vllm_conc_ab.sh`, 3
 alternating trials, same checkpoint); the "1.58x gap" and "~1.08x pinned" of
@@ -164,6 +164,7 @@ One row per lever: verdict, headline number, ref. Measurement narrative in
 |---|---|---|---|
 | FP8 paged decode, four tokens per warp iteration | SHIPPED default-on | microbench 32 x 1100 209.1 -> 92.4 us (345 -> 780 GB/s with the paired e4m3 conversion), 32 x 4096 716.9 -> 332.4; serving @32 982-token prompts +25.2%, 38-token +13.9%; vs vLLM 38-token 3948.9 vs 3817.6 (+3.4%, was -7.6%) | `attention.paged_fp8_multitok`, #1872, #1875 |
 | FP8 lane-per-token QK variant, and an 8-token instance | REFUTED | -6.7% at 1100 tokens but +32% at 300 (half the lanes idle); 8-token 94.2 vs 91.7 us (registers) | #1875, not in tree |
+| FP8 paged decode, 16 lanes per KV row (8 bytes per lane, 4 shuffles per dot) and the Q heads of a KV head grouped per CTA (5/4/3/2 dividing the GQA ratio), q slices re-read from shared memory so the HPC=5 instance holds 128 registers (two CTAs per SM), the next row group's K and V rows in flight during the current reduce | SHIPPED default-on | microbench 32 x 1100: 40/8 heads 95.2 -> 56.4 us (757 -> 1278 GB/s), 32/8 83.5 -> 55.6; 32 x 4096 334.6 -> 186.2 (1442 GB/s); the F16 four-head kernel reads 1368 GB/s on the same 32 x 1100 shape. Qwen3-14B-NVFP4 @32 x 982-token prompts, two images, 3 trials x 3 waves: 2192.7/2193.6/2203.2 -> 2496.6/2480.4/2482.9 tok/s (+13.9/+13.1/+12.7%), ITL p50 10.5 -> 8.7 ms, TTFT p90 unchanged; 38-token prompts 4176.5/4205.6/4212.2 -> 4327.6/4279.4/4322.7 (+3.6/+1.8/+2.6%). Refuted on the way: 8 lanes x 16 bytes per row at HPC 5 needs 180-217 registers (one CTA per SM, 60-66 us), q in registers 66.4 us, V issued after the softmax 63.6, TOK=4 at 16 lanes 63.9; ncu on the register-resident form: 12 active warps per SM, 0.68 eligible per scheduler, DRAM 56% | `attention_paged_fp8_multitok_gqa.cu`, #1953 |
 | NVFP4 paged decode, four tokens per warp iteration, split-K target 4 CTAs/SM | SHIPPED default-on | 32 x 1100 123.3 -> 90.0 us, 1 x 77k 293.8 -> 209.6 (-29%); e2e 32k +6.6%, 64k +14.1% | `attention.paged_nvfp4_multitok`, #1876 |
 | the same split-K twin for FP8 | REFUTED | its split-K route already runs the cp.async-pipelined scalar kernel at 800-900 GB/s (77k 198.2 vs 200.4 us) | #1876 |
 | NVFP4 Q heads grouped per CTA, each K/V row converted once | SHIPPED default-on | 24/4 HD=256 1 x 77k 214.2 -> 177.3 us, 32 x 1100 92.9 -> 68.6; e2e 32k +3.0%, 64k +4.2%, @32 +1.1..1.3% | #1886 |

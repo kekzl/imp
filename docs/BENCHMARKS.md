@@ -600,6 +600,7 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
 | 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok prompts, vLLM 0.27.1, imp KV pool 8192 blocks | 1458.7 / 1454.3 / 1480.2 (**1470.6**) | 2492.6 / 2458.0 / 2503.5 (**2492.6**) | **-41.0%** | 0/3 |
 | 8 | run 5 with `attention.paged_fp8_multitok=4` (this branch), pool 8192 | 3948.9 / 3947.3 / 3972.9 (**3948.9**) | 3817.6 / 3837.3 / 3784.5 (**3817.6**) | **+3.4%** | 3/3 |
 | 9 | run 7 with `attention.paged_fp8_multitok=4` (this branch) | 1839.5 / 1845.0 / 1855.3 (**1845.0**) | 2467.9 / 2478.0 / 2510.0 (**2478.0**) | **-25.5%** | 0/3 |
+| 10 | run 9 after the paced prefill (#1950-#1952) and the grouped FP8 decode attention (#1953), 2026-09-08 | 2491.2 / 2515.5 / 2482.6 (**2491.2**) | 2485.9 / 2490.9 / 2497.7 (**2490.9**) | **+0.0%** | 2/3 |
 
 - vLLM's first wave on a fresh server reads 383-389 tok/s at 32 streams
   (24.6-25.1 s wall) and 103.5-104.2 at 8 on every trial: JIT / autotune
@@ -621,10 +622,12 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
   prefill GEMM. Runs 8-9 are runs 5 and 7 with the four-token FP8 decode
   kernel (`attention.paged_fp8_multitok`, roadmap ledger 2026-09-03): the
   38-token shape flips to imp +3.4% (3/3), the 982-token shape closes from
-  0.59x to 0.75x; what remains there is the paced serving prefill. The
-  32-stream lead in runs 1-4 is a property of the GDN hybrid, not of every
-  model; attribution of the dense
-  gap is the next engine-side item in `docs/roadmap.md`.
+  0.59x to 0.75x. Run 10 (2026-09-08) is run 9 after the paced serving
+  prefill (#1950-#1952) and the grouped FP8 decode attention (#1953, roadmap
+  ledger 2026-09-08): +0.2 / +1.0 / -0.6% per trial, parity; vLLM 0.27.1
+  now reaches /health in 71 s and shows no first-wave penalty (weights from
+  the page cache in 1.1 s, torch.compile 24 s). The 32-stream lead in runs
+  1-4 is a property of the GDN hybrid, not of every model.
 - vLLM 0.27.1 reads the same as on 2026-08-25 (1447.8 here vs 1475.2 on the
   older client); imp moved 935.7 -> 1807.9 at 32 and 358.4 -> 573.0 at 8 on
   the levers in the roadmap ledger. vLLM 0.28.0 is 2.6% below 0.27.1 on this

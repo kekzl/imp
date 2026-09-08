@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- FP8 paged decode attention (HD=128, `attention.paged_fp8_multitok=4`) groups the Q heads of a KV head per CTA on a
+  16-lanes-per-row layout (each K/V row loaded and converted once): 32 x 1100 microbench 95.2 -> 56.4 us; Qwen3-14B-NVFP4 at 32
+  streams x 982-token prompts +12.7..+13.9% (ITL p50 10.5 -> 8.7 ms), parity with vLLM 0.27.1 there, was 0.75x ([roadmap](docs/roadmap.md), #1953)
 - `runtime.prefill_mixed_decode` (default on): while prompts prefill, the decoding requests ride the ragged prefill
   forward as one-row members (one batched paged-decode attention launch per layer), so a burst step runs no separate
   decode forward: Qwen3-14B-NVFP4 32 x ~1k-token burst +6.6..+7.8% aggregate, TTFT p50 -20..-23%, ITL max 141 -> 80 ms ([roadmap](docs/roadmap.md), #1952)

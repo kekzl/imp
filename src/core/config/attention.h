@@ -111,8 +111,11 @@ struct Attention {
     // tok/s; output bit-identical (2026-09-01, docs/roadmap.md). Default on.
     bool fa2_dense_2cta = true;
     // FP8 paged decode (HD=128): tokens per warp iteration. 4 = the multitok
-    // kernel (attention_paged_fp8_multitok.cu), 1 = the plain kernel. Measured
-    // 2026-09-03 on Qwen3-14B-NVFP4 at 32 streams x 1.1k context, see PERF.md.
+    // kernels, 1 = the plain kernel. Under 4 the Q heads of a KV head are
+    // grouped per CTA on a 16-lanes-per-row layout
+    // (attention_paged_fp8_multitok_gqa.cu, 2026-09-08: 32 x 1100 on 40/8
+    // heads 95.2 -> 56.4 us), the per-head four-token kernel
+    // (attention_paged_fp8_multitok.cu) serves the shapes it does not.
     int paged_fp8_multitok = 4;
     // NVFP4 paged decode (HD=128/256): tokens per warp iteration, same idea
     // (attention_paged_nvfp4_multitok.cu); the Q heads of a KV head are grouped
