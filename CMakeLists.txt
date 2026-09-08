@@ -904,6 +904,7 @@ if(IMP_BUILD_TESTS)
         tests/test_reduce.cu
         tests/test_softmax.cu
         tests/test_sampling.cu
+        tests/test_sampling_advanced.cu
         tests/test_penalty_hist_append.cu
         tests/test_rowwise_topm.cu
         tests/test_executor_kernels.cu

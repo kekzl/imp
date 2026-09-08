@@ -800,6 +800,54 @@ jobs:
           ./build-asan/test-core
           ./build-asan/test-text
 
+  # Coverage-guided fuzzing, nightly (AUDIT_arch_2026 F2-6). The CPU lane
+  # replays 1500 fixed-seed iterations per target and can only re-find a known
+  # defect class; libFuzzer with coverage feedback is what finds a new one, and
+  # nothing ran it unless someone typed the docker line in fuzz/README.md. The
+  # four CPU-only targets, 10 minutes each, corpus carried between nights in
+  # the cache, crashers in the run's artifacts. Advisory: a crasher is a
+  # warning here and an issue for a human.
+  fuzz-nightly:
+    name: Fuzz (nightly, libFuzzer)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    container:
+      image: silkeh/clang:18@sha256:3914c93a02e866795aafc80737488e515b96390eff3d2787cf8c5095997baea9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore the corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Build the four CPU-only targets
+        run: |
+          cmake -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+                -DIMP_FUZZERS=ON -DIMP_BUILD_TESTS=OFF -DIMP_BUILD_SERVER=OFF
+          cmake --build build-fuzz -j"$(nproc)" \
+                --target fuzz_json_schema fuzz_regex fuzz_gbnf fuzz_tool_stream
+
+      - name: Fuzz each target for 10 minutes
+        run: |
+          mkdir -p fuzz/crashes
+          for t in fuzz_json_schema fuzz_regex fuzz_gbnf fuzz_tool_stream; do
+            mkdir -p "fuzz/corpus/$t"
+            echo "== $t =="
+            ./build-fuzz/$t -max_total_time=600 -artifact_prefix="fuzz/crashes/$t-" "fuzz/corpus/$t" \
+              || echo "::warning::$t found a crasher (see the fuzz-crashes artifact)"
+          done
+
+      - name: Keep the crashers
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashes
+          path: fuzz/crashes
+          if-no-files-found: ignore
+
   test:
     name: Test
     needs: build

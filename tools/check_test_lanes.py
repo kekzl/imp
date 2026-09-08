@@ -219,7 +219,9 @@ def main():
     # (test-e2e, GPU + Qwen3-8B: a real cache file with one record index flipped).
     # 1072 -> 1073 (AUDIT_arch_2026 C-3): ServingSignalsTest.GraphsComeBackWhenThePressureClearsWithoutEvictions
     # (test-e2e, GPU + Qwen3-8B: the valve fires on a real pool and the replay after re-promotion is the proof).
-    PINNED = 1073
+    # 1073 -> 1079 (AUDIT_arch_2026 I-4): SamplingAdvancedTest x6 (test-compute, GPU, no model): DRY,
+    # mirostat v2 and logit_bias at their kernel entry points, samplers that had no test in any lane.
+    PINNED = 1079
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -35,7 +35,8 @@
         "IMP_BUILD_TESTS": "ON",
         "IMP_BUILD_TOOLS": "ON",
         "IMP_BUILD_BENCH": "OFF",
-        "IMP_BUILD_SERVER": "ON"
+        "IMP_BUILD_SERVER": "ON",
+        "IMP_DISABLE_120F_FALLBACK": "ON"
       }
     },
     {
