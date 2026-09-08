@@ -12,6 +12,7 @@
 // RuntimeConfig and Engine so this can run in the unit lane.
 
 #include "runtime/graph_eligibility.h"
+#include "runtime/snapshot_boundary.h"
 
 #include <gtest/gtest.h>
 
@@ -106,4 +107,17 @@ TEST(GraphEligibility, BurstStepLimitNeverExceedsTheTokensTheBurstHas) {
     EXPECT_EQ(burst_launch_step_limit(8, 8), 8);
     EXPECT_EQ(burst_launch_step_limit(0, 5), 0) << "0 stays unbounded (the loop runs to max_steps)";
     EXPECT_EQ(burst_launch_step_limit(8, 0), 8) << "nothing to clamp against";
+}
+
+// Prefix-cache snapshot boundary: the largest block-aligned prompt position,
+// and none at all under the minimum (a 35-token prompt is then one prefill
+// chunk instead of 32 + 3 with a sync between, 2026-09-08).
+TEST(GraphEligibility, SnapshotBoundaryIsBlockAlignedAndSkipsShortPrompts) {
+    EXPECT_EQ(snapshot_boundary(35, 16, 256), 0) << "32 < 256: no snapshot, no split";
+    EXPECT_EQ(snapshot_boundary(35, 16, 0), 32) << "0 keeps every block-aligned prompt";
+    EXPECT_EQ(snapshot_boundary(256, 16, 256), 256) << "the minimum itself qualifies";
+    EXPECT_EQ(snapshot_boundary(1082, 16, 256), 1072);
+    EXPECT_EQ(snapshot_boundary(1082, 32, 256), 1056) << "block size decides the alignment";
+    EXPECT_EQ(snapshot_boundary(15, 16, 0), 0) << "under one block there is nothing to save";
+    EXPECT_EQ(snapshot_boundary(35, 0, 0), 0);
 }

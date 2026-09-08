@@ -329,6 +329,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("server.agent_scan_limit", cfg.server.agent_scan_limit);
     I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
     I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
+    I("server.snapshot_min_prompt_tokens", cfg.server.snapshot_min_prompt_tokens);
     S("server.otlp_endpoint", cfg.server.otlp_endpoint);
     S("server.otlp_service_name", cfg.server.otlp_service_name);
     B("server.green_contexts", cfg.server.green_contexts);

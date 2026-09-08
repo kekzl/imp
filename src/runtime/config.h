@@ -388,6 +388,14 @@ struct RuntimeConfig {
         // slots): more concurrent multi-turn sessions keep their tail-only
         // prefill. 0 = off.
         int recurrent_snapshot_host_mb = 2048;
+        // A prompt whose block-aligned prefix is shorter than this takes no
+        // prefix-cache snapshot (recurrent slab or SWA window) and no prefill
+        // split at the boundary. The split costs every first turn two eager
+        // chunks plus a sync: 35-token prompt, Qwen3.8-27B-NVFP4, one stream,
+        // server-side TTFT floor 36 -> 22 ms unsplit (2026-09-08), while the
+        // turn-2 saving of a 32-token prefix is under 3 ms. 0 = snapshot
+        // every block-aligned prompt.
+        int snapshot_min_prompt_tokens = 256;
         // Green Contexts / prefill-decode overlap streams in the server engine.
         // OFF by default (suspected memSyncDomain race on sm_120 fallback
         // streams — gemma-3-12b IMA); opt in via [server] green_contexts = true.

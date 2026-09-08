@@ -16,12 +16,14 @@
 
 #include "runtime/engine.h"
 #include "runtime/batch.h"
+#include "runtime/snapshot_boundary.h"
 #include "runtime/think_stop_logic.h"
 #include "model/chat_template.h"
 #include "core/logging.h"
 #include <cstdlib>
 
 #include <algorithm>
+#include <chrono>
 #include <span>
 #include <string>
 
@@ -358,7 +360,8 @@ int Engine::hybrid_snapshot_end_(const Request& req) const {
     if (req.vision_emb || req.image || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    return (static_cast<int>(req.input_tokens.size()) / bs) * bs;
+    return snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
+                             runtime_config_.server.snapshot_min_prompt_tokens);
 }
 
 void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
@@ -375,14 +378,19 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     auto it = recurrent_slot_of_.find(req.id);
     if (it == recurrent_slot_of_.end())
         return;
+    const auto t0 = std::chrono::steady_clock::now();
     if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream)) {
         // The copy must complete before anything else mutates the slot. Later
         // prefill chunks run on this same stream (ordered); the first DECODE
         // step may run on a different stream (green contexts), so make the
         // last-chunk save visible before returning. One sync per prefill.
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        IMP_LOG_DEBUG("RecurrentSnapshot: saved %d-token state for req %d (%d/%d slots)", snap_end,
-                      req.id, recurrent_snapshots_->size(), recurrent_snapshots_->capacity());
+        // The wall time sits inside the TTFT (between the prefill chunks):
+        // the D2D save plus everything queued ahead of it on the stream.
+        IMP_LOG_DEBUG(
+            "RecurrentSnapshot: saved %d-token state for req %d (%d/%d slots) in %.1f ms", snap_end, req.id,
+            recurrent_snapshots_->size(), recurrent_snapshots_->capacity(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 }
 
@@ -428,7 +436,8 @@ int Engine::snapshot_end_(const Request& req) const {
     if (req.vision_emb || req.image || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    return (static_cast<int>(req.input_tokens.size()) / bs) * bs;
+    return snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
+                             runtime_config_.server.snapshot_min_prompt_tokens);
 }
 
 void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
