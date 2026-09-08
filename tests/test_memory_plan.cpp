@@ -209,6 +209,76 @@ TEST(MemoryPlan, FailsWithAnItemisedReportAndActionableLevers) {
         EXPECT_GE(res.failure.levers[i - 1].frees, res.failure.levers[i].frees);
 }
 
+namespace {
+
+// The shadow probe of Qwen3.8-27B-NVFP4 at runtime.max_batch_size=64
+// (2026-09-08 server log): distributable 9683 MiB after the weights, SSM/GDN
+// state 4968 MiB for 64 slots, library reserve 3900, mandatory caches 1602,
+// engine-persistent 949. The plan rejected (over by 1735 MiB), the live pass
+// never charged the state, and the pool probe read 528 GB/s: spilled.
+PlanInput hybrid_64_slots() {
+    PlanInput in;
+    in.model.n_layers = 64;
+    in.model.n_kv_layers = 16;
+    in.model.n_kv_heads = 4;
+    in.model.head_dim = 256;
+    in.model.weight_bytes = 0;  // already uploaded: the budget is post-weight
+    in.model.weight_cache_bytes = 1602 * kMiB;
+    in.model.mandatory_cache_bytes = 1602 * kMiB;
+    in.features.ssm_state_bytes = 64ull * 77 * kMiB + 40 * kMiB;  // 4968 MiB
+    in.limits.max_batch_size = 64;
+    in.limits.max_seq_len = 4096;
+    in.limits.kv_block_size = 16;
+    in.limits.kv_block_bytes_per_layer = 16ull * 4 * 256 * 2 / 2 + 1024;  // NVFP4 + scales
+    in.limits.min_kv_tokens = 16384;
+    in.engine_persistent_bytes = 949 * kMiB;
+    in.library = LibraryReserve{3900 * kMiB, "measured 2026-09-08"};
+    in.budget_bytes = 9683 * kMiB;
+    return in;
+}
+
+const PlanLever* batch_lever(const PlanResult& res) {
+    for (const auto& lv : res.failure.levers)
+        if (lv.change.rfind("runtime.max_batch_size", 0) == 0)
+            return &lv;
+    return nullptr;
+}
+
+}  // namespace
+
+TEST(MemoryPlan, BatchLeverCountsTheBatchShapedSsmState) {
+    const auto in = hybrid_64_slots();
+    const auto res = plan_memory(in);
+    ASSERT_FALSE(res.ok);
+    const PlanLever* lv = batch_lever(res);
+    ASSERT_NE(lv, nullptr) << "the batch lever must be offered when the state is the overrun";
+    // Was "runtime.max_batch_size 64 -> 63 frees 0 MiB": the KV pool was
+    // already at its floor and the per-slot state was not counted.
+    EXPECT_GE(lv->frees, in.features.ssm_state_bytes / 64);
+}
+
+TEST(MemoryPlan, FittingBatchIsTheLargestThePlanAccepts) {
+    const auto in = hybrid_64_slots();
+    const size_t per_slot = in.features.ssm_state_bytes / 64;
+    const int fit = plan_fitting_batch(in, per_slot);
+    ASSERT_GE(fit, 1);
+    ASSERT_LT(fit, 64);
+    auto at = [&](int b) {
+        PlanInput t = in;
+        t.limits.max_batch_size = b;
+        t.features.ssm_state_bytes = in.features.ssm_state_bytes - per_slot * static_cast<size_t>(64 - b);
+        return plan_memory(t).ok;
+    };
+    EXPECT_TRUE(at(fit));
+    EXPECT_FALSE(at(fit + 1));
+    // A configuration that fits keeps its batch.
+    EXPECT_EQ(plan_fitting_batch(dense_input(), 0), 8);
+    // Nothing fits: says so instead of inventing a slot.
+    PlanInput none = in;
+    none.budget_bytes = 1 * kMiB;
+    EXPECT_EQ(plan_fitting_batch(none, per_slot), 0);
+}
+
 TEST(MemoryPlan, RefusesToServeAPoolBelowTheAdmissionFloor) {
     // Observed on Qwen3.6-35B-A3B-NVFP4 at --max-batch 64: KV collapsed to 16
     // blocks = 512 tokens and every longer prompt came back cancelled with no

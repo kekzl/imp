@@ -188,4 +188,10 @@ struct PlanResult {
 // Pure. Never touches the device. Deterministic for a given input.
 PlanResult plan_memory(const PlanInput& in);
 
+// The largest max_batch_size in [1, in.limits.max_batch_size] the plan
+// accepts, shrinking the batch-shaped part of features.ssm_state_bytes by
+// `ssm_bytes_per_slot` per dropped slot (any fixed remainder, e.g. reserved
+// verify slots, stays). 0 when not even one slot fits. Pure.
+int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot);
+
 }  // namespace imp

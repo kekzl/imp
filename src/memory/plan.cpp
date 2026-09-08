@@ -193,7 +193,12 @@ PlanResult plan_memory(const PlanInput& in) {
         f.levers.push_back(PlanLever{fmt_lever("runtime.max_seq_len", seq, seq / 2), frees});
     }
     if (batch > 1) {
-        const size_t frees = p.kv.bytes / static_cast<size_t>(batch) + p.kv.swa_bytes / static_cast<size_t>(batch);
+        // Everything batch-shaped: the KV share per slot AND the SSM/GDN state
+        // per slot. Without the state the lever read "64 -> 63 frees 0 MiB" on
+        // a hybrid whose 4968 MiB state was the whole overrun (2026-09-08).
+        const size_t frees = p.kv.bytes / static_cast<size_t>(batch) +
+                             p.kv.swa_bytes / static_cast<size_t>(batch) +
+                             in.features.ssm_state_bytes / static_cast<size_t>(batch);
         f.levers.push_back(
             PlanLever{fmt_lever("runtime.max_batch_size", batch, batch - 1), frees});
     }
@@ -212,6 +217,21 @@ PlanResult plan_memory(const PlanInput& in) {
         f.levers.resize(3);
 
     return res;
+}
+
+int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot) {
+    const int batch = std::max(1, in.limits.max_batch_size);
+    for (int b = batch; b >= 1; --b) {
+        PlanInput trial = in;
+        trial.limits.max_batch_size = b;
+        const size_t dropped = ssm_bytes_per_slot * static_cast<size_t>(batch - b);
+        trial.features.ssm_state_bytes = in.features.ssm_state_bytes > dropped
+                                             ? in.features.ssm_state_bytes - dropped
+                                             : 0;
+        if (plan_memory(trial).ok)
+            return b;
+    }
+    return 0;
 }
 
 }  // namespace imp

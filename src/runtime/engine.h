@@ -44,6 +44,8 @@
 namespace imp {
 
 struct ImageData;  // src/vision/image_processor.h (per-request vision)
+struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
+struct PlanResult;       // src/memory/plan.h
 
 struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
@@ -1281,6 +1283,10 @@ private:
     // ── Init sub-phases ────────────────────────────────────────────
     bool init_weights();
     bool init_kv_cache();
+    // Plan rejected: lower max_batch_size to the largest batch the plan fits
+    // when the batch-shaped SSM/GDN state is the overrun (MEMORY.md D14).
+    void clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
+                                  int live_kv_blocks);
     bool init_features();
     void warmup();
     // Config-resolution helpers for the front half of init() — each one

@@ -90,6 +90,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- `runtime.max_batch_size` is clamped to the largest batch the memory plan fits when the SSM/GDN state is the overrun,
+  instead of the live-pass fallback that never charged it: Qwen3.8-27B-NVFP4 at 64 slots put 5088 MiB of state past the
+  headroom, KV pool probe 528 GB/s (spilled); now `clamped 64 -> 41`, probe 1621 GB/s ([MEMORY.md D14](docs/internals/MEMORY.md))
 - Small-M NVFP4 GEMM (`gemm_nvfp4_smallm_v2`, M <= 32): the #1954 weight prefetch raced its stage barrier on
   multi-wave grids (gate|up sibling launch, 544 CTAs), a 24-token prefill differed per run and `runtime.deterministic`
   did not hold (isolated 126 of 200 launches bit-different, now 0; gate `NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable`) (#1958)
