@@ -54,12 +54,17 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
         return;
     }
 
-    // Timestamp
-    time_t now = time(nullptr);
+    // Timestamp with milliseconds: a request's phases (admission, prefill
+    // chunks, snapshot save, first token) are 5-50 ms apart, and a log at
+    // whole seconds cannot order them.
+    struct timespec ts {};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    time_t now = ts.tv_sec;
     struct tm tm_buf {};
     localtime_r(&now, &tm_buf);
     char time_str[32];
-    strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_buf);
+    const size_t n = strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_buf);
+    snprintf(time_str + n, sizeof(time_str) - n, ".%03ld", ts.tv_nsec / 1000000L);
 
     // Extract filename from path
     const char* basename = file;

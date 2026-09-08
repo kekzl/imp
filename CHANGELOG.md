@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Prompts under `server.snapshot_min_prompt_tokens` (256) take no prefix-cache snapshot and no prefill split at the
+  block boundary: 35-token prompt on Qwen3.8-27B-NVFP4, client TTFT floor 48 -> 35 ms, medians 63/54 -> 36/48 over
+  2 x 12 waves; log timestamps carry milliseconds, the `/v1/completions` log line `ttft=` and `queue=` ([roadmap](docs/roadmap.md))
 - The last async-loop burst of a request rearms the parked graph instead of recapturing (step cap clamped to
   the tokens left: 3 recaptures per 3 requests -> 0); `[spec-capture]` prices capture, instantiate and launch;
   the burst-boundary gap measured closed: 57 rearm boundaries at max ITL 12-13 ms vs a 10.7 ms step ([roadmap](docs/roadmap.md))

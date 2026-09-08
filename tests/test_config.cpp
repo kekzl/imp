@@ -70,6 +70,13 @@ TEST(RuntimeConfigTest, AgentScanLimitBindsAndDefaultsTo256) {
     EXPECT_EQ(cfg.server.agent_scan_limit, 8);
 }
 
+TEST(RuntimeConfigTest, SnapshotMinPromptTokensBindsAndDefaultsTo256) {
+    RuntimeConfig cfg;
+    EXPECT_EQ(cfg.server.snapshot_min_prompt_tokens, 256);
+    set_(cfg, {"server.snapshot_min_prompt_tokens=0"});
+    EXPECT_EQ(cfg.server.snapshot_min_prompt_tokens, 0);
+}
+
 // kv_cache.swa_sizing tri-state: "auto"/"on"/"off" plus legacy bool literals
 // (the key was a bool until 2026-07-24 — existing imp.conf files keep parsing).
 TEST(RuntimeConfigTest, SwaSizingTriState) {

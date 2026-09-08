@@ -439,8 +439,11 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
 
             auto t_end = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-            IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
-                         n_output_tokens, ms);
+            // Same shape as the chat driver's line: ttft and the admission wait
+            // are what a TTFT attribution reads from the log.
+            IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, queue=%.1f ms)",
+                         comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms, ttft_ms,
+                         server_req->queue_ms.load(std::memory_order_relaxed));
             state.metrics.record_completion("/v1/completions", ms, ttft_ms, n_prompt_tokens, n_output_tokens);
 
             return true;

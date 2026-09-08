@@ -484,7 +484,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // exactly at the largest block-aligned prompt position so the state there
     // can be captured — the snapshot is only restorable where reused KV
     // blocks cover the whole prefix, and only full blocks are cacheable. The
-    // extra tail chunk is at most block_size-1 tokens.
+    // extra tail chunk is at most block_size-1 tokens, and it is a second
+    // eager chunk plus a sync on the TTFT path, so prompts under
+    // server.snapshot_min_prompt_tokens take no boundary (snapshot_boundary.h).
     const int snap_end = snapshot_end_(*req);
     if (snap_end > offset && snap_end < offset + chunk_len) {
         chunk_len = snap_end - offset;

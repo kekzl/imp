@@ -674,6 +674,11 @@ recurrent_snapshot_mb = 256
 # (one H2D of one slab). Sessions beyond the device slot count keep their
 # tail-only prefill. 0 = off.
 recurrent_snapshot_host_mb = 2048
+# Prompts whose block-aligned prefix is shorter than this take no snapshot
+# and no prefill split at the boundary (the split is two eager chunks plus a
+# sync: 35-token prompt TTFT floor 36 -> 22 ms unsplit on Qwen3.8-27B-NVFP4,
+# the turn-2 saving of a 32-token prefix is under 3 ms). 0 = always snapshot.
+snapshot_min_prompt_tokens = 256
 # OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
 # URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every
 # generation request becomes one SERVER span (queue / prefill / decode
