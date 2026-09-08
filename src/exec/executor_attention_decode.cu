@@ -2,11 +2,13 @@
 #include <utility>
 //
 // This is NOT a standalone translation unit — it is textually #include'd inside
-// the body of GraphExecutor::run_attention (executor_attention.cu), inside the
-// `else { ... }` (decode) branch. It is therefore omitted from the CMake source
-// list and must not be compiled on its own. The contents are byte-for-byte the
-// original inline block; see executor_attention.cu for surrounding context and
-// local variables in scope (including the `after_attention` label).
+// the body of GraphExecutor::run_attention (executor_attention.cu), as the body
+// of the `decode_attend` lambda: `state`, `n`, `qv`/`kk`/`vv`/`ao` and
+// `layer_block_tables` are its parameters (the whole decode batch, or the
+// rider sub-batch of a mixed prefill+decode step), everything else is captured
+// from run_attention. It is therefore omitted from the CMake source list and
+// must not be compiled on its own. `return` leaves the lambda where the inline
+// block used to `goto after_attention`.
         // MLA absorbed decode (Phase 3, opt-in attention.mla_absorb): the
         // current token's latent + decoupled key were just written into the
         // per-layer latent cache (above, before the prefill/decode branch). Run
@@ -24,7 +26,7 @@
                                 static_cast<half*>(ao.data), mla_absorb_scores_, state.context_lens,
                                 nh, hd, cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.kv_lora_rank,
                                 cfg.v_head_dim, mla_absorb_max_seq_, scale, stream);
-            goto after_attention;
+            return;  // leaves the decode_attend lambda (executor_attention.cu)
         }
 
         // Decode: write new token's K/V to cache first
@@ -48,8 +50,10 @@
             }
             const int pairs = effective_rope_dim / 2;
             const float inv_scaling = 1.0f / layer_rope_freq_scale;
-            Tensor kv_view = view_tokens(k_, n);
-            Tensor vv_view = view_tokens(v_, n);
+            // The lambda's K/V views: rows [row_begin, row_begin + n) of the
+            // shared workspaces (the whole batch, or a mixed step's riders).
+            Tensor kv_view = kk;
+            Tensor vv_view = vv;
             dim3 fused_grid(n, 2);
             write_kv_cache_rope_fused_kernel<<<fused_grid, threads, 0, stream>>>(
                 static_cast<const half*>(kv_view.data), static_cast<const half*>(vv_view.data),
@@ -63,7 +67,7 @@
             // selection force-includes the recent blocks, so the one-step lag
             // is harmless.
         } else {
-            write_kv_cache(layer, state, stream);
+            write_kv_cache(layer, state, stream, row_begin, n);
         }
 
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
@@ -127,7 +131,7 @@
             }
             cudaFree(k_flat);
             cudaFree(v_flat);
-            goto after_attention;
+            return;  // leaves the decode_attend lambda (executor_attention.cu)
         }
 
         // Paged attention: Q shape depends on batch size

@@ -352,6 +352,11 @@ public:
     uint64_t kv_pressure_rejections() const noexcept {
         return kv_pressure_rejections_.load(std::memory_order_relaxed);
     }
+    // Steps whose decoders rode the ragged prefill forward
+    // (runtime.prefill_mixed_decode); the test and /metrics read it.
+    uint64_t mixed_decode_steps() const noexcept {
+        return mixed_decode_steps_.load(std::memory_order_relaxed);
+    }
     // Counted by the pool itself, not mirrored here: growth is decided in
     // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
     uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
@@ -1468,9 +1473,39 @@ private:
     // (capped at effective_chunk total rows); requests that do not fit stay in
     // sched_prefill_batch_ for the next step. Implementation:
     // engine_prefill_ragged.cpp.
+    // `riders` (runtime.prefill_mixed_decode): decoding requests whose next
+    // token rides the same forward as one-row members, sampled with the
+    // decode sampler and distributed by step_decode_process_outputs, so the
+    // step needs no separate decode forward.
     void step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk,
-                              cudaStream_t stream);
+                              cudaStream_t stream, std::vector<std::shared_ptr<Request>>* riders = nullptr);
     int prefill_ragged_model_ok_ = -1;  // lazy probe: -1 unknown, 0 no, 1 yes
+
+    // ── Mixed prefill+decode step (runtime.prefill_mixed_decode) ──
+    // While a burst ingests, every prefill step is followed by a decode step
+    // for the wave's finishers: ~20 ms of a 57 ms step on Qwen3-14B-NVFP4 is
+    // that decode forward plus its host turnaround. Riding the decoders as
+    // one-row members of the ragged prefill forward removes it: their GEMM
+    // rows are free next to 2048 prefill rows, their attention runs the
+    // per-sequence prefill route, sampling and delivery stay the decode
+    // path's. Dense models only (no recurrent state to carry), and only
+    // decoders the ragged path admits.
+    bool mixed_rider_ok_(const Request& r) const;
+    // The decoders that ride this step (each with its KV block prepared),
+    // empty when the step is not mixed. Fills mixed_served_this_step_.
+    void mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders);
+    bool mixed_served_this_step_ = false;
+    std::atomic<uint64_t> mixed_decode_steps_{0};
+
+    // step_decode sub-phase, one decoder: KV block for this step's token,
+    // SWA window, StreamingLLM valves. False = cancelled, skip this step.
+    bool decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs);
+    // One token per decode row of `logits` (row i = valid_decode[i]) with
+    // each request's own sampling state (async batched sampler, device
+    // penalty histories, per-row constraints, sync-only rows).
+    std::vector<int32_t> sample_decode_rows_(InferenceState& state,
+                                             std::vector<std::shared_ptr<Request>>& valid_decode,
+                                             const Tensor& logits, cudaStream_t dec_stream);
 
     // Process all decode requests in sched_decode_batch_.
     void step_decode(cudaStream_t stream);
@@ -1479,9 +1514,12 @@ private:
     void step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t stream);
 
     // Extract logprobs from decode logits and distribute tokens to requests.
+    // allow_loop = false: distribute only, never hand a single decoder to the
+    // async graph loop or the constrained pipeline (the mixed step's riders).
     void step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
                                      const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
-                                     bool needs_logprobs, bool needs_constrained, cudaStream_t stream);
+                                     bool needs_logprobs, bool needs_constrained, cudaStream_t stream,
+                                     bool allow_loop = true);
 
     // ── Pipelined batched decode (bd_pipe_) ──────────────────────────
     // Static per-row / per-batch eligibility for the one-step-in-flight

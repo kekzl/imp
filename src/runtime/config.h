@@ -200,6 +200,19 @@ struct RuntimeConfig {
         // 32 streams while the pool sat idle. Set a positive value to
         // reimpose a hard forward-count cap on top of the token budget.
         int prefill_batch_decode_cap = 0;
+        // Mixed prefill+decode step: while prompts prefill, the decoding
+        // requests ride the ragged prefill forward as one-row members (their
+        // next token sampled by the decode sampler), so the step runs no
+        // separate decode forward. Dense models only; a decoder the ragged
+        // path does not admit (vision, logprobs, constraints, MTP) keeps the
+        // whole batch on the separate decode step. Measured (Qwen3-14B-NVFP4,
+        // 3 trials x 3 waves): 32 x 982-token burst aggregate +6.6..+7.8 %,
+        // TTFT p50 821-842 -> 630-665 ms, p90 -21 %, ITL max 141 -> 80 ms,
+        // gaps over 100 ms 22 -> 0 of 9568; 31 short streams + a 4.4k-token
+        // ingest: their ITL during the ingest p95 63 -> 51 ms, the ingest's
+        // TTFT 293 -> 240 ms. The 2048-row step reads 65 ms against 86 with
+        // the separate decode step (docs/roadmap.md, Server and latency).
+        bool prefill_mixed_decode = true;
         // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
         // single-sequence, so concurrent sessions time-slice the decode.
         // This is the slice length in tokens — after it, the engine rotates

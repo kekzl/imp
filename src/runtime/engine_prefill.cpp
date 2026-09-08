@@ -142,6 +142,13 @@ void Engine::step_prefill(cudaStream_t stream) {
     // tail alone: 32 x ~1080-token prompts took 54 prefill steps for 34
     // forwards' worth of rows, half of them launch-bound tails.
     int ragged_rows_left = std::min(effective_chunk, executor_->max_tokens());
+    // Mixed prefill+decode step (runtime.prefill_mixed_decode): the decoders
+    // ride this step's ragged forward as one-row members, so their rows come
+    // off the same row cap and the step runs no separate decode forward.
+    std::vector<std::shared_ptr<Request>> riders;
+    if (ragged_mode)
+        mixed_collect_riders_(riders);
+    ragged_rows_left -= static_cast<int>(riders.size());
     size_t forwards = 0;
     for (size_t i = 0; i < n_prefill; i++) {
         auto& req = sched_prefill_batch_[(start + i) % n_prefill];
@@ -195,7 +202,12 @@ void Engine::step_prefill(cudaStream_t stream) {
         if (budgeted)
             token_budget -= charge;
     }
-    if (ragged_batch.size() == 1)
+    // Riders need the ragged forward even behind a single prefill member;
+    // without a prefill member they decode on the separate step as usual
+    // (decode_prepare_kv_ is idempotent, the block is already there).
+    if (!riders.empty() && !ragged_batch.empty())
+        step_prefill_ragged_(ragged_batch, effective_chunk, stream, &riders);
+    else if (ragged_batch.size() == 1)
         step_prefill_one(ragged_batch[0], effective_chunk, stream);
     else if (!ragged_batch.empty())
         step_prefill_ragged_(ragged_batch, effective_chunk, stream);
