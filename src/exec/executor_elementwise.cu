@@ -63,6 +63,8 @@ __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const h
                                                                          half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
+    pdl_wait();
+    pdl_trigger();  // one load + one store per thread: let the next grid in now
     if (idx < n2) {
         const half2* a2 = reinterpret_cast<const half2*>(a);
         const half2* b2 = reinterpret_cast<const half2*>(b);
@@ -364,6 +366,7 @@ void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out, cudaSt
     int64_t n2 = (n + 1) / 2;
     int threads = 256;
     int blocks = static_cast<int>((n2 + threads - 1) / threads);
+    pdl::enable_kernel(elementwise_add_store_fp16_kernel);
     pdl::launch(elementwise_add_store_fp16_kernel, dim3(blocks), dim3(threads), 0, stream,
                 static_cast<const half*>(a.data), static_cast<const half*>(b.data),
                 static_cast<half*>(out.data), n);

@@ -76,6 +76,10 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
     const int head_idx = blockIdx.y;
     const int pair_idx = threadIdx.x;
 
+    // PDL (no-op on a plain launch): Q/K/positions are the previous kernels'
+    // outputs; the KV write that follows may be scheduled once we hold them.
+    pdl_wait();
+    pdl_trigger();
     if (pair_idx >= rope_pairs)
         return;
 
@@ -176,12 +180,14 @@ void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, floa
 
     switch (Q.qtype) {
         case QType::F32:
+            pdl::enable_kernel(rope_forward_kernel<float>);
             pdl::launch(rope_forward_kernel<float>, grid, block, 0, stream, static_cast<float*>(Q.data),
                         static_cast<float*>(K.data), positions, batch, seq_len, n_heads, n_kv_heads, head_dim,
                         theta, inv_scaling, pairs, neox, ext_factor, attn_factor, cd0, cd1,
                         longrope_inv_freqs, mrope);
             break;
         case QType::F16:
+            pdl::enable_kernel(rope_forward_kernel<__half>);
             pdl::launch(rope_forward_kernel<__half>, grid, block, 0, stream, static_cast<__half*>(Q.data),
                         static_cast<__half*>(K.data), positions, batch, seq_len, n_heads, n_kv_heads,
                         head_dim, theta, inv_scaling, pairs, neox, ext_factor, attn_factor, cd0, cd1,

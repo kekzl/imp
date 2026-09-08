@@ -644,6 +644,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     __nv_fp8_e4m3* __restrict__ v_cache_base, float inv_scale, int block_stride, int row_elems,
     int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     int token_idx = blockIdx.x;
+    // PDL (no-op on a plain launch): K/V/positions come from the RoPE grid.
+    pdl_wait();
+    pdl_trigger();
     if (token_idx >= n_tokens)
         return;
 
