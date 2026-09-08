@@ -65,15 +65,15 @@ prefill_chunk_size   = -1
 # to 31 decoding streams their inter-token p95 goes 109 -> 186 ms; that stall
 # is what this knob bounds, so 1024 stays the default.
 prefill_chunk_decode_cap = 1024
-# Scale the cap above by waiting / decoding when the requests waiting for
-# their first token outnumber the decoders, up to the full chunk: a burst
-# packs two ~1k-token prompts per forward while most of the wave still waits.
-# With more decoders than waiters (the 31-streams-plus-one-ingest case above)
-# the ratio is below 1 and nothing changes. Measured on Qwen3-14B-NVFP4, 32 x
-# ~1k-token burst: +3.0..+4.2% aggregate, TTFT p50 -18..-23%, ITL max 106 ->
-# 139 ms; the 31-streams-plus-ingest case reads the same ITL on both arms
-# (p95 62.5, max 65 ms).
-prefill_cap_fairness = true
+# Scale the cap above by W x waiting / decoding once that exceeds 1, up to
+# the full chunk; W is how many waiters one decoder's smoothness is worth,
+# 0 = off, 1 = symmetric. A burst then packs two ~1k-token prompts per
+# forward while the wave still waits; with the 31-streams-plus-one-ingest
+# case above the ratio stays below 1 for every W under 31 and nothing
+# changes. Measured on Qwen3-14B-NVFP4, 32 x ~1k-token burst: W=1 vs off
+# +3.0..+4.2% aggregate, TTFT p50 -18..-23%, ITL max 106 -> 139 ms; W=4 vs
+# W=1 a further +1.9..+2.5%, TTFT p90 -8..-9%, ITL max unchanged.
+prefill_cap_fairness = 4
 # How MANY prefill FORWARDS run per engine step while others decode (a ragged
 # cross-sequence forward counts once, however many prompts it packs; its rows
 # are bounded by the cap above). Measured with three concurrent ingests: worst
