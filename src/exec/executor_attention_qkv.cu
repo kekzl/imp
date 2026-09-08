@@ -314,10 +314,21 @@
                         kv_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
                     }
-                    gemm_via_handle_(ly.wq_id, no, q_target, ctx);
-                    gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);
-                    if (ly.wv.data != nullptr) {
-                        gemm_via_handle_(ly.wv_id, no, vv, kv_ctx);
+                    // Batched decode on the small-M NVFP4 path: q|k|v as one
+                    // launch (the 16-tile k/v shapes ride q's wave instead of
+                    // a striped kernel + reduce each). Declines fall through.
+                    bool qkv_multi = false;
+                    if (n > 1 && ly.wv.data != nullptr) {
+                        const TensorID qkv_ids[3] = {ly.wq_id, ly.wk_id, ly.wv_id};
+                        Tensor* qkv_outs[3] = {&q_target, &kk, &vv};
+                        qkv_multi = try_smallm_multi_dispatch_(qkv_ids, qkv_outs, 3, no, ctx);
+                    }
+                    if (!qkv_multi) {
+                        gemm_via_handle_(ly.wq_id, no, q_target, ctx);
+                        gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);
+                        if (ly.wv.data != nullptr) {
+                            gemm_via_handle_(ly.wv_id, no, vv, kv_ctx);
+                        }
                     }
                     // else: K=V sharing path — vv populated below from kk.
                 }

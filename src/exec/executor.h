@@ -903,6 +903,11 @@ private:
     // two gemm_via_handle_ calls it would have issued anyway.
     bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                    Tensor& out_a, Tensor& out_b, const GemmContext& ctx);
+    // General form: 2..3 weights on one input (attention q|k|v adds the
+    // striped k/v shapes to q's single-stripe wave). Outputs must have row
+    // stride N.
+    bool try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input,
+                                    const GemmContext& ctx);
     // True when an M>1 dispatch of `id` is guaranteed to take the CUTLASS
     // NVFP4 prefill block in gemm_via_handle_ (which quantizes the input
     // into the shared activation scratch). Gate for the act-quant-hint

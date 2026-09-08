@@ -165,45 +165,55 @@ void GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
 
 bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                               Tensor& out_a, Tensor& out_b, const GemmContext& ctx) {
+    const TensorID ids[2] = {id_a, id_b};
+    Tensor* outs[2] = {&out_a, &out_b};
+    return try_smallm_multi_dispatch_(ids, outs, 2, input, ctx);
+}
+
+bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count,
+                                               const Tensor& input, const GemmContext& ctx) {
     // Mirror of the single-tensor smallm v2 eligibility in gemm_via_handle_
     // (see the block there for the rationale of each condition) applied to
-    // BOTH weights, plus: same K, v2 only, stripes==1 shapes only, fresh
-    // outputs only. Every decline is a plain `false` — the caller issues the
-    // two single dispatches it would have issued anyway.
+    // EVERY weight, plus: same K, v2 only, the single-stripe policy on the
+    // combined tile count, fresh outputs only. Every decline is a plain
+    // `false` — the caller issues the single dispatches it would have issued
+    // anyway.
     if (!dispatch_policy().gemm.nvfp4_smallm || dispatch_policy().gemm.nvfp4_smallm_impl != 2 ||
-        !dispatch_policy().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m ||
-        overlap_prefill_active_ || ctx.beta != 0.0f || id_a == kInvalidTensorID ||
-        id_b == kInvalidTensorID)
+        !dispatch_policy().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m || overlap_prefill_active_ ||
+        ctx.beta != 0.0f || count < 2 || count > kSmallMV2MaxSiblings)
         return false;
     const int M = static_cast<int>(input.shape[0]);
     // M==1 stays on the fused decode GEMVs; M>32 is prefill.
-    if (M < 2 || M > 32)
+    if (M < 2 || M > 32 || input.qtype != QType::F16)
         return false;
-    if (input.qtype != QType::F16 || out_a.qtype != QType::F16 || out_b.qtype != QType::F16)
-        return false;
-    const auto& ha = registry_.handle(id_a);
-    const auto& hb = registry_.handle(id_b);
-    NvFP4QuantResult nva;
-    NvFP4QuantResult nvb;
-    if (!smallm_weight_(ha, nva) || !smallm_weight_(hb, nvb))
-        return false;
-    const int K = static_cast<int>(nva.K);
-    if (static_cast<int>(nvb.K) != K || (K % 256) != 0)
-        return false;
-    const int N1 = static_cast<int>(nva.N);
-    const int N2 = static_cast<int>(nvb.N);
-    if ((N1 % 64) != 0 || (N2 % 64) != 0)
-        return false;
-    if (gemm_nvfp4_smallm_v2_stripes(N1, K) != 1 || gemm_nvfp4_smallm_v2_stripes(N2, K) != 1)
+    NvFP4QuantResult nv[kSmallMV2MaxSiblings];
+    SmallMV2Sibling sib[kSmallMV2MaxSiblings];
+    int K = 0;
+    int total_tiles = 0;
+    for (int i = 0; i < count; ++i) {
+        if (ids[i] == kInvalidTensorID || outs[i] == nullptr || outs[i]->qtype != QType::F16)
+            return false;
+        if (!smallm_weight_(registry_.handle(ids[i]), nv[i]))
+            return false;
+        const int N = static_cast<int>(nv[i].N);
+        if (i == 0)
+            K = static_cast<int>(nv[i].K);
+        // Output row stride must be N: the kernel writes y[m * N + n].
+        if (static_cast<int>(nv[i].K) != K || (K % 256) != 0 || (N % 64) != 0 || outs[i]->shape[1] != N)
+            return false;
+        sib[i] = {&nv[i], reinterpret_cast<half*>(outs[i]->data), N};
+        total_tiles += N / 64;
+    }
+    if (gemm_nvfp4_smallm_v2_stripes(total_tiles * 64, K) != 1)
         return false;
     const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
     ensure_smallm_xq_(xq_need, ctx.stream);
     if (smallm_xq_bytes_ < xq_need)
         return false;
-    // Same statistic the single path records: both weights consume `input`.
+    // Same statistic the single path records: every weight consumes `input`.
     if (calib_) {
-        calib_->accumulate(cur_layer_, ha.kind, input, ctx.stream);
-        calib_->accumulate(cur_layer_, hb.kind, input, ctx.stream);
+        for (int i = 0; i < count; ++i)
+            calib_->accumulate(cur_layer_, registry_.handle(ids[i]).kind, input, ctx.stream);
     }
     uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
     uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
@@ -227,8 +237,7 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
     xq.tensor_scale = 1.0f;
     xq.N = M;
     xq.K = K;
-    return gemm_nvfp4_smallm_v2_pair_a4(nva, nvb, xq, reinterpret_cast<half*>(out_a.data),
-                                        reinterpret_cast<half*>(out_b.data), M, N1, N2, K, ctx.stream);
+    return gemm_nvfp4_smallm_v2_multi_a4(sib, count, xq, M, K, ctx.stream);
 }
 
 }  // namespace imp

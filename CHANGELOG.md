@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Small-M NVFP4 GEMM (batched decode M<=32) prefetches its weight ring before `griddepcontrol.wait` and triggers PDL
+  dependents at CTA start; attention q|k|v run as one launch (`gemm_nvfp4_smallm_v2_multi_a4`). Qwen3-14B-NVFP4 at
+  32 streams x 982-token prompts +3.0/+4.9/+1.4/+2.9% aggregate (4/4), ITL p50 9.0-9.3 -> 8.7-8.9 ms ([roadmap](docs/roadmap.md))
 - FP8 paged decode attention (HD=128, `attention.paged_fp8_multitok=4`) groups the Q heads of a KV head per CTA on a
   16-lanes-per-row layout (each K/V row loaded and converted once): 32 x 1100 microbench 95.2 -> 56.4 us; Qwen3-14B-NVFP4 at 32
   streams x 982-token prompts +12.7..+13.9% (ITL p50 10.5 -> 8.7 ms), parity with vLLM 0.27.1 there, was 0.75x ([roadmap](docs/roadmap.md), #1953)

@@ -206,7 +206,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
          !cur_spec_verify_ && !overlap_prefill_active_ && lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && !will_fuse_o_nvfp4 &&
         !will_fuse_o_beta1_nvfp4 && !using_fp32_accum) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+        // Kernel copy, not cudaMemcpyAsync: a memcpy node has no programmatic
+        // edge, so it cut the PDL chain add -> copy -> norm -> q GEMM once per
+        // layer (the GEMM's weight prefetch overlaps the whole chain).
+        device_copy_async(r.data, h.data, h.nbytes(), stream);
     }
 
     // For Qwen3.5: Q projection writes to larger buffer (includes gate), then split

@@ -37,7 +37,8 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
-    pdl_wait();  // first global read follows
+    pdl_wait();     // first global read follows
+    pdl_trigger();  // scheduling only: the dependent GEMM prefetches its weights during this grid
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
@@ -71,7 +72,6 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
     }
     __syncthreads();
     const float inv_rms = s_inv;
-    pdl_trigger();  // inputs are in registers; only the weight read + stores remain
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
@@ -118,7 +118,8 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
-    pdl_wait();  // first global read follows
+    pdl_wait();     // first global read follows
+    pdl_trigger();  // scheduling only: the dependent GEMM prefetches its weights during this grid
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
@@ -152,7 +153,6 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
     }
     __syncthreads();
     const float inv_rms = s_inv;
-    pdl_trigger();  // inputs are in registers; only the weight read + stores remain
 
     const int64_t packed_row = static_cast<int64_t>(blockIdx.x) * (d_model >> 1);
     const int64_t scales_row = static_cast<int64_t>(blockIdx.x) * (d_model >> 4);

@@ -20,7 +20,9 @@
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -262,6 +264,169 @@ TEST_F(NvFP4SmallMV2Test, SweepTuning) {
     }
     cudaFree(d_y);
     cudaFree(d_ws);
+    cudaEventDestroy(t0);
+    cudaEventDestroy(t1);
+}
+
+// Three siblings in one launch (attention q|k|v: 80 + 16 + 16 tiles) must
+// be bit-identical to three single launches at stripes=1 (same CTA body,
+// same tile order); the striped single path for N=1024 (10 stripes + reduce)
+// is a different reduction order and is NOT the reference here.
+TEST_F(NvFP4SmallMV2Test, TripleMatchesSinglesBitwise) {
+    const int M = 32, K = 5120;
+    const int Ns[3] = {5120, 1024, 1024};
+    std::mt19937 rng(17);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<__half> x_h((size_t)M * K);
+    for (auto& v : x_h)
+        v = __float2half(dist(rng));
+    DeviceQuant X;
+    X.quantize(x_h, M, K);
+    DeviceQuant W[3];
+    void* y_multi[3];
+    void* y_single[3];
+    for (int i = 0; i < 3; ++i) {
+        std::vector<__half> w_h((size_t)Ns[i] * K);
+        for (auto& v : w_h)
+            v = __float2half(dist(rng));
+        W[i].quantize(w_h, Ns[i], K);
+        ASSERT_EQ(cudaMalloc(&y_multi[i], (size_t)M * Ns[i] * sizeof(__half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&y_single[i], (size_t)M * Ns[i] * sizeof(__half)), cudaSuccess);
+        ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4_tuned(W[i].q, X.q, static_cast<half*>(y_single[i]), M, Ns[i],
+                                                       K, nullptr, nullptr, false, /*stages=*/6,
+                                                       /*stripes=*/1));
+    }
+    const imp::SmallMV2Sibling sib[3] = {{&W[0].q, static_cast<half*>(y_multi[0]), Ns[0]},
+                                         {&W[1].q, static_cast<half*>(y_multi[1]), Ns[1]},
+                                         {&W[2].q, static_cast<half*>(y_multi[2]), Ns[2]}};
+    ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_multi_a4(sib, 3, X.q, M, K, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    for (int i = 0; i < 3; ++i) {
+        std::vector<uint16_t> a((size_t)M * Ns[i]), b((size_t)M * Ns[i]);
+        ASSERT_EQ(cudaMemcpy(a.data(), y_multi[i], a.size() * 2, cudaMemcpyDeviceToHost), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(b.data(), y_single[i], b.size() * 2, cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(a, b) << "sibling " << i << " N=" << Ns[i];
+        cudaFree(y_multi[i]);
+        cudaFree(y_single[i]);
+    }
+    // Below the combined single-stripe threshold the multi launch declines.
+    const imp::SmallMV2Sibling small[2] = {{&W[1].q, nullptr, Ns[1]}, {&W[2].q, nullptr, Ns[2]}};
+    EXPECT_FALSE(imp::gemm_nvfp4_smallm_v2_multi_a4(small, 2, X.q, M, K, nullptr));
+}
+
+// Per-shape bandwidth on the dense batched-decode shapes (Qwen3-14B geometry:
+// q/o 5120x5120, k/v 1024x5120, gate|up pair 2 x 17408x5120, down
+// 5120x17408) against an L2-defeating ring of weight copies (>= 4 copies,
+// >= 400 MB per shape) so the number is DRAM, not the 96 MB L2. Prints
+// us/call and GB/s of weight bytes; no assertion (a survey, not a gate).
+TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
+    if (getenv("IMP_SMALLM_V2_SHAPES") == nullptr)
+        GTEST_SKIP() << "set IMP_SMALLM_V2_SHAPES=1 to run the shape survey";
+    struct Shape {
+        int N1, N2, K;  // N2 > 0: sibling pair launch
+        const char* name;
+    };
+    const Shape shapes[] = {
+        {5120, 0, 5120, "q/o 5120x5120"},        {1024, 0, 5120, "k/v 1024x5120"},
+        {7168, 0, 5120, "qkv-as-one 7168x5120"}, {17408, 17408, 5120, "gate|up pair 2x17408x5120"},
+        {5120, 0, 17408, "down 5120x17408"},
+    };
+    const int M = 32;
+    std::mt19937 rng(13);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    for (const Shape& s : shapes) {
+        const int K = s.K;
+        const int Nmax = std::max(s.N1, s.N2);
+        std::vector<__half> w_h((size_t)Nmax * K), x_h((size_t)M * K);
+        for (auto& v : w_h)
+            v = __float2half(dist(rng));
+        for (auto& v : x_h)
+            v = __float2half(dist(rng));
+        DeviceQuant W, X;
+        W.quantize(w_h, Nmax, K);
+        X.quantize(x_h, M, K);
+        const size_t nib1 = (size_t)s.N1 * K / 2, sf1 = (size_t)s.N1 * K / 16;
+        const size_t nib2 = (size_t)s.N2 * K / 2, sf2 = (size_t)s.N2 * K / 16;
+        const double bytes = (double)(nib1 + sf1 + nib2 + sf2);
+        const int copies = std::max(4, (int)(400e6 / bytes) + 1);
+        // Ring: `copies` independent weight buffers with identical content.
+        std::vector<imp::NvFP4QuantResult> ring1(copies), ring2(copies);
+        for (int c = 0; c < copies; ++c) {
+            void *p1 = nullptr, *s1 = nullptr;
+            ASSERT_EQ(cudaMalloc(&p1, nib1), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&s1, sf1), cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(p1, W.q.packed_data, nib1, cudaMemcpyDeviceToDevice), cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(s1, W.q.micro_scales, sf1, cudaMemcpyDeviceToDevice), cudaSuccess);
+            ring1[c] = W.q;
+            ring1[c].packed_data = p1;
+            ring1[c].micro_scales = s1;
+            ring1[c].N = s.N1;
+            if (s.N2 > 0) {
+                void *p2 = nullptr, *s2 = nullptr;
+                ASSERT_EQ(cudaMalloc(&p2, nib2), cudaSuccess);
+                ASSERT_EQ(cudaMalloc(&s2, sf2), cudaSuccess);
+                ASSERT_EQ(cudaMemcpy(p2, W.q.packed_data, nib2, cudaMemcpyDeviceToDevice), cudaSuccess);
+                ASSERT_EQ(cudaMemcpy(s2, W.q.micro_scales, sf2, cudaMemcpyDeviceToDevice), cudaSuccess);
+                ring2[c] = W.q;
+                ring2[c].packed_data = p2;
+                ring2[c].micro_scales = s2;
+                ring2[c].N = s.N2;
+            }
+        }
+        void *d_y1 = nullptr, *d_y2 = nullptr, *d_ws = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_y1, (size_t)M * s.N1 * sizeof(__half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_y2, (size_t)M * std::max(s.N2, 64) * sizeof(__half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ws, imp::gemm_nvfp4_smallm_v2_workspace_bytes(s.N1, K)), cudaSuccess);
+        auto call = [&](int i) {
+            const int c = i % copies;
+            if (s.N2 > 0)
+                return imp::gemm_nvfp4_smallm_v2_pair_a4(ring1[c], ring2[c], X.q, static_cast<half*>(d_y1),
+                                                         static_cast<half*>(d_y2), M, s.N1, s.N2, K, nullptr);
+            return imp::gemm_nvfp4_smallm_v2_a4(ring1[c], X.q, static_cast<half*>(d_y1), M, s.N1, K, d_ws,
+                                                nullptr);
+        };
+        ASSERT_TRUE(call(0)) << s.name;
+        // Warm >= 1 s of busy time (idle downclock, STOP #3 of benchmark-cuda).
+        float ms = 0.0f;
+        double warm_ms = 0.0;
+        for (int w = 0; warm_ms < 1200.0; ++w) {
+            cudaEventRecord(t0);
+            for (int i = 0; i < 200; ++i)
+                call(i);
+            cudaEventRecord(t1);
+            ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
+            cudaEventElapsedTime(&ms, t0, t1);
+            warm_ms += ms;
+        }
+        double best = 1e30;
+        for (int r = 0; r < 5; ++r) {
+            cudaEventRecord(t0);
+            for (int i = 0; i < 200; ++i)
+                call(i);
+            cudaEventRecord(t1);
+            ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
+            cudaEventElapsedTime(&ms, t0, t1);
+            best = std::min(best, (double)ms);
+        }
+        const double us = best * 1000.0 / 200.0;
+        const int ctas = (s.N1 + s.N2) / 64 * imp::gemm_nvfp4_smallm_v2_stripes(s.N1, K);
+        printf("[ SHAPES   ] %-28s ctas=%4d stripes=%d copies=%d: %8.2f us  %7.1f GB/s  (%.1f MB)\n", s.name,
+               ctas, imp::gemm_nvfp4_smallm_v2_stripes(s.N1, K), copies, us, bytes / us * 1e-3, bytes * 1e-6);
+        for (int c = 0; c < copies; ++c) {
+            cudaFree(ring1[c].packed_data);
+            cudaFree(ring1[c].micro_scales);
+            if (s.N2 > 0) {
+                cudaFree(ring2[c].packed_data);
+                cudaFree(ring2[c].micro_scales);
+            }
+        }
+        cudaFree(d_y1);
+        cudaFree(d_y2);
+        cudaFree(d_ws);
+    }
     cudaEventDestroy(t0);
     cudaEventDestroy(t1);
 }
