@@ -223,7 +223,9 @@ def main():
     # mirostat v2 and logit_bias at their kernel entry points, samplers that had no test in any lane.
     # 1079 -> 1080 (roadmap Open 2, mixed prefill+decode step): RaggedPrefillTest.MixedDecodeRidersMatchSeparateSteps
     # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
-    PINNED = 1083
+    # 1083 -> 1084 (small-M pipeline race, roadmap ledger 2026-09-08): NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable
+    # (test-quant, GPU, no model: 200 launches per in-situ shape, single and multi kernel, bit-identical or red).
+    PINNED = 1084
 
     text = CMAKE.read_text()
     mods = module_sources(text)

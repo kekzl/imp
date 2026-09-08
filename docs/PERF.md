@@ -164,6 +164,12 @@ sequence; rows 1..31 carry different content at different lengths.
 | M=1 vs M=32, `gemm.nvfp4_smallm=false` | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
 | config change alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
 
+The control arm is also the test's race detector: between #1954 and the
+2026-09-08 fix it read 1-3 flips of 64 (a stage barrier in the small-M
+pipeline completing before the prefetched weights landed, on the 544-CTA
+gate|up launch of the 24-token prefill), see the roadmap ledger row
+"small-M pipeline race".
+
 Three things the table settles:
 
 - **Batching is not a rounding-sized effect.** 7 of 64 greedy tokens change,
