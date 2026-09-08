@@ -235,6 +235,14 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
             "could not give them blocks\n";
         out += "# TYPE imp_kv_pressure_rejections_total counter\n";
         out += "imp_kv_pressure_rejections_total " + std::to_string(kv_rejects) + "\n";
+        uint64_t mixed_steps = 0;
+        if (state.ctx && state.ctx->engine)
+            mixed_steps = state.ctx->engine->mixed_decode_steps();
+        out +=
+            "# HELP imp_mixed_decode_steps_total Engine steps whose decoders rode the ragged prefill "
+            "forward (runtime.prefill_mixed_decode)\n";
+        out += "# TYPE imp_mixed_decode_steps_total counter\n";
+        out += "imp_mixed_decode_steps_total " + std::to_string(mixed_steps) + "\n";
         out += "# HELP imp_kv_pool_growths_total Times the growable KV pool committed more memory\n";
         out += "# TYPE imp_kv_pool_growths_total counter\n";
         out += "imp_kv_pool_growths_total " + std::to_string(kv_growths) + "\n";

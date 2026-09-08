@@ -69,9 +69,63 @@ bool Engine::prefill_ragged_req_ok_(const Request& req) const {
            !wants_constraints;
 }
 
-void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk,
-                                  cudaStream_t stream) {
+bool Engine::mixed_rider_ok_(const Request& r) const {
+    if (r.status != RequestStatus::DECODING || r.output_tokens.empty() || !prefill_ragged_req_ok_(r))
+        return false;
+    // The rider's row is a one-token continuation chunk at its context end;
+    // the cuBLAS-only attention configs size their S-matrix from it.
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    return !executor_ || executor_->max_safe_prefill_chunk(r.context_len() - 1, 1, kv_bs) >= 1;
+}
+
+void Engine::mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders) {
+    riders.clear();
+    if (!runtime_config_.runtime.prefill_mixed_decode || sched_decode_batch_.empty())
+        return;
+    // Dense only (a recurrent state has no one-row ragged route), and only
+    // when nothing else owns the decode batch: a pipelined step in flight,
+    // the constrained pipeline, the MoE offload manager, or prefill/decode
+    // stream overlap. A PARKED async runner is fine (a running one never
+    // reaches step_prefill: step_impl_ resumes it first); the rider's eager
+    // token between two bursts is what a separate decode step is today.
+    const char* why = nullptr;
+    if (ssm_state_)
+        why = "recurrent model";
+    else if (bd_pipe_.in_flight)
+        why = "decode pipeline in flight";
+    else if (cpipe_.active)
+        why = "constrained pipeline";
+    else if (offload_mgr_)
+        why = "MoE offload";
+    else if (overlap_ready_)
+        why = "prefill_overlap";
+    const int max_bs = runtime_config_.runtime.max_batch_size;
+    if (!why && max_bs > 0 && static_cast<int>(sched_decode_batch_.size()) > max_bs)
+        why = "decode batch over max_batch_size";
+    // Every decoder must qualify: a batch split between riders and a separate
+    // decode step would run two forwards, worse than one.
+    if (!why)
+        for (const auto& r : sched_decode_batch_)
+            if (!mixed_rider_ok_(*r)) {
+                why = "a decoder the ragged path does not admit";
+                break;
+            }
+    if (why) {
+        IMP_LOG_DEBUG("Mixed step refused: %s (%zu decoding)", why, sched_decode_batch_.size());
+        return;
+    }
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    for (auto& r : sched_decode_batch_) {
+        if (!decode_prepare_kv_(r, kv_bs))
+            continue;  // cancelled, exactly as step_decode would have
+        riders.push_back(r);
+    }
+}
+
+void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk,
+                                  cudaStream_t stream, std::vector<std::shared_ptr<Request>>* riders) {
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    const int n_riders = riders ? static_cast<int>(riders->size()) : 0;
 
     struct RaggedSeq {
         std::shared_ptr<Request> req;
@@ -81,12 +135,13 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         bool is_last = false;
         int snap_end = 0;
         int slot = 0;
+        bool rider = false;  // decoding request riding as a one-row member
     };
     std::vector<RaggedSeq> geoms;
-    geoms.reserve(reqs.size());
+    geoms.reserve(reqs.size() + static_cast<size_t>(n_riders));
 
     InferenceState state;
-    int rows_left = std::min(effective_chunk, executor_->max_tokens());
+    int rows_left = std::min(effective_chunk, executor_->max_tokens()) - n_riders;
     size_t deferred = 0;
 
     for (auto& req : reqs) {
@@ -167,8 +222,17 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         geoms.push_back({req, offset, chunk_len, ctx_len, is_last, snap_end, state.ssm_seq_id});
     }
 
+    // Without a prefill member the riders decode on the separate step (the
+    // caller's decode step runs when mixed_served_this_step_ stays false).
     if (geoms.empty())
         return;
+    const int n_pf = static_cast<int>(geoms.size());
+    if (n_riders > 0) {
+        // One-row continuation at the context end: the token to feed is the
+        // last sampled one, its KV block was prepared by decode_prepare_kv_.
+        for (auto& r : *riders)
+            geoms.push_back({r, r->context_len() - 1, 1, r->context_len(), false, 0, 0, true});
+    }
     if (geoms.size() == 1) {
         // A single survivor gains nothing from the ragged plumbing — run it
         // through the serial path (the KV alloc and state reset above are
@@ -206,7 +270,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
             const auto& bt = kv_manager_->block_table(g.req->id);
             std::copy(bt.begin(), bt.end(), h_bt.begin() + static_cast<size_t>(s) * max_blocks);
             for (int i = 0; i < g.chunk_len; ++i) {
-                h_tok[static_cast<size_t>(col) + i] = g.req->input_tokens[g.offset + i];
+                h_tok[static_cast<size_t>(col) + i] = g.rider ? g.req->output_tokens.back()
+                                                              : g.req->input_tokens[g.offset + i];
                 h_pos[static_cast<size_t>(col) + i] = g.offset + i;
             }
             col += g.chunk_len;
@@ -307,6 +372,12 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     state.seq_offsets = d_soff;
     state.h_seq_offsets = h_soff.data();
     state.h_seq_q_offsets = h_qoff.data();
+    // The riders are the trailing geoms: run_attention decodes them as one
+    // paged batch (inference_state.h, n_riders).
+    state.n_riders = n_riders;
+    state.rider_max_context_len = 0;
+    for (int s = n_pf; s < n_seq; ++s)
+        state.rider_max_context_len = std::max(state.rider_max_context_len, h_ctx[static_cast<size_t>(s)]);
     if (ssm_state_) {
         state.h_ssm_slots = h_slots.data();
         state.ssm_seq_slots = d_slots;
@@ -332,7 +403,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         executor_->use_workspace(0);
     (void)executor_->resize_workspace(total, stream);
 
-    IMP_LOG_DEBUG("Ragged prefill: %d seqs, %d rows (chunk cap %d)", n_seq, total, effective_chunk);
+    IMP_LOG_DEBUG("Ragged prefill: %d seqs, %d rows (chunk cap %d, %d riders)", n_seq, total, effective_chunk,
+                  n_riders);
 
     Tensor logits_out;
     executor_->forward_logits(state, logits_out, stream);
@@ -342,6 +414,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     for (int s = 0; s < n_seq; ++s) {
         auto& g = geoms[s];
         auto& req = g.req;
+        if (g.rider)
+            continue;  // decoded below through the decode path
         req->prefill_offset = g.offset + g.chunk_len;
         IMP_LOG_DEBUG("Ragged prefill: req %d chunk [%d, %d) of %d", req->id, g.offset, req->prefill_offset,
                       static_cast<int>(req->input_tokens.size()));
@@ -373,6 +447,29 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
             if (kv_manager_->prefix_caching_enabled())
                 kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
         }
+    }
+
+    // Riders: each one's single row is its sequence's last row, so logits
+    // rows [n_pf, n_seq) are theirs in order. Sampled and delivered by the
+    // decode path (per-request sampler, penalty histories, stop logic,
+    // streaming), which is what makes a mixed step indistinguishable from a
+    // prefill step followed by a decode step.
+    if (n_riders > 0) {
+        InferenceState dstate;
+        dstate.is_prefill = false;
+        dstate.n_sequences = 1;
+        dstate.kv_cache = kv_cache_raw_;
+        dstate.kv_manager = kv_manager_.get();
+        fill_sampling_params(*(*riders)[0], dstate);
+        dstate.seed = engine_internal::compute_step_seed(*(*riders)[0]);
+        Tensor rider_logits = logits_out.slice(n_pf, n_pf + n_riders);
+        auto tokens = sample_decode_rows_(dstate, *riders, rider_logits, stream);
+        // No async-loop launch from here: the loop would hold the engine on
+        // one decoder for a burst while the prompts this step is for wait.
+        step_decode_process_outputs(*riders, tokens, Tensor(), /*needs_logprobs=*/false,
+                                    /*needs_constrained=*/false, stream, /*allow_loop=*/false);
+        mixed_served_this_step_ = true;
+        mixed_decode_steps_.fetch_add(1, std::memory_order_relaxed);
     }
 
     if (deferred > 0)

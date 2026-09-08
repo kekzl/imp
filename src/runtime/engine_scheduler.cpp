@@ -122,6 +122,7 @@ IMP_REGISTER_CUDA_STATIC_RESET(engine_scheduler_reset_static_cuda_state);
 }  // namespace
 
 bool Engine::step_impl_() {
+    mixed_served_this_step_ = false;
     const bool s_ot = runtime_config_.diagnostics.step_timing;
     std::chrono::steady_clock::time_point o0, o1, o2, o3, o4;
     if (s_ot)
@@ -202,7 +203,10 @@ bool Engine::step_impl_() {
             g_ot = {};
         }
     }
-    if (!sched_decode_batch_.empty()) {
+    // A mixed step already decoded this batch inside the ragged prefill
+    // forward (runtime.prefill_mixed_decode); a second decode forward would
+    // feed every row its own token twice.
+    if (!sched_decode_batch_.empty() && !mixed_served_this_step_) {
         step_decode(decode_stream());
         ensure_prefill_workspace(executor_.get());
     }
@@ -645,6 +649,167 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
 // step_decode — process all decode requests (batched)
 // =====================================================================
 
+// step_decode sub-phase, one decoder: allocate the KV block this step's
+// token needs (growable-pool retry, exhaustion cancel), keep the SWA window
+// prepared, run the StreamingLLM valves. False = the request was cancelled
+// and must not decode this step. Shared with the mixed prefill+decode step
+// (engine_prefill_ragged.cpp), so the two paths cannot drift.
+bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
+    int ctx_len = req->context_len();
+    int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
+    const auto& block_table = kv_manager_->block_table(req->id);
+    int blocks_have = static_cast<int>(block_table.size());
+
+    if (blocks_needed > blocks_have) {
+        int new_block = kv_manager_->append_block(req->id);
+        if (new_block < 0 && kv_cache_raw_ != nullptr) {
+            // A growable pool gets one chance to answer with memory before
+            // the sequence is cancelled. Admission alone is not enough: a
+            // generation that was admitted can still outgrow the pool
+            // block by block, and without this a pool that started small
+            // cancelled every long generation mid-decode — measured, a
+            // synthetic 8192-token run produced ZERO tokens where a fixed
+            // pool produced 354 tok/s.
+            //
+            // Grown in coarse steps rather than one block at a time: the
+            // cost is per driver mapping call, not per byte.
+            const int have = kv_cache_raw_->total_blocks();
+            if (kv_cache_raw_->ceiling_blocks() > have) {
+                kv_cache_raw_->try_grow_to(have + std::max(64, have / 4));
+                new_block = kv_manager_->append_block(req->id);
+            }
+        }
+        if (new_block < 0) {
+            // KV exhausted: append_block already reclaimed cached blocks, so
+            // the free pool AND all reclaimable cached blocks are empty. The
+            // old fallback evicted an LRU sequence — but every lru_order_
+            // entry is LIVE and imp has no recompute path, so evicting one
+            // (a current-batch member, or a still-active sequence beyond
+            // max_batch_size) silently corrupted it (use-after-free once it
+            // ran). Reject-newest instead: cancel THIS sequence and leave the
+            // others' KV intact. StreamingLLM auto-enable (above) already
+            // handles the graceful FP16 case before we reach here.
+            // Log loudly: this used to be a silent cancel that surfaced as a
+            // bare "internal error" at the API (Gemma-4-12B at ctx 16384 on a
+            // 1024-block FP16-KV pool cost a debugging session to attribute).
+            int pool_blocks = kv_cache_raw_ ? kv_cache_raw_->total_blocks() : 0;
+            IMP_LOG_ERROR(
+                "KV pool exhausted at decode: seq %d needs block %d but the %d-block pool has "
+                "0 free/reclaimable — cancelling this sequence (others keep their KV). The "
+                "pool was VRAM-clamped below the requested context; free VRAM, lower "
+                "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
+                req->id, blocks_needed, pool_blocks);
+            kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+            req->cancel_reason = CancelReason::KvCapacity;
+            cancel_sequence_(req);
+            req->status = RequestStatus::CANCELLED;
+            return false;
+        }
+    }
+
+    // SWA-aware sizing: keep the trailing window live for this step's
+    // write + reads; retire blocks that fell out of the window.
+    if (swa_sizing_active_) {
+        kv_manager_->swa_trim(req->id, ctx_len);
+        if (!kv_manager_->swa_prepare(req->id, ctx_len)) {
+            IMP_LOG_ERROR(
+                "SWA KV sizing failed at decode: seq %d could not prepare its window at "
+                "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
+                req->id, ctx_len);
+            kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+            req->cancel_reason = CancelReason::KvCapacity;
+            cancel_sequence_(req);
+            req->status = RequestStatus::CANCELLED;
+            return false;
+        }
+    }
+
+    // Auto-activate StreamingLLM when KV cache is nearly exhausted.
+    // Only fires once (guards on !streaming_kv_enabled) and only for FP16
+    // KV — quantized variants don't support sentinel-block skipping yet.
+    // Never under SWA sizing (streaming_kv_auto is cleared at init there).
+    if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
+        // Reclaimable prefix-cache blocks are free for this purpose: the
+        // allocator takes them before it fails. Counting only the free list
+        // against the blocks LIVE sequences hold fired on a pool that was
+        // 1/3 cached-but-reclaimable (Llama-3.2-3B, 32 x 1000-token streams,
+        // 3000-block pool: "0/2016 free" with 984 reclaimable), and the
+        // one-way graph demotion below then cost 40% of decode throughput
+        // for the rest of the process (2026-09-03).
+        auto st = kv_manager_->stats();
+        const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
+        const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
+                                             : st.total_blocks + st.free_blocks + st.cached_blocks;
+        if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
+            if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
+                config_.streaming_kv_enabled = true;
+                streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
+                int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
+                int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
+                                                            : model_->config().sliding_window;
+                if (win <= 0)
+                    win = 4096;
+                config_.streaming_kv_window = win;
+                executor_->set_streaming_kv(n_sinks, win);
+                IMP_LOG_WARN(
+                    "KV cache >90%% full (%d free + %d reclaimable of %d blocks) - auto-enabling "
+                    "StreamingLLM (sinks=%d, window=%d)",
+                    st.free_blocks, reclaimable, pool_total, n_sinks, win);
+                demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
+            }
+        }
+    } else if (config_.streaming_kv_enabled &&
+               graph_demotion_ == GraphDemotionReason::StreamingKvKvPressure) {
+        // The way back (AUDIT_arch_2026 C-3): the valve above armed
+        // StreamingLLM and dropped graphs on a pool that was momentarily
+        // full. Once a fifth of it is free again and no live sequence was
+        // ever evicted (a sentinel in a block table would be read by a
+        // replayed graph), both are undone. Runs only while the auto-arm
+        // is the demotion reason, so a configured StreamingLLM stays.
+        auto st = kv_manager_->stats();
+        const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
+        const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
+                                             : st.total_blocks + st.free_blocks + st.cached_blocks;
+        if (kv_pressure_repromotes_graphs(st.free_blocks, reclaimable, pool_total,
+                                          streaming_kv_evicted_blocks_.load(std::memory_order_relaxed))) {
+            config_.streaming_kv_enabled = false;
+            executor_->set_streaming_kv(0, 0);
+            IMP_LOG_INFO(
+                "KV cache pressure cleared (%d free + %d reclaimable of %d blocks, nothing "
+                "evicted) - StreamingLLM auto-enable lifted",
+                st.free_blocks, reclaimable, pool_total);
+            promote_graphs_();
+        }
+    }
+
+    // StreamingLLM smart KV cache: once context exceeds the threshold,
+    // free middle blocks while keeping sinks + window. The decode kernel
+    // skips the freed (-1 sentinel) slots via its own n_sinks logic.
+    if (config_.streaming_kv_enabled) {
+        int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
+        int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
+                                                    : model_->config().sliding_window;
+        if (n_sinks > 0 && win > 0) {
+            int threshold = (config_.streaming_kv_threshold > 0) ? config_.streaming_kv_threshold
+                                                                 : (n_sinks + win + 2 * kv_bs);
+            if (req->context_len() > threshold) {
+                // Idempotent: returns 0 once this sequence is fully
+                // streamed, so accumulating gives the total context this
+                // request lost — which is what the caller is told.
+                const int freed = kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
+                if (freed > 0) {
+                    req->evicted_kv_tokens += freed * kv_bs;
+                    // Pins the graph demotion: a sentinel now sits in a
+                    // live block table (graph_eligibility.h).
+                    streaming_kv_evicted_blocks_.fetch_add(static_cast<uint64_t>(freed),
+                                                           std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void Engine::step_decode(cudaStream_t dec_stream) {
     auto& decode_batch = sched_decode_batch_;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -861,157 +1026,8 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     auto& valid_decode = valid_decode_;
 
     for (auto& req : decode_batch) {
-        int ctx_len = req->context_len();
-        int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
-        const auto& block_table = kv_manager_->block_table(req->id);
-        int blocks_have = static_cast<int>(block_table.size());
-
-        if (blocks_needed > blocks_have) {
-            int new_block = kv_manager_->append_block(req->id);
-            if (new_block < 0 && kv_cache_raw_ != nullptr) {
-                // A growable pool gets one chance to answer with memory before
-                // the sequence is cancelled. Admission alone is not enough: a
-                // generation that was admitted can still outgrow the pool
-                // block by block, and without this a pool that started small
-                // cancelled every long generation mid-decode — measured, a
-                // synthetic 8192-token run produced ZERO tokens where a fixed
-                // pool produced 354 tok/s.
-                //
-                // Grown in coarse steps rather than one block at a time: the
-                // cost is per driver mapping call, not per byte.
-                const int have = kv_cache_raw_->total_blocks();
-                if (kv_cache_raw_->ceiling_blocks() > have) {
-                    kv_cache_raw_->try_grow_to(have + std::max(64, have / 4));
-                    new_block = kv_manager_->append_block(req->id);
-                }
-            }
-            if (new_block < 0) {
-                // KV exhausted: append_block already reclaimed cached blocks, so
-                // the free pool AND all reclaimable cached blocks are empty. The
-                // old fallback evicted an LRU sequence — but every lru_order_
-                // entry is LIVE and imp has no recompute path, so evicting one
-                // (a current-batch member, or a still-active sequence beyond
-                // max_batch_size) silently corrupted it (use-after-free once it
-                // ran). Reject-newest instead: cancel THIS sequence and leave the
-                // others' KV intact. StreamingLLM auto-enable (above) already
-                // handles the graceful FP16 case before we reach here.
-                // Log loudly: this used to be a silent cancel that surfaced as a
-                // bare "internal error" at the API (Gemma-4-12B at ctx 16384 on a
-                // 1024-block FP16-KV pool cost a debugging session to attribute).
-                int pool_blocks = kv_cache_raw_ ? kv_cache_raw_->total_blocks() : 0;
-                IMP_LOG_ERROR(
-                    "KV pool exhausted at decode: seq %d needs block %d but the %d-block pool has "
-                    "0 free/reclaimable — cancelling this sequence (others keep their KV). The "
-                    "pool was VRAM-clamped below the requested context; free VRAM, lower "
-                    "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
-                    req->id, blocks_needed, pool_blocks);
-                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
-                req->cancel_reason = CancelReason::KvCapacity;
-                cancel_sequence_(req);
-                req->status = RequestStatus::CANCELLED;
-                continue;
-            }
-        }
-
-        // SWA-aware sizing: keep the trailing window live for this step's
-        // write + reads; retire blocks that fell out of the window.
-        if (swa_sizing_active_) {
-            kv_manager_->swa_trim(req->id, ctx_len);
-            if (!kv_manager_->swa_prepare(req->id, ctx_len)) {
-                IMP_LOG_ERROR(
-                    "SWA KV sizing failed at decode: seq %d could not prepare its window at "
-                    "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
-                    req->id, ctx_len);
-                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
-                req->cancel_reason = CancelReason::KvCapacity;
-                cancel_sequence_(req);
-                req->status = RequestStatus::CANCELLED;
-                continue;
-            }
-        }
-
-        // Auto-activate StreamingLLM when KV cache is nearly exhausted.
-        // Only fires once (guards on !streaming_kv_enabled) and only for FP16
-        // KV — quantized variants don't support sentinel-block skipping yet.
-        // Never under SWA sizing (streaming_kv_auto is cleared at init there).
-        if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
-            // Reclaimable prefix-cache blocks are free for this purpose: the
-            // allocator takes them before it fails. Counting only the free list
-            // against the blocks LIVE sequences hold fired on a pool that was
-            // 1/3 cached-but-reclaimable (Llama-3.2-3B, 32 x 1000-token streams,
-            // 3000-block pool: "0/2016 free" with 984 reclaimable), and the
-            // one-way graph demotion below then cost 40% of decode throughput
-            // for the rest of the process (2026-09-03).
-            auto st = kv_manager_->stats();
-            const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
-            const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
-                                                 : st.total_blocks + st.free_blocks + st.cached_blocks;
-            if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
-                if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
-                    config_.streaming_kv_enabled = true;
-                    streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
-                    int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
-                    int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
-                                                                : model_->config().sliding_window;
-                    if (win <= 0) win = 4096;
-                    config_.streaming_kv_window = win;
-                    executor_->set_streaming_kv(n_sinks, win);
-                    IMP_LOG_WARN(
-                        "KV cache >90%% full (%d free + %d reclaimable of %d blocks) - auto-enabling "
-                        "StreamingLLM (sinks=%d, window=%d)",
-                        st.free_blocks, reclaimable, pool_total, n_sinks, win);
-                    demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
-                }
-            }
-        } else if (config_.streaming_kv_enabled &&
-                   graph_demotion_ == GraphDemotionReason::StreamingKvKvPressure) {
-            // The way back (AUDIT_arch_2026 C-3): the valve above armed
-            // StreamingLLM and dropped graphs on a pool that was momentarily
-            // full. Once a fifth of it is free again and no live sequence was
-            // ever evicted (a sentinel in a block table would be read by a
-            // replayed graph), both are undone. Runs only while the auto-arm
-            // is the demotion reason, so a configured StreamingLLM stays.
-            auto st = kv_manager_->stats();
-            const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
-            const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
-                                                 : st.total_blocks + st.free_blocks + st.cached_blocks;
-            if (kv_pressure_repromotes_graphs(st.free_blocks, reclaimable, pool_total,
-                                              streaming_kv_evicted_blocks_.load(std::memory_order_relaxed))) {
-                config_.streaming_kv_enabled = false;
-                executor_->set_streaming_kv(0, 0);
-                IMP_LOG_INFO(
-                    "KV cache pressure cleared (%d free + %d reclaimable of %d blocks, nothing "
-                    "evicted) - StreamingLLM auto-enable lifted",
-                    st.free_blocks, reclaimable, pool_total);
-                promote_graphs_();
-            }
-        }
-
-        // StreamingLLM smart KV cache: once context exceeds the threshold,
-        // free middle blocks while keeping sinks + window. The decode kernel
-        // skips the freed (-1 sentinel) slots via its own n_sinks logic.
-        if (config_.streaming_kv_enabled) {
-            int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
-            int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
-                                                        : model_->config().sliding_window;
-            if (n_sinks > 0 && win > 0) {
-                int threshold = (config_.streaming_kv_threshold > 0) ? config_.streaming_kv_threshold
-                                                                     : (n_sinks + win + 2 * kv_bs);
-                if (req->context_len() > threshold) {
-                    // Idempotent: returns 0 once this sequence is fully
-                    // streamed, so accumulating gives the total context this
-                    // request lost — which is what the caller is told.
-                    const int freed = kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
-                    if (freed > 0) {
-                        req->evicted_kv_tokens += freed * kv_bs;
-                        // Pins the graph demotion: a sentinel now sits in a
-                        // live block table (graph_eligibility.h).
-                        streaming_kv_evicted_blocks_.fetch_add(static_cast<uint64_t>(freed),
-                                                               std::memory_order_relaxed);
-                    }
-                }
-            }
-        }
+        if (!decode_prepare_kv_(req, kv_bs))
+            continue;
         valid_decode.push_back(req);
     }
 
@@ -1219,7 +1235,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     // manager if needed (decode might be the first step with json_mode).
     // The single-sequence state carries the request's constrainers (the
     // graph-loop / constrained-pipeline launch paths read them from state);
-    // batched decode attaches them per row in sample_per_request, so
+    // batched decode attaches them per row in sample_decode_rows_, so
     // constraints stay enforced at batch>1 (previously they were silently
     // dropped whenever a constrained request shared a decode batch).
     for (auto& r : valid_decode)
@@ -1244,6 +1260,173 @@ struct StepTiming {
 };
 StepTiming g_step_timing;
 }  // namespace
+
+// One token per decode row of `logits` (row i = valid_decode[i]) with each
+// request's own sampling state: the two-pass async batched sampler,
+// device-resident penalty histories, per-row constraint masks, sync-only
+// rows after the gather. Shared by step_decode_forward and the mixed
+// prefill+decode step (engine_prefill_ragged.cpp).
+std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
+                                                 std::vector<std::shared_ptr<Request>>& valid_decode,
+                                                 const Tensor& logits, cudaStream_t dec_stream) {
+    int n = static_cast<int>(valid_decode.size());
+
+    if (n == 1) {
+        auto& req = valid_decode[0];
+        int32_t tok = executor_->sample_single_from_logits(logits, state, dec_stream);
+        if (state.mirostat == 2)
+            req->mirostat_mu = state.mirostat_mu;
+        return {tok};
+    }
+
+    std::vector<int32_t> result(n);
+    // Two-pass batched sampling: pass 1 ENQUEUES every row's filter+
+    // sampler chain into its own scratch slot (stream-ordered, so the
+    // shared d_penalty_tokens_ upload/consume pairs stay correct); pass 2
+    // gathers all tokens with ONE pinned D2H + ONE stream sync. The
+    // previous per-row synchronous readback blocked the engine thread
+    // ~850 us per sequence per step (pageable 4-byte D2H + sync each) —
+    // 29% GPU idle at n=16 sustained serving (nsys, 2026-07-12). Rows
+    // with sync-only sampling modes (mirostat, logit_bias, CUB-regime
+    // top_k) decline untouched in pass 1 and sample synchronously after
+    // the gather.
+    std::vector<int> sync_rows;
+    // Device-resident penalty histories (#1755): row i's history lives in
+    // slot hist_slot[i]; after the gather ONE kernel appends this step's
+    // sampled tokens (offs[i] < 0 skips a row). Replaces a pageable H2D
+    // of the whole output history per row per step.
+    imp::PenaltyAppendArgs pen_append;
+    pen_append.n = n;
+    pen_append.cap = penalty_hist_cap_;
+    std::vector<int> pen_row_slot(n, -1);
+    for (int i = 0; i < n; i++)
+        pen_append.offs[i] = -1;
+    for (int i = 0; i < n; i++) {
+        auto& req = valid_decode[i];
+        InferenceState per_state = state;
+        fill_sampling_params(*req, per_state);
+        // Per-step seed (same fix as single-sequence path)
+        per_state.seed = compute_step_seed(*req);
+        per_state.penalty_tokens = nullptr;
+        per_state.n_penalty_tokens = 0;
+        bool req_needs_pen = (req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
+                              req->presence_penalty != 0.0f);
+        if (req_needs_pen && !req->output_tokens.empty()) {
+            const int need = static_cast<int>(req->output_tokens.size());
+            int slot = penalty_hist_slot_(req->id, valid_decode);
+            if (slot >= 0 && need <= penalty_hist_cap_) {
+                auto& hs = penalty_hist_state_[slot];
+                if (hs.synced != need) {
+                    // Full (re)sync — first batch entry of this request, or
+                    // the host history diverged (sync-row step, think strip).
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_hist_ + (size_t)slot * penalty_hist_cap_,
+                                                       req->output_tokens.data(),
+                                                       (size_t)need * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                                       dec_stream));
+                    hs.synced = need;
+                }
+                per_state.penalty_tokens = d_penalty_hist_ + (size_t)slot * penalty_hist_cap_;
+                per_state.n_penalty_tokens = need;
+                pen_row_slot[i] = slot;
+            } else if (d_penalty_tokens_ && (size_t)need <= d_penalty_tokens_capacity_) {
+                // No slot pool — the old shared-buffer upload path.
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                                                   (size_t)need * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                                   dec_stream));
+                per_state.penalty_tokens = d_penalty_tokens_;
+                per_state.n_penalty_tokens = need;
+            }
+        }
+        // Per-row constraint masks: keeps json_schema/json_mode enforced
+        // when the request shares a decode batch (the batch-level state
+        // carries no constrainers at n>1; the row sampler applies the
+        // mask to this row's logits before sampling).
+        if (req->constraints) {
+            per_state.schema_constrainer = req->constraints->schema_constrainer();
+            per_state.json_constrainer = req->constraints->json_constrainer();
+            per_state.regex_constrainer = req->constraints->regex_constrainer();
+            per_state.grammar_constrainer = req->constraints->grammar_constrainer();
+        } else {
+            per_state.schema_constrainer = nullptr;
+            per_state.json_constrainer = nullptr;
+            per_state.regex_constrainer = nullptr;
+            per_state.grammar_constrainer = nullptr;
+        }
+        per_state.n_sequences = 1;
+        Tensor seq_logits = logits.slice(i, i + 1);
+        if (!executor_->sample_single_from_logits_async(seq_logits, per_state, i, dec_stream)) {
+            sync_rows.push_back(i);
+            // Sync-row token never lands in sample slot i — the device
+            // history would diverge; force a resync next step.
+            if (pen_row_slot[i] >= 0)
+                penalty_hist_state_[pen_row_slot[i]].synced = -1;
+        } else if (pen_row_slot[i] >= 0) {
+            pen_append.slots[i] = pen_row_slot[i];
+            pen_append.offs[i] = static_cast<int>(req->output_tokens.size());
+        }
+    }
+    if (static_cast<int>(sync_rows.size()) < n) {
+        const int32_t* toks = executor_->collect_sampled_tokens(n, dec_stream);
+        if (toks) {
+            for (int i = 0; i < n; i++)
+                result[i] = toks[i];
+            // Append this step's tokens to the device histories. AFTER
+            // collect on purpose: the row-batched top-k stash only writes
+            // its sample slots inside collect's flush, and the parity has
+            // not flipped yet, so the slots still hold this step.
+            bool any_append = false;
+            for (int i = 0; i < n && !any_append; i++)
+                any_append = pen_append.offs[i] >= 0;
+            if (any_append && executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream)) {
+                for (int i = 0; i < n; i++)
+                    if (pen_append.offs[i] >= 0)
+                        penalty_hist_state_[pen_append.slots[i]].synced = pen_append.offs[i] + 1;
+            }
+        } else {
+            // Collector unavailable (no slot buffers) — every row falls
+            // back to the synchronous path below.
+            sync_rows.clear();
+            for (int i = 0; i < n; i++)
+                sync_rows.push_back(i);
+        }
+    }
+    for (int i : sync_rows) {
+        auto& req = valid_decode[i];
+        InferenceState per_state = state;
+        fill_sampling_params(*req, per_state);
+        per_state.seed = compute_step_seed(*req);
+        per_state.penalty_tokens = nullptr;
+        per_state.n_penalty_tokens = 0;
+        bool req_needs_pen = (req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
+                              req->presence_penalty != 0.0f);
+        if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
+            size_t rn = req->output_tokens.size();
+            if (rn <= d_penalty_tokens_capacity_) {
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                                                   rn * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream));
+                per_state.penalty_tokens = d_penalty_tokens_;
+                per_state.n_penalty_tokens = static_cast<int>(rn);
+            }
+        }
+        if (req->constraints) {
+            per_state.schema_constrainer = req->constraints->schema_constrainer();
+            per_state.json_constrainer = req->constraints->json_constrainer();
+            per_state.regex_constrainer = req->constraints->regex_constrainer();
+            per_state.grammar_constrainer = req->constraints->grammar_constrainer();
+        } else {
+            per_state.schema_constrainer = nullptr;
+            per_state.json_constrainer = nullptr;
+            per_state.regex_constrainer = nullptr;
+            per_state.grammar_constrainer = nullptr;
+        }
+        per_state.n_sequences = 1;
+        Tensor seq_logits = logits.slice(i, i + 1);
+        result[i] = executor_->sample_single_from_logits(seq_logits, per_state, dec_stream);
+        if (per_state.mirostat == 2)
+            req->mirostat_mu = per_state.mirostat_mu;
+    }
+    return result;
+}
 
 void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
                                  cudaStream_t dec_stream) {
@@ -1337,168 +1520,6 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                                   needs_constrained);
 
     // Per-request sampling lambda
-    auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
-        int n = static_cast<int>(valid_decode.size());
-
-        if (n == 1) {
-            auto& req = valid_decode[0];
-            int32_t tok = executor_->sample_single_from_logits(logits, state, dec_stream);
-            if (state.mirostat == 2)
-                req->mirostat_mu = state.mirostat_mu;
-            return {tok};
-        }
-
-        std::vector<int32_t> result(n);
-        // Two-pass batched sampling: pass 1 ENQUEUES every row's filter+
-        // sampler chain into its own scratch slot (stream-ordered, so the
-        // shared d_penalty_tokens_ upload/consume pairs stay correct); pass 2
-        // gathers all tokens with ONE pinned D2H + ONE stream sync. The
-        // previous per-row synchronous readback blocked the engine thread
-        // ~850 us per sequence per step (pageable 4-byte D2H + sync each) —
-        // 29% GPU idle at n=16 sustained serving (nsys, 2026-07-12). Rows
-        // with sync-only sampling modes (mirostat, logit_bias, CUB-regime
-        // top_k) decline untouched in pass 1 and sample synchronously after
-        // the gather.
-        std::vector<int> sync_rows;
-        // Device-resident penalty histories (#1755): row i's history lives in
-        // slot hist_slot[i]; after the gather ONE kernel appends this step's
-        // sampled tokens (offs[i] < 0 skips a row). Replaces a pageable H2D
-        // of the whole output history per row per step.
-        imp::PenaltyAppendArgs pen_append;
-        pen_append.n = n;
-        pen_append.cap = penalty_hist_cap_;
-        std::vector<int> pen_row_slot(n, -1);
-        for (int i = 0; i < n; i++)
-            pen_append.offs[i] = -1;
-        for (int i = 0; i < n; i++) {
-            auto& req = valid_decode[i];
-            InferenceState per_state = state;
-            fill_sampling_params(*req, per_state);
-            // Per-step seed (same fix as single-sequence path)
-            per_state.seed = compute_step_seed(*req);
-            per_state.penalty_tokens = nullptr;
-            per_state.n_penalty_tokens = 0;
-            bool req_needs_pen = (req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
-                                  req->presence_penalty != 0.0f);
-            if (req_needs_pen && !req->output_tokens.empty()) {
-                const int need = static_cast<int>(req->output_tokens.size());
-                int slot = penalty_hist_slot_(req->id, valid_decode);
-                if (slot >= 0 && need <= penalty_hist_cap_) {
-                    auto& hs = penalty_hist_state_[slot];
-                    if (hs.synced != need) {
-                        // Full (re)sync — first batch entry of this request, or
-                        // the host history diverged (sync-row step, think strip).
-                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                            d_penalty_hist_ + (size_t)slot * penalty_hist_cap_,
-                            req->output_tokens.data(), (size_t)need * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, dec_stream));
-                        hs.synced = need;
-                    }
-                    per_state.penalty_tokens = d_penalty_hist_ + (size_t)slot * penalty_hist_cap_;
-                    per_state.n_penalty_tokens = need;
-                    pen_row_slot[i] = slot;
-                } else if (d_penalty_tokens_ &&
-                           (size_t)need <= d_penalty_tokens_capacity_) {
-                    // No slot pool — the old shared-buffer upload path.
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
-                                                       (size_t)need * sizeof(int32_t),
-                                                       cudaMemcpyHostToDevice, dec_stream));
-                    per_state.penalty_tokens = d_penalty_tokens_;
-                    per_state.n_penalty_tokens = need;
-                }
-            }
-            // Per-row constraint masks: keeps json_schema/json_mode enforced
-            // when the request shares a decode batch (the batch-level state
-            // carries no constrainers at n>1; the row sampler applies the
-            // mask to this row's logits before sampling).
-            if (req->constraints) {
-                per_state.schema_constrainer = req->constraints->schema_constrainer();
-                per_state.json_constrainer = req->constraints->json_constrainer();
-                per_state.regex_constrainer = req->constraints->regex_constrainer();
-                per_state.grammar_constrainer = req->constraints->grammar_constrainer();
-            } else {
-                per_state.schema_constrainer = nullptr;
-                per_state.json_constrainer = nullptr;
-                per_state.regex_constrainer = nullptr;
-                per_state.grammar_constrainer = nullptr;
-            }
-            per_state.n_sequences = 1;
-            Tensor seq_logits = logits.slice(i, i + 1);
-            if (!executor_->sample_single_from_logits_async(seq_logits, per_state, i, dec_stream)) {
-                sync_rows.push_back(i);
-                // Sync-row token never lands in sample slot i — the device
-                // history would diverge; force a resync next step.
-                if (pen_row_slot[i] >= 0)
-                    penalty_hist_state_[pen_row_slot[i]].synced = -1;
-            } else if (pen_row_slot[i] >= 0) {
-                pen_append.slots[i] = pen_row_slot[i];
-                pen_append.offs[i] = static_cast<int>(req->output_tokens.size());
-            }
-        }
-        if (static_cast<int>(sync_rows.size()) < n) {
-            const int32_t* toks = executor_->collect_sampled_tokens(n, dec_stream);
-            if (toks) {
-                for (int i = 0; i < n; i++)
-                    result[i] = toks[i];
-                // Append this step's tokens to the device histories. AFTER
-                // collect on purpose: the row-batched top-k stash only writes
-                // its sample slots inside collect's flush, and the parity has
-                // not flipped yet, so the slots still hold this step.
-                bool any_append = false;
-                for (int i = 0; i < n && !any_append; i++)
-                    any_append = pen_append.offs[i] >= 0;
-                if (any_append &&
-                    executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream)) {
-                    for (int i = 0; i < n; i++)
-                        if (pen_append.offs[i] >= 0)
-                            penalty_hist_state_[pen_append.slots[i]].synced = pen_append.offs[i] + 1;
-                }
-            } else {
-                // Collector unavailable (no slot buffers) — every row falls
-                // back to the synchronous path below.
-                sync_rows.clear();
-                for (int i = 0; i < n; i++)
-                    sync_rows.push_back(i);
-            }
-        }
-        for (int i : sync_rows) {
-            auto& req = valid_decode[i];
-            InferenceState per_state = state;
-            fill_sampling_params(*req, per_state);
-            per_state.seed = compute_step_seed(*req);
-            per_state.penalty_tokens = nullptr;
-            per_state.n_penalty_tokens = 0;
-            bool req_needs_pen = (req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
-                                  req->presence_penalty != 0.0f);
-            if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
-                size_t rn = req->output_tokens.size();
-                if (rn <= d_penalty_tokens_capacity_) {
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
-                                                       rn * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                                       dec_stream));
-                    per_state.penalty_tokens = d_penalty_tokens_;
-                    per_state.n_penalty_tokens = static_cast<int>(rn);
-                }
-            }
-            if (req->constraints) {
-                per_state.schema_constrainer = req->constraints->schema_constrainer();
-                per_state.json_constrainer = req->constraints->json_constrainer();
-                per_state.regex_constrainer = req->constraints->regex_constrainer();
-                per_state.grammar_constrainer = req->constraints->grammar_constrainer();
-            } else {
-                per_state.schema_constrainer = nullptr;
-                per_state.json_constrainer = nullptr;
-                per_state.regex_constrainer = nullptr;
-                per_state.grammar_constrainer = nullptr;
-            }
-            per_state.n_sequences = 1;
-            Tensor seq_logits = logits.slice(i, i + 1);
-            result[i] = executor_->sample_single_from_logits(seq_logits, per_state, dec_stream);
-            if (per_state.mirostat == 2)
-                req->mirostat_mu = per_state.mirostat_mu;
-        }
-        return result;
-    };
 
     // Execute forward pass (piecewise CUDA Graph: forward in graph,
     // sampling always eager — per-batch-size graph pool avoids
@@ -1603,14 +1624,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // Eager sampling (handles all modes: greedy, top-k/p, penalties,
         // force_token, constraints, logprobs, mirostat)
         if (!piped)
-            tokens = sample_per_request(logits_out);
+            tokens = sample_decode_rows_(state, valid_decode, logits_out, dec_stream);
         if (s_timing)
             tp3 = std::chrono::steady_clock::now();
         if (needs_logprobs)
             decode_logits_out = logits_out;
     } else {
         executor_->forward_logits(state, decode_logits_out, dec_stream);
-        tokens = sample_per_request(decode_logits_out);
+        tokens = sample_decode_rows_(state, valid_decode, decode_logits_out, dec_stream);
     }
 
     if (!decode_batch_pool_.is_allocated()) {
@@ -1863,8 +1884,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
 void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
                                          const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
-                                         bool needs_logprobs, bool needs_constrained,
-                                         cudaStream_t dec_stream) {
+                                         bool needs_logprobs, bool needs_constrained, cudaStream_t dec_stream,
+                                         bool allow_loop) {
     Tokenizer* tok = model_->tokenizer();
 
     // Extract logprobs
@@ -1937,13 +1958,13 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
 
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
-    if (decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 && !offload_mgr_ &&
-        config_.use_cuda_graphs &&
+    if (allow_loop && decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 &&
+        !offload_mgr_ && config_.use_cuda_graphs &&
         // A PARKED runner (burst-hybrid speculation) is setup but idle — it
         // must be allowed back in here, or bursts only ever fire once. A park
         // for a DIFFERENT request is torn down inside the launch.
-        (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0) &&
-        !needs_logprobs && !needs_constrained) {
+        (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0) && !needs_logprobs &&
+        !needs_constrained) {
         auto& dreq = valid_decode[0];
         // forward_decode_async only implements banned_tokens + rep/freq/presence
         // penalties device-side. Any sampling feature that requires host-side
@@ -2054,9 +2075,9 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     // masks walk the whole vocabulary. masked_sample_async
     // covers banned tokens + greedy/top-k/top-p only — penalties or any
     // host-side sampling feature stays on the eager path.
-    if (decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 && !offload_mgr_ &&
-        config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active && !needs_logprobs &&
-        needs_constrained) {
+    if (allow_loop && decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 &&
+        !offload_mgr_ && config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active &&
+        !needs_logprobs && needs_constrained) {
         auto& dreq = valid_decode[0];
         // rep/freq/presence penalties and think_budget ARE supported (uploaded /
         // forced per tick like the eager path) — the server defaults

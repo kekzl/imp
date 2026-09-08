@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `runtime.prefill_mixed_decode` (default on): while prompts prefill, the decoding requests ride the ragged prefill
+  forward as one-row members (one batched paged-decode attention launch per layer), so a burst step runs no separate
+  decode forward: Qwen3-14B-NVFP4 32 x ~1k-token burst +6.6..+7.8% aggregate, TTFT p50 -20..-23%, ITL max 141 -> 80 ms ([roadmap](docs/roadmap.md), #1952)
 - `runtime.prefill_cap_fairness` (waiters per decoder, default 4, 0 = off): the prefill chunk cap under decode scales by
   W x waiting / decoding, so a burst no longer paces 30 waiters behind its first 2 finishers: Qwen3-14B-NVFP4 32 x ~1k-token
   burst +3.0..+4.2% aggregate at W=1, a further +1.9..+2.5% at W=4 (TTFT p50 -18..-23%, p90 -9%, ITL max 106 -> 139-147 ms); 31 streams + one 4.4k ingest unchanged ([roadmap](docs/roadmap.md), #1950, #1951)

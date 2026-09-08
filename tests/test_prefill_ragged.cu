@@ -192,5 +192,81 @@ TEST_F(RaggedPrefillTest, ChunkedRagged) {
         EXPECT_EQ(ragged_out[i], serial_out[i]) << "request " << i << " diverged (chunked ragged)";
 }
 
+// Staggered arrival: two prompts decode while two more prefill, so the
+// ragged forward of the late pair carries the early pair as one-row riders
+// (runtime.prefill_mixed_decode). Same tokens as the separate-step arm, and
+// the engine must report that mixed steps actually ran.
+static std::vector<std::vector<int32_t>> run_staggered(Engine& engine,
+                                                       const std::vector<std::vector<int32_t>>& prompts,
+                                                       int max_tokens) {
+    std::vector<std::shared_ptr<Request>> reqs;
+    auto submit = [&](size_t i) {
+        auto req = std::make_shared<Request>();
+        req->input_tokens = prompts[i];
+        req->max_tokens = max_tokens;
+        req->temperature = 0.0f;
+        req->seed = 42;
+        engine.add_request(req);
+        reqs.push_back(req);
+    };
+    submit(0);
+    submit(1);
+    for (int s = 0; s < 3; ++s)
+        (void)engine.step();
+    submit(2);
+    submit(3);
+    auto all_done = [&]() {
+        for (const auto& r : reqs)
+            if (r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED)
+                return false;
+        return true;
+    };
+    int steps = 0;
+    while (!all_done() && steps < 200) {
+        (void)engine.step();
+        steps++;
+    }
+    std::vector<std::vector<int32_t>> out;
+    for (const auto& r : reqs) {
+        EXPECT_EQ(r->status, RequestStatus::FINISHED);
+        out.push_back(r->output_tokens);
+    }
+    return out;
+}
+
+TEST_F(RaggedPrefillTest, MixedDecodeRidersMatchSeparateSteps) {
+    auto prompts = ragged_prompts();
+    std::vector<std::vector<int32_t>> mixed_out, plain_out;
+    uint64_t mixed_steps = 0;
+    {
+        auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
+        gemm_init();
+        auto rc = ragged_runtime_config(/*prefill_batch=*/true);
+        rc.runtime.prefill_mixed_decode = true;
+        set_pending_runtime_config(rc);
+        Engine engine;
+        ASSERT_TRUE(engine.init(tm.model, ragged_engine_config()));
+        mixed_out = run_staggered(engine, prompts, 8);
+        mixed_steps = engine.mixed_decode_steps();
+        tm.cleanup();
+    }
+    {
+        auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
+        gemm_init();
+        auto rc = ragged_runtime_config(/*prefill_batch=*/true);
+        rc.runtime.prefill_mixed_decode = false;
+        set_pending_runtime_config(rc);
+        Engine engine;
+        ASSERT_TRUE(engine.init(tm.model, ragged_engine_config()));
+        plain_out = run_staggered(engine, prompts, 8);
+        EXPECT_EQ(engine.mixed_decode_steps(), 0u);
+        tm.cleanup();
+    }
+    EXPECT_GE(mixed_steps, 1u) << "no step carried riders: the late pair's prefill ran without the decoders";
+    ASSERT_EQ(mixed_out.size(), plain_out.size());
+    for (size_t i = 0; i < mixed_out.size(); ++i)
+        EXPECT_EQ(mixed_out[i], plain_out[i]) << "request " << i << " diverged (mixed vs separate steps)";
+}
+
 }  // namespace
 }  // namespace imp

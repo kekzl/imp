@@ -221,7 +221,9 @@ def main():
     # (test-e2e, GPU + Qwen3-8B: the valve fires on a real pool and the replay after re-promotion is the proof).
     # 1073 -> 1079 (AUDIT_arch_2026 I-4): SamplingAdvancedTest x6 (test-compute, GPU, no model): DRY,
     # mirostat v2 and logit_bias at their kernel entry points, samplers that had no test in any lane.
-    PINNED = 1079
+    # 1079 -> 1080 (roadmap Open 2, mixed prefill+decode step): RaggedPrefillTest.MixedDecodeRidersMatchSeparateSteps
+    # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
+    PINNED = 1080
 
     text = CMAKE.read_text()
     mods = module_sources(text)
