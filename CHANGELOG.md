@@ -27,7 +27,7 @@ there instead of retelling it.
 
 - `runtime.prefill_cap_fairness` (default on): the prefill chunk cap under decode scales by waiting / decoding, so a
   burst no longer paces 30 waiters behind its first 2 finishers: Qwen3-14B-NVFP4 32 x ~1k-token burst +3.0..+4.2%
-  aggregate, TTFT p50 -18..-23%, ITL max 106 -> 139 ms; 31 streams + one 4.4k ingest unchanged (ITL p95 62.5 ms both arms) ([roadmap](docs/roadmap.md))
+  aggregate, TTFT p50 -18..-23%, ITL max 106 -> 139 ms; 31 streams + one 4.4k ingest unchanged (ITL p95 62.5 ms both arms) ([roadmap](docs/roadmap.md), #1950)
 - AUDIT_arch_2026 campaign closed: 24 dispatch rows (#1909-#1927, #1939-#1946), 0 open findings, every ID with a
   verdict in [SETTLED H](docs/audit/SETTLED.md); the P5 dispatch log names PRs, not branches ([AUDIT_arch_2026](docs/audit/AUDIT_arch_2026.md), #1949)
 - Prompts under `server.snapshot_min_prompt_tokens` (256) take no prefix-cache snapshot and no prefill split at the
