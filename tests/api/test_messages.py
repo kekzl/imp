@@ -34,6 +34,48 @@ def _msg(**kw):
     return body
 
 
+def _thinking_signature(text: str) -> str:
+    """The server's digest of a thinking block (anthropic.cpp thinking_signature):
+    FNV-1a 64 over the text, `imp_sig_<16 hex>`."""
+    h = 1469598103934665603
+    for b in text.encode():
+        h ^= b
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return f"imp_sig_{h:016x}"
+
+
+@pytest.mark.nomodel
+class TestThinkingSignature:
+    """A prior-turn thinking block that carries a signature must match it
+    (AUDIT_arch_2026 E-8): the field used to be emitted and never read, so an
+    edited chain of thought was replayed as the model's own. Reached in the
+    body transform, before the server looks for a model."""
+
+    def _history(self, thinking, signature):
+        return [
+            {"role": "user", "content": "Think about it."},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": thinking, "signature": signature},
+                {"type": "text", "text": "Done."},
+            ]},
+            {"role": "user", "content": "And now?"},
+        ]
+
+    def test_edited_thinking_block_is_refused(self, client, model):
+        r = client.post("/v1/messages", json=_msg(
+            model=model, messages=self._history("I reasoned this way.", _thinking_signature("Something else."))))
+        _assert_anthropic_error(r, 400)
+        assert "signature" in r.json()["error"]["message"]
+
+    def test_unedited_thinking_block_passes_the_check(self, client, model):
+        text = "I reasoned this way."
+        r = client.post("/v1/messages", json=_msg(
+            model=model, messages=self._history(text, _thinking_signature(text))))
+        # Model-less, the request goes on to fail for want of weights, never
+        # on the signature.
+        assert "signature" not in r.json().get("error", {}).get("message", "")
+
+
 def _assert_anthropic_error(r, status, err_type="invalid_request_error"):
     """Every error on this endpoint must arrive in the Anthropic envelope.
 

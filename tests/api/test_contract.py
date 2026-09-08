@@ -285,6 +285,16 @@ class TestMetricsEndpoint:
         r = client.get("/metrics")
         assert "imp_model_loaded" in r.text
 
+    def test_metrics_series_carry_the_endpoint_label(self, client):
+        # AUDIT_arch_2026 E-7: one TTFT/duration ladder for every dialect meant
+        # a dashboard could not tell /v1/messages from /v1/completions. The
+        # per-endpoint series are emitted at zero, so both lanes carry them.
+        text = client.get("/metrics").text
+        for ep in ("chat_completions", "completions", "messages", "responses", "embeddings", "rerank"):
+            assert f'imp_endpoint_requests_total{{endpoint="{ep}"}}' in text, ep
+        assert 'imp_endpoint_ttft_seconds_bucket{endpoint="chat_completions",le=' in text
+        assert 'imp_model_loaded{model="' in text
+
     def test_metrics_has_preemption_and_batch_series(self, client):
         # Emitted with or without a model (zeros), so the model-less lane and
         # the mock both carry them: the preemption rates that used to be log

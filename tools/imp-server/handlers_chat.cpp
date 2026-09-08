@@ -272,10 +272,10 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
                         ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
                         const double q = server_req->queue_ms.load(std::memory_order_relaxed);
                         if (q >= 0.0)
-                            state.metrics.queue_time.observe(q / 1000.0);
+                            state.metrics.record_queue_wait("/v1/completions", q / 1000.0);
                     } else {
-                        state.metrics.inter_token.observe(
-                            std::chrono::duration<double>(t_tok - t_prev_token).count());
+                        state.metrics.record_inter_token(
+                            "/v1/completions", std::chrono::duration<double>(t_tok - t_prev_token).count());
                     }
                     t_prev_token = t_tok;
                 }
@@ -441,15 +441,7 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
             double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
             IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
                          n_output_tokens, ms);
-            state.metrics.requests_total++;
-            state.metrics.tokens_prompt_total += n_prompt_tokens;
-            state.metrics.tokens_completion_total += n_output_tokens;
-            state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-            state.metrics.request_duration.observe(ms / 1000.0);
-            if (ttft_ms >= 0.0) {
-                state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
-                state.metrics.ttft.observe(ttft_ms / 1000.0);
-            }
+            state.metrics.record_completion("/v1/completions", ms, ttft_ms, n_prompt_tokens, n_output_tokens);
 
             return true;
         });
@@ -514,10 +506,10 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
                 ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
                 const double q = server_req->queue_ms.load(std::memory_order_relaxed);
                 if (q >= 0.0)
-                    state.metrics.queue_time.observe(q / 1000.0);
+                    state.metrics.record_queue_wait("/v1/completions", q / 1000.0);
             } else {
-                state.metrics.inter_token.observe(
-                    std::chrono::duration<double>(t_tok - t_prev_token).count());
+                state.metrics.record_inter_token("/v1/completions",
+                                                 std::chrono::duration<double>(t_tok - t_prev_token).count());
             }
             t_prev_token = t_tok;
         }
@@ -581,15 +573,7 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
     double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
     IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
                  n_output_tokens, ms);
-    state.metrics.requests_total++;
-    state.metrics.tokens_prompt_total += n_prompt_tokens;
-    state.metrics.tokens_completion_total += n_output_tokens;
-    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-    state.metrics.request_duration.observe(ms / 1000.0);
-    if (ttft_ms >= 0.0) {
-        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
-        state.metrics.ttft.observe(ttft_ms / 1000.0);
-    }
+    state.metrics.record_completion("/v1/completions", ms, ttft_ms, n_prompt_tokens, n_output_tokens);
 
     // Build logprobs if requested
     // #1589: this is /v1/completions, so it gets the Completions shape.

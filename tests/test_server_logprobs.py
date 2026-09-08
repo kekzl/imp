@@ -104,6 +104,31 @@ def main():
             check(abs(pos["logprob"] - top[0].get("logprob", -99)) <= EPS,
                   f"{tag} chosen logprob {pos['logprob']} != top1 {top[0].get('logprob')}")
 
+    # AUDIT_arch_2026 E-3: the logprobs are of the PROCESSED distribution
+    # (docs/API.md). Bias the greedy first token out of existence and ask
+    # again: processed logprobs put the new greedy token at top-1 and drop the
+    # biased one out of the top-k; raw logprobs would still report the biased
+    # token as top-1 next to a different chosen token.
+    first = lp["content"][0]["token"]
+    ids = _post("/tokenize", {"content": first}).get("tokens", [])
+    if len(ids) == 1:
+        r2 = _post("/v1/chat/completions", {
+            "model": M,
+            "messages": [{"role": "user", "content": "Count: one two three four"}],
+            "max_tokens": 4, "temperature": 0.0,
+            "logprobs": True, "top_logprobs": TOPK,
+            "logit_bias": {str(ids[0]): -100},
+        })
+        pos0 = r2["choices"][0]["logprobs"]["content"][0]
+        top0 = pos0["top_logprobs"]
+        check(pos0["token"] != first, f"logit_bias -100 on {first!r} did not move the greedy token")
+        check(top0 and top0[0]["token"] == pos0["token"],
+              f"processed logprobs: top1 {top0[0].get('token') if top0 else None!r} != chosen {pos0['token']!r}")
+        check(all(t["token"] != first for t in top0),
+              f"the biased-out token {first!r} still appears in top_logprobs: raw, not processed")
+    else:
+        print(f"logprobs: skipping the logit_bias case, {first!r} tokenizes to {len(ids)} ids")
+
     return _verdict()
 
 

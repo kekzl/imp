@@ -196,7 +196,13 @@ class MockHandler(BaseHTTPRequestHandler):
                 f"imp_tokens_completion_total {metrics.tokens_completion_total}\n"
                 f"# HELP imp_model_loaded Model loaded\n"
                 f"# TYPE imp_model_loaded gauge\n"
-                f"imp_model_loaded 1\n"
+                f'imp_model_loaded{{model="mock"}} 1\n'
+                + "".join(
+                    f'imp_endpoint_requests_total{{endpoint="{ep}"}} 0\n'
+                    f'imp_endpoint_ttft_seconds_bucket{{endpoint="{ep}",le="+Inf"}} 0\n'
+                    for ep in ("chat_completions", "completions", "messages", "responses", "embeddings", "rerank")
+                )
+                + f"# HELP imp_queue_depth Queue depth\n"
                 f"# HELP imp_queue_depth Queue depth\n"
                 f"# TYPE imp_queue_depth gauge\n"
                 f"imp_queue_depth 0\n"

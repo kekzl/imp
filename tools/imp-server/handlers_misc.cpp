@@ -261,38 +261,57 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
 
     // Latency histograms (Prometheus histogram: cumulative _bucket{le=...},
     // plus _sum and _count). Buckets are in seconds.
-    auto emit_histogram = [&out](const char* name, const char* help, const LatencyHistogram& h) {
-        out += "# HELP ";
-        out += name;
-        out += ' ';
-        out += help;
-        out += "\n# TYPE ";
-        out += name;
-        out += " histogram\n";
+    // `labels` is the label set without the trailing `le`, e.g.
+    // `endpoint="messages",`; empty for the unlabelled totals.
+    auto emit_histogram_body = [&out](const char* name, const std::string& labels,
+                                      const LatencyHistogram& h) {
         for (int i = 0; i < LatencyHistogram::kNumBuckets; ++i) {
             char le[32];
             std::snprintf(le, sizeof(le), "%g", h.bounds[i]);
             out += name;
-            out += "_bucket{le=\"";
+            out += "_bucket{";
+            out += labels;
+            out += "le=\"";
             out += le;
             out += "\"} ";
             out += std::to_string(h.buckets[i].load());
             out += "\n";
         }
         out += name;
-        out += "_bucket{le=\"+Inf\"} ";
+        out += "_bucket{";
+        out += labels;
+        out += "le=\"+Inf\"} ";
         out += std::to_string(h.count.load());
         out += "\n";
         char sum[48];
         std::snprintf(sum, sizeof(sum), "%g", h.sum_us.load() / 1e6);
+        const std::string tail = labels.empty() ? std::string(" ")
+                                                : "{" + labels.substr(0, labels.size() - 1) + "} ";
         out += name;
-        out += "_sum ";
+        out += "_sum";
+        out += tail;
         out += sum;
         out += "\n";
         out += name;
-        out += "_count ";
+        out += "_count";
+        out += tail;
         out += std::to_string(h.count.load());
         out += "\n";
+    };
+    auto emit_header = [&out](const char* name, const char* help, const char* type) {
+        out += "# HELP ";
+        out += name;
+        out += ' ';
+        out += help;
+        out += "\n# TYPE ";
+        out += name;
+        out += ' ';
+        out += type;
+        out += "\n";
+    };
+    auto emit_histogram = [&](const char* name, const char* help, const LatencyHistogram& h) {
+        emit_header(name, help, "histogram");
+        emit_histogram_body(name, "", h);
     };
     emit_histogram("imp_request_duration_seconds", "Request end-to-end latency in seconds",
                    m.request_duration);
@@ -303,6 +322,40 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         "imp_queue_time_seconds",
         "Seconds from submit to the scheduler's first batch (the wait behind max_batch_size and KV)",
         m.queue_time);
+    // The same series per endpoint (AUDIT_arch_2026 E-7), every endpoint
+    // emitted even at zero so a panel can be built before traffic arrives.
+    emit_header("imp_endpoint_requests_total", "Completed generation requests per endpoint", "counter");
+    for (int e = 0; e < ServerMetrics::kEndpointCount; ++e) {
+        out += "imp_endpoint_requests_total{endpoint=\"";
+        out += ServerMetrics::endpoint_name(e);
+        out += "\"} ";
+        out += std::to_string(m.series(static_cast<ServerMetrics::Endpoint>(e)).requests_total.load());
+        out += "\n";
+    }
+    struct EndpointHist {
+        const char* name;
+        const char* help;
+        LatencyHistogram ServerMetrics::EndpointSeries::*member;
+    };
+    const EndpointHist endpoint_hists[] = {
+        {"imp_endpoint_request_duration_seconds", "Request end-to-end latency in seconds, per endpoint",
+         &ServerMetrics::EndpointSeries::request_duration},
+        {"imp_endpoint_ttft_seconds", "Time to first token in seconds, per endpoint",
+         &ServerMetrics::EndpointSeries::ttft},
+        {"imp_endpoint_inter_token_seconds", "Inter-token latency in seconds, per endpoint",
+         &ServerMetrics::EndpointSeries::inter_token},
+        {"imp_endpoint_queue_time_seconds",
+         "Seconds from submit to the scheduler's first batch, per endpoint",
+         &ServerMetrics::EndpointSeries::queue_time},
+    };
+    for (const auto& eh : endpoint_hists) {
+        emit_header(eh.name, eh.help, "histogram");
+        for (int e = 0; e < ServerMetrics::kEndpointCount; ++e) {
+            const std::string labels = std::string("endpoint=\"") + ServerMetrics::endpoint_name(e) + "\",";
+            emit_histogram_body(eh.name, labels,
+                                m.series(static_cast<ServerMetrics::Endpoint>(e)).*eh.member);
+        }
+    }
     out += "# HELP imp_requests_rejected_total Requests refused with a 4xx\n";
     out += "# TYPE imp_requests_rejected_total counter\n";
     out += "imp_requests_rejected_total " + std::to_string(m.requests_rejected.load()) + "\n";
@@ -337,6 +390,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded = false;
+    std::string model_label;
     int queue = -1;
     long long waiting = -1, running = -1;
     {
@@ -345,16 +399,28 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
+            model_label = loaded ? state.model_name : std::string();
             if (state.batching) {
                 queue = state.batching->queue_depth();
                 waiting = state.batching->queue_waiting.load(std::memory_order_relaxed);
                 running = state.batching->queue_running.load(std::memory_order_relaxed);
             }
         } else {
-            loaded = state.model_status_snapshot().loaded;  // queue stays -1 (unknown)
+            const auto snap = state.model_status_snapshot();  // queue stays -1 (unknown)
+            loaded = snap.loaded;
+            model_label = loaded ? snap.model_name : std::string();
         }
     }
-    out += "imp_model_loaded " + std::string(loaded ? "1" : "0") + "\n";
+    // Labelled with the model (E-7): a swapped model's numbers and its
+    // predecessor's were one series before. Quotes and backslashes in a
+    // name are escaped the way the exposition format wants.
+    std::string model_escaped;
+    for (char c : model_label) {
+        if (c == '"' || c == '\\')
+            model_escaped += '\\';
+        model_escaped += (c == '\n') ? ' ' : c;
+    }
+    out += "imp_model_loaded{model=\"" + model_escaped + "\"} " + std::string(loaded ? "1" : "0") + "\n";
     out += "# HELP imp_queue_depth Current number of active and pending requests\n";
     out += "# TYPE imp_queue_depth gauge\n";
     out += "imp_queue_depth " + std::to_string(queue) + "\n";
@@ -489,6 +555,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         state.ctx && state.ctx->engine && state.ctx->engine->is_encoder_model();
     if (!is_encoder && state.batching && state.batching->is_running()) {
         state.metrics.requests_total++;
+        state.metrics.series(ServerMetrics::kEmbeddings).requests_total++;
         auto t0b = std::chrono::steady_clock::now();
         const int d_model = imp_model_d_model(state.model);
         if (has_dimensions && requested_dims != d_model) {
@@ -636,6 +703,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     } batching_guard{restart_batching};
 
     state.metrics.requests_total++;
+    state.metrics.series(ServerMetrics::kEmbeddings).requests_total++;
     auto t0 = std::chrono::steady_clock::now();
 
     // Get model dimensions

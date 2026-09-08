@@ -163,6 +163,7 @@ void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerSt
     }
 
     state.metrics.requests_total++;
+    state.metrics.series(ServerMetrics::kRerank).requests_total++;
     auto t0 = std::chrono::steady_clock::now();
 
     // Submit every (query, document) pair while the lock is held, so submission

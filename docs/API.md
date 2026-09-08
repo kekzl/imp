@@ -46,7 +46,7 @@ all of them at once.
 | `stop` | ✅ | |
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
-| `logprobs` | ✅ | `tests/test_server_logprobs.py` in `make test-server`, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
+| `logprobs` | ✅ | **of the processed distribution**: the row the sampler drew from, after penalties, `logit_bias`, banned tokens, a constraint mask, `min_p` and `typical_p` (vLLM's `processed_logprobs`; a masked token reads as probability 0, and at temperature 0 the emitted token is always `top_logprobs[0]`). `tests/test_server_logprobs.py` in `make test-server` pins that with a `logit_bias` case, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
 | `ignore_eos` | ✅ | vLLM-compatible extension on chat and completions: EOS and stop tokens are counted as output tokens without text, the think-model implicit `\nHuman` stop is not injected, user `stop` strings still apply, the request ends at `max_tokens` with `finish_reason: "length"`; for benchmark clients that need equal token counts across arms (`tools/analysis/burst_stream_client.py` with `IGNORE_EOS=1`). `tests/test_server_ignore_eos.py` in `make test-server` |
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
@@ -95,6 +95,15 @@ the server log (#1640, #1641):
 | `imp_prefix_cache_evictions_total` | a cached prefix block was reclaimed for a new allocation. Rising while `imp_tokens_cached_total` stalls means the pool is smaller than the working set |
 
 `imp_requests_cancelled_total` remains client-disconnect only.
+
+Per endpoint, the same counter and ladders carry an `endpoint` label
+(`chat_completions`, `completions`, `messages`, `responses`, `embeddings`,
+`rerank`): `imp_endpoint_requests_total`, `imp_endpoint_request_duration_seconds`,
+`imp_endpoint_ttft_seconds`, `imp_endpoint_inter_token_seconds`,
+`imp_endpoint_queue_time_seconds`, every endpoint emitted at zero so a panel
+can be built before traffic arrives. The unlabelled series stay the totals.
+`imp_model_loaded` carries `model="<name>"`, so a swapped model's numbers are
+not its predecessor's.
 
 `imp_decode_batch_last_rows` (gauge) is the number of sequences in the most
 recent decode step, 0 while the worker idles: the live batch, where
@@ -262,8 +271,17 @@ server default (`--think-budget`, 0.5) applies and these fields turn it off -
 
 `thinking` blocks carry a `signature`, and the stream emits `signature_delta`
 before the block's `content_block_stop` (SDKs round-trip the pair). It is a
-deterministic digest of the block text, not an attestation: it proves the
-block came back unedited, nothing more.
+deterministic digest of the block text, not an attestation: a prior-turn
+block whose signature does not match its text is refused with `400`
+(edited after the server produced it), a block without a signature is taken
+as-is, and nothing stops a client from computing one.
+
+On a request with tools the stream holds back up to `server.agent_scan_limit`
+tokens (default 256) while it is still unknown whether the model is reasoning:
+the template renders a pre-closed think block there, so a reasoning model emits
+only the closer. The hold is the TTFT of a prose reply on that path; lower the
+key on a model that never reasons. Plain chat requests hold 8 tokens and
+release on the first word.
 
 Either field alone suffices. Measured on Qwen3.8-27B, JSON prompt at
 `max_tokens: 400`, `reasoning_content` characters: nothing set 160,

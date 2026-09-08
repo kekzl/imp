@@ -51,6 +51,15 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     EXPECT_EQ(cfg.kv_cache.block_size, 32);
 }
 
+// AUDIT_arch_2026 E-4: the agent-path SCAN hold was a constant in
+// stream_driver.cpp; it is the whole TTFT of a prose reply on tool requests.
+TEST(RuntimeConfigTest, AgentScanLimitBindsAndDefaultsTo256) {
+    RuntimeConfig cfg;
+    EXPECT_EQ(cfg.server.agent_scan_limit, 256);
+    set_(cfg, {"server.agent_scan_limit=8"});
+    EXPECT_EQ(cfg.server.agent_scan_limit, 8);
+}
+
 // kv_cache.swa_sizing tri-state: "auto"/"on"/"off" plus legacy bool literals
 // (the key was a bool until 2026-07-24 — existing imp.conf files keep parsing).
 TEST(RuntimeConfigTest, SwaSizingTriState) {
