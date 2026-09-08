@@ -317,7 +317,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [generation]
     B("generation.no_logit_softcap", cfg.generation.no_logit_softcap);
-    B("generation.lm_dequant_fp16", cfg.generation.lm_dequant_fp16);
     B("generation.force_bos", cfg.generation.force_bos);
     B("generation.no_ban", cfg.generation.no_ban);
     B("generation.mtp_no_rope", cfg.generation.mtp_no_rope);
@@ -378,6 +377,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
+    B("diagnostics.lm_dequant_fp16", cfg.diagnostics.lm_dequant_fp16);
     S("diagnostics.vram_audit_dump", cfg.diagnostics.vram_audit_dump);
 
     // [calibration]

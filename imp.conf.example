@@ -626,7 +626,6 @@ nvfp4_residual_beta1 = false
 
 [generation]
 no_logit_softcap     = false
-lm_dequant_fp16      = false
 # Force-prepend BOS token even when the tokenizer says no.
 force_bos            = false
 # Disable the banned-token list (debug).
@@ -899,6 +898,10 @@ sparsity_threshold   = 0.0
 log_level            = info
 # Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
 debug_forward        = false
+# Bisect for a wrong top logit: the LM head runs dequant -> FP16 -> cuBLAS
+# instead of the fused Q8_1 GEMV, allocating the whole FP16 output projection
+# per forward. Never on in serving (was generation.lm_dequant_fp16).
+lm_dequant_fp16      = false
 # Print intermediate Jinja2 chat-template rendering steps.
 debug_template       = false
 # If non-empty, dump per-layer hidden states as .npy files to this directory.

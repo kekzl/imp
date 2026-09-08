@@ -784,11 +784,13 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 debug_tensor_rows("after_final_rmsnorm_row", no_last, stream);
                 debug_tensor_rows("h_last_row", h_last, stream);
             }
-            // DEBUG experiment (b): bypass fused rmsnorm_quantize_q8_1 + dp4a GEMV.
-            // Dequant output_proj to FP16 temp buffer, cuBLAS FP16 GEMM into FP32 logits.
-            // If this gives llama-matching top logit (~+2.07) then the dp4a path is buggy;
-            // if it still gives +8.83 then the bug is in hidden state or output_norm.
-            if (dispatch_policy().generation.lm_dequant_fp16) {
+            // Bisect, kept as `diagnostics.lm_dequant_fp16` (AUDIT_arch_2026
+            // A2-9): bypass the fused rmsnorm_quantize_q8_1 + dp4a GEMV, dequant
+            // output_proj to an FP16 temp buffer (a per-forward cudaMallocAsync
+            // of the whole projection) and run cuBLAS FP16 into FP32 logits. A
+            // llama-matching top logit here means the dp4a path is wrong; the
+            // same wrong logit means the hidden state or output_norm is.
+            if (dispatch_policy().diagnostics.lm_dequant_fp16) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 int N = cfg.vocab_size;

@@ -166,6 +166,12 @@ struct Diagnostics {
     bool vram_audit = false;
     // Optional append-only file the VRAM audit table is mirrored into.
     std::string vram_audit_dump;
+    // A finished bisect, kept as a diagnostic (AUDIT_arch_2026 A2-9): the LM
+    // head runs dequant -> FP16 -> cuBLAS instead of the fused Q8_1 GEMV, with
+    // a per-forward cudaMallocAsync of the whole FP16 output projection. Tells
+    // a wrong top logit apart from a wrong hidden state; never on in serving.
+    // Was `generation.lm_dequant_fp16`.
+    bool lm_dequant_fp16 = false;
     // [RETIRED] tq_skip_qjl removed in Phase 5 (TurboQuant retired 2026-05-17).
 };
 }  // namespace imp::cfg
