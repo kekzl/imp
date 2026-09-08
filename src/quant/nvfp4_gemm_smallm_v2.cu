@@ -89,22 +89,25 @@ __device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t parity) {
 
 // Async-arrive: one arrive on the mbarrier once all prior cp.async of this
 // thread have completed. .noinc consumes one of the pre-initialized expected
-// arrivals (the memcpy_async pattern: full-barrier expected count = 32
-// producer lanes).
+// arrivals (the memcpy_async pattern). Every arrival a phase needs is in the
+// init count (kFullArrivals); the track-only form (no .noinc, "increment now,
+// arrive later") is deliberately not used: its increment is ordered only
+// against the issuing thread, so when the producer's 32 arrivals land first
+// (a second-wave CTA behind a full LSU queue) the phase completes without the
+// helper warp's copies and the consumers read a stage whose weights have not
+// arrived. Measured: gate|up multi launch, 544 CTAs, M=24, 126 of 200 launches
+// bit-different (NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable).
 __device__ __forceinline__ void cp_async_mbar_arrive(uint64_t* bar) {
     const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
     asm volatile("cp.async.mbarrier.arrive.noinc.shared.b64 [%0];" ::"r"(a));
 }
 
-// Track-only form (no .noinc): the pending count is incremented first and
-// the async arrive decrements it, so the phase cannot complete before this
-// thread's prior cp.async land while the expected count stays untouched.
-// Lets a helper warp contribute copies to a stage without changing the
-// barrier's arrival accounting.
-__device__ __forceinline__ void cp_async_mbar_track(uint64_t* bar) {
-    const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile("cp.async.mbarrier.arrive.shared.b64 [%0];" ::"r"(a));
-}
+// Full-barrier arrivals per phase: 32 async arrives from the producer lanes
+// (their copies landed) plus 32 more, which are consumer warp 0's async
+// arrives on a prefetched first use and the producer's plain arrives
+// otherwise (stage 0 and every refill), so the count never depends on who
+// issued the weights.
+constexpr uint32_t kFullArrivals = 64;
 
 // 16-byte global->shared async copy, zero-filling when src_bytes == 0
 // (activation rows >= M: nibbles AND scales land as 0, so the padded rows
@@ -157,8 +160,8 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     if (tid == 0) {
 #pragma unroll
         for (int s = 0; s < kStages; ++s) {
-            mbar_init(&bar_full[s], 32);    // producer lanes async-arrive
-            mbar_init(&bar_empty[s], 128);  // consumer lanes arrive
+            mbar_init(&bar_full[s], kFullArrivals);  // see kFullArrivals
+            mbar_init(&bar_empty[s], 128);           // consumer lanes arrive
         }
     }
     __syncthreads();
@@ -233,6 +236,11 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             // One async-arrive per lane covers every cp.async this lane issued
             // for the stage, the weights before the grid dependency included.
             cp_async_mbar_arrive(&bar_full[s]);
+            // The stage's other 32 arrivals: consumer warp 0's async arrives
+            // on a prefetched first use (1 <= i < pre), this lane's plain
+            // arrive everywhere else (kFullArrivals).
+            if (i == 0 || i >= pre)
+                mbar_arrive(&bar_full[s]);
         };
         // Weights are immutable, so they may stream in BEFORE
         // griddepcontrol.wait, i.e. while the predecessor grid still runs;
@@ -241,7 +249,8 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         // from consumer warp 0 (below) in parallel, so a CTA that launched
         // late (dependency already resolved) still sees X0 queued right
         // behind W0 and stage 0 lands as early as the unprefetched order did.
-        issue_w(0);
+        if (iters > 0)
+            issue_w(0);
         pdl_wait();
         for (int i = 0; i < pre; ++i)
             issue_x(i);
@@ -256,12 +265,13 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         // ---- consumer warps: wait, MMA, release ----
         if (warp == 0) {
             // Ring prefetch: W for stages 1..pre-1 before the grid
-            // dependency. The track-only arrive keeps each stage's full
-            // barrier from completing before these copies land, without
-            // touching its expected count (32 producer arrivals).
+            // dependency. This warp's 32 async arrives are the stage's second
+            // half of kFullArrivals, so its first phase cannot complete
+            // before these copies land, whatever order the producer's
+            // arrivals take.
             for (int i = 1; i < pre; ++i) {
                 issue_w(i);
-                cp_async_mbar_track(&bar_full[i]);
+                cp_async_mbar_arrive(&bar_full[i]);
             }
         }
         // No global access before the epilogue (y read/write), which the

@@ -471,4 +471,115 @@ TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
     cudaEventDestroy(t1);
 }
 
+// Run-to-run determinism: the same W, Xq and shape must produce bit-identical
+// y on every launch, single and multi (sibling) kernel alike. Nothing in the
+// kernel is order-dependent (fixed-order MMA, fixed-order stripe reduce), so
+// any mismatch is a pipeline race: a stage consumed before all of its copies
+// landed. BatchInvarianceTest caught exactly that on Qwen3-14B after #1954:
+// its 24-token prefill runs these shapes (q|k|v multi, gate|up multi, o and
+// down single at M=24), the KV cache came out different per run and the M=1
+// vs M=1 control arm flipped 1-3 of 64 greedy tokens (max |dlogp| 0.3-0.7).
+//
+// Two input sets alternate so a stage read too early sees the OTHER set's
+// bytes left in shared memory by the previous launch, never a stale copy of
+// the right ones. Each launch writes its own y slice; the run is repeated
+// synchronized per launch and back to back on one stream (the in-situ
+// condition: programmatic edge, the dependent's CTAs land while the primary
+// still streams, deep async queues).
+TEST_F(NvFP4SmallMV2Test, RepeatedLaunchesBitwiseStable) {
+    struct Shape {
+        int M, K, count, N[3];
+    };
+    const Shape shapes[] = {{24, 5120, 3, {5120, 1024, 1024}}, {24, 5120, 2, {17408, 17408, 0}},
+                            {24, 5120, 1, {5120, 0, 0}},       {24, 17408, 1, {5120, 0, 0}},
+                            {32, 5120, 3, {5120, 1024, 1024}}, {1, 5120, 1, {1024, 0, 0}}};
+    const int launches = 200;
+    for (const Shape& s : shapes) {
+        std::mt19937 rng(11 + s.M + s.K + s.count);
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        DeviceQuant W[2][3], X[2];
+        for (int set = 0; set < 2; ++set) {
+            std::vector<__half> x_h((size_t)s.M * s.K);
+            for (auto& v : x_h)
+                v = __float2half(dist(rng));
+            X[set].quantize(x_h, s.M, s.K);
+            for (int i = 0; i < s.count; ++i) {
+                std::vector<__half> w_h((size_t)s.N[i] * s.K);
+                for (auto& v : w_h)
+                    v = __float2half(dist(rng));
+                W[set][i].quantize(w_h, s.N[i], s.K);
+            }
+        }
+        int total_n = 0;
+        for (int i = 0; i < s.count; ++i)
+            total_n += s.N[i];
+        const size_t y_elems = (size_t)s.M * total_n;  // one launch: sibling outputs concatenated
+        const size_t y_bytes = y_elems * sizeof(__half);
+        void *d_y = nullptr, *d_ws = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_y, y_bytes * launches), cudaSuccess);
+        const int stripes = s.count == 1 ? imp::gemm_nvfp4_smallm_v2_stripes(s.N[0], s.K) : 1;
+        if (s.count == 1)
+            ASSERT_EQ(cudaMalloc(&d_ws, imp::gemm_nvfp4_smallm_v2_workspace_bytes(s.N[0], s.K)), cudaSuccess);
+        for (int back_to_back = 0; back_to_back < 2; ++back_to_back) {
+            if (back_to_back && stripes != 1)
+                continue;  // striped shapes share one partials workspace; only stream order keeps that safe
+            ASSERT_EQ(cudaMemset(d_y, 0, y_bytes * launches), cudaSuccess);
+            for (int i = 0; i < launches; ++i) {
+                const int set = i & 1;
+                half* y_i = reinterpret_cast<half*>(static_cast<uint8_t*>(d_y) + y_bytes * i);
+                if (s.count == 1) {
+                    ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W[set][0].q, X[set].q, y_i, s.M, s.N[0], s.K,
+                                                             d_ws, nullptr, /*accumulate=*/false));
+                } else {
+                    imp::SmallMV2Sibling sib[3];
+                    half* yp = y_i;
+                    for (int t = 0; t < s.count; ++t) {
+                        sib[t] = {&W[set][t].q, yp, s.N[t]};
+                        yp += (size_t)s.M * s.N[t];
+                    }
+                    ASSERT_TRUE(
+                        imp::gemm_nvfp4_smallm_v2_multi_a4(sib, s.count, X[set].q, s.M, s.K, nullptr));
+                }
+                if (!back_to_back)
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            }
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            std::vector<uint16_t> all(y_elems * launches);
+            ASSERT_EQ(cudaMemcpy(all.data(), d_y, y_bytes * launches, cudaMemcpyDeviceToHost), cudaSuccess);
+            int bad_launches = 0;
+            size_t bad_elems = 0;
+            for (int i = 2; i < launches; ++i) {
+                const uint16_t* ref = all.data() + y_elems * (i & 1);
+                const uint16_t* cur = all.data() + y_elems * i;
+                size_t bad = 0;
+                for (size_t e = 0; e < y_elems; ++e)
+                    bad += (cur[e] != ref[e]);
+                if (bad) {
+                    ++bad_launches;
+                    bad_elems += bad;
+                }
+            }
+            printf(
+                "[ DETERMIN ] M=%2d K=%5d %s N=%d/%d/%d stripes=%2d %-12s: %d of %d launches differ from the "
+                "first (%zu elements)\n",
+                s.M, s.K, s.count == 1 ? "single" : "multi ", s.N[0], s.N[1], s.N[2], stripes,
+                back_to_back ? "back-to-back" : "synced", bad_launches, launches, bad_elems);
+            EXPECT_EQ(bad_launches, 0)
+                << "M=" << s.M << " K=" << s.K << " count=" << s.count << " N0=" << s.N[0]
+                << (back_to_back ? " back-to-back" : " synced") << ": " << bad_launches << " of " << launches
+                << " launches differ from the first";
+        }
+        cudaFree(d_y);
+        cudaFree(d_ws);
+        for (int set = 0; set < 2; ++set) {
+            cudaFree(X[set].q.packed_data);
+            cudaFree(X[set].q.micro_scales);
+            for (int i = 0; i < s.count; ++i) {
+                cudaFree(W[set][i].q.packed_data);
+                cudaFree(W[set][i].q.micro_scales);
+            }
+        }
+    }
+}
+
 }  // namespace
