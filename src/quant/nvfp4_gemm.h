@@ -63,6 +63,12 @@ size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K);
 bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                              int N_out, int K, void* d_workspace, cudaStream_t stream,
                              bool accumulate = false);
+// FP32-output twin for the batched LM head (the samplers read float logits):
+// single-stripe shapes only (a vocab-sized N tiles the card many times over),
+// fresh output, no workspace; false otherwise. Same accumulators as the FP16
+// kernel, written before the FP16 rounding.
+bool gemm_nvfp4_smallm_v2_a4_f32(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, float* y, int M,
+                                 int N_out, int K, cudaStream_t stream);
 // Tuning hook (tests only): explicit stage depth {2,3,4,6} and stripe count.
 bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                                    int N_out, int K, void* d_workspace, cudaStream_t stream,

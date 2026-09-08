@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -268,6 +269,45 @@ TEST_F(NvFP4SmallMV2Test, SweepTuning) {
     cudaEventDestroy(t1);
 }
 
+// The FP32-output twin (batched LM head) writes the same accumulators the
+// FP16 kernel rounds: rounding its output to FP16 must reproduce the FP16
+// kernel bit for bit. Striped shapes are refused (no FP32 reduce path).
+TEST_F(NvFP4SmallMV2Test, F32OutputRoundsToTheHalfKernel) {
+    const int M = 32, N = 5120, K = 5120;  // 80 tiles: one stripe
+    std::mt19937 rng(19);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<__half> w_h((size_t)N * K), x_h((size_t)M * K);
+    for (auto& v : w_h)
+        v = __float2half(dist(rng));
+    for (auto& v : x_h)
+        v = __float2half(dist(rng));
+    DeviceQuant W, X;
+    W.quantize(w_h, N, K);
+    X.quantize(x_h, M, K);
+    void *d_y16 = nullptr, *d_y32 = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_y16, (size_t)M * N * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y32, (size_t)M * N * sizeof(float)), cudaSuccess);
+    ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y16), M, N, K, nullptr, nullptr));
+    ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4_f32(W.q, X.q, static_cast<float*>(d_y32), M, N, K, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<uint16_t> y16((size_t)M * N);
+    std::vector<float> y32((size_t)M * N);
+    ASSERT_EQ(cudaMemcpy(y16.data(), d_y16, y16.size() * 2, cudaMemcpyDeviceToHost), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(y32.data(), d_y32, y32.size() * 4, cudaMemcpyDeviceToHost), cudaSuccess);
+    size_t mismatches = 0;
+    for (size_t i = 0; i < y32.size(); ++i) {
+        __half r = __float2half(y32[i]);
+        uint16_t bits;
+        std::memcpy(&bits, &r, 2);
+        mismatches += (bits != y16[i]);
+    }
+    EXPECT_EQ(mismatches, 0u);
+    cudaFree(d_y16);
+    cudaFree(d_y32);
+    // N=1024 at K=5120 is a 10-stripe shape: the FP32 twin declines.
+    EXPECT_FALSE(imp::gemm_nvfp4_smallm_v2_a4_f32(W.q, X.q, nullptr, M, 1024, K, nullptr));
+}
+
 // Three siblings in one launch (attention q|k|v: 80 + 16 + 16 tiles) must
 // be bit-identical to three single launches at stripes=1 (same CTA body,
 // same tile order); the striped single path for N=1024 (10 stripes + reduce)
@@ -329,7 +369,7 @@ TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
     const Shape shapes[] = {
         {5120, 0, 5120, "q/o 5120x5120"},        {1024, 0, 5120, "k/v 1024x5120"},
         {7168, 0, 5120, "qkv-as-one 7168x5120"}, {17408, 17408, 5120, "gate|up pair 2x17408x5120"},
-        {5120, 0, 17408, "down 5120x17408"},
+        {5120, 0, 17408, "down 5120x17408"},     {151936, 0, 5120, "lm_head 151936x5120"},
     };
     const int M = 32;
     std::mt19937 rng(13);

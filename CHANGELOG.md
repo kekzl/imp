@@ -25,6 +25,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Batched-decode LM head at n <= 32 runs on the small-M mxf4nvf4 kernel with FP32 logits and a norm-fused activation
+  quantize (`gemm.nvfp4_lm_head_smallm`, default on) instead of the CUTLASS 128-row tile: Qwen3-14B-NVFP4 at 32 streams
+  +1.2/+2.2/+0.2%, Qwen3.8-27B +0.6/+0.4/+2.6% aggregate (3/3 each); isolated 437 MB LM head 314 us vs 365 in situ before ([roadmap](docs/roadmap.md))
 - Small-M NVFP4 GEMM (batched decode M<=32) prefetches its weight ring before `griddepcontrol.wait` and triggers PDL
   dependents at CTA start; attention q|k|v run as one launch (`gemm_nvfp4_smallm_v2_multi_a4`). Qwen3-14B-NVFP4 at
   32 streams x 982-token prompts +3.0/+4.9/+1.4/+2.9% aggregate (4/4), ITL p50 9.0-9.3 -> 8.7-8.9 ms ([roadmap](docs/roadmap.md), #1954)
