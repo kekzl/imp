@@ -97,4 +97,14 @@ Conclusion: the model card's reason (unit-offset norm) was wrong; a calibrated e
 
 ## Phase log
 
-(one entry per phase: reproduction or "attack run, nothing found", commit, floor deltas)
+| Phase | Branch / PR | Result | Floor delta |
+|---|---|---|---|
+| P1 loader contract | #1962 | ignore list enforced, fused split with provenance; Qwen3.8-27B-NVFP4-vllm 496/0 unclassified, 170 entries = 1 + 161 + 8; Phi-4-NVFP4 loads again | tg128 292.93 (+2.00 %), pp512 12408 (+0.01 %), paired 0.08 / 0.16 % |
+| P2 VRAM ceilings + snapshot boundary | #1960 | pools report ceilings, aligned prompts snapshot (n-1)/bs; ASan fix in test_memory_plan.cpp | graphs ON 441 tok/s (2.49x) |
+| P2b BF16 chain | 3e0ae96c in #1960 | REFUTED, see SETTLED.md; chain 0.337 vs cold 0.329 rel-L2 | none |
+| P3 think budget | #1963 | one think_limit for host and graph path, imp_finish_detail on the wire, engine seed for CLI/API | tg128 296.90 (+3.38 %), pp512 12601 (+1.56 %), paired 2.33 / 1.12 % |
+| P4 speculation contract | #1964 | per-request mtp_k, declines visible, batch_rr on any drafter, dequant cap without LM head; first GPU run: 3 tests red, 0 code defects (MTP oracle = near-tie margin, wiring guard = script, PartialRoPE float-frequency budget) | tg128 291.72 (+1.58 %), pp512 11931 (-3.83 % vs pin, paired -0.06 % vs main), paired decode +0.27 % |
+| P6 AWQ qwen3_5 | #1966 | ABCD -0.55 % PPL vs RTN (4.5986 vs 4.6242), BDEG -0.23 %, BD +0.10 %; RTN stays default | tg128 295.14 (+2.77 %), pp512 12571 (+1.32 %), paired -0.15 / +0.06 % |
+| P7 greedy vs history | open | split in two: (a) the logprobs flag alone parts a cold deterministic run at token 81/127 on a 0.086-nat near-tie (different LM-head/sampling path), measured in MtpGreedyIdentityTest 2026-09-09; (b) server-history dependence still unexplained | none |
+
+Open after the campaign: think stop-token mask after a forced close (P3 follow-up), SWA twin of the snapshot_boundary gap, P7 (b), speculation gates refuse logprobs requests (a speculated request cannot report logprobs, documented nowhere).
