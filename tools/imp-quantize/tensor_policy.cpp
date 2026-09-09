@@ -1,5 +1,7 @@
 #include "tensor_policy.h"
 
+#include "model/nvfp4_module_policy.h"
+
 #include <map>
 
 namespace imp::quantize {
@@ -10,8 +12,6 @@ bool ends_with(const std::string& s, const std::string& suf) {
 }
 
 bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
-
-bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
 bool is_float_dtype(const std::string& dtype) { return dtype == "BF16" || dtype == "F16"; }
 
@@ -43,73 +43,12 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
         why_not = std::to_string(t.shape.size()) + "-D";
         return false;
     }
-    if (contains(t.name, "embed_tokens") || contains(t.name, "embed_positions")) {
-        why_not = "embedding";
+    // The role exclusions live in src/model/nvfp4_module_policy.h, which the
+    // LOADER also calls to decide whether a module the checkpoint left plain is
+    // a Linear it should have found packed. One list, so the writer's silence
+    // and the reader's refusal cannot disagree about which roles are exempt.
+    if (imp::nvfp4_policy::role_excluded(t.name, t.shape[1], quantize_lm_head, why_not))
         return false;
-    }
-    if (contains(t.name, "norm")) {
-        why_not = "norm";
-        return false;
-    }
-    if (contains(t.name, "lm_head") && !quantize_lm_head) {
-        why_not = "lm_head (use --lm-head to include)";
-        return false;
-    }
-    // The vision tower. Its upload path takes F16/BF16/F32 and rejects anything
-    // else outright (qwen3vl_vision_upload.cpp), so an NVFP4 tower is a tower no
-    // loader can read back: the tensors are 2-D and K-aligned, so every shape
-    // check waves them through. Multimodal checkpoints carry it under
-    // `model.visual.*`; a text-only one has no such tensor and is unaffected.
-    if (contains(t.name, "visual.") || contains(t.name, "vision_tower.")) {
-        why_not = "vision tower (upload path takes source precision only)";
-        return false;
-    }
-    // The MTP draft head, for the same reason and with a worse failure mode.
-    // Its loader takes `mtp.*.weight` by name (safetensors_loader.cpp) and knows
-    // nothing about the `weight_scale` / `weight_scale_2` companions, so a
-    // quantized head arrives as packed nibbles with no scales: half the expected
-    // width, read as BF16. Nothing errors. The head loads, drafts, and every
-    // draft is rejected.
-    //
-    // Measured on Qwen3.8-27B: quantizing it took draft acceptance from 81% (the
-    // published Qwen3.6-27B checkpoint, whose head is BF16) to 0 of 24, which
-    // costs speed and never correctness, so there is no louder symptom than the
-    // accept rate. It is 0.22 GiB, and excluding it is the whole fix.
-    if (starts_with(t.name, "mtp.")) {
-        why_not = "MTP draft head (its loader reads the weight by name, without scales)";
-        return false;
-    }
-    // Two weight roles that are 2-D and K-aligned — so every shape check waves
-    // them through — but that must NOT be quantized. Both were found by
-    // bisection on DeepSeek-V2-Lite (MLA + 64-expert MoE), where quantizing
-    // everything produced a checkpoint that loaded and then emitted
-    // cross-script repetition garbage while the BF16 source answered normally.
-    // Excluding them costs almost nothing: a handful of small matrices per
-    // layer against 4992 expert tensors that quantize fine.
-    //
-    // 1. MLA latent projections. `kv_a_proj_with_mqa` packs latent+RoPE into one
-    //    output and `kv_b_proj` up-projects the latent into per-head nope/v
-    //    halves; the runtime slices and reshapes both. Leaving only these two in
-    //    full precision made the same checkpoint coherent again.
-    if (contains(t.name, "kv_a_proj") || contains(t.name, "kv_b_proj")) {
-        why_not = "MLA latent projection (runtime slices it — must stay full precision)";
-        return false;
-    }
-    // 2. MoE router. It decides WHICH experts run, and FP4 across 16
-    //    shared-scale values is enough to change the top-k pick. Measured
-    //    independently: with the MLA pair already excluded, quantizing the
-    //    router alone still produced garbage. Published exports (Modelopt,
-    //    llm-compressor) keep routers full precision for the same reason.
-    //    `.gate.weight` is the router; expert projections are `gate_proj.weight`
-    //    and are unaffected by this suffix test.
-    if (ends_with(t.name, ".gate.weight") || ends_with(t.name, ".router.weight")) {
-        why_not = "MoE router (FP4 changes expert selection)";
-        return false;
-    }
-    if (t.shape[1] % 16 != 0) {
-        why_not = "K=" + std::to_string(t.shape[1]) + " is not a multiple of 16";
-        return false;
-    }
     return true;
 }
 
