@@ -626,8 +626,11 @@ TEST(ShadowPlan, ChargesTheRecurrentSnapshotStoreAgainstTheKvPool) {
     ASSERT_TRUE(res_without) << res_without.failure.report();
 
     // Its own line, carrying exactly the probe's bytes.
+    // lines() returns by value: keep the vector alive past the loop or `line`
+    // dangles (ASan heap-use-after-free at the EXPECT below).
+    const auto lines = res_with.plan.lines();
     const PlanLine* line = nullptr;
-    for (const auto& l : res_with.plan.lines())
+    for (const auto& l : lines)
         if (l.tag == RegionTag::RecurrentSnapshots)
             line = &l;
     ASSERT_NE(line, nullptr) << "the snapshot store has no plan line";
