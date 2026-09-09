@@ -44,8 +44,29 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     }
     capacity_ = allocated_bufs_;
     if (capacity_ == 0) {
+        // Was a silent `return`. The caller reads enabled() == false and turns
+        // hybrid prefix caching off with a message about the BUDGET, which is
+        // the one thing that was not the problem: the budget bought `want`
+        // slots and the device refused every one of them.
+        size_t free_bytes = 0, total_device = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_device) != cudaSuccess)
+            free_bytes = 0;
+        IMP_LOG_ERROR(
+            "RecurrentSnapshotStore: 0/%d slots x %.1f MiB allocated (budget %.0f MiB, %.0f MiB "
+            "free) - hybrid prefix caching stays OFF; every turn re-prefills its whole prompt",
+            want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0),
+            free_bytes / (1024.0 * 1024.0));
         pool_.reset();
         return;
+    }
+    if (capacity_ < want) {
+        // A partial store is not a failure, but it is not what was configured
+        // either: the hit rate is set by the slot count, and 6/8 turn-2 hits
+        // came from exactly this shortfall once before (#1937/#1938).
+        IMP_LOG_WARN(
+            "RecurrentSnapshotStore: only %d of %d slots x %.1f MiB allocated (budget %.0f MiB) - "
+            "the device refused the rest; fewer snapshots means more full re-prefills",
+            capacity_, want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
     }
     IMP_LOG_INFO("RecurrentSnapshotStore: %d/%d slots x %.1f MiB pre-allocated (budget %.0f MiB)",
                  capacity_, want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
@@ -59,10 +80,16 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
         pool_->free_host_bufs.push_back(p);
         host_capacity_++;
     }
-    if (want_host > 0)
+    if (want_host > 0) {
         IMP_LOG_INFO("RecurrentSnapshotStore: host tier %d/%d slots x %.1f MiB pinned (budget %.0f MiB)",
                      host_capacity_, want_host, entry_bytes / (1024.0 * 1024.0),
                      host_budget_bytes / (1024.0 * 1024.0));
+        if (host_capacity_ < want_host)
+            IMP_LOG_WARN(
+                "RecurrentSnapshotStore: host tier short by %d of %d slots (cudaHostAlloc refused) - "
+                "evicted snapshots are dropped instead of demoted",
+                want_host - host_capacity_, want_host);
+    }
 }
 
 std::shared_ptr<const RecurrentSnapshotEntry> RecurrentSnapshotStore::find(size_t key) {

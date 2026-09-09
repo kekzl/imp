@@ -26,6 +26,8 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 #include <utility>
 
@@ -271,6 +273,24 @@ bool Engine::init_kv_cache() {
         probe.mandatory_cache_bytes = vram_budget.mandatory_sf_bytes + vram_budget.mandatory_moe_bytes +
                                       vram_budget.imma_plane_bytes;
         probe.ssm_state_bytes = vram_budget.ssm_footprint_bytes;
+        // The recurrent snapshot store cudaMallocs server.recurrent_snapshot_mb
+        // AFTER this plan and after the KV pool is sized, so the pool used to be
+        // sized over 256 MiB that another tenant of the same init was about to
+        // take. Charged here at the figure the store will actually claim: whole
+        // slots of one sequence's state, never more than the budget.
+        if (mcfg.ssm_inner_size > 0 && config_.use_prefix_caching &&
+            runtime_config_.server.recurrent_snapshot_mb > 0 && vram_budget.ssm_footprint_bytes > 0) {
+            const size_t slots =
+                static_cast<size_t>(config_.max_batch_size) + static_cast<size_t>(std::max(0, ssm_reserved_slots));
+            const size_t per_seq = slots > 0 ? vram_budget.ssm_footprint_bytes / slots : 0;
+            const size_t budget = static_cast<size_t>(runtime_config_.server.recurrent_snapshot_mb) << 20;
+            // The store pre-allocates WHOLE slots of one sequence's state and
+            // stops at the budget, so the device charge is
+            // floor(budget / per_seq) * per_seq, not the raw budget. The host
+            // tier (server.recurrent_snapshot_host_mb) is pinned HOST memory
+            // and is not a VRAM charge.
+            probe.recurrent_snapshot_bytes = per_seq > 0 ? (budget / per_seq) * per_seq : 0;
+        }
         if (executor_) {
             probe.engine_persistent_bytes = executor_->workspace_estimate();
             probe.workspace_estimate_available = true;
@@ -845,8 +865,17 @@ bool Engine::init_kv_cache() {
             if (!ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
                                   mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_,
                                   ssm_reserved_slots)) {
-                IMP_LOG_WARN("Failed to init SSM state, continuing without it");
+                // NOT "continuing without it". A GDN/SSM layer whose recurrent
+                // state is missing reads a null slab: the model produces
+                // garbage for every request, and the only signal was one WARN
+                // at startup. SSMState::init has already logged the bytes, the
+                // slots, the free figure and the lever.
                 ssm_state_.reset();
+                throw std::runtime_error(
+                    "SSM/GDN state pool allocation failed and this model has " +
+                    std::to_string(n_ssm) +
+                    " recurrent layers; refusing to serve without it (see the SSM/GDN state "
+                    "pool line above for the shortfall and the lever)");
             } else if (ssm_reserved_slots > 0) {
                 IMP_LOG_INFO("SSM state: %d slot(s) reserved past max_batch_size=%d for the "
                              "multi-candidate verify (speculative.mtp_tree_width=%d, %.1f MiB each)",

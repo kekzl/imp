@@ -342,6 +342,43 @@ TEST(MemoryPlan, NoKvLayersIsNotADivideByZero) {
     EXPECT_EQ(res.plan.kv.bytes, 0u);
 }
 
+// ── Every FeatureSet field the plan reads must reach a line ───────────
+
+TEST(MemoryPlan, EveryFeatureFieldReachesALine) {
+    // plan_memory() reads five FeatureSet byte fields. Four of them were
+    // written by nobody: the only caller (shadow_plan_input) filled
+    // ssm_state_bytes and left the rest at 0, so the 256 MiB recurrent
+    // snapshot store, the speculative staging and the vision tower were
+    // charged to nothing and taken AFTER the KV pool was sized. A field that
+    // cannot appear as its own line cannot be reconciled against the log
+    // either, which is what made the 5088 MiB state invisible (MEMORY.md D14).
+    //
+    // Distinct values, so a field folded into another line cannot pass by
+    // coincidence.
+    auto in = dense_input();
+    in.features.ssm_state_bytes = 101 * kMiB;
+    in.features.recurrent_snapshot_bytes = 102 * kMiB;
+    in.features.residual_ring_bytes = 103 * kMiB;
+    in.features.spec_decode_bytes = 104 * kMiB;
+    in.features.vision_tower_bytes = 105 * kMiB;
+
+    auto res = plan_memory(in);
+    ASSERT_TRUE(res) << res.failure.report();
+
+    const auto lines = res.plan.lines();
+    auto line_with = [&](size_t bytes) -> const PlanLine* {
+        for (const auto& l : lines)
+            if (l.bytes == bytes)
+                return &l;
+        return nullptr;
+    };
+    EXPECT_NE(line_with(101 * kMiB), nullptr) << "features.ssm_state_bytes";
+    EXPECT_NE(line_with(102 * kMiB), nullptr) << "features.recurrent_snapshot_bytes";
+    EXPECT_NE(line_with(103 * kMiB), nullptr) << "features.residual_ring_bytes";
+    EXPECT_NE(line_with(104 * kMiB), nullptr) << "features.spec_decode_bytes";
+    EXPECT_NE(line_with(105 * kMiB), nullptr) << "features.vision_tower_bytes";
+}
+
 TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
     auto in = dense_input();
     in.features.ssm_state_bytes = 128 * kMiB;
@@ -355,6 +392,66 @@ TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
         sum += l.bytes;
     EXPECT_EQ(sum, res.plan.total())
         << "criterion 6 is >=95% accounted; a plan that does not add up cannot get there";
+}
+
+// ── The SSM/GDN state byte formula, one copy ──────────────────────────
+
+#include "memory/ssm_state_size.h"
+
+namespace {
+
+// Qwen3.8-27B-NVFP4 (/home/kekz/models/Qwen3.8-27B-NVFP4-vllm/config.json):
+// 64 layers of which 48 are linear_attention, linear_conv_kernel_dim 4,
+// linear_num_value_heads 48 x linear_value_head_dim 128 -> ssm_inner_size 6144,
+// linear_key_head_dim 128 -> ssm_state_size, linear_num_key_heads 16 -> groups.
+// conv_channels = 6144 + 2 * 16 * 128 = 10240.
+SsmStateGeometry qwen38_gdn(QType h_dtype) {
+    return SsmStateGeometry{/*n_ssm_layers=*/48,   /*conv_channels=*/10240, /*conv_kernel=*/4,
+                            /*n_heads=*/48,        /*head_dim=*/128,        /*state_size=*/128,
+                            h_dtype};
+}
+
+}  // namespace
+
+TEST(SsmStatePool, PinsTheQwen38GeometryTheAllocatorTakes) {
+    // The two copies of this formula disagreed: vram_budget.cpp charged
+    // conv_channels * (conv_kernel - 1) * 4 unaligned, ssm_state.cu allocated
+    // align256(conv_channels * conv_kernel * 4) + align256(h). 4968 MiB planned
+    // against 5088 MiB taken at 64 slots (MEMORY.md D14) - short in the
+    // direction that oversubscribes the card.
+    const auto g = qwen38_gdn(QType::F16);
+    EXPECT_EQ(ssm_conv_bytes_per_layer(g), 10240ull * 4 * 4);          // already 256-aligned
+    EXPECT_EQ(ssm_h_bytes_per_layer(g), 48ull * 128 * 128 * 2);        // already 256-aligned
+    EXPECT_EQ(ssm_bytes_per_slot(g), 48ull * (163840 + 1572864));      // 79.5 MiB
+    EXPECT_EQ(ssm_pool_bytes(g, 64, 0), 5088ull * kMiB);
+    EXPECT_EQ(ssm_pool_bytes(g, 41, 0), 41ull * 79 * kMiB + 41 * kMiB / 2);
+
+    // The retired charge, so a revert to it cannot pass unnoticed.
+    const size_t old_charge = 48ull * 64 *
+                              (10240ull * (4 - 1) * sizeof(float) + 48ull * 128 * 128 * 2);
+    EXPECT_GT(ssm_pool_bytes(g, 64, 0), old_charge)
+        << "the plan must never charge less than the allocator takes";
+
+    // Reserved verify slots are priced with the pool, not on top of it.
+    EXPECT_EQ(ssm_pool_bytes(g, 41, 3), ssm_pool_bytes(g, 44, 0));
+
+    // F32 h state doubles the dominant term.
+    EXPECT_EQ(ssm_h_bytes_per_layer(qwen38_gdn(QType::F32)), 2 * ssm_h_bytes_per_layer(g));
+}
+
+TEST(SsmStatePool, FailureMessageNamesSlotsLayersFreeAndTheLever) {
+    // `Failed to allocate SSM state pool (5335154688 bytes)` was the whole
+    // message: no slot count, no free figure, no knob.
+    const std::string m = ssm_pool_failure_message(ssm_pool_bytes(qwen38_gdn(QType::F16), 64, 0),
+                                                  /*slots=*/64, /*reserved_slots=*/3,
+                                                  /*n_ssm_layers=*/48, /*free_bytes=*/312 * kMiB);
+    EXPECT_NE(m.find("5088 MiB"), std::string::npos) << m;
+    EXPECT_NE(m.find("67 slots"), std::string::npos) << m;
+    EXPECT_NE(m.find("64 live + 3 reserved"), std::string::npos) << m;
+    EXPECT_NE(m.find("48 layers"), std::string::npos) << m;
+    EXPECT_NE(m.find("312 MiB free"), std::string::npos) << m;
+    EXPECT_NE(m.find("runtime.max_batch_size"), std::string::npos)
+        << "a refusal without the lever is a stack trace with better grammar: " << m;
 }
 
 // ── A7 step 2b: the shadow plan run next to the live budget ───────────
@@ -383,7 +480,104 @@ ShadowPlanProbe dense_probe() {
     return p;
 }
 
+// The hybrid the ceiling line exists for: 48 GDN layers of per-slot recurrent
+// state against 16 attention layers of paged KV (Qwen3.8-27B-NVFP4, block 16),
+// after the #1958 clamp took the batch from 64 to 41 slots.
+ShadowPlanProbe hybrid_probe() {
+    ShadowPlanProbe p;
+    p.distributable_bytes = 9760 * kMiB;
+    p.weight_cache_demand = 1602 * kMiB;
+    p.mandatory_cache_bytes = 1602 * kMiB;
+    p.ssm_state_bytes = 41ull * 77 * kMiB + 26 * kMiB;  // 41 slots x 77.625 MiB
+    p.engine_persistent_bytes = 949 * kMiB;
+    p.workspace_estimate_available = true;
+    p.library_reserve_bytes = 3900 * kMiB;
+    p.n_kv_layers = 16;
+    p.max_batch_size = 41;
+    p.max_seq_len = 4096;
+    p.kv_block_size = 16;
+    p.min_kv_tokens = 4096;
+    p.kv_block_bytes_per_layer = 16ull * 4 * 256 * 2 / 2 + 1024;  // NVFP4 + scales
+    return p;
+}
+
 }  // namespace
+
+// ── E1: the report states BOTH pool ceilings ──────────────────────────
+
+TEST(MemoryPlan, KvSeqCeilingIsBlocksOverBlocksPerSeq) {
+    // The KV pool's ceiling in sequences is what the plan already knows and
+    // never said: blocks / blocks_per_seq. On the hybrid the two pools are
+    // sized by different rules (state is a fixed pre-charge per slot, KV takes
+    // the residual), so nothing forces them to agree - and when they disagree
+    // the state was bought for slots the KV pool cannot serve.
+    const auto res = plan_memory(shadow_plan_input(hybrid_probe()));
+    ASSERT_TRUE(res) << res.failure.report();
+    ASSERT_GT(res.plan.kv.blocks_per_seq, 0);
+    const int kv_seqs = res.plan.kv.blocks / res.plan.kv.blocks_per_seq;
+    const int recurrent_seqs = hybrid_probe().max_batch_size;
+    EXPECT_EQ(res.plan.kv.blocks_per_seq, 4096 / 16);
+    // Either the batch fits both pools, or the ceiling line has to warn.
+    const int fit = plan_fitting_batch(shadow_plan_input(hybrid_probe()),
+                                       hybrid_probe().ssm_state_bytes / 41);
+    EXPECT_TRUE(fit <= kv_seqs || kv_seqs < recurrent_seqs)
+        << "a batch the plan accepts (" << fit << ") above the KV ceiling (" << kv_seqs
+        << ") must be reported, not left to the first long request";
+}
+
+TEST(ShadowPlan, ReportStatesBothPoolCeilings) {
+    const auto p = hybrid_probe();
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(res) << res.failure.report();
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/896);
+
+    const int kv_seqs = res.plan.kv.blocks / res.plan.kv.blocks_per_seq;
+    EXPECT_NE(r.find("ceiling: recurrent 41 seqs"), std::string::npos)
+        << "startup must REPORT the recurrent ceiling, not only the KV one:\n" << r;
+    EXPECT_NE(r.find("KV " + std::to_string(kv_seqs) + " seqs at max_seq_len 4096"), std::string::npos) << r;
+    EXPECT_NE(r.find("(256 blocks/seq)"), std::string::npos) << r;
+    ASSERT_LT(kv_seqs, 41) << "fixture no longer reproduces the over-subscribed shape";
+    EXPECT_NE(r.find("WARN"), std::string::npos)
+        << "state paid for 41 slots the KV pool cannot serve at full context, silently:\n" << r;
+}
+
+TEST(ShadowPlan, NoCeilingWarningWhenBothPoolsServeTheBatch) {
+    // Same hybrid, a batch both pools serve. The warning has to be a statement
+    // about THIS configuration, not about hybrids.
+    auto p = hybrid_probe();
+    p.max_batch_size = 3;
+    p.ssm_state_bytes = 3ull * 77 * kMiB + 2 * kMiB;
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(res) << res.failure.report();
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/768);
+    EXPECT_NE(r.find("ceiling: recurrent 3 seqs, KV 3 seqs"), std::string::npos) << r;
+    EXPECT_EQ(r.find("WARN"), std::string::npos)
+        << "a plan whose pools agree must not cry wolf:\n" << r;
+
+    // A dense pool holding fewer full-context sequences than max_batch_size is
+    // ordinary continuous batching: no per-slot pre-charge, nothing wasted.
+    auto d = dense_probe();
+    d.max_batch_size = 64;
+    const auto dres = plan_memory(shadow_plan_input(d));
+    ASSERT_TRUE(dres) << dres.failure.report();
+    const std::string dr = shadow_plan_report(d, dres, /*live_kv_blocks=*/2048);
+    EXPECT_NE(dr.find("ceiling: recurrent 64 seqs"), std::string::npos) << dr;
+    EXPECT_EQ(dr.find("WARN"), std::string::npos) << "no state was bought per slot:\n" << dr;
+}
+
+TEST(ShadowPlan, ARejectedPlanStillStatesTheCeilings) {
+    // The rejected branch is exactly where the operator has to see which of the
+    // two ceilings binds - the failure text names bytes, not sequences.
+    auto p = hybrid_probe();
+    p.distributable_bytes = 9683 * kMiB;  // 19 MiB short, the pre-clamp shape
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_FALSE(res.ok);
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/16);
+    EXPECT_NE(r.find("plan REJECTS"), std::string::npos) << r;
+    EXPECT_NE(r.find("ceiling: recurrent 41 seqs"), std::string::npos)
+        << "a rejection without the ceilings leaves the operator guessing which pool to cut:\n"
+        << r;
+}
 
 TEST(ShadowPlan, DoesNotChargeWeightsOrContextASecondTime) {
     // At budget time the weights and the CUDA context are already resident.

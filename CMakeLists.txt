@@ -1074,6 +1074,11 @@ if(IMP_BUILD_TESTS)
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
         tests/test_batch_invariance.cu
+        # Decode-graph buckets on a GDN hybrid: one captured graph per batch
+        # size, two different ways to reach the recurrent slot (captured scalar
+        # at n == 1, device slot table at n > 1), and nothing covered a
+        # capture+replay of bucket i against bucket 1 on a recurrent model.
+        tests/test_gdn_graph_buckets.cu
         tests/test_determinism_e2e.cpp
         tests/test_deepstack_inject.cu
         tests/test_vision_chunk_offset.cu

@@ -250,7 +250,17 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     const bool cacheable = !has_image || req->vision_content_hash != 0;
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
-        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, -1,
+        // Hybrid models cap reuse at the recurrent-snapshot boundary, exactly
+        // as the scheduler's admission path does (scheduler.cpp). This branch
+        // passed -1 (unlimited) with no snapshot lookup at all: a KV prefix
+        // reused past the last snapshot carries attention KV the recurrent
+        // state never saw, and the continuation would decode from a zeroed GDN
+        // state. Unreachable today because the scheduler pre-allocates every
+        // admitted request, which is exactly why it must not be left as a
+        // second policy waiting for the first caller that skips admission.
+        const int max_reuse =
+            (recurrent_snapshots_ && ssm_state_) ? hybrid_prefix_reuse_limit_(*req) : -1;
+        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, max_reuse,
                                                                  req->prefix_salt);
         if (prefix_reused < 0) {
             // KV exhausted even after cached-block reclamation. The old fallback

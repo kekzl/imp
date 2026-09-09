@@ -93,6 +93,12 @@ there instead of retelling it.
 - `runtime.max_batch_size` is clamped to the largest batch the memory plan fits when the SSM/GDN state is the overrun,
   instead of the live-pass fallback that never charged it: Qwen3.8-27B-NVFP4 at 64 slots put 5088 MiB of state past the
   headroom, KV pool probe 528 GB/s (spilled); now `clamped 64 -> 41`, probe 1621 GB/s ([MEMORY.md D14](docs/internals/MEMORY.md))
+- Recurrent and KV pools are reported and charged: the plan report ends with `ceiling: recurrent N seqs, KV M seqs at
+  max_seq_len L`, WARNs when `M < N`, charges `server.recurrent_snapshot_mb` (256 MiB, previously taken after the pool was
+  sized), and both SSM byte formulas are one header (4968 charged vs 5088 taken at 64 slots) ([MEMORY.md D15](docs/internals/MEMORY.md))
+- Loud instead of silent: >90 % KV pressure on FP8/NVFP4 KV warns that StreamingLLM has no valve there (it declined with
+  no log), a refused SSM/GDN pool names bytes/slots/layers/free and the lever and no longer retries past the headroom-aware
+  allocator, and a hybrid whose state pool fails now refuses to start instead of serving garbage ([MEMORY.md D15](docs/internals/MEMORY.md))
 - Small-M NVFP4 GEMM (`gemm_nvfp4_smallm_v2`, M <= 32): the #1954 weight prefetch raced its stage barrier on
   multi-wave grids (gate|up sibling launch, 544 CTAs), a 24-token prefill differed per run and `runtime.deterministic`
   did not hold (isolated 126 of 200 launches bit-different, now 0; gate `NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable`) (#1958)

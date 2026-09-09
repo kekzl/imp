@@ -740,8 +740,23 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
         const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
                                              : st.total_blocks + st.free_blocks + st.cached_blocks;
+        const bool kv_is_f16 = kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16;
+        if (kv_pressure_warns_no_streaming_valve(st.free_blocks, reclaimable, pool_total, kv_is_f16) &&
+            !kv_pressure_no_valve_warned_.test_and_set(std::memory_order_relaxed)) {
+            // The `if` below declined here and logged nothing. On this model's
+            // default KV dtype that made the whole valve dead code, and the
+            // next visible event was the hard cancel further up once the pool
+            // ran dry (AUDIT_arch_2026 C-4 follow-up).
+            IMP_LOG_WARN(
+                "KV cache >90%% full (%d free + %d reclaimable of %d blocks) and StreamingLLM is "
+                "unavailable on kv_cache.dtype=%s (sentinel-block skipping is F16-only): there is "
+                "no valve, and requests will be CANCELLED once the pool runs dry. Lower "
+                "runtime.max_seq_len or runtime.max_batch_size, or raise the pool.",
+                st.free_blocks, reclaimable, pool_total,
+                kv_cache_raw_ ? qtype_name(kv_cache_raw_->qtype()) : "unknown");
+        }
         if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
-            if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
+            if (kv_is_f16) {
                 config_.streaming_kv_enabled = true;
                 streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
                 int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
