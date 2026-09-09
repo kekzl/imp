@@ -21,9 +21,10 @@
 //
 // WHAT IT IS NOT
 //   Not a batch-invariance guarantee (imp deliberately has none,
-//   docs/determinism.md) - the arms here run the SAME prompt, so every row of a
-//   batched step is bit-identical work and the reduction shapes match. What is
-//   compared is state addressing, not floating-point associativity.
+//   docs/determinism.md): bucket n is never compared with bucket 1. Each arm is
+//   compared with a PERMUTATION of itself (same prompts, same batch shape,
+//   reversed slot assignment), so the GEMM tiles and the per-row reduction
+//   order match and only the slot addressing can differ.
 //
 // GPU lane: needs a real hybrid checkpoint (IMP_TEST_MODEL with GDN layers).
 // =============================================================================
@@ -37,6 +38,7 @@
 #include "runtime/request.h"
 #include "test_models.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -108,10 +110,26 @@ protected:
     // N concurrent greedy requests carrying the SAME prompt. Returns one output
     // token vector per request, in submission order.
     std::vector<std::vector<int32_t>> run_concurrent(int n_seqs) {
+        return run_concurrent(std::vector<std::vector<int32_t>>(n_seqs, tokens_));
+    }
+
+    // Prompt i for an n-way arm: the fixture prompt minus its last i tokens, so
+    // every row carries different content and a different length.
+    std::vector<std::vector<int32_t>> distinct_prompts(int n_seqs) const {
+        std::vector<std::vector<int32_t>> out;
+        for (int i = 0; i < n_seqs; ++i)
+            out.emplace_back(tokens_.begin(), tokens_.end() - i);
+        return out;
+    }
+
+    // One greedy request per prompt, all in flight together. Returns one output
+    // token vector per request, in submission order.
+    std::vector<std::vector<int32_t>> run_concurrent(const std::vector<std::vector<int32_t>>& prompts) {
+        const int n_seqs = static_cast<int>(prompts.size());
         std::vector<std::shared_ptr<Request>> reqs;
         for (int i = 0; i < n_seqs; ++i) {
             auto req = std::make_shared<Request>();
-            req->input_tokens = tokens_;
+            req->input_tokens = prompts[i];
             req->max_tokens = kGen;
             req->temperature = 0.0f;
             req->top_p = 1.0f;
@@ -148,22 +166,35 @@ protected:
     std::vector<int32_t> tokens_;
 };
 
-// Every bucket must produce the reference stream. A bucket whose captured graph
-// addresses the wrong recurrent slab answers fluently and differently.
-TEST_F(GdnGraphBucketTest, EveryBatchBucketMatchesTheSingleSequenceRun) {
-    const auto ref = run_concurrent(1);
-    ASSERT_EQ(ref.size(), 1u);
-    ASSERT_FALSE(ref[0].empty()) << "the reference arm produced no tokens";
-
+// Every bucket must address each row's own recurrent slab. The oracle is a
+// permutation of the SAME n-way batch: n distinct prompts submitted in order
+// and then in reverse order share the batch shape (so the GEMM tiles and the
+// reduction order per row are the same) and differ only in which slot each
+// request lands in. A bucket whose captured graph reads the slab of a
+// neighbouring slot answers fluently and differently for one of the two
+// orders. Comparing bucket n against the n=1 run is NOT a valid oracle: the
+// batched GEMM path (M >= 2) is a different kernel from the M=1 GEMV and imp has
+// no batch-invariance guarantee (docs/determinism.md); measured on
+// Qwen3.5-4B-mxfp4 the n=4 and n=8 buckets leave the n=1 stream at token 16
+// while every row inside a bucket agrees.
+TEST_F(GdnGraphBucketTest, EveryBatchBucketAddressesItsOwnRecurrentSlot) {
     for (int n : {2, 4, 8}) {
-        const auto arm = run_concurrent(n);
-        ASSERT_EQ(static_cast<int>(arm.size()), n);
+        const auto prompts = distinct_prompts(n);
+        auto reversed = prompts;
+        std::reverse(reversed.begin(), reversed.end());
+
+        const auto forward = run_concurrent(prompts);
+        const auto backward = run_concurrent(reversed);
+        ASSERT_EQ(static_cast<int>(forward.size()), n);
+        ASSERT_EQ(static_cast<int>(backward.size()), n);
         for (int i = 0; i < n; ++i) {
-            EXPECT_EQ(arm[i], ref[0])
-                << "batch bucket " << n << ", row " << i << ": the decode graph captured for " << n
-                << " sequences produced a different stream than the n=1 graph on the SAME prompt. "
-                   "On a hybrid that is state addressing (d_ssm_seq_slots_ / the captured slot "
-                   "scalar), not FP associativity - every row here does identical work.";
+            ASSERT_FALSE(forward[i].empty()) << "bucket " << n << " row " << i << " produced no tokens";
+            EXPECT_EQ(forward[i], backward[n - 1 - i])
+                << "batch bucket " << n << ", prompt " << i << ": the same prompt in the same " << n
+                << "-way batch shape produced a different stream when it was submitted in slot "
+                << (n - 1 - i) << " instead of slot " << i
+                << ". Same GEMM shapes, same per-row reduction order: that is state addressing "
+                   "(d_ssm_seq_slots_ / the captured slot scalar), not FP associativity.";
         }
     }
 }

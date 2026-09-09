@@ -29,6 +29,7 @@
 #include "runtime/snapshot_boundary.h"
 #include "test_models.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -307,7 +308,13 @@ constexpr const char* kLongPrompt =
     "was read from a live allocator says what happened to be free at one instant on one machine, "
     "and a number that was computed from declared demand says the same thing on every boot. "
     "The second kind can be tested without a device, printed at startup, and compared against "
-    "what the process later took. The first kind can only be argued about. Continue the text:";
+    "what the process later took. The first kind can only be argued about. A plan that charges "
+    "every pool it will later allocate can be wrong by a constant, and a constant is something a "
+    "test can pin; a plan that discovers its pools at runtime is wrong by whatever the last "
+    "request left behind, and nothing can pin that. The same distinction separates a recurrent "
+    "state that is restored from a snapshot taken at a block boundary from one that is rebuilt "
+    "by replaying the prefix: the first costs a copy, the second costs a prefill, and only the "
+    "first can be compared token for token against a cold run. Continue the text:";
 
 TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
@@ -368,7 +375,14 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     constexpr int kTokens = 16;
 
     // ── arm A: block-aligned prompt ──────────────────────────────────────
-    const int aligned_len = (n_full / kv_bs) * kv_bs;
+    // The prefix cache pins at most a quarter of the pool (128 blocks at this
+    // max_seq_len -> 32 blocks = 512 tokens). A prompt past the pin budget is
+    // cached only up to the budget, its snapshot sits at the prompt's own
+    // boundary beyond it, and the downward scan finds no snapshot at or below
+    // the KV match: cached_tokens 0 (measured with the 592-token prompt).
+    // Keep the warm prompt inside the budget so the restore path is reached.
+    constexpr int kPinBudgetBlocks = 32;
+    const int aligned_len = std::min((n_full / kv_bs) * kv_bs, kPinBudgetBlocks * kv_bs);
     std::vector<int32_t> aligned(full.begin(), full.begin() + aligned_len);
     int cold_cached = -1, warm_cached = -1;
     const std::vector<int32_t> cold_a = run(aligned, kTokens, &cold_cached);
@@ -386,10 +400,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     // ── arm B: unaligned prompt (len % kv_bs != 0) ───────────────────────
     // The boundary rounds DOWN, so the tail tokens are always forwarded. A
     // restore that ignored the remainder would show up here and nowhere else.
-    imp_context_free(ctx_);
-    ctx_ = nullptr;
-    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
-    engine = ctx_->engine.get();
+    // A second engine cannot be built on this model handle (the weight caches
+    // consumed the source tensors), so cold means a reset: it evicts every
+    // cached block, and without cached KV no snapshot can be matched.
+    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
     const int unaligned_len = aligned_len - (kv_bs / 2 > 0 ? kv_bs / 2 : 1) - 1;
     ASSERT_NE(unaligned_len % kv_bs, 0);
     std::vector<int32_t> unaligned(full.begin(), full.begin() + unaligned_len);
@@ -403,10 +417,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     // the warm prefix, but the snapshot sits at the warm prompt's own boundary.
     // cached_tokens must follow the SNAPSHOT, or the continuation decodes from
     // a state that never saw the tokens whose KV it is reading.
-    imp_context_free(ctx_);
-    ctx_ = nullptr;
-    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
-    engine = ctx_->engine.get();
+    // A second engine cannot be built on this model handle (the weight caches
+    // consumed the source tensors), so cold means a reset: it evicts every
+    // cached block, and without cached KV no snapshot can be matched.
+    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
     ASSERT_GE(n_full, aligned_len + 40) << "need 40 tokens past the warm prompt";
     std::vector<int32_t> extended(full.begin(), full.begin() + aligned_len);
     (void)run(extended, kTokens, nullptr);  // warm: saves the snapshot at its boundary
@@ -418,10 +432,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
         << "reuse ran past the snapshot boundary (" << ext_cached << " > " << expect_c << ")";
     EXPECT_GT(ext_cached, 0) << "the extended prompt shares a snapshot-backed prefix";
 
-    imp_context_free(ctx_);
-    ctx_ = nullptr;
-    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
-    engine = ctx_->engine.get();
+    // A second engine cannot be built on this model handle (the weight caches
+    // consumed the source tensors), so cold means a reset: it evicts every
+    // cached block, and without cached KV no snapshot can be matched.
+    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
     const std::vector<int32_t> cold_c = run(extended, kTokens, nullptr);
     EXPECT_EQ(warm_c, cold_c)
         << "warm prompt + 40 new tokens: the continuation after a snapshot restore must equal a "

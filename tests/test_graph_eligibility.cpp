@@ -135,7 +135,12 @@ TEST(GraphEligibility, BurstStepLimitNeverExceedsTheTokensTheBurstHas) {
 TEST(GraphEligibility, SnapshotBoundaryIsBlockAlignedAndSkipsShortPrompts) {
     EXPECT_EQ(snapshot_boundary(35, 16, 256), 0) << "32 < 256: no snapshot, no split";
     EXPECT_EQ(snapshot_boundary(35, 16, 0), 32) << "0 keeps every block-aligned prompt";
-    EXPECT_EQ(snapshot_boundary(256, 16, 256), 256) << "the minimum itself qualifies";
+    EXPECT_EQ(snapshot_boundary(257, 16, 256), 256) << "the minimum itself qualifies";
+    EXPECT_EQ(snapshot_boundary(256, 16, 256), 0)
+        << "an aligned 256-token prompt snapshots at 240 (< min): a restore must leave one token";
+    EXPECT_EQ(snapshot_boundary(512, 16, 256), 496)
+        << "an aligned prompt snapshots one block short, or the (n-1)/bs admission cap never matches it";
+    EXPECT_EQ(snapshot_boundary(513, 16, 256), 512);
     EXPECT_EQ(snapshot_boundary(1082, 16, 256), 1072);
     EXPECT_EQ(snapshot_boundary(1082, 32, 256), 1056) << "block size decides the alignment";
     EXPECT_EQ(snapshot_boundary(15, 16, 0), 0) << "under one block there is nothing to save";
