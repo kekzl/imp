@@ -50,7 +50,7 @@ all of them at once.
 | `ignore_eos` | ✅ | vLLM-compatible extension on chat and completions: EOS and stop tokens are counted as output tokens without text, the think-model implicit `\nHuman` stop is not injected, user `stop` strings still apply, the request ends at `max_tokens` with `finish_reason: "length"`; for benchmark clients that need equal token counts across arms (`tools/analysis/burst_stream_client.py` with `IGNORE_EOS=1`). `tests/test_server_ignore_eos.py` in `make test-server` |
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
-| `"speculative": true/false` | ✅ | per-request override, carried by all three dialects (chat, `/v1/messages`, `/v1/responses`). When a verify step ran, `usage.completion_tokens_details` carries `imp_spec_drafted`, `imp_spec_accepted`, `imp_spec_verify_steps` (Anthropic: top-level `usage` keys; Responses: `output_tokens_details`), and the request span the same as `imp.spec_*` attributes. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
+| `"speculative": true/false/{"mtp_k": N}` | ✅ | per-request override, carried by all three dialects (chat, `/v1/messages`, `/v1/responses`). The boolean form switches every drafter on or off; `false` reaches **all three** (n-gram, MTP head, token recycling) since #1639. The object form addresses the trained MTP head alone and is orthogonal to the boolean: `{"mtp_k": 0}` turns the head off for this request and leaves the matcher running, `{"mtp_k": 2}` asks for a depth-2 chain. `N` outside `0..<armed depth>` is a 400 naming the range (the bound is the device chain cap, 16, when no head is armed). Neither form can conjure a head the checkpoint lacks or the process did not upload. When a verify step ran, or the request asked for MTP and did not get it, `usage.completion_tokens_details` carries `imp_spec_drafted`, `imp_spec_accepted`, `imp_spec_emitted`, `imp_spec_verify_steps` and, on a decline, `imp_spec_declined` + `imp_spec_declined_detail`. All six travel on every dialect from one shared table (`tools/imp-server/spec_usage_keys.h`): Anthropic lifts them into top-level `usage`, Responses into `usage.output_tokens_details`. The request span carries the counters as `imp.spec_*` attributes. Decline reasons: `no_mtp_head`, `mtp_head_not_loaded` (the concurrency decline - `speculative.mtp_k=auto` refuses the head on a server taking concurrent requests), `mtp_head_not_armed`, `mtp_depth_clamped` |
 | `"lora": "name"` | ✅ | PEFT adapter selected per request, every quant path. One adapter is active at a time: a request naming a different one waits until the in-flight requests finished, then the worker switches (decode graphs re-capture); it is never batched with them. The prefix cache is keyed by adapter, so a shared system prompt is prefilled once per adapter. Adapter shapes are checked against the model at load |
 | `"priority": int` | ✅ | vLLM-compatible admission priority, **lower value schedules earlier**, default 0. Strictly dominates the scheduler's shortest-first-with-aging order; a caller that sets priorities owns starvation across classes. Accepted on all three dialects |
 
@@ -95,6 +95,21 @@ the server log (#1640, #1641):
 | `imp_prefix_cache_evictions_total` | a cached prefix block was reclaimed for a new allocation. Rising while `imp_tokens_cached_total` stalls means the pool is smaller than the working set |
 
 `imp_requests_cancelled_total` remains client-disconnect only.
+
+Speculative decoding is counted twice: once in aggregate
+(`imp_spec_drafted_total`, `_accepted_total`, `_verify_steps_total`,
+`_miss_steps_total`) and once per draft source, `imp_spec_mtp_*` against
+`imp_spec_ngram_*`, each with `drafted_total`, `accepted_total`,
+`emitted_total`, `verify_steps_total` and `verify_wall_ms_total`. The aggregate
+cannot price the MTP head on its own: the n-gram/suffix matcher, the prompt
+prediction and token recycling fill the same verify chunk and land in the same
+totals, so a server running the documented MTP pair reports the same four
+numbers as one the matcher carried. `imp_spec_mtp_accepted_total /
+imp_spec_mtp_drafted_total` is the head's acceptance rate,
+`imp_spec_mtp_emitted_total / imp_spec_mtp_verify_steps_total` is what its
+verify bought, and `imp_spec_mtp_verify_wall_ms_total` is what it cost.
+`imp_spec_ngram_*` is every non-MTP drafter together. All ten hang off a live
+engine, so a model-less server emits none of them.
 
 Per endpoint, the same counter and ladders carry an `endpoint` label
 (`chat_completions`, `completions`, `messages`, `responses`, `embeddings`,

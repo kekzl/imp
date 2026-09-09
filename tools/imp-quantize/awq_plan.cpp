@@ -3,29 +3,39 @@
 // exported checkpoint stays a plain NVFP4 checkpoint that needs no runtime
 // support.
 //
-// Four groups per layer, defined by which activation they share:
+// The site table (which consumers share an activation, which producer absorbs
+// 1/s, whether that producer's norm carries a unit offset) lives in
+// awq_sites.h and is decided from tensor names alone, so the CPU lane holds
+// it. This file does the parts that need the checkpoint and the GPU: the
+// activation statistic, the scale search, the safety scan over consumers this
+// planner does not know by name, and the storage bound on the fold.
 //
-//   A  q,k,v      <- input_layernorm            fold 1/s into the norm weight
-//   B  gate,up    <- post_attention_layernorm   fold 1/s into the norm weight
-//   C  o_proj     <- v_proj output channels     fold 1/s into v_proj's rows
-//   D  down_proj  <- up_proj output channels    fold 1/s into up_proj's rows
+//   A  q,k,v            <- input_layernorm            fold into the norm
+//   G  linear_attn.in_proj_{qkv,z,a,b} <- input_layernorm          same norm
+//   B  gate,up          <- post_attention_layernorm    fold into the norm
+//   C  o_proj           <- v_proj output channels      fold into v_proj rows
+//   D  down_proj        <- up_proj output channels     fold into up_proj rows
+//   E  linear_attn.out_proj <- linear_attn.norm        tied across value heads
 //
-// A and B are exact for any pre-norm RMSNorm of the form y = (x/rms(x)) * g:
-// dividing g by s divides the norm's output by s, and rms(x) is computed
-// before g so it does not move. That is exactly why Gemma-class models are
-// refused here — their norm applies (1 + g), where dividing g is not dividing
-// the output.
+// The norm folds are exact for BOTH conventions: for y = (x/rms(x)) * g the
+// producer stores g/s, and for y = (x/rms(x)) * (1 + g) it stores
+// (1 + g)/s - 1, so that (1 + g') = (1 + g)/s. rms(x) is computed before g in
+// either case, so the norm's own statistic does not move. What is NOT exact is
+// the STORAGE: near a gain of zero a BF16 half-ulp on a delta near -1 is an
+// unbounded relative error on the gain, so every norm divisor is passed
+// through awq_clamp_norm_divisors before it reaches either side of the pair
+// (quant/awq_norm_fold.h).
 //
-// C and D are exact because attention is linear in v and SwiGLU's product is
-// elementwise: scaling one output channel of the producer scales precisely the
-// matching input channel of the consumer. C additionally has to respect GQA —
-// several query heads read one KV head, so every o_proj input channel mapping
-// to the same v channel must get the same scale. Tying the ACTIVATION statistic
-// before the search is what guarantees that: s is a pure function of a.
+// C, D and E are exact because attention is linear in v, SwiGLU's product is
+// elementwise, and the GDN gate multiplies after the norm: scaling one output
+// channel of the producer scales precisely the matching input channel of the
+// consumer. C and E additionally tie the ACTIVATION statistic across the heads
+// that share a producer channel, which is what guarantees the fold exists at
+// all: s is then a pure function of a.
 //
-// Groups C and D are searched first because their fold modifies v_proj and
-// up_proj, which are themselves members of groups A and B — those searches
-// must see the weights they will actually be quantizing.
+// The row folds are searched first because their producers (v_proj, up_proj)
+// are themselves members of the norm groups, and those searches must see the
+// weights they will actually be quantizing.
 
 #include "awq.h"
 
@@ -39,11 +49,17 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace imp::awq {
 
 namespace {
+
+// How far the gain a folded norm channel reproduces may sit from the gain the
+// fold intended. Below this the fold is worth having; a channel that cannot
+// hold it keeps a smaller scale instead of losing its gain.
+constexpr float kNormFoldTol = 0.01f;
 
 const JValue* obj_get(const JValue& v, const char* key) {
     if (v.type != JType::OBJECT)
@@ -59,30 +75,14 @@ int64_t obj_int(const JValue& v, const char* key, int64_t fallback) {
     return (f && f->type == JType::NUMBER) ? f->as_int() : fallback;
 }
 
-// The norm fold assumes RMSNorm applies its weight multiplicatively with no
-// +1 offset. Refusing everything else is the whole safety story for group A/B:
-// a Gemma-style (1 + g) norm would silently produce a different model.
-bool arch_uses_plain_rmsnorm(const std::string& model_type) {
-    static const char* kOk[] = {"qwen2", "qwen3", "llama", "mistral"};
-    for (const char* a : kOk)
-        if (model_type == a)
-            return true;
-    return false;
+std::string obj_str(const JValue& v, const char* key) {
+    const JValue* f = obj_get(v, key);
+    return (f && f->type == JType::STRING) ? f->str_val : std::string();
 }
 
 struct Shape2 {
     int64_t N = 0, K = 0;
 };
-
-bool tensor_shape(const std::map<std::string, const RawTensor*>& index, const std::string& name,
-                  Shape2& out) {
-    auto it = index.find(name);
-    if (it == index.end() || it->second->shape.size() != 2)
-        return false;
-    out.N = it->second->shape[0];
-    out.K = it->second->shape[1];
-    return true;
-}
 
 // Fetches a matrix as FP16, with any already-decided row divisor applied so the
 // search sees the values that will actually be quantized.
@@ -103,36 +103,40 @@ bool fetch_matrix(const std::map<std::string, const RawTensor*>& index, const Pl
     return true;
 }
 
-// The fold's safety condition, and the reason this function exists.
-//
-// Dividing a norm's weight by s divides its OUTPUT by s — for EVERY consumer of
-// that norm, not just the ones in the group. Each consumer only stays correct
-// if its own columns were multiplied by the same s. So a norm may be folded
-// only when every 2-D consumer of it is a group member.
-//
-// This is not hypothetical. Two weight roles are deliberately excluded from
-// quantization (MLA latent projections, MoE router) and therefore never receive
-// the compensating column scale — and the MoE router reads exactly the norm
-// group B folds into. A MoE checkpoint whose expert names happened to match
-// would have had its router silently fed inputs divided by s.
-//
-// `extra` lists consumer names that are NOT members; the fold is refused if any
-// of them exists in the checkpoint.
-bool fold_is_safe(const std::map<std::string, const RawTensor*>& index,
-                  const std::vector<std::string>& extra_consumers, std::string& blocker) {
-    for (const auto& name : extra_consumers) {
-        if (index.count(name)) {
-            blocker = name;
-            return false;
-        }
+// A 1-D producer's values, in float. The clamp needs the numbers the tensor
+// actually holds, not an approximation of them: the whole bound is about what
+// this dtype can and cannot store.
+bool raw_to_float(const RawTensor& t, std::vector<float>& out) {
+    const int64_t n = t.numel();
+    out.resize(static_cast<size_t>(n));
+    if (t.dtype == "F32") {
+        std::memcpy(out.data(), t.data, static_cast<size_t>(n) * 4);
+        return true;
     }
-    return true;
+    const auto* src = static_cast<const uint16_t*>(t.data);
+    if (t.dtype == "F16") {
+        for (int64_t i = 0; i < n; i++)
+            out[static_cast<size_t>(i)] = half_to_float(src[i]);
+        return true;
+    }
+    if (t.dtype == "BF16") {
+        for (int64_t i = 0; i < n; i++)
+            out[static_cast<size_t>(i)] = bf16_to_float(src[i]);
+        return true;
+    }
+    return false;
 }
 
 // Every 2-D `.weight` under `prefix` that is not a member and not explicitly
 // exempt. Used to catch consumers this file does not know about by name — a new
 // architecture adding a second reader of a pre-norm must not silently break the
 // fold.
+//
+// This is not hypothetical. Two weight roles are deliberately excluded from
+// quantization (MLA latent projections, MoE router) and therefore never receive
+// the compensating column scale, and the MoE router reads exactly the norm
+// group B folds into. A MoE checkpoint whose expert names happened to match
+// would have had its router silently fed inputs divided by s.
 std::vector<std::string> unlisted_consumers(const std::map<std::string, const RawTensor*>& index,
                                             const std::string& prefix,
                                             const std::vector<std::string>& members,
@@ -147,7 +151,8 @@ std::vector<std::string> unlisted_consumers(const std::map<std::string, const Ra
             continue;
         bool skip = false;
         for (const auto& suf : exempt_suffixes)
-            if (name.size() >= suf.size() && name.compare(name.size() - suf.size(), suf.size(), suf) == 0)
+            if (name.size() >= suf.size() &&
+                name.compare(name.size() - suf.size(), suf.size(), suf) == 0)
                 skip = true;
         if (!skip)
             out.push_back(name);
@@ -155,69 +160,174 @@ std::vector<std::string> unlisted_consumers(const std::map<std::string, const Ra
     return out;
 }
 
-// Runs one group: search, then record the column scales and the fold. Returns
-// the error text only on a hard error; a skipped group is reported through
-// `plan` and comes back as a default SearchResult (alpha 0 = no fold), which is
-// what keeps the previous group's scale from standing. That used to depend on
-// the function remembering to clear its out-parameter first.
-std::expected<SearchResult, std::string> run_group(const std::map<std::string, const RawTensor*>& index,
-                                                   const CalibrationStats& stats, int layer, const char* kind,
-                                                   const std::vector<std::string>& members,
-                                                   const std::vector<float>& act_override, Plan& plan) {
-    SearchResult result;
-    const CalibrationEntry* stat = stats.find(layer, kind);
-    if (!stat && act_override.empty()) {
-        plan.groups_skipped++;
-        return result;
+// The site's activation statistic: the max over the kinds that read this
+// activation, then tied across the producer channels the fold shares. Taking
+// the max is robustness against one kind being absent from the calibration
+// file; tying BEFORE the search is what makes the resulting scale foldable.
+bool site_statistic(const CalibrationStats& stats, int layer, const FoldSite& site, int64_t K,
+                    const std::vector<int64_t>& tie, int64_t producer_len, std::vector<float>& out) {
+    out.clear();
+    for (const auto& key : site.calib_keys) {
+        const CalibrationEntry* e = stats.find(layer, key);
+        if (!e || static_cast<int64_t>(e->mean_abs.size()) != K)
+            continue;
+        if (out.empty())
+            out = e->mean_abs;
+        else
+            for (size_t i = 0; i < out.size(); i++)
+                out[i] = std::max(out[i], e->mean_abs[i]);
     }
-    const std::vector<float>& act = act_override.empty() ? stat->mean_abs : act_override;
+    if (out.empty())
+        return false;
+    if (site.tie == TieMode::Identity)
+        return true;
+    std::vector<float> per_producer(static_cast<size_t>(producer_len), 0.0f);
+    for (int64_t i = 0; i < K; i++)
+        per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])] =
+            std::max(per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])],
+                     out[static_cast<size_t>(i)]);
+    for (int64_t i = 0; i < K; i++)
+        out[static_cast<size_t>(i)] = per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])];
+    return true;
+}
+
+// Runs one site: search, then record the column scales and the fold. Returns
+// the error text only on a hard error; a site that cannot run is reported
+// through `plan` and leaves the checkpoint untransformed at that site.
+std::expected<void, std::string> run_site(const std::map<std::string, const RawTensor*>& index,
+                                          const CalibrationStats& stats, int layer, const FoldSite& site,
+                                          Geometry geo, Plan& plan) {
+    const std::string label = "layer " + std::to_string(layer) + " group " + std::string(1, site.group);
+    auto skip = [&](const std::string& why) {
+        plan.groups_skipped++;
+        plan.notes.push_back(label + ": " + why);
+    };
 
     std::vector<std::vector<uint16_t>> storage;
     std::vector<GroupMatrix> mats;
     int64_t K = -1;
-    storage.reserve(members.size());
-    for (const auto& name : members) {
+    storage.reserve(site.members.size());
+    for (const auto& name : site.members) {
         std::vector<uint16_t> bits;
         Shape2 sh;
         if (!fetch_matrix(index, plan, name, bits, sh)) {
-            plan.groups_skipped++;
-            plan.notes.push_back("layer " + std::to_string(layer) + " " + kind + ": missing or " +
-                                 "unquantizable member " + name);
-            return result;
+            skip("missing or unquantizable member " + name);
+            return {};
         }
         if (K < 0)
             K = sh.K;
         else if (K != sh.K) {
-            plan.groups_skipped++;
-            plan.notes.push_back("layer " + std::to_string(layer) + " " + kind + ": members disagree on K");
-            return result;
+            skip("members disagree on K");
+            return {};
         }
         storage.push_back(std::move(bits));
-        mats.push_back({&storage.back(), sh.N});
-    }
-    if (K <= 0 || K % 16 != 0 || static_cast<int64_t>(act.size()) != K) {
-        plan.groups_skipped++;
-        plan.notes.push_back("layer " + std::to_string(layer) + " " + kind +
-                             ": K does not match the calibration vector");
-        return result;
+        mats.push_back({nullptr, sh.N});
     }
     // `mats` holds pointers into `storage`; reserve() above keeps them stable.
-    for (size_t i = 0; i < members.size(); i++)
+    for (size_t i = 0; i < mats.size(); i++)
         mats[i].data = &storage[i];
+    if (K <= 0 || K % 16 != 0) {
+        skip("K = " + std::to_string(K) + " is not an NVFP4 width");
+        return {};
+    }
+
+    const auto pit = index.find(site.producer);
+    if (pit == index.end()) {
+        skip("producer " + site.producer + " is not in this checkpoint");
+        return {};
+    }
+    const RawTensor& producer = *pit->second;
+    // One producer, one fold. Two groups of the same layer folding into the
+    // same tensor would leave the second one's divisor standing and the first
+    // one's consumers scaled against a divisor nothing applied.
+    if (plan.vec_div.count(site.producer) || plan.row_div.count(site.producer)) {
+        skip(site.producer + " was already folded by another group of this layer");
+        return {};
+    }
+    // A norm's own length IS the tie: the GDN gated norm is [head_dim] and
+    // shared across the value heads, and reading its width off the tensor
+    // avoids depending on which config key spells the linear-attention head.
+    if (site.tie == TieMode::PerHeadDim)
+        geo.head_dim = producer.numel();
+    const int64_t plen = tie_producer_len(site.tie, K, geo);
+    const std::vector<int64_t> tie = tie_map(site.tie, K, geo);
+    if (plen <= 0 || tie.empty()) {
+        skip("K = " + std::to_string(K) + " does not tie onto " + site.producer);
+        return {};
+    }
+    const bool producer_fits = site.kind == FoldKind::MatrixRows
+                                   ? (producer.shape.size() == 2 && producer.shape[0] == plen)
+                                   : (producer.numel() == plen);
+    if (!producer_fits) {
+        skip(site.producer + " has the wrong shape for this fold");
+        return {};
+    }
+
+    // Dividing a norm divides its output for EVERY consumer of it, not only the
+    // group's members. A consumer this planner does not know by name is a
+    // blocker, not a detail.
+    if (!site.scan_prefix.empty()) {
+        const auto extra = unlisted_consumers(index, site.scan_prefix, site.members, site.scan_exempt);
+        if (!extra.empty()) {
+            skip("no fold, " + extra.front() + " also reads " + site.producer + " but is not scaled");
+            return {};
+        }
+    }
+
+    std::vector<float> act;
+    if (!site_statistic(stats, layer, site, K, tie, plen, act)) {
+        skip("no calibration entry of width " + std::to_string(K));
+        return {};
+    }
 
     auto searched = search_group_scale(mats, K, act);
     if (!searched)
         return std::unexpected(searched.error());
-    result = std::move(*searched);
-
-    if (result.alpha == 0.0f) {
+    SearchResult res = std::move(*searched);
+    plan.group_errors.push_back({layer, std::string(1, site.group), res.err_rtn, res.err_best});
+    if (res.alpha == 0.0f) {
         plan.groups_rtn++;
-        return result;
+        return {};
     }
+
+    std::vector<float> div(static_cast<size_t>(plen), 1.0f);
+    for (int64_t i = 0; i < K; i++)
+        div[static_cast<size_t>(tie[static_cast<size_t>(i)])] = res.s[static_cast<size_t>(i)];
+
+    if (site.kind == FoldKind::NormVector) {
+        std::vector<float> g;
+        if (!raw_to_float(producer, g)) {
+            skip("producer dtype " + producer.dtype + " cannot carry a fold");
+            return {};
+        }
+        NormFoldReport rep;
+        awq_clamp_norm_divisors(g.data(), g.size(), site.offset, producer.dtype, kNormFoldTol, div, rep);
+        plan.channels_clamped += static_cast<int>(rep.clamped);
+        if (rep.clamped > 0) {
+            char worst[96];
+            std::snprintf(worst, sizeof(worst), "%.3f -> %.3f", double(rep.worst_clamp_from),
+                          double(rep.worst_clamp_to));
+            plan.notes.push_back(label + ": " + std::to_string(rep.clamped) + " of " +
+                                 std::to_string(rep.channels) + " channels clamped so " +
+                                 producer.dtype + " can carry the fold (worst " + worst + ")");
+        }
+        // The consumer must be scaled by what the producer can actually store,
+        // or the pair stops being inverse on exactly the channels that needed
+        // protecting most.
+        for (int64_t i = 0; i < K; i++)
+            res.s[static_cast<size_t>(i)] = div[static_cast<size_t>(tie[static_cast<size_t>(i)])];
+        plan.vec_div[site.producer] = div;
+        plan.vec_offset[site.producer] = site.offset;
+    } else {
+        plan.row_div[site.producer] = div;
+        if (!site.producer_bias.empty() && index.count(site.producer_bias))
+            plan.vec_div[site.producer_bias] = div;
+    }
+
     plan.groups_scaled++;
-    for (const auto& name : members)
-        plan.col_scale[name] = result.s;
-    return result;
+    for (const auto& name : site.members)
+        plan.col_scale[name] = res.s;
+    return {};
 }
 
 }  // namespace
@@ -243,15 +353,15 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
                                             const CalibrationStats& stats,
                                             const std::string& config_json_path, const std::string& groups) {
     Plan plan;
-    const bool want_a = groups.find('A') != std::string::npos;
-    const bool want_b = groups.find('B') != std::string::npos;
-    const bool want_c = groups.find('C') != std::string::npos;
-    const bool want_d = groups.find('D') != std::string::npos;
-    if (!want_a && !want_b && !want_c && !want_d)
-        return std::unexpected("--calib-groups '" + groups + "' selects no group; use a subset of ABCD");
+    if (groups.empty())
+        return std::unexpected("--calib-groups selects no group; use a subset of " +
+                               std::string(kAwqAllGroups));
+    if (groups.find_first_not_of(kAwqAllGroups) != std::string::npos)
+        return std::unexpected("--calib-groups '" + groups + "' has a letter outside " +
+                               std::string(kAwqAllGroups));
     if (groups != kAwqAllGroups)
         plan.notes.push_back("group selector: " + groups + " (default " + kAwqAllGroups +
-                             ") — this is a diagnostic subset, not a normal checkpoint");
+                             ") - this is a diagnostic subset, not a normal checkpoint");
 
     std::ifstream f(config_json_path, std::ios::binary);
     if (!f) {
@@ -266,205 +376,77 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         return std::unexpected("cannot parse " + config_json_path);
     }
 
-    const JValue* mt = obj_get(cfg, "model_type");
-    const std::string model_type = (mt && mt->type == JType::STRING) ? mt->str_val : "";
-    if (!arch_uses_plain_rmsnorm(model_type)) {
+    // The convention is looked up, not guessed: imp applies the +1 at load for
+    // the qwen3_5 family and at kernel time for Gemma, and the fold has to know
+    // which. A wrapper config states the text model's own type under
+    // text_config, so both spellings are tried.
+    const JValue* text_cfg = obj_get(cfg, "text_config");
+    std::string model_type = obj_str(cfg, "model_type");
+    auto conv = arch_norm_convention(model_type);
+    if (!conv && text_cfg) {
+        const std::string inner = obj_str(*text_cfg, "model_type");
+        if (auto nested = arch_norm_convention(inner)) {
+            conv = nested;
+            model_type = inner;
+        }
+    }
+    if (!conv) {
         return std::unexpected("--calib does not support model_type '" + model_type +
-                               "': the norm fold is only valid for a plain multiplicative RMSNorm "
-                               "(qwen2/qwen3/llama/mistral). Quantize without --calib instead.");
+                               "': this tool folds a plain (g) or unit-offset (1 + g) RMSNorm and has "
+                               "no block layout for that architecture. Quantize without --calib instead.");
     }
 
-    const int64_t n_layers = obj_int(cfg, "num_hidden_layers", 0);
-    const int64_t n_heads = obj_int(cfg, "num_attention_heads", 0);
-    const int64_t n_kv_heads = obj_int(cfg, "num_key_value_heads", n_heads);
-    const int64_t hidden = obj_int(cfg, "hidden_size", 0);
-    int64_t head_dim = obj_int(cfg, "head_dim", 0);
+    auto geom_int = [&](const char* key, int64_t fallback) {
+        const int64_t top = obj_int(cfg, key, -1);
+        if (top > 0)
+            return top;
+        return text_cfg ? obj_int(*text_cfg, key, fallback) : fallback;
+    };
+    const int64_t n_layers = geom_int("num_hidden_layers", 0);
+    const int64_t n_heads = geom_int("num_attention_heads", 0);
+    const int64_t n_kv_heads = geom_int("num_key_value_heads", n_heads);
+    const int64_t hidden = geom_int("hidden_size", 0);
+    int64_t head_dim = geom_int("head_dim", 0);
     if (head_dim <= 0 && n_heads > 0)
         head_dim = hidden / n_heads;
     if (n_layers <= 0 || n_heads <= 0 || n_kv_heads <= 0 || head_dim <= 0) {
         return std::unexpected("config.json is missing the layer/head geometry --calib needs");
     }
-    const int64_t n_rep = n_heads / n_kv_heads;
+    const Geometry geo{head_dim, n_heads / n_kv_heads};
+
+    // The layer prefix comes off the checkpoint. Hardcoding "model.layers."
+    // cost nothing visible on a hybrid that names them
+    // model.language_model.layers.N: every group found zero members and the
+    // export was labelled calibrated.
+    std::set<std::string> names;
+    for (const auto& [name, t] : index)
+        names.insert(name);
+    const std::string prefix = resolve_layer_prefix(names);
+    if (prefix.empty()) {
+        return std::unexpected("cannot find the per-layer tensor prefix in this checkpoint "
+                               "(neither model.layers.N nor a nested equivalent)");
+    }
+    printf("AWQ: model_type %s, %s norm, layers under %s\n", model_type.c_str(),
+           *conv == NormConvention::UnitOffset ? "unit-offset (1 + g)" : "plain", prefix.c_str());
 
     for (int64_t L = 0; L < n_layers; L++) {
-        const std::string base = "model.layers." + std::to_string(L) + ".";
-        const std::string v_name = base + "self_attn.v_proj.weight";
-        const std::string o_name = base + "self_attn.o_proj.weight";
-        const std::string up_name = base + "mlp.up_proj.weight";
-        const std::string down_name = base + "mlp.down_proj.weight";
-
-        // ---- Group C: o_proj, folded into v_proj's output rows ----
-        // This one folds into the tensor the KV CACHE stores, and imp's default
-        // KV dtype on this model class is FP8_E4M3 — so the obvious worry is
-        // that widening v's per-channel range costs more in the cache than the
-        // scale wins in the weight. Measured on Qwen3-0.6B and REFUTED: the
-        // FP8-vs-FP16-KV penalty is 0.300 PPL on the calibrated checkpoint and
-        // 0.595 on the round-to-nearest one. The scaled v_proj is, if anything,
-        // friendlier to FP8 KV than the unscaled one.
-        Shape2 osh, vsh;
-        const CalibrationEntry* o_stat = stats.find(static_cast<int>(L), "WO");
-        if (want_c && o_stat && tensor_shape(index, o_name, osh) && tensor_shape(index, v_name, vsh) &&
-            static_cast<int64_t>(o_stat->mean_abs.size()) == osh.K && osh.K == n_heads * head_dim &&
-            vsh.N == n_kv_heads * head_dim) {
-            // Tie the statistic across the query heads that share a KV head, so
-            // the resulting scale is foldable into v_proj at all.
-            std::vector<float> tied(static_cast<size_t>(osh.K), 0.0f);
-            std::vector<float> per_v(static_cast<size_t>(vsh.N), 0.0f);
-            for (int64_t i = 0; i < osh.K; i++) {
-                const int64_t h = i / head_dim, d = i % head_dim;
-                const int64_t vc = (h / n_rep) * head_dim + d;
-                per_v[static_cast<size_t>(vc)] = std::max(per_v[static_cast<size_t>(vc)],
-                                                          o_stat->mean_abs[static_cast<size_t>(i)]);
-            }
-            for (int64_t i = 0; i < osh.K; i++) {
-                const int64_t h = i / head_dim, d = i % head_dim;
-                tied[static_cast<size_t>(i)] = per_v[static_cast<size_t>((h / n_rep) * head_dim + d)];
-            }
-            const auto ran = run_group(index, stats, static_cast<int>(L), "WO", {o_name}, tied, plan);
+        const std::string base = prefix + std::to_string(L) + ".";
+        const auto selected = layer_fold_sites(names, base, *conv, groups);
+        const auto all = layer_fold_sites(names, base, *conv, kAwqAllGroups);
+        plan.groups_disabled += static_cast<int>(all.size() - selected.size());
+        for (const auto& site : selected) {
+            const auto ran = run_site(index, stats, static_cast<int>(L), site, geo, plan);
             if (!ran)
                 return std::unexpected(ran.error());
-            const SearchResult& res = *ran;
-            if (res.alpha != 0.0f && plan.col_scale.count(o_name)) {
-                std::vector<float> row_div(static_cast<size_t>(vsh.N), 1.0f);
-                for (int64_t i = 0; i < osh.K; i++) {
-                    const int64_t h = i / head_dim, d = i % head_dim;
-                    row_div[static_cast<size_t>((h / n_rep) * head_dim + d)] =
-                        plan.col_scale[o_name][static_cast<size_t>(i)];
-                }
-                plan.row_div[v_name] = row_div;
-                const std::string v_bias = base + "self_attn.v_proj.bias";
-                if (index.count(v_bias))
-                    plan.vec_div[v_bias] = row_div;
-            }
-        } else if (!want_c) {
-            plan.groups_disabled++;
-        } else {
-            plan.groups_skipped++;
         }
-
-        // ---- Group D: down_proj, folded into up_proj's output rows ----
-        Shape2 dsh, ush;
-        if (want_d && tensor_shape(index, down_name, dsh) && tensor_shape(index, up_name, ush) &&
-            dsh.K == ush.N) {
-            const auto ran = run_group(index, stats, static_cast<int>(L), "W_DOWN", {down_name}, {}, plan);
-            if (!ran)
-                return std::unexpected(ran.error());
-            const SearchResult& res = *ran;
-            if (res.alpha != 0.0f && plan.col_scale.count(down_name)) {
-                plan.row_div[up_name] = plan.col_scale[down_name];
-                const std::string up_bias = base + "mlp.up_proj.bias";
-                if (index.count(up_bias))
-                    plan.vec_div[up_bias] = plan.col_scale[down_name];
-            }
-        } else if (!want_d) {
-            plan.groups_disabled++;
-        } else {
-            plan.groups_skipped++;
-        }
-
-        // ---- Group A: q/k/v, folded into input_layernorm ----
-        // Every member reads the same normed hidden state, so any member's
-        // statistic describes the group; taking the max is just robustness
-        // against one of them being absent from the calibration file.
-        {
-            std::vector<std::string> members;
-            for (const char* p : {"q_proj", "k_proj", "v_proj"}) {
-                const std::string n = base + "self_attn." + p + ".weight";
-                if (index.count(n))
-                    members.push_back(n);
-            }
-            std::vector<float> act;
-            for (const char* k : {"WQ", "WK", "WV"}) {
-                const CalibrationEntry* e = stats.find(static_cast<int>(L), k);
-                if (!e)
-                    continue;
-                if (act.empty())
-                    act = e->mean_abs;
-                else if (act.size() == e->mean_abs.size())
-                    for (size_t i = 0; i < act.size(); i++)
-                        act[i] = std::max(act[i], e->mean_abs[i]);
-            }
-            const std::string norm = base + "input_layernorm.weight";
-            // o_proj reads the attention output, not this norm, so it is exempt.
-            // Anything else 2-D under self_attn. IS a consumer — notably MLA's
-            // kv_a_proj_with_mqa, which is excluded from quantization and so
-            // would never get the compensating scale.
-            std::string blocker;
-            const std::vector<std::string> extra = unlisted_consumers(index, base + "self_attn.", members,
-                                                                      {"o_proj.weight"});
-            if (want_a && !members.empty() && !act.empty() && index.count(norm) &&
-                fold_is_safe(index, extra, blocker)) {
-                const auto ran = run_group(index, stats, static_cast<int>(L), "WQ", members, act, plan);
-                if (!ran)
-                    return std::unexpected(ran.error());
-                const SearchResult& res = *ran;
-                if (res.alpha != 0.0f)
-                    plan.vec_div[norm] = res.s;
-            } else if (!want_a) {
-                plan.groups_disabled++;
-            } else {
-                plan.groups_skipped++;
-                if (!blocker.empty())
-                    plan.notes.push_back("layer " + std::to_string(L) + " q/k/v: no fold — " + blocker +
-                                         " also reads input_layernorm but is not scaled");
-            }
-        }
-
-        // ---- Group B: gate/up, folded into post_attention_layernorm ----
-        {
-            std::vector<std::string> members;
-            for (const char* p : {"gate_proj", "up_proj"}) {
-                const std::string n = base + "mlp." + p + ".weight";
-                if (index.count(n))
-                    members.push_back(n);
-            }
-            std::vector<float> act;
-            for (const char* k : {"W_GATE", "W_UP"}) {
-                const CalibrationEntry* e = stats.find(static_cast<int>(L), k);
-                if (!e)
-                    continue;
-                if (act.empty())
-                    act = e->mean_abs;
-                else if (act.size() == e->mean_abs.size())
-                    for (size_t i = 0; i < act.size(); i++)
-                        act[i] = std::max(act[i], e->mean_abs[i]);
-            }
-            const std::string norm = base + "post_attention_layernorm.weight";
-            // down_proj reads the SwiGLU product, not this norm, so it is exempt.
-            // Everything else 2-D under mlp. IS a consumer: the MoE router
-            // (`mlp.gate.weight`, excluded from quantization), every routed
-            // expert's gate/up, and shared-expert gate/up. On a MoE checkpoint
-            // this refuses the fold rather than dividing the router's input by a
-            // scale the router never receives.
-            std::string blocker;
-            const std::vector<std::string> extra = unlisted_consumers(index, base + "mlp.", members,
-                                                                      {"down_proj.weight"});
-            if (want_b && !members.empty() && !act.empty() && index.count(norm) &&
-                fold_is_safe(index, extra, blocker)) {
-                const auto ran = run_group(index, stats, static_cast<int>(L), "W_GATE", members, act, plan);
-                if (!ran)
-                    return std::unexpected(ran.error());
-                const SearchResult& res = *ran;
-                if (res.alpha != 0.0f)
-                    plan.vec_div[norm] = res.s;
-            } else if (!want_b) {
-                plan.groups_disabled++;
-            } else {
-                plan.groups_skipped++;
-                if (!blocker.empty()) {
-                    plan.notes.push_back("layer " + std::to_string(L) + " gate/up: no fold — " + blocker +
-                                         " also reads post_attention_layernorm but is not scaled");
-                } else if (members.empty() && index.count(base + "mlp.experts.0.gate_proj.weight")) {
-                    // MoE layer: the FFN weight is in per-expert tensors this
-                    // planner does not group, so the experts — the bulk of the
-                    // model — stay at round-to-nearest. Say so; a silent bump of
-                    // `skipped` reads like a technicality rather than "most of
-                    // the weights were not calibrated".
-                    plan.notes.push_back("layer " + std::to_string(L) +
-                                         ": MoE experts NOT calibrated (per-expert groups are not "
-                                         "modelled yet) — they stay round-to-nearest");
-                }
-            }
+        // A MoE layer's FFN weight is in per-expert tensors this planner does
+        // not group, so the experts - the bulk of the model - stay at
+        // round-to-nearest. Say so; a silent absence reads like a technicality
+        // rather than "most of the weights were not calibrated".
+        if (all.empty() && index.count(base + "mlp.experts.0.gate_proj.weight")) {
+            plan.notes.push_back("layer " + std::to_string(L) +
+                                 ": MoE experts NOT calibrated (per-expert groups are not "
+                                 "modelled yet) - they stay round-to-nearest");
         }
 
         if ((L + 1) % 8 == 0 || L + 1 == n_layers)

@@ -5,6 +5,7 @@
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/attention_dispatch_rules.h"
+#include "exec/dequant_cap.h"
 #include "memory/vram_query.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
@@ -1300,8 +1301,17 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     // all-or-nothing skip left Nemotron with no workspace at all, which is
     // what made its verify-chunk capture fail: #855 census crash class).
     constexpr size_t kCap = 512ULL * 1024 * 1024;  // 512 MiB
-    size_t max_bytes = 0;         // largest dequant target overall
+    size_t max_bytes = 0;         // largest ELIGIBLE dequant target
     size_t covered_bytes = 0;     // largest target we will actually cover
+    size_t lm_head_bytes = 0;     // the excluded plane, for the log
+    // The LM head is not a candidate for the fallback this cap guards: at
+    // M > 1 executor_forward.cu serves it with the smallm v2 kernel, the
+    // CUTLASS NVFP4 GEMM or the batched K-par GEMV, and none of the three
+    // dequantizes the weight. Counting it made ONE plane that cannot reach the
+    // fallback disable prefill graph capture for every plane that can
+    // (Qwen3.8-27B-NVFP4: 2425 MiB LM head against a 170 MiB largest layer
+    // plane). See exec/dequant_cap.h.
+    const void* lm_head_ptr = model_ ? model_->output_proj().data : nullptr;
     auto consider = [&](int64_t N, int64_t K) {
         size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(half);
         if (bytes > max_bytes)
@@ -1309,12 +1319,20 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
         if (bytes <= kCap && bytes > covered_bytes)
             covered_bytes = bytes;
     };
+    auto consider_plane = [&](const void* ptr, int64_t N, int64_t K) {
+        const size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(half);
+        if (ptr != nullptr && ptr == lm_head_ptr) {
+            lm_head_bytes = std::max(lm_head_bytes, bytes);
+            return;
+        }
+        consider(N, K);
+    };
     for (const auto& [ptr, qr] : wcache_.nvfp4)
-        consider(qr.N, qr.K);
+        consider_plane(ptr, qr.N, qr.K);
     for (const auto& [ptr, moe] : wcache_.nvfp4_moe)
-        consider(moe.N, moe.K);  // single-expert dequant slice
+        consider_plane(ptr, moe.N, moe.K);  // single-expert dequant slice
     for (const auto& [ptr, cw] : wcache_.cutlass_nvfp4)
-        consider(cw.N, cw.K);
+        consider_plane(ptr, cw.N, cw.K);
     // SafeTensors NVFP4 prequant: per-tensor and per-expert NVFP4 storage lives
     // on the Layer struct (qtype=NVFP4 with scales sidecar), not in wcache_.
     // The gemm_nvfp4 fallback (executor_forward_moe.cu line ~2369 for MoE
@@ -1357,7 +1375,7 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
             consider_t(L.expert_down_packed);
         }
     }
-    if (max_bytes == 0) {
+    if (max_bytes == 0 && lm_head_bytes == 0) {
         // No NVFP4 weights — nothing to do. The fallback won't fire.
         return true;
     }
@@ -1365,18 +1383,29 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     // Weights beyond the workspace stay on the lazy-cudaMalloc fallback on
     // non-captured streams; hitting one of them under capture now throws
     // (gemm_nvfp4) and the capture fails cleanly.
-    if (max_bytes > kCap) {
-        const bool ignore_cap = imp::process_diag_prefill_graph_ignore_dequant_cap();
+    DequantCapInputs cap_in;
+    cap_in.max_eligible_bytes = max_bytes;
+    cap_in.max_excluded_bytes = lm_head_bytes;
+    cap_in.cap_bytes = kCap;
+    cap_in.ignore_cap = imp::process_diag_prefill_graph_ignore_dequant_cap();
+    const DequantCapDecision cap = dequant_cap_decide(cap_in);
+    IMP_LOG_INFO("prefill dequant cap: %.0f MiB of eligible planes vs %.0f MiB cap -> graph %s "
+                 "(LM head %.0f MiB excluded, it never takes the M>1 dequant fallback; covered %.0f MiB)",
+                 max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0),
+                 cap.graph_capture_ok ? "capturable" : "disabled",
+                 lm_head_bytes / (1024.0 * 1024.0), covered_bytes / (1024.0 * 1024.0));
+    if (cap.over_cap) {
         IMP_LOG_WARN(
-            "gemm_nvfp4 dequant workspace: largest NVFP4 weight is %.2f MiB > %.0f MiB cap "
+            "gemm_nvfp4 dequant workspace: largest eligible NVFP4 weight is %.2f MiB > %.0f MiB cap "
             "(covered: %.2f MiB) — prefill graph capture %s (a captured M>1 fallback "
             "on the oversized weight fails loud).",
             max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0),
             covered_bytes / (1024.0 * 1024.0),
-            ignore_cap ? "KEPT ENABLED by diagnostics.prefill_graph_ignore_dequant_cap" : "disabled");
-        if (!ignore_cap)
-            nvfp4_dequant_uncapturable_ = true;  // scheduler will skip prefill-graph capture
+            cap_in.ignore_cap ? "KEPT ENABLED by diagnostics.prefill_graph_ignore_dequant_cap"
+                              : "disabled");
     }
+    if (!cap.graph_capture_ok)
+        nvfp4_dequant_uncapturable_ = true;  // scheduler will skip prefill-graph capture
     if (covered_bytes == 0)
         return !nvfp4_dequant_uncapturable_;
 

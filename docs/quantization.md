@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-09
+commit: 8456782a
 -->
 
 # Quantization
@@ -250,11 +250,27 @@ channels deserve it takes a forward pass; hence calibration. The transform is ex
 quantization, `y = x W^T = (x/s)(W diag(s))^T`; imp picks `s` by measurement (per candidate
 exponent it quantizes with the real kernel and keeps the winner; `alpha = 0`, plain
 round-to-nearest, is always in the grid). The compensating `1/s` folds into the producer (plain
-NVFP4 checkpoint, no runtime support): four groups per layer, q/k/v and gate/up into the preceding
-RMSNorm weight, `o_proj` into `v_proj`'s output rows (GQA-tied), `down_proj` into `up_proj`'s.
+NVFP4 checkpoint, no runtime support): six groups per layer, q/k/v (A) and gate/up (B) into the
+preceding RMSNorm weight, `o_proj` into `v_proj`'s output rows (C, GQA-tied), `down_proj` into
+`up_proj`'s (D), and on the Qwen3.5/3.8 GDN hybrids the four `linear_attn.in_proj_*` into the same
+input norm (G) and `linear_attn.out_proj` into `linear_attn.norm` (E, tied across the value heads,
+which is what makes a `[head_dim]` norm shared by 48 heads foldable at all).
 
-- The norm fold assumes plain multiplicative RMSNorm, so `--calib` **refuses** `(1 + g)`
-  architectures (Gemma-class) rather than silently producing a different model.
+- **Both norm conventions fold.** For `y = norm(x) * g` the producer stores `g/s`; for the
+  unit-offset `y = norm(x) * (1 + g)` it stores `(1 + g)/s - 1`, so the GAIN is divided rather than
+  the delta, and `(1 + g') = (1 + g)/s` exactly. `--calib` therefore accepts the qwen3_5 family
+  (Qwen3.5 / 3.8 / Qwen3-Next, where imp bakes the `+1` in at load) and still refuses an
+  architecture whose block layout it does not model, naming that as the reason rather than the
+  offset. E and G are not measured against an uncalibrated twin yet; score before publishing.
+- **The storage is the hazard, not the algebra.** The folded delta sits near `-1` while the gain
+  can be tiny, so a BF16 half-ulp becomes an unbounded relative error on the gain. Measured on
+  Qwen3.8-27B layers 0-3 (40 960 channels of both block norms): 4 channels have a gain below 0.05,
+  the smallest is 0.00390625, and folding it in BF16 loses 25 % at `s = 1.25`, 50 % at `s = 1.5`
+  and 100 % at `s >= 2`, where the delta saturates to exactly `-1` and the channel is deleted while
+  its weights were scaled up. The exporter clamps that channel's `s` towards 1 until the gain it
+  can store is within 1 %, uses the clamped value on BOTH sides of the pair, and prints the count.
+  Widening the norm to F32 is not the alternative: the loader applies the `+1` on BF16-source paths
+  only, so an F32 norm would load without the offset.
 - A norm can only be folded when every consumer is scaled: the two excluded roles (MLA latent
   projections, MoE router) never receive compensation, and the router reads exactly the norm the
   gate/up group folds into. `--calib` checks each norm's consumers and refuses the fold when an
@@ -263,6 +279,10 @@ RMSNorm weight, `o_proj` into `v_proj`'s output rows (GQA-tied), `down_proj` int
 - `--calib` does not calibrate MoE experts yet: the planner groups the dense FFN by name
   (`mlp.gate_proj` / `mlp.up_proj` / `mlp.down_proj`), not `mlp.experts.<e>.*`. Attention groups
   still calibrate; experts stay at round-to-nearest, stated per layer in the output.
+- Every export (calibrated or not) prints one provenance line at the start, one error line at the
+  end, and writes `quant_report.json` beside the weights: per tensor the max relative error against
+  the tensor's absmax and the MSE, decoded from the bytes that were written rather than from imp's
+  own dequant kernel, plus the AWQ search objective (`err_rtn`, `err_best`) per group.
 - Calibrate on a different corpus than you score on: `tools/analysis/fetch_calib_corpus.sh`
   assembles general public-domain prose; scoring happens on `ppl_corpus_45k.txt`. One text for
   both reports a gain that exists only on it.

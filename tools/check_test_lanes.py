@@ -233,7 +233,17 @@ def main():
     # NvFP4MergedScaleSpread.SiblingsUseTheirOwnGlobalScale (test-quant, GPU, no model: two
     # siblings with a 4x amax spread through the multi-sibling smallm v2 launch, each block
     # against its own-scale spec reference).
-    PINNED = 1089
+    # 1089 -> 1091 (per-request speculation + hd256 coverage): two GPU-lane tests that had
+    # no counterpart at all. MtpGreedyIdentityTest.MtpDoesNotChangeGreedyTokens (test-e2e, GPU +
+    # Qwen3.8-27B-NVFP4 with its MTP head: mtp_k=0 against mtp_k=2, parting only at a near-tie
+    # inside the SETTLED D-2 batch-shape envelope) and
+    # QkNormRopeFusedTest.MatchesNormThenStandaloneRope (test-compute, GPU, no model: the #1957
+    # fused kernel against host RMSNorm + the standalone RoPE kernel at n = 1/32/64; TEST_P counts
+    # once as a macro).
+    # 1091 -> 1093 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
+    # quantize like the exporter, decode by the format's own rule, bound the error; and the unit-offset
+    # norm fold through the quantizer. The fold's algebra stays in the CPU lane (AwqNormFold x6).
+    PINNED = 1093
 
     text = CMAKE.read_text()
     mods = module_sources(text)

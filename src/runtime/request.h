@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include "model/chat_template.h"
+#include "runtime/spec_request.h"
 
 namespace imp {
 
@@ -80,6 +81,10 @@ struct Request {
     int spec_verifies = 0;
     long long spec_drafted = 0;
     long long spec_accepted = 0;
+    // Tokens this request's verify steps EMITTED. Reported next to drafted and
+    // accepted: accepted/drafted is the head's hit rate, emitted/verifies is
+    // what the caller actually bought, and only the second one prices the step.
+    long long spec_emitted = 0;
     bool spec_ngram_given_up = false;
     int spec_last_giveup_pos = 0;  // output size at last give-up (burst re-arm)
     // Sticky acceptance verdict: structured-but-mutating content (number
@@ -100,6 +105,17 @@ struct Request {
     // enables what the model and the operator config allow; it cannot conjure
     // an MTP head the checkpoint does not carry.
     int spec_override = -1;
+    // Per-request MTP chain depth from `"speculative": {"mtp_k": N}` (-1 =
+    // the server's speculative.mtp_k). Orthogonal to spec_override above: the
+    // object form addresses the trained head only. Resolved against what the
+    // process armed by mtp_resolve_request (runtime/spec_request.h); the
+    // engine clamps its adaptive chain to it.
+    int spec_mtp_k = -1;
+    // Why this request did not get the speculation it asked for. Set once at
+    // request build; travels back in
+    // usage.completion_tokens_details.imp_spec_declined. kNone is both "got
+    // what it asked for" and "asked for nothing".
+    SpecDecline spec_decline = SpecDecline::kNone;
     // Admission priority (vLLM semantics: LOWER value schedules earlier,
     // default 0). Read by Scheduler::schedule as the primary sort key of the
     // pending queue; aging and shortest-first order requests WITHIN a

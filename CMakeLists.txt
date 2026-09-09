@@ -210,6 +210,7 @@ set(IMP_QUANT_SOURCES
     src/quant/fp8_utils.cu
     src/quant/quant_gemm.cu
     src/quant/awq_transform.cpp
+    src/quant/awq_norm_fold.cpp
     src/quant/calibration_stats.cpp
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
@@ -355,6 +356,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
     src/runtime/engine_spec_ngram.cpp
+    src/runtime/engine_spec_stats.cpp
     src/runtime/engine_spec_buffers.cpp
     src/runtime/engine_spec_capture.cpp
     src/runtime/engine_spec_mtp.cpp
@@ -529,6 +531,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
+        tools/imp-quantize/awq_sites.cpp
+        tools/imp-quantize/quant_report.cpp
         tools/imp-quantize/awq.cu
     )
     target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
@@ -795,6 +799,10 @@ if(IMP_BUILD_TESTS)
         tests/test_ngram_draft.cpp
     tests/test_mtp_presence.cpp
         tests/test_spec_gates.cpp
+        # The per-request speculation contract (depth + decline reason), the
+        # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
+        # three decide something on a GPU path from pure inputs; CI has no GPU.
+        tests/test_spec_request.cpp
         tests/test_suffix_draft.cpp
         tests/test_token_recycle_draft.cpp
         tests/test_routing_decision.cpp
@@ -825,6 +833,17 @@ if(IMP_BUILD_TESTS)
         # share a scale, a config.json with two quantization_config keys.
         tools/imp-quantize/checkpoint_out.cpp
         tests/test_quantize_checkpoint_out.cpp
+        # Which consumers share an activation, which producer absorbs 1/s, and
+        # whether that norm carries a unit offset. Wrong here is a checkpoint
+        # that loads and is a different model, so the table is a pure function
+        # and the CPU lane holds it.
+        tools/imp-quantize/awq_sites.cpp
+        tests/test_awq_plan_sites.cpp
+        # What the export cost, per tensor. The decode is checked against
+        # hand-built format bytes: a report that reads zero everywhere looks
+        # exactly like a perfect export.
+        tools/imp-quantize/quant_report.cpp
+        tests/test_quantize_report.cpp
         # Attention-family capability rules: the prefill dispatch and the
         # chunk clamp must answer 'can this head_dim skip the S-matrix' the
         # same way, or nothing bounds the chunk and cuBLAS aborts.
@@ -920,6 +939,9 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-compute SOURCES
         tests/test_cuda_fault_signal.cu
         tests/test_rope.cu
+        # The fused QK-norm + RoPE decode kernel (#1957) had no test reference
+        # at all: nothing in the tree named qknorm_rope_fused.
+        tests/test_qknorm_rope_fused.cu
         tests/test_mrope.cu
         tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
@@ -988,6 +1010,13 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
+        # The export round trip: quantize like the exporter, decode by the
+        # format's own rule, bound the error. Needs the real kernel, so it
+        # lives here rather than in the CPU lane; the fold's algebra is
+        # covered without a GPU by the AWQ calibration tests in test-core.
+        tests/test_quantize_nvfp4_roundtrip.cu
+        tools/imp-quantize/checkpoint_out.cpp
+        tools/imp-quantize/quant_report.cpp
         tests/test_mxf4nvf4_probe.cu
         tests/test_mxf4nvf4_mma_bench.cu
         tests/test_mma_peak_saturated.cu
@@ -1065,6 +1094,9 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_forward.cpp
         tests/test_nvfp4_prefill_cache_knob.cpp
         tests/test_spec_capture_fidelity.cpp
+        # MTP must not change greedy output. The fidelity test above gates the
+        # captured graph, not the speculation; this gates the accept path.
+        tests/test_mtp_greedy_identity.cpp
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
@@ -1195,6 +1227,17 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_degen_thresholds.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
+    # Batch>1 speculation is gated on "is there a draft source" at two call
+    # sites (scheduler round-robin, #1003 pipeline yield). Both used to ask
+    # speculative.ngram, the key the measured MTP recipe sets to false, and a
+    # mutant that points either back survives the whole CPU lane: answering
+    # the question at runtime needs a GPU, a model and a batch. A grep, like
+    # guard_cancel_teardown; a script rather than a TEST body because the
+    # shipped binaries run without the tree.
+    add_test(NAME guard_spec_rr_wiring
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_spec_rr_wiring.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     # No skipped test in the three lanes above. DEPENDS only orders: a lane
     # that crashed leaves its previous report behind, and is red on its own.
     add_test(NAME guard_unit_skips
@@ -1205,7 +1248,7 @@ if(IMP_BUILD_TESTS)
                          guard_det_suite_filter guard_cancel_teardown
                          guard_verify_filter guard_precommit_filter guard_unit_skips
                          guard_makefile_filters guard_lane_filter_copy
-                         guard_degen_thresholds
+                         guard_degen_thresholds guard_spec_rr_wiring
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

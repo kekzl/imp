@@ -2,6 +2,7 @@
 // See anthropic.h for the public surface.
 
 #include "anthropic.h"
+#include "spec_usage_keys.h"
 #include "utils.h"
 
 #include <atomic>
@@ -357,8 +358,9 @@ json anthropic_to_openai_body(const json& anth) {
         oai["top_p"] = anth["top_p"];
     if (anth.contains("top_k"))
         oai["top_k"] = anth["top_k"];
-    // imp extension: per-request speculative-decode override, passed through
-    // to the shared OpenAI param parser.
+    // imp extension: per-request speculative-decode contract, passed through
+    // verbatim in both forms (bool, or {"mtp_k": N}); the OpenAI parser
+    // validates it once for every dialect.
     if (anth.contains("speculative"))
         oai["speculative"] = anth["speculative"];
     if (anth.contains("stream"))
@@ -711,11 +713,12 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         usage_out["cache_read_input_tokens"] = cached;
         usage_out["cache_creation_input_tokens"] = creation;
         // imp extension (C-6): per-request speculation counters ride along
-        // under the same vendor-prefixed keys the OpenAI shape carries.
+        // under the same vendor-prefixed keys the OpenAI shape carries. The key
+        // list is shared (spec_usage_keys.h), not copied: the hand-copied
+        // version here dropped imp_spec_emitted and the decline reason the day
+        // they were added, and only /v1/chat/completions reported them.
         if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
-            for (const char* k : {"imp_spec_drafted", "imp_spec_accepted", "imp_spec_verify_steps"})
-                if (u["completion_tokens_details"].contains(k))
-                    usage_out[k] = u["completion_tokens_details"][k];
+            imp_server::copy_spec_usage_keys(u["completion_tokens_details"], usage_out);
             // Anthropic's own name for the same number (their Responses-shaped
             // usage carries output_tokens_details.reasoning_tokens), so this
             // one is not imp-namespaced.

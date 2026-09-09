@@ -930,13 +930,26 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // silently losing speculation to the batch-size-1 dispatch gate above.
     // The verify emits that request's tokens for this step; it is removed
     // from this step's batched decode and rejoins next step.
-    if (decode_batch.size() > 1 && !ssm_state_ && runtime_config_.speculative.batch_rr &&
-        runtime_config_.speculative.ngram) {
+    // The entry question is "is there a draft source", not "is the n-gram
+    // matcher on". Demanding speculative.ngram here switched round-robin
+    // verify off for exactly the configuration the MTP recipe prescribes
+    // (`speculative.mtp_k=2` PAIRED with `speculative.ngram=false`,
+    // docs/MODELS.md), so an MTP-drafting server lost batched speculation to
+    // the flag that arms the head. The recurrent term below hid it on the
+    // hybrids; on every dense model it was live.
+    const SpecBatchRrState rr_state{
+        runtime_config_.speculative.batch_rr, ssm_state_ != nullptr,
+        static_cast<int>(decode_batch.size()),
+        std::any_of(decode_batch.begin(), decode_batch.end(),
+                    [this](const auto& r) { return spec_any_drafter_enabled_(*r); })};
+    if (spec_batch_rr_active(rr_state)) {
         int cand = -1;
         int best_id = INT_MAX, wrap_id = INT_MAX, wrap_idx = -1;
         for (size_t i = 0; i < decode_batch.size(); ++i) {
             auto& r = decode_batch[i];
-            if (!spec_ngram_enabled_(*r))
+            // Same widening per row: a request whose only drafter is the MTP
+            // head must be an eligible candidate here.
+            if (!spec_any_drafter_enabled_(*r))
                 continue;
             spec_maybe_rearm_(*r);
             if (!spec_verify_gates_ok_(*r))
@@ -1730,11 +1743,15 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // (device-side tokens, no host hiddens) the cache is stale — skip
         // feeding so it never desynchronizes silently.
         auto* ws_gate = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
-        const bool mtp_synced = ws_gate != nullptr && mtp_bound_req_ == valid_decode[0]->id &&
+        // Depth for THIS request: 0 when it declined the head
+        // (`"speculative": {"mtp_k": 0}` or `"speculative": false`), which is
+        // the one case where the process has a head armed and must not draft.
+        const int mtp_req_k = mtp_chain_k_(*valid_decode[0]);
+        const bool mtp_synced = ws_gate != nullptr && mtp_req_k > 0 &&
+                                mtp_bound_req_ == valid_decode[0]->id &&
                                 ws_gate->mtp_pos == cur_pos &&
                                 (ws_gate->max_seq_len <= 0 ||
-                                 ws_gate->mtp_pos + mtp_chain_k_() <
-                                     ws_gate->max_seq_len);
+                                 ws_gate->mtp_pos + mtp_req_k < ws_gate->max_seq_len);
         Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
         if (h_view.data != nullptr && mtp_synced) {
             const int hidden_dim = model_->config_.d_model;
@@ -1755,7 +1772,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 h_for_mtp = normed;
             }
 
-            // K-chain draft. K=mtp_chain_k_() (adaptive, <= mtp_spec_k_).
+            // K-chain draft. K=mtp_chain_k_(req) (adaptive, <= the depth this
+            // REQUEST resolved to, itself <= mtp_spec_k_).
             // For each step k=0..K-1:
             //   - input: (prev_token_k, h_prev_k)
             //   - output: prediction_k, ws.d_h_final updated for next iter
@@ -1766,7 +1784,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // the main model actually does next). Roll back to mtp_pos_saved
             // after K-1 speculative steps so the real cache stays aligned.
             auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
-            const int K = mtp_chain_k_();
+            const int K = mtp_req_k;
             const int mtp_pos_before = ws->mtp_pos;
             int chain_prev_tok = next_token;
             const void* chain_h_prev = h_for_mtp;

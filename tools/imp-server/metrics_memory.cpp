@@ -138,6 +138,35 @@ if (state.ctx && state.ctx->engine) {
         out += "# HELP imp_spec_miss_steps_total Decode steps with no usable draft\n";
         out += "# TYPE imp_spec_miss_steps_total counter\n";
         out += "imp_spec_miss_steps_total " + std::to_string(sp.miss_steps) + "\n";
+
+        // Per draft SOURCE. The aggregate above cannot price the MTP head: the
+        // n-gram/suffix matcher, the prompt prediction and token recycling fill
+        // the same verify chunk and land in the same totals, so a server
+        // running the documented MTP pair (mtp_k=2, ngram=false) reports the
+        // same four series as one running the matcher alone. accepted/drafted
+        // is the acceptance rate per source; emitted/verify_steps is what the
+        // step actually bought; verify_wall_ms is what it cost.
+        // `ngram` is every non-MTP drafter together.
+        auto spec_source = [&out](const char* name, const imp::Engine::SpecSourceStats& s) {
+            const std::string p = std::string("imp_spec_") + name + "_";
+            out += "# HELP " + p + "verify_steps_total Verify forwards this source drafted\n";
+            out += "# TYPE " + p + "verify_steps_total counter\n";
+            out += p + "verify_steps_total " + std::to_string(s.verify_steps) + "\n";
+            out += "# HELP " + p + "drafted_total Draft tokens proposed by this source\n";
+            out += "# TYPE " + p + "drafted_total counter\n";
+            out += p + "drafted_total " + std::to_string(s.drafted) + "\n";
+            out += "# HELP " + p + "accepted_total Draft tokens the verify step accepted\n";
+            out += "# TYPE " + p + "accepted_total counter\n";
+            out += p + "accepted_total " + std::to_string(s.accepted) + "\n";
+            out += "# HELP " + p + "emitted_total Tokens emitted by this source's verify steps\n";
+            out += "# TYPE " + p + "emitted_total counter\n";
+            out += p + "emitted_total " + std::to_string(s.emitted) + "\n";
+            out += "# HELP " + p + "verify_wall_ms_total Host wall inside this source's verify steps\n";
+            out += "# TYPE " + p + "verify_wall_ms_total counter\n";
+            out += p + "verify_wall_ms_total " + std::to_string(s.verify_wall_ms) + "\n";
+        };
+        spec_source("mtp", sp.mtp);
+        spec_source("ngram", sp.other);
     }
 }
 // --vram-budget adherence. own_bytes is this process's allocations since

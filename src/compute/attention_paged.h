@@ -308,6 +308,21 @@ bool paged_attention_applies_sinks(QType kv_dtype);
 // firing: the resolver consults it at init and falls back to FP16 KV.
 bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim);
 
+// Does FP8 KV get the FAST paged decode kernels at this head_dim, or only the
+// scalar template?
+//
+// Serving and serving WELL are two questions, and only the first one was
+// asked. paged_attention_serves_head_dim says FP8 covers 64/96/128/256/512, so
+// `kv_cache.dtype=fp8` passes init on a head_dim-256 model and lands on
+// LAUNCH_FP8_FALLBACK with nothing in the log. The four-token and GQA-lane
+// kernels (attention_paged_fp8_multitok.cu, attention_paged_fp8_multitok_gqa.cu)
+// are head_dim-128 instances by construction - 4 FP8 bytes per lane is what
+// makes one uint32 load per lane work - and both refuse every other head_dim.
+// On Qwen3.8-27B (head_dim 256) the operator pin therefore buys the FP8 byte
+// count and none of the FP8 decode speed, while `auto` resolves NVFP4 there
+// and gets the GQA multitok kernel.
+constexpr bool paged_fp8_decode_has_fast_kernel(int head_dim) { return head_dim == 128; }
+
 // Terminal for a launcher that has no template for `head_dim`. One function so
 // the 17 sites are one line each and the message is written once.
 [[noreturn]] void paged_attention_unsupported_head_dim(const char* fn, int head_dim);

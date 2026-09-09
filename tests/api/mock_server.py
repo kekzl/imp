@@ -202,6 +202,21 @@ class MockHandler(BaseHTTPRequestHandler):
                     f'imp_endpoint_ttft_seconds_bucket{{endpoint="{ep}",le="+Inf"}} 0\n'
                     for ep in ("chat_completions", "completions", "messages", "responses", "embeddings", "rerank")
                 )
+                + "".join(
+                    f"# HELP imp_spec_{m} Speculative decoding, all sources\n"
+                    f"# TYPE imp_spec_{m} counter\n"
+                    f"imp_spec_{m} 0\n"
+                    for m in ("drafted_total", "accepted_total", "verify_steps_total",
+                              "miss_steps_total")
+                )
+                + "".join(
+                    f"# HELP imp_spec_{src}_{m} Speculative decoding by draft source\n"
+                    f"# TYPE imp_spec_{src}_{m} counter\n"
+                    f"imp_spec_{src}_{m} 0\n"
+                    for src in ("mtp", "ngram")
+                    for m in ("verify_steps_total", "drafted_total", "accepted_total",
+                              "emitted_total", "verify_wall_ms_total")
+                )
                 + f"# HELP imp_queue_depth Queue depth\n"
                 f"# HELP imp_queue_depth Queue depth\n"
                 f"# TYPE imp_queue_depth gauge\n"
@@ -289,6 +304,40 @@ class MockHandler(BaseHTTPRequestHandler):
             if not isinstance(n, int) or n < 1 or n > 4:
                 self._send_error(400, '"n" must be between 1 and 4.')
                 return False
+        if not self._validate_speculative(body):
+            return False
+        return True
+
+    def _validate_speculative(self, body: dict) -> bool:
+        """imp extension "speculative": true|false|{"mtp_k": N}.
+
+        Mirrors parse_spec_field_ in tools/imp-server/handlers_internal.h. The
+        mock arms no MTP head, so the bound is the device chain cap
+        (kSpecRequestMaxMtpK = 16) - which is also what a model-less imp-server
+        answers, so both lanes assert the same message.
+        """
+        if "speculative" not in body:
+            return True
+        sp = body["speculative"]
+        if isinstance(sp, bool):
+            return True
+        if not isinstance(sp, dict):
+            self._send_error(
+                400, '"speculative" must be a boolean or an object of the form {"mtp_k": N}')
+            return False
+        if "mtp_k" not in sp:
+            return True  # an empty object asks for nothing
+        k = sp["mtp_k"]
+        if not isinstance(k, int) or isinstance(k, bool):
+            self._send_error(400, '"speculative.mtp_k" must be an integer in 0..16')
+            return False
+        if k < 0 or k > 16:
+            self._send_error(
+                400,
+                '"speculative.mtp_k" is %d, outside the accepted range 0..16 '
+                "(no MTP head is armed; the bound is the device chain cap)" % k,
+            )
+            return False
         return True
 
     def _generate_tokens(self, seed: int, max_tokens: int) -> list[str]:

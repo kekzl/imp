@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Added
 
+- `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
+  summary line and `quant_report.json` at the end (per tensor max relative error and MSE decoded
+  from the written bytes, AWQ `err_rtn`/`err_best` per group) ([quantization.md](docs/quantization.md))
+- `"speculative"` accepts `{"mtp_k": N}` on every chat dialect: a request picks its own MTP chain depth
+  (0..the armed depth, else 400 naming the range), and a decline reaches the caller as
+  `imp_spec_declined` on all three dialects (one shared key table) instead of one startup log line
+- `/metrics` splits speculation by draft source: `imp_spec_mtp_*` against `imp_spec_ngram_*`
+  (drafted, accepted, emitted, verify_steps, verify_wall_ms), so the head's acceptance rate is
+  separable from the matcher's
 - `HybridRestoreChainStateStaysClose` (test-e2e, GDN checkpoint): 30 chained recurrent-snapshot restores against a
   cold prefill of the same prompt, compared on the state slab per layer. 27B chain 0.337 vs 0.329 relative L2 for a
   cold prefill chunked at the same boundaries; two cold runs are bit-identical ([SETTLED.md](docs/audit/SETTLED.md))
@@ -34,6 +43,9 @@ there instead of retelling it.
 - The `[allow]` pins in `tools/filesize_thresholds.toml`, `tools/function_size_thresholds.toml` and
   `PINNED` in `tools/check_test_lanes.py` are ceilings: growth up to the next multiple of 25 above the pin
   and any shrink are a NOTE, only growth past that fails (exact two-way pins: 9 merge conflicts on 2026-09-09)
+- `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
+  `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
+  Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
   Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
   entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))
@@ -106,6 +118,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
+  to false, at either gate (the scheduler branch and the #1003 pipeline yield that reaches it):
+  round-robin batched verify was off on every dense model running MTP alone
+- The 512 MiB NVFP4 dequant cap no longer counts the LM head, which never takes the M > 1 dequant
+  fallback it guards: 2425 MiB against a 170 MiB largest eligible plane on Qwen3.8-27B-NVFP4
+- `kv_cache.dtype=fp8` on a head_dim != 128 model logs the fast-kernel miss at init; the FP8 four-token
+  and GQA-lane decode kernels are head_dim-128 instances and the pin silently bought the scalar path
 - `imp-cli` and embedded `src/api` callers get the think budget on prompt-injected `<think>` templates:
   `add_request` seeded `in_think_block` but never `started_in_think`, so the recount saw 0 reasoning tokens.
   imp-server already seeded both (`build_imp_request_`, #784) and is unaffected

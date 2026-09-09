@@ -854,8 +854,19 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
-    if (body.contains("speculative") && body["speculative"].is_boolean())
-        imp_req->spec_override = body["speculative"].get<bool>() ? 1 : 0;
+    // Same contract as /v1/chat/completions: bool, or {"mtp_k": N}.
+    {
+        const SpecFieldParse sp =
+            parse_spec_field_(body, state.armed_mtp_k.load(std::memory_order_relaxed));
+        if (!sp.ok) {
+            send_json_error(res, 400, "invalid_request_error", sp.error);
+            return;
+        }
+        apply_spec_contract_(*imp_req, sp.spec_override, sp.mtp_k,
+                             state.armed_mtp_k.load(std::memory_order_relaxed),
+                             state.mtp_head_present.load(std::memory_order_relaxed),
+                             state.mtp_head_loaded.load(std::memory_order_relaxed));
+    }
     // Predicted Outputs (string-content form) on the completions route: the
     // prediction only seeds the n-gram draft corpus, output is unchanged.
     if (body.contains("prediction") && body["prediction"].is_object()) {
