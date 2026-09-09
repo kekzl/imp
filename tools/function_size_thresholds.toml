@@ -44,9 +44,10 @@ skip_dirs = ["refs"]
 [allow]
 # An entry is a CEILING, not an exemption, exactly as in filesize_thresholds.toml:
 # `code_loc` is the measured length when the exception was accepted and the gate
-# fails when the body drifts from it in EITHER direction. Re-pin with
-# `python3 tools/check_function_size.py --update` and say in the PR body which
-# way it moved. The key is `path::signature`, never a line number — a line number
+# fails when the body grows past the next multiple of 25 above it (625 admits
+# 650); shrinking or growth inside that slack is a NOTE. Re-pin with
+# `python3 tools/check_function_size.py --update` and say in the PR body why it
+# grew. The key is `path::signature`, never a line number — a line number
 # goes stale on the first edit above the function.
 #
 # Reason letters, same meaning as the file gate:

@@ -25,10 +25,11 @@ the 29 allowlisted files were the only ones in the tree with no size limit at
 all — exactly the files where recompile blast radius is worst. Measured
 2026-08-21: sixteen of them had grown past the code-LOC figure their own reason
 cited, `engine_scheduler.cpp` by 83 % (1074 -> 1962), and every CI run was green
-throughout. So each entry now carries a measured `code_loc` and the gate fails
-when the file drifts from it in EITHER direction, the same two-way ratchet
-`tools/alloc_allowlist.txt` uses. Growing an allowlisted file is still allowed;
-growing it silently is not. `--update` re-pins, and the diff is the record.
+throughout. So each entry carries a measured `code_loc`. Rule: FAIL when the
+file grows past the pin's ceiling = next multiple of PIN_SLACK (25) strictly
+above the pin (1376 -> 1400, 625 -> 650); shrinking or growth inside the ceiling
+is a NOTE. Exact two-way pins cost 9 merge conflicts in one day (2026-09-09)
+and found nothing. `--update` re-pins, and the diff is the record.
   python3 tools/check_filesize.py --root src/compute  # restrict scan roots
 """
 import argparse
@@ -46,6 +47,52 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filesize_thresholds.toml")
 SRC_EXT = (".cu", ".cuh", ".cpp", ".hpp", ".h")
 INCLUDE_CU = re.compile(r'^\s*#include\s+"([^"]+\.cu)"', re.M)
+
+# An [allow] pin admits growth up to the next multiple of this strictly above
+# the pin. 25 code LOC is ~3 % of an 800-line TU: enough that a merge does not
+# trip it, small enough that a file cannot double before the ratchet bites.
+PIN_SLACK = 25
+
+
+def pin_ceiling(pin):
+    """The largest code LOC an [allow] entry admits without a re-pin: the next
+    multiple of PIN_SLACK strictly above the pin (625 -> 650, 1376 -> 1400)."""
+    return (pin // PIN_SLACK + 1) * PIN_SLACK
+
+
+def classify_drift(pin, actual):
+    """'over' past the ceiling (FAIL), 'shrank' below the pin, 'grew' inside the
+    ceiling (both a NOTE), None when the measurement equals the pin."""
+    if actual > pin_ceiling(pin):
+        return "over"
+    if actual < pin:
+        return "shrank"
+    if actual > pin:
+        return "grew"
+    return None
+
+
+def report_drift(drift, what, tool):
+    """Print the NOTE for moves inside the ceiling and the FAIL block for the
+    ones past it. drift: [(key, pinned, actual, kind)]. -> True when any is over."""
+    moved = [d for d in drift if d[3] != "over"]
+    over = [d for d in drift if d[3] == "over"]
+    if moved:
+        print(f"\nNOTE: {len(moved)} allowlisted {what}(s) moved inside their ceiling "
+              f"(re-pin at leisure with `python3 {tool} --update`):")
+        print(f"  {'pinned':>7} {'ceiling':>7} {'actual':>7} {'+/-':>6}  {what}")
+        for k, pinned, actual, _ in moved:
+            print(f"  {pinned:>7} {pin_ceiling(pinned):>7} {actual:>7} {actual - pinned:>+6}  {k}")
+    if over:
+        print(f"\nFAIL: {len(over)} allowlisted {what}(s) grew past their pinned ceiling.")
+        print(f"  {'pinned':>7} {'ceiling':>7} {'actual':>7} {'+/-':>6}  {what}")
+        for k, pinned, actual, _ in over:
+            print(f"  {pinned:>7} {pin_ceiling(pinned):>7} {actual:>7} {actual - pinned:>+6}  {k}")
+        print(f"\nAn allowlist entry is a ceiling, not an exemption: growth up to the next "
+              f"multiple of {PIN_SLACK} above the pin is free, more is not. Re-pin with")
+        print(f"  python3 {tool} --update")
+        print("and say in the PR body why it grew.")
+    return bool(over)
 
 
 def code_loc(text):
@@ -227,7 +274,22 @@ def selftest():
         ok = got == want
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}: expected {want}, got {got}")
-    print(f"selftest: {len(cases) - failures}/{len(cases)} cases")
+    # The pin rule: growth is free up to the next multiple of PIN_SLACK strictly
+    # above the pin, shrinking always, one past the ceiling fails.
+    pin_cases = [
+        ("exactly pinned", 1376, 1376, None),
+        ("shrank", 1376, 1300, "shrank"),
+        ("grew inside the ceiling", 1376, 1400, "grew"),
+        ("one past the ceiling", 1376, 1401, "over"),
+        ("pin on a multiple keeps one full step", 625, 650, "grew"),
+        ("pin on a multiple, one past", 625, 651, "over"),
+    ]
+    for name, pin, actual, want in pin_cases:
+        got = classify_drift(pin, actual)
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name}: pin {pin} actual {actual} -> {got}")
+    print(f"selftest: {len(cases) + len(pin_cases) - failures}/{len(cases) + len(pin_cases)} cases")
     return 1 if failures else 0
 
 
@@ -311,21 +373,23 @@ def main():
         for p in sorted(stale):
             print(f"  {p}")
 
-    # The ceiling half of the allowlist: a listed file must still measure what its
-    # entry says it measures. Drift in either direction fails, because a stale
-    # number is what let engine_scheduler.cpp grow 83 % with the gate green.
+    # The ceiling half of the allowlist: a listed file may not grow past its
+    # pin's ceiling, because a stale number is what let engine_scheduler.cpp
+    # grow 83 % with the gate green. Shrinking and growth inside the slack are
+    # notes, so a merge does not turn into a re-pin conflict.
     drift = []
     measured = {r["path"]: r["code"] for r in rows}
     for path, entry in sorted(allow.items()):
         actual = measured.get(path)
         if actual is None:
             continue  # file gone; the stale-entry note above already covers it
-        if actual != entry["code_loc"]:
-            drift.append((path, entry["code_loc"], actual))
+        kind = classify_drift(entry["code_loc"], actual)
+        if kind:
+            drift.append((path, entry["code_loc"], actual, kind))
 
     if args.update:
         text = open(args.config, encoding="utf-8").read()
-        for path, _, actual in drift:
+        for path, _, actual, _ in drift:
             pat = re.compile(r'(^"' + re.escape(path) + r'"\s*=\s*\{\s*code_loc\s*=\s*)\d+',
                              re.M)
             text, n = pat.subn(lambda m: m.group(1) + str(actual), text)
@@ -336,14 +400,7 @@ def main():
         print(f"\nallowlist re-pinned: {len(drift)} entr(y/ies) updated")
         return 0
 
-    if drift and not args.warn_only:
-        print(f"\nFAIL: {len(drift)} allowlisted file(s) drifted from their pinned code_loc.")
-        print(f"  {'pinned':>7} {'actual':>7} {'+/-':>6}  file")
-        for path, pinned, actual in drift:
-            print(f"  {pinned:>7} {actual:>7} {actual - pinned:>+6}  {path}")
-        print("\nAn allowlist entry is a ceiling, not an exemption. Re-pin with")
-        print("  python3 tools/check_filesize.py --update")
-        print("and say in the PR body which way it moved and why.")
+    if report_drift(drift, "file", "tools/check_filesize.py") and not args.warn_only:
         return 1
 
     if hards and not args.warn_only:

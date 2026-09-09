@@ -33,13 +33,15 @@ measures four files that do not exist as compilation objects.
 THRESHOLDS come from the measured distribution (see the toml header), not from
 what sounds tidy.
 
-ALLOWLIST is a two-way ceiling with a mandatory reason, identical in shape and
-intent to check_filesize.py's — an entry records that a long function is
-accepted AND how long it was when that was decided, so it cannot grow silently.
+ALLOWLIST is a ceiling with a mandatory reason, identical in shape and intent
+to check_filesize.py's: an entry records that a long function is accepted AND
+how long it was when that was decided. FAIL when the body grows past the next
+multiple of PIN_SLACK (25) above the pin; shrinking or growth inside that is a
+NOTE (check_filesize.classify_drift).
 
 Exit codes:
-  0  no non-allowlisted function over hard, no allowlist drift
-  1  a violation or a drifted allowlist entry
+  0  no non-allowlisted function over hard, no allowlist entry past its ceiling
+  1  a violation or an allowlist entry past its ceiling
   2  malformed config
 
 Usage:
@@ -361,13 +363,14 @@ def main():
           f"warn={len(warns)} allowlisted={len(allowed)} violations={len(hards)}")
 
     measured = {key(r): r["code"] for r in rows}
-    drift = [(k, e["code_loc"], measured[k]) for k, e in sorted(allow.items())
-             if k in measured and measured[k] != e["code_loc"]]
+    drift = [(k, e["code_loc"], measured[k], _cfs.classify_drift(e["code_loc"], measured[k]))
+             for k, e in sorted(allow.items())
+             if k in measured and _cfs.classify_drift(e["code_loc"], measured[k])]
     gone = [k for k in allow if k not in measured]
 
     if args.update:
         text = open(args.config, encoding="utf-8").read()
-        for k, _, actual in drift:
+        for k, _, actual, _ in drift:
             pat = re.compile(r'(^"' + re.escape(k) + r'"\s*=\s*\{\s*code_loc\s*=\s*)\d+', re.M)
             text, n = pat.subn(lambda m: m.group(1) + str(actual), text)
             if n != 1:
@@ -383,14 +386,7 @@ def main():
         for k in sorted(gone):
             print(f"  {k}")
 
-    if drift and not args.warn_only:
-        print(f"\nFAIL: {len(drift)} allowlisted function(s) drifted from their pinned code_loc.")
-        print(f"  {'pinned':>7} {'actual':>7} {'+/-':>6}  function")
-        for k, pinned, actual in drift:
-            print(f"  {pinned:>7} {actual:>7} {actual - pinned:>+6}  {k}")
-        print("\nAn allowlist entry is a ceiling, not an exemption. Re-pin with")
-        print("  python3 tools/check_function_size.py --update")
-        print("and say in the PR body which way it moved and why.")
+    if _cfs.report_drift(drift, "function", "tools/check_function_size.py") and not args.warn_only:
         return 1
 
     if hards and not args.warn_only:

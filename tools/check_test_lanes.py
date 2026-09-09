@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin the number of GTest cases that no CI lane runs, and fail when it moves.
+"""Pin the number of GTest cases that no CI lane runs, and fail when it grows past the pin.
 
 WHY THIS EXISTS
 ---------------
@@ -289,7 +289,13 @@ def main():
     pin = args.pin if args.pin is not None else PINNED
     print(f"test-lanes: {unlaned} GTest macro(s) run in no CI lane (pinned {pin}); "
           f"{laned} run in `ctest -L unit`")
-    if unlaned != pin:
+    if unlaned < pin:
+        # The direction worth having: a test moved into a CI lane. A note, not
+        # a failure, so it does not become a merge conflict on the next branch.
+        print(f"\nNOTE: {pin - unlaned} fewer unlaned macro(s) than pinned; lower PINNED to "
+              f"{unlaned} when convenient.")
+        return 0
+    if unlaned > pin:
         print(f"\nFAIL: the unlaned GTest MACRO count is {unlaned}, pinned at {pin}.")
         print("This counts TEST/TEST_F/TEST_P macros in sources. It is NOT the")
         print("`--gtest_list_tests` figure, which is larger because a TEST_P runs")
@@ -297,8 +303,7 @@ def main():
         print("\nNot automatically a regression: it is the number of tests whose only")
         print("execution is a human running `make verify-fast` / `make test-gpu` on a")
         print("real card. If you added GPU tests, re-pin PINNED in this file and say")
-        print("so in the PR. If it DROPPED, a test moved into the CPU lane -- re-pin")
-        print("and say that too, because that is the direction worth celebrating.")
+        print("so in the PR.")
         return 1
     return 0
 

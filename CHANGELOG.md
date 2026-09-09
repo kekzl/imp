@@ -40,6 +40,9 @@ there instead of retelling it.
 
 ### Changed
 
+- The `[allow]` pins in `tools/filesize_thresholds.toml`, `tools/function_size_thresholds.toml` and
+  `PINNED` in `tools/check_test_lanes.py` are ceilings: growth up to the next multiple of 25 above the pin
+  and any shrink are a NOTE, only growth past that fails (exact two-way pins: 9 merge conflicts on 2026-09-09)
 - `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
   `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
   Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
