@@ -8,7 +8,8 @@
 // the modules that stayed at source precision. Together those two are a
 // COMPLETE partition of the checkpoint's Linears: a Linear is either packed or
 // listed, never neither. Qwen3.8-27B-NVFP4-vllm: 496 packed modules, 170 ignore
-// entries, 121 plain 2-D weights of which 121 are in `ignore`, 0 left over.
+// entries, and every one of its 121 plain 2-D weights is covered by an entry:
+// 0 Linears left over.
 //
 // Until #1960 imp parsed `ignore` into NvFP4Config::exclude_modules and read it
 // nowhere. A Linear that lost its `weight_scale` on the way in (misnamed,
@@ -24,6 +25,7 @@
 #include <regex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace imp::nvfp4_policy {
@@ -92,6 +94,58 @@ inline bool glob_match(std::string_view pat, std::string_view s) {
     return p == pat.size();
 }
 
+// The wrapper-prefix strip, applied to a REGEX rather than to a module name. A
+// checkpoint that spells its ignore entries against the on-disk names needs it
+// on the `re:` arm too: the modules being matched are already prefix-stripped,
+// so `re:model\.language_model\.decoder\..*` would match nothing and turn every
+// Linear it covers into an unclassified slot, i.e. a refusal. Both the raw and
+// the stripped pattern are tried, so this can only ever add a match.
+inline std::string normalize_pattern(std::string_view p) {
+    static constexpr std::string_view kForms[][2] = {{"model\\.language_model\\.", "model\\."},
+                                                     {"model.language_model.", "model."},
+                                                     {"language_model\\.", ""},
+                                                     {"language_model.", ""}};
+    for (const auto& f : kForms)
+        if (starts_with_(p, f[0]))
+            return std::string(f[1]) + std::string(p.substr(f[0].size()));
+    return std::string(p);
+}
+
+// One ignore entry, parsed once. Compiling a regex per (entry, module) pair
+// costs seconds on a 30k-module checkpoint; the attribution pass below walks
+// every module for every entry.
+struct CompiledIgnoreEntry {
+    bool is_regex = false;
+    bool regex_ok = false;
+    bool has_norm = false;
+    std::regex rx, rx_norm;
+    std::string literal;  // normalized, for the non-regex forms
+    bool has_glob = false;
+};
+
+inline CompiledIgnoreEntry compile_ignore_entry(std::string_view raw) {
+    CompiledIgnoreEntry e;
+    if (starts_with_(raw, "re:")) {
+        e.is_regex = true;
+        const std::string pat(raw.substr(3));
+        const std::string norm = normalize_pattern(pat);
+        try {
+            e.rx = std::regex(pat);
+            e.regex_ok = true;
+            if (norm != pat) {
+                e.rx_norm = std::regex(norm);
+                e.has_norm = true;
+            }
+        } catch (const std::regex_error&) {
+            e.regex_ok = false;  // an unparseable pattern matches nothing, never everything
+        }
+        return e;
+    }
+    e.literal = normalize_module(raw);
+    e.has_glob = contains_(e.literal, "*");
+    return e;
+}
+
 // One ignore entry against one module name. The three forms are the ones the
 // two producers actually write:
 //   - `re:<regex>`   compressed-tensors / vLLM `check_equal_or_regex_match`
@@ -101,21 +155,22 @@ inline bool glob_match(std::string_view pat, std::string_view s) {
 //   - `*.suffix`     Modelopt glob
 // Plus a trailing-segment match (`lm_head` covers `model.lm_head`), which is
 // how vLLM's fused-module lookup resolves a short entry.
-inline bool entry_matches(std::string_view entry_raw, const std::string& module) {
-    if (starts_with_(entry_raw, "re:")) {
-        try {
-            return std::regex_match(module, std::regex(std::string(entry_raw.substr(3))));
-        } catch (const std::regex_error&) {
-            return false;  // an unparseable pattern matches nothing, never everything
-        }
+inline bool entry_matches(const CompiledIgnoreEntry& e, const std::string& module) {
+    if (e.is_regex) {
+        if (!e.regex_ok)
+            return false;
+        return std::regex_match(module, e.rx) || (e.has_norm && std::regex_match(module, e.rx_norm));
     }
-    const std::string entry = normalize_module(entry_raw);
-    if (entry == module)
+    if (e.literal == module)
         return true;
-    if (contains_(entry, "*"))
-        return glob_match(entry, module);
-    return module.size() > entry.size() && ends_with_(module, entry) &&
-           module[module.size() - entry.size() - 1] == '.';
+    if (e.has_glob)
+        return glob_match(e.literal, module);
+    return module.size() > e.literal.size() && ends_with_(module, e.literal) &&
+           module[module.size() - e.literal.size() - 1] == '.';
+}
+
+inline bool entry_matches(std::string_view entry_raw, const std::string& module) {
+    return entry_matches(compile_ignore_entry(entry_raw), module);
 }
 
 inline bool module_is_ignored(const std::string& module, const std::vector<std::string>& ignore) {
@@ -198,11 +253,26 @@ struct SlotObservation {
     bool has_global_scale = false;  // a sibling `.weight_scale_2` exists
 };
 
+// Two independent counts, and the log line has to keep them apart.
+//
+// The SLOT counts partition the Linear-role `.weight` tensors the loader holds.
+// The IGNORE counts partition the checkpoint's `ignore` list, which is the list
+// the operator has in front of them: Qwen3.8-27B declares 170 entries and only
+// one of them lands on a slot that reaches the classifier, because 112 are
+// vision-tower modules, 48 are 3-D conv1d kernels, one is the embedding table
+// (none of which is a Linear the NVFP4 GEMM path serves) and 8 are MTP modules
+// whose tensors are diverted out of the map entirely. Reporting "1 ignored"
+// against a 170-entry list reads as "169 were dropped".
 struct Inventory {
     int quantized = 0;
     int ignored = 0;
     int unclassified = 0;
     int missing_global_scale = 0;
+    // entries == on_linear_slot + outside_linear_set + unmatched
+    int ignore_entries = 0;
+    int ignore_on_linear_slot = 0;
+    int ignore_outside_linear_set = 0;
+    int ignore_unmatched = 0;
     std::string first_unclassified;
     std::string first_missing_global_scale;
 };
@@ -219,10 +289,15 @@ inline bool is_linear_role(const SlotObservation& s) {
 
 inline Inventory classify(const std::vector<SlotObservation>& slots, const std::vector<std::string>& ignore) {
     Inventory inv;
+    // module name -> did it reach the classifier (i.e. is it a Linear role).
+    std::vector<std::pair<std::string, bool>> modules;
+    modules.reserve(slots.size());
     for (const SlotObservation& s : slots) {
-        if (!is_linear_role(s))
-            continue;
         const std::string module = module_of_tensor(s.name);
+        const bool linear = is_linear_role(s);
+        modules.emplace_back(module, linear);
+        if (!linear)
+            continue;
         if (s.has_micro_scale) {
             inv.quantized++;
             if (!s.has_global_scale) {
@@ -239,6 +314,31 @@ inline Inventory classify(const std::vector<SlotObservation>& slots, const std::
         inv.unclassified++;
         if (inv.first_unclassified.empty())
             inv.first_unclassified = module;
+    }
+
+    // Attribute the ignore list itself. An entry that matches any Linear-role
+    // slot counts as honoured even if that slot turned out to be packed: the
+    // question here is what became of the operator's 170 lines, not what became
+    // of the tensors.
+    inv.ignore_entries = static_cast<int>(ignore.size());
+    for (const std::string& raw : ignore) {
+        const CompiledIgnoreEntry e = compile_ignore_entry(raw);
+        bool on_linear = false, seen = false;
+        for (const auto& [module, linear] : modules) {
+            if (!entry_matches(e, module))
+                continue;
+            seen = true;
+            if (linear) {
+                on_linear = true;
+                break;
+            }
+        }
+        if (on_linear)
+            inv.ignore_on_linear_slot++;
+        else if (seen)
+            inv.ignore_outside_linear_set++;
+        else
+            inv.ignore_unmatched++;
     }
     return inv;
 }

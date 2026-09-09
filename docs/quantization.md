@@ -46,8 +46,13 @@ Calibrated per-tensor scales via AWQ or SmoothQuant. Compatible producers:
 
 A compressed-tensors checkpoint declares `targets: ["Linear"]` plus an `ignore` list, and the two
 together are a complete partition of its Linears. imp reconstructs that partition at load and logs
-it as `NVFP4 inventory: <quantized> quantized, <ignored> ignored, <unclassified> unclassified,
-<n> missing global scale`. Two refusals, both compressed-tensors only:
+one `NVFP4 inventory:` line that keeps two different populations apart: the Linear slots it holds
+(quantized / ignored / unclassified / missing global scale) and the ignore entries the operator
+wrote (on a Linear slot / outside the Linear set / with no tensor in the map). Qwen3.8-27B-NVFP4-vllm
+reports 496 quantized, 0 unclassified, and its 170 entries split 1 + 161 + 8: `lm_head` lands on a
+Linear slot, 161 are vision-tower modules, 3-D conv1d kernels and the embedding table (none of them a
+Linear the NVFP4 GEMM path serves), and 8 are MTP modules whose tensors are diverted out of the map.
+Two refusals, both compressed-tensors only:
 
 - a Linear that is neither packed nor in `ignore` (imp lost its `weight_scale` on the way in and
   would serve it as if the author had kept it in source precision);
@@ -74,7 +79,7 @@ The `config_groups` these checkpoints ship set `input_activations: null` (W4A16)
 that field. At `n == 1` decode the activations stay FP16 (the NVFP4 GEMV family), but from M >= 2
 the activations are quantized to NVFP4 as well and the GEMM runs W4A4: `gemm.nvfp4_smallm` for
 M <= 32, the CUTLASS NVFP4 x NVFP4 prefill above it, and the batched LM head. This is deliberate
-and measured (+16% at 32 streams, +36% at 8, 2.18x prefill); `gemm.nvfp4_smallm=false` falls back.
+and measured (+16% at 32 streams, +36% at 8, #1766); `gemm.nvfp4_smallm=false` falls back.
 
 ### imp-quantize: converting a checkpoint yourself (EXPERIMENTAL)
 

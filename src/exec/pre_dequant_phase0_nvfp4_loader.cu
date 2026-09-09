@@ -30,28 +30,59 @@
 namespace imp {
 namespace {
 
+// Rows of the weight_scale tensor a slot was promoted against, 0 when the slot
+// has no scratch entry of its own. Only valid before the scratch is cleared.
+int64_t promoted_plane_rows(const Model& model, const std::string& key) {
+    auto it = model.nvfp4_scratch_.find(key);
+    if (it == model.nvfp4_scratch_.end() || it->second.weight_scale.ndim != 2)
+        return 0;
+    return it->second.weight_scale.shape[0];
+}
+
 // Load-time assertion over the projection groups that CAN share a scale plane.
 // Runs once, after the split arms above; a violation is refused rather than
 // served, because every failure mode here reads as a plausible model that
 // answers with one projection decoded against another's micro-scales.
-void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg) {
-    int n_groups = 0, n_fused = 0;
+//
+// `arm_qkv` / `arm_gate_up` are the layers where the fix-up arm actually wrote
+// sibling pointers into the base's plane. That is a different fact from the
+// weight having come from one fused tensor: Phi-4-reasoning-plus-NVFP4 ships
+// both projections fused, and its siblings still promote from three independent
+// scale allocations, so asserting a row offset on `fused` alone refused it.
+void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg,
+                                    const std::vector<char>& arm_qkv,
+                                    const std::vector<char>& arm_gate_up) {
+    int n_groups = 0, n_fused = 0, n_one_plane = 0;
     std::string err;
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model.layer(i);
+        const std::string lk = "L" + std::to_string(i) + ".";
         MergedScaleGroup groups[2] = {};
-        groups[0] = {i, "q|k|v", 0, {}, L.qkv_split_from_fused, L.wq.shape[1] / 8, 0};
+        groups[0].layer = i;
+        groups[0].what = "q|k|v";
+        groups[0].fused = L.qkv_split_from_fused;
+        groups[0].spans_one_plane = arm_qkv[i] != 0;
+        groups[0].scale_row_bytes = L.wq.shape[1] / 8;
         if (L.wq.qtype == QType::NVFP4 && L.wk.qtype == QType::NVFP4 && L.wv.qtype == QType::NVFP4) {
             groups[0].count = 3;
-            groups[0].m[0] = {L.wq.scales, L.wq.tensor_scale, L.wq.shape[0]};
-            groups[0].m[1] = {L.wk.scales, L.wk.tensor_scale, L.wk.shape[0]};
-            groups[0].m[2] = {L.wv.scales, L.wv.tensor_scale, L.wv.shape[0]};
+            groups[0].m[0] = {L.wq.scales, L.wq.tensor_scale, L.wq.shape[0],
+                              promoted_plane_rows(model, lk + "wq")};
+            groups[0].m[1] = {L.wk.scales, L.wk.tensor_scale, L.wk.shape[0],
+                              promoted_plane_rows(model, lk + "wk")};
+            groups[0].m[2] = {L.wv.scales, L.wv.tensor_scale, L.wv.shape[0],
+                              promoted_plane_rows(model, lk + "wv")};
         }
-        groups[1] = {i, "gate|up", 0, {}, L.gate_up_split_from_fused, L.w_gate.shape[1] / 8, 0};
+        groups[1].layer = i;
+        groups[1].what = "gate|up";
+        groups[1].fused = L.gate_up_split_from_fused;
+        groups[1].spans_one_plane = arm_gate_up[i] != 0;
+        groups[1].scale_row_bytes = L.w_gate.shape[1] / 8;
         if (L.w_gate.qtype == QType::NVFP4 && L.w_up.qtype == QType::NVFP4) {
             groups[1].count = 2;
-            groups[1].m[0] = {L.w_gate.scales, L.w_gate.tensor_scale, L.w_gate.shape[0]};
-            groups[1].m[1] = {L.w_up.scales, L.w_up.tensor_scale, L.w_up.shape[0]};
+            groups[1].m[0] = {L.w_gate.scales, L.w_gate.tensor_scale, L.w_gate.shape[0],
+                              promoted_plane_rows(model, lk + "w_gate")};
+            groups[1].m[1] = {L.w_up.scales, L.w_up.tensor_scale, L.w_up.shape[0],
+                              promoted_plane_rows(model, lk + "w_up")};
         }
         for (const MergedScaleGroup& g : groups) {
             if (g.count == 0)
@@ -59,6 +90,8 @@ void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg) 
             n_groups++;
             if (g.fused)
                 n_fused++;
+            if (g.spans_one_plane)
+                n_one_plane++;
             if (!merged_scale_group_ok(g, &err))
                 throw std::runtime_error(
                     "NVFP4 merged-scale provenance violated: " + err +
@@ -67,7 +100,8 @@ void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg) 
         }
     }
     if (n_groups > 0)
-        IMP_LOG_INFO("merged-scale provenance: %d groups checked, %d fused", n_groups, n_fused);
+        IMP_LOG_INFO("merged-scale provenance: %d groups checked, %d fused, %d sharing one scale plane",
+                     n_groups, n_fused, n_one_plane);
 }
 
 }  // namespace
@@ -344,16 +378,9 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
         int q_rows = mc.n_heads * hd;
         int kv_rows = mc.n_kv_heads * hd;
+        std::vector<char> arm_qkv(mc.n_layers, 0), arm_gate_up(mc.n_layers, 0);
         int n_qkv_split = 0, n_gateup_split = 0, n_declined = 0;
         std::string first_decline;
-        // Rows of the scale plane the base was promoted against. Still readable
-        // here: the scratch is cleared further down.
-        auto plane_rows = [&](const std::string& key) -> int64_t {
-            auto it = mut_model->nvfp4_scratch_.find(key);
-            if (it == mut_model->nvfp4_scratch_.end() || it->second.weight_scale.ndim != 2)
-                return 0;
-            return it->second.weight_scale.shape[0];
-        };
         auto decline = [&](int layer, const char* what, const std::string& why) {
             n_declined++;
             if (first_decline.empty())
@@ -373,7 +400,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 r.n_sibs = 2;
                 r.base_k_packed = L.wq.shape[1];
                 r.sib_k_packed = L.wk.shape[1];
-                r.plane_rows = plane_rows(lk + "wq");
+                r.plane_rows = promoted_plane_rows(*mut_model, lk + "wq");
                 std::string why;
                 if (L.wv.shape[0] != kv_rows) {
                     decline(i, "qkv", "wv has " + std::to_string(L.wv.shape[0]) + " rows, not " +
@@ -390,6 +417,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                     L.wv.tensor_scale = L.wq.tensor_scale;
                     L.wv.scales = static_cast<char*>(L.wq.scales) +
                                   static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
+                    arm_qkv[i] = 1;
                     n_qkv_split++;
                 }
             }
@@ -406,7 +434,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 r.n_sibs = 1;
                 r.base_k_packed = L.w_gate.shape[1];
                 r.sib_k_packed = L.w_up.shape[1];
-                r.plane_rows = plane_rows(lk + "w_gate");
+                r.plane_rows = promoted_plane_rows(*mut_model, lk + "w_gate");
                 std::string why;
                 if (r.base_rows != r.sib_rows) {
                     decline(i, "gate_up", "gate has " + std::to_string(r.base_rows) +
@@ -419,6 +447,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                     L.w_up.tensor_scale = L.w_gate.tensor_scale;
                     L.w_up.scales = static_cast<char*>(L.w_gate.scales) +
                                     static_cast<size_t>(r.base_rows) * scale_row_bytes;
+                    arm_gate_up[i] = 1;
                     n_gateup_split++;
                 }
             }
@@ -431,8 +460,8 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                          "siblings keep their own scales or stay unpromoted; a split without "
                          "provenance would have aimed them into another weight's scale plane.",
                          n_declined, first_decline.c_str());
+        assert_merged_scale_provenance(*mut_model, cfg, arm_qkv, arm_gate_up);
     }
-    assert_merged_scale_provenance(*mut_model, cfg);
 
     // GDN alpha/beta (Qwen3.5 linear_attn.in_proj_a/in_proj_b) are FP16_ONLY:
     // the delta-rule decay / learning-rate projections are precision-sensitive

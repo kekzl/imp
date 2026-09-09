@@ -860,8 +860,15 @@ static bool nvfp4_inventory_refuses(const std::unordered_map<std::string, Tensor
         slots.push_back(std::move(s));
     }
     const pol::Inventory inv = pol::classify(slots, cfg.nvfp4_exclude_modules);
-    IMP_LOG_INFO("NVFP4 inventory: %d quantized, %d ignored, %d unclassified, %d missing global scale",
-                 inv.quantized, inv.ignored, inv.unclassified, inv.missing_global_scale);
+    // Slots and ignore entries are two different populations and the line keeps
+    // them apart: "1 ignored" next to a 170-entry list reads as "169 dropped".
+    IMP_LOG_INFO("NVFP4 inventory: %d Linear modules quantized, %d ignored, %d unclassified, "
+                 "%d missing global scale; quantization_config.ignore %d entries = %d on a Linear "
+                 "slot, %d outside the Linear set (vision tower, conv1d, embeddings), %d with no "
+                 "tensor in the map (MTP head, dropped shards)",
+                 inv.quantized, inv.ignored, inv.unclassified, inv.missing_global_scale,
+                 inv.ignore_entries, inv.ignore_on_linear_slot, inv.ignore_outside_linear_set,
+                 inv.ignore_unmatched);
     return pol::refuses(inv, cfg.is_llm_compressor_nvfp4, why);
 }
 

@@ -2,21 +2,30 @@
 
 // Provenance rules for the fused-projection scale split, as pure functions.
 //
-// A compressed-tensors checkpoint may ship q|k|v as one `qkv_proj` tensor and
-// gate|up as one `gate_up_proj`. weight_map.cpp splits the DATA into imp's
-// per-slot tensors; the per-group scale plane is one buffer covering all rows,
-// so the siblings' `.scales` are offsets into the base sibling's plane and they
-// share the one `weight_global_scale` the checkpoint gave the fused tensor.
+// A checkpoint may ship q|k|v as one `qkv_proj` tensor and gate|up as one
+// `gate_up_proj` (Phi-4-reasoning-plus-NVFP4 does both). weight_map.cpp splits
+// the DATA into imp's per-slot tensors and SLICES the `[rows, K/16]` scale plane
+// by output-row range, so each sibling reaches promotion with its own scale
+// tensor. What the siblings do share is the one `weight_global_scale` the
+// checkpoint gave the fused tensor: weight_map routes that scalar to all of
+// them, and it is the only per-tensor number they have in common.
 //
-// The loader-side fix-up arm that repairs those offsets used to fire on a
-// PREDICATE that a separate-tensor checkpoint also satisfies: base promoted,
-// sibling not promoted, base has scales. Any unrelated promotion failure on the
-// sibling (missing weight_scale, rejected scale dtype, shape decline) therefore
-// pointed the sibling's scales into the base's plane and copied the base's
-// tensor scale over it. On Qwen3.8-27B that is w_up reading 17408 x 320 =
-// 5.57 MB past the end of w_gate's plane, with `n_gateup_split` logged as if
-// nothing happened. Two separate weights are not a split, so the arm needs the
-// one fact the predicate cannot reconstruct: did a split actually happen.
+// Two different facts, and conflating them is what this header exists to stop:
+//
+//   fused            the WEIGHT came from one checkpoint tensor. Says nothing
+//                    about where the scale bytes live: weight_upload gives every
+//                    scratch entry its own cudaMallocAsync, so the three planes
+//                    are three unrelated allocations.
+//   spans_one_plane  the loader's fix-up arm wrote sibling pointers as offsets
+//                    into the base's plane. This is the ONLY way siblings end up
+//                    sharing a base pointer, and the only case where a row
+//                    offset is a meaningful thing to assert.
+//
+// The fix-up arm itself used to fire on a predicate a separate-tensor checkpoint
+// also satisfies (base promoted, sibling not promoted, base has scales), so any
+// unrelated promotion failure on a sibling pointed its micro-scales into the
+// base's plane with the base's global scale. On Qwen3.8-27B that is w_up reading
+// 17408 x 320 = 5.57 MB past the end of w_gate's plane, logged as a normal split.
 //
 // Both functions are pure so the CPU lane can drive them; the loader supplies
 // the pointers.
@@ -48,6 +57,15 @@ inline int64_t fused_split_needed_rows(const FusedSplitRequest& r) {
 
 // True when the arm may fire. Declines are not errors: a checkpoint with
 // separate tensors declines every layer and serves normally.
+//
+// On today's producers the arm cannot fire in EITHER direction, and that is the
+// point rather than an oversight. weight_map slices the fused scale plane per
+// sibling, so a sibling either promotes on its own scale (the arm's predicate
+// needs an unpromoted sibling and never runs) or fails to promote for an
+// unrelated reason, in which case the base's plane covers only the base's rows
+// and the belt below declines. The arm is kept because it is the repair path for
+// a fused layout whose scale plane is NOT sliced per sibling, and because
+// deleting it would delete the belt that makes the wrong repair impossible.
 inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_not) {
     auto no = [&](const char* m) {
         if (why_not)
@@ -63,7 +81,9 @@ inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_no
     if (r.plane_rows <= 0)
         return no("the fused scale plane's row count is unknown");
     if (r.plane_rows < fused_split_needed_rows(r))
-        return no("the fused scale plane is smaller than the rows the split would address");
+        return no(
+            "the fused scale plane covers only the base's rows, so it was already sliced per "
+            "sibling and there is nothing to repair");
     return true;
 }
 
@@ -72,27 +92,33 @@ struct MergedScaleMember {
     const void* scales = nullptr;
     float tensor_scale = 0.0f;
     int64_t rows = 0;
+    // Rows of THIS member's own weight_scale tensor, read back from the promote
+    // scratch. 0 = the member has no scratch entry of its own, which is what the
+    // repaired siblings of a `spans_one_plane` group look like.
+    int64_t plane_rows = 0;
 };
 
-// A {wq,wk,wv} or {w_gate,w_up} group of one layer. Member 0 owns the plane.
+// A {wq,wk,wv} or {w_gate,w_up} group of one layer. Member 0 owns the plane in
+// the `spans_one_plane` case.
 struct MergedScaleGroup {
     int layer = -1;
     const char* what = "";
     int count = 0;
     MergedScaleMember m[3];
-    bool fused = false;           // the provenance flag, same source as above
-    int64_t scale_row_bytes = 0;  // K_packed / 8
-    int64_t plane_rows = 0;       // rows of the fused plane, 0 = unknown
+    bool fused = false;            // the weight came from one checkpoint tensor
+    bool spans_one_plane = false;  // the fix-up arm wrote m[1..]'s pointers into m[0]'s plane
+    int64_t scale_row_bytes = 0;   // K_packed / 8
 };
 
-// The load-time assertion. Returns false and fills `err` when the group's scale
-// pointers cannot be explained by the provenance the layer recorded.
+// The load-time assertion. Returns false and fills `err` when the group's scales
+// cannot be explained by the provenance the layer recorded.
 //
 // Non-fused groups get the one check that cannot false-positive: two distinct
 // allocations never share an address, so equal pointers are corruption. Their
-// OFFSETS are deliberately not checked - an allocator is free to place two
-// independent scale planes exactly one plane apart, and a checkpoint with
-// separate q/k/v (Qwen3.8-27B) would then be refused for being tidy.
+// offsets are deliberately not checked, and neither are the fused group's unless
+// the arm actually wrote them: an allocator is free to place two independent
+// scale planes exactly one plane apart, and asserting the offset would refuse a
+// checkpoint for being tidy.
 inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     auto fail = [&](const std::string& m) {
         if (err)
@@ -108,6 +134,29 @@ inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     if (!g.fused)
         return true;
 
+    for (int i = 1; i < g.count; ++i) {
+        // Bit equality, not a tolerance: the siblings were divided by ONE
+        // weight_global_scale, so any difference means one of them was promoted
+        // against a scale the checkpoint never gave it.
+        if (std::memcmp(&g.m[i].tensor_scale, &g.m[0].tensor_scale, sizeof(float)) != 0)
+            return fail("sibling " + std::to_string(i) + " carries tensor_scale " +
+                        std::to_string(g.m[i].tensor_scale) + " but the fused tensor's is " +
+                        std::to_string(g.m[0].tensor_scale));
+    }
+
+    if (!g.spans_one_plane) {
+        // The sliced layout: every sibling owns a plane of exactly its own rows.
+        // A plane that is too small under-runs into the next allocation; one that
+        // is too large means the slice never happened and the sibling is reading
+        // its neighbours' rows as its own.
+        for (int i = 0; i < g.count; ++i) {
+            if (g.m[i].plane_rows > 0 && g.m[i].plane_rows != g.m[i].rows)
+                return fail("sibling " + std::to_string(i) + " has " + std::to_string(g.m[i].rows) +
+                            " rows but a scale plane of " + std::to_string(g.m[i].plane_rows));
+        }
+        return true;
+    }
+
     const char* base = static_cast<const char*>(g.m[0].scales);
     if (base == nullptr)
         return fail("split from one fused tensor but the base carries no scales");
@@ -118,13 +167,6 @@ inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
         const MergedScaleMember& s = g.m[i];
         if (s.scales == nullptr)
             return fail("sibling " + std::to_string(i) + " lost its scales after the split");
-        // Bit equality, not a tolerance: the siblings were divided by ONE
-        // weight_global_scale, so any difference means one of them was promoted
-        // against a scale the checkpoint never gave it.
-        if (std::memcmp(&s.tensor_scale, &g.m[0].tensor_scale, sizeof(float)) != 0)
-            return fail("sibling " + std::to_string(i) + " carries tensor_scale " +
-                        std::to_string(s.tensor_scale) + " but the fused tensor's is " +
-                        std::to_string(g.m[0].tensor_scale));
         const char* want = base + off_rows * g.scale_row_bytes;
         if (static_cast<const char*>(s.scales) != want)
             return fail("sibling " + std::to_string(i) + " points " +
@@ -133,9 +175,9 @@ inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
                         std::to_string(off_rows * g.scale_row_bytes));
         off_rows += s.rows;
     }
-    if (g.plane_rows > 0 && off_rows > g.plane_rows)
+    if (g.m[0].plane_rows > 0 && off_rows > g.m[0].plane_rows)
         return fail("the split addresses " + std::to_string(off_rows) + " rows of a plane holding " +
-                    std::to_string(g.plane_rows));
+                    std::to_string(g.m[0].plane_rows));
     return true;
 }
 
