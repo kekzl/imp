@@ -124,6 +124,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- The nightly libFuzzer job never fuzzed: no ninja, no nvcc for `project(... CUDA)`, libstdc++ 12
+  against the tree's C++23. `IMP_FUZZERS_CPU_ONLY=ON` builds three parser targets without CUDA on
+  Ubuntu 26.04: 718969 / 124308 / 271836 executions in 20 s per target (#1969)
 - CI change detection ran `git` before the step that marks the checkout a safe directory, so its
   `git cat-file` died on the ownership refusal and the fail-open returned `code=true` every run:
   the docs-only skip had never once fired, and a fall-open now says so with a `::warning::`
