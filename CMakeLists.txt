@@ -210,6 +210,7 @@ set(IMP_QUANT_SOURCES
     src/quant/fp8_utils.cu
     src/quant/quant_gemm.cu
     src/quant/awq_transform.cpp
+    src/quant/awq_norm_fold.cpp
     src/quant/calibration_stats.cpp
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
@@ -529,6 +530,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
+        tools/imp-quantize/awq_sites.cpp
+        tools/imp-quantize/quant_report.cpp
         tools/imp-quantize/awq.cu
     )
     target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
@@ -824,6 +827,17 @@ if(IMP_BUILD_TESTS)
         # share a scale, a config.json with two quantization_config keys.
         tools/imp-quantize/checkpoint_out.cpp
         tests/test_quantize_checkpoint_out.cpp
+        # Which consumers share an activation, which producer absorbs 1/s, and
+        # whether that norm carries a unit offset. Wrong here is a checkpoint
+        # that loads and is a different model, so the table is a pure function
+        # and the CPU lane holds it.
+        tools/imp-quantize/awq_sites.cpp
+        tests/test_awq_plan_sites.cpp
+        # What the export cost, per tensor. The decode is checked against
+        # hand-built format bytes: a report that reads zero everywhere looks
+        # exactly like a perfect export.
+        tools/imp-quantize/quant_report.cpp
+        tests/test_quantize_report.cpp
         # Attention-family capability rules: the prefill dispatch and the
         # chunk clamp must answer 'can this head_dim skip the S-matrix' the
         # same way, or nothing bounds the chunk and cuBLAS aborts.
@@ -986,6 +1000,13 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
+        # The export round trip: quantize like the exporter, decode by the
+        # format's own rule, bound the error. Needs the real kernel, so it
+        # lives here rather than in the CPU lane; the fold's algebra is
+        # covered without a GPU by the AWQ calibration tests in test-core.
+        tests/test_quantize_nvfp4_roundtrip.cu
+        tools/imp-quantize/checkpoint_out.cpp
+        tools/imp-quantize/quant_report.cpp
         tests/test_mxf4nvf4_probe.cu
         tests/test_mxf4nvf4_mma_bench.cu
         tests/test_mma_peak_saturated.cu

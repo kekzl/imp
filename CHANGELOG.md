@@ -13,6 +13,9 @@ there instead of retelling it.
 
 ### Added
 
+- `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
+  summary line and `quant_report.json` at the end (per tensor max relative error and MSE decoded
+  from the written bytes, AWQ `err_rtn`/`err_best` per group) ([quantization.md](docs/quantization.md))
 - `kv_cache.block_size`: tokens per KV block as an operator key (0 = auto: 32 for `n_kv_heads <= 4`,
   else 16), refused at load outside multiples of 16 in [16, 256]; `imp-bench decode-attn` sweeps 16/32/64 and
   `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_arch_2026 B-5](docs/audit/AUDIT_arch_2026.md))
@@ -25,6 +28,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
+  `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
+  Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
 - Fused QK-norm + RoPE (`qknorm_rope_fused`, one CTA per head x token) now serves batched decode rows (n <= 64,
   full-head norm weights) instead of n == 1 only: q-norm, k-norm and rope were three launches per layer at 32 streams.
   Qwen3-14B-NVFP4 32 streams +0.8/+0.7/-0.3%, Qwen3.8-27B +0.2/+0.2/+0.2%; batched rows share the single-stream numerics ([roadmap](docs/roadmap.md), #1957)

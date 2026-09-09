@@ -225,7 +225,10 @@ def main():
     # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
     # 1083 -> 1084 (small-M pipeline race, roadmap ledger 2026-09-08): NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable
     # (test-quant, GPU, no model: 200 launches per in-situ shape, single and multi kernel, bit-identical or red).
-    PINNED = 1084
+    # 1084 -> 1086 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
+    # quantize like the exporter, decode by the format's own rule, bound the error; and the unit-offset
+    # norm fold through the quantizer. The fold's algebra stays in the CPU lane (AwqNormFold x6).
+    PINNED = 1086
 
     text = CMAKE.read_text()
     mods = module_sources(text)
