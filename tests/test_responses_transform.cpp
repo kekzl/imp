@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 #include "responses.h"
+#include "spec_usage_keys.h"
+#include <string>
 
 #include <stdexcept>
 
@@ -217,6 +219,31 @@ TEST(ResponsesTransform, SpecCountersPassThrough) {
     // Absent upstream stays absent downstream.
     json plain = openai_to_responses_response(make_oai("hi"), "m", "resp_p");
     EXPECT_FALSE(plain["usage"]["output_tokens_details"].contains("imp_spec_drafted"));
+}
+
+// Every key, from the shared table: this shim carried the same hand-copied
+// three-name list as the Anthropic one, and dropped imp_spec_emitted and the
+// decline reason for as long as they existed.
+TEST(ResponsesTransform, EverySpecUsageKeyPassesThrough) {
+    json oai = make_oai("hi");
+    oai["usage"]["completion_tokens_details"] = {{"reasoning_tokens", 2}};
+    for (const char* k : imp_server::kSpecUsageKeys)
+        oai["usage"]["completion_tokens_details"][k] = "sentinel";
+    json out = openai_to_responses_response(oai, "m", "resp_all");
+    const json& d = out["usage"]["output_tokens_details"];
+    EXPECT_EQ(d["reasoning_tokens"], 2) << "the spec keys must not displace the block's own field";
+    for (const char* k : imp_server::kSpecUsageKeys)
+        EXPECT_EQ(d.value(k, std::string("MISSING")), "sentinel")
+            << k << " was dropped by the Responses transform";
+}
+
+TEST(ResponsesTransform, DeclineReachesOutputTokensDetails) {
+    json oai = make_oai("hi");
+    oai["usage"]["completion_tokens_details"] = {
+        {"imp_spec_drafted", 0}, {"imp_spec_emitted", 0}, {"imp_spec_declined", "no_mtp_head"}};
+    json out = openai_to_responses_response(oai, "m", "resp_d");
+    EXPECT_EQ(out["usage"]["output_tokens_details"].value("imp_spec_declined", std::string()),
+              "no_mtp_head");
 }
 
 TEST(ResponsesTransform, TextResponse) {

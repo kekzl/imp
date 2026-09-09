@@ -4,6 +4,7 @@
 #include "model/chat_template.h"
 #include "runtime/scheduler.h"
 #include "runtime/spec_gates.h"
+#include "runtime/spec_request.h"
 #include "runtime/request.h"
 #include "runtime/batch.h"
 #include "runtime/green_ctx.h"
@@ -336,6 +337,20 @@ public:
     // only fires on repetitive context, and on ordinary prompts the engine logs
     // drafted=0 for every request while the test compares the non-speculative
     // path against itself.
+    // Per draft SOURCE. The aggregate counters below cannot answer the one
+    // question an operator asks about MTP - is the head earning its 0.79 GiB -
+    // because the n-gram matcher, the prompt prediction and token recycling
+    // fill the same chunk and land in the same totals. `mtp` is what the
+    // trained head drafted; `other` is every remaining source together
+    // (matcher, suffix index, prediction, recycling), which is the split the
+    // /metrics series expose as imp_spec_mtp_* and imp_spec_ngram_*.
+    struct SpecSourceStats {
+        long long verify_steps = 0;
+        long long drafted = 0;
+        long long accepted = 0;
+        long long emitted = 0;
+        double verify_wall_ms = 0;
+    };
     struct SpecStats {
         long long verify_steps = 0;  // verify forwards run
         long long miss_steps = 0;    // decode steps with no usable draft
@@ -343,6 +358,8 @@ public:
         long long accepted = 0;      // draft tokens accepted
         long long emitted = 0;       // tokens emitted by verify steps
         double verify_wall_ms = 0;   // host wall inside step_spec_verify_ (verify steps only)
+        SpecSourceStats mtp{};       // verify steps the MTP head drafted
+        SpecSourceStats other{};     // every non-MTP drafter
     };
     const SpecStats& spec_stats() const noexcept { return spec_stats_; }
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
@@ -1013,6 +1030,14 @@ private:
     int mtp_chain_k_() const noexcept {
         return std::max(1, mtp_k_live_ > 0 ? mtp_k_live_ : mtp_spec_k_);
     }
+    // The depth THIS request resolved to: its own `speculative.mtp_k`, or the
+    // server default, bounded by what the process armed. 0 = no MTP drafting
+    // for this request. This is the AIMD ceiling; a caller that asked for
+    // mtp_k=1 on a k=2 server must not ride the ladder back up to 2.
+    int mtp_request_k_(const Request& req) const;
+    // Per-request form of the adaptive depth: the live chain, clamped to the
+    // request's ceiling. 0 when the request declined the head.
+    int mtp_chain_k_(const Request& req) const;
     // Consume the pending MTP chain as the verify draft for req (empty when
     // MTP is off / unbound / stale / KV-cap reached).
     std::vector<int32_t> mtp_take_draft_(const Request& req);
@@ -1152,10 +1177,18 @@ private:
         // caller who had switched the feature off (#1639).
         const bool forced_off = req.spec_override == 0;
         s.ngram_on = req.spec_override >= 0 ? req.spec_override == 1 : runtime_config_.speculative.ngram;
-        s.mtp_on = !forced_off && mtp_spec_decode_enabled();
+        // The head is a per-request contract, not a process-wide switch: a
+        // request may lower its depth or turn it off, and asking for it on a
+        // process that armed nothing is a DECLINE with a reason rather than a
+        // silent plain decode (spec_request.h). The rule is shared with the
+        // server so the two cannot disagree about what a request asked for.
+        s.mtp_on = mtp_resolve_request(mtp_request_state_(req)).k > 0;
         s.recycling_on = !forced_off && runtime_config_.speculative.token_recycling;
         return s;
     }
+    // The inputs mtp_resolve_request needs, read off this engine. Out of line
+    // (engine_spec_mtp.cpp): this header is at its hard-review ceiling.
+    MtpRequestState mtp_request_state_(const Request& req) const;
     // The model-level half of spec_verify_gates_ok_: facts that cannot change
     // between requests or between steps — so it is computed once and cached.
     // spec_ngram_enabled_ sits on the per-step decode path; recomputing this
@@ -1190,6 +1223,9 @@ private:
     bool ensure_spec_buffers_(int chunk_cap, int max_blocks);
     void free_spec_buffers_();
     void log_spec_stats_() const;
+    // One verify step's tally, aggregate plus per draft source.
+    void spec_stats_record_(bool from_mtp, long long drafted, long long accepted, long long emitted,
+                            double wall_ms) noexcept;
     // Per-request suffix index (speculative.suffix): lazily built over
     // input ++ prediction, extended with output tokens as they land.
     // Erased when the request finishes.

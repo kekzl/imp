@@ -10,10 +10,12 @@
 // This header is NOT part of the public handler API — that stays in handlers.h.
 
 #include "handlers.h"
+#include "spec_usage_keys.h"
 
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
+#include "runtime/spec_request.h"
 #include "memory/kv_cache.h"
 
 #include <chrono>
@@ -58,6 +60,13 @@ struct ChatRequestParams {
     // "speculative" (bool). Lets code-gen calls opt into speculation while
     // short tool-arg generations skip it on the same server.
     int spec_override = -1;
+    // Per-request MTP chain depth, from `"speculative": {"mtp_k": N}`. -1 =
+    // the server default (speculative.mtp_k). Orthogonal to spec_override: the
+    // object form addresses the head only, so `{"mtp_k": 0}` leaves the n-gram
+    // matcher alone. Resolved against what the process armed
+    // (src/runtime/spec_request.h) - a request can lower the depth or ask for
+    // the head, it cannot upload one.
+    int spec_mtp_k = -1;
     // OpenAI Predicted Outputs: concatenated text of the "prediction" body
     // field ({"type":"content","content": string | [{"type":"text","text"}]}).
     // Tokenized later in the snapshot stage (needs the tokenizer) and fed to
@@ -119,6 +128,12 @@ struct ChatRequestParams {
 
 // Lock-acquired engine state (populated under state.mtx).
 struct ChatStateSnapshot {
+    // MTP head facts of the load this request was admitted against, so the
+    // per-request speculation contract resolves against a consistent picture
+    // even if a model swap lands mid-request (spec_request.h).
+    int mtp_armed_k = 0;
+    bool mtp_head_present = false;
+    bool mtp_head_loaded = false;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
@@ -202,18 +217,109 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
 //
 // Returns a null json when there is nothing to report, so the field appears
 // only when it says something.
-// Per-request speculation accounting (AUDIT_arch_2026 C-6): the three
-// counters the request already carries, under vendor-prefixed keys inside
+// Per-request speculation accounting (AUDIT_arch_2026 C-6): the counters the
+// request already carries, under vendor-prefixed keys inside
 // completion_tokens_details so an OpenAI-strict client sees extras it can
-// ignore. Absent when no verify step ran, so a request with speculation off
-// (or a model without a drafter) never sees the keys.
+// ignore. Absent when no verify step ran AND nothing was declined, so a
+// request with speculation off (or a model without a drafter) never sees the
+// keys.
+//
+// The decline is the half that was missing. `speculative.mtp_k=auto` refuses
+// the head on any server that takes concurrent requests, and until now a
+// caller asking for MTP got a plain decode and no way to tell: the refusal
+// lived in one startup INFO line.
 inline void add_spec_usage_(nlohmann::json& usage, const std::shared_ptr<imp::Request>& req) {
-    if (!req || (req->spec_verifies == 0 && req->spec_drafted == 0))
+    if (!req)
+        return;
+    const bool declined = imp::spec_decline_is_reportable(req->spec_decline);
+    if (!declined && req->spec_verifies == 0 && req->spec_drafted == 0)
         return;
     auto& d = usage["completion_tokens_details"];
     d["imp_spec_drafted"] = req->spec_drafted;
     d["imp_spec_accepted"] = req->spec_accepted;
+    d["imp_spec_emitted"] = req->spec_emitted;
     d["imp_spec_verify_steps"] = req->spec_verifies;
+    if (declined) {
+        d["imp_spec_declined"] = imp::spec_decline_name(req->spec_decline);
+        d["imp_spec_declined_detail"] = imp::spec_decline_detail(req->spec_decline);
+    }
+}
+
+// `"speculative"` on the request body (imp extension), in both accepted forms:
+//   true / false     - every drafter on / off, as before
+//   {"mtp_k": N}     - MTP chain depth for THIS request, 0 <= N <= armed
+// The two are orthogonal: the object form addresses the head only.
+//
+// `armed_mtp_k` is the depth the process armed (Engine::mtp_spec_decode_k()),
+// 0 when no head is loaded. It bounds the accepted range so the message can
+// name it; without a model loaded the bound is the device chain cap, which is
+// what makes this answerable on the model-less validation lane.
+struct SpecFieldParse {
+    bool ok = true;
+    int spec_override = -1;
+    int mtp_k = -1;
+    std::string error;
+};
+
+// The three MTP facts the contract below needs, read once per request off the
+// server atomics (a model swap can move them mid-request).
+template <typename State, typename Snap>
+inline void snapshot_mtp_state_(const State& state, Snap& snap) {
+    snap.mtp_armed_k = state.armed_mtp_k.load(std::memory_order_relaxed);
+    snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
+    snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
+}
+
+// Resolve the per-request speculation contract onto an engine Request. One
+// helper so the three submission sites (chat core, /v1/completions, and the
+// dialect shims through the first) cannot resolve it three ways.
+inline void apply_spec_contract_(imp::Request& req, int spec_override, int spec_mtp_k, int armed_k,
+                                 bool head_present, bool head_loaded) {
+    req.spec_override = spec_override;
+    req.spec_mtp_k = spec_mtp_k;
+    imp::MtpRequestState ms;
+    ms.requested_k = spec_mtp_k;
+    ms.armed_k = armed_k;
+    ms.head_present = head_present;
+    ms.head_loaded = head_loaded;
+    ms.forced_off = spec_override == 0;
+    req.spec_decline = imp::mtp_resolve_request(ms).reason;
+}
+
+inline SpecFieldParse parse_spec_field_(const nlohmann::json& body, int armed_mtp_k) {
+    SpecFieldParse out;
+    if (!body.contains("speculative"))
+        return out;
+    const auto& sp = body["speculative"];
+    if (sp.is_boolean()) {
+        out.spec_override = sp.get<bool>() ? 1 : 0;
+        return out;
+    }
+    if (!sp.is_object()) {
+        out.ok = false;
+        out.error = "\"speculative\" must be a boolean or an object of the form {\"mtp_k\": N}";
+        return out;
+    }
+    if (!sp.contains("mtp_k"))
+        return out;  // an empty object asks for nothing
+    const auto& k = sp["mtp_k"];
+    const int ceiling = armed_mtp_k > 0 ? armed_mtp_k : imp::kSpecRequestMaxMtpK;
+    if (!k.is_number_integer()) {
+        out.ok = false;
+        out.error = "\"speculative.mtp_k\" must be an integer in 0.." + std::to_string(ceiling);
+        return out;
+    }
+    const int v = k.get<int>();
+    if (v < 0 || v > ceiling) {
+        out.ok = false;
+        out.error = "\"speculative.mtp_k\" is " + std::to_string(v) + ", outside the accepted range 0.." +
+                    std::to_string(ceiling) +
+                    (armed_mtp_k > 0 ? " (the MTP chain depth this server armed)"
+                                     : " (no MTP head is armed; the bound is the device chain cap)");
+        return out;
+    }
+    out.mtp_k = v;
+    return out;
 }
 
 inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>& req, int n_prompt_tokens) {

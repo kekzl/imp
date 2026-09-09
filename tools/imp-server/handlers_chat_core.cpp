@@ -182,6 +182,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.channel_close_id = state.channel_close_id;
         ctx.snap.channel_newline_id = state.channel_newline_id;
         ctx.snap.max_seq_len = state.max_seq_len;
+        snapshot_mtp_state_(state, ctx.snap);
         ctx.snap.tpl_family = ctx.snap.have_template ? ctx.snap.chat_tpl.family()
                                                      : imp::ChatTemplateFamily::CHATML;
         if (ctx.snap.have_template)
@@ -752,7 +753,11 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
     req->pin_kv_prefix = ctx.params.cache_prompt;
     req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
-    req->spec_override = ctx.params.spec_override;
+    // Per-request speculation: the override, the MTP depth, and the reason a
+    // decline happened, resolved by the same pure rule the engine uses
+    // (spec_request.h) so the two cannot disagree about one request.
+    apply_spec_contract_(*req, ctx.params.spec_override, ctx.params.spec_mtp_k, ctx.snap.mtp_armed_k,
+                         ctx.snap.mtp_head_present, ctx.snap.mtp_head_loaded);
     req->priority = ctx.params.priority;
     req->prediction_tokens = ctx.snap.prediction_tokens;
     req->min_p = ctx.params.min_p;

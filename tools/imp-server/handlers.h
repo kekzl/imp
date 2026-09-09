@@ -271,6 +271,14 @@ struct ServerState {
     // flag before 2026-08-29, which made `runtime.max_batch_size=1` from
     // imp.conf a single-stream server that auto still declined.
     int resolved_max_batch_size = 0;
+    // MTP head facts of the CURRENT load, published so the request path can
+    // read them without taking state.mtx: the per-request `"speculative":
+    // {"mtp_k": N}` field is validated against the armed depth on every
+    // request, and /health's lock contention is already known debt (#888).
+    // Written once per load (handlers.cpp), under the same lock a swap holds.
+    std::atomic<int> armed_mtp_k{0};        // Engine::mtp_spec_decode_k()
+    std::atomic<bool> mtp_head_present{false};  // checkpoint ships MTP tensors
+    std::atomic<bool> mtp_head_loaded{false};   // ... and this process uploaded them
     std::atomic<int> next_id{0};
     std::atomic<int> next_tool_call_id{0};
     ServerArgs default_args;
