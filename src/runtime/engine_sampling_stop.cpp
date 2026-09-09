@@ -266,6 +266,11 @@ int Engine::acquire_recurrent_slot_(int req_id) {
     return slot;
 }
 
+int Engine::recurrent_slot(int req_id) const {
+    auto it = recurrent_slot_of_.find(req_id);
+    return (it != recurrent_slot_of_.end()) ? it->second : -1;
+}
+
 void Engine::release_recurrent_slot_(int req_id) {
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())

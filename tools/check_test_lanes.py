@@ -225,7 +225,11 @@ def main():
     # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
     # 1083 -> 1084 (small-M pipeline race, roadmap ledger 2026-09-08): NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable
     # (test-quant, GPU, no model: 200 launches per in-situ shape, single and multi kernel, bit-identical or red).
-    PINNED = 1084
+    # 1087 -> 1088 (chained hybrid restores, MEMORY.md D16): HybridRestoreChainTest
+    # .HybridRestoreChainStateStaysClose (test-e2e, GPU + a GDN checkpoint: 30 growing
+    # turns on the recurrent prefix cache against a cold prefill of the same prompt,
+    # compared on the state slab rather than on the tokens).
+    PINNED = 1088
 
     text = CMAKE.read_text()
     mods = module_sources(text)
