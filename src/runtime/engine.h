@@ -321,6 +321,15 @@ public:
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
 
+    // The recurrent (SSM/GDN) state pool, or nullptr on a model without one,
+    // and the slot a request holds (-1 once it released it at finish).
+    // Readable so a test can compare the STATE two prefill routes reached
+    // instead of the tokens they sampled: a chained snapshot restore and a
+    // cold prefill of the same prompt can differ in the state long before the
+    // difference crosses an argmax, and only the slab shows that.
+    SSMState* ssm_state() const noexcept { return ssm_state_.get(); }
+    int recurrent_slot(int req_id) const;
+
     // Speculative-decode counters, for /metrics and for tests that need to
     // prove the drafter actually ran (#1321). Without this, a spec-decoding
     // test passes whether or not a single token was drafted: the n-gram matcher
@@ -448,6 +457,12 @@ private:
     std::atomic<uint64_t> kv_pressure_rejections_{0};
     std::atomic<uint64_t> streaming_kv_auto_enables_{0};
     std::atomic<uint64_t> streaming_kv_evicted_blocks_{0};
+    // Once per ENGINE: the >90 % pressure trigger fired on a KV dtype that has
+    // no StreamingLLM valve. Per step it would flood the log for the rest of
+    // the run; once is the one line that says the pool is at the wall. A model
+    // swap builds a new Engine and warns again, which is correct - it is a new
+    // pool with a new dtype.
+    std::atomic_flag kv_pressure_no_valve_warned_ = ATOMIC_FLAG_INIT;
     std::atomic<uint64_t> graph_repromotions_{0};
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;

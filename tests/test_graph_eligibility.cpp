@@ -97,6 +97,26 @@ TEST(GraphEligibility, KvPressureLiftsAtAFifthUnlessSomethingWasEvicted) {
     EXPECT_FALSE(kv_pressure_repromotes_graphs(0, 0, 0, 0));
 }
 
+// The valve is F16-only, and on every other KV dtype the same 90 % pressure
+// used to fall through an `if` with no log at all. The next thing an operator
+// saw was the hard cancel in decode_prepare_kv_ once the pool ran dry.
+TEST(GraphEligibility, QuantizedKvPressureWarnsBecauseThereIsNoValve) {
+    // Qwen3.8-27B-NVFP4 resolves FP8 KV by default: same pool state, no valve.
+    EXPECT_TRUE(kv_pressure_warns_no_streaming_valve(0, 0, 3000, /*kv_is_f16=*/false));
+    EXPECT_TRUE(kv_pressure_warns_no_streaming_valve(299, 0, 3000, false));
+
+    // F16 has the valve; it arms StreamingLLM and logs that. Two lines for one
+    // event would be worse than none.
+    EXPECT_FALSE(kv_pressure_warns_no_streaming_valve(0, 0, 3000, /*kv_is_f16=*/true));
+
+    // Below the trigger there is nothing to say, on either dtype.
+    EXPECT_FALSE(kv_pressure_warns_no_streaming_valve(300, 0, 3000, false))
+        << "a tenth exactly is not under a tenth";
+    EXPECT_FALSE(kv_pressure_warns_no_streaming_valve(0, 984, 3000, false))
+        << "reclaimable prefix-cache blocks are free for this purpose (#1879)";
+    EXPECT_FALSE(kv_pressure_warns_no_streaming_valve(0, 0, 0, false)) << "no pool, no pressure";
+}
+
 // The last burst of a request: 7 tokens left under a miss_burst of 8 must
 // launch 7 steps, or the parked runner refuses the rearm (76 + 8 > 83) and
 // recaptures. The KV-starved shape (3 reserved under 8) is the same clamp.
@@ -115,7 +135,12 @@ TEST(GraphEligibility, BurstStepLimitNeverExceedsTheTokensTheBurstHas) {
 TEST(GraphEligibility, SnapshotBoundaryIsBlockAlignedAndSkipsShortPrompts) {
     EXPECT_EQ(snapshot_boundary(35, 16, 256), 0) << "32 < 256: no snapshot, no split";
     EXPECT_EQ(snapshot_boundary(35, 16, 0), 32) << "0 keeps every block-aligned prompt";
-    EXPECT_EQ(snapshot_boundary(256, 16, 256), 256) << "the minimum itself qualifies";
+    EXPECT_EQ(snapshot_boundary(257, 16, 256), 256) << "the minimum itself qualifies";
+    EXPECT_EQ(snapshot_boundary(256, 16, 256), 0)
+        << "an aligned 256-token prompt snapshots at 240 (< min): a restore must leave one token";
+    EXPECT_EQ(snapshot_boundary(512, 16, 256), 496)
+        << "an aligned prompt snapshots one block short, or the (n-1)/bs admission cap never matches it";
+    EXPECT_EQ(snapshot_boundary(513, 16, 256), 512);
     EXPECT_EQ(snapshot_boundary(1082, 16, 256), 1072);
     EXPECT_EQ(snapshot_boundary(1082, 32, 256), 1056) << "block size decides the alignment";
     EXPECT_EQ(snapshot_boundary(15, 16, 0), 0) << "under one block there is nothing to save";

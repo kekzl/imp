@@ -34,6 +34,13 @@ struct ShadowPlanProbe {
     size_t mandatory_cache_bytes = 0;
     size_t ssm_state_bytes = 0;
     size_t engine_persistent_bytes = 0;
+    // The pools the plan reads from FeatureSet and nobody used to write. The
+    // snapshot store was the loud one: `server.recurrent_snapshot_mb` (256 MiB
+    // by default) is cudaMalloc'd AFTER the KV pool is sized, so the plan sized
+    // the pool over memory another tenant of the same init was about to take.
+    size_t recurrent_snapshot_bytes = 0;
+    size_t spec_decode_bytes = 0;
+    size_t residual_ring_bytes = 0;
 
     // The charge the old pass cannot see (A1.5). 0 disables it.
     size_t library_reserve_bytes = 0;

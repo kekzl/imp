@@ -27,6 +27,13 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     in.model.mandatory_cache_bytes = probe.mandatory_cache_bytes;
 
     in.features.ssm_state_bytes = probe.ssm_state_bytes;
+    in.features.recurrent_snapshot_bytes = probe.recurrent_snapshot_bytes;
+    in.features.spec_decode_bytes = probe.spec_decode_bytes;
+    in.features.residual_ring_bytes = probe.residual_ring_bytes;
+    // features.vision_tower_bytes stays 0 deliberately: the tower is an engine
+    // ARENA tenant and the arena is already open when this probe is built, so
+    // its bytes are outside distributable_bytes. Charging it here would
+    // double-count it. The note at the bottom of the report says so.
     in.features.n_swa_layers = probe.n_swa_layers;
     in.features.swa_live_tokens = probe.swa_live_tokens;
 
@@ -53,7 +60,7 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
                                 : probe.n_kv_layers);
 
     std::string out;
-    char line[320];
+    char line[512];
     auto emit = [&](const char* fmt, auto... args) {
         // Without arguments `fmt` is still a runtime pointer as far as the
         // compiler can tell, so a stray '%' in it would read operands that were
@@ -73,7 +80,15 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     emit("  library reserve          %8.0f MiB  (%s)", probe.library_reserve_bytes / kMiB,
          probe.library_reserve_bytes ? "charged by both passes since #1109" : "disabled");
     if (probe.ssm_state_bytes)
-        emit("  SSM/GDN state            %8.0f MiB", probe.ssm_state_bytes / kMiB);
+        emit("  SSM/GDN state            %8.0f MiB  (%d slots)", probe.ssm_state_bytes / kMiB,
+             probe.max_batch_size);
+    if (probe.recurrent_snapshot_bytes)
+        emit("  recurrent snapshots      %8.0f MiB  (server.recurrent_snapshot_mb)",
+             probe.recurrent_snapshot_bytes / kMiB);
+    if (probe.spec_decode_bytes)
+        emit("  speculative staging      %8.0f MiB", probe.spec_decode_bytes / kMiB);
+    if (probe.residual_ring_bytes)
+        emit("  residual FP16 ring       %8.0f MiB", probe.residual_ring_bytes / kMiB);
     if (probe.engine_persistent_bytes)
         emit("  engine-persistent        %8.0f MiB", probe.engine_persistent_bytes / kMiB);
 
@@ -93,6 +108,37 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         }
         out += '\n';
     }
+
+    // Both pool ceilings, in the same unit an operator thinks in: sequences.
+    // The two pools are sized by different rules - the recurrent state is a
+    // fixed pre-charge of max_batch_size slots, the KV pool takes whatever
+    // residual is left - so nothing makes them agree, and when they disagree
+    // the state was bought for slots the KV pool cannot serve at full context.
+    // Printed in BOTH branches: a rejected plan is exactly when the operator
+    // needs to know which of the two ceilings is the binding one.
+    const int recurrent_seqs = probe.max_batch_size;
+    const int kv_seqs =
+        shadow.plan.kv.blocks_per_seq > 0 ? shadow.plan.kv.blocks / shadow.plan.kv.blocks_per_seq : 0;
+    // The context at which ALL recurrent slots fit: the pool in tokens, split N
+    // ways. Without it the common shape (max_seq_len 131072 on a 4596-block
+    // pool: M = 0) reads "KV 0 seqs" and names two knobs with no target for
+    // either. 4596 x 16 / 28 = 2626 tokens is the answer the operator needs.
+    const int ctx_all = recurrent_seqs > 0
+                            ? shadow.plan.kv.blocks * probe.kv_block_size / recurrent_seqs
+                            : 0;
+    emit("  ceiling: recurrent %d seqs, KV %d seqs at max_seq_len %d (%d blocks/seq), all %d seqs at "
+         "<= %d tokens",
+         recurrent_seqs, kv_seqs, probe.max_seq_len, shadow.plan.kv.blocks_per_seq, recurrent_seqs,
+         ctx_all);
+    // Only where there IS per-slot state to over-buy. A dense pool that holds
+    // fewer full-context sequences than max_batch_size is ordinary continuous
+    // batching: nothing was pre-charged per slot, so nothing was wasted.
+    if (probe.ssm_state_bytes > 0 && kv_seqs < recurrent_seqs)
+        emit("  WARN: the KV pool serves %d of the %d recurrent slots at max_seq_len %d; all %d fit "
+             "only up to %d tokens of context (%d blocks x %d). Set runtime.max_seq_len=%d, or "
+             "lower runtime.max_batch_size",
+             kv_seqs, recurrent_seqs, probe.max_seq_len, recurrent_seqs, ctx_all,
+             shadow.plan.kv.blocks, probe.kv_block_size, ctx_all);
 
     // Say what is NOT modelled rather than implying full coverage.
     if (!probe.workspace_estimate_available)

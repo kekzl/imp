@@ -21,6 +21,7 @@
 #include "memory/vram_query.h"
 #include "memory/kv_cache.h"
 #include "memory/plan.h"
+#include "memory/ssm_state_size.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/scheduler.h"
 
@@ -481,14 +482,21 @@ void Engine::init_resolve_kv_dtype_policy_() {
             if (mcfg.ssm_inner_size > 0 && mcfg.ssm_state_size > 0) {
                 int n_ssm = (kv_layers < mcfg.n_layers) ? (mcfg.n_layers - kv_layers)
                                                         : mcfg.n_layers;
-                int ssm_heads = mcfg.ssm_dt_rank > 0 ? mcfg.ssm_dt_rank : 1;
-                int ssm_hd = mcfg.ssm_inner_size / ssm_heads;
-                // h state FP32-conservative (GDN pins FP32; Mamba2 may resolve
-                // FP16 later) + conv state FP16.
-                size_t h_b = static_cast<size_t>(ssm_heads) * ssm_hd * mcfg.ssm_state_size * 4;
-                size_t conv_b =
-                    static_cast<size_t>(mcfg.ssm_conv_channels()) * mcfg.ssm_conv_kernel * 2;
-                per_slot_state = (h_b + conv_b) * static_cast<size_t>(n_ssm);
+                const int ssm_heads = mcfg.ssm_dt_rank > 0 ? mcfg.ssm_dt_rank : 1;
+                // memory/ssm_state_size.h, F32 h state: this runs BEFORE
+                // init_resolve_ssm_dtype_ picks the storage dtype, so it prices
+                // the widest one on purpose. The header's conv term (full
+                // kernel width, 256-byte aligned) is larger than the 2-byte
+                // estimate this site used to carry, which keeps the
+                // conservatism and removes the fourth copy of the formula.
+                const SsmStateGeometry geom{n_ssm,
+                                            mcfg.ssm_conv_channels(),
+                                            mcfg.ssm_conv_kernel,
+                                            ssm_heads,
+                                            mcfg.ssm_inner_size / ssm_heads,
+                                            mcfg.ssm_state_size,
+                                            QType::F32};
+                per_slot_state = ssm_bytes_per_slot(geom);
             }
             size_t per_slot = per_tok_kv * static_cast<size_t>(kRefCtxTokens) + per_slot_state;
             if (per_slot > 0) {
