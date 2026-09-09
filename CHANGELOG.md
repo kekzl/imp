@@ -35,16 +35,6 @@ there instead of retelling it.
   the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`.
   The CUDA-graph loop used the fraction alone (at `max_tokens` 4096: 2048 against the host rule's 3072)
 
-### Fixed
-
-- `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
-  to false, at either gate (the scheduler branch and the #1003 pipeline yield that reaches it):
-  round-robin batched verify was off on every dense model running MTP alone
-- The 512 MiB NVFP4 dequant cap no longer counts the LM head, which never takes the M > 1 dequant
-  fallback it guards: 2425 MiB against a 170 MiB largest eligible plane on Qwen3.8-27B-NVFP4
-- `kv_cache.dtype=fp8` on a head_dim != 128 model logs the fast-kernel miss at init; the FP8 four-token
-  and GQA-lane decode kernels are head_dim-128 instances and the pin silently bought the scalar path
-
 ### Changed
 
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
@@ -119,6 +109,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
+  to false, at either gate (the scheduler branch and the #1003 pipeline yield that reaches it):
+  round-robin batched verify was off on every dense model running MTP alone
+- The 512 MiB NVFP4 dequant cap no longer counts the LM head, which never takes the M > 1 dequant
+  fallback it guards: 2425 MiB against a 170 MiB largest eligible plane on Qwen3.8-27B-NVFP4
+- `kv_cache.dtype=fp8` on a head_dim != 128 model logs the fast-kernel miss at init; the FP8 four-token
+  and GQA-lane decode kernels are head_dim-128 instances and the pin silently bought the scalar path
 - `imp-cli` and embedded `src/api` callers get the think budget on prompt-injected `<think>` templates:
   `add_request` seeded `in_think_block` but never `started_in_think`, so the recount saw 0 reasoning tokens.
   imp-server already seeded both (`build_imp_request_`, #784) and is unaffected
