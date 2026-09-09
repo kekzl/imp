@@ -303,6 +303,22 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
                 (void)executor_->resize_workspace(chunk_len, pf_stream);
             }
         }
+
+        // hybrid_prefix_reuse_limit_ attached a snapshot when it computed the
+        // cap above, and that snapshot is only valid if the prefill actually
+        // resumes at the snapshot's OWN boundary. The scheduler drops it on a
+        // mismatch (scheduler.cpp) and this branch had no counterpart: the skip
+        // here is `prefix_reused - 1` blocks and then clamped, so a restore at
+        // block b could be paired with a prefill resuming at block b-1, i.e. a
+        // recurrent state one block ahead of the KV it continues from. Dropping
+        // it costs a full prefill; keeping it corrupts the answer silently.
+        if (req->recurrent_restore && req->recurrent_restore->n_tokens != req->cached_tokens) {
+            IMP_LOG_WARN(
+                "PrefixCache: seq %d snapshot boundary %d != %d skipped tokens - discarding the "
+                "recurrent snapshot and prefilling from scratch",
+                req->id, req->recurrent_restore->n_tokens, req->cached_tokens);
+            req->recurrent_restore.reset();
+        }
     } else {
         int additional = num_blocks - existing;
         if (additional > 0) {

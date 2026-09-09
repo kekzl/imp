@@ -439,6 +439,19 @@ TEST(SsmStatePool, PinsTheQwen38GeometryTheAllocatorTakes) {
     EXPECT_EQ(ssm_h_bytes_per_layer(qwen38_gdn(QType::F32)), 2 * ssm_h_bytes_per_layer(g));
 }
 
+TEST(SsmStatePool, AFailedPoolIsFatalOnlyForModelsThatHaveRecurrentLayers) {
+    // `Failed to init SSM state, continuing without it` served a hybrid whose
+    // GDN layers then read a null slab: fluent garbage for every request, one
+    // WARN at startup. The decision is pure, so the CPU lane pins it even
+    // though the allocation that triggers it needs a device.
+    EXPECT_TRUE(must_refuse_without_ssm_state(/*n_ssm_layers=*/48, /*pool_init_ok=*/false));
+    EXPECT_FALSE(must_refuse_without_ssm_state(48, true)) << "a pool that came up is not a refusal";
+    EXPECT_FALSE(must_refuse_without_ssm_state(0, false))
+        << "a dense model has no recurrent layers and must not be refused";
+    EXPECT_FALSE(must_refuse_without_ssm_state(0, true));
+    EXPECT_TRUE(must_refuse_without_ssm_state(1, false)) << "one GDN layer is enough to corrupt";
+}
+
 TEST(SsmStatePool, FailureMessageNamesSlotsLayersFreeAndTheLever) {
     // `Failed to allocate SSM state pool (5335154688 bytes)` was the whole
     // message: no slot count, no free figure, no knob.
@@ -563,6 +576,73 @@ TEST(ShadowPlan, NoCeilingWarningWhenBothPoolsServeTheBatch) {
     const std::string dr = shadow_plan_report(d, dres, /*live_kv_blocks=*/2048);
     EXPECT_NE(dr.find("ceiling: recurrent 64 seqs"), std::string::npos) << dr;
     EXPECT_EQ(dr.find("WARN"), std::string::npos) << "no state was bought per slot:\n" << dr;
+}
+
+TEST(ShadowPlan, CeilingAtZeroKvSeqsNamesTheContextThatFits) {
+    // The shipping shape: a 131072-token max_seq_len against a pool of a few
+    // thousand blocks makes blocks_per_seq exceed blocks, so M is 0. "KV 0 seqs"
+    // plus "lower runtime.max_batch_size or runtime.max_seq_len" named two knobs
+    // and no target for either. The pool DOES serve all N slots - at a shorter
+    // context - and that number is the answer.
+    auto p = hybrid_probe();
+    p.max_seq_len = 131072;
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(res) << res.failure.report();
+    ASSERT_GT(res.plan.kv.blocks, 0) << "fixture must still buy a pool, only a short one";
+    ASSERT_GT(res.plan.kv.blocks_per_seq, res.plan.kv.blocks) << "this arm exists for M == 0";
+    const int kv_seqs = res.plan.kv.blocks / res.plan.kv.blocks_per_seq;
+    ASSERT_EQ(kv_seqs, 0);
+
+    const int ctx_all = res.plan.kv.blocks * p.kv_block_size / p.max_batch_size;
+    ASSERT_GT(ctx_all, 0);
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/res.plan.kv.blocks);
+    EXPECT_NE(r.find("all 41 seqs at <= " + std::to_string(ctx_all) + " tokens"), std::string::npos)
+        << "the ceiling line must state what the pool DOES serve:\n" << r;
+    EXPECT_NE(r.find("Set runtime.max_seq_len=" + std::to_string(ctx_all)), std::string::npos)
+        << "a WARN that names a knob without a target is not actionable:\n" << r;
+    // The whole WARN has to survive the emit buffer: its last words are the
+    // second lever, so a truncation loses exactly the actionable half.
+    EXPECT_NE(r.find("lower runtime.max_batch_size"), std::string::npos)
+        << "the WARN was truncated by the emit buffer:\n" << r;
+}
+
+TEST(ShadowPlan, ChargesTheRecurrentSnapshotStoreAgainstTheKvPool) {
+    // The headline of MEMORY.md D15: the snapshot store cudaMallocs
+    // server.recurrent_snapshot_mb AFTER the KV pool is sized. If the probe
+    // field does not reach the plan, the pool is sized over those bytes and
+    // nothing downstream notices - which is what shadow_plan_input did.
+    // 64 MiB rather than the 256 MiB default, and the budget carries the charge
+    // on top: both arms must FIT, or the comparison would be against a
+    // rejection instead of against a smaller pool. The mechanism is the same at
+    // either size.
+    const size_t snap = 64 * kMiB;
+    auto base = hybrid_probe();
+    base.distributable_bytes += snap;
+    auto with = base;
+    with.recurrent_snapshot_bytes = snap;
+    const auto res_with = plan_memory(shadow_plan_input(with));
+    ASSERT_TRUE(res_with) << res_with.failure.report();
+    const auto res_without = plan_memory(shadow_plan_input(base));
+    ASSERT_TRUE(res_without) << res_without.failure.report();
+
+    // Its own line, carrying exactly the probe's bytes.
+    const PlanLine* line = nullptr;
+    for (const auto& l : res_with.plan.lines())
+        if (l.tag == RegionTag::RecurrentSnapshots)
+            line = &l;
+    ASSERT_NE(line, nullptr) << "the snapshot store has no plan line";
+    EXPECT_EQ(line->bytes, snap);
+
+    // And it comes out of the KV residual, not out of nothing.
+    EXPECT_LT(res_with.plan.kv.bytes, res_without.plan.kv.bytes)
+        << "a charge that does not shrink the pool was not charged";
+    EXPECT_EQ(res_without.plan.kv.bytes - res_with.plan.kv.bytes,
+              static_cast<size_t>(res_without.plan.kv.blocks - res_with.plan.kv.blocks) *
+                  with.kv_block_bytes_per_layer * static_cast<size_t>(with.n_kv_layers));
+
+    const std::string r = shadow_plan_report(with, res_with, /*live_kv_blocks=*/0);
+    EXPECT_NE(r.find("recurrent snapshots"), std::string::npos) << r;
+    EXPECT_NE(r.find("server.recurrent_snapshot_mb"), std::string::npos) << r;
 }
 
 TEST(ShadowPlan, ARejectedPlanStillStatesTheCeilings) {

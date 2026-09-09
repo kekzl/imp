@@ -68,6 +68,16 @@ inline size_t ssm_pool_bytes(const SsmStateGeometry& g, int slots, int reserved_
     return ssm_bytes_per_slot(g) * static_cast<size_t>(n);
 }
 
+// Whether a failed state-pool allocation must stop the load. A model with
+// recurrent layers whose state slab is missing does not degrade: every GDN
+// layer reads a null pointer and the output is garbage for every request,
+// while the only signal used to be one WARN at startup ("Failed to init SSM
+// state, continuing without it"). A dense model has no such layers and is
+// unaffected, which is the distinction this predicate exists to make.
+inline bool must_refuse_without_ssm_state(int n_ssm_layers, bool pool_init_ok) {
+    return n_ssm_layers > 0 && !pool_init_ok;
+}
+
 // What the operator is told when the pool is refused. Pure, so the CPU lane can
 // pin the four things that make the refusal actionable: which pool, how big,
 // how many slots it was for, and the knob that shrinks it. The old message was

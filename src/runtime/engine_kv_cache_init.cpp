@@ -14,6 +14,7 @@
 #include "memory/vram_query.h"
 #include "memory/library_reserve_cache.h"
 #include "memory/plan.h"
+#include "memory/ssm_state_size.h"
 #include "runtime/plan_shadow.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
@@ -862,9 +863,11 @@ bool Engine::init_kv_cache() {
             int n_heads = mcfg.ssm_dt_rank;
             int hd = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_state_ = std::make_unique<SSMState>();
-            if (!ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
-                                  mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_,
-                                  ssm_reserved_slots)) {
+            const bool ssm_pool_ok =
+                ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
+                                 mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_,
+                                 ssm_reserved_slots);
+            if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
                 // NOT "continuing without it". A GDN/SSM layer whose recurrent
                 // state is missing reads a null slab: the model produces
                 // garbage for every request, and the only signal was one WARN

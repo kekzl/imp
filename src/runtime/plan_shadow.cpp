@@ -60,7 +60,7 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
                                 : probe.n_kv_layers);
 
     std::string out;
-    char line[320];
+    char line[512];
     auto emit = [&](const char* fmt, auto... args) {
         // Without arguments `fmt` is still a runtime pointer as far as the
         // compiler can tell, so a stray '%' in it would read operands that were
@@ -119,16 +119,26 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     const int recurrent_seqs = probe.max_batch_size;
     const int kv_seqs =
         shadow.plan.kv.blocks_per_seq > 0 ? shadow.plan.kv.blocks / shadow.plan.kv.blocks_per_seq : 0;
-    emit("  ceiling: recurrent %d seqs, KV %d seqs at max_seq_len %d (%d blocks/seq)", recurrent_seqs,
-         kv_seqs, probe.max_seq_len, shadow.plan.kv.blocks_per_seq);
+    // The context at which ALL recurrent slots fit: the pool in tokens, split N
+    // ways. Without it the common shape (max_seq_len 131072 on a 4596-block
+    // pool: M = 0) reads "KV 0 seqs" and names two knobs with no target for
+    // either. 4596 x 16 / 28 = 2626 tokens is the answer the operator needs.
+    const int ctx_all = recurrent_seqs > 0
+                            ? shadow.plan.kv.blocks * probe.kv_block_size / recurrent_seqs
+                            : 0;
+    emit("  ceiling: recurrent %d seqs, KV %d seqs at max_seq_len %d (%d blocks/seq), all %d seqs at "
+         "<= %d tokens",
+         recurrent_seqs, kv_seqs, probe.max_seq_len, shadow.plan.kv.blocks_per_seq, recurrent_seqs,
+         ctx_all);
     // Only where there IS per-slot state to over-buy. A dense pool that holds
     // fewer full-context sequences than max_batch_size is ordinary continuous
     // batching: nothing was pre-charged per slot, so nothing was wasted.
     if (probe.ssm_state_bytes > 0 && kv_seqs < recurrent_seqs)
-        emit("  WARN: the KV pool serves %d of the %d recurrent slots at full context - state is "
-             "paid for slots the KV pool cannot serve (lower runtime.max_batch_size or "
-             "runtime.max_seq_len)",
-             kv_seqs, recurrent_seqs);
+        emit("  WARN: the KV pool serves %d of the %d recurrent slots at max_seq_len %d; all %d fit "
+             "only up to %d tokens of context (%d blocks x %d). Set runtime.max_seq_len=%d, or "
+             "lower runtime.max_batch_size",
+             kv_seqs, recurrent_seqs, probe.max_seq_len, recurrent_seqs, ctx_all,
+             shadow.plan.kv.blocks, probe.kv_block_size, ctx_all);
 
     // Say what is NOT modelled rather than implying full coverage.
     if (!probe.workspace_estimate_available)

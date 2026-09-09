@@ -311,7 +311,11 @@ constexpr const char* kLongPrompt =
 
 TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
-        GTEST_SKIP() << "not a recurrent model: the snapshot store is not built for dense models";
+        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: this test covers the recurrent-snapshot "
+                        "restore path and IMP_TEST_MODEL points at a model with ssm_inner_size == 0. "
+                        "The `test-e2e` Makefile target runs it in its own container against "
+                        "IMP_TEST_MODEL_GDN; a run of PrefixCacheE2ETest.* against a dense model "
+                        "leaves the hybrid half of prefix caching UNCOVERED.";
 
     ImpConfig cfg = imp_config_default();
     cfg.max_seq_len = 2048;

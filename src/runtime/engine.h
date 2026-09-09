@@ -448,9 +448,11 @@ private:
     std::atomic<uint64_t> kv_pressure_rejections_{0};
     std::atomic<uint64_t> streaming_kv_auto_enables_{0};
     std::atomic<uint64_t> streaming_kv_evicted_blocks_{0};
-    // Once per process: the >90 % pressure trigger fired on a KV dtype that has
+    // Once per ENGINE: the >90 % pressure trigger fired on a KV dtype that has
     // no StreamingLLM valve. Per step it would flood the log for the rest of
-    // the run; per process it is the one line that says the pool is at the wall.
+    // the run; once is the one line that says the pool is at the wall. A model
+    // swap builds a new Engine and warns again, which is correct - it is a new
+    // pool with a new dtype.
     std::atomic_flag kv_pressure_no_valve_warned_ = ATOMIC_FLAG_INIT;
     std::atomic<uint64_t> graph_repromotions_{0};
     std::unique_ptr<GraphExecutor> executor_;

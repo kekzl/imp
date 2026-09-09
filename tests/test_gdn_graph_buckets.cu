@@ -73,7 +73,10 @@ protected:
         const ImpModelFormat fmt = is_safetensors_dir(path) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
         ASSERT_EQ(imp_model_load(path.c_str(), fmt, &model_), IMP_SUCCESS);
         if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
-            GTEST_SKIP() << "not a recurrent model: there are no GDN slot buckets to compare";
+            GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: " << path
+                         << " has ssm_inner_size == 0, so there is no per-sequence recurrent slot "
+                            "and no bucket to compare. Point IMP_TEST_MODEL_GDN at a GDN/SSM "
+                            "checkpoint (the `test-e2e` target does).";
 
         ImpConfig cfg = imp_config_default();
         cfg.max_seq_len = 1024;

@@ -211,6 +211,16 @@ test-e2e: build
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-Q8_0.gguf \
 		-e IMP_TEST_GGUF=/models/Qwen3-8B-Q8_0.gguf \
 		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*"
+	@# The hybrid recurrent paths: the snapshot restore and the decode-graph
+	@# buckets. Both skip on a dense checkpoint, and every line above loads a
+	@# dense one, so without this container they run from NO target - the
+	@# AUDIT_arch_2026 I-1 escape class again. Own container, GDN checkpoint.
+	@# HybridSnapshotRestoreMatchesFresh needs a prompt past 512 tokens and
+	@# asserts that rather than skipping, so a wrong checkpoint fails here.
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
+		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:GdnGraphBucketTest.*"
 	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
 	@# loader + RoPE path the #503 class shipped prompt-blind on).
 	docker run --rm --gpus all -v $(HOME)/models:/models \
