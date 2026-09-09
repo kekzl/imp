@@ -80,6 +80,25 @@ jobs:
         with:
           fetch-depth: 0  # full history so the base SHA is present for `git diff`
 
+      # git refuses this checkout on ownership inside the container: the
+      # Actions runner owns /__w/imp/imp and the job's user does not. Without
+      # this, any gate that shells out to git dies - check-release.sh:55 got an
+      # empty `git rev-parse` and cd'd to nothing, which failed the required
+      # check for a reason that had nothing to do with the tree.
+      #
+      # This has to come BEFORE the detection step below, and did not: the step
+      # was the FIRST git caller in the job, its `git cat-file` died on exactly
+      # this ownership refusal with stderr suppressed, and the fail-open handed
+      # back code=true on every run. Proof from run 34412431017, whose diff is
+      # two files and neither is code:
+      #   non-docs changes: code=true (src|tools .cpp: true)
+      #   changed files:
+      # with nothing after "changed files:" - an empty `files`, so no `git diff`
+      # ever ran. The docs-only skip this step exists for had therefore never
+      # fired once, which is why a docs-only PR still paid a ~4 min Build.
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       # Docs-only changes (only **/*.md or docs/** touched) skip the expensive
       # CUDA build/test below but still report the required `Build` check as
       # success — every heavy step is gated on steps.changes.outputs.code, so the
@@ -99,6 +118,14 @@ jobs:
           # it does that on most PRs here, which are .cu, .py or .md. Same
           # FAIL-OPEN rule as `code`: any uncertainty runs the job.
           cpp=true
+          # Say so when the fail-open fires. Without this the step prints a
+          # perfectly normal-looking `code=true` and an empty file list, which
+          # is what let a permanently-open gate go unnoticed: it looks the same
+          # as a genuine code PR. A run that cannot resolve its base is a
+          # detection that is not running, and should read as one.
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "::warning::change detection fell open (base '${base:-<unset>}' unresolvable) - every gated step runs"
+          fi
           if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             files="$(git diff --name-only "$base" HEAD)"
             # code stays true unless EVERY changed file is markdown or under docs/.
@@ -133,14 +160,6 @@ jobs:
       # so `which gate failed` keeps a check name and there is one list, not two.
       # Runs on docs-only PRs too: the docs and release-hygiene gates are exactly
       # the ones a docs-only change can break.
-      # git refuses this checkout on ownership inside the container: the
-      # Actions runner owns /__w/imp/imp and the job's user does not. Without
-      # this, any gate that shells out to git dies - check-release.sh:55 got an
-      # empty `git rev-parse` and cd'd to nothing, which failed the required
-      # check for a reason that had nothing to do with the tree.
-      - name: Trust the checkout (container UID differs from the runner's)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
       - name: Static gates (blocking, before the build)
         run: bash scripts/ci_static_gates.sh
 

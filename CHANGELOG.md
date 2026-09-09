@@ -121,6 +121,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- CI change detection ran `git` before the step that marks the checkout a safe directory, so its
+  `git cat-file` died on the ownership refusal and the fail-open returned `code=true` every run:
+  the docs-only skip had never once fired, and a fall-open now says so with a `::warning::`
 - `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
   to false, at either gate (the scheduler branch and the #1003 pipeline yield that reaches it):
   round-robin batched verify was off on every dense model running MTP alone
