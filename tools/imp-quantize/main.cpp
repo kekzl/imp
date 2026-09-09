@@ -74,6 +74,7 @@
 #include "awq.h"
 #include "checkpoint_out.h"
 #include "fp8_source.h"
+#include "quant_report.h"
 #include "tensor_policy.h"
 
 #include "core/tensor.h"
@@ -139,10 +140,14 @@ void usage() {
         "                  imp-cli --model DIR --perplexity <corpus> --calibrate FILE\n"
         "                Without it the quantization is plain round-to-nearest,\n"
         "                which costs measurably more quality (see the header).\n"
-        "  --calib-groups ABCD\n"
-        "                Which AWQ scale groups run (default ABCD).\n"
+        "  --calib-groups ABCDEG\n"
+        "                Which AWQ scale groups run (default ABCDEG).\n"
         "                  A q,k,v  <- input_layernorm        C o_proj   <- v_proj\n"
         "                  B gate,up<- post_attention_norm    D down_proj<- up_proj\n"
+        "                  G linear_attn.in_proj_* <- input_layernorm   (qwen3_5 GDN)\n"
+        "                  E linear_attn.out_proj  <- linear_attn.norm  (qwen3_5 GDN)\n"
+        "                E and G exist only on the GDN hybrids and are NOT measured\n"
+        "                against an uncalibrated twin yet.\n"
         "                The ATTENTION groups (A, C) are what breaks on wide GQA:\n"
         "                on Qwen3-14B (n_rep=5) ABCD costs +2.68 PPL while BD --\n"
         "                the two FFN groups -- GAINS 0.13 over round-to-nearest.\n"
@@ -179,11 +184,17 @@ const std::vector<float>& plan_vec(const std::map<std::string, std::vector<float
 
 // A fresh copy of a 1-D producer with 1/s folded in, in the tensor's ORIGINAL
 // dtype — the loader reads these by dtype, so widening here would be a format
-// change rather than a fix.
-std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<float>& div, bool& ok) {
+// change rather than a fix. It would also be a WRONG fix on a unit-offset norm:
+// src/model/weight_upload.cu adds the +1 on BF16-source paths only, so an F32
+// copy of the same norm would load without the offset.
+//
+// `offset` is the plan's, not this function's guess: a norm folded as if it
+// were plain produces a checkpoint that loads and is a different model.
+std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<float>& div, NormOffset offset,
+                                       bool& ok) {
     std::vector<unsigned char> out(t.nbytes);
     std::memcpy(out.data(), t.data, t.nbytes);
-    ok = awq_apply_vector_div(out.data(), static_cast<size_t>(t.numel()), t.dtype, div);
+    ok = awq_apply_vector_div(out.data(), static_cast<size_t>(t.numel()), t.dtype, div, offset);
     return out;
 }
 
@@ -372,6 +383,12 @@ int main(int argc, char** argv) {
         usage();
         return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
     }
+    // What this export IS, before it starts. The tool has been EXPERIMENTAL in
+    // a source comment and a doc heading since it shipped and said so nowhere
+    // an operator would see it; the calibrated arm prints the same line with
+    // its sample count once the calibration file has been read.
+    if (opt.calib_file.empty())
+        printf("%s\n", quantize::experimental_banner(/*calibrated=*/false, 0).c_str());
 
     std::vector<fs::path> shards;
     std::error_code ec;
@@ -488,10 +505,10 @@ int main(int argc, char** argv) {
             // by s whose columns were never multiplied by it: a wrong
             // checkpoint that loads and generates.
             //
-            // Unreachable today only because every arch with a fused attention
-            // gate (qwen3_5, qwen3_next) fails arch_uses_plain_rmsnorm() — i.e.
-            // it is armed for whoever widens that allowlist. Refuse rather than
-            // mangle, the same call #1188 made for stacked experts.
+            // Reachable since the norm-convention table admitted qwen3_5 and
+            // qwen3_next, which are exactly the architectures with a fused
+            // attention gate. Refuse rather than mangle, the same call #1188
+            // made for stacked experts.
             if (opt.keep_attn_gate && !opt.calib_file.empty()) {
                 fprintf(stderr,
                         "Error: --keep-attn-gate cannot be combined with --calib. The gate half is\n"
@@ -534,6 +551,10 @@ int main(int argc, char** argv) {
         for (const auto& src : opened)
             for (const auto& t : src->tensors())
                 index[t.name] = &t;
+        uint64_t samples = 0;
+        for (const auto& e : stats.entries)
+            samples = std::max(samples, e.rows);
+        printf("%s\n", quantize::experimental_banner(/*calibrated=*/true, samples).c_str());
         printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
                stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
         auto built = awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(),
@@ -547,6 +568,8 @@ int main(int argc, char** argv) {
                plan.groups_rtn, plan.groups_skipped);
         if (plan.groups_disabled > 0)
             printf(", %d disabled (--calib-groups %s)", plan.groups_disabled, opt.calib_groups.c_str());
+        if (plan.channels_clamped > 0)
+            printf(", %d norm channel(s) clamped to what the dtype can store", plan.channels_clamped);
         printf("\n");
         for (const auto& n : plan.notes)
             printf("  note: %s\n", n.c_str());
@@ -667,6 +690,10 @@ int main(int argc, char** argv) {
     };
 
     size_t n_quantized = 0, n_copied = 0, n_moe_skipped = 0;
+    // What every quantized tensor cost, measured on the bytes that were
+    // written. Costs no GPU: the packed nibbles and micro-scales are already
+    // on the host at this point.
+    std::vector<quantize::TensorError> tensor_errors;
     size_t bytes_in = 0, bytes_out = 0;
     // Where the bytes that did NOT shrink went. A checkpoint that misses the
     // card by a gigabyte is a question about this table, not about the ratio:
@@ -758,6 +785,8 @@ int main(int argc, char** argv) {
                 quant_store.push_back(std::move(*quantized));
                 const Quantized& q = quant_store.back();
                 emit_quantized(out, scale_store, t.name, N, K, q);
+                tensor_errors.push_back(quantize::nvfp4_tensor_error(t.name, h.data(), q.packed.data(),
+                                                                     q.micro.data(), q.tensor_scale, N, K));
                 bytes_out += q.packed.size() + q.micro.size() + sizeof(float);
                 n_quantized++;
                 continue;
@@ -785,7 +814,10 @@ int main(int argc, char** argv) {
                 auto vd = plan.vec_div.find(t.name);
                 if (vd != plan.vec_div.end() && !opt.dry_run) {
                     bool folded = false;
-                    folded_store.push_back(folded_copy(t, vd->second, folded));
+                    const auto off = plan.vec_offset.find(t.name);
+                    folded_store.push_back(folded_copy(
+                        t, vd->second, off == plan.vec_offset.end() ? NormOffset::Plain : off->second,
+                        folded));
                     if (!folded) {
                         fprintf(stderr,
                                 "  %s: cannot fold the AWQ scale into a %s tensor of %lld elements "
@@ -824,6 +856,8 @@ int main(int argc, char** argv) {
             quant_store.push_back(std::move(*quantized));
             const Quantized& q = quant_store.back();
             emit_quantized(out, scale_store, t.name, N, K, q);
+            tensor_errors.push_back(quantize::nvfp4_tensor_error(t.name, h.data(), q.packed.data(),
+                                                                 q.micro.data(), q.tensor_scale, N, K));
             const size_t written = q.packed.size() + q.micro.size() + sizeof(float);
             // The forecast --dry-run printed is this same arithmetic. If the two
             // ever disagree the forecast has quietly become a guess, so say so
@@ -919,6 +953,15 @@ int main(int argc, char** argv) {
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     printf("\nsize: %.2f GiB -> %.2f GiB (%.2fx)%s", bytes_in / 1073741824.0, bytes_out / 1073741824.0,
            bytes_out ? double(bytes_in) / double(bytes_out) : 0.0, opt.dry_run ? " (forecast)" : "");
+    // What it cost, per tensor. Until this line existed the only number an
+    // operator could get out of an export was its size.
+    if (!opt.dry_run) {
+        printf("\n%s", quantize::format_error_summary(tensor_errors, 5).c_str());
+        if (const auto wrote = quantize::write_error_report(opt.out_dir, tensor_errors, plan.group_errors,
+                                                            !opt.calib_file.empty());
+            !wrote)
+            fprintf(stderr, "\n%s\n", wrote.error().c_str());
+    }
     report_copied_breakdown(copied_bytes_by_reason, bytes_out);
     report_card_fit(bytes_out);
     printf("\n");

@@ -6,6 +6,8 @@
 // product unchanged. If that ever stops holding, a "calibrated" checkpoint is
 // silently a different model, and no quantization metric would say so.
 
+#include "core/fp_bits.h"
+#include "quant/awq_norm_fold.h"
 #include "quant/awq_transform.h"
 #include "quant/calibration_stats.h"
 
@@ -214,6 +216,124 @@ TEST(AwqCalibration, VectorFoldRefusesWhatItCannotDo) {
     EXPECT_TRUE(awq_apply_vector_div(bytes, 4, "F32", std::vector<float>(4, 2.0f)));
     for (float f : v)
         EXPECT_FLOAT_EQ(f, 0.5f);
+}
+
+// ---------------------------------------------------------------------------
+// The unit-offset fold (Qwen3.5 / 3.6 / 3.8) and the storage hazard it carries.
+// ---------------------------------------------------------------------------
+
+// The real worst channel of Qwen3.8-27B: layer 0's post_attention_layernorm
+// stores -0.99609375, so the gain the kernel applies is 2^-8.
+constexpr float kWorstDelta = -0.99609375f;
+constexpr float kWorstGain = 0.00390625f;
+
+// The identity the whole family rests on: (1 + g') == (1 + g)/s.
+TEST(AwqNormFold, UnitOffsetFoldDividesTheGain) {
+    for (float g : {0.25f, -0.5f, 1.5f, -0.05f}) {
+        for (float s : {0.5f, 1.25f, 2.0f}) {
+            const float stored = awq_fold_norm_value(g, s, NormOffset::Unit);
+            EXPECT_NEAR(awq_norm_gain(stored, NormOffset::Unit), (1.0f + g) / s, 1e-6f)
+                << "g=" << g << " s=" << s;
+            // The plain rule on the same input divides the DELTA, which is a
+            // different model whenever the offset is real.
+            EXPECT_NEAR(awq_fold_norm_value(g, s, NormOffset::Plain), g / s, 1e-6f);
+        }
+    }
+}
+
+// Storing that identity in BF16 is where it breaks, and by how much.
+TEST(AwqNormFold, BF16LosesTheNearZeroGainChannel) {
+    struct Case {
+        float s;
+        float min_loss;
+    };
+    // Measured on the checkpoint: 25 % at 1.25, 50 % at 1.5, and at s >= 2 the
+    // stored delta saturates to exactly -1 and the channel is deleted.
+    for (const Case c : {Case{1.25f, 0.24f}, Case{1.5f, 0.49f}, Case{2.0f, 0.99f}}) {
+        const float err = awq_fold_gain_error(kWorstDelta, c.s, NormOffset::Unit, "BF16");
+        EXPECT_GT(err, c.min_loss) << "s=" << c.s;
+    }
+    // s = 2 is the annihilation case: the recovered gain is exactly zero.
+    const float stored = awq_round_to_dtype(awq_fold_norm_value(kWorstDelta, 2.0f, NormOffset::Unit), "BF16");
+    EXPECT_FLOAT_EQ(stored, -1.0f);
+    EXPECT_FLOAT_EQ(awq_norm_gain(stored, NormOffset::Unit), 0.0f);
+    // F32 storage is not the fix (the loader applies +1 on BF16 paths only) but
+    // it is the proof that the dtype, not the algebra, is what fails.
+    EXPECT_LT(awq_fold_gain_error(kWorstDelta, 2.0f, NormOffset::Unit, "F32"), 1e-6f);
+}
+
+// The clamp keeps the channel instead of deleting it: never a gain of zero,
+// always inside the bound, and never a divisor further from 1 than asked for.
+TEST(AwqNormFold, ClampKeepsTheChannelInsideTheBound) {
+    constexpr float kTol = 0.01f;
+    for (float s : {1.25f, 1.5f, 2.0f, 4.0f}) {
+        const float clamped = awq_clamp_norm_divisor(kWorstDelta, s, NormOffset::Unit, "BF16", kTol);
+        EXPECT_LT(clamped, s) << "s=" << s;
+        EXPECT_GE(clamped, 1.0f) << "s=" << s;
+        EXPECT_LE(awq_fold_gain_error(kWorstDelta, clamped, NormOffset::Unit, "BF16"), kTol) << "s=" << s;
+        const float stored = awq_round_to_dtype(awq_fold_norm_value(kWorstDelta, clamped, NormOffset::Unit),
+                                                "BF16");
+        EXPECT_GT(awq_norm_gain(stored, NormOffset::Unit), 0.0f) << "channel deleted at s=" << s;
+    }
+    // A healthy channel is not touched: the bound already holds, so the search
+    // must return the divisor unchanged rather than something near it.
+    EXPECT_FLOAT_EQ(awq_clamp_norm_divisor(0.25f, 1.5f, NormOffset::Unit, "BF16", kTol), 1.5f);
+}
+
+// A plain norm stores g/s, whose relative error is a half-ulp by construction,
+// so the clamp is a no-op there. That is what makes it safe to run the same
+// code on every architecture.
+TEST(AwqNormFold, PlainSitesAreNeverClamped) {
+    for (float g : {kWorstDelta, 0.87f, -0.5f}) {
+        for (float s : {1.25f, 2.0f, 4.0f}) {
+            EXPECT_LT(awq_fold_gain_error(g, s, NormOffset::Plain, "BF16"), 0.01f);
+            EXPECT_FLOAT_EQ(awq_clamp_norm_divisor(g, s, NormOffset::Plain, "BF16", 0.01f), s);
+        }
+    }
+}
+
+TEST(AwqNormFold, ClampReportCountsAndBoundsWhatItMoved) {
+    // Source values as a BF16 tensor holds them: a fold reads stored bytes, and
+    // -0.9f is not a BF16 value, so a raw literal would charge the fold for the
+    // rounding the checkpoint had already done.
+    std::vector<float> g;
+    for (float v : {kWorstDelta, 0.25f, -0.9f, -0.99f})
+        g.push_back(bf16_to_float(float_to_bf16(v)));
+    std::vector<float> div = {2.0f, 2.0f, 2.0f, 2.0f};
+    NormFoldReport rep;
+    awq_clamp_norm_divisors(g.data(), g.size(), NormOffset::Unit, "BF16", 0.01f, div, rep);
+    EXPECT_EQ(rep.channels, 4u);
+    EXPECT_GE(rep.clamped, 1u);
+    EXPECT_LT(rep.clamped, 4u) << "a healthy channel must not be clamped";
+    EXPECT_LE(rep.worst_rel_err, 0.01f);
+    EXPECT_FLOAT_EQ(div[1], 2.0f) << "g = 0.25 is representable at s = 2";
+    EXPECT_LT(div[0], 2.0f);
+    // The clamped divisor is the one the consumer must use, so the product it
+    // reconstructs is the folded gain times that divisor.
+    for (size_t j = 0; j < g.size(); j++) {
+        const float stored = awq_round_to_dtype(awq_fold_norm_value(g[j], div[j], NormOffset::Unit), "BF16");
+        const float recovered = awq_norm_gain(stored, NormOffset::Unit) * div[j];
+        const float want = awq_norm_gain(g[j], NormOffset::Unit);
+        EXPECT_NEAR(recovered, want, 0.01f * std::fabs(want) + 1e-7f) << "channel " << j;
+    }
+}
+
+// The writer's side: the same offset must reach the bytes, or the plan and the
+// checkpoint describe different models.
+TEST(AwqNormFold, VectorFoldWritesTheOffsetAwareValue) {
+    std::vector<uint16_t> bf16 = {float_to_bf16(0.25f), float_to_bf16(kWorstDelta)};
+    std::vector<uint16_t> plain = bf16;
+    const std::vector<float> div = {2.0f, 1.0f};
+    auto* off_bytes = reinterpret_cast<unsigned char*>(bf16.data());
+    auto* plain_bytes = reinterpret_cast<unsigned char*>(plain.data());
+    ASSERT_TRUE(awq_apply_vector_div(off_bytes, 2, "BF16", div, NormOffset::Unit));
+    ASSERT_TRUE(awq_apply_vector_div(plain_bytes, 2, "BF16", div, NormOffset::Plain));
+    EXPECT_NE(bf16[0], plain[0]) << "the offset must change what is stored";
+    EXPECT_NEAR(1.0f + bf16_to_float(bf16[0]), 1.25f / 2.0f, 0.01f);
+    EXPECT_NEAR(bf16_to_float(plain[0]), 0.25f / 2.0f, 0.01f);
+    // Divisor 1 is a no-op under both conventions.
+    EXPECT_EQ(bf16[1], float_to_bf16(kWorstDelta));
+    EXPECT_EQ(plain[1], float_to_bf16(kWorstDelta));
 }
 
 // A wrong-length plan vector must be ignored rather than partially applied:

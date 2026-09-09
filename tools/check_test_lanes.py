@@ -240,7 +240,10 @@ def main():
     # QkNormRopeFusedTest.MatchesNormThenStandaloneRope (test-compute, GPU, no model: the #1957
     # fused kernel against host RMSNorm + the standalone RoPE kernel at n = 1/32/64; TEST_P counts
     # once as a macro).
-    PINNED = 1091
+    # 1091 -> 1093 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
+    # quantize like the exporter, decode by the format's own rule, bound the error; and the unit-offset
+    # norm fold through the quantizer. The fold's algebra stays in the CPU lane (AwqNormFold x6).
+    PINNED = 1093
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -13,6 +13,9 @@ there instead of retelling it.
 
 ### Added
 
+- `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
+  summary line and `quant_report.json` at the end (per tensor max relative error and MSE decoded
+  from the written bytes, AWQ `err_rtn`/`err_best` per group) ([quantization.md](docs/quantization.md))
 - `"speculative"` accepts `{"mtp_k": N}` on every chat dialect: a request picks its own MTP chain depth
   (0..the armed depth, else 400 naming the range), and a decline reaches the caller as
   `imp_spec_declined` on all three dialects (one shared key table) instead of one startup log line
@@ -37,6 +40,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
+  `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
+  Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
 - The `Sanitizers` lane keeps a ccache store of its own and drops the `compute_120f` PTX it cannot
   use (no GPU, device code is not sanitized; +53.1 % device-compile time per `Build`). It rebuilt
   every TU from scratch and was the workflow's critical path in 8 of 8 PR runs: 19 min median

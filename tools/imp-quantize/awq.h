@@ -26,7 +26,11 @@
 // approximation of the output MSE — exact if input channels were uncorrelated,
 // and the same approximation the AWQ paper's scale definition rests on.
 
+#include "awq_sites.h"
+#include "quant_report.h"
+
 #include "model/safetensors_raw.h"
+#include "quant/awq_norm_fold.h"
 #include "quant/calibration_stats.h"
 
 #include <cstdint>
@@ -51,6 +55,19 @@ struct Plan {
     std::map<std::string, std::vector<float>> row_div;
     // v[j] /= vec_div[j]       — 1-D producers: RMSNorm weights and biases.
     std::map<std::string, std::vector<float>> vec_div;
+    // Which convention a folded 1-D producer follows. A unit-offset RMSNorm
+    // stores (1 + g)/s - 1, not g/s: dividing the delta of a (1 + g) norm
+    // divides the wrong quantity. Absent means plain, which is what a bias is.
+    std::map<std::string, NormOffset> vec_offset;
+
+    // Channels whose divisor the storage bound pulled back towards 1 because
+    // the folded value could not represent the intended gain in the tensor's
+    // own dtype (quant/awq_norm_fold.h). Never a deleted channel; a smaller
+    // scale on the few channels where BF16 cannot carry the fold.
+    int channels_clamped = 0;
+    // The search objective per group, which the tool computed and discarded
+    // until the export report existed.
+    std::vector<quantize::GroupError> group_errors;
 
     int groups_scaled = 0;   // a non-zero alpha won
     int groups_rtn = 0;      // alpha = 0 won, weights left alone
@@ -79,7 +96,12 @@ struct Plan {
 //
 // So this is a production switch, not only a diagnostic: prefer "BD" on
 // wide-GQA models and the default on narrow-GQA ones.
-constexpr const char* kAwqAllGroups = "ABCD";
+//
+// E and G are the GDN sites of the qwen3_5 hybrids (awq_sites.h) and exist
+// nowhere else, so adding them to the default changes nothing on a dense
+// model. They are NOT measured on a hybrid yet: score any export that used
+// them against its uncalibrated twin before publishing it.
+constexpr const char* kAwqAllGroups = "ABCDEG";
 
 // Builds the transform from a calibration file and the checkpoint's own
 // config.json. `groups` selects which of A/B/C/D run. Returns false with `err`
