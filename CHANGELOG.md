@@ -46,6 +46,12 @@ there instead of retelling it.
 - `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
   `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
   Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
+- The `Sanitizers` lane keeps a ccache store of its own and drops the `compute_120f` PTX it cannot
+  use (no GPU, device code is not sanitized; +53.1 % device-compile time per `Build`). It rebuilt
+  every TU from scratch and was the workflow's critical path in 8 of 8 PR runs: 19 min median
+- `clang-tidy` starts only on a changed `src/`|`tools/` `.cpp` (new `cpp` output on `Build`,
+  fail-open like `code`) and restores the build cache read-only instead of re-uploading ~476 MB per
+  run; it was adding ~2.6 min after `Build` to lint zero files on every `.cu`- or docs-only PR
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
   Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
   entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))
@@ -118,6 +124,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- CI change detection ran `git` before the step that marks the checkout a safe directory, so its
+  `git cat-file` died on the ownership refusal and the fail-open returned `code=true` every run:
+  the docs-only skip had never once fired, and a fall-open now says so with a `::warning::`
 - `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
   to false, at either gate (the scheduler branch and the #1003 pipeline yield that reaches it):
   round-robin batched verify was off on every dense model running MTP alone
