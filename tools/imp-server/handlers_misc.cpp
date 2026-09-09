@@ -219,6 +219,12 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_timed_out_total Requests the server ended at --request-timeout\n";
     out += "# TYPE imp_requests_timed_out_total counter\n";
     out += "imp_requests_timed_out_total " + std::to_string(m.requests_timed_out.load()) + "\n";
+    out +=
+        "# HELP imp_requests_reasoning_exhausted_total Requests whose answer never started: "
+        "the token budget went to reasoning\n";
+    out += "# TYPE imp_requests_reasoning_exhausted_total counter\n";
+    out += "imp_requests_reasoning_exhausted_total " + std::to_string(m.requests_reasoning_exhausted.load()) +
+           "\n";
     // Read from the engine at scrape time rather than mirrored into
     // ServerMetrics: the decision is the engine's, and a second copy is a
     // second thing to keep in sync (#1641).

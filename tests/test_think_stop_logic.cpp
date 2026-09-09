@@ -87,6 +87,46 @@ TEST(ThinkTokenAccept, NoTypeTableHeuristicTopOfVocab) {
 // the ones emitted while "currently_thinking" is true; the opener/closer ids
 // themselves are NOT counted.
 
+// ---------------------------------------------------------------------------
+// Prompt-tail seed (the flag pair Engine::add_request derives from the prompt)
+// ---------------------------------------------------------------------------
+// The defect this covers: add_request set only `in_think_block` and never
+// `started_in_think`, so on every model whose template ends the generation
+// prompt with "<think>\n" (Qwen3/3.5/3.6/3.8, DeepSeek-R1) the recount below
+// started outside think, counted 0, should_force_think_end never fired, and the
+// request spent all of max_tokens reasoning. Both flags come from one tail, so
+// they are derived in one place and cannot drift apart again.
+
+TEST(ThinkSeedFromPromptTail, TrailingOpenerSeedsBothFlags) {
+    // The Qwen3.x generation prompt: "...<|im_start|>assistant\n<think>\n".
+    ThinkSeed s = seed_from_prompt_tail("<|im_start|>assistant\n<think>\n");
+    EXPECT_TRUE(s.in_think);
+    EXPECT_TRUE(s.started_in_think) << "the budget recount never starts in-think";
+}
+
+TEST(ThinkSeedFromPromptTail, ClosedBlockSeedsNeither) {
+    // A template that renders a pre-closed think block (the agent-scan family):
+    // generation starts OUTSIDE think, so neither flag may be set.
+    ThinkSeed s = seed_from_prompt_tail("<think>\n\n</think>\n\n");
+    EXPECT_FALSE(s.in_think);
+    EXPECT_FALSE(s.started_in_think);
+}
+
+TEST(ThinkSeedFromPromptTail, ReopenedAfterCloseSeedsBothFlags) {
+    // A prior turn's block closed, this turn's opener follows: the LAST marker
+    // wins. "</think>" contains "think>", so the precedence test must skip the
+    // "</" the closer contributes (open_pos > close_pos + 1).
+    ThinkSeed s = seed_from_prompt_tail("</think>\nanswer\n<|im_start|>assistant\n<think>\n");
+    EXPECT_TRUE(s.in_think);
+    EXPECT_TRUE(s.started_in_think);
+}
+
+TEST(ThinkSeedFromPromptTail, NoMarkerSeedsNeither) {
+    ThinkSeed s = seed_from_prompt_tail("<|im_start|>assistant\n");
+    EXPECT_FALSE(s.in_think);
+    EXPECT_FALSE(s.started_in_think);
+}
+
 TEST(BudgetRecount, OpenerInOutputCountsBetweenMarkers) {
     // Output: [open, r, r, r, close, c]. With started_in_think=false the count
     // is the 3 tokens strictly between open and close. Ends not thinking.
@@ -230,6 +270,43 @@ TEST(ForceThinkEnd, ScaledReserveStillForcesTheCloseInTime) {
     EXPECT_FALSE(should_force_think_end(0.5f, 200, 4096, below, 100, /*started_in_think=*/true));
     std::vector<int32_t> at(3072, 1);
     EXPECT_TRUE(should_force_think_end(0.5f, 200, 4096, at, 100, /*started_in_think=*/true));
+}
+
+// ---------------------------------------------------------------------------
+// The reserve is a config key (runtime.think_answer_reserve), not a constant
+// ---------------------------------------------------------------------------
+
+TEST(AnswerReserveKey, DefaultMatchesTheOldConstant) {
+    // The key's default is the compile-time value every call site used before.
+    EXPECT_EQ(answer_reserve_for(600), answer_reserve_for(600, kMaxAnswerReserve));
+    EXPECT_EQ(answer_reserve_for(600, 256), 256);
+}
+
+TEST(AnswerReserveKey, RaisedFloorForcesTheCloseEarlier) {
+    // reserve 1024 at max_tokens 2000: think_limit = max(1000, 976) = 1000.
+    // reserve 1400: think_limit = max(1000, 600) = 1000 (the fraction wins).
+    // The reserve only ever moves the limit DOWN to the fraction, never below.
+    EXPECT_EQ(answer_reserve_for(2000, 1024), 1024);
+    std::vector<int32_t> at(1000, 1);
+    EXPECT_TRUE(should_force_think_end(0.5f, 200, 2000, at, 100, true, 1024));
+    std::vector<int32_t> below(999, 1);
+    EXPECT_FALSE(should_force_think_end(0.5f, 200, 2000, below, 100, true, 1024));
+}
+
+TEST(AnswerReserveKey, ZeroReserveLeavesTheFractionInCharge) {
+    // reserve 0 at max_tokens 260, budget 0.5: the flat floor is gone, only
+    // max_tokens/4 = 65 is left, so limit = max(130, 260 - 65 = 195) = 195.
+    EXPECT_EQ(answer_reserve_for(260, 0), 65);  // max_tokens/4 still applies
+    std::vector<int32_t> at_130(130, 1);
+    EXPECT_FALSE(should_force_think_end(0.5f, 200, 260, at_130, 100, true, 0));
+    // ...and with the 256 default it does: max(130, 260 - 256 = 4) = 130.
+    EXPECT_TRUE(should_force_think_end(0.5f, 200, 260, at_130, 100, true, 256));
+}
+
+TEST(AnswerReserveKey, NegativeReserveClampsToZero) {
+    // A corrupted config must not hand the model more than max_tokens of room.
+    EXPECT_EQ(answer_reserve_for(600, -1), answer_reserve_for(600, 0));
+    EXPECT_EQ(answer_reserve_for(600, -100000), 150);
 }
 
 // ---------------------------------------------------------------------------

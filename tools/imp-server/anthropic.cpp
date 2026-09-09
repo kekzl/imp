@@ -716,6 +716,12 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
             for (const char* k : {"imp_spec_drafted", "imp_spec_accepted", "imp_spec_verify_steps"})
                 if (u["completion_tokens_details"].contains(k))
                     usage_out[k] = u["completion_tokens_details"][k];
+            // Anthropic's own name for the same number (their Responses-shaped
+            // usage carries output_tokens_details.reasoning_tokens), so this
+            // one is not imp-namespaced.
+            if (u["completion_tokens_details"].contains("reasoning_tokens"))
+                usage_out["output_tokens_details"] = {
+                    {"reasoning_tokens", u["completion_tokens_details"]["reasoning_tokens"]}};
         }
         // Anthropic's usage shape has no slot for "we dropped context", so this
         // is an imp-namespaced extension rather than a guess at their schema.
@@ -732,7 +738,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         id = std::string("msg_") + id.substr(std::char_traits<char>::length("chatcmpl"));
     }
 
-    return {
+    json out = {
         {"id", id},
         {"type", "message"},
         {"role", "assistant"},
@@ -742,6 +748,12 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         {"stop_sequence", stop_sequence.empty() ? json(nullptr) : json(stop_sequence)},
         {"usage", std::move(usage_out)},
     };
+    // imp extension, same style as the imp_spec_* usage keys: the OpenAI choice
+    // carries the exhaustion detail, and stop_reason has no member for it
+    // either. Both transports and both dialects therefore say it the same way.
+    if (choice.contains("imp_finish_detail") && choice["imp_finish_detail"].is_string())
+        out["imp_finish_detail"] = choice["imp_finish_detail"];
+    return out;
 }
 
 }  // namespace imp_server::anthropic

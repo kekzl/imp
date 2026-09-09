@@ -313,6 +313,8 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     // Cache accounting is only known after prefill ran, so it rides on the
     // final usage update instead of message_start.
     json delta_usage = {{"output_tokens", res.n_output_tokens}};
+    if (res.n_reasoning_tokens > 0)
+        delta_usage["output_tokens_details"] = {{"reasoning_tokens", res.n_reasoning_tokens}};
     {
         int cached_now = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
         int creation = cache_creation_tokens_(active_req, n_prompt_tokens);
@@ -322,12 +324,17 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             delta_usage["cache_creation_input_tokens"] = creation;
         }
     }
+    // The exhaustion detail rides in the same delta as stop_reason, which keeps
+    // its Anthropic enum (client compatibility). Same condition and same value
+    // as the OpenAI dialect's `imp_finish_detail` on the final chunk.
+    json delta = {{"stop_reason", stop_reason},
+                  {"stop_sequence", res.stop_sequence.empty() ? json(nullptr) : json(res.stop_sequence)}};
+    if (!res.tool_calls_emitted && !res.content_emitted && res.n_reasoning_tokens > 0) {
+        delta["imp_finish_detail"] = "reasoning_budget_exhausted";
+        state.metrics.requests_reasoning_exhausted++;
+    }
     out.emit("message_delta",
-             json{{"type", "message_delta"},
-                  {"delta",
-                   {{"stop_reason", stop_reason},
-                    {"stop_sequence", res.stop_sequence.empty() ? json(nullptr) : json(res.stop_sequence)}}},
-                  {"usage", std::move(delta_usage)}});
+             json{{"type", "message_delta"}, {"delta", std::move(delta)}, {"usage", std::move(delta_usage)}});
     out.emit("message_stop", json{{"type", "message_stop"}});
     sink.done();
 

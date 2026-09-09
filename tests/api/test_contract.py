@@ -303,3 +303,101 @@ class TestMetricsEndpoint:
         for name in ("imp_streaming_kv_auto_enables_total", "imp_prefix_cache_evictions_total",
                      "imp_decode_batch_last_rows"):
             assert name in text, name
+
+
+class TestReasoningBudgetContract:
+    """The reasoning budget's report on the wire, same shape on both transports.
+
+    Two facts this pins, both of which used to hold only on the streaming path:
+    `usage.completion_tokens_details.reasoning_tokens` (the non-streaming path
+    reported nothing, so /v1/responses non-stream always said 0), and an
+    explicit exhaustion signal when the budget left no room for the answer
+    (before it, an empty `content` and a completed answer were the same wire
+    bytes and only the server log said which). `finish_reason` is deliberately
+    unchanged: the OpenAI enum has no member for this, so the detail rides
+    beside it as the imp-namespaced `imp_finish_detail`.
+
+    Lane-agnostic: a server whose model does not reason for this prompt reports
+    no reasoning channel, and the test then asserts only that the shape is
+    absent rather than wrong.
+    """
+
+    def test_non_stream_reports_reasoning_tokens(self, client, model):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 64,
+            "temperature": 0,
+            "reasoning_effort": "low",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        choice = body["choices"][0]
+        reasoning = choice["message"].get("reasoning_content") or ""
+        details = body["usage"].get("completion_tokens_details", {})
+        if not reasoning:
+            assert "reasoning_tokens" not in details
+            return
+        assert isinstance(details.get("reasoning_tokens"), int)
+        assert details["reasoning_tokens"] > 0
+        assert details["reasoning_tokens"] <= body["usage"]["completion_tokens"]
+
+    def test_non_stream_signals_an_exhausted_budget(self, client, model):
+        # A budget too small to reach the answer: everything generated stays
+        # inside the think block, so `content` is empty and `reasoning_content`
+        # is not. That is the case the signal exists for.
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 8,
+            "temperature": 0,
+            "reasoning_effort": "low",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        choice = body["choices"][0]
+        content = choice["message"].get("content") or ""
+        reasoning = choice["message"].get("reasoning_content") or ""
+        if content or not reasoning:
+            assert "imp_finish_detail" not in choice
+            return
+        assert choice["imp_finish_detail"] == "reasoning_budget_exhausted"
+        # finish_reason stays inside the OpenAI enum (client compatibility).
+        assert choice["finish_reason"] in ("stop", "length")
+
+    def test_stream_reports_the_same_two_facts(self, client, model):
+        from conftest import parse_sse
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 8,
+            "temperature": 0,
+            "reasoning_effort": "low",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        })
+        assert r.status_code == 200
+        events = parse_sse(r.text)
+        reasoning = "".join(
+            (e["choices"][0]["delta"].get("reasoning_content") or "")
+            for e in events if e.get("choices")
+        )
+        content = "".join(
+            (e["choices"][0]["delta"].get("content") or "")
+            for e in events if e.get("choices")
+        )
+        usage_events = [e for e in events if e.get("usage")]
+        assert usage_events, "include_usage requested but no usage chunk arrived"
+        details = usage_events[-1]["usage"].get("completion_tokens_details", {})
+        if not reasoning:
+            assert "reasoning_tokens" not in details
+            return
+        assert details.get("reasoning_tokens", 0) > 0
+        details_seen = [
+            e["choices"][0].get("imp_finish_detail")
+            for e in events if e.get("choices") and e["choices"][0].get("imp_finish_detail")
+        ]
+        if content:
+            assert not details_seen
+        else:
+            assert details_seen == ["reasoning_budget_exhausted"]

@@ -6,6 +6,7 @@
 #include "runtime/request.h"
 #include "lora/lora_adapter.h"
 #include "runtime/engine_internal.h"
+#include "runtime/think_stop_logic.h"
 #include "runtime/config.h"
 #include "core/process_diag.h"
 #include "runtime/process_diag_install.h"
@@ -1065,14 +1066,21 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         // instead of rewriting each site.
         if (!req->trace_id.empty())
             IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
-        // Initialize in_think_block from the prompt tail. Chat templates for
-        // Qwen3 / Qwen3.5 / Qwen3.6 / DeepSeek-R1 inject `<think>\n` via
-        // add_generation_prompt by default — without seeding the flag here,
-        // a model that promptly closes its empty thinking block will hit
+        // Initialize the think state from the prompt tail. Chat templates for
+        // Qwen3 / Qwen3.5 / Qwen3.6 / Qwen3.8 / DeepSeek-R1 inject `<think>\n`
+        // via add_generation_prompt by default: without seeding the flags
+        // here, a model that promptly closes its empty thinking block will hit
         // should_stop with in_think_block=false on the trailing im_end and
         // produce a 0-content completion. We scan the decoded text of the
         // last few input tokens (covers both single-id and BPE multi-token
         // forms) and look for whichever marker appears last.
+        //
+        // BOTH flags come from the same tail. Setting only in_think_block left
+        // the ANSWER-headroom budget dead on exactly these models: the opener
+        // is in the prompt, so count_reasoning_tokens starting outside think
+        // counted 0, should_force_think_end never fired, `</think>` was never
+        // injected, and the request spent all of max_tokens reasoning (empty
+        // `content`; docs/TROUBLESHOOTING.md).
         Tokenizer* ptok = model_ ? model_->tokenizer() : nullptr;
         if (ptok && !req->input_tokens.empty()) {
             constexpr int kTailScan = 16;  // covers worst case BPE split + slack
@@ -1082,15 +1090,11 @@ void Engine::add_request(std::shared_ptr<Request> req) {
             for (int i = start; i < n; ++i) {
                 tail_text += ptok->decode_token(req->input_tokens[i]);
             }
-            size_t open_pos = tail_text.rfind("<think>");
-            size_t close_pos = tail_text.rfind("</think>");
-            // </think> shares a suffix with <think>, so resolve precedence:
-            // open is "later" only if it appears AFTER any close.
-            bool open_is_last = (open_pos != std::string::npos) &&
-                                (close_pos == std::string::npos || open_pos > close_pos + 1);
-            if (open_is_last) {
+            const think_logic::ThinkSeed seed = think_logic::seed_from_prompt_tail(tail_text);
+            if (seed.in_think)
                 req->in_think_block = true;
-            }
+            if (seed.started_in_think)
+                req->started_in_think = true;
         }
         // gpt-oss Harmony generation starts in the analysis (reasoning) channel
         // — the model emits <|channel|>analysis<|message|> as its first output,

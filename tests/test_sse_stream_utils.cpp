@@ -573,6 +573,59 @@ TEST(AnswerLostToReasoning, StaysQuietOnAToolCall) {
     EXPECT_FALSE(answer_lost_to_reasoning(true, "", ""));
 }
 
+// nonstream_reasoning_tokens: usage.completion_tokens_details.reasoning_tokens
+// on the NON-streaming path. It used to be reported by the streaming path only,
+// so the same request answered two different numbers depending on the transport
+// and /v1/responses non-stream always said 0.
+//
+// Fixtures: think_start_id 100, think_end_id 200, matching test_think_stop_logic.
+
+TEST(NonStreamReasoningTokens, CountsBetweenTheMarkers) {
+    // [open, r, r, r, close, c] -> the 3 tokens strictly inside the block.
+    std::vector<int32_t> out = {100, 1, 2, 3, 200, 4};
+    EXPECT_EQ(nonstream_reasoning_tokens(out, 100, 200, /*started_in_think=*/false,
+                                         /*reasoning_chars=*/12, nullptr),
+              3);
+}
+
+TEST(NonStreamReasoningTokens, PromptInjectedOpenerCountsFromTokenZero) {
+    // The Qwen3.x case: the opener is in the PROMPT, so the output has none and
+    // started_in_think carries the state. All four are reasoning.
+    std::vector<int32_t> out = {7, 8, 9, 10};
+    EXPECT_EQ(nonstream_reasoning_tokens(out, 100, 200, /*started_in_think=*/true,
+                                         /*reasoning_chars=*/20, nullptr),
+              4);
+}
+
+TEST(NonStreamReasoningTokens, NoReasoningTextReportsNothing) {
+    std::vector<int32_t> out = {100, 1, 2, 200, 3};
+    EXPECT_EQ(nonstream_reasoning_tokens(out, 100, 200, false, /*reasoning_chars=*/0, nullptr), 0);
+}
+
+TEST(NonStreamReasoningTokens, WithoutAThinkEndIdChargesTheDecodedPrefix) {
+    // Tokenizers that ship </think> split across BPE pieces have no id to count
+    // on (think_end_id < 0). Reasoning is a prefix of the output, so the leading
+    // tokens whose decoded bytes cover it are charged. 4 bytes per token here,
+    // 10 reasoning chars -> 3 tokens (8 bytes is short, 12 covers it).
+    std::vector<int32_t> out = {1, 2, 3, 4, 5};
+    auto four_bytes = [](int32_t) -> size_t { return 4; };
+    EXPECT_EQ(nonstream_reasoning_tokens(out, -1, -1, true, /*reasoning_chars=*/10, four_bytes), 3);
+    // Exactly on a boundary: 8 chars = 2 tokens, not 3.
+    EXPECT_EQ(nonstream_reasoning_tokens(out, -1, -1, true, /*reasoning_chars=*/8, four_bytes), 2);
+    // Reasoning longer than the whole output cannot charge more than it has.
+    EXPECT_EQ(nonstream_reasoning_tokens(out, -1, -1, true, /*reasoning_chars=*/999, four_bytes), 5);
+}
+
+TEST(NonStreamReasoningTokens, FallsBackWhenTheIdScanFindsNothing) {
+    // Harmony and friends: think ids exist but the output carries neither
+    // marker and the request did not start in-think, so the id scan returns 0
+    // while reasoning_content is not empty. Charging the prefix beats reporting
+    // a zero the streaming path would not report.
+    std::vector<int32_t> out = {1, 2, 3};
+    auto one_byte = [](int32_t) -> size_t { return 1; };
+    EXPECT_EQ(nonstream_reasoning_tokens(out, 100, 200, false, /*reasoning_chars=*/2, one_byte), 2);
+}
+
 // A floored KV pool is not "the last request failed", it is "this process
 // cannot serve". Reported from production: `docker compose restart` while the
 // previous process still held the card came up with 16 blocks against a planned

@@ -165,10 +165,24 @@ worth reporting, and it was the exact defect fixed in #1256.
 
 ## `content` is empty and the answer sits in `reasoning_content`
 
-On a thinking model in a long conversation, raise `max_tokens` before
-assuming a defect. The model thinks first and the budget is shared: once
-thinking fills it, the reply never starts and imp returns empty `content`
-with `finish_reason: stop`, an honest report of what was generated.
+Since the answer-headroom fix this is the engine's job, not the operator's:
+the request seeds `started_in_think` from the prompt tail, so the budget
+engages on the templates that inject `<think>\n` (Qwen3/3.5/3.6/3.8,
+DeepSeek-R1) instead of counting 0 reasoning tokens forever. At `max_tokens`
+260 with the 0.5 default the limit is `max(130, 260 - 256) = 130` reasoning
+tokens: the engine injects `</think>` there and the reply gets the rest.
+Reserve size: `runtime.think_answer_reserve` (default 256).
+
+When the reply still does not start, the response says so: `imp_finish_detail:
+"reasoning_budget_exhausted"` beside `finish_reason`,
+`usage.completion_tokens_details.reasoning_tokens` (OpenAI) /
+`usage.output_tokens_details.reasoning_tokens` (Anthropic, Responses), and
+`imp_requests_reasoning_exhausted_total` on `/metrics`. `finish_reason` itself
+stays `stop` / `length`.
+
+The table below is the measurement from BEFORE that change and is what the
+budget now prevents. Raising `max_tokens` is still the fix when the model needs
+a longer answer than the reserve leaves it.
 
 Measured on Qwen3.8-27B, one session grown to ~8k tokens over 74 turns:
 
@@ -190,7 +204,15 @@ engines, so context length alone is not the trigger.
 
 The server logs `empty content: the answer never started because the token
 budget went to reasoning`, with the amount of thinking and the finish reason.
-Reproduce with `tools/analysis/multiturn_deep.py`.
+Reproduce, or gate, with the budget sweep:
+
+```
+python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 \
+    --model <id> --max-tokens 200,260,400,600 --assert-answered
+```
+
+`--assert-answered` fails any turn whose `content` is empty and whose response
+carries no `imp_finish_detail`. It runs in `scripts/test_server.sh`.
 
 ## Build or test problems
 

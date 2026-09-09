@@ -625,7 +625,8 @@ int Engine::step_constrained_pipeline() {
     // reasoning budget is exhausted mid-think, force </think> this step.
     p.state.force_token = -1;
     if (think_logic::should_force_think_end(req->think_budget, think_end_id_, req->max_tokens,
-                                            req->output_tokens, think_start_id_, req->started_in_think)) {
+                                            req->output_tokens, think_start_id_, req->started_in_think,
+                                            runtime_config_.runtime.think_answer_reserve)) {
         p.state.force_token = think_end_id_;
     }
     // Token-history penalties — per-tick upload, exactly like the eager path.

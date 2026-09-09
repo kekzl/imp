@@ -22,6 +22,8 @@ there instead of retelling it.
 - `--max-images-per-request` (default 8) on every chat dialect, and the image decoder refuses a side
   above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
   `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_arch_2026 F2-4, F2-9](docs/audit/AUDIT_arch_2026.md))
+- `runtime.think_answer_reserve` (default 256, was the compile-time `kMaxAnswerReserve`): tokens of `max_tokens`
+  the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`
 
 ### Changed
 
@@ -90,6 +92,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- Think budget engages on prompt-injected `<think>` templates (Qwen3/3.5/3.6/3.8, DeepSeek-R1): `add_request`
+  seeded `in_think_block` but never `started_in_think`, so the recount saw 0 reasoning tokens and `</think>` was
+  never forced. At `max_tokens` 260 the forced close now lands at reasoning token 130 (`docs/TROUBLESHOOTING.md`)
+- Budget exhaustion is reported on the wire: `imp_finish_detail: "reasoning_budget_exhausted"` (OpenAI choice +
+  final chunk, Anthropic response + `message_delta`), `reasoning_tokens` in `usage` on the non-streaming and
+  Anthropic paths, `imp_requests_reasoning_exhausted_total` on `/metrics`; `finish_reason`/`stop_reason` unchanged
 - `runtime.max_batch_size` is clamped to the largest batch the memory plan fits when the SSM/GDN state is the overrun,
   instead of the live-pass fallback that never charged it: Qwen3.8-27B-NVFP4 at 64 slots put 5088 MiB of state past the
   headroom, KV pool probe 528 GB/s (spilled); now `clamped 64 -> 41`, probe 1621 GB/s ([MEMORY.md D14](docs/internals/MEMORY.md))

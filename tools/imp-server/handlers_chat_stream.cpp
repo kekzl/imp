@@ -190,10 +190,22 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             "model needs room to answer AFTER it thinks.");
     }
 
+    // ...and the machine-readable half, which #1593 could not give it: the same
+    // condition the non-streaming path uses (utils.cpp answer_lost_to_reasoning)
+    // - empty content, no tool call, a non-empty reasoning channel. Broader than
+    // reasoning_truncated above, which is finish == "length" only, so a model
+    // that hit EOS mid-thought was reported by neither.
+    const bool budget_exhausted = !out.tool_calls_emitted && !out.content_emitted &&
+                                  out.n_reasoning_tokens > 0;
+    if (budget_exhausted)
+        state.metrics.requests_reasoning_exhausted++;
+
     // Send final chunk with finish_reason
     json empty_delta = json::object();
     std::string final_chunk = sse_chunk(comp_id, created, snap_model_name, empty_delta,
-                                        openai_finish_reason(out.finish));
+                                        openai_finish_reason(out.finish),
+                                        /*logprobs=*/nullptr,
+                                        budget_exhausted ? "reasoning_budget_exhausted" : nullptr);
     sink.write(final_chunk.data(), final_chunk.size());
 
     // Send usage chunk if requested

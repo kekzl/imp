@@ -198,8 +198,8 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
         if (req.harmony_force_idx >= static_cast<int>(harmony_force_seq_.size()))
             req.harmony_force_idx = -1;  // opener complete
     } else if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
-                                                   req.output_tokens, think_start_id_,
-                                                   req.started_in_think)) {
+                                                   req.output_tokens, think_start_id_, req.started_in_think,
+                                                   runtime_config_.runtime.think_answer_reserve)) {
         if (harmony_reasoning_ && !harmony_force_seq_.empty()) {
             // Start forcing the full <|end|>…<|message|> opener (see above).
             state.force_token = harmony_force_seq_[0];
