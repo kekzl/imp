@@ -37,6 +37,12 @@ there instead of retelling it.
 
 ### Changed
 
+- The `Sanitizers` lane keeps a ccache store of its own and drops the `compute_120f` PTX it cannot
+  use (no GPU, device code is not sanitized; +53.1 % device-compile time per `Build`). It rebuilt
+  every TU from scratch and was the workflow's critical path in 8 of 8 PR runs: 19 min median
+- `clang-tidy` starts only on a changed `src/`|`tools/` `.cpp` (new `cpp` output on `Build`,
+  fail-open like `code`) and restores the build cache read-only instead of re-uploading ~476 MB per
+  run; it was adding ~2.6 min after `Build` to lint zero files on every `.cu`- or docs-only PR
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
   Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
   entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))

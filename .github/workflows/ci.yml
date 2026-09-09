@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.changes.outputs.code }}
+      cpp: ${{ steps.changes.outputs.cpp }}
 
     container:
       # Native CUDA devel image: nvcc $CUDA_VERSION is on PATH at /usr/local/cuda
@@ -92,15 +93,34 @@ jobs:
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           code=true
+          # `cpp` gates the clang-tidy job, which lints changed src|tools *.cpp
+          # and nothing else. It used to start on every code PR and pay ~2.6 min
+          # (container pull + cache round trip) to print "nothing to lint" - and
+          # it does that on most PRs here, which are .cu, .py or .md. Same
+          # FAIL-OPEN rule as `code`: any uncertainty runs the job.
+          cpp=true
           if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             files="$(git diff --name-only "$base" HEAD)"
             # code stays true unless EVERY changed file is markdown or under docs/.
             if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)'; then
               code=false
             fi
+            # `grep -c`, not `grep -q`, and no here-string. Two traps meet on
+            # this line. #1499: `grep -q` exits at the first match, the producer
+            # takes EPIPE and pipefail reports a non-zero pipeline for a
+            # SUCCESSFUL match. And the here-string the other lanes use to dodge
+            # that is a bashism - this job declares no `shell:`, so it gets
+            # whatever the CUDA image provides, and `Build` is the one required
+            # check (ruleset 14716423): a syntax error here fails every PR.
+            # `grep -c` reads all of stdin, so nothing ever takes EPIPE, and it
+            # is POSIX. `|| true` because grep exits 1 when the count is 0.
+            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools)/.*\.cpp$' || true)"
+            [ "${n_cpp:-0}" -gt 0 ] || cpp=false
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          printf 'non-docs changes: code=%s\nchanged files:\n%s\n' "$code" "${files:-<none>}"
+          echo "cpp=$cpp" >> "$GITHUB_OUTPUT"
+          printf 'non-docs changes: code=%s (src|tools .cpp: %s)\nchanged files:\n%s\n' \
+            "$code" "$cpp" "${files:-<none>}"
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
       # requires exactly one context (`Build`), so a gate that runs only as its
@@ -264,7 +284,7 @@ jobs:
   tidy:
     name: clang-tidy
     needs: build
-    if: needs.build.outputs.code == 'true'
+    if: needs.build.outputs.cpp == 'true'
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
@@ -278,8 +298,13 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends cmake g++ git python3 clang-tidy
+      # cache/restore, not cache: this job only READS compile_commands.json and
+      # _deps. Plain `actions/cache` also runs a post-step that re-uploaded the
+      # ~476 MB build/ under a key the Build job had already written - 29 s on
+      # every run, and that much more of the repo's 10 GB cache quota spent
+      # evicting entries the next PR wants.
       - name: Restore build dir (compile_commands.json + _deps)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build
           key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
@@ -679,6 +704,14 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
+    # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
+    # flags, so nothing here is shareable with the `Build` (Release) or
+    # `PTX fallback` stores and a shared dir would only evict theirs.
+    env:
+      CCACHE_DIR: /github/home/.ccache-asan
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: "1"
     # This image ships no bash, so GitHub picks `sh -e {0}` and any bashism is a
     # syntax error at step start. The first version used a here-string and the
     # job died in 1m15s before building anything - with `Build` the only
@@ -691,7 +724,7 @@ jobs:
         shell: sh
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bash git python3 cmake ninja-build ca-certificates
+          apt-get install -y --no-install-recommends bash git python3 cmake ninja-build ccache ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -719,6 +752,19 @@ jobs:
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "sanitizer build: run=$run"
+
+      # This lane rebuilt every TU from scratch on every run: 19 min median over
+      # the last 8 PR runs, which WAS the wall clock of the whole workflow (the
+      # `Build` job's median is 6 min). It is the same store shape the
+      # `PTX fallback` lane already uses.
+      - name: Restore ccache
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache-asan
+          key: ${{ runner.os }}-cuda13.3-ccache-asan-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.3-ccache-asan-
 
       - name: Fetch pinned deps
         if: steps.scope.outputs.run == 'true'
@@ -750,8 +796,21 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DIMP_SANITIZERS=ON \
             -DIMP_BUILD_TOOLS=OFF -DIMP_BUILD_BENCH=OFF -DIMP_BUILD_SERVER=OFF \
+            -DIMP_DISABLE_120F_FALLBACK=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest
+          # IMP_DISABLE_120F_FALLBACK=ON: the option defaults OFF, so this lane
+          # was emitting the compute_120f PTX entry as well as the sm_120a SASS.
+          # The `Build` job measured the second gencode at +53.1% device-compile
+          # time, and this lane can use neither image - the runner has no GPU and
+          # CMakeLists.txt does not sanitize device code ("CUDA code is NOT
+          # sanitized"). The fatbin that ships is assembled and checked by the
+          # `PTX fallback` job, which deliberately leaves the option at OFF.
+          ccache -z
           cmake --build build-asan --target test-core test-text -j"$(nproc)"
+          ccache -s
 
       # A binary that contains none of the tests reports "PASSED 0 tests" and
       # exits 0. That is how the first version of this job would have gone green
