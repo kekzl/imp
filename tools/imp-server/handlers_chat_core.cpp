@@ -182,9 +182,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.channel_close_id = state.channel_close_id;
         ctx.snap.channel_newline_id = state.channel_newline_id;
         ctx.snap.max_seq_len = state.max_seq_len;
-        ctx.snap.mtp_armed_k = state.armed_mtp_k.load(std::memory_order_relaxed);
-        ctx.snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
-        ctx.snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
+        snapshot_mtp_state_(state, ctx.snap);
         ctx.snap.tpl_family = ctx.snap.have_template ? ctx.snap.chat_tpl.family()
                                                      : imp::ChatTemplateFamily::CHATML;
         if (ctx.snap.have_template)

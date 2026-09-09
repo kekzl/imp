@@ -261,6 +261,15 @@ struct SpecFieldParse {
     std::string error;
 };
 
+// The three MTP facts the contract below needs, read once per request off the
+// server atomics (a model swap can move them mid-request).
+template <typename State, typename Snap>
+inline void snapshot_mtp_state_(const State& state, Snap& snap) {
+    snap.mtp_armed_k = state.armed_mtp_k.load(std::memory_order_relaxed);
+    snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
+    snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
+}
+
 // Resolve the per-request speculation contract onto an engine Request. One
 // helper so the three submission sites (chat core, /v1/completions, and the
 // dialect shims through the first) cannot resolve it three ways.
