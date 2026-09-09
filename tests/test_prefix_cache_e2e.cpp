@@ -314,7 +314,10 @@ constexpr const char* kLongPrompt =
     "request left behind, and nothing can pin that. The same distinction separates a recurrent "
     "state that is restored from a snapshot taken at a block boundary from one that is rebuilt "
     "by replaying the prefix: the first costs a copy, the second costs a prefill, and only the "
-    "first can be compared token for token against a cold run. Continue the text:";
+    "first can be compared token for token against a cold run. A benchmark that reports one "
+    "number per model hides which of the two it measured, and a reader who copies that number "
+    "into a plan inherits the hidden choice. Naming the pool, the boundary and the charge next "
+    "to every figure costs a few words and saves a second measurement. Continue the text:";
 
 TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
@@ -412,7 +415,7 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     EXPECT_EQ(warm_cached, imp::snapshot_boundary(unaligned_len, kv_bs, min_snap));
     EXPECT_EQ(warm_b, cold_b) << "unaligned prompt: restored state != fresh state";
 
-    // ── arm C: warm prompt + 40 new tokens ───────────────────────────────
+    // ── arm C: warm prompt + 100 new tokens ───────────────────────────────
     // The KV match is longer than the snapshot: the cache holds every block of
     // the warm prefix, but the snapshot sits at the warm prompt's own boundary.
     // cached_tokens must follow the SNAPSHOT, or the continuation decodes from
@@ -421,10 +424,15 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     // consumed the source tensors), so cold means a reset: it evicts every
     // cached block, and without cached KV no snapshot can be matched.
     ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
-    ASSERT_GE(n_full, aligned_len + 40) << "need 40 tokens past the warm prompt";
+    // 100, not 40: a continuation past one chunk of the chunk-parallel GDN scan
+    // (gdn.chunkpar_scan, 64-token chunks) takes a different prefill route
+    // from the restored state than a short tail does. Measured 2026-09-09 on
+    // Qwen3.8-27B-NVFP4: a 13-token continuation after a restore answered, a
+    // 93-token continuation regurgitated an earlier user turn.
+    ASSERT_GE(n_full, aligned_len + 100) << "need 100 tokens past the warm prompt";
     std::vector<int32_t> extended(full.begin(), full.begin() + aligned_len);
     (void)run(extended, kTokens, nullptr);  // warm: saves the snapshot at its boundary
-    extended.insert(extended.end(), full.begin() + aligned_len, full.begin() + aligned_len + 40);
+    extended.insert(extended.end(), full.begin() + aligned_len, full.begin() + aligned_len + 100);
     const int expect_c = imp::snapshot_boundary(aligned_len, kv_bs, min_snap);
     int ext_cached = -1;
     const std::vector<int32_t> warm_c = run(extended, kTokens, &ext_cached);
@@ -438,7 +446,7 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
     const std::vector<int32_t> cold_c = run(extended, kTokens, nullptr);
     EXPECT_EQ(warm_c, cold_c)
-        << "warm prompt + 40 new tokens: the continuation after a snapshot restore must equal a "
+        << "warm prompt + 100 new tokens: the continuation after a snapshot restore must equal a "
            "cold prefill of the same prompt";
 }
 
