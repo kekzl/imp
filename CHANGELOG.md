@@ -13,6 +13,9 @@ there instead of retelling it.
 
 ### Added
 
+- `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
+  summary line and `quant_report.json` at the end (per tensor max relative error and MSE decoded
+  from the written bytes, AWQ `err_rtn`/`err_best` per group) ([quantization.md](docs/quantization.md))
 - `"speculative"` accepts `{"mtp_k": N}` on every chat dialect: a request picks its own MTP chain depth
   (0..the armed depth, else 400 naming the range), and a decline reaches the caller as
   `imp_spec_declined` on all three dialects (one shared key table) instead of one startup log line
@@ -37,6 +40,9 @@ there instead of retelling it.
 
 ### Changed
 
+- `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
+  `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
+  Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
   Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
   entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))
