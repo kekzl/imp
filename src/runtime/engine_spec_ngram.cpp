@@ -162,8 +162,8 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
         // Forcing due: the eager step must run NOW to force </think>; a
         // verify would emit past the exhausted budget instead.
         if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
-                                                req.output_tokens, think_start_id_,
-                                                req.started_in_think))
+                                                req.output_tokens, think_start_id_, req.started_in_think,
+                                                runtime_config_.runtime.think_answer_reserve))
             return "think_budget_in_block";
     }
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return "not_decoding";

@@ -165,10 +165,28 @@ worth reporting, and it was the exact defect fixed in #1256.
 
 ## `content` is empty and the answer sits in `reasoning_content`
 
-On a thinking model in a long conversation, raise `max_tokens` before
-assuming a defect. The model thinks first and the budget is shared: once
-thinking fills it, the reply never starts and imp returns empty `content`
-with `finish_reason: stop`, an honest report of what was generated.
+The response now says which of the two situations it is, on every dialect and
+both transports: `imp_finish_detail: "reasoning_budget_exhausted"` beside
+`finish_reason`, `usage.completion_tokens_details.reasoning_tokens` (OpenAI) /
+`usage.output_tokens_details.reasoning_tokens` (Anthropic, Responses), and
+`imp_requests_reasoning_exhausted_total` on `/metrics`. `finish_reason` itself
+stays `stop` / `length`. Before that the only report was a server-side WARN.
+
+The answer-headroom budget does engage on imp-server: measured on the current
+build, `max_tokens` 64 returns 126 characters of reasoning and then 186
+characters of content, `max_tokens` 16 returns 32 characters of reasoning and
+then content. So the forced `</think>` fires. The limit is
+`max(max_tokens x think_budget, max_tokens - max(runtime.think_answer_reserve,
+max_tokens/4))`, i.e. 130 reasoning tokens at `max_tokens` 260 and the 0.5
+default.
+
+**Still open:** the empty replies below still reproduce on a long session at
+`max_tokens` 120-150 (turn 5 of the 74-turn replay: `finish_reason: length`,
+586 characters of reasoning, `content` empty), and the think seed does not
+explain them. Under investigation, tracked in the dispatch audit; the leading
+hypothesis is that the model re-opens `<think>` after the forced close and the
+last-close-wins splitter then leaves `content` empty. Raising `max_tokens`
+remains the fix.
 
 Measured on Qwen3.8-27B, one session grown to ~8k tokens over 74 turns:
 
@@ -190,7 +208,15 @@ engines, so context length alone is not the trigger.
 
 The server logs `empty content: the answer never started because the token
 budget went to reasoning`, with the amount of thinking and the finish reason.
-Reproduce with `tools/analysis/multiturn_deep.py`.
+Reproduce, or gate, with the budget sweep:
+
+```
+python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 \
+    --model <id> --max-tokens 200,260,400,600 --assert-answered
+```
+
+`--assert-answered` fails any turn whose `content` is empty and whose response
+carries no `imp_finish_detail`. It runs in `scripts/test_server.sh`.
 
 ## Build or test problems
 

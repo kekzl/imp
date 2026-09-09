@@ -213,6 +213,18 @@ struct RuntimeConfig {
         // TTFT 293 -> 240 ms. The 2048-row step reads 65 ms against 86 with
         // the separate decode step (docs/roadmap.md, Server and latency).
         bool prefill_mixed_decode = true;
+        // Tokens of `max_tokens` the think budget keeps for the ANSWER on a
+        // reasoning model. The engine force-closes the think block (injects
+        // `</think>`) once reasoning reaches
+        // max_tokens - max(think_answer_reserve, max_tokens/4), or the
+        // `think_budget` fraction, whichever is LATER - so a larger max_tokens
+        // only ever buys more thinking room. Was a compile-time constant
+        // (think_stop_logic.h kMaxAnswerReserve); operators serving a model
+        // whose answers are long (structured output) raise it, an agent loop
+        // that only needs a short verdict lowers it. Below 0 is read as 0 (no
+        // floor: the fraction alone decides). At the 0.5 default and
+        // max_tokens 260 the limit is max(130, 4) = 130 reasoning tokens.
+        int think_answer_reserve = 256;
         // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
         // single-sequence, so concurrent sessions time-slice the decode.
         // This is the slice length in tokens — after it, the engine rotates

@@ -717,8 +717,15 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         // list is shared (spec_usage_keys.h), not copied: the hand-copied
         // version here dropped imp_spec_emitted and the decline reason the day
         // they were added, and only /v1/chat/completions reported them.
-        if (u.contains("completion_tokens_details"))
+        if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
             imp_server::copy_spec_usage_keys(u["completion_tokens_details"], usage_out);
+            // Anthropic's own name for the same number (their Responses-shaped
+            // usage carries output_tokens_details.reasoning_tokens), so this
+            // one is not imp-namespaced.
+            if (u["completion_tokens_details"].contains("reasoning_tokens"))
+                usage_out["output_tokens_details"] = {
+                    {"reasoning_tokens", u["completion_tokens_details"]["reasoning_tokens"]}};
+        }
         // Anthropic's usage shape has no slot for "we dropped context", so this
         // is an imp-namespaced extension rather than a guess at their schema.
         // Only present when eviction actually fired.
@@ -734,7 +741,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         id = std::string("msg_") + id.substr(std::char_traits<char>::length("chatcmpl"));
     }
 
-    return {
+    json out = {
         {"id", id},
         {"type", "message"},
         {"role", "assistant"},
@@ -744,6 +751,12 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         {"stop_sequence", stop_sequence.empty() ? json(nullptr) : json(stop_sequence)},
         {"usage", std::move(usage_out)},
     };
+    // imp extension, same style as the imp_spec_* usage keys: the OpenAI choice
+    // carries the exhaustion detail, and stop_reason has no member for it
+    // either. Both transports and both dialects therefore say it the same way.
+    if (choice.contains("imp_finish_detail") && choice["imp_finish_detail"].is_string())
+        out["imp_finish_detail"] = choice["imp_finish_detail"];
+    return out;
 }
 
 }  // namespace imp_server::anthropic

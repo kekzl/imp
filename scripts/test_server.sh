@@ -102,6 +102,13 @@ run "logprobs"            python3 tests/test_server_logprobs.py
 run "ignore_eos"          python3 tests/test_server_ignore_eos.py
 run "messages stream"     python3 tests/test_server_messages_stream.py
 run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
+# The budget sweep the toggle test cannot see: it pins max_tokens 512, and the
+# answer-headroom force-close only bites below it. multiturn_deep.py had ZERO
+# invocation sites (the #1573 class). --assert-answered makes an empty reply a
+# failure unless the server labels it reasoning_budget_exhausted.
+run "reasoning budget reaches the answer" python3 tools/analysis/multiturn_deep.py \
+    --url "http://localhost:$PORT" --model "$MODEL" --max-tokens 200,260,400,600 \
+    --assert-answered
 run "tracing (OTLP spans)" python3 tests/test_server_tracing.py
 run "metrics (every path feeds the histograms)" python3 tests/test_server_metrics.py
 run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py

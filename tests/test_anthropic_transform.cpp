@@ -241,6 +241,39 @@ TEST(AnthropicCacheUsage, DeclineReachesTheAnthropicUsage) {
     EXPECT_EQ(anth["usage"].value("imp_spec_emitted", -1), 0);
 }
 
+// The reasoning budget's two report fields cross the dialect boundary here: the
+// converter reads the OpenAI body the chat handler produced. Both directions,
+// because "the detail appears exactly when the answer was lost" is the half a
+// mutant that emits it unconditionally would break.
+TEST(AnthropicReasoningReport, ReasoningTokensBecomeOutputTokensDetails) {
+    json oai = oai_response_with_usage(json{
+        {"prompt_tokens", 10},
+        {"completion_tokens", 40},
+        {"total_tokens", 50},
+        {"completion_tokens_details", json{{"reasoning_tokens", 33}}},
+    });
+    json anth = openai_to_anthropic_response(oai, "claude-x");
+    // Anthropic's own name for the number, so it is not imp-namespaced.
+    EXPECT_EQ(anth["usage"]["output_tokens_details"].value("reasoning_tokens", -1), 33);
+    json plain = openai_to_anthropic_response(
+        oai_response_with_usage(json{{"prompt_tokens", 10}, {"completion_tokens", 5}, {"total_tokens", 15}}),
+        "claude-x");
+    EXPECT_FALSE(plain["usage"].contains("output_tokens_details"));
+}
+
+TEST(AnthropicReasoningReport, FinishDetailIsCopiedOnlyWhenTheChoiceCarriesIt) {
+    json oai = oai_response_with_usage(json{{"prompt_tokens", 10}, {"completion_tokens", 5}});
+    oai["choices"][0]["imp_finish_detail"] = "reasoning_budget_exhausted";
+    json anth = openai_to_anthropic_response(oai, "claude-x");
+    EXPECT_EQ(anth.value("imp_finish_detail", ""), "reasoning_budget_exhausted");
+    // stop_reason keeps the Anthropic enum: a client switching on it sees no
+    // new member.
+    EXPECT_EQ(anth.value("stop_reason", ""), "end_turn");
+
+    json answered = oai_response_with_usage(json{{"prompt_tokens", 10}, {"completion_tokens", 5}});
+    EXPECT_FALSE(openai_to_anthropic_response(answered, "claude-x").contains("imp_finish_detail"));
+}
+
 TEST(AnthropicCacheUsage, CacheReadAndCreationMapped) {
     json oai = oai_response_with_usage(json{
         {"prompt_tokens", 100},

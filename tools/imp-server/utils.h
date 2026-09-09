@@ -5,6 +5,7 @@
 
 #include "runtime/request.h"
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -187,6 +188,55 @@ bool bearer_token_matches(const std::string& authorization, const std::string& a
 // is exactly the one that has to be covered by a test rather than by a run.
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning);
 
+// The same predicate over the three FACTS, so the streaming path (which never
+// holds the finished strings, only "did any content byte go out") asks the same
+// question as the non-streaming one. One source of truth for four emitters.
+inline bool answer_lost_to_reasoning_flags(bool has_tool_calls, bool content_empty, bool has_reasoning) {
+    return !has_tool_calls && content_empty && has_reasoning;
+}
+
+// The wire value of the exhaustion signal, or nullptr when the request does not
+// qualify. `finish_reason` / `stop_reason` keep their upstream enums, so this
+// rides beside them as an imp-namespaced extra.
+inline const char* reasoning_finish_detail(bool has_tool_calls, bool content_empty, bool has_reasoning) {
+    return answer_lost_to_reasoning_flags(has_tool_calls, content_empty, has_reasoning)
+               ? "reasoning_budget_exhausted"
+               : nullptr;
+}
+
+// The ONE site that writes the field onto a response object (an OpenAI choice,
+// an Anthropic `message_delta`). The write lives with the decision on purpose:
+// the handler TUs are in no CPU test target, so a mutant that emits the field
+// unconditionally has to get past this function, which is (test_sse_stream_utils).
+inline void attach_reasoning_finish_detail(json& obj, bool has_tool_calls, bool content_empty,
+                                           bool has_reasoning) {
+    if (const char* detail = reasoning_finish_detail(has_tool_calls, content_empty, has_reasoning))
+        obj["imp_finish_detail"] = detail;
+}
+
+// The same predicate, plus the server-side WARN that names which of the two
+// situations an empty `content` is. Returns what it decided, so the caller can
+// attach the wire signal (`imp_finish_detail`) and the metric without asking
+// twice.
+bool report_answer_lost_to_reasoning(bool has_tool_calls, const std::string& content,
+                                     const std::string& reasoning, const char* finish);
+
+// usage.completion_tokens_details.reasoning_tokens for the NON-streaming path.
+// The streaming path counts what its split state machine routed to the
+// reasoning sink; this one has only the finished text and the output token ids,
+// so it counts the same tokens two ways:
+//   think_end_id >= 0  -> the ENGINE's own recount over the ids, i.e. exactly
+//                         the number should_force_think_end acts on (exact).
+//   think_end_id <  0  -> tokenizers whose </think> is split across BPE pieces
+//                         have no id to count on. Reasoning is a prefix of the
+//                         output, so charge the leading tokens whose decoded
+//                         bytes cover `reasoning_chars` (an estimate).
+// `decoded_len` returns the byte length of one token's decoded text; it is only
+// called on the second path. Returns 0 when there is no reasoning to charge.
+int nonstream_reasoning_tokens(const std::vector<int32_t>& output_ids, int32_t think_start_id,
+                               int32_t think_end_id, bool started_in_think, size_t reasoning_chars,
+                               const std::function<size_t(int32_t)>& decoded_len);
+
 // Why this server cannot serve, or "" when it can. Not the same question as
 // whether the last request failed.
 //
@@ -328,8 +378,12 @@ int parse_max_tokens_field(const json& body, int def);
 // keeping at most `cap` entries. Returns true iff entries were dropped.
 bool parse_stop_field(const json& body, size_t cap, std::vector<std::string>& out);
 
+// `finish_detail` rides beside finish_reason on the choice as
+// `imp_finish_detail` (nullptr = absent). finish_reason itself keeps the OpenAI
+// enum: a client that switches on it must not have to learn a new member.
 std::string sse_chunk(const std::string& id, int64_t created, const std::string& model, const json& delta,
-                      const char* finish_reason, const json& logprobs = nullptr);
+                      const char* finish_reason, const json& logprobs = nullptr,
+                      const char* finish_detail = nullptr);
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
                                  const std::string& text, const char* finish_reason,
