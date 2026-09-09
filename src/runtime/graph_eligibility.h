@@ -75,6 +75,19 @@ inline bool kv_pressure_repromotes_graphs(int free_blocks, int reclaimable_block
     return evicted_blocks == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;
 }
 
+// The valve the trigger above arms is F16-only: StreamingLLM frees middle
+// blocks and leaves -1 sentinels the decode kernel skips, and the quantized KV
+// layouts have no sentinel path. On FP8/NVFP4 KV - the default for Qwen3.8-27B
+// and every hybrid resolved to FP8 KV - the same 90 % pressure therefore hit an
+// `if` that declined and logged nothing; the next thing an operator saw was the
+// hard cancel in decode_prepare_kv_ once the pool ran dry, with no hint that the
+// pool had been at 90 % for minutes. This says which pool state fired and that
+// there is no valve on this dtype, once per process.
+inline bool kv_pressure_warns_no_streaming_valve(int free_blocks, int reclaimable_blocks,
+                                                 int pool_total, bool kv_is_f16) {
+    return !kv_is_f16 && kv_pressure_demotes_graphs(free_blocks, reclaimable_blocks, pool_total);
+}
+
 // Per-launch step cap of a bounded async-loop burst against the tokens the
 // burst actually has (`prepare_graph_loop`: max_tokens left, capped by the KV
 // blocks it could reserve). A cap wider than that made the parked runner

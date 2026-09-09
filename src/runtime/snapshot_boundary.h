@@ -13,10 +13,16 @@
 
 namespace imp {
 
+// A restore has to leave at least one prompt token to forward (the model needs
+// logits), so the admission cap is (prompt_tokens - 1) / block_size blocks
+// (Engine::hybrid_prefix_reuse_limit_). A prompt that is itself block-aligned
+// therefore snapshots one block short of its length: saved at the full length
+// the snapshot could never be matched and every aligned prompt got zero reuse
+// (measured 2026-09-09: 512-token prompt, warm cached_tokens 0).
 inline int snapshot_boundary(int prompt_tokens, int block_size, int min_tokens) {
-    if (block_size <= 0 || prompt_tokens <= 0)
+    if (block_size <= 0 || prompt_tokens <= 1)
         return 0;
-    const int end = (prompt_tokens / block_size) * block_size;
+    const int end = ((prompt_tokens - 1) / block_size) * block_size;
     return end >= min_tokens ? end : 0;
 }
 

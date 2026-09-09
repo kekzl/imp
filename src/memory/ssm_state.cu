@@ -1,6 +1,7 @@
 #include "memory/ssm_state.h"
 
 #include <algorithm>
+#include "memory/ssm_state_size.h"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -25,41 +26,36 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
     h_dtype_ = h_dtype;
     alloc_ = alloc;
 
-    // conv_state is always FP32 (small, needs precision)
-    // h_state uses h_dtype (FP32 or FP16)
-    conv_bytes_ = static_cast<size_t>(conv_channels) * conv_kernel * sizeof(float);
-    h_bytes_ = static_cast<size_t>(n_heads) * head_dim_ssm * state_size * dtype_size(h_dtype_);
-
-    // Align each sub-allocation to 256 bytes
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
-    conv_bytes_ = align256(conv_bytes_);
-    h_bytes_ = align256(h_bytes_);
-
-    per_layer_bytes_ = conv_bytes_ + h_bytes_;
-    per_seq_bytes_ = per_layer_bytes_ * n_ssm_layers_;
-    total_bytes_ = per_seq_bytes_ * static_cast<size_t>(max_sequences_ + n_reserved_);
+    // Geometry and byte counts: memory/ssm_state_size.h, the ONE formula. The
+    // plan charges the same header, so what is charged is what is taken.
+    const SsmStateGeometry geom{n_ssm_layers_, conv_channels, conv_kernel,
+                                n_heads,       head_dim_ssm, state_size, h_dtype_};
+    conv_bytes_ = ssm_conv_bytes_per_layer(geom);
+    h_bytes_ = ssm_h_bytes_per_layer(geom);
+    per_layer_bytes_ = ssm_bytes_per_layer(geom);
+    per_seq_bytes_ = ssm_bytes_per_slot(geom);
+    total_bytes_ = ssm_pool_bytes(geom, max_sequences_, n_reserved_);
 
     if (alloc_) {
+        // No raw-cudaMalloc retry behind the allocator's back. That hatch is
+        // how 5088 MiB of state landed past the headroom on Qwen3.8-27B-NVFP4
+        // and spilled the KV pool to 528 GB/s (MEMORY.md D14): the allocator
+        // said no, the pool took the memory anyway, and nothing downstream
+        // knew. A rejected pool is a refused configuration now, with the
+        // numbers and the lever.
         pool_ = alloc_->allocate(total_bytes_, "ssm_state");
-        // SSM state is critical — fall back to raw cudaMalloc if the
-        // headroom-aware allocator rejects it (e.g. Nemotron-30B uses
-        // 29+ GiB for weights, leaving <headroom free, but SSM state
-        // is only ~25 MiB and essential for correct inference).
-        if (!pool_) {
-            IMP_LOG_WARN("SSM state: allocator rejected, trying raw cudaMalloc (%zu bytes)", total_bytes_);
-            cudaError_t err = cudaMalloc(&pool_, total_bytes_);
-            if (err == cudaSuccess)
-                alloc_ = nullptr;  // don't free via allocator
-            else
-                pool_ = nullptr;
-        }
     } else {
         cudaError_t err = cudaMalloc(&pool_, total_bytes_);
         if (err != cudaSuccess)
             pool_ = nullptr;
     }
     if (!pool_) {
-        IMP_LOG_ERROR("Failed to allocate SSM state pool (%zu bytes)", total_bytes_);
+        size_t free_bytes = 0, total_device = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_device) != cudaSuccess)
+            free_bytes = 0;
+        IMP_LOG_ERROR("%s", ssm_pool_failure_message(total_bytes_, max_sequences_, n_reserved_,
+                                                     n_ssm_layers_, free_bytes)
+                                .c_str());
         return false;
     }
 
