@@ -310,10 +310,22 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     if (body.contains("cache_prefix_messages") && body["cache_prefix_messages"].is_number_integer())
         ctx.params.cache_prefix_messages = body["cache_prefix_messages"].get<int>();
 
-    // Per-request speculative-decode override (imp extension). Absent → leave
-    // tri-state at -1 (server default). Present bool → force on/off.
-    if (body.contains("speculative") && body["speculative"].is_boolean())
-        ctx.params.spec_override = body["speculative"].get<bool>() ? 1 : 0;
+    // Per-request speculative-decode contract (imp extension). Absent → leave
+    // the tri-state at -1 (server default). `true`/`false` force every drafter
+    // on/off; `{"mtp_k": N}` sets the MTP chain depth for this request alone.
+    // A depth outside the armed range is a 400 naming the range, not a
+    // silently ignored field - the class of defect this repo keeps paying for
+    // (#1384, the Anthropic shim deleting content blocks before the check).
+    {
+        const int armed_mtp_k = state.armed_mtp_k.load(std::memory_order_relaxed);
+        const SpecFieldParse sp = parse_spec_field_(body, armed_mtp_k);
+        if (!sp.ok) {
+            send_json_error(res, 400, "invalid_request_error", sp.error);
+            return false;
+        }
+        ctx.params.spec_override = sp.spec_override;
+        ctx.params.spec_mtp_k = sp.mtp_k;
+    }
 
     // OpenAI Predicted Outputs: {"prediction": {"type": "content", "content":
     // string | [{"type":"text","text":...}...]}}. The text is a draft hint —

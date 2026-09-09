@@ -55,29 +55,6 @@
 
 namespace imp {
 
-
-void Engine::log_spec_stats_() const {
-    if (spec_stats_.verify_steps + spec_stats_.miss_steps == 0)
-        return;
-    IMP_LOG_INFO("[spec-ngram] verify_steps=%lld miss_steps=%lld drafted=%lld accepted=%lld "
-                 "(%.1f%%) emitted=%lld (%.2f tok/verify, %.2f ms/verify)",
-                 spec_stats_.verify_steps, spec_stats_.miss_steps, spec_stats_.drafted,
-                 spec_stats_.accepted,
-                 spec_stats_.drafted ? 100.0 * spec_stats_.accepted / spec_stats_.drafted : 0.0,
-                 spec_stats_.emitted,
-                 spec_stats_.verify_steps
-                     ? static_cast<double>(spec_stats_.emitted) / spec_stats_.verify_steps
-                     : 0.0,
-                 spec_stats_.verify_steps ? spec_stats_.verify_wall_ms / spec_stats_.verify_steps
-                                          : 0.0);
-    if (mtp_tree_branched_ + mtp_tree_linear_ > 0)
-        IMP_LOG_INFO("[spec-ngram] mtp tree: branched=%lld linear=%lld (margin gate %.2f)",
-                     mtp_tree_branched_, mtp_tree_linear_, runtime_config_.speculative.mtp_tree_margin);
-}
-
-
-
-
 // Burst-hybrid re-arm: a given-up request whose async-loop burst
 // (speculative.burst tokens) has completed gets a short probe window — two
 // draft attempts and a fresh acceptance sample. Think models produce their
@@ -1163,13 +1140,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
     }
 
-    spec_stats_.verify_steps++;
-    spec_stats_.drafted += K;
-    spec_stats_.accepted += matched;
-    spec_stats_.emitted += emitted;
-    spec_stats_.verify_wall_ms +=
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0)
-            .count();
+    spec_stats_record_(draft_from_mtp, K, matched, emitted,
+                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                 verify_t0)
+                           .count());
     // (request-end stats logging lives in finish_request)
 
     // Acceptance economics: structured-but-mutating content (number tables,
@@ -1186,6 +1160,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     req->spec_verifies++;
     req->spec_drafted += K;
     req->spec_accepted += matched;
+    req->spec_emitted += emitted;
     if (draft_from_prediction) {
         req->pred_accepted += matched;
         req->pred_rejected += K - matched;
@@ -1204,8 +1179,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Draft-poor prompts converge to k=1 verifies instead of paying the
         // deep-chunk cost at low accept; draft-rich prompts climb back.
         if (runtime_config_.speculative.mtp_adaptive_k) {
+            // Ceiling is the depth THIS request resolved to, not the
+            // process-wide one: a caller that asked for mtp_k=1 must not ride
+            // the ladder back up to the server default.
+            const int req_ceiling = mtp_request_k_(*req);
             if (matched >= K)
-                mtp_k_live_ = std::min(mtp_spec_decode_k(), mtp_chain_k_() + 1);
+                mtp_k_live_ = std::min(req_ceiling, mtp_chain_k_() + 1);
             else
                 mtp_k_live_ = std::max(1, mtp_chain_k_() - 1);
         }

@@ -556,19 +556,35 @@ TEST(RoPETest, RopeLargerDim) {
 }
 
 // =========================================================================
-// Test 6 -- PartialRoPE (Qwen3.5 style: rope_dim=64, head_dim=256)
-//   Only the first rope_dim dimensions should be rotated.
-//   The remaining (head_dim - rope_dim) dimensions must stay unchanged.
+// Test 6 -- PartialRoPE, the convention that actually ships
+//   Qwen3.5/3.6/3.8: head_dim 256, rope_dim 64, NeoX pairs (i, i + 32).
+//
+//   This test used to run the INTERLEAVED default (neox=false, pairs
+//   (2i, 2i+1)) and call it "Qwen3.5 style". Both conventions leave dims
+//   [rope_dim, head_dim) untouched and both rotate 64 dims, so every shape
+//   assertion passed either way and the pair layout - the only thing that
+//   differs, and the thing #503 broke on Phi-4 - was never checked. The
+//   loader ships neox=true for this family (src/compute/rope.cu, "neox pair
+//   layout for partial RoPE": x1 = x[ix + n_dims/2], n_dims = 64, NOT
+//   head_dim).
+//
+//   Positions span the range the double-precision angle exists for: 0, 1,
+//   and three past float mantissa precision at these frequencies (#1630).
+//   262143 is 2^18-1, beyond any context this family serves, and is here
+//   because the failure is silent: a wrong angle is still a plausible number.
 // =========================================================================
 TEST(RoPETest, PartialRoPE) {
     const int batch = 1;
-    const int seq_len = 2;
     const int n_heads = 2;
     const int n_kv_heads = 2;
     const int head_dim = 256;
     const int rope_dim = 64;
+    const int rope_pairs = rope_dim / 2;  // 32: the NeoX split point
     const float theta = 10000.0f;
     const float scaling = 1.0f;
+
+    const std::vector<int> pos_host = {0, 1, 1023, 65535, 262143};
+    const int seq_len = static_cast<int>(pos_host.size());
 
     const int64_t q_count = (int64_t)batch * seq_len * n_heads * head_dim;
     const int64_t k_count = (int64_t)batch * seq_len * n_kv_heads * head_dim;
@@ -576,44 +592,33 @@ TEST(RoPETest, PartialRoPE) {
     std::vector<float> q_host(q_count), k_host(k_count);
     fill_linear(q_host);
     fill_linear(k_host);
+    const std::vector<float> q_orig(q_host), k_orig(k_host);
 
-    // Keep originals for comparison of the unrotated portion
-    std::vector<float> q_orig(q_host), k_orig(k_host);
-
-    // Non-zero positions to ensure rotation happens
-    std::vector<int> pos_host = {3, 7};
-
-    // CPU reference: only rotate first rope_dim dims
-    std::vector<float> q_ref(q_host), k_ref(k_host);
-    for (int b = 0; b < batch; b++) {
+    // Host reference: NeoX pairs (i, i + rope_pairs) over the first rope_dim
+    // dims only, angle in double - the kernel's linear branch does the same,
+    // because at pos 262143 the float product loses its low bits outright.
+    auto rotate = [&](std::vector<float>& ref, int heads) {
         for (int s = 0; s < seq_len; s++) {
-            int pos = pos_host[b * seq_len + s];
-            for (int h = 0; h < n_heads; h++) {
-                float* qh = q_ref.data() + (((int64_t)b * seq_len + s) * n_heads + h) * head_dim;
-                for (int i = 0; i < rope_dim / 2; i++) {
-                    float freq = 1.0f / (powf(theta, (2.0f * i) / rope_dim) * scaling);
-                    float angle = pos * freq;
-                    float c = cosf(angle), sn = sinf(angle);
-                    float q0 = qh[2 * i], q1 = qh[2 * i + 1];
-                    qh[2 * i] = q0 * c - q1 * sn;
-                    qh[2 * i + 1] = q0 * sn + q1 * c;
-                }
-            }
-            for (int h = 0; h < n_kv_heads; h++) {
-                float* kh = k_ref.data() + (((int64_t)b * seq_len + s) * n_kv_heads + h) * head_dim;
-                for (int i = 0; i < rope_dim / 2; i++) {
-                    float freq = 1.0f / (powf(theta, (2.0f * i) / rope_dim) * scaling);
-                    float angle = pos * freq;
-                    float c = cosf(angle), sn = sinf(angle);
-                    float k0 = kh[2 * i], k1 = kh[2 * i + 1];
-                    kh[2 * i] = k0 * c - k1 * sn;
-                    kh[2 * i + 1] = k0 * sn + k1 * c;
+            const int pos = pos_host[s];
+            for (int h = 0; h < heads; h++) {
+                float* x = ref.data() + ((int64_t)s * heads + h) * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    const float freq =
+                        (1.0f / powf(theta, (2.0f * i) / static_cast<float>(rope_dim))) * scaling;
+                    const double angle = static_cast<double>(pos) * static_cast<double>(freq);
+                    const float c = static_cast<float>(cos(angle));
+                    const float sn = static_cast<float>(sin(angle));
+                    const float x0 = x[i], x1 = x[i + rope_pairs];
+                    x[i] = x0 * c - x1 * sn;
+                    x[i + rope_pairs] = x0 * sn + x1 * c;
                 }
             }
         }
-    }
+    };
+    std::vector<float> q_ref(q_host), k_ref(k_host);
+    rotate(q_ref, n_heads);
+    rotate(k_ref, n_kv_heads);
 
-    // Upload to GPU
     float* q_dev = to_device(q_host.data(), q_count);
     float* k_dev = to_device(k_host.data(), k_count);
     int* pos_dev = to_device(pos_host.data(), pos_host.size());
@@ -621,40 +626,61 @@ TEST(RoPETest, PartialRoPE) {
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
-    rope_forward(Q, K, pos_dev, head_dim, theta, scaling, rope_dim);
+    rope_forward(Q, K, pos_dev, head_dim, theta, scaling, rope_dim, /*neox=*/true);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto q_out = to_host(q_dev, q_count);
     auto k_out = to_host(k_dev, k_count);
 
     const float tol = 5e-4f;
+    for (int64_t i = 0; i < q_count; i++)
+        EXPECT_NEAR(q_out[i], q_ref[i], tol) << "Q NeoX partial RoPE mismatch at index " << i;
+    for (int64_t i = 0; i < k_count; i++)
+        EXPECT_NEAR(k_out[i], k_ref[i], tol) << "K NeoX partial RoPE mismatch at index " << i;
 
-    // Verify rotated portion matches CPU reference
-    for (int64_t i = 0; i < q_count; i++) {
-        EXPECT_NEAR(q_out[i], q_ref[i], tol) << "Q partial RoPE mismatch at index " << i;
-    }
-    for (int64_t i = 0; i < k_count; i++) {
-        EXPECT_NEAR(k_out[i], k_ref[i], tol) << "K partial RoPE mismatch at index " << i;
+    // Dims [rope_dim, head_dim) must be BIT-identical, not merely close: the
+    // kernel may not touch them at all. That is 192 of the 256 dims here.
+    for (int s = 0; s < seq_len; s++) {
+        for (int h = 0; h < n_heads; h++) {
+            const int64_t base = ((int64_t)s * n_heads + h) * head_dim;
+            for (int d = rope_dim; d < head_dim; d++)
+                EXPECT_EQ(q_out[base + d], q_orig[base + d])
+                    << "Q dim " << d << " (pos " << pos_host[s] << ") must be untouched";
+        }
+        for (int h = 0; h < n_kv_heads; h++) {
+            const int64_t base = ((int64_t)s * n_kv_heads + h) * head_dim;
+            for (int d = rope_dim; d < head_dim; d++)
+                EXPECT_EQ(k_out[base + d], k_orig[base + d])
+                    << "K dim " << d << " (pos " << pos_host[s] << ") must be untouched";
+        }
     }
 
-    // Verify unrotated portion (dims >= rope_dim) is unchanged
-    for (int b = 0; b < batch; b++) {
+    // Control: the interleaved layout must NOT reproduce this answer. Without
+    // it the test passes under either convention, which is how it passed while
+    // asserting the wrong one.
+    {
+        std::vector<float> interleaved(q_orig);
         for (int s = 0; s < seq_len; s++) {
+            const int pos = pos_host[s];
             for (int h = 0; h < n_heads; h++) {
-                int64_t base = (((int64_t)b * seq_len + s) * n_heads + h) * head_dim;
-                for (int d = rope_dim; d < head_dim; d++) {
-                    EXPECT_NEAR(q_out[base + d], q_orig[base + d], 1e-6f)
-                        << "Q dim " << d << " should be unchanged (partial RoPE)";
-                }
-            }
-            for (int h = 0; h < n_kv_heads; h++) {
-                int64_t base = (((int64_t)b * seq_len + s) * n_kv_heads + h) * head_dim;
-                for (int d = rope_dim; d < head_dim; d++) {
-                    EXPECT_NEAR(k_out[base + d], k_orig[base + d], 1e-6f)
-                        << "K dim " << d << " should be unchanged (partial RoPE)";
+                float* x = interleaved.data() + ((int64_t)s * n_heads + h) * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    const float freq =
+                        (1.0f / powf(theta, (2.0f * i) / static_cast<float>(rope_dim))) * scaling;
+                    const double angle = static_cast<double>(pos) * static_cast<double>(freq);
+                    const float c = static_cast<float>(cos(angle));
+                    const float sn = static_cast<float>(sin(angle));
+                    const float x0 = x[2 * i], x1 = x[2 * i + 1];
+                    x[2 * i] = x0 * c - x1 * sn;
+                    x[2 * i + 1] = x0 * sn + x1 * c;
                 }
             }
         }
+        bool differs = false;
+        for (int64_t i = 0; i < q_count && !differs; i++)
+            differs = std::fabs(interleaved[i] - q_ref[i]) > tol;
+        EXPECT_TRUE(differs) << "the NeoX and interleaved references agree on this input, so this "
+                                "test cannot tell the two conventions apart";
     }
 
     cudaFree(q_dev);

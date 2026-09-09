@@ -355,6 +355,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
     src/runtime/engine_spec_ngram.cpp
+    src/runtime/engine_spec_stats.cpp
     src/runtime/engine_spec_buffers.cpp
     src/runtime/engine_spec_capture.cpp
     src/runtime/engine_spec_mtp.cpp
@@ -794,6 +795,10 @@ if(IMP_BUILD_TESTS)
         tests/test_ngram_draft.cpp
     tests/test_mtp_presence.cpp
         tests/test_spec_gates.cpp
+        # The per-request speculation contract (depth + decline reason), the
+        # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
+        # three decide something on a GPU path from pure inputs; CI has no GPU.
+        tests/test_spec_request.cpp
         tests/test_suffix_draft.cpp
         tests/test_token_recycle_draft.cpp
         tests/test_routing_decision.cpp
@@ -919,6 +924,9 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-compute SOURCES
         tests/test_cuda_fault_signal.cu
         tests/test_rope.cu
+        # The fused QK-norm + RoPE decode kernel (#1957) had no test reference
+        # at all: nothing in the tree named qknorm_rope_fused.
+        tests/test_qknorm_rope_fused.cu
         tests/test_mrope.cu
         tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
@@ -1063,6 +1071,9 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_forward.cpp
         tests/test_nvfp4_prefill_cache_knob.cpp
         tests/test_spec_capture_fidelity.cpp
+        # MTP must not change greedy output. The fidelity test above gates the
+        # captured graph, not the speculation; this gates the accept path.
+        tests/test_mtp_greedy_identity.cpp
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp

@@ -309,13 +309,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // launchers answered a miss with a log line and a return - leaving O
     // unwritten, which is a wrong answer at exit code 0. Same fallback shape as
     // the sink arm, over every distinct head_dim the model uses.
+    std::set<int> dims;
+    if (mcfg.head_dim > 0)
+        dims.insert(mcfg.head_dim);
+    for (int d : mcfg.head_dim_per_layer)
+        if (d > 0)
+            dims.insert(d);
     if (config_.kv_cache_dtype != QType::F16) {
-        std::set<int> dims;
-        if (mcfg.head_dim > 0)
-            dims.insert(mcfg.head_dim);
-        for (int d : mcfg.head_dim_per_layer)
-            if (d > 0)
-                dims.insert(d);
         for (int d : dims) {
             if (!paged_attention_serves_head_dim(config_.kv_cache_dtype, d)) {
                 IMP_LOG_WARN(
@@ -326,6 +326,26 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 config_.kv_cache_dtype = QType::F16;
                 break;
             }
+        }
+    }
+
+    // FP8 KV serves head_dim 256, and serves it on the SCALAR kernel: the
+    // four-token and GQA-lane decode kernels are head_dim-128 instances
+    // (attention_paged.h). The pin therefore looked free - init accepted it,
+    // the launcher wrote correct output - and cost the whole FP8 decode
+    // speedup with nothing in the log to say so. One line, at the point the
+    // dtype is chosen.
+    if (config_.kv_cache_dtype == QType::FP8_E4M3) {
+        for (int d : dims) {
+            if (paged_fp8_decode_has_fast_kernel(d))
+                continue;
+            IMP_LOG_WARN("FP8 KV at head_dim %d: the fast decode kernels cover head_dim 128 only, "
+                         "the scalar path serves this model.%s",
+                         d,
+                         kv_nvfp4_default_safe(mcfg.arch)
+                             ? " kv_cache.dtype=auto resolves NVFP4 here, which does have a "
+                               "head_dim-256 decode kernel."
+                             : "");
         }
     }
 

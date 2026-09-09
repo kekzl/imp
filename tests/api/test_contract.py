@@ -303,3 +303,18 @@ class TestMetricsEndpoint:
         for name in ("imp_streaming_kv_auto_enables_total", "imp_prefix_cache_evictions_total",
                      "imp_decode_batch_last_rows"):
             assert name in text, name
+
+    def test_metrics_split_speculation_by_draft_source(self, client, has_model):
+        # The four aggregate imp_spec_* counters cannot price the MTP head: the
+        # n-gram matcher, the prompt prediction and token recycling fill the
+        # same verify chunk and land in the same totals, so a server running
+        # the documented MTP pair (mtp_k=2, ngram=false) reports the same
+        # numbers as one the matcher carried. The per-source series answer
+        # "what is the head's acceptance rate" and "what did its verify cost".
+        if not has_model:
+            pytest.skip("the spec counters hang off a live engine; the model-less lane has none")
+        text = client.get("/metrics").text
+        for src in ("mtp", "ngram"):
+            for m in ("verify_steps_total", "drafted_total", "accepted_total",
+                      "emitted_total", "verify_wall_ms_total"):
+                assert f"imp_spec_{src}_{m}" in text, f"imp_spec_{src}_{m}"

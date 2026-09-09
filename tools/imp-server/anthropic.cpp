@@ -357,8 +357,9 @@ json anthropic_to_openai_body(const json& anth) {
         oai["top_p"] = anth["top_p"];
     if (anth.contains("top_k"))
         oai["top_k"] = anth["top_k"];
-    // imp extension: per-request speculative-decode override, passed through
-    // to the shared OpenAI param parser.
+    // imp extension: per-request speculative-decode contract, passed through
+    // verbatim in both forms (bool, or {"mtp_k": N}); the OpenAI parser
+    // validates it once for every dialect.
     if (anth.contains("speculative"))
         oai["speculative"] = anth["speculative"];
     if (anth.contains("stream"))

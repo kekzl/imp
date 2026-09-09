@@ -202,6 +202,14 @@ class MockHandler(BaseHTTPRequestHandler):
                     f'imp_endpoint_ttft_seconds_bucket{{endpoint="{ep}",le="+Inf"}} 0\n'
                     for ep in ("chat_completions", "completions", "messages", "responses", "embeddings", "rerank")
                 )
+                + "".join(
+                    f"# HELP imp_spec_{src}_{m} Speculative decoding by draft source\n"
+                    f"# TYPE imp_spec_{src}_{m} counter\n"
+                    f"imp_spec_{src}_{m} 0\n"
+                    for src in ("mtp", "ngram")
+                    for m in ("verify_steps_total", "drafted_total", "accepted_total",
+                              "emitted_total", "verify_wall_ms_total")
+                )
                 + f"# HELP imp_queue_depth Queue depth\n"
                 f"# HELP imp_queue_depth Queue depth\n"
                 f"# TYPE imp_queue_depth gauge\n"

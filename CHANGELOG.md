@@ -13,6 +13,12 @@ there instead of retelling it.
 
 ### Added
 
+- `"speculative"` accepts `{"mtp_k": N}` on every chat dialect: a request picks its own MTP chain depth
+  (0..the armed depth, else 400 naming the range), and a decline reaches the caller as
+  `usage.completion_tokens_details.imp_spec_declined` instead of one startup log line
+- `/metrics` splits speculation by draft source: `imp_spec_mtp_*` against `imp_spec_ngram_*`
+  (drafted, accepted, emitted, verify_steps, verify_wall_ms), so the head's acceptance rate is
+  separable from the matcher's
 - `kv_cache.block_size`: tokens per KV block as an operator key (0 = auto: 32 for `n_kv_heads <= 4`,
   else 16), refused at load outside multiples of 16 in [16, 256]; `imp-bench decode-attn` sweeps 16/32/64 and
   `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_arch_2026 B-5](docs/audit/AUDIT_arch_2026.md))
@@ -22,6 +28,15 @@ there instead of retelling it.
 - `--max-images-per-request` (default 8) on every chat dialect, and the image decoder refuses a side
   above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
   `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_arch_2026 F2-4, F2-9](docs/audit/AUDIT_arch_2026.md))
+
+### Fixed
+
+- `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
+  to false: round-robin batched verify was off on every dense model running MTP alone
+- The 512 MiB NVFP4 dequant cap no longer counts the LM head, which never takes the M > 1 dequant
+  fallback it guards: 2425 MiB against a 170 MiB largest eligible plane on Qwen3.8-27B-NVFP4
+- `kv_cache.dtype=fp8` on a head_dim != 128 model logs the fast-kernel miss at init; the FP8 four-token
+  and GQA-lane decode kernels are head_dim-128 instances and the pin silently bought the scalar path
 
 ### Changed
 
