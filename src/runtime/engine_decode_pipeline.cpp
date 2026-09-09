@@ -438,11 +438,20 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
     // (observed verify_steps=1 per request). Fields-only candidate check;
     // the draft-depth economics (min_draft) run in the RR branch. The chain
     // re-engages on the following step via the normal plain-path entry.
-    if (cont && runtime_config_.speculative.batch_rr && runtime_config_.speculative.ngram && !ssm_state_ &&
+    // The same widening as the RR branch itself (engine_scheduler.cpp): the
+    // question is whether ANY drafter can feed the verify step, not whether the
+    // n-gram matcher is on. Asking for `speculative.ngram` here starved the RR
+    // verify on exactly the configuration the recipe prescribes (dense model,
+    // mtp_k=2 PAIRED with ngram=false, batch > 1): the pipeline chained, the
+    // yield never fired, and the branch it was built to reach never ran.
+    // `runtime.decode_pipeline` defaults on, so this gate, not the RR branch,
+    // is what decides whether batch>1 speculation happens at all.
+    if (cont && runtime_config_.speculative.batch_rr && !ssm_state_ &&
         ++bd_pipe_.steps_since_spec_yield >= spec_rr_yield_interval_) {
         bd_pipe_.steps_since_spec_yield = 0;
         for (const auto& r : bd_pipe_.rows) {
-            if (r->status == RequestStatus::DECODING && spec_ngram_enabled_(*r) && !r->spec_ngram_given_up) {
+            if (r->status == RequestStatus::DECODING && spec_any_drafter_enabled_(*r) &&
+                !r->spec_ngram_given_up) {
                 cont = false;
                 break;
             }

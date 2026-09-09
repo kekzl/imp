@@ -1,4 +1,5 @@
 #include "responses.h"
+#include "spec_usage_keys.h"
 
 #include <cstdio>
 #include <stdexcept>
@@ -303,13 +304,11 @@ json openai_to_responses_response(const json& oai, const std::string& req_model,
         if (u.contains("completion_tokens_details"))
             reasoning_toks = u["completion_tokens_details"].value("reasoning_tokens", 0);
         usage["output_tokens_details"] = {{"reasoning_tokens", reasoning_toks}};
-        // imp extension (C-6): per-request speculation counters, same keys
-        // as the chat shape.
-        if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
-            for (const char* k : {"imp_spec_drafted", "imp_spec_accepted", "imp_spec_verify_steps"})
-                if (u["completion_tokens_details"].contains(k))
-                    usage["output_tokens_details"][k] = u["completion_tokens_details"][k];
-        }
+        // imp extension (C-6): per-request speculation counters, same keys as
+        // the chat shape, from the shared table (spec_usage_keys.h).
+        if (u.contains("completion_tokens_details"))
+            imp_server::copy_spec_usage_keys(u["completion_tokens_details"],
+                                             usage["output_tokens_details"]);
         out["usage"] = std::move(usage);
     }
     return out;

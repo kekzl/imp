@@ -777,6 +777,19 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
                             "continuing without MTP drafts\n",
                     mtp_k, imp_error_string(mtp_err));
     }
+    // Publish what the load actually produced. `head_present` is true for a
+    // checkpoint that ships MTP tensors this process declined to upload -
+    // which is what the concurrency decline looks like from a request's side,
+    // and what makes its refusal reportable instead of indistinguishable from
+    // a model that has no head at all.
+    state.armed_mtp_k.store(state.ctx ? state.ctx->engine->mtp_spec_decode_k() : 0,
+                            std::memory_order_relaxed);
+    state.mtp_head_loaded.store(state.model->model->mtp_.has_value() &&
+                                    state.model->model->mtp_->loaded,
+                                std::memory_order_relaxed);
+    state.mtp_head_present.store(state.mtp_head_loaded.load(std::memory_order_relaxed) ||
+                                     state.model->model->mtp_head_available_unloaded_,
+                                 std::memory_order_relaxed);
 
     // Extract model name from path. Strip trailing separators first so a
     // directory passed with a trailing slash (e.g. /models/Foo-NVFP4/) still

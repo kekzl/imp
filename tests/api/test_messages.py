@@ -117,6 +117,26 @@ class TestMessagesValidation:
         _assert_anthropic_error(r, 400)
         assert "model" in r.json()["error"]["message"]
 
+    # The imp `speculative` extension is passed through verbatim by the shim and
+    # validated once, by the shared OpenAI parser. What the Anthropic surface
+    # owns is the ENVELOPE: a refusal here must be the Anthropic error shape,
+    # not the OpenAI one.
+    @pytest.mark.parametrize("value", ["yes", 1, {"mtp_k": -1}, {"mtp_k": 99}, {"mtp_k": "2"}])
+    def test_speculative_field_rejected_in_the_anthropic_envelope(self, client, model, value):
+        r = client.post("/v1/messages", json=_msg(model=model, speculative=value))
+        _assert_anthropic_error(r, 400)
+        assert "speculative" in r.json()["error"]["message"]
+
+    def test_speculative_depth_error_names_the_range(self, client, model):
+        r = client.post("/v1/messages", json=_msg(model=model, speculative={"mtp_k": 99}))
+        _assert_anthropic_error(r, 400)
+        assert "0.." in r.json()["error"]["message"]
+
+    @pytest.mark.parametrize("value", [True, False, {}, {"mtp_k": 0}, {"mtp_k": 2}])
+    def test_speculative_field_accepted_shapes(self, client, model, value):
+        r = client.post("/v1/messages", json=_msg(model=model, speculative=value))
+        assert r.status_code != 400, r.text
+
     @pytest.mark.parametrize("temperature", [-0.1, 2.5])
     def test_temperature_out_of_range(self, client, model, temperature):
         """imp validates [0,2] here, not Anthropic's [0,1] — the OpenAI bound is

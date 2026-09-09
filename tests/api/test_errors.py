@@ -303,6 +303,49 @@ class TestPerRequestCaps:
         assert r.status_code == 400
         assert "messages" in r.json()["error"]["message"]
 
+    # imp extension "speculative": true|false|{"mtp_k": N}. The object form is
+    # what lets a request turn the MTP head on and pick its depth; a depth
+    # outside the range must be a 400 that NAMES the range, not a field the
+    # server accepts and ignores (the #1384 class: parsed, then dropped).
+    @pytest.mark.parametrize("value", [
+        "yes",                  # wrong type entirely
+        1,                      # a number is not a boolean
+        {"mtp_k": -1},          # below the range
+        {"mtp_k": 99},          # above any chain buffer
+        {"mtp_k": "2"},         # a string depth
+        {"mtp_k": 1.5},         # a fractional depth
+    ])
+    def test_speculative_field_rejects_bad_shapes(self, client, model, value):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "speculative": value,
+        })
+        assert r.status_code == 400, r.text
+        assert "speculative" in r.json()["error"]["message"]
+
+    def test_speculative_depth_error_names_the_range(self, client, model):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "speculative": {"mtp_k": 99},
+        })
+        assert r.status_code == 400
+        msg = r.json()["error"]["message"]
+        assert "0.." in msg, msg
+
+    @pytest.mark.parametrize("value", [True, False, {"mtp_k": 0}, {"mtp_k": 2}, {}])
+    def test_speculative_field_accepts_both_forms(self, client, model, value):
+        # Accepted shapes must not be 400. Whether the request then generates
+        # is a different lane's business (the model-less server answers 503).
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 4,
+            "speculative": value,
+        })
+        assert r.status_code != 400, r.text
+
     def test_logit_bias_above_cap(self, client, model):
         r = client.post("/v1/chat/completions", json={
             "model": model,

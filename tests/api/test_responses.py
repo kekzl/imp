@@ -99,6 +99,26 @@ class TestResponsesNonStream:
             r = c.post("/v1/responses", json={"model": model, "input": "x", **body})
             assert r.status_code == 400, r.text
 
+    # The imp `speculative` extension reaches the shared OpenAI parser through
+    # this shim too, so its refusals and its accepted shapes must hold here.
+    # Model-less, like the two above.
+    @pytest.mark.nomodel
+    @pytest.mark.parametrize("value", ["yes", 1, {"mtp_k": -1}, {"mtp_k": 99}, {"mtp_k": "2"}])
+    def test_speculative_field_rejected(self, model, value):
+        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
+            r = c.post("/v1/responses",
+                       json={"model": model, "input": "x", "speculative": value})
+            assert r.status_code == 400, r.text
+            assert "speculative" in r.json()["error"]["message"]
+
+    @pytest.mark.nomodel
+    @pytest.mark.parametrize("value", [True, False, {}, {"mtp_k": 0}, {"mtp_k": 2}])
+    def test_speculative_field_accepted_shapes(self, model, value):
+        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
+            r = c.post("/v1/responses",
+                       json={"model": model, "input": "x", "speculative": value})
+            assert r.status_code != 400, r.text
+
     # The other edge: everything the transform can carry must still get through
     # to the model lookup, which is a 404/503 on a server with no weights.
     # `regex` and `grammar` are the two this PR added, and they are exactly the

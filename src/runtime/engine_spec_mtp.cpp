@@ -36,6 +36,12 @@
 
 namespace imp {
 
+// The wire ceiling for a per-request `speculative.mtp_k` cannot exceed the
+// device chain buffer. spec_request.h stays out of the CUDA include chain, so
+// the two constants are tied here, where both are visible.
+static_assert(kSpecRequestMaxMtpK <= kMtpMaxChainK,
+              "per-request MTP depth ceiling must fit the device chain buffer");
+
 void Engine::mtp_unbind_(const char* why) {
     if (mtp_bound_req_ >= 0 && !mtp_stale_logged_) {
         IMP_LOG_INFO("mtp-spec: drafting off for req %d (%s)", mtp_bound_req_, why);
@@ -45,6 +51,28 @@ void Engine::mtp_unbind_(const char* why) {
     mtp_pending_draft_.clear();
     mtp_pending_chains_.clear();
     mtp_draft_ctx_ = -1;
+}
+
+MtpRequestState Engine::mtp_request_state_(const Request& req) const {
+    MtpRequestState s;
+    s.requested_k = req.spec_mtp_k;
+    s.armed_k = mtp_spec_k_;
+    // "present" covers the head this process declined to upload: that is what
+    // the concurrency decline looks like from a request's side, and telling it
+    // apart from a checkpoint with no head is the whole point of the reason.
+    s.head_present = model_ && (model_->mtp_.has_value() || model_->mtp_head_available_unloaded_);
+    s.head_loaded = model_ && model_->mtp_.has_value() && model_->mtp_->loaded;
+    s.forced_off = req.spec_override == 0;
+    return s;
+}
+
+int Engine::mtp_request_k_(const Request& req) const {
+    return mtp_resolve_request(mtp_request_state_(req)).k;
+}
+
+int Engine::mtp_chain_k_(const Request& req) const {
+    const int req_k = mtp_request_k_(req);
+    return req_k <= 0 ? 0 : std::min(mtp_chain_k_(), req_k);
 }
 
 std::vector<int32_t> Engine::mtp_take_draft_(const Request& req) {

@@ -28,6 +28,7 @@
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "runtime/config.h"
 #include "refs/e2e_greedy_locks.h"
 #include "test_models.h"
 #include <cstdio>
@@ -61,6 +62,21 @@ protected:
             GTEST_SKIP() << "Set IMP_TEST_MODEL to run greedy locks";
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
         path_ = path;
+
+        // Pin every drafter OFF before the load. A lock freezes a token
+        // sequence; speculation is the one thing in this engine that makes the
+        // sequence depend on what the PROCESS served before, because the n-gram
+        // corpus and the MTP head's KV cache both carry across requests
+        // (docs/LIMITATIONS.md: "Golden tests must pin speculative.ngram and
+        // speculative.mtp_k"). Without this the lock recorded under one drafter
+        // configuration is re-run under whatever the defaults happen to be, and
+        // a drift reads as a forward-pass regression.
+        imp::RuntimeConfig rc;
+        rc.speculative.ngram = false;
+        rc.speculative.suffix = false;
+        rc.speculative.token_recycling = false;
+        rc.speculative.mtp_k = 0;
+        imp::set_pending_runtime_config(rc);
 
         ImpModelFormat fmt = is_safetensors_dir(path_) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
         ASSERT_EQ(imp_model_load(path, fmt, &model_), IMP_SUCCESS);

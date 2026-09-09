@@ -304,6 +304,25 @@ class TestMetricsEndpoint:
                      "imp_decode_batch_last_rows"):
             assert name in text, name
 
+    def test_metrics_split_speculation_by_draft_source(self, client):
+        # The four aggregate imp_spec_* counters cannot price the MTP head: the
+        # n-gram matcher, the prompt prediction and token recycling fill the
+        # same verify chunk and land in the same totals, so a server running
+        # the documented MTP pair (mtp_k=2, ngram=false) reports the same
+        # numbers as one the matcher carried. The per-source series answer
+        # "what is the head's acceptance rate" and "what did its verify cost".
+        #
+        # Keyed on the AGGREGATE series, not on a lane fixture: both blocks sit
+        # behind the same "an engine exists" guard in metrics_memory.cpp, so a
+        # server that publishes one and not the other is the defect this
+        # asserts, and a model-less server publishes neither.
+        text = client.get("/metrics").text
+        if "imp_spec_drafted_total" not in text:
+            pytest.skip("no engine: this server publishes no speculation counters at all")
+        for src in ("mtp", "ngram"):
+            for m in ("verify_steps_total", "drafted_total", "accepted_total",
+                      "emitted_total", "verify_wall_ms_total"):
+                assert f"imp_spec_{src}_{m}" in text, f"imp_spec_{src}_{m}"
 
 class TestReasoningBudgetContract:
     """The reasoning budget's report on the wire, same shape on both transports.

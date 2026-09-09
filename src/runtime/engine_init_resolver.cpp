@@ -261,7 +261,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // above entirely, and the config-file arm only logs the branches it takes.
     // Evaluated here rather than after the head_dim/sink fallbacks below, so
     // this reports the user's choice and not a fallback's.
-    if (kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype)) {
+    const bool kv_dtype_pinned = kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype);
+    if (kv_dtype_pinned) {
         const int factor = kv_pin_context_cost_factor(mcfg.arch, config_.kv_cache_dtype);
         if (factor > 1) {
             IMP_LOG_WARN(
@@ -310,13 +311,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // launchers answered a miss with a log line and a return - leaving O
     // unwritten, which is a wrong answer at exit code 0. Same fallback shape as
     // the sink arm, over every distinct head_dim the model uses.
+    std::set<int> dims;
+    if (mcfg.head_dim > 0)
+        dims.insert(mcfg.head_dim);
+    for (int d : mcfg.head_dim_per_layer)
+        if (d > 0)
+            dims.insert(d);
     if (config_.kv_cache_dtype != QType::F16) {
-        std::set<int> dims;
-        if (mcfg.head_dim > 0)
-            dims.insert(mcfg.head_dim);
-        for (int d : mcfg.head_dim_per_layer)
-            if (d > 0)
-                dims.insert(d);
         for (int d : dims) {
             if (!paged_attention_serves_head_dim(config_.kv_cache_dtype, d)) {
                 IMP_LOG_WARN(
@@ -327,6 +328,32 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 config_.kv_cache_dtype = QType::F16;
                 break;
             }
+        }
+    }
+
+    // FP8 KV serves head_dim 256, and serves it on the SCALAR kernel: the
+    // four-token and GQA-lane decode kernels are head_dim-128 instances
+    // (attention_paged.h). The pin therefore looked free - init accepted it,
+    // the launcher wrote correct output - and cost the whole FP8 decode
+    // speedup with nothing in the log to say so. One line, at the point the
+    // dtype is chosen.
+    //
+    // A PIN only. An auto-resolved FP8 is this engine's own choice on an arch
+    // it measured (the hint and no-hint arms above), and the arms that can
+    // resolve FP8 are gated on families whose head_dim is 128; warning there
+    // would be the engine reporting itself for a decision it made, on a line
+    // the operator cannot act on.
+    if (config_.kv_cache_dtype == QType::FP8_E4M3 && kv_dtype_pinned) {
+        for (int d : dims) {
+            if (paged_fp8_decode_has_fast_kernel(d))
+                continue;
+            IMP_LOG_WARN("FP8 KV at head_dim %d: the fast decode kernels cover head_dim 128 only, "
+                         "the scalar path serves this model.%s",
+                         d,
+                         kv_nvfp4_default_safe(mcfg.arch)
+                             ? " kv_cache.dtype=auto resolves NVFP4 here, which does have a "
+                               "head_dim-256 decode kernel."
+                             : "");
         }
     }
 
