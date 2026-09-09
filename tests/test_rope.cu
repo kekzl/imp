@@ -632,11 +632,34 @@ TEST(RoPETest, PartialRoPE) {
     auto q_out = to_host(q_dev, q_count);
     auto k_out = to_host(k_dev, k_count);
 
+    // The kernel computes the pair frequency in float (device powf, 4 ulp)
+    // and only the position product in double (#1630); the reference above
+    // does the same with the host's powf (1 ulp). The two disagree by a few
+    // ulp of freq and the position multiplies that: at pos 262143, pair 3
+    // (freq 0.42) one ulp is 0.013 rad, 26x the base tolerance, and it showed
+    // up as 0.0058 on a 0.40 value. Budget: 8 ulp of freq times pos, times the
+    // rotation's sensitivity (|x0| + |x1| <= 2). Dims past rope_dim keep the
+    // base tolerance and get a bit-exact check further down.
     const float tol = 5e-4f;
-    for (int64_t i = 0; i < q_count; i++)
-        EXPECT_NEAR(q_out[i], q_ref[i], tol) << "Q NeoX partial RoPE mismatch at index " << i;
-    for (int64_t i = 0; i < k_count; i++)
-        EXPECT_NEAR(k_out[i], k_ref[i], tol) << "K NeoX partial RoPE mismatch at index " << i;
+    auto tol_at = [&](int pos, int d) {
+        if (d >= rope_dim)
+            return tol;
+        const int i = d % rope_pairs;
+        const float freq = (1.0f / powf(theta, (2.0f * i) / static_cast<float>(rope_dim))) * scaling;
+        return tol + 2.0f * static_cast<float>(pos) * freq * 8.0f * 1.1920929e-7f;
+    };
+    for (int64_t i = 0; i < q_count; i++) {
+        const int s = static_cast<int>(i / ((int64_t)n_heads * head_dim));
+        const int d = static_cast<int>(i % head_dim);
+        EXPECT_NEAR(q_out[i], q_ref[i], tol_at(pos_host[s], d))
+            << "Q NeoX partial RoPE mismatch at index " << i << " (pos " << pos_host[s] << ", dim " << d << ")";
+    }
+    for (int64_t i = 0; i < k_count; i++) {
+        const int s = static_cast<int>(i / ((int64_t)n_kv_heads * head_dim));
+        const int d = static_cast<int>(i % head_dim);
+        EXPECT_NEAR(k_out[i], k_ref[i], tol_at(pos_host[s], d))
+            << "K NeoX partial RoPE mismatch at index " << i << " (pos " << pos_host[s] << ", dim " << d << ")";
+    }
 
     // Dims [rope_dim, head_dim) must be BIT-identical, not merely close: the
     // kernel may not touch them at all. That is 192 of the 256 dims here.

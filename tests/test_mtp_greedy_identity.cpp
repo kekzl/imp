@@ -1,11 +1,11 @@
 // =============================================================================
-// test_mtp_greedy_identity.cpp - MTP must not change greedy output
+// test_mtp_greedy_identity.cpp - MTP may only move greedy output at a near-tie
 // =============================================================================
 //
 // Speculative decoding is a SPEED optimisation: the verify step accepts a draft
-// token only when it equals what the model would have sampled anyway, so at
-// temperature 0 the token sequence with the head on must equal the sequence
-// with it off. Nothing in this tree asserted that.
+// token only when it equals the argmax of the verify forward's own logits.
+// Nothing in this tree asserted anything about the tokens that come out with
+// the head on.
 //
 // What existed instead: test_spec_capture_fidelity.cpp compares a CAPTURED
 // verify chunk against an EAGER forward of the same state - it gates the graph,
@@ -16,23 +16,38 @@
 // MTP defect that changes output rather than crashing - a mis-consumed row, an
 // off-by-one in the accepted prefix, the banned-mask bug of #1796 - had no gate.
 //
-// This is the missing one: same prompt, same greedy params, mtp_k=0 against
-// mtp_k=2 with ngram=false, 128 tokens, token-identical.
+// Why this is NOT a token-identity test. The verify forward runs the chain at
+// M = 1 + mtp_k rows; plain decode runs M = 1. On this engine the batch SHAPE
+// moves the logits (docs/audit/SETTLED.md D-2, #1924: M=1 against M=32 on
+// Qwen3-14B-NVFP4, mean |dlogp| 0.242, max 1.636 nats, 7 of 64 greedy tokens
+// flip, both M=1/M=1 arms bit-identical). The first cut of this test demanded
+// identity and diverged on 3 of 3 prompts. So the oracle is the one the
+// batch-shape record allows: same prompt, same greedy params, both arms in
+// runtime.deterministic, mtp_k=0 against mtp_k=2 with ngram=false, 128 tokens.
+// Where the two sequences first part, the mtp_k=0 arm's own top-1/top-2 margin
+// at that step must lie inside the batch-shape envelope. A verify/accept defect
+// (an accepted draft the model would not have sampled) parts the sequences at
+// a WIDE margin and is red; a near-tie flip is the documented batch-shape class
+// and is not.
 //
 // GPU lane: needs the checkpoint and its MTP head (~0.79 GiB on top of the
 // model). Skips when either is absent.
 // =============================================================================
-
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "runtime/config.h"
 #include "runtime/engine.h"
-
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
+#include <memory>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -54,12 +69,17 @@ size_t device_free_mib() {
     return free_b >> 20;
 }
 
-// The two arms differ in ONE pair of keys. Everything else that could move a
-// token is pinned identically: no n-gram matcher, no suffix index, no token
-// recycling, no economics give-up (a mid-run give-up would make the arms differ
-// in WHICH steps speculated, which is exactly what must not matter).
+// Both arms deterministic: without it the forward itself is not reproducible
+// (93.6 % of floats differ between two runs of the same binary) and a token
+// comparison measures nothing.
 imp::RuntimeConfig arm_config(int mtp_k) {
     imp::RuntimeConfig rc;
+    rc.runtime.deterministic = true;
+    // A request that reaches max_tokens finishes naturally and registers its
+    // block hashes, so the second run of the same prompt would hit the prefix
+    // cache and prefill at a different chunk shape (AUDIT_qwen38_nvfp4.md P7:
+    // a chunk shape moves a near-tie). Every run here is cold.
+    rc.server.prefix_cache = false;
     rc.speculative.ngram = false;
     rc.speculative.suffix = false;
     rc.speculative.token_recycling = false;
@@ -71,36 +91,67 @@ imp::RuntimeConfig arm_config(int mtp_k) {
 
 constexpr int kGenTokens = 128;
 
-// Token-level generation, not text: a detokenized comparison hides a token
-// split that renders to the same string.
-std::vector<int32_t> greedy_tokens(ImpModel model, ImpContext ctx, const char* prompt, int n_gen) {
+// SETTLED D-2: the batch shape moves a single token's logp by up to 1.636 nats
+// (M=32 against M=1). A flip needs the top-1 and top-2 logp to move towards
+// each other, so the margin a batch-shape flip can bridge is bounded by twice
+// that; anything wider is not the batch shape.
+constexpr float kBatchShapeMarginNats = 2.0f * 1.636f;
+
+struct GreedyRun {
+    std::vector<int32_t> tokens;
+    // top-1 minus top-2 logp at each step, as this arm saw it. +inf when the
+    // engine returned fewer than two alternatives for a step.
+    std::vector<float> margin;
+};
+
+// want_margins asks for top-2 logprobs. The speculation gates refuse a request
+// that carries logprobs (engine_spec_ngram.cpp, 'constrained_decode'), so the
+// speculated arm never asks, and the margins come from a logprobs run of the
+// plain arm, valid as far as its tokens agree with the logprobs-free run.
+GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_gen, bool want_margins) {
     ImpGenerateParams params = imp_generate_params_default();
     params.temperature = 0.0f;
     params.top_k = 1;
     params.top_p = 1.0f;
     params.seed = 42;
     params.max_tokens = n_gen;
+    params.logprobs = want_margins ? 1 : 0;
+    params.top_logprobs = want_margins ? 2 : 0;
 
+    GreedyRun run;
     std::vector<int32_t> prompt_tokens(2048);
     int n_prompt = 0;
     if (imp_tokenize(model, prompt, prompt_tokens.data(), &n_prompt, 2048) != IMP_SUCCESS)
-        return {};
+        return run;
     prompt_tokens.resize(n_prompt);
 
     if (imp_context_reset(ctx) != IMP_SUCCESS)
-        return {};
+        return run;
     if (imp_prefill_with_params(ctx, prompt_tokens.data(), n_prompt, &params) != IMP_SUCCESS)
-        return {};
+        return run;
+    // Hold the request: the C API drops active_request the moment the request
+    // finishes (max_tokens reached inside the last decode_step), and
+    // output_logprobs lives on the request.
+    std::shared_ptr<imp::Request> req = ctx->active_request;
 
-    std::vector<int32_t> out;
-    out.reserve(n_gen);
+    run.tokens.reserve(n_gen);
     for (int i = 0; i < n_gen; i++) {
         int32_t tok = -1;
         if (imp_decode_step(ctx, &params, &tok) != IMP_SUCCESS || tok < 0)
             break;
-        out.push_back(tok);
+        run.tokens.push_back(tok);
     }
-    return out;
+    // output_logprobs is parallel to output_tokens on the request that produced
+    // them.
+    if (req) {
+        for (const auto& info : req->output_logprobs) {
+            float m = std::numeric_limits<float>::infinity();
+            if (info.top.size() >= 2)
+                m = info.top[0].logprob - info.top[1].logprob;
+            run.margin.push_back(m);
+        }
+    }
+    return run;
 }
 
 // Prompts long enough for the chain to engage repeatedly (the head drafts off
@@ -124,7 +175,7 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
         GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free, card has " << free_mib << " MiB";
 
     // ---- arm A: no speculation at all.
-    std::vector<std::vector<int32_t>> baseline;
+    std::vector<GreedyRun> baseline;
     {
         imp::set_pending_runtime_config(arm_config(0));
         ImpModel model = nullptr;
@@ -135,15 +186,57 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
         cfg.max_batch_size = 1;
         ImpContext ctx = nullptr;
         ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
-        for (const char* p : kPrompts)
-            baseline.push_back(greedy_tokens(model, ctx, p, kGenTokens));
+        for (const char* p : kPrompts) {
+            const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
+            GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
+            const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
+            // Same engine, same params, deterministic, cold: neither a second
+            // run nor the logprobs flag may move a token. Each is a finding of
+            // its own (AUDIT_qwen38_nvfp4.md P7: a trajectory that depends on
+            // what the engine ran before), and this test cannot read margins
+            // off a different sequence.
+            const auto report = [&](const GreedyRun& x, const GreedyRun& y) {
+                size_t i = 0;
+                while (i < std::min(x.tokens.size(), y.tokens.size()) && x.tokens[i] == y.tokens[i])
+                    ++i;
+                std::printf("[mtp-identity] arm A '%s': parts at token %zu of %zu/%zu", p, i,
+                            x.tokens.size(), y.tokens.size());
+                if (i < x.tokens.size() && i < y.tokens.size())
+                    std::printf(" (%d vs %d)", x.tokens[i], y.tokens[i]);
+                if (i < y.margin.size())
+                    std::printf(", logprobs-run margin there %.3f nats", y.margin[i]);
+                std::printf("\n");
+            };
+            if (first.tokens != plain.tokens)
+                report(first, plain);
+            ASSERT_EQ(first.tokens, plain.tokens)
+                << "prompt " << p << ": two cold deterministic runs of the plain arm differ";
+            // The logprobs run is a different LM-head/sampling path and parts
+            // from the plain run at a near-tie (measured 2026-09-09 on
+            // Qwen3.8-27B-NVFP4: token 81 of 127, 0.086 nats). Its margins are
+            // the plain run's margins exactly as far as the two agree, and
+            // unreadable past that point.
+            size_t lp_split = 0;
+            while (lp_split < std::min(plain.tokens.size(), with_lp.tokens.size()) &&
+                   plain.tokens[lp_split] == with_lp.tokens[lp_split])
+                ++lp_split;
+            if (lp_split < plain.tokens.size())
+                report(plain, with_lp);
+            plain.margin.assign(with_lp.margin.begin(),
+                                with_lp.margin.begin() + static_cast<std::ptrdiff_t>(
+                                                            std::min(lp_split, with_lp.margin.size())));
+            baseline.push_back(std::move(plain));
+        }
         imp_context_free(ctx);
         imp_model_free(model);
     }
-    for (size_t i = 0; i < baseline.size(); ++i)
-        ASSERT_GE(baseline[i].size(), 32u)
-            << "prompt " << i << " produced " << baseline[i].size()
+    for (size_t i = 0; i < baseline.size(); ++i) {
+        ASSERT_GE(baseline[i].tokens.size(), 32u)
+            << "prompt " << i << " produced " << baseline[i].tokens.size()
             << " tokens; too few for the comparison to mean anything";
+        ASSERT_GT(baseline[i].margin.size(), 0u)
+            << "prompt " << i << ": the logprobs run returned no margins, the oracle has nothing to read";
+    }
 
     // ---- arm B: the documented MTP pair, depth 2.
     imp::set_pending_runtime_config(arm_config(2));
@@ -162,29 +255,55 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
         GTEST_SKIP() << "checkpoint at " << dir << " carries no loadable MTP head";
     }
 
-    std::vector<std::vector<int32_t>> speculated;
+    std::vector<GreedyRun> speculated;
     for (const char* p : kPrompts)
-        speculated.push_back(greedy_tokens(model, ctx, p, kGenTokens));
+        speculated.push_back(greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false));
 
     const auto stats = ctx->engine->spec_stats();
     imp_context_free(ctx);
     imp_model_free(model);
 
-    // A green identity test proves nothing if the head never drafted: without
-    // this the arms are the non-speculative path compared against itself
-    // (#1321, the reason SpecStats exists at all).
+    // A green test proves nothing if the head never drafted: without this the
+    // arms are the non-speculative path compared against itself (#1321, the
+    // reason SpecStats exists at all). And a verify that accepts nothing is
+    // the plain path with extra work, which no token comparison can see.
     ASSERT_GT(stats.mtp.drafted, 0)
         << "the MTP head drafted nothing over " << (kGenTokens * 3)
         << " greedy tokens, so this test compared the plain decode path against itself";
+    ASSERT_GT(stats.mtp.accepted, 0)
+        << "the MTP head drafted " << stats.mtp.drafted << " tokens and the verify accepted none";
 
     for (size_t i = 0; i < baseline.size(); ++i) {
-        EXPECT_EQ(baseline[i], speculated[i])
-            << "prompt " << i << " (" << kPrompts[i] << "): greedy output changed with MTP on.\n"
-            << "  mtp_k=0: " << baseline[i].size() << " tokens\n"
-            << "  mtp_k=2: " << speculated[i].size() << " tokens\n"
-            << "Speculation is a speed optimisation: the verify step accepts a draft only when it "
-               "equals the token the model would have sampled, so a divergence here is a defect in "
-               "the verify/accept path, never an acceptable difference.";
+        const auto& a = baseline[i].tokens;
+        const auto& b = speculated[i].tokens;
+        const size_t n = std::min(a.size(), b.size());
+        size_t first = 0;
+        while (first < n && a[first] == b[first])
+            ++first;
+        if (first == n && a.size() == b.size()) {
+            std::printf("[mtp-identity] prompt %zu: %zu tokens identical\n", i, n);
+            continue;
+        }
+        ASSERT_LT(first, n) << "prompt " << i << ": one arm stopped early (" << a.size() << " vs "
+                            << b.size() << " tokens) with an identical prefix";
+        if (first >= baseline[i].margin.size()) {
+            // The logprobs run parted from the plain run before this point, so
+            // the margin here is unreadable: reported, not judged.
+            std::printf("[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=2 %d), margin "
+                        "unreadable (logprobs run parted at %zu)\n",
+                        i, first, a[first], b[first], baseline[i].margin.size());
+            continue;
+        }
+        const float margin = baseline[i].margin[first];
+        std::printf("[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=2 %d), margin %.3f nats\n",
+                    i, first, a[first], b[first], margin);
+        EXPECT_LE(margin, kBatchShapeMarginNats)
+            << "prompt " << i << " (" << kPrompts[i] << "): greedy output parted at token " << first
+            << " (mtp_k=0 chose " << a[first] << ", mtp_k=2 chose " << b[first] << ") where the "
+            << "mtp_k=0 arm's top-1/top-2 margin was " << margin << " nats.\n"
+            << "The batch shape of the verify chunk can only flip a near-tie (SETTLED D-2, #1924: "
+            << "max 1.636 nats per token). A flip at this margin is a verify/accept defect: an "
+            << "accepted draft the model would not have sampled.";
     }
 }
 

@@ -649,11 +649,6 @@ if(IMP_BUILD_TESTS)
         # Fixture files under tests/fixtures/, by absolute path: ctest and the image
         # run the binaries from different working directories.
         target_compile_definitions(${target} PRIVATE IMP_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
-        # Repo root, for the few guards that assert on SOURCE TEXT rather than on
-        # behaviour: a wiring question ("which predicate does this call site
-        # ask?") needs a GPU and a model to answer at runtime, so the CI lane
-        # can only read it. Same idea as the guard_* ctest entries below.
-        target_compile_definitions(${target} PRIVATE IMP_TEST_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
@@ -1209,6 +1204,17 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_degen_thresholds.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
+    # Batch>1 speculation is gated on "is there a draft source" at two call
+    # sites (scheduler round-robin, #1003 pipeline yield). Both used to ask
+    # speculative.ngram, the key the measured MTP recipe sets to false, and a
+    # mutant that points either back survives the whole CPU lane: answering
+    # the question at runtime needs a GPU, a model and a batch. A grep, like
+    # guard_cancel_teardown; a script rather than a TEST body because the
+    # shipped binaries run without the tree.
+    add_test(NAME guard_spec_rr_wiring
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_spec_rr_wiring.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     # No skipped test in the three lanes above. DEPENDS only orders: a lane
     # that crashed leaves its previous report behind, and is red on its own.
     add_test(NAME guard_unit_skips
@@ -1219,7 +1225,7 @@ if(IMP_BUILD_TESTS)
                          guard_det_suite_filter guard_cancel_teardown
                          guard_verify_filter guard_precommit_filter guard_unit_skips
                          guard_makefile_filters guard_lane_filter_copy
-                         guard_degen_thresholds
+                         guard_degen_thresholds guard_spec_rr_wiring
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

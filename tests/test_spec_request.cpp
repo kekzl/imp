@@ -18,8 +18,6 @@
 
 #include <gtest/gtest.h>
 
-#include <fstream>
-#include <sstream>
 #include <string>
 
 using imp::DequantCapInputs;
@@ -243,61 +241,6 @@ TEST(PagedFp8Decode, FastKernelsAreHeadDim128Only) {
 TEST(PagedFp8Decode, ServingAndServingFastAreDifferentQuestions) {
     EXPECT_TRUE(paged_attention_serves_head_dim(imp::QType::FP8_E4M3, 256));
     EXPECT_FALSE(paged_fp8_decode_has_fast_kernel(256));
-}
-
-// ------------------------------------------------------------- the wiring
-
-// Two call sites decide whether batch>1 speculation happens at all, and both
-// used to ask `speculative.ngram` - the one key the measured MTP recipe sets to
-// false. Fixing the rule does not fix the wiring: a mutant that points either
-// site back at the n-gram predicate survives the entire CPU lane, because
-// answering the question at runtime needs a GPU, a model and a batch.
-//
-// So this guard reads the source. It is the same trade the guard_* ctest
-// entries make (a literal filter copy that no test execution can compare), and
-// it is the only lane CI has.
-std::string read_source(const char* rel) {
-    std::ifstream in(std::string(IMP_TEST_SOURCE_ROOT) + "/" + rel);
-    EXPECT_TRUE(in.good()) << "cannot read " << rel;
-    std::stringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
-}
-
-// The block between `first` and the next line containing `end_marker`.
-std::string block_after(const std::string& src, const std::string& first, const std::string& end_marker) {
-    const size_t a = src.find(first);
-    EXPECT_NE(a, std::string::npos) << "anchor not found: " << first;
-    if (a == std::string::npos)
-        return {};
-    const size_t b = src.find(end_marker, a);
-    EXPECT_NE(b, std::string::npos) << "end marker not found: " << end_marker;
-    return src.substr(a, b == std::string::npos ? std::string::npos : b - a);
-}
-
-TEST(SpecBatchRrWiring, SchedulerRoundRobinAsksForADrafterNotForNgram) {
-    const std::string src = read_source("src/runtime/engine_scheduler.cpp");
-    const std::string blk = block_after(src, "SpecBatchRrState rr_state", "spec_rr_yield_interval_ =");
-    EXPECT_NE(blk.find("spec_any_drafter_enabled_"), std::string::npos)
-        << "the round-robin branch must select rows by 'can anyone draft', not by the n-gram flag";
-    EXPECT_EQ(blk.find("spec_ngram_enabled_"), std::string::npos)
-        << "spec_ngram_enabled_ is back in the round-robin branch: with the documented MTP pair "
-           "(mtp_k=2, ngram=false) it selects no row and batch>1 speculation never fires";
-    EXPECT_EQ(blk.find("speculative.ngram"), std::string::npos)
-        << "the batch_rr entry gate must not read speculative.ngram";
-}
-
-TEST(SpecBatchRrWiring, PipelineYieldAsksForADrafterNotForNgram) {
-    const std::string src = read_source("src/runtime/engine_decode_pipeline.cpp");
-    const std::string blk =
-        block_after(src, "speculative.batch_rr", "const int next_parity");
-    EXPECT_NE(blk.find("spec_any_drafter_enabled_"), std::string::npos)
-        << "the #1003 yield is what lets the round-robin verify get a turn; asking the n-gram "
-           "question here starves it on a dense model drafting with MTP alone";
-    EXPECT_EQ(blk.find("spec_ngram_enabled_"), std::string::npos)
-        << "spec_ngram_enabled_ is back in the pipeline spec yield";
-    EXPECT_EQ(blk.find("speculative.ngram"), std::string::npos)
-        << "the pipeline spec yield must not read speculative.ngram";
 }
 
 }  // namespace
