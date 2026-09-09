@@ -14,6 +14,7 @@
 #include "runtime/vram_budget.h"
 #include "core/cuda_raii.h"
 #include "core/logging.h"
+#include "memory/ssm_state_size.h"
 #include "memory/vram_query.h"
 
 #include <algorithm>
@@ -198,18 +199,25 @@ bool Engine::init_weights() {
         expert_reserve += kv_est;
 
         if (mcfg.ssm_inner_size > 0) {
-            int conv_ch = mcfg.ssm_conv_channels();
-            int n_heads = mcfg.ssm_dt_rank;
-            int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             int n_ssm = 0;
             for (int i = 0; i < mcfg.n_layers; i++)
                 if (model_->layer(i).ssm_in.data != nullptr)
                     n_ssm++;
-            expert_reserve += static_cast<size_t>(n_ssm) * config_.max_batch_size *
-                              (static_cast<unsigned long>(conv_ch) * std::max(mcfg.ssm_conv_kernel - 1, 0) *
-                                   sizeof(float) +
-                               static_cast<size_t>(n_heads) * hd_ssm * mcfg.ssm_state_size *
-                                   dtype_size(config_.ssm_state_dtype));
+            // memory/ssm_state_size.h, the same header SSMState::init allocates
+            // from. This was the THIRD copy of the formula: conv_kernel-1 taps,
+            // no 256-byte alignment and no reserved verify slots, so the
+            // expert-offload decision was taken against a state pool smaller
+            // than the one that gets allocated - under-charging in the direction
+            // that oversubscribes the card (MEMORY.md D14/D15).
+            const int n_heads = mcfg.ssm_dt_rank;
+            const SsmStateGeometry geom{n_ssm,
+                                        mcfg.ssm_conv_channels(),
+                                        mcfg.ssm_conv_kernel,
+                                        n_heads,
+                                        (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
+                                        mcfg.ssm_state_size,
+                                        config_.ssm_state_dtype};
+            expert_reserve += ssm_pool_bytes(geom, config_.max_batch_size, spec_mc_reserved_slots_());
             // Recurrent-snapshot store (hybrid prefix caching): its buffers
             // are pre-allocated eagerly at KV-cache init, so the offload
             // decision must leave room for them.

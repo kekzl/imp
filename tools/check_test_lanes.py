@@ -225,14 +225,18 @@ def main():
     # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
     # 1083 -> 1084 (small-M pipeline race, roadmap ledger 2026-09-08): NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable
     # (test-quant, GPU, no model: 200 launches per in-situ shape, single and multi kernel, bit-identical or red).
-    # 1084 -> 1086 (per-request speculation + hd256 coverage): two GPU-lane tests that had
+    # 1087 -> 1088 (chained hybrid restores, MEMORY.md D16): HybridRestoreChainTest
+    # .HybridRestoreChainStateStaysClose (test-e2e, GPU + a GDN checkpoint: 30 growing
+    # turns on the recurrent prefix cache against a cold prefill of the same prompt,
+    # compared on the state slab rather than on the tokens).
+    # 1088 -> 1090 (per-request speculation + hd256 coverage): two GPU-lane tests that had
     # no counterpart at all. MtpGreedyIdentityTest.MtpDoesNotChangeGreedyTokens (test-e2e, GPU +
     # Qwen3.8-27B-NVFP4 with its MTP head: mtp_k=0 against mtp_k=2, token-identical or red -
     # speculation is a speed optimisation and nothing asserted that) and
     # QkNormRopeFusedTest.MatchesNormThenStandaloneRope (test-compute, GPU, no model: the #1957
     # fused kernel against host RMSNorm + the standalone RoPE kernel at n = 1/32/64; TEST_P counts
     # once as a macro).
-    PINNED = 1086
+    PINNED = 1090
 
     text = CMAKE.read_text()
     mods = module_sources(text)

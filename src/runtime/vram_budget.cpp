@@ -6,6 +6,7 @@
 #include "core/logging.h"
 #include "memory/vram_query.h"
 #include "memory/plan.h"  // kMeasuredLibraryReserveBytes
+#include "memory/ssm_state_size.h"
 #include <algorithm>
 #include <cuda_runtime.h>
 
@@ -195,15 +196,20 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             if (model.layer(i).ssm_in.data != nullptr)
                 n_ssm++;
         if (n_ssm > 0) {
-            int conv_ch = mcfg.ssm_conv_channels();
-            int n_heads = mcfg.ssm_dt_rank;
-            int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
-            ssm_footprint = static_cast<size_t>(n_ssm) *
-                            static_cast<size_t>(config.max_batch_size + std::max(0, ssm_reserved_slots)) *
-                            (static_cast<unsigned long>(conv_ch) * std::max(mcfg.ssm_conv_kernel - 1, 0) *
-                                 sizeof(float) +
-                             static_cast<size_t>(n_heads) * hd_ssm * mcfg.ssm_state_size *
-                                 dtype_size(config.ssm_state_dtype));
+            // memory/ssm_state_size.h, the same header SSMState::init allocates
+            // from. This site used to carry its own copy of the formula with
+            // conv_kernel-1 taps and no 256-byte alignment: 4968 MiB charged
+            // against 5088 MiB taken on Qwen3.8-27B-NVFP4 at 64 slots, i.e. the
+            // budget was short of the allocation it bounds (MEMORY.md D14).
+            const int n_heads = mcfg.ssm_dt_rank;
+            const SsmStateGeometry geom{n_ssm,
+                                        mcfg.ssm_conv_channels(),
+                                        mcfg.ssm_conv_kernel,
+                                        n_heads,
+                                        (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
+                                        mcfg.ssm_state_size,
+                                        config.ssm_state_dtype};
+            ssm_footprint = ssm_pool_bytes(geom, config.max_batch_size, ssm_reserved_slots);
         }
     }
 

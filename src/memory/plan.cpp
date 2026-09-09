@@ -96,14 +96,20 @@ PlanResult plan_memory(const PlanInput& in) {
     p.model_resident = in.model.weight_bytes + mandatory_caches;
 
     // ── 3. Engine-persistent + scratch + the fixed pools. ──
-    p.engine_persistent = in.engine_persistent_bytes + in.features.vision_tower_bytes +
-                          in.features.spec_decode_bytes;
+    // The vision tower and the speculative staging used to be summed INTO
+    // engine_persistent, which made them unreadable in the itemisation and
+    // impossible to reconcile against a log line. Every FeatureSet byte field
+    // gets its own line now (test: EveryFeatureFieldReachesALine).
+    p.engine_persistent = in.engine_persistent_bytes;
     p.forward_scratch = in.forward_scratch_bytes;
 
     push(p.pools, "SSM/GDN state", RegionTag::SsmState, in.features.ssm_state_bytes);
     push(p.pools, "recurrent snapshots", RegionTag::RecurrentSnapshots,
          in.features.recurrent_snapshot_bytes);
     push(p.pools, "residual FP16 ring", RegionTag::ResidualRing, in.features.residual_ring_bytes);
+    push(p.pools, "vision tower", RegionTag::EnginePersistent, in.features.vision_tower_bytes);
+    push(p.pools, "speculative decode staging", RegionTag::EnginePersistent,
+         in.features.spec_decode_bytes);
 
     // ── 4. SWA group: batch-shaped, charged before the global pool. ──
     int n_global_layers = in.model.n_kv_layers;
