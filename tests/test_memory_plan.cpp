@@ -400,7 +400,7 @@ TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
 
 namespace {
 
-// Qwen3.8-27B-NVFP4 (/home/kekz/models/Qwen3.8-27B-NVFP4-vllm/config.json):
+// Qwen3.8-27B-NVFP4 (the `Qwen3.8-27B-NVFP4-vllm` export, its `config.json`):
 // 64 layers of which 48 are linear_attention, linear_conv_kernel_dim 4,
 // linear_num_value_heads 48 x linear_value_head_dim 128 -> ssm_inner_size 6144,
 // linear_key_head_dim 128 -> ssm_state_size, linear_num_key_heads 16 -> groups.

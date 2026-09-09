@@ -11,8 +11,10 @@
 //   The prefix cache is only populated when a request FINISHES naturally
 //   (engine step() → finish_request() → register_block_hashes() + cache the
 //   blocks). The manual token-level path (imp_prefill_with_params +
-//   imp_decode_step) never registers hashes, AND imp_context_reset()
-//   deliberately evicts ALL cached blocks. So the cache engages ONLY across
+//   imp_decode_step) never registers hashes, AND imp_context_reset() evicts
+//   ALL cached blocks - but only while it still sees ctx->active_request, so
+//   a test that drives the engine directly gets a no-op. So the cache engages
+//   ONLY across
 //   two consecutive imp_generate() calls on the SAME context with NO reset
 //   between them: call 1 finishes and caches its prefix; call 2 hits it.
 //   We therefore drive imp_generate twice and rely on greedy determinism.
@@ -23,6 +25,7 @@
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 #include "model/model.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"
@@ -375,6 +378,19 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
         return req->output_tokens;
     };
 
+    // Drop every cached block and every recurrent snapshot. NOT
+    // imp_context_reset(): that only evicts when ctx->active_request is set,
+    // which the C API sets and this test does not (it drives the engine
+    // directly through add_request/step). Every "cold" arm below used to run
+    // against a fully populated cache and compared one restore against
+    // another instead of against a fresh prefill (found 2026-09-09).
+    auto go_cold = [&]() {
+        ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);  // graphs, batch pool, device sync
+        while (engine->kv_manager()->evict_cached_block()) {
+        }
+        engine->clear_recurrent_snapshots();
+    };
+
     constexpr int kTokens = 16;
 
     // ── arm A: block-aligned prompt ──────────────────────────────────────
@@ -404,9 +420,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     // The boundary rounds DOWN, so the tail tokens are always forwarded. A
     // restore that ignored the remainder would show up here and nowhere else.
     // A second engine cannot be built on this model handle (the weight caches
-    // consumed the source tensors), so cold means a reset: it evicts every
-    // cached block, and without cached KV no snapshot can be matched.
-    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+    // consumed the source tensors), so cold means dropping the cache in place:
+    // go_cold() evicts every cached block and every snapshot, and without
+    // cached KV no snapshot can be matched.
+    go_cold();
     const int unaligned_len = aligned_len - (kv_bs / 2 > 0 ? kv_bs / 2 : 1) - 1;
     ASSERT_NE(unaligned_len % kv_bs, 0);
     std::vector<int32_t> unaligned(full.begin(), full.begin() + unaligned_len);
@@ -421,9 +438,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     // cached_tokens must follow the SNAPSHOT, or the continuation decodes from
     // a state that never saw the tokens whose KV it is reading.
     // A second engine cannot be built on this model handle (the weight caches
-    // consumed the source tensors), so cold means a reset: it evicts every
-    // cached block, and without cached KV no snapshot can be matched.
-    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+    // consumed the source tensors), so cold means dropping the cache in place:
+    // go_cold() evicts every cached block and every snapshot, and without
+    // cached KV no snapshot can be matched.
+    go_cold();
     // 100, not 40: a continuation past one chunk of the chunk-parallel GDN scan
     // (gdn.chunkpar_scan, 64-token chunks) takes a different prefill route
     // from the restored state than a short tail does. Measured 2026-09-09 on
@@ -440,14 +458,32 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
         << "reuse ran past the snapshot boundary (" << ext_cached << " > " << expect_c << ")";
     EXPECT_GT(ext_cached, 0) << "the extended prompt shares a snapshot-backed prefix";
 
+    // The cold reference has to split its prefill where the warm one restored,
+    // or it is not the same computation. A restore at B forwards [B, snap) and
+    // [snap, end); a default cold prefill takes [0, snap) and [snap, end), so
+    // the two differ by one chunk boundary at B - and on a GDN model that is
+    // not a rounding difference. Measured 2026-09-09 on Qwen3.8-27B-NVFP4 with
+    // the prefix cache OFF, changing nothing but the chunk size: one extra
+    // boundary in a 3299-token prompt (chunk 2048 -> 1024) moves the recurrent
+    // state by 0.34 relative L2 per layer and flips the greedy continuation,
+    // and the drift then stays flat down to chunk 32 rather than growing with
+    // the count (docs/audit/SETTLED.md, tests/test_hybrid_restore_chain.cu).
+    // Pinning runtime.prefill_chunk_size to the restore point gives the cold
+    // arm the SAME boundaries, which is what makes the equality a statement
+    // about the restored state instead of about the chunk shape.
     // A second engine cannot be built on this model handle (the weight caches
-    // consumed the source tensors), so cold means a reset: it evicts every
-    // cached block, and without cached KV no snapshot can be matched.
-    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+    // consumed the source tensors), so cold means dropping the cache in place:
+    // go_cold() evicts every cached block and every snapshot, and without
+    // cached KV no snapshot can be matched.
+    go_cold();
+    ASSERT_GT(ext_cached, 0);
+    const int saved_chunk = engine->mutable_runtime_config().runtime.prefill_chunk_size;
+    engine->mutable_runtime_config().runtime.prefill_chunk_size = ext_cached;
     const std::vector<int32_t> cold_c = run(extended, kTokens, nullptr);
+    engine->mutable_runtime_config().runtime.prefill_chunk_size = saved_chunk;
     EXPECT_EQ(warm_c, cold_c)
         << "warm prompt + 100 new tokens: the continuation after a snapshot restore must equal a "
-           "cold prefill of the same prompt";
+           "cold prefill that forwards the same tokens through the same chunk boundaries";
 }
 
 }  // namespace

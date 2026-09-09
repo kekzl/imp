@@ -1073,6 +1073,9 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        # Chained recurrent restores: 30 growing turns against a cold prefill of
+        # the same prompt, compared on the state slab rather than on tokens.
+        tests/test_hybrid_restore_chain.cu
         tests/test_batch_invariance.cu
         # Decode-graph buckets on a GDN hybrid: one captured graph per batch
         # size, two different ways to reach the recurrent slot (captured scalar

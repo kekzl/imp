@@ -13,6 +13,9 @@ there instead of retelling it.
 
 ### Added
 
+- `HybridRestoreChainStateStaysClose` (test-e2e, GDN checkpoint): 30 chained recurrent-snapshot restores against a
+  cold prefill of the same prompt, compared on the state slab per layer. 27B chain 0.337 vs 0.329 relative L2 for a
+  cold prefill chunked at the same boundaries; two cold runs are bit-identical ([SETTLED.md](docs/audit/SETTLED.md))
 - `kv_cache.block_size`: tokens per KV block as an operator key (0 = auto: 32 for `n_kv_heads <= 4`,
   else 16), refused at load outside multiples of 16 in [16, 256]; `imp-bench decode-attn` sweeps 16/32/64 and
   `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_arch_2026 B-5](docs/audit/AUDIT_arch_2026.md))
@@ -90,6 +93,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- The prefix-cache E2E test's "cold" arms were not cold: `imp_context_reset()` only evicts while a C-API request is
+  live, and the test drives the engine directly, so two of its three arms compared one restore against another
+  instead of against a fresh prefill ([tests/test_prefix_cache_e2e.cpp](tests/test_prefix_cache_e2e.cpp))
 - `runtime.max_batch_size` is clamped to the largest batch the memory plan fits when the SSM/GDN state is the overrun,
   instead of the live-pass fallback that never charged it: Qwen3.8-27B-NVFP4 at 64 slots put 5088 MiB of state past the
   headroom, KV pool probe 528 GB/s (spilled); now `clamped 64 -> 41`, probe 1621 GB/s ([MEMORY.md D14](docs/internals/MEMORY.md))

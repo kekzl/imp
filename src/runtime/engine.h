@@ -321,6 +321,15 @@ public:
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
 
+    // The recurrent (SSM/GDN) state pool, or nullptr on a model without one,
+    // and the slot a request holds (-1 once it released it at finish).
+    // Readable so a test can compare the STATE two prefill routes reached
+    // instead of the tokens they sampled: a chained snapshot restore and a
+    // cold prefill of the same prompt can differ in the state long before the
+    // difference crosses an argmax, and only the slab shows that.
+    SSMState* ssm_state() const noexcept { return ssm_state_.get(); }
+    int recurrent_slot(int req_id) const;
+
     // Speculative-decode counters, for /metrics and for tests that need to
     // prove the drafter actually ran (#1321). Without this, a spec-decoding
     // test passes whether or not a single token was drafted: the n-gram matcher

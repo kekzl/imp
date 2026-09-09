@@ -217,10 +217,14 @@ test-e2e: build
 	@# AUDIT_arch_2026 I-1 escape class again. Own container, GDN checkpoint.
 	@# HybridSnapshotRestoreMatchesFresh needs a prompt past 512 tokens and
 	@# asserts that rather than skipping, so a wrong checkpoint fails here.
+	@# HybridRestoreChainTest is a TEST_P suite: the *...* form is required
+	@# (tests/CLAUDE.md - a bare Suite.* on a TEST_P matches nothing and gtest
+	@# calls that PASSED). It chains 30 restores against a cold prefill of the
+	@# same prompt and compares the recurrent slab, not the tokens.
 	docker run --rm --gpus all -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
-		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:GdnGraphBucketTest.*"
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:GdnGraphBucketTest.*:*HybridRestoreChainTest*"
 	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
 	@# loader + RoPE path the #503 class shipped prompt-blind on).
 	docker run --rm --gpus all -v $(HOME)/models:/models \
