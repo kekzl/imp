@@ -224,7 +224,7 @@ void send_dialect_error(httplib::Response& res, const std::string& path, int sta
 }
 
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning) {
-    return !has_tool_calls && content.empty() && !reasoning.empty();
+    return answer_lost_to_reasoning_flags(has_tool_calls, content.empty(), !reasoning.empty());
 }
 
 bool report_answer_lost_to_reasoning(bool has_tool_calls, const std::string& content,

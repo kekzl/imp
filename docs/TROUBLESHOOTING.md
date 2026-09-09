@@ -165,24 +165,28 @@ worth reporting, and it was the exact defect fixed in #1256.
 
 ## `content` is empty and the answer sits in `reasoning_content`
 
-Since the answer-headroom fix this is the engine's job, not the operator's:
-the request seeds `started_in_think` from the prompt tail, so the budget
-engages on the templates that inject `<think>\n` (Qwen3/3.5/3.6/3.8,
-DeepSeek-R1) instead of counting 0 reasoning tokens forever. At `max_tokens`
-260 with the 0.5 default the limit is `max(130, 260 - 256) = 130` reasoning
-tokens: the engine injects `</think>` there and the reply gets the rest.
-Reserve size: `runtime.think_answer_reserve` (default 256).
-
-When the reply still does not start, the response says so: `imp_finish_detail:
-"reasoning_budget_exhausted"` beside `finish_reason`,
-`usage.completion_tokens_details.reasoning_tokens` (OpenAI) /
+The response now says which of the two situations it is, on every dialect and
+both transports: `imp_finish_detail: "reasoning_budget_exhausted"` beside
+`finish_reason`, `usage.completion_tokens_details.reasoning_tokens` (OpenAI) /
 `usage.output_tokens_details.reasoning_tokens` (Anthropic, Responses), and
 `imp_requests_reasoning_exhausted_total` on `/metrics`. `finish_reason` itself
-stays `stop` / `length`.
+stays `stop` / `length`. Before that the only report was a server-side WARN.
 
-The table below is the measurement from BEFORE that change and is what the
-budget now prevents. Raising `max_tokens` is still the fix when the model needs
-a longer answer than the reserve leaves it.
+The answer-headroom budget does engage on imp-server: measured on the current
+build, `max_tokens` 64 returns 126 characters of reasoning and then 186
+characters of content, `max_tokens` 16 returns 32 characters of reasoning and
+then content. So the forced `</think>` fires. The limit is
+`max(max_tokens x think_budget, max_tokens - max(runtime.think_answer_reserve,
+max_tokens/4))`, i.e. 130 reasoning tokens at `max_tokens` 260 and the 0.5
+default.
+
+**Still open:** the empty replies below still reproduce on a long session at
+`max_tokens` 120-150 (turn 5 of the 74-turn replay: `finish_reason: length`,
+586 characters of reasoning, `content` empty), and the think seed does not
+explain them. Under investigation, tracked in the dispatch audit; the leading
+hypothesis is that the model re-opens `<think>` after the forced close and the
+last-close-wins splitter then leaves `content` empty. Raising `max_tokens`
+remains the fix.
 
 Measured on Qwen3.8-27B, one session grown to ~8k tokens over 74 turns:
 

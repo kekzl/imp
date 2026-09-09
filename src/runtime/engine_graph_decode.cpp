@@ -159,7 +159,11 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
             // bounded bursts (n-gram speculation think-phase) the request
             // relaunches mid-think, so the per-launch limit must be the
             // REMAINING budget or every burst would re-grant the full one.
-            const int full = static_cast<int>(req.max_tokens * req.think_budget);
+            // The SAME limit the eager sampler enforces (think_logic::think_limit):
+            // the fraction alone cut thinking earlier than the documented
+            // reserve rule and ignored runtime.think_answer_reserve.
+            const int full = think_logic::think_limit(req.max_tokens, req.think_budget,
+                                                      runtime_config_.runtime.think_answer_reserve);
             bool thinking_now = false;
             const int used = think_logic::count_reasoning_tokens(
                 req.output_tokens, think_start_id_, think_end_id_, req.started_in_think,
@@ -304,8 +308,10 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                 const int used = think_logic::count_reasoning_tokens(
                     req->output_tokens, think_start_id_, think_end_id_, req->started_in_think,
                     thinking_now);
-                think_limit = std::max(
-                    1, static_cast<int>(req->max_tokens * req->think_budget) - used);
+                think_limit =
+                    std::max(1, think_logic::think_limit(req->max_tokens, req->think_budget,
+                                                         runtime_config_.runtime.think_answer_reserve) -
+                                    used);
             }
             if (runtime_config_.diagnostics.spec_trace)
                 IMP_LOG_INFO("[burst-launch] REARM seed=%d pos=%d ctx=%d limit=%d", (int)first_token,

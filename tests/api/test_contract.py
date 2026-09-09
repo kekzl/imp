@@ -341,6 +341,12 @@ class TestReasoningBudgetContract:
         assert isinstance(details.get("reasoning_tokens"), int)
         assert details["reasoning_tokens"] > 0
         assert details["reasoning_tokens"] <= body["usage"]["completion_tokens"]
+        # THE negative half of "exactly then": this budget reached the answer,
+        # so the exhaustion detail must be absent. Without this, a server that
+        # emits it unconditionally tells every well-served client its reply was
+        # truncated, and no test anywhere notices.
+        if choice["message"].get("content"):
+            assert "imp_finish_detail" not in choice
 
     def test_non_stream_signals_an_exhausted_budget(self, client, model):
         # A budget too small to reach the answer: everything generated stays
@@ -401,3 +407,29 @@ class TestReasoningBudgetContract:
             assert not details_seen
         else:
             assert details_seen == ["reasoning_budget_exhausted"]
+
+    def test_stream_omits_the_detail_when_the_answer_arrived(self, client, model):
+        # The same stream, with room for an answer. The max_tokens 8 arm above
+        # can only ever see the positive branch, so its `if content` half is
+        # dead: this arm is the one that fails on an unconditional emission.
+        from conftest import parse_sse
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 64,
+            "temperature": 0,
+            "reasoning_effort": "low",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        })
+        assert r.status_code == 200
+        events = parse_sse(r.text)
+        content = "".join(
+            (e["choices"][0]["delta"].get("content") or "")
+            for e in events if e.get("choices")
+        )
+        if not content:
+            pytest.skip("the model produced no content at max_tokens 64")
+        for e in events:
+            if e.get("choices"):
+                assert "imp_finish_detail" not in e["choices"][0]

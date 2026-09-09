@@ -23,7 +23,8 @@ there instead of retelling it.
   above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
   `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_arch_2026 F2-4, F2-9](docs/audit/AUDIT_arch_2026.md))
 - `runtime.think_answer_reserve` (default 256, was the compile-time `kMaxAnswerReserve`): tokens of `max_tokens`
-  the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`
+  the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`.
+  The CUDA-graph loop used the fraction alone (at `max_tokens` 4096: 2048 against the host rule's 3072)
 
 ### Changed
 
@@ -92,9 +93,9 @@ there instead of retelling it.
 
 ### Fixed
 
-- Think budget engages on prompt-injected `<think>` templates (Qwen3/3.5/3.6/3.8, DeepSeek-R1): `add_request`
-  seeded `in_think_block` but never `started_in_think`, so the recount saw 0 reasoning tokens and `</think>` was
-  never forced. At `max_tokens` 260 the forced close now lands at reasoning token 130 (`docs/TROUBLESHOOTING.md`)
+- `imp-cli` and embedded `src/api` callers get the think budget on prompt-injected `<think>` templates:
+  `add_request` seeded `in_think_block` but never `started_in_think`, so the recount saw 0 reasoning tokens.
+  imp-server already seeded both (`build_imp_request_`, #784) and is unaffected
 - Budget exhaustion is reported on the wire: `imp_finish_detail: "reasoning_budget_exhausted"` (OpenAI choice +
   final chunk, Anthropic response + `message_delta`), `reasoning_tokens` in `usage` on the non-streaming and
   Anthropic paths, `imp_requests_reasoning_exhausted_total` on `/metrics`; `finish_reason`/`stop_reason` unchanged

@@ -329,10 +329,10 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     // as the OpenAI dialect's `imp_finish_detail` on the final chunk.
     json delta = {{"stop_reason", stop_reason},
                   {"stop_sequence", res.stop_sequence.empty() ? json(nullptr) : json(res.stop_sequence)}};
-    if (!res.tool_calls_emitted && !res.content_emitted && res.n_reasoning_tokens > 0) {
-        delta["imp_finish_detail"] = "reasoning_budget_exhausted";
+    attach_reasoning_finish_detail(delta, res.tool_calls_emitted, !res.content_emitted,
+                                   res.n_reasoning_tokens > 0);
+    if (delta.contains("imp_finish_detail"))
         state.metrics.requests_reasoning_exhausted++;
-    }
     out.emit("message_delta",
              json{{"type", "message_delta"}, {"delta", std::move(delta)}, {"usage", std::move(delta_usage)}});
     out.emit("message_stop", json{{"type", "message_stop"}});

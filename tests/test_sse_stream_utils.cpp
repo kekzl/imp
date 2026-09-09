@@ -626,6 +626,60 @@ TEST(NonStreamReasoningTokens, FallsBackWhenTheIdScanFindsNothing) {
     EXPECT_EQ(nonstream_reasoning_tokens(out, 100, 200, false, /*reasoning_chars=*/2, one_byte), 2);
 }
 
+// The exhaustion signal, both directions. The three handler TUs that emit it
+// (handlers_chat_core.cpp, handlers_chat_stream.cpp, handlers_messages.cpp) are
+// in NO CPU test target, so the decision and the write were moved into utils.h
+// where these tests reach them. A mutant that emits the field unconditionally
+// has to get past exactly this.
+
+TEST(ReasoningFinishDetail, FiresOnlyWhenTheAnswerWasLostToReasoning) {
+    EXPECT_STREQ(reasoning_finish_detail(/*has_tool_calls=*/false, /*content_empty=*/true,
+                                         /*has_reasoning=*/true),
+                 "reasoning_budget_exhausted");
+}
+
+TEST(ReasoningFinishDetail, AbsentWhenThereIsAnAnswer) {
+    // THE negative half. An answer arrived, so the budget was not exhausted -
+    // emitting the detail here would tell every well-served client its reply
+    // was truncated.
+    EXPECT_EQ(reasoning_finish_detail(false, /*content_empty=*/false, true), nullptr);
+}
+
+TEST(ReasoningFinishDetail, AbsentWithoutReasoningAndOnToolCalls) {
+    // Empty content and no thinking either is a different situation (an
+    // immediate stop match), and a tool call legitimately carries no content.
+    EXPECT_EQ(reasoning_finish_detail(false, true, /*has_reasoning=*/false), nullptr);
+    EXPECT_EQ(reasoning_finish_detail(/*has_tool_calls=*/true, true, true), nullptr);
+}
+
+TEST(ReasoningFinishDetail, AttachWritesTheFieldOnlyWhenItFires) {
+    json fired = json::object();
+    attach_reasoning_finish_detail(fired, false, true, true);
+    ASSERT_TRUE(fired.contains("imp_finish_detail"));
+    EXPECT_EQ(fired["imp_finish_detail"], "reasoning_budget_exhausted");
+
+    json quiet = json::object();
+    attach_reasoning_finish_detail(quiet, false, /*content_empty=*/false, true);
+    EXPECT_FALSE(quiet.contains("imp_finish_detail"));
+    EXPECT_TRUE(quiet.empty()) << "the object must be left untouched";
+}
+
+TEST(SseChunk, CarriesTheFinishDetailBesideAnUnchangedFinishReason) {
+    json delta = json::object();
+    json got = parse_sse(
+        sse_chunk("id", 1, "m", delta, "length", /*logprobs=*/nullptr, "reasoning_budget_exhausted"));
+    const json& choice = got["choices"][0];
+    EXPECT_EQ(choice["imp_finish_detail"], "reasoning_budget_exhausted");
+    // The enum member a strict SDK switches on is untouched.
+    EXPECT_EQ(choice["finish_reason"], "length");
+}
+
+TEST(SseChunk, OmitsTheFinishDetailWhenThereIsNone) {
+    json delta = json::object();
+    json got = parse_sse(sse_chunk("id", 1, "m", delta, "stop"));
+    EXPECT_FALSE(got["choices"][0].contains("imp_finish_detail"));
+}
+
 // A floored KV pool is not "the last request failed", it is "this process
 // cannot serve". Reported from production: `docker compose restart` while the
 // previous process still held the card came up with 16 blocks against a planned

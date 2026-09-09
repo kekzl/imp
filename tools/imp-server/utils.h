@@ -188,6 +188,32 @@ bool bearer_token_matches(const std::string& authorization, const std::string& a
 // is exactly the one that has to be covered by a test rather than by a run.
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning);
 
+// The same predicate over the three FACTS, so the streaming path (which never
+// holds the finished strings, only "did any content byte go out") asks the same
+// question as the non-streaming one. One source of truth for four emitters.
+inline bool answer_lost_to_reasoning_flags(bool has_tool_calls, bool content_empty, bool has_reasoning) {
+    return !has_tool_calls && content_empty && has_reasoning;
+}
+
+// The wire value of the exhaustion signal, or nullptr when the request does not
+// qualify. `finish_reason` / `stop_reason` keep their upstream enums, so this
+// rides beside them as an imp-namespaced extra.
+inline const char* reasoning_finish_detail(bool has_tool_calls, bool content_empty, bool has_reasoning) {
+    return answer_lost_to_reasoning_flags(has_tool_calls, content_empty, has_reasoning)
+               ? "reasoning_budget_exhausted"
+               : nullptr;
+}
+
+// The ONE site that writes the field onto a response object (an OpenAI choice,
+// an Anthropic `message_delta`). The write lives with the decision on purpose:
+// the handler TUs are in no CPU test target, so a mutant that emits the field
+// unconditionally has to get past this function, which is (test_sse_stream_utils).
+inline void attach_reasoning_finish_detail(json& obj, bool has_tool_calls, bool content_empty,
+                                           bool has_reasoning) {
+    if (const char* detail = reasoning_finish_detail(has_tool_calls, content_empty, has_reasoning))
+        obj["imp_finish_detail"] = detail;
+}
+
 // The same predicate, plus the server-side WARN that names which of the two
 // situations an empty `content` is. Returns what it decided, so the caller can
 // attach the wire signal (`imp_finish_detail`) and the metric without asking

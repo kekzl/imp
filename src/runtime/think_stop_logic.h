@@ -23,11 +23,16 @@ namespace imp::think_logic {
 // Chat templates for Qwen3 / Qwen3.5 / Qwen3.6 / Qwen3.8 / DeepSeek-R1 end the
 // generation prompt with `<think>\n`, so generation starts INSIDE a think block
 // and the output carries no opener. Two request flags follow from that tail and
-// both must be set, which is the bug this seam closes: add_request set only
-// `in_think_block` (stop suppression) and never `started_in_think` (the budget
-// recount seed), so count_reasoning_tokens started outside think, returned 0,
-// should_force_think_end never fired, `</think>` was never injected and the
-// request spent all of max_tokens reasoning (empty `content`).
+// both must be set: `in_think_block` (stop suppression) and `started_in_think`
+// (the budget recount seed). add_request set only the first, so on that path
+// count_reasoning_tokens started outside think, returned 0 and
+// should_force_think_end never fired.
+//
+// SCOPE: imp-server never had that hole. `build_imp_request_`
+// (tools/imp-server/handlers_chat_core.cpp) sets both flags from
+// `enable_thinking` for all three dialects, and add_request only ever sets them
+// to true, so the server path was already correct. This closes the same hole
+// for `imp-cli` and embedded `src/api` callers, which set neither.
 //
 // Precedence: `</think>` shares a suffix with `<think>`, so an opener counts as
 // "last" only when it appears AFTER any closer (`open_pos > close_pos + 1`
@@ -140,6 +145,19 @@ inline constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswer
     return scaled > floor ? scaled : floor;
 }
 
+// The reasoning-token limit every enforcement path must agree on: the LATER of
+// the fractional budget and "everything but the answer reserve". Three paths
+// enforce it (the eager sampler, the CUDA-graph loop's device counter, and the
+// n-gram/scheduler gates) and the graph loop used to compute the fraction ALONE,
+// so it cut thinking earlier than the documented rule: at max_tokens 1024 it
+// fired at 512 where the host rule allows 768. One function, so
+// runtime.think_answer_reserve reaches all of them.
+inline constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve) {
+    const int frac_limit = static_cast<int>(max_tokens * think_budget);
+    const int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
+    return frac_limit > reserve_limit ? frac_limit : reserve_limit;
+}
+
 // Should the sampler force a </think> token this step? True when budgeting is
 // active, a </think> id exists, the model is still thinking, and the reasoning
 // count has reached the limit. The limit is the LATER of the fractional budget
@@ -150,13 +168,11 @@ inline bool should_force_think_end(float think_budget, int32_t think_end_id, int
                                    bool started_in_think, int answer_reserve = kMaxAnswerReserve) {
     if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
         return false;
-    int frac_limit = static_cast<int>(max_tokens * think_budget);
-    int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
-    int think_limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
+    const int limit = think_limit(max_tokens, think_budget, answer_reserve);
     bool currently_thinking = false;
     int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
                                              currently_thinking);
-    return currently_thinking && n_reasoning >= think_limit;
+    return currently_thinking && n_reasoning >= limit;
 }
 
 // --- Text-tail </think> / <think> detection (track_think_state fallback) ---

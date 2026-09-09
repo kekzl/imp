@@ -1171,9 +1171,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // has no member for this and an unknown value breaks strict SDKs). The
         // imp-namespaced detail beside it is the machine-readable half a caller
         // can act on, replacing "read the server log" as the only way to tell
-        // an exhausted reasoning budget from a model that chose silence.
-        if (budget_exhausted)
-            choice["imp_finish_detail"] = "reasoning_budget_exhausted";
+        // an exhausted reasoning budget from a model that chose silence. The
+        // decision AND the write live in utils.h, where a CPU test reaches them.
+        attach_reasoning_finish_detail(choice, !tool_calls.empty(), content.empty(),
+                                       !reasoning_content.empty());
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }

@@ -1076,11 +1076,13 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         // forms) and look for whichever marker appears last.
         //
         // BOTH flags come from the same tail. Setting only in_think_block left
-        // the ANSWER-headroom budget dead on exactly these models: the opener
-        // is in the prompt, so count_reasoning_tokens starting outside think
-        // counted 0, should_force_think_end never fired, `</think>` was never
-        // injected, and the request spent all of max_tokens reasoning (empty
-        // `content`; docs/TROUBLESHOOTING.md).
+        // the ANSWER-headroom budget dead for callers that do not seed it
+        // themselves: the opener is in the prompt, so count_reasoning_tokens
+        // starting outside think counted 0 and should_force_think_end never
+        // fired. imp-server is not one of those callers - build_imp_request_
+        // (tools/imp-server/handlers_chat_core.cpp) has seeded both flags from
+        // enable_thinking since #784 - so this is the imp-cli / embedded
+        // src/api path.
         Tokenizer* ptok = model_ ? model_->tokenizer() : nullptr;
         if (ptok && !req->input_tokens.empty()) {
             constexpr int kTailScan = 16;  // covers worst case BPE split + slack
