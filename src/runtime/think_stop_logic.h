@@ -13,9 +13,42 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace imp::think_logic {
+
+// --- Prompt-tail seed (Engine::add_request) ---
+//
+// Chat templates for Qwen3 / Qwen3.5 / Qwen3.6 / Qwen3.8 / DeepSeek-R1 end the
+// generation prompt with `<think>\n`, so generation starts INSIDE a think block
+// and the output carries no opener. Two request flags follow from that tail and
+// both must be set: `in_think_block` (stop suppression) and `started_in_think`
+// (the budget recount seed). add_request set only the first, so on that path
+// count_reasoning_tokens started outside think, returned 0 and
+// should_force_think_end never fired.
+//
+// SCOPE: imp-server never had that hole. `build_imp_request_`
+// (tools/imp-server/handlers_chat_core.cpp) sets both flags from
+// `enable_thinking` for all three dialects, and add_request only ever sets them
+// to true, so the server path was already correct. This closes the same hole
+// for `imp-cli` and embedded `src/api` callers, which set neither.
+//
+// Precedence: `</think>` shares a suffix with `<think>`, so an opener counts as
+// "last" only when it appears AFTER any closer (`open_pos > close_pos + 1`
+// skips the `</` the closer contributes).
+struct ThinkSeed {
+    bool in_think = false;          // suppress stop tokens; the block is open
+    bool started_in_think = false;  // the budget recount starts in-think
+};
+
+inline ThinkSeed seed_from_prompt_tail(std::string_view tail) {
+    const size_t open_pos = tail.rfind("<think>");
+    const size_t close_pos = tail.rfind("</think>");
+    const bool open_is_last = (open_pos != std::string_view::npos) &&
+                              (close_pos == std::string_view::npos || open_pos > close_pos + 1);
+    return ThinkSeed{open_is_last, open_is_last};
+}
 
 // --- Warmup: should <think> be treated as a control/think token? ---
 //
@@ -81,6 +114,9 @@ inline int count_reasoning_tokens(const std::vector<int32_t>& output_tokens, int
 // the model think up to `max_tokens - kMaxAnswerReserve`, so it force-closes only
 // when the answer floor is actually at risk — eliminating the premature cut (and
 // its leak) whenever the model finishes thinking naturally within that window.
+// The default of `runtime.think_answer_reserve`, which is the configurable
+// value every caller passes in. Kept as the fallback for callers that have no
+// RuntimeConfig at hand and as the documented default.
 inline constexpr int kMaxAnswerReserve = 256;
 
 // ...but a FLAT cap makes the answer length independent of max_tokens, and that
@@ -98,9 +134,28 @@ inline constexpr int kMaxAnswerReserve = 256;
 // 4096 tokens is saying they expect a long answer, so the reserve follows them:
 // a quarter of the budget, never below the flat floor. Below 1024 this changes
 // nothing — which is where the leak the cap was introduced for was reported.
-inline constexpr int answer_reserve_for(int max_tokens) {
+//
+// `reserve` is `runtime.think_answer_reserve` (default kMaxAnswerReserve). A
+// negative value is not a smaller reserve, it is a corrupted config that would
+// hand the model MORE than max_tokens of thinking room, so it clamps to 0
+// (= "no floor", the fractional budget alone decides).
+inline constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve) {
+    const int floor = reserve > 0 ? reserve : 0;
     const int scaled = max_tokens / 4;
-    return scaled > kMaxAnswerReserve ? scaled : kMaxAnswerReserve;
+    return scaled > floor ? scaled : floor;
+}
+
+// The reasoning-token limit every enforcement path must agree on: the LATER of
+// the fractional budget and "everything but the answer reserve". Three paths
+// enforce it (the eager sampler, the CUDA-graph loop's device counter, and the
+// n-gram/scheduler gates) and the graph loop used to compute the fraction ALONE,
+// so it cut thinking earlier than the documented rule: at max_tokens 1024 it
+// fired at 512 where the host rule allows 768. One function, so
+// runtime.think_answer_reserve reaches all of them.
+inline constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve) {
+    const int frac_limit = static_cast<int>(max_tokens * think_budget);
+    const int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
+    return frac_limit > reserve_limit ? frac_limit : reserve_limit;
 }
 
 // Should the sampler force a </think> token this step? True when budgeting is
@@ -110,16 +165,14 @@ inline constexpr int answer_reserve_for(int max_tokens) {
 // grants MORE thinking room, never less (strictly fewer forced cuts).
 inline bool should_force_think_end(float think_budget, int32_t think_end_id, int max_tokens,
                                    const std::vector<int32_t>& output_tokens, int32_t think_start_id,
-                                   bool started_in_think) {
+                                   bool started_in_think, int answer_reserve = kMaxAnswerReserve) {
     if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
         return false;
-    int frac_limit = static_cast<int>(max_tokens * think_budget);
-    int reserve_limit = max_tokens - answer_reserve_for(max_tokens);
-    int think_limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
+    const int limit = think_limit(max_tokens, think_budget, answer_reserve);
     bool currently_thinking = false;
     int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
                                              currently_thinking);
-    return currently_thinking && n_reasoning >= think_limit;
+    return currently_thinking && n_reasoning >= limit;
 }
 
 // --- Text-tail </think> / <think> detection (track_think_state fallback) ---

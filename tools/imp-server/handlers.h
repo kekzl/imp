@@ -197,6 +197,13 @@ struct ServerMetrics {
     // was invisible - the client saw finish_reason "length", the same value a
     // completed token budget produces, and no counter moved.
     std::atomic<int64_t> requests_timed_out{0};
+    // Requests that ended with EMPTY content beside a non-empty reasoning
+    // channel: the token budget went to thinking and the answer never started.
+    // Same shape of blind spot requests_timed_out closed - the client sees
+    // finish_reason "stop" or "length", both of which a completed answer also
+    // produces, and no counter moved. The per-request half is the
+    // `imp_finish_detail: "reasoning_budget_exhausted"` field on the choice.
+    std::atomic<int64_t> requests_reasoning_exhausted{0};
     // Constrained requests (json_schema/json_mode/enforced tools) that ALSO
     // request logprobs: they silently leave the ConstrainedPipeline fast path
     // for eager decode (~102 vs ~235 tok/s on the 8B reference) — surfaced

@@ -875,10 +875,11 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                    // the </think> token. Launching the loop here instead
                    // produced 1-token budget-stopped loops with a full
                    // recapture each, and </think> was never forced.
-                   !think_logic::should_force_think_end(
-                       decode_batch[0]->think_budget, think_end_id_, decode_batch[0]->max_tokens,
-                       decode_batch[0]->output_tokens, think_start_id_,
-                       decode_batch[0]->started_in_think)) {
+                   !think_logic::should_force_think_end(decode_batch[0]->think_budget, think_end_id_,
+                                                        decode_batch[0]->max_tokens,
+                                                        decode_batch[0]->output_tokens, think_start_id_,
+                                                        decode_batch[0]->started_in_think,
+                                                        runtime_config_.runtime.think_answer_reserve)) {
             // Budgeted think interior: the loop handles the budget device-
             // side in bounded bursts so the host catches the think→answer
             // transition and resumes verification in the draft-rich answer

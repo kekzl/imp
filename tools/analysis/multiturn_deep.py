@@ -22,10 +22,19 @@ session produced empty replies and one single-token non-Latin answer; at 600 the
 same session is 74/74 clean. The same conversation degenerates on vLLM too, so
 it is the model, not the engine.
 
+`--max-tokens` takes a LIST, because the budget is the variable this probe
+exists to vary: one value answers "is this run clean", a sweep answers "at which
+budget does the answer stop arriving". `--assert-answered` turns the sweep into
+a gate: every turn must carry non-empty content OR the server's
+`imp_finish_detail: "reasoning_budget_exhausted"`, i.e. an empty reply is only
+acceptable when the server SAYS the budget went to reasoning.
+
 stdlib only, same as degen_suite. Exit 0 = clean, 1 = failures.
 
   python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 \
       --model <id> --filler 60 --max-tokens 600
+  python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 \
+      --model <id> --max-tokens 200,260,400,600 --assert-answered
 """
 import argparse
 import json
@@ -107,13 +116,36 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8080")
     ap.add_argument("--model", required=True)
-    ap.add_argument("--max-tokens", type=int, default=220)
+    ap.add_argument("--max-tokens", default="220",
+                    help="one value, or a comma-separated list to sweep "
+                         "(each value runs the whole session)")
+    ap.add_argument("--assert-answered", action="store_true",
+                    help="fail when a turn has empty content and the response carries no "
+                         "imp_finish_detail (the server's explicit exhaustion signal)")
     ap.add_argument("--timeout", type=float, default=300.0)
     ap.add_argument("--filler", type=int, default=0,
                     help="extra topic turns inserted before the final recalls, so "
                          "the planted facts are recalled across a much longer session")
     a = ap.parse_args()
 
+    try:
+        budgets = [int(v) for v in str(a.max_tokens).split(",") if v.strip()]
+    except ValueError:
+        print(f"--max-tokens: not a comma-separated int list: {a.max_tokens!r}")
+        return 2
+    if not budgets:
+        print("--max-tokens: empty")
+        return 2
+
+    rc = 0
+    for mt in budgets:
+        if len(budgets) > 1:
+            print(f"\n=== max_tokens {mt} ===")
+        rc |= run_session(a, mt)
+    return rc
+
+
+def run_session(a, max_tokens):
     turns = list(TURNS)
     if a.filler:
         # Insert neutral topic turns before the last three (the deep recalls),
@@ -132,7 +164,7 @@ def main():
     print(f"{'turn':>4}  {'kind':<7} {'prompt_tok':>10} {'gen':>5} {'s':>6}  verdict")
     for i, (prompt, kind, expect) in enumerate(turns, 1):
         messages.append({"role": "user", "content": prompt})
-        payload, dt = post(a.url, a.model, messages, a.max_tokens, a.timeout)
+        payload, dt = post(a.url, a.model, messages, max_tokens, a.timeout)
         choice = payload["choices"][0]
         msg = choice["message"]
         text = (msg.get("content") or "").strip()
@@ -141,20 +173,30 @@ def main():
         usage = payload.get("usage", {})
         messages.append({"role": "assistant", "content": text or "(empty)"})
 
+        # The server's explicit exhaustion signal, both dialects
+        # (utils.cpp answer_lost_to_reasoning -> imp_finish_detail).
+        detail = choice.get("imp_finish_detail") or payload.get("imp_finish_detail") or ""
+
         problems = []
         d = degenerate(text, 1 if kind in ("recall", "math") else 10)
         if d:
             problems.append(d)
         if expect and expect.lower() not in text.lower():
             problems.append(f"missing {expect!r}")
+        if a.assert_answered and not text and not detail:
+            # An empty reply the server does not explain is the defect this
+            # probe was written for: before the signal existed the only way to
+            # tell it from a spent budget was to read the server log.
+            problems.append("empty content and no imp_finish_detail")
         verdict = "ok" if not problems else "FAIL: " + "; ".join(problems)
         if problems:
             # An empty content field is ambiguous: a real defect, or the whole
             # token budget spent in the reasoning channel. Record what separates
             # the two instead of guessing later.
-            detail = (f"finish={finish} reasoning_chars={len(reasoning)} "
-                      f"completion_tok={usage.get('completion_tokens')}")
-            failures.append((i, kind, verdict + " | " + detail,
+            rtok = usage.get("completion_tokens_details", {}).get("reasoning_tokens")
+            why = (f"finish={finish} detail={detail or '-'} reasoning_chars={len(reasoning)} "
+                   f"reasoning_tok={rtok} completion_tok={usage.get('completion_tokens')}")
+            failures.append((i, kind, verdict + " | " + why,
                              (text or reasoning)[-160:]))
         print(f"{i:>4}  {kind:<7} {usage.get('prompt_tokens', 0):>10} "
               f"{usage.get('completion_tokens', 0):>5} {dt:>6.1f}  {verdict}")

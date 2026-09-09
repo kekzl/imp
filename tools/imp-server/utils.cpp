@@ -1,6 +1,8 @@
 #include "utils.h"
 #include "imp/imp.h"
 #include "stream_pipeline.h"
+#include "core/logging.h"
+#include "runtime/think_stop_logic.h"
 
 #include <algorithm>
 #include <cstring>
@@ -222,7 +224,53 @@ void send_dialect_error(httplib::Response& res, const std::string& path, int sta
 }
 
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning) {
-    return !has_tool_calls && content.empty() && !reasoning.empty();
+    return answer_lost_to_reasoning_flags(has_tool_calls, content.empty(), !reasoning.empty());
+}
+
+bool report_answer_lost_to_reasoning(bool has_tool_calls, const std::string& content,
+                                     const std::string& reasoning, const char* finish) {
+    // An empty answer beside a full reasoning channel is not a defect, and it
+    // reads exactly like one. The reply shares the token budget with the
+    // thinking, so once the thinking fills it the answer never starts and the
+    // caller sees `content: ""`. Measured on Qwen3.8-27B before the budget
+    // engaged on prompt-injected <think>: a 74-turn session returned empty
+    // replies at max_tokens 260 and was 74/74 clean at 600
+    // (docs/TROUBLESHOOTING.md). Say which of the two it was, rather than leave
+    // someone bisecting an engine that did what it was asked. The caller turns
+    // the same bool into the wire signal and the counter.
+    if (!answer_lost_to_reasoning(has_tool_calls, content, reasoning))
+        return false;
+    IMP_LOG_WARN(
+        "empty content: the answer never started because the token budget went to "
+        "reasoning (%zu chars of thinking, finish_reason=%s). Raise max_tokens: a "
+        "thinking model needs room to answer AFTER it thinks.",
+        reasoning.size(), finish ? finish : "");
+    return true;
+}
+
+int nonstream_reasoning_tokens(const std::vector<int32_t>& output_ids, int32_t think_start_id,
+                               int32_t think_end_id, bool started_in_think, size_t reasoning_chars,
+                               const std::function<size_t(int32_t)>& decoded_len) {
+    if (reasoning_chars == 0)
+        return 0;
+    if (think_end_id >= 0) {
+        bool still_thinking = false;
+        const int n = imp::think_logic::count_reasoning_tokens(output_ids, think_start_id, think_end_id,
+                                                               started_in_think, still_thinking);
+        if (n > 0)
+            return n;
+    }
+    if (!decoded_len)
+        return 0;
+    int n = 0;
+    size_t chars = 0;
+    for (int32_t id : output_ids) {
+        if (chars >= reasoning_chars)
+            break;
+        chars += decoded_len(id);
+        n++;
+    }
+    return n;
 }
 
 const char* health_unservable_code(bool engine_faulted, bool kv_pool_floored) {
@@ -859,10 +907,13 @@ std::pair<std::string, std::string> extract_reasoning(const std::string& text) {
 }
 
 std::string sse_chunk(const std::string& id, int64_t created, const std::string& model, const json& delta,
-                      const char* finish_reason, const json& logprobs) {
+                      const char* finish_reason, const json& logprobs, const char* finish_detail) {
     json choice = {{"index", 0},
                    {"delta", delta},
                    {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}};
+    if (finish_detail) {
+        choice["imp_finish_detail"] = finish_detail;
+    }
     if (!logprobs.is_null()) {
         choice["logprobs"] = logprobs;
     }

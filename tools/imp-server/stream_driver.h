@@ -84,6 +84,12 @@ struct StreamLoopResult {
     int n_reasoning_tokens = 0;
     double ttft_ms = 0.0;
     bool tool_calls_emitted = false;
+    // Any non-empty content byte reached the wire. The exhaustion signal needs
+    // the streaming equivalent of the non-streaming `content.empty()` test, and
+    // `reasoning_truncated` below is not it: that one is finish == "length"
+    // only, so a reasoning model that hit EOS mid-thought (finish "stop", the
+    // in-think stop suppression plus the 16-token grace) reported nothing.
+    bool content_emitted = false;
     // Generation hit max_tokens while still inside reasoning and produced no
     // content (the chat dialect emits its "[Reasoning truncated ...]" notice).
     bool reasoning_truncated = false;

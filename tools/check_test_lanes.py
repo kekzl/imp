@@ -229,10 +229,14 @@ def main():
     # .HybridRestoreChainStateStaysClose (test-e2e, GPU + a GDN checkpoint: 30 growing
     # turns on the recurrent prefix cache against a cold prefill of the same prompt,
     # compared on the state slab rather than on the tokens).
-    # 1088 -> 1090 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
+    # 1088 -> 1089 (NVFP4 loader quantization contract, Qwen3.8 harden dispatch P1):
+    # NvFP4MergedScaleSpread.SiblingsUseTheirOwnGlobalScale (test-quant, GPU, no model: two
+    # siblings with a 4x amax spread through the multi-sibling smallm v2 launch, each block
+    # against its own-scale spec reference).
+    # 1089 -> 1091 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
     # quantize like the exporter, decode by the format's own rule, bound the error; and the unit-offset
     # norm fold through the quantizer. The fold's algebra stays in the CPU lane (AwqNormFold x6).
-    PINNED = 1090
+    PINNED = 1091
 
     text = CMAKE.read_text()
     mods = module_sources(text)

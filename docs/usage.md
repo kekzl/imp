@@ -363,7 +363,7 @@ Server-only flags (not on `imp-cli`):
 | `--rate-limit <n>` | Max requests/min per IP (default 0 = unlimited) |
 | `--log-requests <path>` | Append per-request JSONL with prompt + response content + timing to `<path>` (opt-in; off by default) |
 | `--reasoning-format <f>` | `deepseek` (default) or `none` — controls `<think>` channel handling |
-| `--think-budget <f>` | Fraction of `max_tokens` reserved for reasoning (default 0.5, 0 = disabled) |
+| `--think-budget <f>` | Fraction of `max_tokens` a reasoning model may spend thinking (default 0.5, 0 = disabled). Paired with `runtime.think_answer_reserve` (default 256): reasoning is force-closed at `max_tokens - max(reserve, max_tokens/4)` or the fraction, whichever is later. Anthropic `thinking.budget_tokens` maps to the fraction; `reasoning_effort` is a template instruction and caps nothing. Exhaustion is reported as `imp_finish_detail: "reasoning_budget_exhausted"` plus `reasoning_tokens` in `usage` - see [`API.md`](API.md) |
 | `--request-timeout <s>` | Per-request timeout in seconds (default 300, 0 = unlimited) |
 | `--max-input-tokens <n>` | Reject prompts longer than n tokens with HTTP 400 (default 0 = unlimited). Holds on `/tokenize`, `/detokenize` and `/v1/messages/count_tokens` too; a body above 16 bytes per allowed token is refused before it is tokenized |
 | `--max-images-per-request <n>` | Cap on `image_url` parts per request (default 8, 0 = unlimited); a side above 16384 px is refused by the decoder |

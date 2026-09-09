@@ -629,6 +629,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                         layer.wk.scales = static_cast<char*>(t.scales) + static_cast<size_t>(q_rows) * scale_row_bytes;
                         layer.wv.scales = static_cast<char*>(t.scales) + static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
                     }
+                    // The only producer of a real q|k|v split. The loader's
+                    // scale fix-up requires this flag (model_config.h).
+                    layer.qkv_split_from_fused = true;
                     matched = true;
                     IMP_LOG_DEBUG("  qkv_proj split: Q[%d] K[%d] V[%d]", q_rows, kv_rows, kv_rows);
                 }
@@ -765,6 +768,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                     size_t scale_row_bytes = static_cast<size_t>(scale_cols);
                     layer.w_up.scales = static_cast<char*>(t.scales) + static_cast<size_t>(half_rows) * scale_row_bytes;
                 }
+                layer.gate_up_split_from_fused = true;  // see qkv_proj above
                 matched = true;
                 IMP_LOG_DEBUG("  gate_up_proj split: gate[%lld] up[%lld]", (long long)half_rows, (long long)half_rows);
             }

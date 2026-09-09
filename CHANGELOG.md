@@ -28,12 +28,22 @@ there instead of retelling it.
 - `--max-images-per-request` (default 8) on every chat dialect, and the image decoder refuses a side
   above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
   `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_arch_2026 F2-4, F2-9](docs/audit/AUDIT_arch_2026.md))
+- `runtime.think_answer_reserve` (default 256, was the compile-time `kMaxAnswerReserve`): tokens of `max_tokens`
+  the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`.
+  The CUDA-graph loop used the fraction alone (at `max_tokens` 4096: 2048 against the host rule's 3072)
 
 ### Changed
 
 - `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
   `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
   Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
+- The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
+  Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
+  entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))
+- The fused-projection scale split (`qkv_proj`, `gate_up_proj`) requires provenance from `weight_map.cpp`, and every
+  fused group is asserted after promotion (one tensor_scale, one plane per sibling); without it a sibling that
+  merely failed to promote inherited the base's global scale and read 5.57 MB past its scale plane
+- `gemm.nvfp4_lm_head=auto` says at load that it overrides the checkpoint's `ignore` entry for `lm_head`
 - Fused QK-norm + RoPE (`qknorm_rope_fused`, one CTA per head x token) now serves batched decode rows (n <= 64,
   full-head norm weights) instead of n == 1 only: q-norm, k-norm and rope were three launches per layer at 32 streams.
   Qwen3-14B-NVFP4 32 streams +0.8/+0.7/-0.3%, Qwen3.8-27B +0.2/+0.2/+0.2%; batched rows share the single-stream numerics ([roadmap](docs/roadmap.md), #1957)
@@ -99,6 +109,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- `imp-cli` and embedded `src/api` callers get the think budget on prompt-injected `<think>` templates:
+  `add_request` seeded `in_think_block` but never `started_in_think`, so the recount saw 0 reasoning tokens.
+  imp-server already seeded both (`build_imp_request_`, #784) and is unaffected
+- Budget exhaustion is reported on the wire: `imp_finish_detail: "reasoning_budget_exhausted"` (OpenAI choice +
+  final chunk, Anthropic response + `message_delta`), `reasoning_tokens` in `usage` on the non-streaming and
+  Anthropic paths, `imp_requests_reasoning_exhausted_total` on `/metrics`; `finish_reason`/`stop_reason` unchanged
 - The prefix-cache E2E test's "cold" arms were not cold: `imp_context_reset()` only evicts while a C-API request is
   live, and the test drives the engine directly, so two of its three arms compared one restore against another
   instead of against a fresh prefill ([tests/test_prefix_cache_e2e.cpp](tests/test_prefix_cache_e2e.cpp))

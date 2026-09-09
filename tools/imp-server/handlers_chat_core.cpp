@@ -812,6 +812,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     // For n > 1, run multiple independent generations sequentially
     json choices = json::array();
     int total_output_tokens = 0;
+    int total_reasoning_tokens = 0;
     double ttft_ms = -1.0;  // first token of the FIRST completion (#1578)
     g_shim_stop_sequence.clear();
 
@@ -1085,6 +1086,16 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             }
         }
 
+        // usage.completion_tokens_details.reasoning_tokens. The streaming path
+        // has reported it from its split state machine since #1593; this one
+        // reported nothing, so the same request answered two different numbers
+        // depending on the transport and /v1/responses non-stream always said 0
+        // (responses.cpp reads the OpenAI field). Counting rule: utils.h.
+        total_reasoning_tokens += nonstream_reasoning_tokens(
+            output_ids, ctx.snap.think_start_id, ctx.snap.think_end_id,
+            active_req && active_req->started_in_think, reasoning_content.size(),
+            [&ctx](int32_t id) { return ctx.snap.tok ? ctx.snap.tok->decode_token(id).size() : 0u; });
+
         // Build logprobs object if requested
         // Chat shape here; /v1/completions builds the other one (#1589). Both
         // come out of utils.cpp now, so the two cannot drift apart again.
@@ -1146,26 +1157,24 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         if (!reasoning_content.empty()) {
             msg["reasoning_content"] = reasoning_content;
         }
-        // An empty answer beside a full reasoning channel is not a defect, and
-        // it reads exactly like one. The reply shares the token budget with the
-        // thinking, so once the thinking fills it the answer never starts, and
-        // the caller sees `content: ""` with `finish_reason: stop`. Measured on
-        // Qwen3.8-27B: a 74-turn session returns empty replies at max_tokens
-        // 260 and is 74/74 clean at 600 (docs/TROUBLESHOOTING.md). Say which of
-        // the two it was, rather than leave someone bisecting an engine that
-        // did what it was asked.
-        if (answer_lost_to_reasoning(!tool_calls.empty(), content, reasoning_content)) {
-            IMP_LOG_WARN(
-                "empty content: the answer never started because the token budget went "
-                "to reasoning (%zu chars of thinking, finish_reason=%s). Raise "
-                "max_tokens — a thinking model needs room to answer AFTER it thinks.",
-                reasoning_content.size(), finish);
-        }
+        // Detection + WARN live beside the predicate in utils.cpp.
+        const bool budget_exhausted = report_answer_lost_to_reasoning(!tool_calls.empty(), content,
+                                                                      reasoning_content, finish);
+        if (budget_exhausted)
+            state.metrics.requests_reasoning_exhausted++;
         if (!tool_validation_error.empty()) {
             msg["tool_call_validation_error"] = tool_validation_error;
         }
 
         json choice = {{"index", ci}, {"message", msg}, {"finish_reason", openai_finish_reason(finish)}};
+        // finish_reason stays "stop"/"length" (client compatibility: the enum
+        // has no member for this and an unknown value breaks strict SDKs). The
+        // imp-namespaced detail beside it is the machine-readable half a caller
+        // can act on, replacing "read the server log" as the only way to tell
+        // an exhausted reasoning budget from a model that chose silence. The
+        // decision AND the write live in utils.h, where a CPU test reaches them.
+        attach_reasoning_finish_detail(choice, !tool_calls.empty(), content.empty(),
+                                       !reasoning_content.empty());
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
@@ -1198,9 +1207,13 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     // Predicted Outputs accounting (only when the request carried a
     // prediction): accepted/rejected draft tokens whose draft came from the
     // prediction region of the n-gram corpus.
+    if (total_reasoning_tokens > 0)
+        usage["completion_tokens_details"]["reasoning_tokens"] = total_reasoning_tokens;
     if (imp_req && !imp_req->prediction_tokens.empty()) {
-        usage["completion_tokens_details"] = {{"accepted_prediction_tokens", imp_req->pred_accepted},
-                                              {"rejected_prediction_tokens", imp_req->pred_rejected}};
+        // Element assignment, not whole-object: reasoning_tokens is already in
+        // there and a replacing assignment would drop it.
+        usage["completion_tokens_details"]["accepted_prediction_tokens"] = imp_req->pred_accepted;
+        usage["completion_tokens_details"]["rejected_prediction_tokens"] = imp_req->pred_rejected;
     }
     add_spec_usage_(usage, imp_req);
 

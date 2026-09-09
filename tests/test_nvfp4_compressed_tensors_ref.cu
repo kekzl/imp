@@ -205,6 +205,15 @@ TEST_F(NvFP4CompressedTensorsRef, TwoLevelScalingVaryingPerBlock) {
     std::vector<uint8_t> h_scale_e4m3(N * n_mb);
     for (size_t i = 0; i < h_scale_e4m3.size(); ++i)
         h_scale_e4m3[i] = f32_to_fp8_e4m3_bits(scale_values[i % 8]);
+    // An all-zero micro-scale is legal on-wire (a 16-element group whose amax
+    // was 0) and must zero that group's contribution rather than decode as a
+    // subnormal or fall through to the tensor scale. It was untested: every
+    // cycled value above is non-zero, so the zero rung of the E4M3 decoder was
+    // only ever reached through the whole-tensor guard.
+    ASSERT_GE(h_scale_e4m3.size(), 2u * static_cast<size_t>(n_mb));
+    h_scale_e4m3[static_cast<size_t>(n_mb)] = 0x00;      // row 1, first group
+    h_scale_e4m3[static_cast<size_t>(n_mb) + 1] = 0x00;  // row 1, second group
+    ASSERT_EQ(fp8_e4m3_to_f32_ref(0x00), 0.0f);
 
     const float tensor_scale = 0.125f;  // Non-trivial multiplier — cannot be silently dropped.
 
@@ -247,6 +256,25 @@ TEST_F(NvFP4CompressedTensorsRef, TwoLevelScalingVaryingPerBlock) {
     std::vector<half> h_y(N);
     cudaMemcpy(h_y.data(), d_y, N * sizeof(half), cudaMemcpyDeviceToHost);
 
+    // The zeroed micro-scales, isolated. With the activation supported only on
+    // k < 32, every contribution to row 1 comes from the two groups whose scale
+    // byte is 0x00, so that row must be EXACTLY zero.
+    //
+    // The full-K comparison below cannot do this job. Recomputing row 1 by hand:
+    // a kernel that falls through to the tensor scale (reads 0x00 as 1.0) moves
+    // it by 0.186 and is caught, but reading exp==0 as a normal (0.015625) moves
+    // it by 0.0029 and a subnormal misread by 0.00036 - both under the 1e-2 that
+    // the FP16 output quantum forces on a sum over K=128.
+    std::vector<half> h_x_head = h_x;
+    for (int k = 32; k < K; ++k)
+        h_x_head[k] = __float2half(0.0f);
+    cudaMemcpy(d_x, h_x_head.data(), K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_y, 0, N * sizeof(half));
+    gemv_nvfp4_kpar(A, reinterpret_cast<const half*>(d_x), reinterpret_cast<half*>(d_y), N, K, stream_);
+    cudaStreamSynchronize(stream_);
+    std::vector<half> h_y_head(N);
+    cudaMemcpy(h_y_head.data(), d_y, N * sizeof(half), cudaMemcpyDeviceToHost);
+
     cudaFree(d_packed);
     cudaFree(d_scale);
     cudaFree(d_x);
@@ -259,6 +287,17 @@ TEST_F(NvFP4CompressedTensorsRef, TwoLevelScalingVaryingPerBlock) {
             max_abs_diff = diff;
     }
     EXPECT_LT(max_abs_diff, 1e-2f);
+
+    EXPECT_EQ(__half2float(h_y_head[1]), 0.0f)
+        << "row 1's first two micro-scales are 0x00, so its whole k < 32 contribution must vanish; "
+        << "got " << __half2float(h_y_head[1]);
+    // Not vacuous: rows with live scales still move under the same activation.
+    bool other_row_moved = false;
+    for (int n = 0; n < N; ++n)
+        if (n != 1 && __half2float(h_y_head[n]) != 0.0f)
+            other_row_moved = true;
+    EXPECT_TRUE(other_row_moved) << "the k < 32 activation produced an all-zero output, so the "
+                                    "row-1 check above proves nothing";
 }
 
 // Test 3: Zero tensor_scale → output must be exactly zero (defensive zeroing
