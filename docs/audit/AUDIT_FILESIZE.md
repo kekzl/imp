@@ -275,7 +275,10 @@ New sibling gate `tools/check_function_size.py`
 (config `tools/function_size_thresholds.toml`), same shape as the file gate:
 code LOC via the *imported* stripper (two gates that disagree about what a code
 line is would produce two baselines), thresholds from the measured distribution,
-two-way `[allow]` ceiling with a mandatory reason.
+`[allow]` ceiling with a mandatory reason (since 2026-09-09 the pin admits growth up
+to the next multiple of 25 above it and shrinking is free; before that the pin was
+exact in both directions, which cost 9 merge conflicts across 4 branches in one day
+and found nothing).
 
 Distribution over **5830** top-level function bodies:
 

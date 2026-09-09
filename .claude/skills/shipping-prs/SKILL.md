@@ -79,7 +79,7 @@ gh pr view <PR> --json mergeStateStatus,statusCheckRollup,reviewDecision
 | `gh pr checks` prints NOTHING and `mergeStateStatus=DIRTY` | conflict with `main`; GitHub runs no workflow on an unbuildable merge ref, so no CI, no auto-merge, no arming | rebase onto `origin/main`; force-push is gated, so push a fresh branch and reopen |
 | `mergeStateStatus=UNKNOWN` | not computed yet | query again; never build a mechanism on it (#1516 cost an hour) |
 | `Build` red on a refactor that moved lines | `citations` gate: dead `file:line` in a living doc (#1783; #1782 paid a CI roundtrip) | `python3 scripts/check_doc_citations.py .` |
-| `File size` / `Test lanes` red after adding a GPU test | unlaned-test pin | raise `PINNED` in `tools/check_test_lanes.py` with a reason; allowlist `code_loc` drift: re-pin in `tools/filesize_thresholds.toml` |
+| `File size` / `Test lanes` red after adding a GPU test | unlaned-test pin | raise `PINNED` in `tools/check_test_lanes.py` with a reason; an allowlisted file past its pin ceiling (next multiple of 25): `python3 tools/check_filesize.py --update` |
 
 ## Cutting a tagged release
 

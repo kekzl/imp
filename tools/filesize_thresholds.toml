@@ -49,9 +49,10 @@ roots = ["src", "tools", "tests"]
 [allow]
 # Allowlist: files that EXCEED their hard-review threshold today and are accepted
 # into the baseline. An entry is a CEILING, not an exemption: `code_loc` is the
-# measured code LOC at the time of pinning and the gate fails when the file drifts
-# from it in either direction. Re-pin with `python3 tools/check_filesize.py --update`
-# and say in the PR body which way it moved.
+# measured code LOC at the time of pinning and the gate fails when the file grows
+# past the next multiple of 25 above it (1376 admits 1400). Shrinking, or growth
+# inside that slack, is a NOTE. Re-pin with `python3 tools/check_filesize.py --update`
+# and say in the PR body why it grew.
 #
 # Why the ceiling exists: before 2026-08-21 an [allow] entry removed the file from
 # the gate entirely, so the 29 allowlisted files were the only ones in the tree with

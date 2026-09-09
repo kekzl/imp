@@ -31,6 +31,9 @@ there instead of retelling it.
 
 ### Changed
 
+- The `[allow]` pins in `tools/filesize_thresholds.toml`, `tools/function_size_thresholds.toml` and
+  `PINNED` in `tools/check_test_lanes.py` are ceilings: growth up to the next multiple of 25 above the pin
+  and any shrink are a NOTE, only growth past that fails (exact two-way pins: 9 merge conflicts on 2026-09-09)
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
   Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
   entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))

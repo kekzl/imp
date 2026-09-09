@@ -67,7 +67,7 @@ docker run --rm --gpus all -v $HOME/models:/models \
 
 | Gate group | Runs where | Content |
 |---|---|---|
-| `filesize` | Build, hooks | `check_filesize.py` (two-way `[allow]` ceiling), `check_determinism_sites.py`, `check_dead_inline_accessors.py`, `check_log_fatal.py` |
+| `filesize` | Build, hooks | `check_filesize.py` (`[allow]` pin = ceiling, +25 slack, shrink free), `check_determinism_sites.py`, `check_dead_inline_accessors.py`, `check_log_fatal.py` |
 | `lanes` | Build, hooks, own check `Test lanes` (#1770) | `check_test_lanes.py --report` (macros per lane); `guard_unit_skips` inside `ctest -L unit` fails on any runtime skip |
 | `entrypoint` | Build, hooks | `tests/test_entrypoint.sh` drives `docker-entrypoint.sh` against a stub (25 assertions) |
 | `alloc` | Build, hooks | `check_alloc_sites.py` + `check_alloc_pairs.py` (allowlist is two-way: removing a site needs the allowlist edit) |
