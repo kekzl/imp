@@ -269,6 +269,44 @@ server default (`--think-budget`, 0.5) applies and these fields turn it off -
 | `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |
 | `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
 
+### The reasoning budget, and what the answer gets
+
+Three knobs, and only one of them caps tokens:
+
+| knob | dialect | what it does |
+|---|---|---|
+| `think_budget` / `--think-budget` | OpenAI | FRACTION of `max_tokens` (default 0.5) the model may spend reasoning |
+| `thinking.budget_tokens` | Anthropic | a token count, converted to that same fraction (`N / max_tokens`, clamped to 1.0); `0` disables thinking |
+| `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8) |
+
+The fraction alone would let a generous `max_tokens` hand half the budget to a
+reply that never needs it, so the engine also keeps an answer reserve:
+reasoning is force-closed (an injected `</think>`) once it reaches
+
+    max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)
+
+or the fraction, **whichever is later** - so a larger `max_tokens` only ever
+buys more thinking room, never less. `runtime.think_answer_reserve` (default
+256, values below 0 read as 0) was a compile-time constant until this release.
+At `max_tokens: 260` and the 0.5 default the limit is `max(130, 4) = 130`
+reasoning tokens.
+
+**When the answer never starts anyway**, the response says so rather than
+leaving an empty `content` that reads like a defect:
+
+| field | where |
+|---|---|
+| `usage.completion_tokens_details.reasoning_tokens` | OpenAI, non-stream and the `include_usage` chunk |
+| `usage.output_tokens_details.reasoning_tokens` | Anthropic (`message_delta` when streaming), `/v1/responses` |
+| `imp_finish_detail: "reasoning_budget_exhausted"` | beside `finish_reason` in the OpenAI choice (non-stream and the final chunk); beside `stop_reason` in the Anthropic response and `message_delta` |
+| `imp_requests_reasoning_exhausted_total` | `/metrics` |
+
+`finish_reason` and `stop_reason` keep their upstream enums: neither has a
+member for this, and an unknown value breaks strict SDKs. The detail is an
+imp-namespaced extra beside them, the same shape as the `imp_spec_*` usage keys.
+It appears only when the request produced empty `content`, no tool call and a
+non-empty reasoning channel.
+
 `thinking` blocks carry a `signature`, and the stream emits `signature_delta`
 before the block's `content_block_stop` (SDKs round-trip the pair). It is a
 deterministic digest of the block text, not an attestation: a prior-turn

@@ -89,6 +89,14 @@ prefill_batch_decode_cap = 0
 # TTFT p50 -20..-23%, ITL max 141 -> 80 ms; 31 streams + a 4.4k-token ingest:
 # their ITL during the ingest p95 63 -> 51 ms.
 prefill_mixed_decode = true
+# Tokens of max_tokens the think budget keeps for the ANSWER on a reasoning
+# model. The engine injects </think> once reasoning reaches
+# max_tokens - max(think_answer_reserve, max_tokens/4), or the think_budget
+# fraction (--think-budget, default 0.5), whichever is later. Below 0 reads as
+# 0 (no floor). At max_tokens 260 the limit is max(130, 4) = 130 reasoning
+# tokens; raise the reserve for models whose answers are long structured
+# output, lower it for agent loops that only need a short verdict.
+think_answer_reserve = 256
 # Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
 # sequence, so concurrent sessions time-slice the decode. Slice length in
 # tokens; after it the engine rotates round-robin to the next decoding

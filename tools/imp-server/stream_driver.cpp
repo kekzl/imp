@@ -118,6 +118,19 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // special-token pieces) and the <|start|>role plumbing. hm_buf holds the
     // current channel's bytes so a token that splits a multibyte char is not
     // emitted mid-codepoint (#760).
+    // Every content byte on the wire goes through one of these two, so
+    // out.content_emitted cannot drift from what the client actually received.
+    auto send_text = [&](const std::string& chunk) -> bool {
+        if (!chunk.empty())
+            out.content_emitted = true;
+        return d.emit_text(chunk);
+    };
+    auto send_content_token = [&](const std::string& chunk, int token_index) -> bool {
+        if (!chunk.empty())
+            out.content_emitted = true;
+        return d.emit_content_token(chunk, token_index);
+    };
+
     const bool harmony = (tpl_family == imp::ChatTemplateFamily::HARMONY);
     std::string hm_channel, hm_name, hm_buf, hm_recipient, hm_args;
     bool hm_in_msg = false, hm_reading_name = false, hm_call_open = false;
@@ -137,7 +150,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
         if (hm_channel == "analysis" || hm_channel == "commentary")
             return d.harmony_reasoning_on ? d.emit_reasoning(chunk) : true;
-        return d.emit_text(chunk);
+        return send_text(chunk);
     };
     // Close an open call: record the arguments and let the dialect close its
     // frame, exactly as the tag path does at CALL_END.
@@ -163,7 +176,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (up_to == 0)
             return true;
         for (const auto& e : pending_spans.flush(up_to)) {
-            if (!d.emit_content_token(pending_text.substr(e.offset, e.length), e.token_index))
+            if (!send_content_token(pending_text.substr(e.offset, e.length), e.token_index))
                 return false;
         }
         pending_text.erase(0, up_to);
@@ -180,7 +193,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             if (complete > 0) {
                 std::string chunk = utf8_buf.substr(0, complete);
                 utf8_buf.erase(0, complete);
-                if (!d.emit_text(chunk))
+                if (!send_text(chunk))
                     return false;
             }
         } else if (!pending_text.empty()) {
@@ -479,7 +492,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                     } else {
                         if (!flush_buffered_content())
                             return false;
-                        if (!d.emit_text(seg.text))
+                        if (!send_text(seg.text))
                             return false;
                     }
                     continue;
@@ -552,7 +565,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             size_t complete = utf8_complete_len(utf8_buf);
             if (complete > 0) {
                 for (const auto& e : utf8_spans.flush(complete)) {
-                    if (!d.emit_content_token(utf8_buf.substr(e.offset, e.length), e.token_index))
+                    if (!send_content_token(utf8_buf.substr(e.offset, e.length), e.token_index))
                         return false;
                 }
                 utf8_buf.erase(0, complete);
@@ -633,7 +646,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // tool calls were emitted).
     if (!utf8_buf.empty() && !text_stop_matched && !out.tool_calls_emitted) {
         for (const auto& e : utf8_spans.flush(utf8_buf.size()))
-            d.emit_content_token(utf8_buf.substr(e.offset, e.length), e.token_index);
+            send_content_token(utf8_buf.substr(e.offset, e.length), e.token_index);
     }
     if (!pending_text.empty() && !text_stop_matched && !out.tool_calls_emitted)
         flush_text(pending_text.size());

@@ -372,8 +372,20 @@ class MockHandler(BaseHTTPRequestHandler):
         prompt_tokens = max(1, len(prompt_text) // 4)
 
         tokens = self._generate_tokens(seed, max_tokens)
-        content = "".join(tokens)
         completion_tokens = len(tokens)
+        # Reasoning contract (handlers_chat_core.cpp / handlers_chat_stream.cpp):
+        # a request that asks for reasoning gets a reasoning channel, the token
+        # count for it in usage.completion_tokens_details.reasoning_tokens, and
+        # - when the budget left nothing for the answer - the exhaustion signal
+        # imp_finish_detail beside finish_reason. A tiny max_tokens is the
+        # server's real exhaustion case: everything generated stayed inside the
+        # think block, so content is empty and reasoning is not.
+        reasoning_tokens: list[str] = []
+        if body.get("reasoning_effort"):
+            n_reason = len(tokens) if max_tokens <= 8 else len(tokens) // 2
+            reasoning_tokens, tokens = tokens[:n_reason], tokens[n_reason:]
+        reasoning = "".join(reasoning_tokens)
+        content = "".join(tokens)
 
         metrics.add_tokens(prompt_tokens, completion_tokens)
 
@@ -382,36 +394,49 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if stream:
             self._stream_chat_response(req_id, created, model, tokens,
-                                       prompt_tokens, include_usage)
+                                       prompt_tokens, include_usage, reasoning_tokens)
         else:
             # n independent generations, like handlers_chat_core.cpp. The mock
             # repeats the same text; what the suite checks is the choice count
             # and the index numbering.
             n_choices = body.get("n", 1)
+
+            def choice(i):
+                msg = {"role": "assistant", "content": content}
+                if reasoning:
+                    msg["reasoning_content"] = reasoning
+                c = {
+                    "index": i,
+                    "message": msg,
+                    "finish_reason": "stop" if completion_tokens < max_tokens else "length",
+                }
+                if reasoning and not content:
+                    c["imp_finish_detail"] = "reasoning_budget_exhausted"
+                return c
+
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens * n_choices,
+                "total_tokens": prompt_tokens + completion_tokens * n_choices,
+            }
+            if reasoning_tokens:
+                usage["completion_tokens_details"] = {
+                    "reasoning_tokens": len(reasoning_tokens) * n_choices
+                }
             self._send_json(200, {
                 "id": req_id,
                 "object": "chat.completion",
                 "created": created,
                 "model": model,
-                "choices": [{
-                    "index": i,
-                    "message": {
-                        "role": "assistant",
-                        "content": content,
-                    },
-                    "finish_reason": "stop" if completion_tokens < max_tokens else "length",
-                } for i in range(n_choices)],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens * n_choices,
-                    "total_tokens": prompt_tokens + completion_tokens * n_choices,
-                },
+                "choices": [choice(i) for i in range(n_choices)],
+                "usage": usage,
             })
 
     def _stream_chat_response(self, req_id: str, created: int, model: str,
                               tokens: list[str], prompt_tokens: int,
-                              include_usage: bool):
-        completion_tokens = len(tokens)
+                              include_usage: bool, reasoning_tokens: list[str] | None = None):
+        reasoning_tokens = reasoning_tokens or []
+        completion_tokens = len(tokens) + len(reasoning_tokens)
 
         # Build full SSE body first so we can set Content-Length.
         # This makes httpx's non-streaming .post() work correctly.
@@ -432,6 +457,20 @@ class MockHandler(BaseHTTPRequestHandler):
         }
         parts.append(f"data: {json.dumps(chunk)}\n\n")
 
+        # Reasoning chunks (delta.reasoning_content, never delta.content)
+        for token in reasoning_tokens:
+            parts.append("data: " + json.dumps({
+                "id": req_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"reasoning_content": token},
+                    "finish_reason": None,
+                }],
+            }) + "\n\n")
+
         # Content chunks
         for i, token in enumerate(tokens):
             is_last = (i == len(tokens) - 1)
@@ -448,6 +487,23 @@ class MockHandler(BaseHTTPRequestHandler):
             }
             parts.append(f"data: {json.dumps(chunk)}\n\n")
 
+        # The answer never started: the server's final chunk carries the
+        # finish_reason and the exhaustion detail with an empty delta
+        # (handlers_chat_stream.cpp).
+        if reasoning_tokens and not tokens:
+            parts.append("data: " + json.dumps({
+                "id": req_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "length",
+                    "imp_finish_detail": "reasoning_budget_exhausted",
+                }],
+            }) + "\n\n")
+
         # Usage chunk (if requested)
         if include_usage:
             usage_chunk = {
@@ -462,6 +518,10 @@ class MockHandler(BaseHTTPRequestHandler):
                     "total_tokens": prompt_tokens + completion_tokens,
                 },
             }
+            if reasoning_tokens:
+                usage_chunk["usage"]["completion_tokens_details"] = {
+                    "reasoning_tokens": len(reasoning_tokens)
+                }
             parts.append(f"data: {json.dumps(usage_chunk)}\n\n")
 
         # DONE sentinel
