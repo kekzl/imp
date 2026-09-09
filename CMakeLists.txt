@@ -688,6 +688,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
         tests/test_llm_compressor_loader.cpp
+        tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp
         tests/test_safetensors_writer.cpp
@@ -982,6 +983,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cutlass_nvfp4_streamk.cu
         tests/test_nvfp4_smallm.cu
         tests/test_nvfp4_smallm_v2.cu
+        tests/test_nvfp4_merged_scale_spread.cu
         tests/test_smallm_dense_bench.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu

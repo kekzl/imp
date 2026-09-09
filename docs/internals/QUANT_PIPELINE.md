@@ -36,7 +36,7 @@ Pure orchestration; calls `src/quant/` kernels for the actual format work.
 
 - `executor_pre_dequant.cu` — 76 LOC orchestrator that calls each phase in order
 - `pre_dequant_internal.h` — 6 shared helpers (`borrow_payload_from_wcache`, `for_each_dense_weight`, etc.)
-- `pre_dequant_phase0_nvfp4_loader.cu` — Phase 0 + 0b: NVFP4 sidecar promotion + CUTLASS-NVFP4 registration
+- `pre_dequant_phase0_nvfp4_loader.cu` - Phase 0 + 0b: NVFP4 sidecar promotion + CUTLASS-NVFP4 registration. The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: `gemm.nvfp4_smallm` up to M = 32, CUTLASS NVFP4 x NVFP4 above.
 - `pre_dequant_phase1_fp16_cache.cu` — Phase 1: GGUF Q*_K → FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
 - `pre_dequant_phase2_fp8_cache.cu` — Phase 2: FP16 → FP8 device tensors for the `fp8_prefill` path
 - `pre_dequant_phase3_nvfp4_decode.cu` — Phase 3: NVFP4 decode-cache quantization (the bulk, 10 helpers), split further into `pre_dequant_phase3_fp8.cu`, `pre_dequant_phase3_cutlass.cu` and `pre_dequant_phase3_moe.cu` (the MoE expert stacks — where #1106 gave the `nvfp4_moe_sfatom` scale-factor slabs an owner)

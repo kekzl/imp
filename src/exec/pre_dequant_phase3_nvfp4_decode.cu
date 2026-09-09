@@ -19,6 +19,7 @@
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
+#include "model/nvfp4_module_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "quant/dequant_gpu.h"
@@ -225,6 +226,15 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
         (1024.0 * 1024.0);
     IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
                  rows, cols, nvfp4_mib);
+    // The checkpoint may have listed lm_head as one of the modules it left at
+    // source precision. imp re-quantizes it anyway (owner-accepted: +2.2% PPL
+    // for +8-16% decode, gemm.h), which is a deliberate override of the
+    // author's declaration and therefore has to be said out loud rather than
+    // inferred from a missing line.
+    if (nvfp4_policy::module_is_ignored("lm_head", cfg.nvfp4_exclude_modules))
+        IMP_LOG_INFO("lm_head is in quantization_config.ignore; gemm.nvfp4_lm_head=auto "
+                     "re-quantizes it at load, set gemm.nvfp4_lm_head=false to serve it at "
+                     "checkpoint precision");
 }
 
 // Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a

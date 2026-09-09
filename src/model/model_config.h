@@ -4,6 +4,7 @@
 #include "model/model_arch.h"
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace imp {
@@ -153,6 +154,13 @@ struct ModelConfig {
     // Reconstruction: val = fp4 * weight_scale_fp8 / weight_global_scale
     // (Modelopt: val = fp4 * weight_scale_fp8 * weight_scale_2)
     bool is_llm_compressor_nvfp4 = false;
+    // `quantization_config.ignore`: the modules the author left at source
+    // precision. Together with `targets: ["Linear"]` this is a COMPLETE
+    // partition of the checkpoint's Linears, which is what lets the loader tell
+    // "the author kept this in BF16" from "imp lost this module's weight_scale"
+    // (src/model/nvfp4_module_policy.h). Parsed since the first
+    // compressed-tensors support, read by nobody until #1960.
+    std::vector<std::string> nvfp4_exclude_modules;
 
     // MXFP4 pre-quantized model (e.g. GPT-OSS exports). Only the metadata
     // is recognised on the SafeTensors path today — the actual decode path
@@ -272,6 +280,14 @@ struct TransformerLayer {
     Tensor layer_out_scale;     // per-layer output scalar (optional)
     Tensor rope_freqs;          // per-layer RoPE frequency factors (full-attn layers only)
     bool kv_equals_k = false;   // Gemma 4: V=K (wv absent for this layer)
+    // Provenance for the fused-projection scale split (src/exec/
+    // nvfp4_merged_scale_guard.h). Set ONLY by weight_map.cpp when it splits one
+    // checkpoint tensor (`qkv_proj` / `gate_up_proj`) into these slots. The
+    // loader's scale fix-up requires it: on a separate-tensor checkpoint the arm
+    // is indistinguishable from an unrelated promotion failure, and firing then
+    // points a sibling's micro-scales into the base's plane.
+    bool qkv_split_from_fused = false;
+    bool gate_up_split_from_fused = false;
     Tensor w_gate, w_up, w_down, ffn_norm;
     Tensor moe_gate;
     std::vector<Tensor> expert_w_gate, expert_w_up, expert_w_down;
