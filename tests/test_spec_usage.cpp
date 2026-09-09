@@ -6,6 +6,7 @@
 #include "handlers_internal.h"  // tools/imp-server/handlers_internal.h
 #include "runtime/request.h"
 #include <memory>
+#include <set>
 #include <string>
 
 namespace {
@@ -118,6 +119,49 @@ TEST(SpecField, WrongTypesAreRefusedRatherThanIgnored) {
     EXPECT_FALSE(parse_spec_field_({{"speculative", 1}}, 2).ok);
     EXPECT_FALSE(parse_spec_field_({{"speculative", {{"mtp_k", "2"}}}}, 2).ok);
     EXPECT_FALSE(parse_spec_field_({{"speculative", {{"mtp_k", 1.5}}}}, 2).ok);
+}
+
+// ------------------------------------------------- the shared key table
+
+// The three surfaces must carry the same keys. Chat WRITES them; the Anthropic
+// and Responses shims COPY them, and they copied a hand-written list of three
+// names, so imp_spec_emitted and the decline reason existed on
+// /v1/chat/completions and nowhere else while the docs claimed all three.
+// This asserts the table is exactly what add_spec_usage_ produces, which is
+// what makes adding a seventh key red instead of invisible.
+TEST(SpecUsageKeys, TableIsExactlyWhatTheChatShapeWrites) {
+    auto req = std::make_shared<imp::Request>();
+    req->spec_verifies = 3;
+    req->spec_drafted = 6;
+    req->spec_accepted = 4;
+    req->spec_emitted = 7;
+    req->spec_decline = imp::SpecDecline::kDepthClamped;  // the widest shape
+    nlohmann::json usage = nlohmann::json::object();
+    add_spec_usage_(usage, req);
+
+    std::set<std::string> written;
+    for (auto& [k, v] : usage["completion_tokens_details"].items())
+        if (k.rfind("imp_spec_", 0) == 0)
+            written.insert(k);
+    std::set<std::string> table(std::begin(imp_server::kSpecUsageKeys),
+                                std::end(imp_server::kSpecUsageKeys));
+    EXPECT_EQ(written, table)
+        << "add_spec_usage_ and spec_usage_keys.h disagree; the Anthropic and Responses shims copy "
+           "the table, so a key missing from it reaches /v1/chat/completions only";
+}
+
+// The copy helper is what both shims call. It must move every key the chat
+// shape produced and invent none.
+TEST(SpecUsageKeys, CopyMovesEveryPresentKeyAndNothingElse) {
+    nlohmann::json from = {{"imp_spec_drafted", 6},
+                           {"imp_spec_declined", "mtp_head_not_loaded"},
+                           {"reasoning_tokens", 5}};
+    nlohmann::json to = nlohmann::json::object();
+    imp_server::copy_spec_usage_keys(from, to);
+    EXPECT_EQ(to["imp_spec_drafted"], 6);
+    EXPECT_EQ(to["imp_spec_declined"], "mtp_head_not_loaded");
+    EXPECT_FALSE(to.contains("reasoning_tokens")) << "the helper copies the spec keys, not the block";
+    EXPECT_FALSE(to.contains("imp_spec_emitted")) << "absent keys must stay absent";
 }
 
 }  // namespace

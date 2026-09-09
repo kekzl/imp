@@ -15,7 +15,7 @@ there instead of retelling it.
 
 - `"speculative"` accepts `{"mtp_k": N}` on every chat dialect: a request picks its own MTP chain depth
   (0..the armed depth, else 400 naming the range), and a decline reaches the caller as
-  `usage.completion_tokens_details.imp_spec_declined` instead of one startup log line
+  `imp_spec_declined` on all three dialects (one shared key table) instead of one startup log line
 - `/metrics` splits speculation by draft source: `imp_spec_mtp_*` against `imp_spec_ngram_*`
   (drafted, accepted, emitted, verify_steps, verify_wall_ms), so the head's acceptance rate is
   separable from the matcher's
@@ -32,7 +32,8 @@ there instead of retelling it.
 ### Fixed
 
 - `speculative.batch_rr` no longer requires `speculative.ngram`, the key the measured MTP recipe sets
-  to false: round-robin batched verify was off on every dense model running MTP alone
+  to false, at either gate (the scheduler branch and the #1003 pipeline yield that reaches it):
+  round-robin batched verify was off on every dense model running MTP alone
 - The 512 MiB NVFP4 dequant cap no longer counts the LM head, which never takes the M > 1 dequant
   fallback it guards: 2425 MiB against a 170 MiB largest eligible plane on Qwen3.8-27B-NVFP4
 - `kv_cache.dtype=fp8` on a head_dim != 128 model logs the fast-kernel miss at init; the FP8 four-token

@@ -649,6 +649,11 @@ if(IMP_BUILD_TESTS)
         # Fixture files under tests/fixtures/, by absolute path: ctest and the image
         # run the binaries from different working directories.
         target_compile_definitions(${target} PRIVATE IMP_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+        # Repo root, for the few guards that assert on SOURCE TEXT rather than on
+        # behaviour: a wiring question ("which predicate does this call site
+        # ask?") needs a GPU and a model to answer at runtime, so the CI lane
+        # can only read it. Same idea as the guard_* ctest entries below.
+        target_compile_definitions(${target} PRIVATE IMP_TEST_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests

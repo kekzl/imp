@@ -2,14 +2,14 @@
 
 // The per-request half of the speculation contract.
 //
-// `speculative.mtp_k` is the SERVER's default depth. A request may lower it,
-// raise it up to the armed chain, or ask for MTP on a server whose default
-// left it off. What no request can do is conjure a head: the checkpoint's MTP
-// tensors are ~0.79 GiB uploaded at load time, and the decision to upload them
-// is made before an engine exists (tools/common/mtp_auto.*). A request that
-// asks for a depth this process cannot serve therefore gets an ANSWER SAYING
-// SO, not a silent plain decode - the reason travels back in
-// `usage.completion_tokens_details.imp_spec_declined`.
+// `speculative.mtp_k` is the SERVER's default depth, and a request picks a
+// depth within it: anything from 0 (off for this request) up to the armed
+// chain. What no request can do is turn the head ON where the process armed
+// nothing, because the checkpoint's MTP tensors are ~0.79 GiB uploaded at load
+// time and the decision to upload them is made before an engine exists
+// (tools/common/mtp_auto.*). Such a request gets an ANSWER SAYING SO, not a
+// silent plain decode: the reason travels back in
+// `usage.completion_tokens_details.imp_spec_declined`, on all three dialects.
 //
 // Kept as a pure function so the truth table is testable without a GPU, a
 // model or a live Engine, and so the server and the engine cannot disagree

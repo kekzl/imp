@@ -10,6 +10,7 @@
 // This header is NOT part of the public handler API — that stays in handlers.h.
 
 #include "handlers.h"
+#include "spec_usage_keys.h"
 
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"

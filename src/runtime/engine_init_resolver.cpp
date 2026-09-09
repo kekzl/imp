@@ -260,7 +260,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // above entirely, and the config-file arm only logs the branches it takes.
     // Evaluated here rather than after the head_dim/sink fallbacks below, so
     // this reports the user's choice and not a fallback's.
-    if (kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype)) {
+    const bool kv_dtype_pinned = kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype);
+    if (kv_dtype_pinned) {
         const int factor = kv_pin_context_cost_factor(mcfg.arch, config_.kv_cache_dtype);
         if (factor > 1) {
             IMP_LOG_WARN(
@@ -335,7 +336,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // the launcher wrote correct output - and cost the whole FP8 decode
     // speedup with nothing in the log to say so. One line, at the point the
     // dtype is chosen.
-    if (config_.kv_cache_dtype == QType::FP8_E4M3) {
+    //
+    // A PIN only. An auto-resolved FP8 is this engine's own choice on an arch
+    // it measured (the hint and no-hint arms above), and the arms that can
+    // resolve FP8 are gated on families whose head_dim is 128; warning there
+    // would be the engine reporting itself for a decision it made, on a line
+    // the operator cannot act on.
+    if (config_.kv_cache_dtype == QType::FP8_E4M3 && kv_dtype_pinned) {
         for (int d : dims) {
             if (paged_fp8_decode_has_fast_kernel(d))
                 continue;

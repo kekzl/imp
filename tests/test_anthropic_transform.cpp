@@ -11,6 +11,8 @@
 // accepted but not modeled (no billing distinction locally).
 
 #include "anthropic.h"
+#include "spec_usage_keys.h"
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -199,6 +201,44 @@ TEST(AnthropicCacheUsage, SpecCountersPassThrough) {
         oai_response_with_usage(json{{"prompt_tokens", 10}, {"completion_tokens", 5}, {"total_tokens", 15}}),
         "claude-x");
     EXPECT_FALSE(plain["usage"].contains("imp_spec_drafted"));
+}
+
+// Every key the chat shape writes, not a hand-copied subset of them. This shim
+// carried a literal three-name list, so the day `imp_spec_emitted` and the
+// decline reason were added they reached /v1/chat/completions and nowhere else
+// - while docs/API.md said all three dialects carried them. The list is now
+// one shared table (tools/imp-server/spec_usage_keys.h) and this asserts the
+// whole of it survives the transform.
+TEST(AnthropicCacheUsage, EverySpecUsageKeyPassesThrough) {
+    json details = json::object();
+    for (const char* k : imp_server::kSpecUsageKeys)
+        details[k] = "sentinel";
+    json anth = openai_to_anthropic_response(
+        oai_response_with_usage(json{{"prompt_tokens", 10},
+                                     {"completion_tokens", 5},
+                                     {"total_tokens", 15},
+                                     {"completion_tokens_details", details}}),
+        "claude-x");
+    for (const char* k : imp_server::kSpecUsageKeys)
+        EXPECT_EQ(anth["usage"].value(k, std::string("MISSING")), "sentinel")
+            << k << " was dropped by the Anthropic transform";
+}
+
+// The decline is the one a caller actually needs: it is the ONLY thing that
+// distinguishes "the server declined your MTP request" from "speculation ran
+// and drafted nothing", and it arrives with zero counters.
+TEST(AnthropicCacheUsage, DeclineReachesTheAnthropicUsage) {
+    json anth = openai_to_anthropic_response(
+        oai_response_with_usage(json{{"prompt_tokens", 10},
+                                     {"completion_tokens", 5},
+                                     {"total_tokens", 15},
+                                     {"completion_tokens_details",
+                                      json{{"imp_spec_drafted", 0},
+                                           {"imp_spec_emitted", 0},
+                                           {"imp_spec_declined", "mtp_head_not_loaded"}}}}),
+        "claude-x");
+    EXPECT_EQ(anth["usage"].value("imp_spec_declined", std::string()), "mtp_head_not_loaded");
+    EXPECT_EQ(anth["usage"].value("imp_spec_emitted", -1), 0);
 }
 
 TEST(AnthropicCacheUsage, CacheReadAndCreationMapped) {
