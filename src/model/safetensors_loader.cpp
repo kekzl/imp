@@ -4,6 +4,7 @@
 #include "model/weight_map.h"
 #include "model/hf_config_loader.h"
 #include "model/llm_compressor_loader.h"
+#include "model/nvfp4_module_policy.h"
 #include "model/sentencepiece_loader.h"
 #include "model/tokenizer.h"
 #include "model/json_util.h"
@@ -832,6 +833,38 @@ bool probe_mtp_head(const std::string& model_dir) {
     return header_has_head(model_dir + "/model.safetensors");
 }
 
+// Reconstruct the checkpoint's declared partition from the tensor map and log
+// it. Returns true (with `why`) when the load must be refused; the rules and
+// their scope live in nvfp4_module_policy.h.
+//
+// Driven off the tensor map rather than off imp's slots because the ignore list
+// is written in the checkpoint's own namespace: a slot cannot say which module
+// it came from, and reconstructing that per architecture is the guess this is
+// meant to remove.
+static bool nvfp4_inventory_refuses(const std::unordered_map<std::string, Tensor>& tensor_map,
+                                    const ModelConfig& cfg, std::string* why) {
+    namespace pol = imp::nvfp4_policy;
+    std::vector<pol::SlotObservation> slots;
+    for (const auto& [name, t] : tensor_map) {
+        if (name.size() < 7 || name.compare(name.size() - 7, 7, ".weight") != 0)
+            continue;
+        const std::string module = name.substr(0, name.size() - 7);
+        pol::SlotObservation s;
+        s.name = name;
+        s.ndim = t.ndim;
+        s.has_micro_scale = tensor_map.count(module + ".weight_scale") > 0;
+        s.has_global_scale = tensor_map.count(module + ".weight_scale_2") > 0;
+        // A packed NVFP4 weight still carries its on-disk [N, K/2] byte width
+        // here; the logical K is what the group-size rule is about.
+        s.K = (t.ndim == 2) ? (s.has_micro_scale ? 2 * t.shape[1] : t.shape[1]) : 0;
+        slots.push_back(std::move(s));
+    }
+    const pol::Inventory inv = pol::classify(slots, cfg.nvfp4_exclude_modules);
+    IMP_LOG_INFO("NVFP4 inventory: %d quantized, %d ignored, %d unclassified, %d missing global scale",
+                 inv.quantized, inv.ignored, inv.unclassified, inv.missing_global_scale);
+    return pol::refuses(inv, cfg.is_llm_compressor_nvfp4, why);
+}
+
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
@@ -1265,6 +1298,12 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;
         cfg.is_llm_compressor_nvfp4 = (nvfp4_cfg.format == HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
         cfg.kv_cache_quant_hint = nvfp4_cfg.kv_cache_quant_algo;
+        cfg.nvfp4_exclude_modules = nvfp4_cfg.exclude_modules;
+        std::string refusal;
+        if (nvfp4_inventory_refuses(tensor_map, cfg, &refusal)) {
+            IMP_LOG_ERROR("%s", refusal.c_str());
+            return nullptr;
+        }
         IMP_LOG_INFO("NVFP4 pre-quantized: %zu scratch entries (group_size=%d)", model->nvfp4_scratch_.size(),
                      nvfp4_cfg.group_size);
         if (!cfg.kv_cache_quant_hint.empty()) {

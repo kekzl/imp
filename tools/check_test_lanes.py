@@ -225,7 +225,11 @@ def main():
     # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
     # 1083 -> 1084 (small-M pipeline race, roadmap ledger 2026-09-08): NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable
     # (test-quant, GPU, no model: 200 launches per in-situ shape, single and multi kernel, bit-identical or red).
-    PINNED = 1084
+    # 1084 -> 1085 (NVFP4 loader quantization contract, #1960):
+    # NvFP4MergedScaleSpread.SiblingsUseTheirOwnGlobalScale (test-quant, GPU, no model: two
+    # siblings with a 4x amax spread through the multi-sibling smallm v2 launch, each block
+    # against its own-scale spec reference).
+    PINNED = 1085
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -42,6 +42,40 @@ Calibrated per-tensor scales via AWQ or SmoothQuant. Compatible producers:
 | [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads; several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt. |
 | `imp-quantize` (in-tree) | **Experimental.** AWQ-calibrated with `--calib`, round-to-nearest without. Below a published export either way. |
 
+#### What the loader enforces from `quantization_config`
+
+A compressed-tensors checkpoint declares `targets: ["Linear"]` plus an `ignore` list, and the two
+together are a complete partition of its Linears. imp reconstructs that partition at load and logs
+it as `NVFP4 inventory: <quantized> quantized, <ignored> ignored, <unclassified> unclassified,
+<n> missing global scale`. Two refusals, both compressed-tensors only:
+
+- a Linear that is neither packed nor in `ignore` (imp lost its `weight_scale` on the way in and
+  would serve it as if the author had kept it in source precision);
+- a packed Linear with no `weight_global_scale` (the format divides by it, so the tensor scale
+  would default to 1.0 and the whole Linear comes out off by the checkpoint's `absmax / 6`).
+
+Modelopt is exempt from both, and that scope is measured rather than assumed: across the local
+checkpoint set the four compressed-tensors exports report 0 unclassified and 0 missing global scale,
+while `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` (Modelopt) has 46 packed Linears with no
+`weight_scale_2`. Its `exclude_modules` is a hint rather than a partition, and `weight_scale_2` is
+genuinely optional there.
+
+`lm_head` sits in `ignore` on most exports and imp re-quantizes it anyway (`gemm.nvfp4_lm_head`,
+auto, owner-accepted trade). That override now says so in one INFO line at load; serve the head at
+checkpoint precision with `--set gemm.nvfp4_lm_head=false`.
+
+Fused-projection scale splits (`qkv_proj`, `gate_up_proj`) require provenance from the tensor-name
+mapper: without it the repair is indistinguishable from a sibling that merely failed to promote,
+and it would aim that sibling's micro-scales into another weight's scale plane.
+
+#### W4A16 on disk, W4A4 from M >= 2
+
+The `config_groups` these checkpoints ship set `input_activations: null` (W4A16). imp does not read
+that field. At `n == 1` decode the activations stay FP16 (the NVFP4 GEMV family), but from M >= 2
+the activations are quantized to NVFP4 as well and the GEMM runs W4A4: `gemm.nvfp4_smallm` for
+M <= 32, the CUTLASS NVFP4 x NVFP4 prefill above it, and the batched LM head. This is deliberate
+and measured (+16% at 32 streams, +36% at 8, 2.18x prefill); `gemm.nvfp4_smallm=false` falls back.
+
 ### imp-quantize: converting a checkpoint yourself (EXPERIMENTAL)
 
 > **Experimental.** Pipeline verified end to end; `--calib` recovers a measurable part of the

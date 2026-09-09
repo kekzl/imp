@@ -205,6 +205,15 @@ TEST_F(NvFP4CompressedTensorsRef, TwoLevelScalingVaryingPerBlock) {
     std::vector<uint8_t> h_scale_e4m3(N * n_mb);
     for (size_t i = 0; i < h_scale_e4m3.size(); ++i)
         h_scale_e4m3[i] = f32_to_fp8_e4m3_bits(scale_values[i % 8]);
+    // An all-zero micro-scale is legal on-wire (a 16-element group whose amax
+    // was 0) and must zero that group's contribution rather than decode as a
+    // subnormal or fall through to the tensor scale. It was untested: every
+    // cycled value above is non-zero, so the zero rung of the E4M3 decoder was
+    // only ever reached through the whole-tensor guard.
+    ASSERT_GE(h_scale_e4m3.size(), 2u * static_cast<size_t>(n_mb));
+    h_scale_e4m3[static_cast<size_t>(n_mb)] = 0x00;      // row 1, first group
+    h_scale_e4m3[static_cast<size_t>(n_mb) + 1] = 0x00;  // row 1, second group
+    ASSERT_EQ(fp8_e4m3_to_f32_ref(0x00), 0.0f);
 
     const float tensor_scale = 0.125f;  // Non-trivial multiplier — cannot be silently dropped.
 

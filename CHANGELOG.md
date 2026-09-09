@@ -25,7 +25,13 @@ there instead of retelling it.
 
 ### Changed
 
-- Fused QK-norm + RoPE (`qknorm_rope_fused`, one CTA per head x token) now serves batched decode rows (n <= 64,
+- The NVFP4 loader now enforces `quantization_config.ignore` instead of only parsing it: one `NVFP4 inventory:
+  N quantized, M ignored, U unclassified, G missing global scale` line (Qwen3.8-27B-NVFP4-vllm: 496/1/0/0), and a
+  compressed-tensors checkpoint with U or G above 0 is refused at load ([quantization.md](docs/quantization.md))
+- The fused-projection scale split (`qkv_proj`, `gate_up_proj`) requires provenance from `weight_map.cpp` and is
+  asserted after promotion (`merged-scale provenance: N groups checked, M fused`); without it a sibling that merely
+  failed to promote inherited the base's global scale and read 5.57 MB past its scale plane
+- `gemm.nvfp4_lm_head=auto` says at load that it overrides the checkpoint's `ignore` entry for `lm_head`
   full-head norm weights) instead of n == 1 only: q-norm, k-norm and rope were three launches per layer at 32 streams.
   Qwen3-14B-NVFP4 32 streams +0.8/+0.7/-0.3%, Qwen3.8-27B +0.2/+0.2/+0.2%; batched rows share the single-stream numerics ([roadmap](docs/roadmap.md), #1957)
 - `rope_forward`, `elementwise_add_store` and the FP8 KV write are PDL-registered (wait, then trigger) like the other

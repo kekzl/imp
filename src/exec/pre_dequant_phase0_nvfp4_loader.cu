@@ -14,6 +14,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/nvfp4_expert_offload.h"
+#include "exec/nvfp4_merged_scale_guard.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
 #include "quant/nvfp4_quant.h"
@@ -22,10 +23,54 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace imp {
+namespace {
+
+// Load-time assertion over the projection groups that CAN share a scale plane.
+// Runs once, after the split arms above; a violation is refused rather than
+// served, because every failure mode here reads as a plausible model that
+// answers with one projection decoded against another's micro-scales.
+void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg) {
+    int n_groups = 0, n_fused = 0;
+    std::string err;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model.layer(i);
+        MergedScaleGroup groups[2] = {};
+        groups[0] = {i, "q|k|v", 0, {}, L.qkv_split_from_fused, L.wq.shape[1] / 8, 0};
+        if (L.wq.qtype == QType::NVFP4 && L.wk.qtype == QType::NVFP4 && L.wv.qtype == QType::NVFP4) {
+            groups[0].count = 3;
+            groups[0].m[0] = {L.wq.scales, L.wq.tensor_scale, L.wq.shape[0]};
+            groups[0].m[1] = {L.wk.scales, L.wk.tensor_scale, L.wk.shape[0]};
+            groups[0].m[2] = {L.wv.scales, L.wv.tensor_scale, L.wv.shape[0]};
+        }
+        groups[1] = {i, "gate|up", 0, {}, L.gate_up_split_from_fused, L.w_gate.shape[1] / 8, 0};
+        if (L.w_gate.qtype == QType::NVFP4 && L.w_up.qtype == QType::NVFP4) {
+            groups[1].count = 2;
+            groups[1].m[0] = {L.w_gate.scales, L.w_gate.tensor_scale, L.w_gate.shape[0]};
+            groups[1].m[1] = {L.w_up.scales, L.w_up.tensor_scale, L.w_up.shape[0]};
+        }
+        for (const MergedScaleGroup& g : groups) {
+            if (g.count == 0)
+                continue;
+            n_groups++;
+            if (g.fused)
+                n_fused++;
+            if (!merged_scale_group_ok(g, &err))
+                throw std::runtime_error(
+                    "NVFP4 merged-scale provenance violated: " + err +
+                    ". Serving this would decode one projection against another's micro-scales at "
+                    "exit code 0.");
+        }
+    }
+    if (n_groups > 0)
+        IMP_LOG_INFO("merged-scale provenance: %d groups checked, %d fused", n_groups, n_fused);
+}
+
+}  // namespace
 
 void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     const ModelConfig& cfg, cudaStream_t stream) {
@@ -289,29 +334,64 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     // data pointers, but scales were routed as fused tensors to ALL sub-
     // projections. Now that promote() set .scales = fused GPU pointer,
     // fix the sub-projection scales to point at the correct row offsets.
+    //
+    // Provenance-gated since #1960: the shape predicate alone is also satisfied
+    // by a separate-tensor checkpoint whose sibling merely failed to promote,
+    // and the repair then aims the sibling's micro-scales into the base's plane
+    // (nvfp4_merged_scale_guard.h). Only weight_map's own split sets the flag.
     {
         const auto& mc = cfg;
         int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
         int q_rows = mc.n_heads * hd;
         int kv_rows = mc.n_kv_heads * hd;
-        int n_qkv_split = 0, n_gateup_split = 0;
+        int n_qkv_split = 0, n_gateup_split = 0, n_declined = 0;
+        std::string first_decline;
+        // Rows of the scale plane the base was promoted against. Still readable
+        // here: the scratch is cleared further down.
+        auto plane_rows = [&](const std::string& key) -> int64_t {
+            auto it = mut_model->nvfp4_scratch_.find(key);
+            if (it == mut_model->nvfp4_scratch_.end() || it->second.weight_scale.ndim != 2)
+                return 0;
+            return it->second.weight_scale.shape[0];
+        };
+        auto decline = [&](int layer, const char* what, const std::string& why) {
+            n_declined++;
+            if (first_decline.empty())
+                first_decline = std::string(what) + " on layer " + std::to_string(layer) + ": " + why;
+        };
         for (int i = 0; i < mc.n_layers; i++) {
             auto& L = mut_model->layers_[i];
+            const std::string lk = "L" + std::to_string(i) + ".";
             // Fused QKV: wq got scales from promote, wk/wv need split from wq's scales
             if (L.wq.qtype == QType::NVFP4 && L.wk.data && L.wv.data &&
                 L.wk.qtype != QType::NVFP4 && L.wq.scales &&
                 L.wq.shape[0] == q_rows && L.wk.shape[0] == kv_rows) {
-                int64_t K_packed = L.wq.shape[1];
-                size_t scale_row_bytes = static_cast<size_t>(K_packed / 8);
-                L.wk.qtype = QType::NVFP4;
-                L.wk.tensor_scale = L.wq.tensor_scale;
-                L.wk.scales = static_cast<char*>(L.wq.scales) +
-                              static_cast<size_t>(q_rows) * scale_row_bytes;
-                L.wv.qtype = QType::NVFP4;
-                L.wv.tensor_scale = L.wq.tensor_scale;
-                L.wv.scales = static_cast<char*>(L.wq.scales) +
-                              static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
-                n_qkv_split++;
+                FusedSplitRequest r;
+                r.provenance = L.qkv_split_from_fused;
+                r.base_rows = L.wq.shape[0];
+                r.sib_rows = L.wk.shape[0];
+                r.n_sibs = 2;
+                r.base_k_packed = L.wq.shape[1];
+                r.sib_k_packed = L.wk.shape[1];
+                r.plane_rows = plane_rows(lk + "wq");
+                std::string why;
+                if (L.wv.shape[0] != kv_rows) {
+                    decline(i, "qkv", "wv has " + std::to_string(L.wv.shape[0]) + " rows, not " +
+                                          std::to_string(kv_rows));
+                } else if (!fused_split_eligible(r, &why)) {
+                    decline(i, "qkv", why);
+                } else {
+                    size_t scale_row_bytes = static_cast<size_t>(r.base_k_packed / 8);
+                    L.wk.qtype = QType::NVFP4;
+                    L.wk.tensor_scale = L.wq.tensor_scale;
+                    L.wk.scales = static_cast<char*>(L.wq.scales) +
+                                  static_cast<size_t>(q_rows) * scale_row_bytes;
+                    L.wv.qtype = QType::NVFP4;
+                    L.wv.tensor_scale = L.wq.tensor_scale;
+                    L.wv.scales = static_cast<char*>(L.wq.scales) +
+                                  static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
+                    n_qkv_split++;
+                }
             }
             // gate_up split: w_gate.scales is fused base, w_up needs offset
             // Fused gate_up: w_gate got scales from promote, w_up has no scales
@@ -319,20 +399,40 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
             // from w_gate and offset the scales pointer.
             if (L.w_gate.qtype == QType::NVFP4 && L.w_up.data &&
                 L.w_up.qtype != QType::NVFP4 && L.w_gate.scales) {
-                int64_t K_packed = L.w_gate.shape[1];
-                int64_t half_rows = L.w_gate.shape[0];
-                size_t scale_row_bytes = static_cast<size_t>(K_packed / 8);
-                L.w_up.qtype = QType::NVFP4;
-                L.w_up.tensor_scale = L.w_gate.tensor_scale;
-                L.w_up.scales = static_cast<char*>(L.w_gate.scales) +
-                                static_cast<size_t>(half_rows) * scale_row_bytes;
-                n_gateup_split++;
+                FusedSplitRequest r;
+                r.provenance = L.gate_up_split_from_fused;
+                r.base_rows = L.w_gate.shape[0];
+                r.sib_rows = L.w_up.shape[0];
+                r.n_sibs = 1;
+                r.base_k_packed = L.w_gate.shape[1];
+                r.sib_k_packed = L.w_up.shape[1];
+                r.plane_rows = plane_rows(lk + "w_gate");
+                std::string why;
+                if (r.base_rows != r.sib_rows) {
+                    decline(i, "gate_up", "gate has " + std::to_string(r.base_rows) +
+                                              " rows, up has " + std::to_string(r.sib_rows));
+                } else if (!fused_split_eligible(r, &why)) {
+                    decline(i, "gate_up", why);
+                } else {
+                    size_t scale_row_bytes = static_cast<size_t>(r.base_k_packed / 8);
+                    L.w_up.qtype = QType::NVFP4;
+                    L.w_up.tensor_scale = L.w_gate.tensor_scale;
+                    L.w_up.scales = static_cast<char*>(L.w_gate.scales) +
+                                    static_cast<size_t>(r.base_rows) * scale_row_bytes;
+                    n_gateup_split++;
+                }
             }
         }
         if (n_qkv_split > 0 || n_gateup_split > 0)
             IMP_LOG_INFO("Fused projection scale split: %d QKV + %d gate_up layers",
                          n_qkv_split, n_gateup_split);
+        if (n_declined > 0)
+            IMP_LOG_WARN("Fused projection scale split declined %d time(s) (first: %s). Those "
+                         "siblings keep their own scales or stay unpromoted; a split without "
+                         "provenance would have aimed them into another weight's scale plane.",
+                         n_declined, first_decline.c_str());
     }
+    assert_merged_scale_provenance(*mut_model, cfg);
 
     // GDN alpha/beta (Qwen3.5 linear_attn.in_proj_a/in_proj_b) are FP16_ONLY:
     // the delta-rule decay / learning-rate projections are precision-sensitive
