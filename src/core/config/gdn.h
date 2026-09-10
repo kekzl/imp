@@ -82,6 +82,13 @@ struct GDN {
     // GDN layer). FP16-resident alpha/beta weights only; other tiers keep the
     // two-call path. false = the two cuBLAS calls.
     bool alpha_beta_smallm = true;
+    // Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj, gate,
+    // alpha and beta in one GEMV launch (quant/nvfp4_gemv_gdn_input.cu), the
+    // out-projection adds the residual in its epilogue (no residual save,
+    // add or copy-back), and gated attention runs q|k|v as one launch. 6
+    // launches per GDN layer and 2 per attention layer fewer. false = the
+    // per-projection launches.
+    bool m1_fused = true;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };

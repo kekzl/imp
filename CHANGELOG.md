@@ -40,6 +40,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Single-stream decode on native-NVFP4 hybrids drops 6 launches per GDN layer and 2 per attention layer
+  (`gdn.m1_fused`: in_proj|gate|alpha|beta one launch, out-projection with the residual, conv in place, q|k|v
+  one launch). Qwen3.8-27B-NVFP4 batch=1 spec-off 94.4 -> 99.5 tok/s (+5.1..6.0 %, 5/5) ([roadmap.md](docs/roadmap.md))
 - Batched GDN decode drops three launches per layer: no residual save when the out-projection accumulates into
   the hidden buffer, kernel copies instead of memcpy nodes, and alpha+beta as one split-K FP16 launch
   (`gdn.alpha_beta_smallm`). Qwen3.8-27B-NVFP4 at 32 streams 1985.7 -> 2019.8 tok/s (+1.7 %, 3/3 pairs positive)

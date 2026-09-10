@@ -106,6 +106,15 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
 void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu, const half* x, half* yg,
                               half* yu, int rows, int K, cudaStream_t stream);
 
+// M=1 GDN input projections in one launch: in_proj + gate (NVFP4) and alpha +
+// beta (FP16 [ab_rows, K] each) on one x. Returns false (nothing launched)
+// when K % 16 != 0, K > 8192 or a weight's K differs; the caller keeps its
+// four-call path. Registered for PDL by nvfp4_gemv_pdl_register().
+bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantResult& w_gate, const half* w_alpha,
+                                const half* w_beta, int ab_rows, const half* x, half* y_in, half* y_gate,
+                                half* y_alpha, half* y_beta, int K, cudaStream_t stream);
+void nvfp4_gdn_input_pdl_register();
+
 // GEMV with residual add: y[M] = A_nvfp4[M,K] @ x[K] + residual[M]
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y, const half* residual, int M,
                          int K, cudaStream_t stream);
