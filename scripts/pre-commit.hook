@@ -10,9 +10,11 @@
 # tests/, CMakeLists, *.cmake) — doc/config-only commits are not gated, and
 # neither are the .md and .py files that live inside those directories.
 #
-# Runs `make test-gpu` (Docker build + the full GTest suite via imp-tests; this
-# includes the CPU binaries too, so a commit that passes here has run everything).
-# Heavy by design. Skip a single commit with:  git commit --no-verify
+# Runs `make build` (skipped when imp:test already carries this tree, see
+# scripts/build_image.sh) and then the test modules the staged diff can reach
+# (modules_for below); the full suite (`make test-gpu`, imp-tests, ~4 min) when
+# the diff touches what every module links, or with IMP_PRECOMMIT_FULL=1.
+# Skip a single commit with:  git commit --no-verify
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -65,5 +67,40 @@ if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-commit (Stage 1 / GPU)" || exit 1
 fi
 
-echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu"
-exec make -s test-gpu
+# Which test modules the staged diff can reach. The full suite (imp-tests, 224
+# tests, ~4 min after the build) runs when the diff touches what every module
+# links (core, include, the build itself) or when IMP_PRECOMMIT_FULL=1; a diff
+# confined to one subsystem runs that subsystem's modules (~30 s to 2 min).
+# A tests/ file maps to the module CMakeLists.txt lists it under. The push
+# hook still runs verify-fast on the whole tree.
+modules_for() {
+    case "$1" in
+        include/*|src/core/*|src/api/*|CMakeLists.txt|cmake/*|*.cmake) echo ALL ;;
+        tests/*) awk -v f="$1" '/imp_add_test_module\(/{m=$1; sub(/.*\(/,"",m)} index($0,f){print m; exit}' \
+                     "$ROOT/CMakeLists.txt" ;;
+        src/memory/*|src/runtime/*) echo "test-core test-kv test-e2e" ;;
+        src/compute/*) echo "test-compute test-attention test-quant test-kv test-moe-gdn" ;;
+        src/exec/*) echo "test-e2e test-moe-gdn test-compute test-attention" ;;
+        src/model/*|src/quant/*) echo "test-quant test-text test-e2e test-core" ;;
+        src/vision/*|src/lora/*|src/sampling/*) echo "test-e2e test-compute" ;;
+        tools/*) echo "test-core test-e2e" ;;
+        *) echo ALL ;;
+    esac
+}
+MODULES=""
+for f in $CHANGED; do
+    m="$(modules_for "$f")"
+    [ -z "$m" ] && m=ALL
+    MODULES="$MODULES $m"
+done
+MODULES="$(echo "$MODULES" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')"
+if [ "${IMP_PRECOMMIT_FULL:-0}" = "1" ] || echo " $MODULES" | grep -q " ALL"; then
+    echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu (full suite)"
+    exec make -s test-gpu
+fi
+echo "pre-commit (Stage 1 / GPU): staged source changes → make build + modules: $MODULES(IMP_PRECOMMIT_FULL=1 runs the full suite)"
+make -s build || exit 1
+for mod in $MODULES; do
+    echo "pre-commit: $mod"
+    docker run --rm --gpus all -v "$HOME/models:/models" imp:test "$mod" || exit 1
+done

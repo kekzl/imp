@@ -16,11 +16,16 @@
 #       gate that fires on a server-handler edit reports the box, not the change.
 #
 #   paired A/B (make verify-ab, AUDIT_arch_2026 H-3)
-#       runs after the perf gate on the same diffs. The single arm above cannot
-#       resolve a delta smaller than the host's own between-session movement
-#       (4-6 % on one tree, threshold 8 %); the paired arm alternates origin/main
-#       (imp:ab-<sha>, built once per sha) against imp:test in one session and
-#       judges the mean paired decode delta. IMP_SKIP_AB=1 skips it.
+#       replaces the single-arm perf gate on kernel diffs (src/compute, src/exec).
+#       The single arm cannot resolve a delta smaller than the host's own
+#       between-session movement (4-8 % on one tree, threshold 8 %); the paired
+#       arm alternates origin/main (imp:ab-<sha>, built once per sha) against
+#       imp:test in one session and judges the mean paired decode delta (2 %).
+#       IMP_SKIP_AB=1 falls back to the single-arm gate. Costs ~5 min, which is
+#       why the other measured paths keep the single arm.
+#
+#   docker build runs once per tree: `make build` skips when imp:test already
+#       carries the tree fingerprint (scripts/build_image.sh, label imp.tree).
 #
 #   roofline (tools/roofline/, per-kernel %-of-peak) has no automated arm: CI
 #       has no GPU runner and roofline.yml only re-parses committed history. A
@@ -138,14 +143,19 @@ if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ -s "$ROOT/tools/roofline/history/index.jsonl
 fi
 
 if [ "$NEEDS_PERF" -eq 1 ]; then
-    echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
-    make -s verify-fast || exit 1
-    if [ "${IMP_SKIP_AB:-0}" = "1" ]; then
-        echo "pre-push: paired A/B skipped (IMP_SKIP_AB=1)"
-        exit 0
+    # Kernel paths get the paired A/B (2 % against origin/main, ~5 min) and
+    # skip the single-arm perf gate, which cannot resolve below the host's own
+    # 4-8 % session drift (263 vs 286 tok/s on one tree, 2026-09-10). The
+    # other measured paths (runtime, model, quant, cmake) keep the single-arm
+    # gate: their changes move a number rarely, and the A/B would cost every
+    # push 5 min for it.
+    if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ "${IMP_SKIP_AB:-0}" != "1" ]; then
+        echo "pre-push: kernel paths changed → make verify-fast (correctness) + paired A/B (make verify-ab)"
+        IMP_VERIFY_SKIP_PERF=1 make -s verify-fast || exit 1
+        exec make -s verify-ab
     fi
-    echo "pre-push: paired A/B against origin/main → make verify-ab"
-    exec make -s verify-ab
+    echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
+    exec make -s verify-fast
 fi
 
 echo "pre-push: source changes outside the measured paths → make verify-fast (no perf gate)"

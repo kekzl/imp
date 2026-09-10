@@ -48,8 +48,10 @@ check-deps:
 check-deps-online:
 	@bash scripts/check_dep_pins.sh --online
 
+# scripts/build_image.sh skips the build when $(DOCKER_IMG) already carries
+# this tree (label imp.tree); IMP_FORCE_BUILD=1 builds anyway.
 build: check-deps
-	docker build $(BUILD_ARGS) $(DEP_ARGS) -t $(DOCKER_IMG) .
+	@bash scripts/build_image.sh $(DOCKER_IMG) $(BUILD_ARGS) $(DEP_ARGS)
 
 # ---------------------------------------------------------------------------
 # Fast inner loop (`make dev`) — incremental compile, seconds not minutes.
@@ -509,7 +511,7 @@ install-hooks:
 	@cp scripts/pre-push.hook .git/hooks/pre-push
 	@chmod +x .git/hooks/pre-push
 	@echo "hooks installed:"
-	@echo "  pre-commit → Stage 1 'make test-gpu' (full GPU suite) on staged src/tests changes"
+	@echo "  pre-commit → Stage 1 GPU tests on staged src/tests changes (modules the diff reaches; full suite on core/include/build changes)"
 	@echo "  pre-push   → 'make verify-fast' on source changes (perf gate only for measured paths)"
 	@echo "  CI (Stage 2) runs 'ctest -L unit' — the CPU lane — automatically"
 

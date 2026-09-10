@@ -24,7 +24,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 |---|---|---|
 | Incremental build (inner loop) | `make dev` | 2-14 s |
 | Incremental build + CI unit lane | `make dev-test` (= `ctest -L unit`) | ~3 s |
-| Full image (the gate; anything you measure or push) | `make build` -> `imp:test` | ~3.5 min regardless of diff |
+| Full image (the gate; anything you measure or push) | `make build` -> `imp:test` | ~3.5 min regardless of diff; 0 s when the image already carries the tree (`imp.tree` label) |
 | CPU unit binary | `make test-unit` (`imp-tests-unit`) | <5 s |
 | Full GPU suite | `make test-gpu` | 4-10 min |
 | E2E on real models | `make test-e2e` | Qwen3-4B-Instruct-2507-Q8_0, Qwen3.5-4B-mxfp4, gemma-4-26B-A4B Q4_K_M, `MOE_MODEL` (gpt-oss-20b-mxfp4), Qwen3-Coder-30B FP4, Nemotron-3-Nano NVFP4 (paths in `Makefile`) |
@@ -80,8 +80,9 @@ docker run --rm --gpus all -v $HOME/models:/models \
 Advisory jobs: `Lint`, `clang-tidy`, `Mock API contract`, `Real API contract (model-less)`, `Sanitizers`, `PTX fallback`.
 
 - Hooks: `make install-hooks` copies `scripts/pre-commit.hook` and `scripts/pre-push.hook`. Never edit `.git/hooks/*`: `guard_precommit_filter` in the CPU lane diffs them against the tracked files.
-- Pre-commit = static gates (~2 s) then `make test-gpu` (full suite, ~10 min) when staged `src/ include/ tools/ tests/ CMakeLists cmake/` files change; `.md .py .hook` skip. A 2-min timeout around `git commit` kills the suite and leaves files staged only. Alternative: `make test-gpu` by hand, read exit 0, then `git commit --no-verify`.
-- Pre-push = static gates, `require_free_gpu.sh`, then `make verify-fast`; the perf gate runs only when the diff matches `PERF_RE` (`src/{compute,exec,quant,runtime,model}/`, any `.cu/.cuh`, `cmake/`, `CMakeLists.txt`, `tests/perf_baseline*`). Skips: `IMP_VERIFY_SKIP_PERF/_VRAM/_GRAPHS=1`.
+- `make build` runs `scripts/build_image.sh`: skipped when `imp:test` already carries the tree fingerprint (label `imp.tree` = index tree + build args; only when the working tree equals the index, no unstaged or untracked files). `IMP_FORCE_BUILD=1` builds anyway. Saves 3.5 min per hook stage on one tree.
+- Pre-commit = static gates (~2 s), `make build`, then only the test modules the staged diff reaches (`modules_for` in `scripts/pre-commit.hook`: `src/memory|runtime` -> test-core test-kv test-e2e, `src/compute` -> test-compute test-attention test-quant test-kv test-moe-gdn, `src/exec` -> test-e2e test-moe-gdn test-compute test-attention, `src/model|quant` -> test-quant test-text test-e2e test-core, a `tests/` file -> its module); the full `make test-gpu` (224 tests, ~4 min) on `include/ src/core src/api CMakeLists cmake/` changes or with `IMP_PRECOMMIT_FULL=1`. `.md .py .hook` skip. A 2-min timeout around `git commit` still kills a long stage: run the stage by hand, read exit 0, then `git commit --no-verify`.
+- Pre-push = static gates, `require_free_gpu.sh`, then `make verify-fast`; the perf gate runs only when the diff matches `PERF_RE` (`src/{compute,exec,quant,runtime,model}/`, any `.cu/.cuh`, `cmake/`, `CMakeLists.txt`, `tests/perf_baseline*`). On `src/compute` or `src/exec` diffs the paired A/B (`make verify-ab`, 2 %, ~5 min) replaces the single-arm perf gate; `IMP_SKIP_AB=1` falls back to it. Skips: `IMP_VERIFY_SKIP_PERF/_VRAM/_GRAPHS=1`.
 - Hooks run `filesize lanes entrypoint alloc launchguards docs citations`; `hygiene` only in CI. Local hygiene check: `docker run --rm -v $PWD:/src -w /src -e HOME=/tmp imp:toolchain bash -c 'git config --global --add safe.directory /src; bash scripts/ci_static_gates.sh hygiene'`.
 - `docs_lint.py` regenerates `docs/audit/docs-rewrite/STALE.md` on every run; it blocks `git pull` until `git checkout -- docs/audit/docs-rewrite/STALE.md` or committed as an `.md`-only follow-up.
 

@@ -66,8 +66,11 @@ GPU correctness cannot run in CI (no GPU runner), so the suite is gated in
 stages — install the hooks with `make install-hooks`:
 
 - **Stage 1 — pre-commit (GPU), local.** `scripts/pre-commit.hook` runs
-  `make test-gpu` (the full GTest suite, which includes the CPU binaries too)
-  when staged changes touch `src/ include/ tools/ tests/ CMakeLists/ *.cmake`.
+  `make build` (skipped when `imp:test` already carries the tree) and the test
+  modules the staged diff reaches; the full `make test-gpu` (every binary) when
+  the diff touches `include/ src/core src/api CMakeLists *.cmake` or with
+  `IMP_PRECOMMIT_FULL=1`. It fires when staged changes touch
+  `src/ include/ tools/ tests/ CMakeLists/ *.cmake`.
   This is where the kernel oracles below are actually gated. (`pre-push` keeps
   the `make verify-fast` perf + peak-VRAM + smoke regression gate — the VRAM gate
   is the one that fails on a memory regression with flat throughput; it needs `jq`
