@@ -111,6 +111,26 @@ TEST(GbnfGrammar, RefusesAbsurdRepetitionBounds) {
     EXPECT_TRUE(compile_error("root ::= \"a\"{0,8}").empty());
 }
 
+// A bound past INT_MAX reached std::stoi before the check above ran, and its
+// std::out_of_range aborted the process. parse_gbnf reads request-supplied
+// grammars, so that was a one-request kill. Found by fuzz_gbnf on the first
+// nightly run that built (2026-09-10), reduced from
+// `1::=--_1k{24444444044444444}...`.
+TEST(GbnfGrammar, ARepetitionBoundPastIntMaxIsRefusedNotThrown) {
+    for (const char* g : {"root ::= \"a\"{24444444044444444}",
+                          "root ::= \"a\"{0,24444444044444444}",
+                          "root ::= \"a\"{99999999999999999999999999,2}",
+                          "root ::= \"a\"{2147483648}"}) {
+        std::string err;
+        std::vector<imp::GbnfRule> rules;
+        int32_t root = -1;
+        EXPECT_FALSE(imp::parse_gbnf(g, rules, root, &err)) << g;
+        EXPECT_FALSE(err.empty()) << g;
+    }
+    // Still parses on the useful side of the bound.
+    EXPECT_TRUE(compile_error("root ::= \"a\"{1,1024}").empty());
+}
+
 // -----------------------------------------------------------------------------
 // Core language semantics
 // -----------------------------------------------------------------------------

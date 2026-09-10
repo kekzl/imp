@@ -22,6 +22,20 @@ constexpr int kMaxRepeat = 1024;
 // nests anywhere near this.
 constexpr int kMaxGroupDepth = 64;
 
+// Digits to a repetition bound without std::stoi's throw. An empty string is 0
+// (`{,4}` means "up to 4"); anything that cannot be under kMaxRepeat is false,
+// which the caller turns into the same refusal an in-range but too-large bound
+// gets. Five digits is already past kMaxRepeat, so the accumulator cannot run
+// away.
+inline bool bound_from_digits(const std::string& s, int& out) {
+    if (s.size() > 5)
+        return false;
+    out = 0;
+    for (char c : s)
+        out = out * 10 + (c - '0');
+    return true;
+}
+
 bool is_word_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
 }
@@ -253,8 +267,17 @@ struct Parser {
         pos++;
         if (a.empty() && b.empty())
             return fail("empty { } repetition");
-        lo = a.empty() ? 0 : std::stoi(a);
-        hi = has_comma ? (b.empty() ? -1 : std::stoi(b)) : lo;
+        // The bound check below is the gate, and std::stoi used to throw
+        // std::out_of_range before it ever ran: `1 ::= x{24444444044444444}`
+        // aborted the process, and parse_gbnf reads request-supplied grammars
+        // (tools/imp-server/constraint_validation.cpp). Found by fuzz_gbnf on
+        // the first nightly run that built, 2026-09-10.
+        if (!bound_from_digits(a, lo) || (has_comma && !b.empty() && !bound_from_digits(b, hi)))
+            return fail("repetition bound over " + std::to_string(kMaxRepeat));
+        if (!has_comma)
+            hi = lo;
+        else if (b.empty())
+            hi = -1;
         if (lo > kMaxRepeat || hi > kMaxRepeat)
             return fail("repetition bound over " + std::to_string(kMaxRepeat));
         if (hi >= 0 && hi < lo)

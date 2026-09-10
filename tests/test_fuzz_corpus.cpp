@@ -176,6 +176,9 @@ std::vector<std::string> gbnf_corpus() {
         "root ::= obj\nobj ::= \"{\" pair (\",\" pair)* \"}\"\npair ::= \"x\"",
         "root ::= \"a\"{1,1024}",
         "root ::= \"a\"{0,100000}",
+        // std::out_of_range out of std::stoi, before the bound check (2026-09-10)
+        "root ::= \"a\"{24444444044444444}",
+        "1::=--_1k{24444444044444444}4444444444444)4444,44",
         "root ::= " + std::string(20000, '(') + "\"a\"" + std::string(20000, ')'),
         "root ::= root",
         "root ::=",
