@@ -961,5 +961,35 @@ TEST_F(HFChatTemplateTest, MissingField) {
     EXPECT_TRUE(result.empty());
 }
 
+
+// A tool's `parameters` schema comes off the request body, and a JSON number
+// between INT64_MAX and UINT64_MAX reaches the template renderer as an integer
+// string: nlohmann keeps 9223372036854775808 verbatim and only normalises past
+// ~1e19. std::stoll threw std::out_of_range on it, in a file with no other
+// catch, and the request answered 500. Same class as the GBNF bound (#1972).
+TEST(ChatTemplateTools, AToolParameterPastInt64MaxRendersInsteadOfThrowing) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok,
+                         "{% for t in tools %}{{ t.function.parameters.properties.x.maximum }}"
+                         "{% endfor %}{% for m in messages %}{{ m.content }}{% endfor %}"));
+    std::vector<ChatMessage> msgs = {{"user", "hi"}};
+    for (const char* schema : {R"({"type":"object","properties":{"x":{"maximum":9223372036854775808}}})",
+                               R"({"type":"object","properties":{"x":{"maximum":18446744073709551615}}})",
+                               R"({"type":"object","properties":{"x":{"maximum":-9223372036854775809}}})"}) {
+        std::vector<ToolFunction> tools = {{"f", "d", schema}};
+        EXPECT_NO_THROW({
+            auto ids = tpl.apply_with_tools(tok, msgs, tools);
+            (void)ids;
+        }) << schema;
+    }
+    // The ordinary side still renders.
+    std::vector<ToolFunction> ok = {{"f", "d", R"({"type":"object","properties":{"x":{"maximum":42}}})"}};
+    EXPECT_NO_THROW({
+        auto ids = tpl.apply_with_tools(tok, msgs, ok);
+        (void)ids;
+    });
+}
+
 }  // namespace
 }  // namespace imp

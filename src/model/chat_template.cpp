@@ -2,6 +2,7 @@
 #include "core/logging.h"
 #include "core/process_diag.h"
 
+#include <stdexcept>
 #include <algorithm>
 #include <functional>
 
@@ -743,9 +744,21 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
         std::string num_str = json_str.substr(start, pos - start);
         if (num_str.empty())
             return jinja::Value();
-        if (is_float)
+        // A JSON number between INT64_MAX and UINT64_MAX survives the request
+        // roundtrip as an integer (9223372036854775808 dumps unchanged; only
+        // past ~1e19 does nlohmann turn it into 1e+26), and std::stoll throws
+        // out_of_range on it. This file has no other catch, so that reached the
+        // request path as a 500. Fall back to the double the value already is.
+        try {
+            if (!is_float)
+                return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
+        } catch (const std::out_of_range&) {
+        }
+        try {
             return jinja::Value(std::stod(num_str));
-        return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
+        } catch (const std::out_of_range&) {
+            return jinja::Value();
+        }
     };
 
     return parse_value();
