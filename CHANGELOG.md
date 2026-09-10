@@ -127,6 +127,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- A tool whose `parameters` schema carries a JSON number between `INT64_MAX` and `UINT64_MAX`
+  (`9223372036854775808` survives the request roundtrip as an integer) made the template renderer
+  throw `std::out_of_range` out of `std::stoll`; it now renders as a double (#1973)
+
 - A GBNF grammar whose repetition bound is past `INT_MAX` answered 500 `{"message":"stoi"}` instead
   of a 400: `std::stoi` threw before the `kMaxRepeat` check ran. Now 400 "repetition bound over 1024
   (at offset 31)". Found by the first nightly libFuzzer run that built (#1972)
