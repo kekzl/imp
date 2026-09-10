@@ -302,18 +302,10 @@ __global__ void ssm_conv1d_prefill_kernel(
         }
         x_out[token * channels + ch] = __float2half(sum);
 
-        // For the last (real) token, write conv_state. Chunks shorter than
-        // kernel_size shift the missing leading values in from the previous
-        // chunk's conv_state (per-thread read index real_n+k stays ahead of
-        // every write index k, so the in-place shift is ordered correctly).
-        if (token == real_n - 1 && conv_state) {
-            float* state = conv_state + ch * kernel_size;
-            for (int k = 0; k < kernel_size; k++) {
-                int src_t = real_n - kernel_size + k;
-                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
-                                        : state[src_t + kernel_size];
-            }
-        }
+        // The conv window commit for the last real row is
+        // ssm_conv1d_commit_kernel, launched after this grid: rows 0..K-2
+        // read the PREVIOUS window from conv_state above, and nothing inside
+        // one grid orders the last row's block after theirs.
         // Same window, taken at snap_n rows. Its leading values come from the
         // PRE-chunk state (conv_prev), not the live one: the real-row commit
         // above may already have run on another block. snap_n == real_n needs
@@ -330,6 +322,48 @@ __global__ void ssm_conv1d_prefill_kernel(
     }
 }
 
+// Conv window commit, one launch after the prefill grid: the window is the
+// last K real inputs; a chunk shorter than K shifts the missing leading
+// values in from the previous window (the per-thread read index real_n + k
+// stays ahead of every write index k, so the in-place shift is ordered).
+// Stream order puts it after every row's read of the previous window, which
+// the prefill grid itself cannot promise (rows 0..K-2 and the commit row are
+// different blocks). grid.y indexes the sequence group of the grouped form.
+__global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const half* __restrict__ x_in,
+                                         int n_tokens, int channels, int kernel_size,
+                                         const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
+                                         int64_t slot_stride) {
+    const int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ch >= channels)
+        return;
+    const int seq = blockIdx.y;
+    if (seq_slots) {
+        conv_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(slot_stride);
+        x_in += static_cast<size_t>(seq) * n_tokens * channels;
+    }
+    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
+    if (real_n <= 0)
+        return;
+    float* state = conv_state + ch * kernel_size;
+    for (int k = 0; k < kernel_size; k++) {
+        const int src_t = real_n - kernel_size + k;
+        state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : state[src_t + kernel_size];
+    }
+}
+
+static void launch_conv1d_commit(void* conv_state, const half* x_in, int n_tokens, int channels,
+                                 int kernel_size, const int* d_real_n, const int* seq_slots,
+                                 int64_t slot_stride, int n_seq, cudaStream_t stream) {
+    if (!conv_state || n_tokens <= 0 || n_seq <= 0)
+        return;
+    constexpr int kThreads = 256;
+    dim3 grid((channels + kThreads - 1) / kThreads, n_seq);
+    ssm_conv1d_commit_kernel<<<grid, kThreads, 0, stream>>>(static_cast<float*>(conv_state), x_in, n_tokens,
+                                                            channels, kernel_size, d_real_n, seq_slots,
+                                                            slot_stride);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
                         Tensor& x_out, int conv_kernel, cudaStream_t stream, const int* d_real_n,
                         void* conv_snap, const int* d_snap_n, const void* conv_prev) {
@@ -342,6 +376,8 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
         static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel, d_real_n,
         static_cast<float*>(conv_snap), d_snap_n, static_cast<const float*>(conv_prev));
     IMP_CUDA_CHECK_LAUNCH();
+    launch_conv1d_commit(conv_state, static_cast<const half*>(x_in.data), n_tokens, channels, conv_kernel,
+                         d_real_n, nullptr, 0, 1, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,17 +447,8 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         // Fused SiLU + FP32 output
         x_out_f32[token * channels + ch] = sum / (1.0f + expf(-sum));
 
-        // Update conv_state for the last (real) token; short chunks shift the
-        // missing leading values in from the previous chunk's conv_state (see
-        // ssm_conv1d_prefill_kernel).
-        if (token == real_n - 1 && conv_state) {
-            float* state = conv_state + ch * kernel_size;
-            for (int k = 0; k < kernel_size; k++) {
-                int src_t = real_n - kernel_size + k;
-                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
-                                        : state[src_t + kernel_size];
-            }
-        }
+        // The conv window commit is ssm_conv1d_commit_kernel, launched after
+        // this grid (see ssm_conv1d_prefill_kernel).
         // Same window, taken at snap_n rows. Its leading values come from the
         // state BEFORE this chunk, and they must be read from the caller's
         // pre-chunk copy rather than from conv_state: the commit above writes
@@ -458,6 +485,8 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
         x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
         static_cast<const float*>(conv_prev));
     IMP_CUDA_CHECK_LAUNCH();
+    launch_conv1d_commit(conv_state, static_cast<const half*>(x_in.data), n_tokens, channels, conv_kernel,
+                         d_real_n, nullptr, 0, 1, stream);
 }
 
 void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
@@ -478,6 +507,8 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
         x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
         static_cast<const float*>(conv_prev), seq_slots, slot_stride);
     IMP_CUDA_CHECK_LAUNCH();
+    launch_conv1d_commit(conv_state_pool, static_cast<const half*>(x_in.data), n_tokens, channels, conv_kernel,
+                         d_real_n, seq_slots, slot_stride, n_seq, stream);
 }
 
 // ---------------------------------------------------------------------------

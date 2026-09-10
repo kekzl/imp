@@ -7,6 +7,8 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <cstdio>
+#include <algorithm>
 
 #include "test_cuda_skip.h"
 
@@ -886,6 +888,71 @@ TEST(SSMConv1dTest, PrefillSnapshotIsConvStateAtSnapRow) {
 
     free_tensor(d_w);
     free_tensor(d_b);
+}
+
+// The prefill kernel commits the new conv window from the block of the last
+// row while the blocks of rows 0..K-2 read the PREVIOUS window from the same
+// buffer; nothing orders the two blocks. Rows 0..K-2 are checked bit-for-bit
+// against the CPU form over many launches (the window is the model's
+// geometry: Qwen3.8 GDN, 10240 channels, K=4, a 160-token prompt).
+TEST(SSMConv1dTest, PrefillFirstRowsReadThePreviousWindowNotTheCommit) {
+    const int channels = 10240, K = 4, n_tokens = 160, launches = 300;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<float> h_x(static_cast<size_t>(n_tokens) * channels), h_w(static_cast<size_t>(channels) * K),
+        h_b(channels), h_state0(static_cast<size_t>(channels) * K);
+    for (auto& v : h_x)
+        v = dist(rng);
+    for (auto& v : h_w)
+        v = dist(rng);
+    for (auto& v : h_b)
+        v = dist(rng);
+    for (auto& v : h_state0)
+        v = dist(rng);
+    // CPU form of rows 0..K-2 from the PREVIOUS window (inputs rounded to fp16
+    // the way the kernel reads them).
+    auto r16 = [](float v) { return __half2float(__float2half(v)); };
+    std::vector<float> ref(static_cast<size_t>(K - 1) * channels);
+    for (int t = 0; t < K - 1; t++)
+        for (int ch = 0; ch < channels; ch++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) {
+                const int src_t = t - (K - 1) + k;
+                const float val = src_t >= 0 ? r16(h_x[static_cast<size_t>(src_t) * channels + ch])
+                                             : h_state0[static_cast<size_t>(ch) * K + src_t + K];
+                sum += val * r16(h_w[static_cast<size_t>(ch) * K + k]);
+            }
+            sum += r16(h_b[ch]);
+            ref[static_cast<size_t>(t) * channels + ch] = sum / (1.0f + std::exp(-sum));
+        }
+    Tensor d_x = make_fp16_gpu(h_x.data(), {n_tokens, channels});
+    Tensor d_w = make_fp16_gpu(h_w.data(), {channels, K});
+    Tensor d_b = make_fp16_gpu(h_b.data(), {channels});
+    float *d_st = nullptr, *d_out = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_st, h_state0.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(n_tokens) * channels * sizeof(float)), cudaSuccess);
+    std::vector<float> rows(ref.size());
+    int bad_launches = 0;
+    size_t worst = 0;
+    for (int i = 0; i < launches; i++) {
+        cudaMemcpy(d_st, h_state0.data(), h_state0.size() * sizeof(float), cudaMemcpyHostToDevice);
+        ssm_conv1d_prefill_f32_silu(d_st, d_x, d_w, d_b, d_out, K, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(rows.data(), d_out, rows.size() * sizeof(float), cudaMemcpyDeviceToHost);
+        size_t off = 0;
+        for (size_t k = 0; k < rows.size(); k++)
+            if (std::fabs(rows[k] - ref[k]) > 1e-3f + 1e-3f * std::fabs(ref[k]))
+                off++;
+        if (off) {
+            bad_launches++;
+            worst = std::max(worst, off);
+        }
+    }
+    std::printf("\n  conv1d prefill: %d/%d launches with rows 0..%d off the previous window (worst %zu / %zu)\n",
+                bad_launches, launches, K - 2, worst, rows.size());
+    EXPECT_EQ(bad_launches, 0);
+    cudaFree(d_st);
+    cudaFree(d_out);
 }
 
 }  // namespace
