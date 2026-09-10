@@ -9,19 +9,19 @@ ArenaAllocator& engine_arena() {
     return inst;
 }
 
-MemError engine_arena_open(Backend& backend, size_t capacity) {
+MemError engine_arena_open(Backend& backend, size_t capacity, bool lazy) {
     ArenaAllocator& a = engine_arena();
     if (a.is_open())
         return MemError::InvalidArgument;
-    MemError e = a.open(backend, capacity, RegionTag::EnginePersistent);
+    MemError e = a.open(backend, capacity, RegionTag::EnginePersistent, lazy);
     if (e != MemError::Ok) {
         IMP_LOG_WARN("engine arena: open(%.1f MiB) failed (%s) — tenants fall back to their "
                      "own allocations",
                      capacity / (1024.0 * 1024.0), mem_error_name(e));
         return e;
     }
-    IMP_LOG_INFO("engine arena: %.1f MiB reserved (engine-persistent tier)",
-                 capacity / (1024.0 * 1024.0));
+    IMP_LOG_INFO("engine arena: %.1f MiB reserved (engine-persistent tier%s)", capacity / (1024.0 * 1024.0),
+                 a.lazy() ? ", committed as tenants take" : "");
     return MemError::Ok;
 }
 

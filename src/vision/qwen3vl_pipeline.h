@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <span>
@@ -49,7 +50,10 @@ public:
     // device here if it is still host-resident. `max_patches` bounds the image
     // size this pipeline will accept — it sizes every workspace, so it is also
     // what an oversized image is rejected against.
-    [[nodiscard]] bool init(VisionModel& tower, int max_patches);
+    // lazy: validate and remember the tower, defer its upload and the arena
+    // takes to the first encode (vram.lazy_commit). is_ready() is true from
+    // init on either way; a deferred build that fails turns it false.
+    [[nodiscard]] bool init(VisionModel& tower, int max_patches, bool lazy = false);
 
     // Device bytes init() will take from the T2 arena — tower excluded, that is
     // qwen3vl_vision_tower_device_bytes(). Answerable before the arena opens: it
@@ -66,7 +70,7 @@ public:
     // drift test compares has to cover both as well.
     size_t taken_bytes() const;
 
-    bool is_ready() const { return encoder_ != nullptr; }
+    bool is_ready() const { return configured_; }
     int max_patches() const { return max_patches_; }
     // Largest image, in pixels, this pipeline's patch budget allows.
     int64_t max_pixels() const;
@@ -99,6 +103,8 @@ private:
     bool encode_patches(const QwenPatches& patches, Qwen3VLImage& out, cudaStream_t stream);
     QwenPatchifyConfig patchify_config() const;
     void free_buffers();
+    bool build_();
+    bool ensure_ready_();
 
     VisionModel* tower_ = nullptr;
     size_t taken_bytes_ = 0;
@@ -106,6 +112,9 @@ private:
     int max_patches_ = 0;
     // Whether THIS pipeline uploaded the tower, and so has to invalidate it.
     bool uploaded_tower_ = false;
+    bool configured_ = false;
+    bool lazy_ = false;
+    std::mutex ready_mu_;
 
     half* d_patches_ = nullptr;
     half* d_out_ = nullptr;

@@ -79,9 +79,10 @@ struct KVCache {
     // overshoot into a WDDM spill. Qwen3.8-27B-NVFP4 plans 2301 blocks with
     // 3013 MiB still free after warmup; the growth is what reaches them.
     bool growable = true;
-    // Percent of the planned pool to COMMIT at startup when growable. 100 keeps
-    // today's behaviour: commit whatever the residual clamp allowed, and grow
-    // only if that was less than planned.
+    // Percent of the planned pool to COMMIT at startup when growable. 100
+    // commits whatever the residual clamp allowed and grows only if that was
+    // less than planned; 25 (default since vram.lazy_commit) commits a quarter
+    // and grows at admission, +25 % per step, into the same plan.
     //
     // Lower is the point of the whole mechanism. A successful cudaMalloc proves
     // nothing about free VRAM on WSL2: measured on this box, a second server
@@ -90,7 +91,7 @@ struct KVCache {
     // fraction of the bandwidth with nothing reporting an error. Committing a
     // fraction up front and growing into demand is the version of that decision
     // that cannot silently overshoot.
-    int growable_initial_pct = 100;
+    int growable_initial_pct = 25;
     // SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on
     // every other layer, gemma-3 5:1 pattern) allocate only the trailing
     // window in a small dedicated block group instead of full-length KV

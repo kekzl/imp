@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+- VRAM is committed on demand for the slot-shaped pools (`vram.lazy_commit`, default on): the SSM/GDN state slab reserves every slot at init and commits one per admitted sequence (scheduler admission gate), the engine arena commits as tenants take, so the Qwen3-VL tower lands on the first image instead of at load. The plan still charges every byte; the KV growth cap subtracts what lazy pools have charged but not committed (`vram_reserved_uncommitted_bytes`). Commits inside a reservation count as `planned_serving_commits()`, no longer as I2 violations. `kv_cache.growable_initial_pct` default 100 -> 25. Qwen3.8-27B-NVFP4 idle after warmup 30053 -> 25455 MiB, first image +0.9 s once, burst of 28 unchanged (`docs/internals/MEMORY.md` B0, lazy pools).
+
 ## [0.39.0] - 2026-09-10
 
 ### Added

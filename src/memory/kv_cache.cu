@@ -659,6 +659,9 @@ int KVCache::try_grow_to(int wanted) {
     size_t free_now = 0, total_now = 0;
     const size_t per_block = bytes_per_block();
     if (per_block > 0 && vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
+        // The reading already excludes what the lazy pools were charged for and
+        // have not committed (vram_budget_mem_get_info): this growth is
+        // opportunistic, a promised SSM slot or the vision tower is not.
         const size_t headroom = vram_allocator_headroom(total_now);
         const size_t spare = free_now > headroom ? free_now - headroom : 0;
         const size_t affordable = static_cast<size_t>(have) + spare / per_block;

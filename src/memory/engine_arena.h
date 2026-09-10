@@ -34,7 +34,9 @@ constexpr size_t kEngineArenaDefaultBytes = 64ull * 1024 * 1024;
 
 // Open/close. Idempotent-safe: opening twice is an error, closing when
 // unopened is a no-op. Called from Engine::init and ~Engine.
-MemError engine_arena_open(Backend& backend, size_t capacity = kEngineArenaDefaultBytes);
+// lazy: see ArenaAllocator::open. The backend must be growable for it to
+// take effect (vmm_backend()); a cudaMalloc backend opens fixed.
+MemError engine_arena_open(Backend& backend, size_t capacity = kEngineArenaDefaultBytes, bool lazy = false);
 void engine_arena_close();
 
 // The arena itself. Always valid to call; take_bytes() returns an empty span

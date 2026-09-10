@@ -201,7 +201,9 @@ bool Engine::init_features() {
     if (model_->vision_tower) {
         const int budget =
             Qwen3VLPipeline::patch_budget(*model_->vision_tower, runtime_config_.runtime.vision_max_patches);
-        if (!qwen_vision_.init(*model_->vision_tower, budget)) {
+        // Lazy only when the arena is: without a growable arena a deferred
+        // take commits nothing later, it just delays the upload.
+        if (!qwen_vision_.init(*model_->vision_tower, budget, engine_arena().lazy())) {
             IMP_LOG_WARN("Qwen3-VL vision tower failed to initialise — continuing text-only");
         } else if (model_->tokenizer()) {
             qwen_image_pad_id_ = model_->tokenizer()->find_token("<|image_pad|>");
@@ -644,6 +646,11 @@ void Engine::warmup() {
     // further when needed (Llama case).
     if (executor_)
         executor_->reset_kv_calibration();
+    // The prewarm above ran a slot per batch row; the lazy slab hands the
+    // pages back so serving starts at zero committed slots (measured: 28/28
+    // committed at init_complete without this, 2240 MiB).
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+    trim_recurrent_slots_after_warmup_();
     IMP_LOG_INFO("Warmup complete");
 }
 

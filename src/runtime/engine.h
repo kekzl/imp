@@ -1457,6 +1457,14 @@ private:
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
+    // Scheduler admission gate: the slot the next acquire will hand out is
+    // committed (lazy SSM slab), or there is no slab to commit. False leaves
+    // the request pending for the next round.
+    bool recurrent_slot_admissible_();
+    // After warmup: the graph prewarm captured a decode graph per batch size
+    // and touched every recurrent slot doing so. Hand the free ones back so
+    // the lazy slab starts serving at zero committed slots.
+    void trim_recurrent_slots_after_warmup_();
     // Teardown for a request that ends abnormally. finish_request is the
     // graceful twin; both release the same per-request resources (#1632).
     void cancel_sequence_(const std::shared_ptr<Request>& req);

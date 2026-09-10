@@ -93,7 +93,11 @@ void MemAccount::sample_once() {
 
 size_t MemAccount::unattributed_bytes() const {
     size_t free_b = 0, total_b = 0;
-    if (!vram_budget_mem_get_info(&free_b, &total_b))
+    // The planner view hides what the lazy pools have charged but not
+    // committed; that is address space, not device memory in use. Read the
+    // raw view in one call: the planner view plus the ledger added back
+    // afterwards raced the prewarm's slot commits (4185 measured vs 3416).
+    if (!vram_budget_mem_get_info_ex(&free_b, &total_b, /*exclude_pending=*/false))
         return 0;
     const size_t used = total_b > free_b ? total_b - free_b : 0;
     std::lock_guard<std::mutex> lock(mu_);

@@ -72,11 +72,18 @@ void set_alloc_phase(AllocPhase);
 // addr2line), nullptr otherwise.
 void note_serving_allocation(RegionTag tag, size_t bytes, const void* site = nullptr);
 
+// A commit into a growable region's reservation while serving. Planned by
+// construction (the reservation was sized at init), so it is counted apart
+// from the I2 violations above and logged once per tag at INFO.
+void note_planned_commit(RegionTag tag, size_t bytes);
+
 // Total acquisitions observed while in AllocPhase::Serving, all tags.
 uint64_t steady_state_allocations();
 // Per-tag breakdown; `tag` indexes the RegionTag enum.
 uint64_t steady_state_allocations(RegionTag tag);
 void reset_steady_state_allocations();
+// Commits into growable reservations while serving (lazy pools), all tags.
+uint64_t planned_serving_commits();
 
 // RAII bracket for the one legitimate re-entry into an allocating phase
 // after serving has begun: server.model_swap tears the model down and builds
@@ -182,10 +189,10 @@ public:
     // Grow/shrink a growable region in place, keeping `base()` stable.
     // Returns MemError::NotGrowable on backends that cannot (cudaMalloc).
     //
-    // Non-virtual, like acquire(): it consults the phase guard and then
-    // dispatches to do_commit(). A growable pool committing pages on the
-    // request path acquires physical memory exactly as acquire() does, and it
-    // used to be counted by none of the three I2 instruments (#1649).
+    // Non-virtual, like acquire(): it counts the growth (note_planned_commit)
+    // and then dispatches to do_commit(). A growable pool committing pages on
+    // the request path acquires physical memory exactly as acquire() does, and
+    // it used to be counted by none of the three I2 instruments (#1649).
     MemError commit(Region& region, size_t new_committed);
 
     // Commit (or release) one interior range of a growable region.
@@ -210,6 +217,11 @@ public:
 
     // Installed hard cap in bytes (--vram-budget); 0 = uncapped.
     virtual size_t capacity() const = 0;
+
+    // Commit granularity of a growable region: commit_range() rounds out to
+    // it. A lazy slab that commits per slot pads its slot stride to this so
+    // two slots never share a granule.
+    virtual size_t granularity() const { return 256; }
 
 protected:
     // Implementations override these two. `acquire()` wraps do_acquire() with

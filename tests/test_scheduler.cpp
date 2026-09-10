@@ -60,6 +60,37 @@ TEST(SchedulerTest, BasicPrefillThenDecode) {
     EXPECT_EQ(prefill.size(), 0u);
     EXPECT_EQ(decode.size(), 2u);
 }
+// The admission gate (lazy recurrent-slot commit): a false answer seats
+// nobody this round and takes nothing; the request is retried next round.
+TEST(SchedulerTest, AdmissionGateHoldsTheWholeRound) {
+    Scheduler sched(4);
+    bool open = false;
+    int asked = 0;
+    sched.set_admission_gate([&] {
+        ++asked;
+        return open;
+    });
+    auto req1 = std::make_shared<Request>();
+    req1->input_tokens = {1, 2, 3};
+    auto req2 = std::make_shared<Request>();
+    req2->input_tokens = {4, 5};
+    sched.add_request(req1);
+    sched.add_request(req2);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 0u);
+    EXPECT_EQ(sched.active_count(), 0);
+    EXPECT_EQ(sched.pending_count(), 2);
+    EXPECT_EQ(asked, 1) << "one refusal ends the round; the second request is not asked for";
+    EXPECT_EQ(req1->status, RequestStatus::PENDING) << "held, not cancelled";
+
+    open = true;
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 2u);
+    EXPECT_EQ(asked, 3);
+}
+
 // 8. Scheduler respects max_batch_size
 TEST(SchedulerTest, MaxBatchSizeLimit) {
     Scheduler sched(2);  // max batch = 2

@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <span>
+#include <stdexcept>
 #include <string>
 
 namespace imp {
@@ -262,8 +263,56 @@ int Engine::acquire_recurrent_slot_(int req_id) {
         IMP_LOG_WARN("recurrent slot pool exhausted (cap=%d) — falling back to id%%cap for req %d", cap,
                      req_id);
     }
+    // The admission gate committed this slot already on the scheduled path;
+    // this is the catch for every other path (imp-cli, the aliasing fallback
+    // above). A slab that is not there cannot be handed to a kernel.
+    if (!ssm_state_->ensure_slot(slot)) {
+        if (recurrent_slot_of_.find(req_id) == recurrent_slot_of_.end())
+            free_recurrent_slots_.push_back(slot);
+        throw std::runtime_error("recurrent state slot " + std::to_string(slot) +
+                                 " could not be committed: the card cannot spare it above the allocator "
+                                 "headroom (vram.lazy_commit=false to allocate every slot at load)");
+    }
     recurrent_slot_of_[req_id] = slot;
     return slot;
+}
+
+void Engine::trim_recurrent_slots_after_warmup_() {
+    if (!ssm_state_ || !ssm_state_->lazy())
+        return;
+    int trimmed = 0, held = 0;
+    for (int s = 0; s < ssm_state_->max_sequences(); ++s) {
+        bool free_slot = true;
+        for (const auto& [req, slot] : recurrent_slot_of_)
+            if (slot == s) {
+                free_slot = false;
+                break;
+            }
+        if (!free_slot) {
+            ++held;
+            continue;
+        }
+        if (ssm_state_->slot_committed(s) && ssm_state_->decommit_slot(s))
+            ++trimmed;
+    }
+    IMP_LOG_INFO("SSM state: %d slot(s) decommitted after warmup (%d still held), %.0f MiB committed",
+                 trimmed, held, ssm_state_->committed_bytes() / (1024.0 * 1024.0));
+}
+
+bool Engine::recurrent_slot_admissible_() {
+    const int cap = ssm_state_ ? ssm_state_->max_sequences() : 0;
+    if (cap <= 0 || !ssm_state_->lazy())
+        return true;
+    if (!recurrent_slots_initialized_) {
+        free_recurrent_slots_.clear();
+        for (int s = cap - 1; s >= 0; --s)
+            free_recurrent_slots_.push_back(s);
+        recurrent_slots_initialized_ = true;
+    }
+    if (free_recurrent_slots_.empty())
+        return true;  // max_batch_size holds the line, not this gate
+    // acquire_recurrent_slot_ pops from the back: commit exactly that slot.
+    return ssm_state_->ensure_slot(free_recurrent_slots_.back());
 }
 
 int Engine::recurrent_slot(int req_id) const {

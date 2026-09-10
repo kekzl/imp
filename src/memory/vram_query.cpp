@@ -16,7 +16,17 @@ std::atomic<size_t> g_budget_bytes{0};
 std::atomic<size_t> g_free_at_install{0};
 std::atomic<size_t> g_total_at_install{0};
 std::atomic<size_t> g_own_peak{0};
+std::atomic<std::ptrdiff_t> g_reserved_uncommitted{0};
 }  // namespace
+
+void vram_reserved_uncommitted_add(std::ptrdiff_t delta_bytes) {
+    g_reserved_uncommitted.fetch_add(delta_bytes, std::memory_order_relaxed);
+}
+
+size_t vram_reserved_uncommitted_bytes() {
+    const std::ptrdiff_t v = g_reserved_uncommitted.load(std::memory_order_relaxed);
+    return v > 0 ? static_cast<size_t>(v) : 0;
+}
 
 void vram_budget_install(size_t budget_mb) {
     size_t budget = budget_mb << 20;
@@ -114,6 +124,10 @@ double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_m
 }
 
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes) {
+    return vram_budget_mem_get_info_ex(free_bytes, total_bytes, /*exclude_pending=*/true);
+}
+
+bool vram_budget_mem_get_info_ex(size_t* free_bytes, size_t* total_bytes, bool exclude_pending) {
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
         if (free_bytes)
@@ -139,6 +153,14 @@ bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes) {
         const size_t budget_left = (budget > my_used) ? (budget - my_used) : 0;
         free_b = std::min(free_b, budget_left);
         total_b = budget;
+    }
+    // What the lazy pools were charged for and have not committed is not free
+    // for anyone who sizes from this reading: measured without this, the KV
+    // plan took the arena's deferred 1946 MiB (3561 -> 9556 blocks) and the
+    // vision tower would have committed into a pool that had already spent it.
+    if (exclude_pending) {
+        const size_t pending = vram_reserved_uncommitted_bytes();
+        free_b = free_b > pending ? free_b - pending : 0;
     }
     if (free_bytes)
         *free_bytes = free_b;

@@ -863,10 +863,17 @@ bool Engine::init_kv_cache() {
             int n_heads = mcfg.ssm_dt_rank;
             int hd = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_state_ = std::make_unique<SSMState>();
-            const bool ssm_pool_ok =
-                ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
-                                 mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_,
-                                 ssm_reserved_slots);
+            // Lazy: reserve every slot, commit one per admitted sequence
+            // (scheduler admission gate below). The plan above charged the
+            // whole slab either way.
+            const bool ssm_pool_ok = ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch,
+                                                      mcfg.ssm_conv_kernel, n_heads, hd, mcfg.ssm_state_size,
+                                                      config_.ssm_state_dtype, &vram_alloc_,
+                                                      ssm_reserved_slots,
+                                                      runtime_config_.vram.lazy_commit ? vmm_backend()
+                                                                                       : nullptr);
+            if (ssm_pool_ok && ssm_state_->lazy() && scheduler_)
+                scheduler_->set_admission_gate([this] { return recurrent_slot_admissible_(); });
             if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
                 // NOT "continuing without it". A GDN/SSM layer whose recurrent
                 // state is missing reads a null slab: the model produces

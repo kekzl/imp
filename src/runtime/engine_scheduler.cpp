@@ -737,9 +737,21 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         // one-way graph demotion below then cost 40% of decode throughput
         // for the rest of the process (2026-09-03).
         auto st = kv_manager_->stats();
-        const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
-        const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
-                                             : st.total_blocks + st.free_blocks + st.cached_blocks;
+        int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
+        int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
+                                       : st.total_blocks + st.free_blocks + st.cached_blocks;
+        // A pool below its ceiling is not under pressure, it is under-committed:
+        // pressure on the committed part is the growth trigger, and the valve
+        // reads the pool after the growth. Without this a pool starting at 25 %
+        // (kv_cache.growable_initial_pct) armed StreamingLLM and demoted graphs
+        // once while filling and once more near its real end.
+        if (kv_cache_raw_ && kv_cache_raw_->ceiling_blocks() > pool_total &&
+            kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
+            kv_cache_raw_->try_grow_to(pool_total + std::max(64, pool_total / 4));
+            st = kv_manager_->stats();
+            reclaimable = kv_manager_->num_reclaimable_cached_blocks();
+            pool_total = kv_cache_raw_->total_blocks();
+        }
         const bool kv_is_f16 = kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16;
         if (kv_pressure_warns_no_streaming_valve(st.free_blocks, reclaimable, pool_total, kv_is_f16) &&
             !kv_pressure_no_valve_warned_.test_and_set(std::memory_order_relaxed)) {

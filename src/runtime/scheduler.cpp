@@ -91,6 +91,11 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
             // not aged still yields to what fits.
             const bool aged = now - req->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
 
+            // Before any KV is taken: a seat the engine cannot back right now
+            // (lazy recurrent slot) ends the round for everyone behind too.
+            if (admission_gate_ && !admission_gate_())
+                break;
+
             // Memory-aware check: estimate KV blocks needed for this request
             if (kv_manager_) {
                 int ctx_len = req->context_len();

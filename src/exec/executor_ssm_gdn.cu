@@ -455,7 +455,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             Tensor xBC_g(xBC_out.data, compute_dtype_, 2, grp_shape, true);
             ssm_conv1d_prefill_f32_silu_grouped(
                 state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
-                static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)), state.ssm_n_seq,
+                static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)), state.ssm_n_seq,
                 xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream, state.d_chunk_len,
                 conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr, conv_prev);
             // Bucket pad rows past the last group belong to no sequence: no
@@ -512,7 +512,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             if (state.ssm_seq_slots && state.ssm_n_seq > 1) {
                 ssm_conv1d_decode_f32_silu_batched(
                     state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
-                    static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
+                    static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
                     static_cast<const half*>(xBC_out.data), ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
                     state.ssm_n_seq, conv_channels, conv_kernel, stream);
             } else {
@@ -851,7 +851,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
                     static_cast<const float*>(ly.ssm_dt_b.data),
                     static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                    static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(__nv_bfloat16)),
+                    static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
                     ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n);
             } else {
@@ -860,7 +860,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
                     static_cast<const float*>(ly.ssm_dt_b.data),
                     static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                    static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
+                    static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
                     ssize, n_groups, stream, gl, real_n, row_offs, static_cast<float*>(snap), snap_n);
             }
