@@ -268,10 +268,11 @@ struct Parser {
         if (a.empty() && b.empty())
             return fail("empty { } repetition");
         // The bound check below is the gate, and std::stoi used to throw
-        // std::out_of_range before it ever ran: `1 ::= x{24444444044444444}`
-        // aborted the process, and parse_gbnf reads request-supplied grammars
-        // (tools/imp-server/constraint_validation.cpp). Found by fuzz_gbnf on
-        // the first nightly run that built, 2026-09-10.
+        // std::out_of_range before it ever ran. Measured on the server, same
+        // request: 500 {"message":"stoi","type":"server_error"} before, 400
+        // "repetition bound over 1024 (at offset 31)" after. httplib's
+        // exception handler is what kept that a 500 rather than an abort; the
+        // fuzz harness has none and died. Found by fuzz_gbnf, 2026-09-10.
         if (!bound_from_digits(a, lo) || (has_comma && !b.empty() && !bound_from_digits(b, hi)))
             return fail("repetition bound over " + std::to_string(kMaxRepeat));
         if (!has_comma)

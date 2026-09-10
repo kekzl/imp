@@ -111,10 +111,10 @@ TEST(GbnfGrammar, RefusesAbsurdRepetitionBounds) {
     EXPECT_TRUE(compile_error("root ::= \"a\"{0,8}").empty());
 }
 
-// A bound past INT_MAX reached std::stoi before the check above ran, and its
-// std::out_of_range aborted the process. parse_gbnf reads request-supplied
-// grammars, so that was a one-request kill. Found by fuzz_gbnf on the first
-// nightly run that built (2026-09-10), reduced from
+// A bound past INT_MAX reached std::stoi before the check above ran. On the
+// server that surfaced as 500 {"message":"stoi"} instead of a 400; anywhere
+// without an exception handler (the fuzz harness) it aborted. Found by
+// fuzz_gbnf on the first nightly run that built (2026-09-10), reduced from
 // `1::=--_1k{24444444044444444}...`.
 TEST(GbnfGrammar, ARepetitionBoundPastIntMaxIsRefusedNotThrown) {
     for (const char* g : {"root ::= \"a\"{24444444044444444}",

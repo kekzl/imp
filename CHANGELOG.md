@@ -127,9 +127,9 @@ there instead of retelling it.
 
 ### Fixed
 
-- A GBNF grammar whose repetition bound is past `INT_MAX` aborted the process: `std::stoi` threw
-  `std::out_of_range` before the `kMaxRepeat` check ran, and grammars arrive on the request path.
-  Found by the first nightly libFuzzer run that built, after 3.3M/269k/272k executions (#1972)
+- A GBNF grammar whose repetition bound is past `INT_MAX` answered 500 `{"message":"stoi"}` instead
+  of a 400: `std::stoi` threw before the `kMaxRepeat` check ran. Now 400 "repetition bound over 1024
+  (at offset 31)". Found by the first nightly libFuzzer run that built (#1972)
 
 - NVFP4 checkpoints with both a `recipe.yaml` and a `quantization_config` read their ignore list
   from the recipe's patterns instead of the expanded names in `config.json` (4 vs 222 on
