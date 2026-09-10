@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-22
-commit: 6a1d363c
+verified: 2026-09-10
+commit: cee72e1f
 -->
 
 # fuzz — targets for the parsers that take untrusted bytes
@@ -18,14 +18,27 @@ whose generator output is asserted **valid** before use.
 |---|---|---|---|
 | corpus + mutator | `make dev` | `tests/test_fuzz_corpus.cpp` | CPU lane, every PR, ~0.7 s |
 | libFuzzer | `-DIMP_FUZZERS=ON`, clang | `fuzz_<target>` binaries | on demand |
+| libFuzzer, parsers only | `-DIMP_FUZZERS_CPU_ONLY=ON`, clang | 3 `fuzz_<target>` binaries | nightly, 10 min each |
+
+`IMP_FUZZERS_CPU_ONLY=ON` builds `fuzz_json_schema`, `fuzz_regex` and
+`fuzz_gbnf` from four translation units with no CUDA language and no dependency
+fetched (`cmake/imp-fuzzers-cpu.cmake`), which is what the nightly job runs:
 
 ```bash
-docker run --rm -v $PWD:/src -w /src silkeh/clang:18 bash -c '
-  cmake -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-        -DIMP_FUZZERS=ON -DIMP_BUILD_TESTS=OFF -DIMP_BUILD_SERVER=OFF &&
-  cmake --build build-fuzz -j$(nproc) --target fuzz_json_schema &&
-  ./build-fuzz/fuzz_json_schema -max_total_time=600'
+docker run --rm -v $PWD:/src -w /src ubuntu:26.04 bash -c '
+  apt-get update -qq && apt-get install -y --no-install-recommends \
+    clang libclang-rt-dev cmake ninja-build &&
+  cmake -B /tmp/build-fuzz -S /src -G Ninja \
+        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+        -DIMP_FUZZERS_CPU_ONLY=ON &&
+  cmake --build /tmp/build-fuzz -j$(nproc) --target fuzz_json_schema &&
+  /tmp/build-fuzz/fuzz_json_schema -max_total_time=600'
 ```
+
+`IMP_FUZZERS=ON` on a full CUDA build adds `fuzz_safetensors`,
+`fuzz_tokenizer_json` and (with the server sources) `fuzz_tool_stream`, which
+need the loader and httplib. The libstdc++ has to be new enough for the tree's
+C++23: `silkeh/clang:18` ships libstdc++ 12 and cannot compile `src/core/logging.cpp`.
 
 ## Targets
 

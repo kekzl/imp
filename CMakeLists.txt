@@ -1,8 +1,22 @@
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
-project(imp LANGUAGES C CXX CUDA VERSION 0.38.0)
+
+# The fuzz/ targets are CPU parsers. IMP_FUZZERS_CPU_ONLY builds those alone and
+# leaves the CUDA language out: a clang-only container has no nvcc, and
+# `project(... CUDA)` fails there before a single target is read.
+set(IMP_PROJECT_LANGUAGES C CXX CUDA)
+if(IMP_FUZZERS_CPU_ONLY)
+    set(IMP_PROJECT_LANGUAGES C CXX)
+endif()
+project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.38.0)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(IMP_FUZZERS_CPU_ONLY)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/imp-fuzzers-cpu.cmake)
+    return()
+endif()
+
 set(CMAKE_CUDA_STANDARD 23)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
