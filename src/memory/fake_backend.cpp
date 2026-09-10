@@ -178,6 +178,18 @@ MemError FakeBackend::do_commit(Region& region, size_t new_committed) {
     return MemError::Ok;
 }
 
+MemError FakeBackend::do_commit_range(Region& region, size_t offset, size_t bytes) {
+    if (!growable_)
+        return MemError::NotGrowable;
+    if (!region.valid() || offset + bytes > region.reserved())
+        return MemError::InvalidArgument;
+    const size_t end = ((offset + bytes + kGranularity - 1) / kGranularity) * kGranularity;
+    const size_t target = std::min(std::max(region.committed(), end), region.reserved());
+    if (target == region.committed())
+        return MemError::Ok;
+    return do_commit(region, target);
+}
+
 void FakeBackend::do_release(void* base, size_t committed, size_t reserved, RegionTag tag) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = std::find_if(live_.begin(), live_.end(), [&](const Live& l) { return l.base == base; });

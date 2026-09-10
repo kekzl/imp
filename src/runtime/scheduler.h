@@ -45,6 +45,13 @@ public:
     // from a zero state). Unset (dense models) = unlimited reuse.
     using PrefixReuseLimitFn = std::function<int(Request&)>;
     void set_prefix_reuse_limit(PrefixReuseLimitFn fn) { prefix_reuse_limit_ = std::move(fn); }
+    // Asked before a pending request takes KV blocks: can the engine seat
+    // one more sequence right now? False ends this round's admission (the
+    // resource is shared, so nothing behind it could be seated either) and
+    // the request stays pending; it is retried next round. The lazy SSM slab
+    // answers with a slot commit (docs/internals/MEMORY.md, lazy pools).
+    using AdmissionGateFn = std::function<bool()>;
+    void set_admission_gate(AdmissionGateFn fn) { admission_gate_ = std::move(fn); }
 
 private:
     int max_batch_size_;
@@ -54,6 +61,7 @@ private:
     std::vector<std::shared_ptr<Request>> active_;
     KVCacheManager* kv_manager_ = nullptr;  // optional, for memory-aware scheduling
     PrefixReuseLimitFn prefix_reuse_limit_;  // optional, hybrid snapshot boundary
+    AdmissionGateFn admission_gate_;         // optional, lazy recurrent-slot commit
 };
 
 }  // namespace imp

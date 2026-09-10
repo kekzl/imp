@@ -18,6 +18,8 @@ constexpr int kNumTags = static_cast<int>(RegionTag::Other) + 1;
 std::atomic<AllocPhase> g_phase{AllocPhase::Loading};
 std::atomic<uint64_t> g_steady_allocs[kNumTags]{};
 std::atomic<bool> g_steady_logged[kNumTags]{};
+std::atomic<uint64_t> g_planned_commits[kNumTags]{};
+std::atomic<bool> g_planned_logged[kNumTags]{};
 
 int tag_index(RegionTag t) {
     int i = static_cast<int>(t);
@@ -74,6 +76,8 @@ void reset_steady_state_allocations() {
     for (int i = 0; i < kNumTags; ++i) {
         g_steady_allocs[i].store(0, std::memory_order_relaxed);
         g_steady_logged[i].store(false, std::memory_order_relaxed);
+        g_planned_commits[i].store(0, std::memory_order_relaxed);
+        g_planned_logged[i].store(false, std::memory_order_relaxed);
     }
 }
 
@@ -111,6 +115,26 @@ void note_serving_allocation(RegionTag tag, size_t bytes, const void* site) {
                   bytes / (1024.0 * 1024.0), region_tag_name(tag));
     std::abort();
 #endif
+}
+
+void note_planned_commit(RegionTag tag, size_t bytes) {
+    if (alloc_phase() != AllocPhase::Serving)
+        return;
+    const int i = tag_index(tag);
+    g_planned_commits[i].fetch_add(1, std::memory_order_relaxed);
+    if (!g_planned_logged[i].exchange(true, std::memory_order_relaxed)) {
+        IMP_LOG_INFO(
+            "lazy commit: %.2f MiB for '%s' while serving, inside its init-time reservation "
+            "(logged once per tag; planned_serving_commits() counts the rest)",
+            bytes / (1024.0 * 1024.0), region_tag_name(tag));
+    }
+}
+
+uint64_t planned_serving_commits() {
+    uint64_t n = 0;
+    for (auto& c : g_planned_commits)
+        n += c.load(std::memory_order_relaxed);
+    return n;
 }
 
 namespace {
@@ -179,11 +203,13 @@ MemError Backend::do_commit_range(Region&, size_t, size_t) { return MemError::No
 
 MemError Backend::decommit_range(Region&, size_t, size_t) { return MemError::NotGrowable; }
 
-// commit() and commit_range() guard, then dispatch. Both acquire physical
+// commit() and commit_range() count, then dispatch. Both acquire physical
 // memory on a growable region, and #1649 found they did it past every I2
 // instrument: the phase counter, the --wrap interposer and check_alloc_sites.py
 // all watch acquire(), and a growable KV pool committing pages under load
-// touches none of them.
+// touches none of them. They are counted apart from acquisitions
+// (planned_serving_commits): a lazy pool committing a slot inside the
+// reservation it planned at init is the design, not an accounting bug.
 //
 // The guard runs AFTER the call, on the delta the backend actually committed,
 // not before on the request. The request overstates: a range may be partly
@@ -203,7 +229,7 @@ MemError Backend::commit(Region& region, size_t new_committed) {
     const size_t before = region.committed();
     const MemError e = do_commit(region, new_committed);
     if (const size_t grew = committed_growth_(before, region.committed()); grew > 0)
-        guard_serving_phase(grew, region.tag());
+        note_planned_commit(region.tag(), grew);
     return e;
 }
 
@@ -211,7 +237,7 @@ MemError Backend::commit_range(Region& region, size_t offset, size_t bytes) {
     const size_t before = region.committed();
     const MemError e = do_commit_range(region, offset, bytes);
     if (const size_t grew = committed_growth_(before, region.committed()); grew > 0)
-        guard_serving_phase(grew, region.tag());
+        note_planned_commit(region.tag(), grew);
     return e;
 }
 

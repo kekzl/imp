@@ -43,6 +43,15 @@ public:
     ~FakeBackend() override;
 
     MemError do_commit(Region& region, size_t new_committed) override;
+    // A range commit is modelled as a prefix extension: committed becomes
+    // max(committed, offset + bytes). Interior gaps are not modelled, which is
+    // exact for a slab that commits its slots in order and conservative
+    // (over-counts) otherwise.
+    MemError do_commit_range(Region& region, size_t offset, size_t bytes) override;
+    // 4 KiB rather than the VMM backend's 2 MiB, so a test can see stride
+    // padding without allocating megabytes per slot.
+    static constexpr size_t kGranularity = 4096;
+    size_t granularity() const override { return kGranularity; }
     BackendStats stats() const override;
     size_t capacity() const override { return capacity_; }
 

@@ -152,8 +152,11 @@ TEST_F(PhaseFixture, ServingPhaseCommitIsCounted) {
     set_alloc_phase(AllocPhase::Serving);
     ASSERT_EQ(be.commit(region, 32 * kMiB), MemError::Ok);
 
-    EXPECT_EQ(steady_state_allocations(), 1u);
-    EXPECT_EQ(steady_state_allocations(RegionTag::KvBlockPool), 1u);
+    // Growth inside a reservation planned at init is a lazy commit, counted
+    // apart from the I2 acquisitions it used to be filed under.
+    EXPECT_EQ(planned_serving_commits(), 1u);
+    EXPECT_EQ(steady_state_allocations(), 0u);
+    EXPECT_EQ(steady_state_allocations(RegionTag::KvBlockPool), 0u);
 #else
     GTEST_SKIP() << "debug build aborts on a serving-phase acquisition by design";
 #endif
@@ -170,11 +173,12 @@ TEST_F(PhaseFixture, ServingPhaseShrinkIsNotCounted) {
 
     set_alloc_phase(AllocPhase::Serving);
     ASSERT_EQ(be.commit(region, 8 * kMiB), MemError::Ok);
-    EXPECT_EQ(steady_state_allocations(), 0u);
+    EXPECT_EQ(planned_serving_commits(), 0u);
 
-    // ... and the growth after it is counted again, so the guard is live.
+    // ... and the growth after it is counted again, so the counter is live.
     ASSERT_EQ(be.commit(region, 24 * kMiB), MemError::Ok);
-    EXPECT_EQ(steady_state_allocations(), 1u);
+    EXPECT_EQ(planned_serving_commits(), 1u);
+    EXPECT_EQ(steady_state_allocations(), 0u);
 #else
     GTEST_SKIP() << "debug build aborts on a serving-phase acquisition by design";
 #endif
@@ -190,10 +194,27 @@ TEST_F(PhaseFixture, ServingPhaseNoOpCommitIsNotCounted) {
 
     set_alloc_phase(AllocPhase::Serving);
     ASSERT_EQ(be.commit(region, 32 * kMiB), MemError::Ok);
+    EXPECT_EQ(planned_serving_commits(), 0u);
     EXPECT_EQ(steady_state_allocations(), 0u);
 #else
     GTEST_SKIP() << "debug build aborts on a serving-phase acquisition by design";
 #endif
+}
+
+// The fake models a range commit as a prefix extension rounded to its
+// granule: exact for a slab committing slots in order, conservative otherwise.
+TEST_F(PhaseFixture, FakeRangeCommitExtendsThePrefix) {
+    FakeBackend be(/*capacity_bytes=*/0, /*growable=*/true);
+    auto r = be.acquire_growable(64 * 1024, 0, 4096, RegionTag::SsmState);
+    ASSERT_TRUE(r);
+    Region region = std::move(r.region);
+    EXPECT_EQ(region.committed(), 0u);
+    ASSERT_EQ(be.commit_range(region, 8192, 100), MemError::Ok);
+    EXPECT_EQ(region.committed(), 3 * FakeBackend::kGranularity);
+    ASSERT_EQ(be.commit_range(region, 0, 100), MemError::Ok);
+    EXPECT_EQ(region.committed(), 3 * FakeBackend::kGranularity) << "inside the prefix: nothing to add";
+    EXPECT_EQ(be.commit_range(region, 60 * 1024, 8192), MemError::InvalidArgument) << "past the reservation";
+    EXPECT_EQ(be.granularity(), FakeBackend::kGranularity);
 }
 
 TEST_F(PhaseFixture, LoadingAndPlanningPhasesAreNotCounted) {

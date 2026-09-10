@@ -324,6 +324,17 @@ struct RuntimeConfig {
     // VRAM budget-planner tuning. Governs compute_vram_budget() only —
     // the pre-dequant phases keep their own internal reserve floors.
     struct Vram {
+        // Commit the slot-shaped pools on demand instead of at init: the
+        // SSM/GDN state slab commits one slot when a sequence is admitted,
+        // the engine arena commits as tenants take (the vision tower only on
+        // the first image). The plan still charges every byte, the address
+        // space is reserved at init, and a commit is refused (the request
+        // waits) rather than spilled when the card cannot spare it. Needs
+        // CUDA VMM; without it every pool is fixed, as before. Qwen3.8-27B at
+        // max_batch_size=28: 2226 MiB of state + 1107 MiB of vision tower
+        // held at idle before, 0 after, until the sequences and the image
+        // arrive.
+        bool lazy_commit = true;
         // Fraction of post-reserve/post-weight-cache VRAM the KV pool
         // targets. Clamped to [0.05, 0.95] at use.
         float kv_fraction = 0.8f;

@@ -780,7 +780,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // #1629: the INFO line printed "-> N MiB reserved" BEFORE the open and
         // regardless of its outcome, and the outcome was discarded. Both made
         // a failed open indistinguishable from a successful one in the log.
-        const MemError arena_err = engine_arena_open(cuda_malloc_backend(), cap);
+        // Lazy: reserve the demand, commit as tenants take. The vision tower
+        // (1107 MiB on Qwen3.8-27B) is then committed on the first image
+        // rather than at load.
+        const bool arena_lazy = runtime_config_.vram.lazy_commit && vmm_backend() != nullptr;
+        const MemError arena_err = engine_arena_open(arena_lazy ? *vmm_backend() : cuda_malloc_backend(), cap,
+                                                     arena_lazy);
         if (arena_err == MemError::Ok) {
             IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
                          d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
@@ -798,7 +803,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // MemAccount::unattributed_bytes() mean "what imp cannot account for"
         // during init instead of "context + arena + that" (AUDIT B79). The
         // library figure is filled in after warmup measures it.
-        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library=*/0, engine_arena().capacity(),
+        // A lazy arena is a tracked pool ("engine_arena" notes per commit),
+        // not a named charge: naming its reservation would count what is
+        // not backed yet.
+        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library=*/0,
+                                                 engine_arena().lazy() ? 0 : engine_arena().capacity(),
                                                  engine_arena().high_water());
     }
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
@@ -925,7 +934,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                                  ? measured_library_reserve_
                                                  : engine_internal::library_reserve_charge(
                                                        runtime_config_.vram.library_reserve_mb),
-                                             engine_arena().capacity(), engine_arena().high_water());
+                                             engine_arena().lazy() ? 0 : engine_arena().capacity(),
+                                             engine_arena().high_water());
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");
 

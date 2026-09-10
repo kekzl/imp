@@ -10,6 +10,8 @@
 #include "memory/block_pool.h"
 #include "memory/fake_backend.h"
 #include "memory/scratch_stack.h"
+#include "memory/ssm_state.h"
+#include "memory/vram_query.h"
 
 #include <cstring>
 #include <numeric>
@@ -444,3 +446,128 @@ static_assert(std::is_convertible_v<StableSpan<int>, DeviceSpan<int>>,
               "dropping the guarantee must stay ergonomic");
 static_assert(!std::is_constructible_v<StableSpan<int>, int*, size_t>,
               "StableSpan must not be constructible from a raw pointer");
+
+// ── Lazy arena (vram.lazy_commit) ─────────────────────────────────────
+
+TEST(ArenaLazy, OpenCommitsNothingUntilATakeReachesIn) {
+    FakeBackend be;
+    ArenaAllocator arena;
+    const size_t ledger0 = vram_reserved_uncommitted_bytes();
+    ASSERT_EQ(arena.open(be, 1 * kMiB, RegionTag::EnginePersistent, /*lazy=*/true), MemError::Ok);
+    EXPECT_TRUE(arena.lazy());
+    EXPECT_EQ(arena.capacity(), 1 * kMiB);
+    EXPECT_EQ(arena.committed(), 0u);
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + 1 * kMiB)
+        << "the reservation is charged, not backed";
+
+    auto a = arena.take_bytes(5000);
+    ASSERT_TRUE(a);
+    EXPECT_EQ(arena.committed(), 2 * FakeBackend::kGranularity) << "prefix rounded up to the granule";
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + 1 * kMiB - 2 * FakeBackend::kGranularity);
+
+    auto b = arena.take_bytes(1000);
+    ASSERT_TRUE(b);
+    EXPECT_EQ(arena.committed(), 2 * FakeBackend::kGranularity)
+        << "a take inside the committed prefix commits nothing";
+    EXPECT_EQ(arena.used() + arena.remaining(), arena.capacity());
+
+    arena.close();
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0)
+        << "close returns the uncommitted rest to the ledger";
+}
+
+TEST(ArenaLazy, FallsBackToAFixedRegionWithoutAGrowableBackend) {
+    FakeBackend be(/*capacity_bytes=*/0, /*growable=*/false);
+    ArenaAllocator arena;
+    const size_t ledger0 = vram_reserved_uncommitted_bytes();
+    ASSERT_EQ(arena.open(be, 64 * 1024, RegionTag::EnginePersistent, /*lazy=*/true), MemError::Ok);
+    EXPECT_FALSE(arena.lazy());
+    EXPECT_EQ(arena.committed(), arena.capacity());
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0);
+}
+
+TEST(ArenaLazy, ExhaustionAtTheReservationIsAValue) {
+    FakeBackend be;
+    ArenaAllocator arena;
+    ASSERT_EQ(arena.open(be, 4096, RegionTag::EnginePersistent, /*lazy=*/true), MemError::Ok);
+    ASSERT_TRUE(arena.take_bytes(4000));
+    EXPECT_FALSE(arena.take_bytes(4000));
+    EXPECT_EQ(be.stats().acquire_count, 1u);
+    arena.close();
+}
+
+// ── Lazy SSM/GDN state slab ───────────────────────────────────────────
+//
+// Geometry chosen so the payload (4608 B) is not a granule multiple: the
+// stride must pad to 8192 while per_seq_bytes() stays the payload.
+
+namespace {
+struct LazySsm {
+    SSMState st;
+    bool ok = false;
+    explicit LazySsm(Backend& be, int max_seqs, int n_reserved = 0) {
+        ok = st.init(/*n_ssm_layers=*/2, max_seqs, /*conv_channels=*/64, /*conv_kernel=*/4, /*n_heads=*/2,
+                     /*head_dim_ssm=*/8, /*state_size=*/17, QType::F32, /*alloc=*/nullptr, n_reserved, &be);
+    }
+};
+constexpr size_t kSsmPayload = 4608;
+constexpr size_t kSsmStride = 8192;
+}  // namespace
+
+TEST(SSMStateLazy, ReservesEverySlotAndCommitsNone) {
+    FakeBackend be;
+    const size_t ledger0 = vram_reserved_uncommitted_bytes();
+    {
+        LazySsm s(be, /*max_seqs=*/4);
+        ASSERT_TRUE(s.ok);
+        EXPECT_TRUE(s.st.lazy());
+        EXPECT_EQ(s.st.per_seq_bytes(), kSsmPayload);
+        EXPECT_EQ(s.st.slot_stride_bytes(), kSsmStride);
+        EXPECT_EQ(s.st.reserved_bytes(), 4 * kSsmStride);
+        EXPECT_EQ(s.st.committed_bytes(), 0u);
+        EXPECT_EQ(s.st.committed_slots(), 0);
+        EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + 4 * kSsmStride);
+    }
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0)
+        << "destruction returns the reservation to the ledger";
+}
+
+TEST(SSMStateLazy, EnsureSlotCommitsThatSlotOnly) {
+    FakeBackend be;
+    const size_t ledger0 = vram_reserved_uncommitted_bytes();
+    LazySsm s(be, /*max_seqs=*/4);
+    ASSERT_TRUE(s.ok);
+    // Slot 0: the fake commits ranges as a prefix, so the first slot is the
+    // one whose committed delta equals one stride exactly.
+    ASSERT_TRUE(s.st.ensure_slot(0));
+    EXPECT_EQ(s.st.committed_slots(), 1);
+    EXPECT_EQ(s.st.committed_bytes(), kSsmStride);
+    EXPECT_TRUE(s.st.slot_committed(0));
+    EXPECT_FALSE(s.st.slot_committed(1));
+    EXPECT_FALSE(s.st.slot_committed(3));
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + 3 * kSsmStride);
+    // Idempotent.
+    ASSERT_TRUE(s.st.ensure_slot(0));
+    EXPECT_EQ(s.st.committed_slots(), 1);
+    // Addressing steps by the padded stride, layers by the payload layout.
+    auto* base = static_cast<char*>(s.st.seq_base(2));
+    EXPECT_EQ(base, static_cast<char*>(s.st.seq_base(0)) + 2 * kSsmStride);
+    EXPECT_EQ(static_cast<char*>(s.st.conv_state(2, 1)), base + 2304);
+    EXPECT_EQ(static_cast<char*>(s.st.h_state(2, 0)), base + 1024);
+    // Out of range is refused, not committed.
+    EXPECT_FALSE(s.st.ensure_slot(4));
+    EXPECT_FALSE(s.st.ensure_slot(-1));
+    // A reset of an uncommitted slot is a no-op (there is nothing to zero).
+    s.st.reset_sequence(3, nullptr);
+    EXPECT_EQ(s.st.committed_slots(), 1);
+}
+
+TEST(SSMStateLazy, ReservedSlotsCommitAtInit) {
+    FakeBackend be;
+    LazySsm s(be, /*max_seqs=*/3, /*n_reserved=*/1);
+    ASSERT_TRUE(s.ok);
+    EXPECT_EQ(s.st.reserved_slot(0), 3);
+    EXPECT_TRUE(s.st.slot_committed(3));
+    EXPECT_EQ(s.st.committed_slots(), 1);
+    EXPECT_FALSE(s.st.slot_committed(0));
+}

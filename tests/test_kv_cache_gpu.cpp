@@ -9,6 +9,8 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/vram_query.h"
+#include "memory/ssm_state.h"
+#include "memory/backend.h"
 #include "core/tensor.h"
 
 #include <cstdint>
@@ -566,6 +568,103 @@ TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
 // memory, reached over PCIe. The same routine over the device pool has to
 // read far above the spill threshold, and the host reading far below it,
 // or the probe could not tell the two apart on a real spill either.
+// What a lazy pool was charged for and has not committed is not spare, even
+// though cudaMemGetInfo reports it free (vram.lazy_commit).
+TEST(KVCacheGrowTest, GrowthLeavesChargedButUncommittedBytesAlone) {
+    SKIP_IF_NO_CUDA();
+    KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
+                  /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/512);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    size_t free_b = 0, total_b = 0;
+    ASSERT_TRUE(vram_budget_mem_get_info(&free_b, &total_b));
+    // Charge everything that is free: no growth may happen.
+    vram_reserved_uncommitted_add(static_cast<std::ptrdiff_t>(free_b));
+    const int got = cache.try_grow_to(512);
+    vram_reserved_uncommitted_add(-static_cast<std::ptrdiff_t>(free_b));
+    EXPECT_EQ(got, 8) << "the ledger must cap growth exactly like the headroom does";
+    EXPECT_GT(cache.try_grow_to(16), 8) << "and growth resumes once the charge is gone";
+}
+
+// A lazily committed SSM slot is real device memory at a 2 MiB-padded
+// stride: the commit lands, a memset on it succeeds, the ledger moves.
+TEST(SSMStateLazyGpu, SlotCommitBacksExactlyOneStride) {
+    SKIP_IF_NO_CUDA();
+    Backend* be = vmm_backend();
+    if (!be)
+        GTEST_SKIP() << "no VMM backend on this device";
+    const size_t ledger0 = vram_reserved_uncommitted_bytes();
+    SSMState st;
+    // 4 layers x (256 ch x 4 taps fp32 + 8 heads x 64 x 128 fp32) = 1 MiB + 4 KiB per slot
+    ASSERT_TRUE(st.init(/*n_ssm_layers=*/4, /*max_sequences=*/8, /*conv_channels=*/256, /*conv_kernel=*/4,
+                        /*n_heads=*/8, /*head_dim_ssm=*/64, /*state_size=*/128, QType::F32, nullptr, 0, be));
+    ASSERT_TRUE(st.lazy());
+    EXPECT_EQ(st.slot_stride_bytes() % be->granularity(), 0u);
+    EXPECT_GE(st.slot_stride_bytes(), st.per_seq_bytes());
+    EXPECT_EQ(st.committed_bytes(), 0u);
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + st.reserved_bytes());
+
+    ASSERT_TRUE(st.ensure_slot(5));
+    EXPECT_EQ(st.committed_bytes(), st.slot_stride_bytes());
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + st.reserved_bytes() - st.slot_stride_bytes());
+    st.reset_sequence(5, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess) << "the committed slot is writable device memory";
+    std::vector<float> probe(16, 1.0f);
+    ASSERT_EQ(cudaMemcpy(probe.data(), st.h_state(5, 3), probe.size() * sizeof(float),
+                         cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (float v : probe)
+        EXPECT_EQ(v, 0.0f);
+    // An uncommitted slot's reset is a no-op and touches nothing.
+    st.reset_sequence(2, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_EQ(st.committed_slots(), 1);
+    // Decommit hands the pages back and the ledger returns to the full
+    // reservation; the slot can be committed again at the same address.
+    void* before = st.seq_base(5);
+    EXPECT_TRUE(st.decommit_slot(5));
+    EXPECT_FALSE(st.decommit_slot(5)) << "already released";
+    EXPECT_EQ(st.committed_bytes(), 0u);
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0 + st.reserved_bytes());
+    ASSERT_TRUE(st.ensure_slot(5));
+    EXPECT_EQ(st.seq_base(5), before);
+    st.reset_sequence(5, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+}
+
+// The after-warmup trim only earns its keep if the driver actually takes the
+// pages back: 28 slots of 80 MiB committed and released, raw free VRAM must
+// return to where it started. Qwen3.8-27B's slab geometry.
+TEST(SSMStateLazyGpu, DecommittedSlotsReturnToTheDriver) {
+    SKIP_IF_NO_CUDA();
+    Backend* be = vmm_backend();
+    if (!be)
+        GTEST_SKIP() << "no VMM backend on this device";
+    size_t free0 = 0, total = 0;
+    ASSERT_EQ(cudaMemGetInfo(&free0, &total), cudaSuccess);
+    SSMState st;
+    // 48 layers x (5120 ch x 4 taps fp32 + 32 heads x 128 x 128 bf16) = 79.5 MiB per slot, stride 80
+    ASSERT_TRUE(st.init(/*n_ssm_layers=*/48, /*max_sequences=*/28, /*conv_channels=*/5120, /*conv_kernel=*/4,
+                        /*n_heads=*/32, /*head_dim_ssm=*/128, /*state_size=*/128, QType::BF16, nullptr, 0,
+                        be));
+    ASSERT_TRUE(st.lazy());
+    for (int s = 0; s < 28; ++s)
+        ASSERT_TRUE(st.ensure_slot(s)) << s;
+    size_t free_full = 0;
+    ASSERT_EQ(cudaMemGetInfo(&free_full, &total), cudaSuccess);
+    const double committed_mib = st.committed_bytes() / (1024.0 * 1024.0);
+    const double taken_mib = (free0 - free_full) / (1024.0 * 1024.0);
+    for (int s = 0; s < 28; ++s)
+        ASSERT_TRUE(st.decommit_slot(s)) << s;
+    size_t free_after = 0;
+    ASSERT_EQ(cudaMemGetInfo(&free_after, &total), cudaSuccess);
+    const double back_mib = (free_after > free_full ? free_after - free_full : 0) / (1024.0 * 1024.0);
+    printf("lazy slab: committed %.0f MiB, device took %.0f MiB, decommit returned %.0f MiB\n", committed_mib,
+           taken_mib, back_mib);
+    EXPECT_NEAR(taken_mib, committed_mib, 64.0) << "commit must cost what it committed, not more";
+    EXPECT_NEAR(back_mib, taken_mib, 64.0) << "decommit must return what commit took";
+}
+
 TEST(KVCacheTest, ResidencyProbeSeparatesDeviceFromHostResidentMemory) {
     SKIP_IF_NO_CUDA();
     // 2 layers x 2048 blocks x 32 KiB per K/V block = 256 MiB; each K region

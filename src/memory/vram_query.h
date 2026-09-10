@@ -62,6 +62,23 @@ size_t vram_own_peak_bytes();
 // cudaMemGetInfo with the budget view applied. Either out pointer may be
 // null. Returns false (zeros) if the raw query fails.
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);
+// The same view with the lazy pools' pending charge left in `free`: for an
+// accounting reader that wants what the device holds, not what a planner may
+// take. One read, so it cannot race a slot commit the way "reading adjusted
+// free, then adding the ledger back" did (measured 4185 MiB of first-forward
+// library charge against a real 3416 on Qwen3.8-27B while the prewarm was
+// committing slots).
+bool vram_budget_mem_get_info_ex(size_t* free_bytes, size_t* total_bytes, bool exclude_pending);
+
+// Bytes the planner charged that no pool has committed yet: a lazy slab's
+// reservation minus what it has mapped so far. Free VRAM shows them as free,
+// and they are not: whoever sizes from a free reading (the KV plan, the
+// weight caches, the KV growth cap) must leave them alone, or the slot commit
+// they were charged for spills when it finally comes. Lazy pools add their
+// reservation at init, subtract each commit and add back each decommit;
+// vram_budget_mem_get_info() subtracts the total from what it reports free.
+void vram_reserved_uncommitted_add(std::ptrdiff_t delta_bytes);
+size_t vram_reserved_uncommitted_bytes();
 
 // Canonical free-VRAM reserve floor for the sizing phases: pct% of the
 // (budget-visible) total, floored at 256 MiB. Keeps the WSL2 shared-memory

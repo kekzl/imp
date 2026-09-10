@@ -724,6 +724,27 @@ What has landed, and every divergence from A2-A7 with the reason. Divergences ar
 | 9c - the KV pool measures its own residency (AUDIT_arch_2026 B-6) | **done (2026-09-07)**: `KVCache::probe_residency()` right after the pool exists, one timed pass of copies spanning up to 512 MiB of the fresh (all-zero) pool after a 300 ms clock warm-up, `kKvPoolSpillGbps` = 500 as the WARN line, gauge on `/health` and `/metrics`. Falsifier in `test-kv`: 256 MiB pool 1287 GB/s, mapped pinned host memory 130-139 GB/s. Two traps: a cold single pass reads 280 GB/s on resident VRAM (floor clocks), a repeated slice inside the 96 MB L2 reads 4681. Only the KV pool is probed; weights and caches still show a spill only as the throughput cliff | `mem(kv): block size as an operator key, the pool probes its own residency` |
 | 9a - `--mem-report` with named charges | **done** | `feat(memory): --mem-report - name the charges the pool notes cannot see` |
 | **A7 step 9 complete** (9a + 9b.1-9b.5) | | criterion 5 is *not* claimed - see B38 |
+| 10 - lazy pools (`vram.lazy_commit`, 2026-09-10) | **done.** The slot-shaped pools reserve at init and commit on demand, the way the KV pool already grew: `SSMState` reserves every slot (stride padded to the 2 MiB granule, payload unchanged) and commits one slot when the scheduler admits a sequence (`Scheduler::set_admission_gate` -> `Engine::recurrent_slot_admissible_`, which commits the slot the next acquire pops; a refused commit holds the round, the request stays pending); the engine arena opens growable and `take_bytes` commits the prefix a take reaches into, so the Qwen3-VL tower (1107 MiB on Qwen3.8-27B) is uploaded and taken on the first image (`Qwen3VLPipeline::init(lazy)` / `ensure_ready_`). The plan charges every byte as before; what is charged and not committed sits in `vram_reserved_uncommitted_bytes()` and the KV growth cap subtracts it, so the opportunistic grower cannot eat a promised slot. Commits inside a reservation are `planned_serving_commits()`, not I2 violations. A slot commit is refused, never spilled: `ensure_slot` reads free VRAM (which already excludes every pool's pending charge) plus its own pending charge against the allocator headroom (#1103). `kv_cache.growable_initial_pct` 100 -> 25. Idle figures: table below | `perf(memory): commit the slot-shaped pools on demand` |
+
+Three things the first measurement taught, all in the same PR: (1) every free-VRAM reader is a planner, so `vram_budget_mem_get_info()` itself subtracts the ledger (the KV plan had taken the arena's deferred 1946 MiB: 3561 -> 9556 blocks, the scale pool 414 -> 602 MiB); (2) the graph prewarm captures one decode graph per batch row and touches every recurrent slot, so `Engine::trim_recurrent_slots_after_warmup_` decommits the free ones (28/28 committed at init_complete before it); (3) `MemAccount::unattributed_bytes()` reads the raw view (`vram_budget_mem_get_info_ex`, pending left in), or the first-forward library charge counts pending address space as used (7212 measured against 3519), and it reads it in ONE call, or the reading races the prewarm's slot commits (4185 against 3416). The KV-pressure valve grows a pool below its ceiling before it demotes graphs, or a 25 % start armed StreamingLLM twice (`ServingSignalsTest.GraphsComeBackWhenThePressureClearsWithoutEvictions`).
+
+Lazy pools, Qwen3.8-27B-NVFP4-vllm, defaults (`runtime.max_batch_size` auto = 28), arm A `imp:ab-a7c5e49d` (main) vs arm B this tree, one run each, 2026-09-10:
+
+| | main | lazy |
+|---|---|---|
+| device used, idle after warmup (nvidia-smi, MiB) | 30053 | 25455 |
+| device used at init_complete (audit, MiB) | 29663 | 25507 |
+| library reserve measured on the first forward (MiB) | 3338 | 3393 |
+| ssm_state committed at init_complete (MiB) | 2226 | 0 (2240 reserved) |
+| engine arena at init_complete (MiB) | 1946 named | 578 tracked (1946 reserved) |
+| kv_cache + scales at init_complete (MiB) | 956 + 414 | 280 + 414 |
+| KV blocks committed / ceiling | 3561 / 13258 | 875 / 13264 |
+| 28 concurrent chat completions, 64 tokens, wall (s) | 1.37 | 1.43 |
+| device used after the burst (MiB) | 30067 | 27691 (28 slots committed) |
+| first image request, 64x64 PNG (s) | 0.35 | 1.28 (tower upload + 1107 MiB commit) |
+| second image request (s) | 0.21 | 0.20 |
+| device used after the images (MiB) | 30131 | 28861 |
+| unattributed residual at init_complete (MiB) | 188 | 247 |
 
 ### I1 allowlist baseline
 

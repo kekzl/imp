@@ -34,7 +34,15 @@ public:
     ArenaAllocator& operator=(const ArenaAllocator&) = delete;
 
     // Acquire `capacity` bytes from `backend`. Fails if already open.
-    [[nodiscard]] MemError open(Backend& backend, size_t capacity, RegionTag tag);
+    // lazy: reserve `capacity` of address space and commit it as takes reach
+    // into it, instead of backing all of it at open. Falls back to a fixed
+    // region on a backend that cannot grow. Every commit goes to the
+    // MemAccount pool "engine_arena" and comes off the reserved-uncommitted
+    // ledger (vram_query.h).
+    [[nodiscard]] MemError open(Backend& backend, size_t capacity, RegionTag tag, bool lazy = false);
+    bool lazy() const { return lazy_; }
+    // Physical bytes backing the arena right now. Equals capacity() unless lazy.
+    size_t committed() const;
 
     // Release the whole region. Every span previously handed out dangles
     // afterwards — that is the contract, and it is why the arena's lifetime is
@@ -79,6 +87,8 @@ private:
     size_t high_water_ = 0;
     uint64_t generation_ = 0;
     RegionTag tag_ = RegionTag::Other;
+    bool lazy_ = false;
+    Backend* backend_ = nullptr;
 };
 
 }  // namespace imp

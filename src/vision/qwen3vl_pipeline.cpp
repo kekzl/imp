@@ -28,6 +28,7 @@ void Qwen3VLPipeline::free_buffers() {
     if (tower_ && uploaded_tower_)
         qwen3vl_release_vision_tower(*tower_);
     uploaded_tower_ = false;
+    configured_ = false;
     taken_bytes_ = 0;
     d_patches_ = nullptr;
     d_out_ = nullptr;
@@ -73,7 +74,7 @@ int64_t Qwen3VLPipeline::max_pixels() const {
     return static_cast<int64_t>(max_patches_) * p * p;
 }
 
-bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches) {
+bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches, bool lazy) {
     free_buffers();
     const VisionConfig& c = tower.config;
     if (!c.is_qwen3vl) {
@@ -88,6 +89,37 @@ bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches) {
     }
     tower_ = &tower;
     max_patches_ = max_patches;
+    configured_ = true;
+    lazy_ = lazy;
+    if (lazy) {
+        IMP_LOG_INFO(
+            "Qwen3-VL pipeline configured: <= %d patches; tower upload and buffers deferred to the "
+            "first image (%.1f MiB of the engine arena stay uncommitted until then)",
+            max_patches,
+            (qwen3vl_vision_tower_device_bytes(tower) + demand_bytes(tower, max_patches)) /
+                (1024.0 * 1024.0));
+        return true;
+    }
+    return build_();
+}
+
+bool Qwen3VLPipeline::ensure_ready_() {
+    std::lock_guard<std::mutex> lock(ready_mu_);
+    if (encoder_)
+        return true;
+    if (!configured_ || !tower_)
+        return false;
+    return build_();
+}
+
+// Upload the tower and take the encoder's buffers from the engine arena.
+// Under lazy_commit this runs on the first image, on the worker thread, and
+// the arena commits what the takes reach into.
+bool Qwen3VLPipeline::build_() {
+    VisionModel& tower = *tower_;
+    const VisionConfig& c = tower.config;
+    const int unit = c.merge_size * c.merge_size;
+    const int max_patches = max_patches_;
 
     // Idempotent: a tower already on the device (a second pipeline over the same
     // model) is left alone rather than uploaded twice.
@@ -212,8 +244,8 @@ bool Qwen3VLPipeline::encode_patches_to(const QwenPatches& patches, half* d_out,
 
 bool Qwen3VLPipeline::encode_rgb(const uint8_t* rgb, int width, int height, Qwen3VLImage& out,
                                  cudaStream_t stream) {
-    if (!encoder_) {
-        IMP_LOG_ERROR("Qwen3-VL pipeline: encode before init");
+    if (!ensure_ready_()) {
+        IMP_LOG_ERROR("Qwen3-VL pipeline: encode before init, or the deferred tower build failed");
         return false;
     }
     QwenPatches patches;
@@ -226,8 +258,8 @@ bool Qwen3VLPipeline::encode_rgb(const uint8_t* rgb, int width, int height, Qwen
 }
 
 bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& out, cudaStream_t stream) {
-    if (!encoder_) {
-        IMP_LOG_ERROR("Qwen3-VL pipeline: encode before init");
+    if (!ensure_ready_()) {
+        IMP_LOG_ERROR("Qwen3-VL pipeline: encode before init, or the deferred tower build failed");
         return false;
     }
     const VisionConfig& c = tower_->config;

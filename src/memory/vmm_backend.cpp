@@ -189,6 +189,7 @@ public:
     }
 
     size_t capacity() const override { return vram_budget_bytes(); }
+    size_t granularity() const override { return granularity_; }
 
 protected:
     // A fixed acquisition is a growable one that never grows. Same code path,
