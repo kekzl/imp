@@ -123,6 +123,12 @@ LABEL org.opencontainers.image.title="imp" \
       org.opencontainers.image.source="https://github.com/kekzl/imp" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0"
 
+# Fingerprint of the tree + build args this image was built from (empty for a
+# dirty tree). scripts/build_image.sh reads it back to skip a rebuild of the
+# same tree.
+ARG IMP_TREE_ID=
+LABEL imp.tree="${IMP_TREE_ID}"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
