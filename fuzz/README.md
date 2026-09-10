@@ -2,7 +2,7 @@
 layer: L3
 audience: agents
 verified: 2026-09-10
-commit: cee72e1f
+commit: 92c01c5c
 -->
 
 # fuzz — targets for the parsers that take untrusted bytes
@@ -36,9 +36,28 @@ docker run --rm -v $PWD:/src -w /src ubuntu:26.04 bash -c '
 ```
 
 `IMP_FUZZERS=ON` on a full CUDA build adds `fuzz_safetensors`,
-`fuzz_tokenizer_json` and (with the server sources) `fuzz_tool_stream`, which
-need the loader and httplib. The libstdc++ has to be new enough for the tree's
+`fuzz_tokenizer_json` and (with the server sources) `fuzz_tool_stream`. The
+first two need the loader. `fuzz_tool_stream` needs `tool_call.cpp`, and that
+chain is longer than it looks: `utils.h` pulls httplib, `utils.cpp` pulls
+`imp/imp.h`, so moving it into the CPU set means splitting a header 17
+translation units include, not adding a link line. The libstdc++ has to be new enough for the tree's
 C++23: `silkeh/clang:18` ships libstdc++ 12 and cannot compile `src/core/logging.cpp`.
+
+## What a longer run buys
+
+Measured 2026-09-10 on this host, the three CPU targets at 900 s each (the
+nightly gives them 600), seeded from an empty corpus:
+
+| target | executions | edges covered | crashers |
+|---|---|---|---|
+| `fuzz_json_schema` | 12644374 | 1928 | 0 |
+| `fuzz_regex` | 651537 | 2182 | 0 |
+| `fuzz_gbnf` | 3185880 | 3397 | 0 |
+
+The one defect these have produced so far (#1972, a repetition bound past
+`INT_MAX`) fell out 71 s into the very first nightly run. Half again the wall
+clock past that found nothing, so the nightly's 10 minutes are not the limiting
+factor; a new corpus entry or a new target is.
 
 ## Targets
 

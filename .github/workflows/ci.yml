@@ -885,8 +885,10 @@ jobs:
   # three parser targets, 10 minutes each, corpus carried between nights in
   # the cache, crashers in the run's artifacts. Advisory: a crasher is a
   # warning here and an issue for a human. fuzz_tool_stream is not here: it
-  # reaches httplib through utils.h, so it needs the full build; the CPU lane
-  # runs its target function on every PR.
+  # needs tool_call.cpp, whose utils.h pulls httplib and whose utils.cpp pulls
+  # imp/imp.h: the chain ends at the engine, so a CPU-only build of it is a
+  # header split across 17 translation units, not a link line (measured
+  # 2026-09-10, abandoned). The CPU lane runs its target function on every PR.
   fuzz-nightly:
     name: Fuzz (nightly, libFuzzer)
     # workflow_dispatch too: schedule-only is why two nights of a job that
