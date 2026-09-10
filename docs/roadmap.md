@@ -33,7 +33,7 @@ Detail records: [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lev
 |---|---|
 | GDN hybrid @32 vs vLLM | AHEAD. Qwen3.8-27B 1807.9 vs 1447.8 tok/s (+24.9%, vLLM 0.27.1), 1833.8 vs 1410.7 (+30.0%, 0.28.0), @8 573.0 vs 495.8 (+15.6%), @32 x 1082-token prompts 873.4 vs 497.8 (+75.5%), 3/3 each |
 | dense NVFP4 @32 vs vLLM | PARITY OR AHEAD (2026-09-08). Qwen3-14B 38-token prompts 3948.9 vs 3817.6 (+3.4%, 2026-09-03); 982-token prompts 2491.2/2515.5/2482.6 vs 2485.9/2490.9/2497.7 (+0.2/+1.0/-0.6%, 2 of 3; was 1845.0 vs 2478.0 = 0.75x before the grouped FP8 decode attention, #1953) |
-| batch=1 | 87.4 tok/s spec-off = 78% of the ~112 tok/s roofline (14.5 GB/token at 1628 GB/s resident); past it only through the MTP verify |
+| batch=1 | 99.5 tok/s spec-off (2026-09-10, `gdn.m1_fused`) = 89% of the ~112 tok/s roofline (14.5 GB/token at 1628 GB/s resident), was 87.4 = 78% on 2026-08-27; past it only through the MTP verify |
 | raw-speed half of [`GOAL.md`](GOAL.md) | MET: batch=1 decode +13-48% vs llama.cpp on every hero (2026-07-12 re-sweep), MoE prefill leads vLLM single-seq, cross-engine PPL parity measured. Everything open below is the agentic half |
 | admission at fan-out | `auto` resolves 28 vs a pinned 32 (630 vs 936): admission, not rotation, and 28 sustain full rate under continuous arrival |
 | next engine-side post | the dense decode step at 32 streams after the grouped FP8 attention and the small-M launch work (ledger 2026-09-08, second row): the small-M GEMM class re-priced at 83% of resident bandwidth by launch durations (5.49 vs 4.56 ms floor per Qwen3-14B step BEFORE the PDL weight prefetch + q\|k\|v launch, which took ~0.3 ms of that), and the prefill forward at 80% of the FP4 peak (Open 2) |
@@ -296,6 +296,17 @@ mixed, default off.
        model=Qwen3.8-27B-NVFP4 cuda=13.3 path=nsys server window 778 steps
        cmd=`nsys profile ... imp-server` + chat 1024-tok]
 ```
+
+Launch chain at M=1 (2026-09-10, nsys graph-node trace on 0b095c4d): a GDN
+layer ran 17 kernels for 155 us, 138 us of them the five big GEMVs at
+1550-1650 GB/s; the rest was in_proj / gate / alpha / beta as four launches
+(20.2 + 12.6 + 4.1 + 3.9 us; the two FP16 alpha/beta GEMVs read 0.5 MB each,
+pure latency), residual save + add + copy-back (2.7 us) and the xBC copy before
+the conv (1.8 us). An attention layer ran k and v as two 4 us launches after q.
+
+| lever | verdict | evidence | ref |
+|---|---|---|---|
+| `gdn.m1_fused`: in_proj + gate + alpha + beta in one multi-row GEMV grid (NVFP4 rows and FP16 rows in the same launch), out-projection with the residual in its epilogue, conv reads proj in place, gated attention q\|k\|v in one launch | SHIPPED default-on | `imp-cli --bench` tg256 spec-off, same binary, flag off/on alternating: 94.03/94.34/94.40 -> 99.22/99.17/100.06 tok/s (+5.5/+5.1/+6.0 %, 3/3). GDN input segments bit-identical to the kernels they replace (in_proj multirow, gate K-par, alpha/beta gemv_fp16; test-quant `NvFP4GemvGdnInput`); the residual epilogue rounds once instead of twice and k/v move to the multirow order, so greedy 200-token completions under `runtime.deterministic=true` diverge from the flag-off arm at a near-tie after 400-800 characters (SETTLED D-2 class; flag-on with and without CUDA graphs byte-equal); chunk-1 PPL on the 45k corpus (every token through the M=1 path, deterministic) 4.5641 -> 4.5646; degen_suite 50/50; final binary re-measured 94.65/94.42 -> 99.55/99.54 tok/s | 2026-09-10 |
 
 ### The MTP verify on a GDN hybrid (2026-08-17 .. 08-19)
 

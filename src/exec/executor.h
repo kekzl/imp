@@ -685,6 +685,9 @@ private:
     void* gdn_ab_ws_ = nullptr;
     size_t gdn_ab_ws_bytes_ = 0;
     bool gdn_ab_narrow_logged_ = false;
+    bool gdn_m1_input_logged_ = false;
+    bool gdn_m1_out_logged_ = false;
+    bool attn_m1_qkv_logged_ = false;
 
     // --- Separately allocated buffers (not part of unified workspace) ---
 
@@ -916,6 +919,24 @@ private:
     // fit; the caller then issues its two gemm_via_handle_ calls.
     bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
                                     Tensor& beta_out, cudaStream_t stream);
+    // The NVFP4 view gemm_via_handle_ would hand the M=1 decode GEMV for this
+    // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
+    // its source bytes). false = that dispatch would not take the GEMV.
+    bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
+    // M=1 GDN launch fusion (gdn.m1_fused, executor_gdn_alpha_beta.cu):
+    // in_proj + gate + alpha + beta in one GEMV launch; the out-projection
+    // adds the residual in its epilogue. Each returns false and launches
+    // nothing when a weight or shape does not fit; the caller keeps its path.
+    // alpha/beta go to ssm_dt_buf_ in the 4-call layout (alpha at 0, beta at
+    // the 256-byte-aligned offset) that the scan reads.
+    bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
+                                 int n_heads, cudaStream_t stream);
+    bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
+    void gdn_out_residual_m1_(const TransformerLayer& ly, const Tensor& y, Tensor& h, cudaStream_t stream);
+    // M=1 attention q|k|v in one NVFP4 GEMV launch on gated-attention models
+    // (the ungated nvfp4_qkv path already does this). Same decline contract.
+    bool try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out, Tensor& k_out,
+                                Tensor& v_out, cudaStream_t stream);
     // General form: 2..3 weights on one input (attention q|k|v adds the
     // striped k/v shapes to q's single-stripe wave). Outputs must have row
     // stride N.

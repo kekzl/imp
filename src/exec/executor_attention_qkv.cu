@@ -323,6 +323,11 @@
                         Tensor* qkv_outs[3] = {&q_target, &kk, &vv};
                         qkv_multi = try_smallm_multi_dispatch_(qkv_ids, qkv_outs, 3, no, ctx);
                     }
+                    // Single-stream decode on gated attention (the ungated
+                    // nvfp4_qkv path above already fuses): q|k|v in one
+                    // NVFP4 GEMV launch instead of three.
+                    if (!qkv_multi && n == 1 && ly.wv.data != nullptr)
+                        qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, stream);
                     if (!qkv_multi) {
                         gemm_via_handle_(ly.wq_id, no, q_target, ctx);
                         gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);

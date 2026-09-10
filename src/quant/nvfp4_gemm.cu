@@ -316,6 +316,7 @@ void nvfp4_gemv_pdl_register() {
     NVFP4_REGISTER(gemv_nvfp4_swiglu_residual_mr_kernel<NR>);
     NVFP4_REGISTER(gemv_nvfp4_geglu_residual_kernel);
     NVFP4_REGISTER(gemv_nvfp4_geglu_residual_mr_kernel<NR>);
+    nvfp4_gdn_input_pdl_register();
     // MoE GEMV kernels
     // MoE decode GEMVs are not instrumented (no pdl_wait) and stay
     // unregistered: registration is the promise that the kernel waits.

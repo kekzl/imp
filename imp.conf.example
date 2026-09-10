@@ -562,6 +562,11 @@ state_bf16           = true
 # Batched decode (2..32 rows): alpha and beta projections in one split-K FP16
 # tensor-core launch instead of two cuBLAS GEMMs (4 launches per GDN layer).
 alpha_beta_smallm    = true
+# Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj, gate, alpha and
+# beta in one GEMV launch, out-projection with the residual in its epilogue,
+# gated attention q|k|v in one launch (6 launches per GDN layer and 2 per
+# attention layer fewer). false = the per-projection launches.
+m1_fused             = true
 
 [gemm]
 # dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec

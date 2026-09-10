@@ -2,6 +2,7 @@
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_debug.h"
+#include "exec/executor_helpers.h"
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
 #include "compute/activation.h"
@@ -328,8 +329,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // h and never reads r: skip the save there, as the attention and FFN
     // twins do. Kernel copy, not cudaMemcpyAsync: a memcpy node has no
     // programmatic edge and cut the PDL chain once per layer.
-    const bool skip_residual_save = !dispatch_policy().gdn.fp32_out && !dump_hidden_dir() &&
-                                    residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h);
+    const bool skip_residual_save =
+        !dispatch_policy().gdn.fp32_out && !dump_hidden_dir() &&
+        (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h) || gdn_out_residual_m1_ok_(ly, n, h));
     if (!skip_residual_save)
         device_copy_async(r.data, h.data, h.nbytes(), stream);
     // Producer fusion: quantize into the small-M scratch inside the norm
@@ -354,6 +356,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
     Tensor proj;
     bool gate_paired = false;
+    bool m1_fused_input = false;
     if (fused_input) {
         // One GEMV produces [proj | gate | alpha | beta] contiguously in
         // gdn_fused_proj_buf_; the views below take offset slices.
@@ -372,7 +375,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // reorder. One smallm v2 launch for both when both route there.
         int64_t gate_shape_early[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
         Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
-        gate_paired = try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx);
+        // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
+        // launch; alpha/beta land in the 4-call layout of step 4 below.
+        m1_fused_input = try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream);
+        gate_paired = m1_fused_input ||
+                      try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx);
         if (!gate_paired)
             gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
     }
@@ -387,8 +394,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     void* conv_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
                                                       : nullptr;
 
-    // conv_f32 destination for FP32 pipeline (conv+SiLU output)
+    // conv_f32 destination for FP32 pipeline (conv+SiLU output). At n == 1 it
+    // sits past the FP16 input row, so the decode conv reads proj in place
+    // (no xBC copy); every tail scratch below is relative to conv_f32.
     float* conv_f32 = static_cast<float*>(ssm_proj_buf_.data);
+    if (n == 1)
+        conv_f32 = reinterpret_cast<float*>(static_cast<char*>(ssm_proj_buf_.data) +
+                                            align256(static_cast<size_t>(conv_channels) *
+                                                     dtype_size(compute_dtype_)));
 
     if (conv_st) {
         if (state.ragged_prefill()) {
@@ -488,8 +501,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // reading stale buffer contents (measured as coherent output for
             // sequence 0 and garbage for the rest). n == 1 on the
             // single-sequence path, so this is the same copy it always was.
-            device_copy_async(xBC_out.data, xBC_in.data,
-                              static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_), stream);
+            // At n == 1 conv_f32 sits past the input row (see above): the
+            // conv reads proj in place, no copy.
+            if (n > 1)
+                device_copy_async(xBC_out.data, xBC_in.data,
+                                  static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_), stream);
             // Batched decode: ssm_n_seq sequences, one token each, each with
             // its own conv state. Falls through to the single-sequence call
             // when the step carries one sequence.
@@ -500,8 +516,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<const half*>(xBC_out.data), ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
                     state.ssm_n_seq, conv_channels, conv_kernel, stream);
             } else {
-                ssm_conv1d_decode_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
-                                           conv_kernel, stream);
+                ssm_conv1d_decode_f32_silu(conv_st, n == 1 ? xBC_in : xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                                           conv_f32, conv_kernel, stream);
             }
         }
     } else {
@@ -633,8 +649,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
                                  ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
-                if (!try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no, alpha_proj_out,
-                                                beta_proj_out, stream)) {
+                // m1_fused_input: step 2 already wrote both into this layout.
+                if (!m1_fused_input && !try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no,
+                                                                   alpha_proj_out, beta_proj_out, stream)) {
                     gemm_via_handle_(ly.gdn_alpha_id, no, alpha_proj_out, ctx);
                     gemm_via_handle_(ly.gdn_beta_id, no, beta_proj_out, ctx);
                 }
@@ -970,6 +987,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                                                static_cast<__half*>(h.data), total);
         IMP_CUDA_CHECK_LAUNCH();
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
+    } else if (gdn_out_residual_m1_ok_(ly, n, h) && !dump_hidden_dir()) {
+        // M=1 (gdn.m1_fused): h = out_proj(y) + h in the GEMV epilogue; the
+        // residual save above was skipped under the same gate.
+        gdn_out_residual_m1_(ly, y_buf, h, stream);
     } else if (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h) && !dump_hidden_dir()) {
         // Batched-decode NVFP4: h += out_proj(y) via the smallm accumulate
         // path (h still holds the residual — see run_ssm's twin). The
