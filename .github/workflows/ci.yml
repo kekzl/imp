@@ -889,7 +889,10 @@ jobs:
   # runs its target function on every PR.
   fuzz-nightly:
     name: Fuzz (nightly, libFuzzer)
-    if: github.event_name == 'schedule'
+    # workflow_dispatch too: schedule-only is why two nights of a job that
+    # configured nothing went unnoticed, since there was no way to run it
+    # against a branch before it landed.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # Ubuntu 26.04 for its libstdc++: the tree's C++23 does not compile against
     # the libstdc++ 12 that silkeh/clang:18 ships (std::ranges over string_view),
