@@ -76,6 +76,12 @@ struct GDN {
     // FP32 on unsupported shapes. FP16 state stays refuted (subnormal
     // truncation). Opt out via gdn.state_bf16=false.
     bool state_bf16 = true;
+    // Batched decode (2 <= M <= 32): the alpha and beta projections run as one
+    // split-K FP16 tensor-core launch (compute/gemm_f16_narrow_smallm.cu)
+    // instead of two cuBLAS GEMMs (nvjet + splitKreduce each, 4 launches per
+    // GDN layer). FP16-resident alpha/beta weights only; other tiers keep the
+    // two-call path. false = the two cuBLAS calls.
+    bool alpha_beta_smallm = true;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };

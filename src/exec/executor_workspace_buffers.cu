@@ -12,6 +12,7 @@
 #include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
 #include "exec/nvfp4_expert_offload.h"
 #include "compute/gdn.h"        // gdn_scan_chunkpar_workspace_bytes
+#include "compute/gemm_f16_narrow_smallm.h"  // gemm_f16_narrow_smallm_workspace_bytes
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -1063,6 +1064,21 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
+    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K
+    // partials + tickets for N = 2 x n_heads. The kernel resets its tickets,
+    // so one zeroing here is the whole initialisation. nullptr keeps the two
+    // cuBLAS calls.
+    if (has_gdn_ && dispatch_policy().gdn.alpha_beta_smallm && cfg.ssm_dt_rank > 0) {
+        gdn_ab_ws_bytes_ = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
+        gdn_ab_ws_ = vram_alloc(vram_alloc_, gdn_ab_ws_bytes_, "gdn_ab_ws");
+        if (gdn_ab_ws_) {
+            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ab_ws_, 0, gdn_ab_ws_bytes_));
+        } else {
+            IMP_LOG_WARN("gdn alpha/beta workspace unavailable (%zu B) - two-call route", gdn_ab_ws_bytes_);
+            gdn_ab_ws_bytes_ = 0;
+        }
+    }
+
     // FP8 activation scratch buffers (for FP8 prefill weight cache)
     if (wcache_.use_fp8) {
         int max_dim = cfg.d_model;
@@ -1496,6 +1512,8 @@ void GraphExecutor::free_buffers() {
 
     vfree(gdn_chunkpar_ws_);
     gdn_chunkpar_ws_bytes_ = 0;
+    vfree(gdn_ab_ws_);
+    gdn_ab_ws_bytes_ = 0;
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {

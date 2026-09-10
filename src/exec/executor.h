@@ -679,6 +679,13 @@ private:
     void* gdn_chunkpar_ws_ = nullptr;
     size_t gdn_chunkpar_ws_bytes_ = 0;
 
+    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K
+    // partials + per-tile tickets, ~100 KiB, zeroed once at allocation.
+    // nullptr keeps the two cuBLAS calls.
+    void* gdn_ab_ws_ = nullptr;
+    size_t gdn_ab_ws_bytes_ = 0;
+    bool gdn_ab_narrow_logged_ = false;
+
     // --- Separately allocated buffers (not part of unified workspace) ---
 
     // LRU cache for host-resident expert weights on GPU.
@@ -903,6 +910,12 @@ private:
     // two gemm_via_handle_ calls it would have issued anyway.
     bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                    Tensor& out_a, Tensor& out_b, const GemmContext& ctx);
+    // Batched-decode GDN alpha + beta projections in one narrow FP16 launch
+    // (gdn.alpha_beta_smallm, executor_gdn_alpha_beta.cu). Returns false and
+    // launches nothing when a weight is not FP16-resident or a shape does not
+    // fit; the caller then issues its two gemm_via_handle_ calls.
+    bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
+                                    Tensor& beta_out, cudaStream_t stream);
     // General form: 2..3 weights on one input (attention q|k|v adds the
     // striped k/v shapes to q's single-stripe wave). Outputs must have row
     // stride N.
