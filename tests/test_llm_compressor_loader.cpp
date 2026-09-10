@@ -1,9 +1,12 @@
 #include "model/llm_compressor_loader.h"
+#include "model/hf_config_loader.h"
+#include "model/nvfp4_module_policy.h"
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 using namespace imp::llm_compressor;
@@ -600,9 +603,11 @@ TEST(LlmCompressorFormatDetect, IgnoresAConfigJsonWithoutAQuantizationBlock) {
     std::filesystem::remove_all(dir, ec);
 }
 
-TEST(LlmCompressorFormatDetect, RecipeYamlStillWinsOverConfigJson) {
+TEST(LlmCompressorFormatDetect, RecipeYamlDecidesTheFormatAndConfigJsonTheIgnoreList) {
     // Both present is the normal llm-compressor upload. The recipe path is the
-    // one with history behind it, so it stays first.
+    // one with history behind it, so it stays first for the FORMAT. The ignore
+    // list is the other way round: the recipe holds the run's patterns, and
+    // `re:.*router` does not cover the `...router.proj` a checkpoint carries.
     std::string dir = tmpdir() + "/fmt_ctboth_" + std::to_string(::getpid());
     std::filesystem::create_directories(dir);
     std::ofstream(dir + "/recipe.yaml") << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n"
@@ -618,7 +623,8 @@ TEST(LlmCompressorFormatDetect, RecipeYamlStillWinsOverConfigJson) {
     imp::HFConfigLoader::NvFP4Config cfg;
     ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
     EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
-    EXPECT_EQ(cfg.exclude_modules.size(), 1u) << "the recipe's ignore list, not config.json's";
+    ASSERT_EQ(cfg.exclude_modules.size(), 3u) << "config.json's expanded names, not the recipe's patterns";
+    EXPECT_EQ(cfg.exclude_modules[0], "a");
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -684,4 +690,92 @@ TEST(LlmCompressorUnused, DropOnlyWhenNeitherConsumerTakesIt) {
             }
         }
     }
+}
+
+// ---- ignore list: recipe patterns vs config.json names (#1969 follow-up) ----
+//
+// recipe.yaml records the run's patterns, config.json the module names they
+// expanded to. `re:.*router` full-matches `...router`, not the `...router.proj`
+// Gemma-4 carries, so reading the list from the recipe left 30 routers
+// unclassified and the inventory refused the checkpoint.
+
+namespace {
+
+// A directory with both files, the shapes Gemma-4-26B-A4B-it-NVFP4 ships.
+std::string write_temp_checkpoint(const std::string& recipe, const std::string& config_json) {
+    std::string dir = tmpdir() + "/ckpt_" + std::to_string(::getpid()) + ".d";
+    std::filesystem::create_directories(dir);
+    std::ofstream r(dir + "/recipe.yaml");
+    r << recipe;
+    r.close();
+    if (!config_json.empty()) {
+        std::ofstream c(dir + "/config.json");
+        c << config_json;
+        c.close();
+    }
+    return dir;
+}
+
+constexpr const char* kGemma4Recipe = R"(default_stage:
+  default_modifiers:
+    QuantizationModifier:
+      targets: [Linear]
+      ignore: [lm_head, 're:.*embed.*', 're:.*router', 're:.*vision_tower.*']
+      scheme: NVFP4
+      bypass_divisibility_checks: false
+)";
+
+constexpr const char* kGemma4Config = R"({
+  "quantization_config": {
+    "quant_method": "compressed-tensors",
+    "format": "nvfp4-pack-quantized",
+    "config_groups": {"group_0": {"targets": ["Linear"],
+      "weights": {"num_bits": 4, "type": "float", "group_size": 16, "strategy": "tensor_group"}}},
+    "ignore": ["model.language_model.layers.0.router.proj",
+               "model.language_model.layers.9.router.proj",
+               "model.vision_tower.patch_embedder.input_proj",
+               "lm_head"]
+  }
+})";
+
+}  // namespace
+
+TEST(LlmCompressorIgnoreList, ConfigJsonNamesReplaceTheRecipePatterns) {
+    std::string dir = write_temp_checkpoint(kGemma4Recipe, kGemma4Config);
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
+    EXPECT_EQ(cfg.group_size, 16);
+    ASSERT_EQ(cfg.exclude_modules.size(), 4u);
+    EXPECT_EQ(cfg.exclude_modules[0], "model.language_model.layers.0.router.proj");
+    cleanup_temp_recipe(dir);
+}
+
+TEST(LlmCompressorIgnoreList, RouterProjIsIgnoredOnlyThroughTheExpandedNames) {
+    // imp's spelling after the llm-compressor prefix strip, which is what the
+    // inventory names in its refusal; the ignore entry keeps the on-disk
+    // `model.language_model.` prefix and the policy normalizes it.
+    const std::string router = "model.layers.9.router.proj";
+
+    // The counter-test: the recipe pattern alone does not cover this module.
+    // Without it a green ConfigJsonNamesReplaceTheRecipePatterns would prove
+    // nothing about the defect.
+    std::vector<std::string> recipe_only = {"lm_head", "re:.*embed.*", "re:.*router",
+                                            "re:.*vision_tower.*"};
+    EXPECT_FALSE(imp::nvfp4_policy::module_is_ignored(router, recipe_only));
+
+    std::string dir = write_temp_checkpoint(kGemma4Recipe, kGemma4Config);
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_TRUE(imp::nvfp4_policy::module_is_ignored(router, cfg.exclude_modules));
+    cleanup_temp_recipe(dir);
+}
+
+TEST(LlmCompressorIgnoreList, RecipePatternsSurviveWhenConfigJsonCarriesNoList) {
+    std::string dir = write_temp_checkpoint(kGemma4Recipe, "");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    ASSERT_EQ(cfg.exclude_modules.size(), 4u);
+    EXPECT_EQ(cfg.exclude_modules[2], "re:.*router");
+    cleanup_temp_recipe(dir);
 }

@@ -1261,8 +1261,23 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         return true;
     }
 
-    if (has_compressor && imp::llm_compressor::parse_recipe_yaml(model_dir, cfg))
+    if (has_compressor && imp::llm_compressor::parse_recipe_yaml(model_dir, cfg)) {
+        // The recipe gives the scheme; the ignore list has to come from
+        // config.json when that carries one. The recipe writes the RUN's
+        // patterns, config.json the module names they expanded to, and the two
+        // do not match the same modules: `re:.*router` full-matches
+        // `...router`, never the `...router.proj` Gemma-4 carries. 4 patterns
+        // against 222 names on Gemma-4-26B-A4B-it-NVFP4, and the 30 routers
+        // that fell through arrived as unclassified Linear slots, which the
+        // inventory refuses (#1962).
+        std::vector<std::string> expanded;
+        if (imp::llm_compressor::read_config_ignore_list(model_dir, expanded)) {
+            IMP_LOG_INFO("NVFP4 ignore list: %zu expanded names from config.json replace %zu recipe pattern(s)",
+                         expanded.size(), cfg.exclude_modules.size());
+            cfg.exclude_modules = std::move(expanded);
+        }
         return true;
+    }
 
     // No recipe.yaml, or one this build cannot use: the checkpoint's own
     // declaration is `quantization_config` in config.json, which is what

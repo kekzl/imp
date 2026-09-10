@@ -75,6 +75,13 @@ void log_summary(const TranslationCounters& counters);
 // missing file, parse error, or unsupported scheme.
 bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg);
 
+// `quantization_config.ignore` from config.json, nothing else. recipe.yaml
+// records the RUN's patterns, config.json the module names they expanded to;
+// the two are not interchangeable (`re:.*router` full-matches `...router`, not
+// the `...router.proj` a checkpoint carries). Returns false when the file, the
+// block or the list is absent or empty.
+bool read_config_ignore_list(const std::string& model_dir, std::vector<std::string>& out);
+
 // The same, from `quantization_config` in config.json.
 //
 // recipe.yaml is llm-compressor's own record of the RUN; the checkpoint's
