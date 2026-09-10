@@ -157,7 +157,12 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
     // CUTLASS mode (253 GB/s, a 2x regression), not suite-load noise.
     const double bar = 0.25 * 1792.0;
     double best_gbs = 0.0;
-    for (int attempt = 0; attempt < 3 && best_gbs < bar; ++attempt) {
+    // 8 attempts, not 3: the per-window dropouts on this box reach 4x (the
+    // measurement is in test_smallm_dense_bench.cu) and three were not enough -
+    // this test went red in one of three full-suite runs on 2026-09-10. The
+    // loop exits on the first attempt that clears the bar, so a healthy card
+    // still pays for one.
+    for (int attempt = 0; attempt < 8 && best_gbs < bar; ++attempt) {
         void *d_x = nullptr, *d_y = nullptr, *d_ws = nullptr;
         ASSERT_EQ(cudaMalloc(&d_x, (size_t)M * K * sizeof(__half)), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&d_y, (size_t)M * N * sizeof(__half)), cudaSuccess);

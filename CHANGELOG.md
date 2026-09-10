@@ -40,6 +40,9 @@ there instead of retelling it.
 
 ### Changed
 
+- The two absolute perf bars in the GPU suite take the best of eight measurement windows: single
+  windows on this box drop out by up to 4x (46.12 to 200.82 us in one run), which failed
+  `SmallMDenseTest.BenchDecodeShape` on two of three runs of an unrelated tree (#1971)
 - The `[allow]` pins in `tools/filesize_thresholds.toml`, `tools/function_size_thresholds.toml` and
   `PINNED` in `tools/check_test_lanes.py` are ceilings: growth up to the next multiple of 25 above the pin
   and any shrink are a NOTE, only growth past that fails (exact two-way pins: 9 merge conflicts on 2026-09-09)
