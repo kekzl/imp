@@ -40,6 +40,9 @@ there instead of retelling it.
 
 ### Changed
 
+- Batched GDN decode drops three launches per layer: no residual save when the out-projection accumulates into
+  the hidden buffer, kernel copies instead of memcpy nodes, and alpha+beta as one split-K FP16 launch
+  (`gdn.alpha_beta_smallm`). Qwen3.8-27B-NVFP4 at 32 streams 1985.7 -> 2019.8 tok/s (+1.7 %, 3/3 pairs positive)
 - The two absolute perf bars in the GPU suite take the best of eight measurement windows: single
   windows on this box drop out by up to 4x (46.12 to 200.82 us in one run), which failed
   `SmallMDenseTest.BenchDecodeShape` on two of three runs of an unrelated tree (#1971)

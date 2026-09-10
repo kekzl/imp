@@ -277,6 +277,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gdn.chunkpar_scan", cfg.gdn.chunkpar_scan);
     I("gdn.chunkpar_strip", cfg.gdn.chunkpar_strip);
     B("gdn.state_bf16", cfg.gdn.state_bf16);
+    B("gdn.alpha_beta_smallm", cfg.gdn.alpha_beta_smallm);
 
     // [gemm]
     B("gemm.no_dp4a_gemv", cfg.gemm.no_dp4a_gemv);

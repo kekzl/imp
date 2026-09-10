@@ -323,8 +323,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     Tensor r = view_tokens(residual_, n);
     Tensor no = view_tokens(norm_out_, n);
 
-    // 1. Save residual + RMSNorm
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+    // 1. Save residual + RMSNorm. The batched-decode beta=1 out-projection
+    // (residual_beta1_nvfp4_ok_, same gate as step 10 below) accumulates into
+    // h and never reads r: skip the save there, as the attention and FFN
+    // twins do. Kernel copy, not cudaMemcpyAsync: a memcpy node has no
+    // programmatic edge and cut the PDL chain once per layer.
+    const bool skip_residual_save = !dispatch_policy().gdn.fp32_out && !dump_hidden_dir() &&
+                                    residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h);
+    if (!skip_residual_save)
+        device_copy_async(r.data, h.data, h.nbytes(), stream);
     // Producer fusion: quantize into the small-M scratch inside the norm
     // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
     // tier); falls back to plain rmsnorm. The n==1 packed-input path is
@@ -421,10 +428,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // the per-group real row count; the snapshot (state after row 0)
             // comes from group 0 only - every group's row 0 is the same token
             // from the same committed state.
-            IMP_CUDA_CHECK_LOG(
-                cudaMemcpyAsync(xBC_out.data, xBC_in.data,
-                                static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
-                                cudaMemcpyDeviceToDevice, stream));
+            device_copy_async(xBC_out.data, xBC_in.data,
+                              static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_), stream);
             const int T = state.ssm_seq_tokens;
             void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
                                   ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
@@ -483,10 +488,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // reading stale buffer contents (measured as coherent output for
             // sequence 0 and garbage for the rest). n == 1 on the
             // single-sequence path, so this is the same copy it always was.
-            IMP_CUDA_CHECK_LOG(
-                cudaMemcpyAsync(xBC_out.data, xBC_in.data,
-                                static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
-                                cudaMemcpyDeviceToDevice, stream));
+            device_copy_async(xBC_out.data, xBC_in.data,
+                              static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_), stream);
             // Batched decode: ssm_n_seq sequences, one token each, each with
             // its own conv state. Falls through to the single-sequence call
             // when the step carries one sequence.
@@ -623,12 +626,18 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 gemm_via_handle_(ly.gdn_alpha_beta_packed_id, no, ab_packed_out, ctx);
             } else {
                 // 4-call fallback: ssm_dt_buf_ for alpha, +offset for beta.
+                // Batched decode runs both in one narrow FP16 launch first
+                // (gdn.alpha_beta_smallm); the two calls stay for every
+                // shape or tier it declines.
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
                 char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
                                  ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
-                gemm_via_handle_(ly.gdn_alpha_id, no, alpha_proj_out, ctx);
-                gemm_via_handle_(ly.gdn_beta_id, no, beta_proj_out, ctx);
+                if (!try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no, alpha_proj_out,
+                                                beta_proj_out, stream)) {
+                    gemm_via_handle_(ly.gdn_alpha_id, no, alpha_proj_out, ctx);
+                    gemm_via_handle_(ly.gdn_beta_id, no, beta_proj_out, ctx);
+                }
             }
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
             // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
@@ -973,8 +982,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Compare to llama's `linear_attn_out-{layer}` from eval-callback.
         dump_tensor_npy("gdn_linear_attn_out", out_buf, stream, layer, cur_decode_step_);
         elementwise_add(out_buf, r, stream);
-        IMP_CUDA_CHECK_LOG(
-            cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+        device_copy_async(h.data, out_buf.data, h.nbytes(), stream);
     }
 }
 

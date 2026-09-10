@@ -559,6 +559,9 @@ layout_override      = ""
 # aggregate at 32 streams on Qwen3.8-27B-NVFP4 for +0.21 % PPL, and the freed
 # bytes go to the KV pool. false = FP32 state.
 state_bf16           = true
+# Batched decode (2..32 rows): alpha and beta projections in one split-K FP16
+# tensor-core launch instead of two cuBLAS GEMMs (4 launches per GDN layer).
+alpha_beta_smallm    = true
 
 [gemm]
 # dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec
