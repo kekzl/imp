@@ -243,7 +243,9 @@ def main():
     # 1091 -> 1093 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
     # quantize like the exporter, decode by the format's own rule, bound the error; and the unit-offset
     # norm fold through the quantizer. The fold's algebra stays in the CPU lane (AwqNormFold x6).
-    PINNED = 1093
+    # 1093 -> 1094: PrefillFirstRowsReadThePreviousWindowNotTheCommit (test-moe-gdn, GPU, no model):
+    # rows 0..K-2 of the conv1d prefill against the CPU form over 300 launches.
+    PINNED = 1094
 
     text = CMAKE.read_text()
     mods = module_sources(text)

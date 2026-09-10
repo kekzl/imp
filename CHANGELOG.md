@@ -127,6 +127,9 @@ there instead of retelling it.
 
 ### Fixed
 
+- Hybrid (GDN) greedy output depended on what else ran on the card: the conv1d prefill kernels committed
+  the conv window from the last row's block while rows 0..K-2 read the previous one from the same buffer;
+  the commit is its own launch now (Qwen3.8-27B-NVFP4, 160 tokens, GPU tenant: 3/39 perturbed, then 0/79).
 - `JValue::obj` held `std::vector<std::pair<std::string, JValue>>`, a complete type with an
   incomplete member, which is not what makes `vector<JValue>` legal. clang rejects it at the
   defaulted constructor, so no clang build of the tree got past `json_util.cpp` (#1975)
