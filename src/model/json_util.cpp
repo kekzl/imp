@@ -297,8 +297,8 @@ JValue JsonParser::parse_null() {
 
 const JValue* jobj_find(const JValue& obj, const std::string& key) {
     for (const auto& kv : obj.obj) {
-        if (kv.first == key)
-            return &kv.second;
+        if (kv.key == key)
+            return &kv.value;
     }
     return nullptr;
 }

@@ -127,6 +127,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- `JValue::obj` held `std::vector<std::pair<std::string, JValue>>`, a complete type with an
+  incomplete member, which is not what makes `vector<JValue>` legal. clang rejects it at the
+  defaulted constructor, so no clang build of the tree got past `json_util.cpp` (#1975)
+
 - A tool whose `parameters` schema carries a JSON number between `INT64_MAX` and `UINT64_MAX`
   (`9223372036854775808` survives the request roundtrip as an integer) made the template renderer
   throw `std::out_of_range` out of `std::stoll`; it now renders as a double (#1973)

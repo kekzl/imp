@@ -412,8 +412,8 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     };
 
     for (const auto& kv : root.obj) {
-        std::string tensor_name = kv.first;  // copy — may be mutated by translation
-        const JValue& tensor_meta = kv.second;
+        std::string tensor_name = kv.key;  // copy — may be mutated by translation
+        const JValue& tensor_meta = kv.value;
 
         if (tensor_name == "__metadata__")
             continue;
@@ -668,13 +668,13 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     // or a vision-only shard when no mmproj is configured).
     std::map<std::string, std::vector<std::string>> shard_tensors;
     for (const auto& kv : weight_map->obj) {
-        if (kv.second.type == JType::STRING) {
-            if (!safetensors_shard_name_is_safe(kv.second.str_val)) {
+        if (kv.value.type == JType::STRING) {
+            if (!safetensors_shard_name_is_safe(kv.value.str_val)) {
                 IMP_LOG_ERROR("Shard name escapes the model directory: '%s' (tensor '%s' in %s)",
-                              kv.second.str_val.c_str(), kv.first.c_str(), index_path.c_str());
+                              kv.value.str_val.c_str(), kv.key.c_str(), index_path.c_str());
                 return false;
             }
-            shard_tensors[kv.second.str_val].push_back(kv.first);
+            shard_tensors[kv.value.str_val].push_back(kv.key);
         }
     }
 
@@ -796,7 +796,7 @@ bool probe_mtp_head(const std::string& model_dir) {
         const JValue* map = jobj_find(root, "weight_map");
         const JValue& obj = (map && map->type == JType::OBJECT) ? *map : root;
         for (const auto& kv : obj.obj)
-            if (name_is_mtp_head_key(kv.first))
+            if (name_is_mtp_head_key(kv.key))
                 return true;
         return false;
     };
