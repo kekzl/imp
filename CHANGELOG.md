@@ -124,6 +124,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- NVFP4 checkpoints with both a `recipe.yaml` and a `quantization_config` read their ignore list
+  from the recipe's patterns instead of the expanded names in `config.json` (4 vs 222 on
+  Gemma-4-26B-A4B-it-NVFP4): the 30 routers arrived unclassified and the load was refused (#1970)
+
 - CI change detection ran `git` before the step that marks the checkout a safe directory, so its
   `git cat-file` died on the ownership refusal and the fail-open returned `code=true` every run:
   the docs-only skip had never once fired, and a fall-open now says so with a `::warning::`

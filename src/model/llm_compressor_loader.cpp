@@ -350,6 +350,27 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
     return true;
 }
 
+bool read_config_ignore_list(const std::string& model_dir, std::vector<std::string>& out) {
+    const std::string text = read_file(model_dir + "/config.json");
+    if (text.empty())
+        return false;
+    JsonParser parser(text);
+    const JValue root = parser.parse();
+    if (!parser.ok() || root.type != JType::OBJECT)
+        return false;
+    const JValue* qc = jobj_find(root, "quantization_config");
+    if (!qc || qc->type != JType::OBJECT)
+        return false;
+    const JValue* ignore = jobj_find(*qc, "ignore");
+    if (!ignore || ignore->type != JType::ARRAY)
+        return false;
+    out.clear();
+    for (const JValue& v : ignore->arr)
+        if (v.type == JType::STRING)
+            out.push_back(v.str_val);
+    return !out.empty();
+}
+
 bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg) {
     const std::string text = read_file(model_dir + "/config.json");
     if (text.empty())
