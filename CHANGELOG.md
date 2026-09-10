@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-09-10
+
 ### Added
 
 - `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
