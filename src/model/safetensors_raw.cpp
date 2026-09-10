@@ -84,17 +84,17 @@ std::string RawSafeTensors::open(const std::string& path) {
 
     const uint64_t data_offset = 8 + header_size;
     for (const auto& kv : root.obj) {
-        if (kv.first == "__metadata__") {
-            if (kv.second.type == JType::OBJECT)
-                for (const auto& m : kv.second.obj)
-                    if (m.second.type == JType::STRING)
-                        metadata_.emplace_back(m.first, m.second.str_val);
+        if (kv.key == "__metadata__") {
+            if (kv.value.type == JType::OBJECT)
+                for (const auto& m : kv.value.obj)
+                    if (m.value.type == JType::STRING)
+                        metadata_.emplace_back(m.key, m.value.str_val);
             continue;
         }
-        const JValue& meta = kv.second;
+        const JValue& meta = kv.value;
         if (meta.type != JType::OBJECT) {
             close();
-            return path + ": entry '" + kv.first + "' is not an object";
+            return path + ": entry '" + kv.key + "' is not an object";
         }
         const JValue* dtype = jobj_find(meta, "dtype");
         const JValue* shape = jobj_find(meta, "shape");
@@ -102,11 +102,11 @@ std::string RawSafeTensors::open(const std::string& path) {
         if (!dtype || dtype->type != JType::STRING || !shape || shape->type != JType::ARRAY || !offsets ||
             offsets->type != JType::ARRAY || offsets->arr.size() != 2) {
             close();
-            return path + ": entry '" + kv.first + "' has a malformed descriptor";
+            return path + ": entry '" + kv.key + "' has a malformed descriptor";
         }
 
         RawTensor t;
-        t.name = kv.first;
+        t.name = kv.key;
         t.dtype = dtype->str_val;
         for (const auto& d : shape->arr)
             t.shape.push_back(static_cast<int64_t>(d.num_val));

@@ -19,14 +19,33 @@ namespace imp {
 
 enum class JType { NUL, STRING, NUMBER, ARRAY, OBJECT };
 
+struct JValue;
+
+// One key/value pair of an object. Not std::pair: `vector<T>` accepts an
+// INCOMPLETE T (a recursive JSON tree needs that), but `pair<string, JValue>`
+// is a complete type with an incomplete member, which is not the same
+// permission. libstdc++ instantiates the vector destructor at the defaulted
+// constructor and clang rejects it there, so `IMP_FUZZERS=ON` could not build
+// with clang at all. Structured bindings (`for (auto& [k, v] : v.obj)`, 11 of
+// the 12 uses) read identically either way.
+struct JMember;
+
 struct JValue {
     JType type = JType::NUL;
     std::string str_val;
     double num_val = 0.0;
     std::vector<JValue> arr;
-    std::vector<std::pair<std::string, JValue>> obj;
+    std::vector<JMember> obj;
 
     int64_t as_int() const { return static_cast<int64_t>(num_val); }
+};
+
+struct JMember {
+    std::string key;
+    JValue value;
+
+    JMember() = default;
+    JMember(std::string k, JValue v) : key(std::move(k)), value(std::move(v)) {}
 };
 
 class JsonParser {
