@@ -16,6 +16,9 @@ there instead of retelling it.
 - Local gates run once per tree: `make build` skips when `imp:test` already carries the tree fingerprint (label `imp.tree`, `scripts/build_image.sh`, 3.5 min per skipped build), the pre-commit hook runs only the test modules the staged diff reaches (full suite on core/include/build changes or `IMP_PRECOMMIT_FULL=1`), and the pre-push hook runs the paired A/B instead of the single-arm perf gate on kernel diffs. Measured before: a commit cost ~7 min and a push ~10 min for one tree.
 - VRAM is committed on demand for the slot-shaped pools (`vram.lazy_commit`, default on): the SSM/GDN state slab reserves every slot at init and commits one per admitted sequence (scheduler admission gate), the engine arena commits as tenants take, so the Qwen3-VL tower lands on the first image instead of at load. The plan still charges every byte; the KV growth cap subtracts what lazy pools have charged but not committed (`vram_reserved_uncommitted_bytes`). Commits inside a reservation count as `planned_serving_commits()`, no longer as I2 violations. `kv_cache.growable_initial_pct` default 100 -> 25. Qwen3.8-27B-NVFP4 idle after warmup 30053 -> 25455 MiB, first image +0.9 s once, burst of 28 unchanged (`docs/internals/MEMORY.md` B0, lazy pools).
 
+### Fixed
+- `usage.prompt_tokens_details.cached_tokens` is present on a prefix-cache miss too (0, the OpenAI shape) on `/v1/chat/completions` and `/v1/completions`: a client probing once at startup read the absent field as "not reported" (#1980). `/tokenize` takes `prompt` (vLLM) as an alias of `content` (llama.cpp) instead of a 400 that made clients fall back to length estimates (#1980).
+
 ## [0.39.0] - 2026-09-10
 
 ### Added

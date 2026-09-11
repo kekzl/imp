@@ -39,10 +39,16 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
         return;
     }
 
+    // `content` is the llama.cpp spelling, `prompt` the vLLM one; a client written
+    // against either gets the exact count instead of a 400 and a length estimate (#1980).
     std::string content = body.value("content", "");
+    if (content.empty())
+        content = body.value("prompt", "");
     if (content.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"content\" is required"}, {"type", "invalid_request_error"}}}};
+        json err = {{"error",
+                     {{"message", "\"content\" (or its alias \"prompt\") is required"},
+                      {"type", "invalid_request_error"}}}};
         res.set_content(dump_safe(err), "application/json");
         return;
     }

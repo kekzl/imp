@@ -27,7 +27,7 @@ all of them at once.
 | `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
-| `POST /tokenize`, `POST /detokenize` | ✅ | |
+| `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
 | `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false` |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
 | `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md) |

@@ -467,6 +467,8 @@ class MockHandler(BaseHTTPRequestHandler):
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens * n_choices,
                 "total_tokens": prompt_tokens + completion_tokens * n_choices,
+                # Mirrors the server: cached_tokens is present on a miss (0), #1980.
+                "prompt_tokens_details": {"cached_tokens": 0},
             }
             if reasoning_tokens:
                 usage["completion_tokens_details"] = {
@@ -565,6 +567,7 @@ class MockHandler(BaseHTTPRequestHandler):
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": {"cached_tokens": 0},
                 },
             }
             if reasoning_tokens:
@@ -651,6 +654,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": len(tokens),
                 "total_tokens": prompt_tokens + len(tokens),
+                "prompt_tokens_details": {"cached_tokens": 0},
             },
         })
 
@@ -658,7 +662,11 @@ class MockHandler(BaseHTTPRequestHandler):
         body = self._parse_json_body(raw)
         if body is None:
             return
-        text = body.get("content", body.get("text", ""))
+        # `content` (llama.cpp) or `prompt` (vLLM), as the server takes them (#1980).
+        text = body.get("content") or body.get("prompt") or ""
+        if not isinstance(text, str) or not text:
+            self._send_error(400, "\"content\" (or its alias \"prompt\") is required")
+            return
         # Mock: 1 token per 4 chars
         n_tokens = max(1, len(text) // 4)
         tokens = list(range(100, 100 + n_tokens))

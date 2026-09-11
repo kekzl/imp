@@ -274,6 +274,7 @@ def main():
     check_valid("/v1/completions valid", "/v1/completions", {"model": M, "prompt": "Say PONG", "max_tokens": 8})
     check_valid("/v1/embeddings valid", "/v1/embeddings", {"model": M, "input": "hello"})
     check_valid("/tokenize valid", "/tokenize", {"model": M, "content": "hello world"})
+    check_valid("/tokenize valid (prompt alias)", "/tokenize", {"model": M, "prompt": "hello world"})
     check_valid("/detokenize valid", "/detokenize", {"model": M, "tokens": [9707, 1879]})
 
     print()
