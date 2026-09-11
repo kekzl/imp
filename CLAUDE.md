@@ -1,7 +1,7 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-06
+verified: 2026-09-11
 commit: b5de0dd7
 -->
 
@@ -60,7 +60,7 @@ make verify                # full
 - **Branch off `main`, `gh pr create --base main`, never stack PRs.** Fewer, batched PRs.
 - **Performance is gated.** `tests/perf_baseline.json` is canonical (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change intentionally moves perf, and say so in the PR.
 - **Runtime config is `RuntimeConfig`** (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). The only env vars seeded into it: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING` (the last four land in `diagnostics.*`). No ad-hoc env reads.
-- **Dependency pins** are single-sourced in `cmake/imp-deps.cmake`. Docker build cache must **not** use `--mount=type=cache` (silently invalidates test results).
+- **Dependency pins** are single-sourced in `cmake/imp-deps.cmake`. Docker build: no `--mount=type=cache` on the build dir (03a2cc19: ninja reused stale objects); the `ccache` mount in the Dockerfile is content-addressed and stays.
 - **File size** is gated on recompile blast radius, not line count: per file, per function body (hard >500 code LOC) and per translation unit (an `#include`d `.cu` counts against its includer). Monolithic belongs in `[allow]` with a reason: `docs/audit/AUDIT_FILESIZE.md`.
 - **VRAM misleads rather than fails on this box.** A successful `cudaMalloc` proves nothing (WDDM oversubscribes into host memory; bandwidth tells resident from spilled, 1530 vs 237 GB/s, #1103), and free VRAM only ever decreases within a process. Capacity is planned, not discovered: `docs/internals/MEMORY.md`.
 - Match surrounding code style; simple and direct, no speculative abstraction.

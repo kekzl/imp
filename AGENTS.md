@@ -1,7 +1,7 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-06
+verified: 2026-09-11
 commit: b5de0dd7
 -->
 
@@ -38,7 +38,7 @@ Rules with no other home:
   (CMake + Dockerfile) and both halves of a pin (tag + commit SHA) together; keep every workflow
   `uses:` on a 40-hex SHA; keep the single-arch gencode block intact.
 - **MAY NOT:** touch kernel/algorithm logic; add multi-arch paths; rename the `Build` CI job (branch-ruleset
-  required check); introduce `--mount=type=cache` in the Docker build; collapse the Dockerfile's
+  required check); put a `--mount=type=cache` on the build dir in the Docker build (the ccache mount is content-addressed and stays); collapse the Dockerfile's
   `toolchain`/`builder` split (`make dev` compiles in the `toolchain` stage) or let the two build paths
   diverge on compiler flags: a `-march` difference between them would silently confound every A/B.
 

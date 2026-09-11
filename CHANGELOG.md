@@ -13,6 +13,8 @@ there instead of retelling it.
 
 ### Added
 - `speculative.batch_verify` (default off): batched speculative verify on the GDN hybrid. Every decoding request forwards its last token plus one MTP draft in a single step; the 2-row recurrent state lands in a spare pool slot (one per batch slot, priced by the planner) and accept swaps slots instead of copying. Qwen3.8-27B-NVFP4-vllm, 8 unique greedy streams: 587-611 -> 704-767 tok/s, 15 streams 990-1057 -> 1099-1214; at 32 clients the spares do not fit (32 -> 18 slots, 1966 -> 1159). `docs/plans/2026-09-11-batched-mtp-verify.md`.
+### Changed
+- Docker image build compiles through `ccache` in a BuildKit cache mount: cold 348 s, warm 10 s (comment edit) to 37 s (header with 12 includers plus one `.cu`), 595/595 compile calls cacheable. The build dir itself is still never cached.
 
 ### Fixed
 - Stop tokens are masked before sampling wherever a stop would have been suppressed: inside the think block while a budget can force `</think>`, and after the close until answer content appears. A suppressed `<|endoftext|>` used to stay in the context, and Qwen3.8-27B-NVFP4 at a near-tie then continued as a new document (`Human: ...`, empty `content`, `finish_reason` stop; `docs/audit/AUDIT_qwen38_nvfp4.md` P3). Eager, conditional-graph, constrained-pipeline and n-gram-verify samplers; `EndToEndModelTest.InThinkStopMaskKeepsStopTokensOutOfTheContext` (17 x `<|im_end|>` before, `</think>` plus answer after).
