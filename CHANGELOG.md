@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+- CI container jobs fetch apt packages from `azure.archive.ubuntu.com` with 5 retries and a 30 s timeout: `archive.ubuntu.com:80` was unreachable for 13 min on 2026-09-11 (run 34574274779), which turned `Build` red and stalled `PTX fallback` in `apt-get` before checkout. Six steps, same pins.
+
 ## [0.40.0] - 2026-09-11
 
 ### Changed

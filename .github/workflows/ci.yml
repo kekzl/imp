@@ -71,10 +71,14 @@ jobs:
       # container has neither: `nvidia/cuda:13.3.1-devel-ubuntu26.04` ships no
       # python3 and no git. Without this the gate step fails "python3: not
       # found" on every PR, which is a false red on the one required check.
+      # Every container job points apt at azure.archive.ubuntu.com: the runners
+      # sit in Azure, and archive.ubuntu.com:80 was unreachable for 13 min on
+      # 2026-09-11 (run 34574274779: Build red, PTX fallback stalled in apt).
       - name: Install git and python3
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git python3
+          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends git python3
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,8 +172,9 @@ jobs:
         # The native CUDA devel image already provides nvcc on PATH at
         # /usr/local/cuda; only the non-CUDA build tooling needs installing.
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends cmake g++ git python3 ccache
+          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends cmake g++ git python3 ccache
 
       - name: Verify nvcc version
         if: steps.changes.outputs.code == 'true'
@@ -315,8 +320,9 @@ jobs:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
       - name: Install deps
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends cmake g++ git python3 clang-tidy
+          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends cmake g++ git python3 clang-tidy
       # cache/restore, not cache: this job only READS compile_commands.json and
       # _deps. Plain `actions/cache` also runs a post-step that re-uploaded the
       # ~476 MB build/ under a key the Build job had already written - 29 s on
@@ -429,8 +435,9 @@ jobs:
 
       - name: Install python
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip python3-venv
+          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-pip python3-venv
           # A venv rather than --break-system-packages: the lock file pins the
           # whole transitive set, and pip cannot replace Debian's own copy of
           # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
@@ -635,8 +642,9 @@ jobs:
       - name: Install toolchain
         shell: sh
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates
+          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -742,8 +750,9 @@ jobs:
       - name: Install toolchain
         shell: sh
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends bash git python3 cmake ninja-build ccache ca-certificates
+          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake ninja-build ccache ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
