@@ -428,6 +428,9 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
                                    {{"prompt_tokens", n_prompt_tokens},
                                     {"completion_tokens", n_output_tokens},
                                     {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
+                if (json details = prompt_tokens_details_(server_req->request, n_prompt_tokens);
+                    !details.is_null())
+                    usage_obj["usage"]["prompt_tokens_details"] = std::move(details);
                 add_spec_usage_(usage_obj["usage"], server_req->request);
                 std::string usage_chunk = "data: " + dump_safe(usage_obj) + "\n\n";
                 sink.write(usage_chunk.data(), usage_chunk.size());
@@ -602,6 +605,8 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
                       {{"prompt_tokens", n_prompt_tokens},
                        {"completion_tokens", n_output_tokens},
                        {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
+    if (json details = prompt_tokens_details_(active_req, n_prompt_tokens); !details.is_null())
+        response["usage"]["prompt_tokens_details"] = std::move(details);
     add_spec_usage_(response["usage"], active_req);
 
     res.set_content(dump_safe(response), "application/json");

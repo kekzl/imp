@@ -18,6 +18,7 @@
 #include "runtime/spec_request.h"
 #include "memory/kv_cache.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -325,17 +326,16 @@ inline SpecFieldParse parse_spec_field_(const nlohmann::json& body, int armed_mt
 inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>& req, int n_prompt_tokens) {
     if (!req)
         return nlohmann::json();
-    nlohmann::json details = nlohmann::json::object();
+    // cached_tokens is always present, 0 on a miss: OpenAI sends the field with
+    // 0 and a client probing once at startup reads "absent" as "unsupported" (#1980).
+    nlohmann::json details = {{"cached_tokens", std::max(0, req->cached_tokens)}};
     if (req->cached_tokens > 0 || req->pin_kv_prefix) {
-        details["cached_tokens"] = req->cached_tokens;
         const int creation = cache_creation_tokens_(req, n_prompt_tokens);
         if (creation > 0)
             details["cache_creation_tokens"] = creation;
     }
     if (req->evicted_kv_tokens > 0)
         details["evicted_tokens"] = req->evicted_kv_tokens;
-    if (details.empty())
-        return nlohmann::json();
     return details;
 }
 

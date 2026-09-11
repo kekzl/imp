@@ -31,6 +31,9 @@ def test_basic_response_shape(client, model):
     assert body["usage"]["total_tokens"] == (
         body["usage"]["prompt_tokens"] + body["usage"]["completion_tokens"]
     )
+    # #1980: present on a miss too (0), the OpenAI shape a startup probe reads.
+    cached = body["usage"]["prompt_tokens_details"]["cached_tokens"]
+    assert isinstance(cached, int) and 0 <= cached <= body["usage"]["prompt_tokens"]
 
 
 def test_system_message(client, model):
@@ -260,3 +263,14 @@ class TestSpeculativeDecoding:
             f"  off: {off_text[:160]!r}\n"
             f"  on : {on_text[:160]!r}"
         )
+
+
+def test_tokenize_takes_content_or_prompt(client, model):
+    """/tokenize: `content` (llama.cpp) and `prompt` (vLLM) are the same field (#1980)."""
+    a = client.post("/tokenize", json={"model": model, "content": "hallo welt"})
+    b = client.post("/tokenize", json={"model": model, "prompt": "hallo welt"})
+    assert a.status_code == 200 and b.status_code == 200
+    assert a.json()["tokens"] == b.json()["tokens"]
+    assert len(a.json()["tokens"]) > 0
+    r = client.post("/tokenize", json={"model": model})
+    assert r.status_code == 400
