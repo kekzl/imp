@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.40.2] - 2026-09-11
+
 ### Fixed
 - `/v1/models` (`max_model_len`, `meta.n_ctx_train`), `/props` and `/info` advertise a growable KV pool's ceiling instead of its current commit. Since `kv_cache.growable_initial_pct` defaulted to 25 (v0.40.0) Qwen3.8-27B-NVFP4 came up at 875 of 13264 blocks and advertised 14000 tokens (v0.39.0: 56976) while a 16860-token prompt was served after one growth; now 131072, the resolver's `max_seq_len`. `/health` `kv_capacity_tokens` still reports the commit, `kv_ceiling_blocks` the ceiling.
 - `scripts/pre-commit.hook` runs a test module by absolute path: since #1982 it exec'd a bare `test-e2e`, and the gtest threadsafe death test `DeviceFaultSignalTest` re-execs argv[0] with `execv` (no PATH search) and failed every pre-commit that reached it.
