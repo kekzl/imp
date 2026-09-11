@@ -57,7 +57,7 @@ build: check-deps
 # Fast inner loop (`make dev`) — incremental compile, seconds not minutes.
 #
 # `make build` copies the tree into an image and compiles from scratch every
-# time: correct, reproducible, and ~3.5 min even for a one-line edit. That is
+# time: correct, reproducible, ~6 min cold and ~40 s from a warm ccache. That is
 # the right gate before a PR and the wrong tool for iterating.
 #
 # `make dev` mounts the working tree into the toolchain image and runs ninja

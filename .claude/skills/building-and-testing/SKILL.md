@@ -11,7 +11,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 |---|---|---|
 | 1 | No CUDA toolkit on the host | Everything runs in Docker. Toolchain `nvidia/cuda:13.3.1-devel-ubuntu26.04`, GCC 15.2, C++23 for host AND device (`CMAKE_CUDA23_STANDARD_COMPILE_OPTION` shim at the top of `CMakeLists.txt`). |
 | 2 | `build/` and `build-dev/` are root-owned | `make dev-clean`, or `docker run --rm -v $PWD:/src -w /src ubuntu rm -rf build`. Never `sudo`. |
-| 3 | No `--mount=type=cache` in the Dockerfile | Silently invalidates test results. |
+| 3 | No `--mount=type=cache` on the build dir in the Dockerfile | 03a2cc19: ninja reused stale objects. The `ccache` mount (`id=imp-ccache`) is content-addressed and stays; `docker builder prune` empties it, which only costs one cold build. |
 | 4 | `models/` in the repo is a symlink farm | Custom `docker run` mounts `$HOME/models:/models`; Makefile targets already do. |
 | 5 | Dependency pins live ONLY in `cmake/imp-deps.cmake` | CUTLASS, GTest, httplib, nlohmann/json, each a TAG plus the SHA the build fetches. `make build` injects both via `scripts/dep_build_args.sh`. `check_dep_pins.sh` runs offline in the `deps` gate (drift, missing SHA, unpinned `uses:`) and `--online` in `Lint` (tag must still resolve to the pinned commit). |
 | 6 | CI has no GPU runner | `Test` job skipped unless repo var `HAS_GPU_RUNNER=true`. GPU correctness and perf are gated LOCALLY: pre-commit (`make test-gpu`), pre-push (`make verify-fast`). |
@@ -24,7 +24,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 |---|---|---|
 | Incremental build (inner loop) | `make dev` | 2-14 s |
 | Incremental build + CI unit lane | `make dev-test` (= `ctest -L unit`) | ~3 s |
-| Full image (the gate; anything you measure or push) | `make build` -> `imp:test` | ~3.5 min regardless of diff; 0 s when the image already carries the tree (`imp.tree` label) |
+| Full image (the gate; anything you measure or push) | `make build` -> `imp:test` | ~6 min cold; 10-40 s from a warm ccache (595 TUs, 2026-09-11); 0 s when the image already carries the tree (`imp.tree` label) |
 | CPU unit binary | `make test-unit` (`imp-tests-unit`) | <5 s |
 | Full GPU suite | `make test-gpu` | 4-10 min |
 | E2E on real models | `make test-e2e` | Qwen3-4B-Instruct-2507-Q8_0, Qwen3.5-4B-mxfp4, gemma-4-26B-A4B Q4_K_M, `MOE_MODEL` (gpt-oss-20b-mxfp4), Qwen3-Coder-30B FP4, Nemotron-3-Nano NVFP4 (paths in `Makefile`) |

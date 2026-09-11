@@ -58,7 +58,7 @@ is **Qwen3.8-27B**, a 27B multimodal model quantized to NVFP4 so it fits one
 5090 with room for a real context. The 60 seconds start once the weights are on
 disk; the two steps before that are a build and a download.
 
-**1. Build the image** (~3.5 min). `scripts/stage-model.sh` runs the downloader
+**1. Build the image** (~6 min the first time, seconds after: ccache). `scripts/stage-model.sh` runs the downloader
 inside the `imp:test` image this produces and exits 1 without it (#1682).
 `docker compose build imp-server` makes `imp:latest`, a different tag.
 
