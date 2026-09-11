@@ -28,6 +28,7 @@
 #include "memory/layer_offload.h"
 #include "memory/vram_allocator.h"
 #include "memory/vram_owned.h"
+#include "runtime/stop_mask.h"
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
 #include <atomic>
@@ -761,6 +762,9 @@ private:
     // Upload d_banned_tokens_ if not already resident. Returns nullptr when
     // the list is empty or the upload failed; callers then simply mask nothing.
     const int32_t* banned_tokens_device_(cudaStream_t stream);
+
+    // Stop ids masked on the steps should_stop would suppress one (stop_mask.h).
+    StopMask stop_mask_;
 
     ChatTemplate chat_template_;
 

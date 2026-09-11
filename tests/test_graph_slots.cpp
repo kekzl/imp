@@ -87,6 +87,7 @@ std::vector<std::pair<const std::byte*, size_t>> device_extents(const GraphSlotV
         E(v.in_think, sizeof(int)),
         E(v.think_exit_step, sizeof(int)),
         E(v.content_after_think, sizeof(int)),
+        E(v.stop_mask_active, sizeof(int)),
         E(v.penalty_count, sizeof(int)),
         E(v.stop_ids, static_cast<size_t>(caps.stop_ids) * sizeof(int32_t)),
         E(v.penalty_ring, static_cast<size_t>(caps.penalty_slots) * sizeof(int32_t)),

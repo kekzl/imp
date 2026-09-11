@@ -205,6 +205,12 @@ struct InferenceState {
     int n_banned_tokens = 0;
     const int32_t* d_banned_tokens = nullptr;  // DEVICE pointer (for CUDA graph path)
     int n_d_banned_tokens = 0;
+    // Graph path twin of the host stop mask: these ids are banned only while
+    // *d_stop_mask_active != 0, a device flag post_decode_step_kernel writes
+    // from think_logic::stop_mask_active. All three set, or none.
+    const int32_t* d_stop_mask_tokens = nullptr;
+    int n_d_stop_mask_tokens = 0;
+    const int* d_stop_mask_active = nullptr;
 
     // Force token: when >= 0, set ALL logits except this token to -inf.
     // Used by think-budget to force </think> generation via logit manipulation

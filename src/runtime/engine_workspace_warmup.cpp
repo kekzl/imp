@@ -188,6 +188,16 @@ bool Engine::init_features() {
             }
         }
     }
+    {
+        // After the think ids: the mask excludes the markers the budget forces.
+        std::vector<int32_t> exclude = harmony_force_seq_;
+        exclude.push_back(think_start_id_);
+        exclude.push_back(think_end_id_);
+        Tokenizer* tok = model_->tokenizer();
+        stop_mask_.build(banned_token_ids_, tok ? tok->eos_ids() : std::vector<int32_t>{},
+                         chat_template_.stop_token_ids(), exclude);
+        (void)stop_mask_.device(vram_alloc_, decode_stream());  // upload in the loading phase (I2)
+    }
 
     // Vision
     if (!config_.mmproj_path.empty()) {

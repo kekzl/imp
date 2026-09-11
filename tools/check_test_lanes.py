@@ -247,7 +247,9 @@ def main():
     # rows 0..K-2 of the conv1d prefill against the CPU form over 300 launches.
     # 1094 -> 1099: GemmF16NarrowSmallM x5 (test-compute, GPU, no model): the one-launch
     # alpha/beta projection of batched GDN decode against a double CPU reference.
-    PINNED = 1104
+    # 1104 -> 1105: InThinkStopMaskKeepsStopTokensOutOfTheContext (test-e2e, GPU, IMP_TEST_MODEL_GDN):
+    # logit_bias +100 on every stop id, the mask must still yield </think> plus content.
+    PINNED = 1105
 
     text = CMAKE.read_text()
     mods = module_sources(text)

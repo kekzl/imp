@@ -63,7 +63,7 @@ src/quant/gpt_oss_mxfp4_convert.cu  # 9
 src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 16
 src/runtime/batch.cpp  # 10
-src/runtime/cuda_graph.cu  # 26
+src/runtime/cuda_graph.cu  # 28
 src/runtime/engine.cpp  # 4
 src/runtime/engine_decode_pipeline.cpp  # 2
 src/runtime/engine_graph_decode.cpp  # 23

@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- Stop tokens are masked before sampling wherever a stop would have been suppressed: inside the think block while a budget can force `</think>`, and after the close until answer content appears. A suppressed `<|endoftext|>` used to stay in the context, and Qwen3.8-27B-NVFP4 at a near-tie then continued as a new document (`Human: ...`, empty `content`, `finish_reason` stop; `docs/audit/AUDIT_qwen38_nvfp4.md` P3). Eager, conditional-graph, constrained-pipeline and n-gram-verify samplers; `EndToEndModelTest.InThinkStopMaskKeepsStopTokensOutOfTheContext` (17 x `<|im_end|>` before, `</think>` plus answer after).
+
 ## [0.40.2] - 2026-09-11
 
 ### Fixed

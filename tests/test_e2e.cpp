@@ -4,6 +4,10 @@
 #include "gguf_stub.h"
 #include "test_models.h"
 #include "runtime/engine.h"
+#include "runtime/think_stop_logic.h"
+#include "model/model.h"
+#include "model/tokenizer.h"
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -649,3 +653,115 @@ TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// In-think stop mask (AUDIT_qwen38_nvfp4 P3). A stop token the model wants
+// inside the think block must be masked BEFORE sampling, not suppressed after:
+// a suppressed <|endoftext|> stays in the context and the model continues as
+// a new document. logit_bias +100 on every stop id makes the stop the argmax
+// at every step, so the only way the output can contain a </think> and answer
+// content is the mask (the budget forces the close, the grace masks the stop
+// until content appears, then the model's own stop is honoured).
+// ---------------------------------------------------------------------------
+
+TEST(EndToEndModelTest, InThinkStopMaskKeepsStopTokensOutOfTheContext) {
+    const std::string path = imp_test::env_path(imp_test::kEnvModelGdn);
+    if (path.empty())
+        GTEST_SKIP() << "Set IMP_TEST_MODEL_GDN to run the think-mask test";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModelGdn));
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 512;
+    config.max_batch_size = 1;
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_context_create(model, &config, &ctx), IMP_SUCCESS);
+    imp::Engine* engine = ctx->engine.get();
+    ASSERT_NE(engine, nullptr);
+    imp::Tokenizer* tok = engine->model()->tokenizer();
+    ASSERT_NE(tok, nullptr);
+
+    const int32_t im_start = tok->find_token("<|im_start|>");
+    const int32_t im_end = tok->find_token("<|im_end|>");
+    const int32_t think_open = tok->find_token("<think>");
+    const int32_t think_close = tok->find_token("</think>");
+    ASSERT_GE(im_start, 0);
+    ASSERT_GE(im_end, 0);
+    ASSERT_GE(think_open, 0);
+    ASSERT_GE(think_close, 0);
+
+    std::vector<int32_t> stop_ids = tok->eos_ids();
+    for (int32_t sid : engine->chat_template().stop_token_ids())
+        stop_ids.push_back(sid);
+    stop_ids.push_back(im_end);
+    ASSERT_FALSE(stop_ids.empty());
+    auto is_stop = [&](int32_t t) {
+        for (int32_t s : stop_ids)
+            if (s == t)
+                return true;
+        return false;
+    };
+
+    auto req = std::make_shared<imp::Request>();
+    auto append = [&](const std::string& text) {
+        for (int32_t t : tok->encode(text, /*no_prefix=*/true))
+            req->input_tokens.push_back(t);
+    };
+    req->input_tokens.push_back(im_start);
+    append("user\nWhat is 2+2? Answer with one digit.");
+    req->input_tokens.push_back(im_end);
+    append("\n");
+    req->input_tokens.push_back(im_start);
+    append("assistant\n");
+    req->input_tokens.push_back(think_open);
+    append("\n");
+    req->in_think_block = true;
+    req->started_in_think = true;
+    req->think_budget = 0.5f;
+    req->max_tokens = 64;
+    req->temperature = 0.0f;
+    req->top_p = 1.0f;
+    req->top_k = 0;
+    for (int32_t s : stop_ids)
+        req->logit_bias.emplace_back(s, 100.0f);
+    req->status = imp::RequestStatus::PENDING;
+    engine->add_request(req);
+
+    for (int step = 0; step < 512 && req->status != imp::RequestStatus::FINISHED &&
+                       req->status != imp::RequestStatus::CANCELLED;
+         step++)
+        (void)engine->step();
+    ASSERT_EQ(req->status, imp::RequestStatus::FINISHED);
+
+    const auto& out = req->output_tokens;
+    ASSERT_FALSE(out.empty());
+    int close_idx = -1;
+    for (size_t i = 0; i < out.size(); i++) {
+        if (out[i] == think_close) {
+            close_idx = static_cast<int>(i);
+            break;
+        }
+    }
+    std::string decoded;
+    for (int32_t t : out)
+        decoded += tok->decode_token(t);
+    ASSERT_GE(close_idx, 0) << "no </think> in output: " << decoded;
+    for (int i = 0; i < close_idx; i++)
+        EXPECT_FALSE(is_stop(out[i])) << "stop token " << out[i] << " inside the think block at " << i;
+    // The grace masks the stop until a content token appears; after that the
+    // biased stop is honoured. So: content, then at most one trailing stop.
+    int content_tokens = 0;
+    for (size_t i = close_idx + 1; i < out.size(); i++) {
+        if (is_stop(out[i])) {
+            EXPECT_EQ(i, out.size() - 1) << "stop token inside the answer at " << i << ": " << decoded;
+            break;
+        }
+        if (!imp::think_logic::piece_is_whitespace(tok->decode_token(out[i])))
+            content_tokens++;
+    }
+    EXPECT_GE(content_tokens, 1) << "empty answer after </think>: " << decoded;
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}

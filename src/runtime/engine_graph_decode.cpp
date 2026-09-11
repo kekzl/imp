@@ -20,20 +20,7 @@ namespace imp {
 // =====================================================================
 
 const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
-    if (banned_token_ids_.empty())
-        return nullptr;
-    if (d_banned_tokens_)
-        return d_banned_tokens_.get();
-    VramOwned<int32_t> buf(vram_alloc_, banned_token_ids_.size(), "banned_tokens");
-    if (!buf) {
-        IMP_LOG_WARN("banned tokens: device upload failed (%zu B), masking disabled", buf.bytes());
-        return nullptr;
-    }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(buf.get(), banned_token_ids_.data(), buf.bytes(),
-                                       cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));  // once, at first use
-    d_banned_tokens_ = std::move(buf);
-    return d_banned_tokens_.get();
+    return upload_id_list_once(d_banned_tokens_, banned_token_ids_, vram_alloc_, "banned_tokens", stream);
 }
 
 void Engine::release_async_block_tables_() {
@@ -236,6 +223,11 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
         state_template.d_banned_tokens = const_cast<int32_t*>(d_banned);
         state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
     }
+    // Stop mask id list; the runner supplies the per-step flag (cuda_graph.cu).
+    if (const int32_t* d_mask = stop_mask_.device(vram_alloc_, stream)) {
+        state_template.d_stop_mask_tokens = d_mask;
+        state_template.n_d_stop_mask_tokens = stop_mask_.n();
+    }
 
     auto gcfg = build_graph_config(*req, remaining);
 
@@ -406,6 +398,11 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     if (const int32_t* d_banned = banned_tokens_device_(stream)) {
         state_template.d_banned_tokens = const_cast<int32_t*>(d_banned);
         state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
+    }
+    // Stop mask id list; the runner supplies the per-step flag (cuda_graph.cu).
+    if (const int32_t* d_mask = stop_mask_.device(vram_alloc_, stream)) {
+        state_template.d_stop_mask_tokens = d_mask;
+        state_template.n_d_stop_mask_tokens = stop_mask_.n();
     }
 
     if (runtime_config_.diagnostics.spec_trace)
@@ -634,6 +631,16 @@ int Engine::step_constrained_pipeline() {
                                             req->output_tokens, think_start_id_, req->started_in_think,
                                             runtime_config_.runtime.think_answer_reserve)) {
         p.state.force_token = think_end_id_;
+    }
+    // Stop mask (mirrors fill_sampling_params): the host drives this sampler
+    // per tick, so the list swap is enough, no device flag.
+    p.state.d_banned_tokens = p.d_banned;
+    p.state.n_d_banned_tokens = p.d_banned ? static_cast<int>(banned_token_ids_.size()) : 0;
+    if (p.state.force_token < 0 && stop_mask_active(*req, think_end_id_)) {
+        if (const int32_t* d_mask = stop_mask_.device(vram_alloc_, stream)) {
+            p.state.d_banned_tokens = d_mask;
+            p.state.n_d_banned_tokens = stop_mask_.n();
+        }
     }
     // Token-history penalties — per-tick upload, exactly like the eager path.
     p.state.penalty_tokens = nullptr;

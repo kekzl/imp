@@ -99,8 +99,9 @@ bool Engine::should_stop(Request& req, int32_t token) const {
     // The model may generate <|im_end|> during reasoning as part of its internal
     // monologue — stopping here produces empty content (llama.cpp ignores this).
     if (req.in_think_block) {
-        // If the model emits a stop token while still inside thinking, treat
-        // it as an implicit </think>: NVFP4 quants on Qwen3.6 occasionally
+        // With a think budget the sampler masks stop ids here (stop_mask_active_)
+        // and this branch is not reached. Without one, a stop token inside
+        // thinking is an implicit </think>: NVFP4 quants on Qwen3.6 occasionally
         // skip the explicit close marker and jump straight to <|im_end|>.
         // Without this, generation freezes inside the suppressed-stop branch
         // forever (in_think never flips, every EOS is masked). Flipping the
@@ -208,6 +209,15 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
         } else {
             state.force_token = think_end_id_;  // <think> models: single </think>
         }
+    }
+
+    // Sampler-side stop mask (think_logic::stop_mask_active): on the steps
+    // should_stop would suppress a stop token, take it out of the logits
+    // instead, so it never enters the context. A forced token is the whole
+    // distribution already.
+    if (state.force_token < 0 && stop_mask_.n() > 0 && stop_mask_active(req, think_end_id_)) {
+        state.banned_tokens = stop_mask_.ids.data();
+        state.n_banned_tokens = stop_mask_.n();
     }
 }
 
