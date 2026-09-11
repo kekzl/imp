@@ -45,6 +45,21 @@ __global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ log
     }
 }
 
+// ban_logits_kernel gated on a device flag: the graph body is fixed, the
+// think state is not (InferenceState::d_stop_mask_active).
+__global__ __launch_bounds__(256) void ban_logits_if_kernel(float* __restrict__ logits,
+                                                            const int32_t* __restrict__ banned_ids,
+                                                            int n_banned, int vocab_size,
+                                                            const int* __restrict__ d_active) {
+    if (*d_active == 0)
+        return;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n_banned; i += gridDim.x * blockDim.x) {
+        int32_t tid = banned_ids[i];
+        if (tid >= 0 && tid < vocab_size)
+            logits[tid] = -1e30f;
+    }
+}
+
 namespace imp {
 
 void launch_ban_logits(float* logits, const int32_t* banned_ids, int n_banned, int vocab_size,
@@ -54,6 +69,25 @@ void launch_ban_logits(float* logits, const int32_t* banned_ids, int n_banned, i
     ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(logits, banned_ids, n_banned, vocab_size);
     IMP_CUDA_CHECK_LAUNCH();
 }
+
+void launch_ban_logits_if(float* logits, const int32_t* banned_ids, int n_banned, int vocab_size,
+                          const int* d_active, cudaStream_t stream) {
+    constexpr int kBanThreads = 256;
+    int blocks = (n_banned + kBanThreads - 1) / kBanThreads;
+    ban_logits_if_kernel<<<blocks, kBanThreads, 0, stream>>>(logits, banned_ids, n_banned, vocab_size,
+                                                             d_active);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+namespace {
+// The graph-captured stop mask (InferenceState::d_stop_mask_*), after the
+// unconditional ban. No-op unless all three fields are set.
+void apply_stop_mask(const InferenceState& state, float* lp, int vocab, cudaStream_t stream) {
+    if (state.d_stop_mask_tokens && state.n_d_stop_mask_tokens > 0 && state.d_stop_mask_active)
+        launch_ban_logits_if(lp, state.d_stop_mask_tokens, state.n_d_stop_mask_tokens, vocab,
+                             state.d_stop_mask_active, stream);
+}
+}  // namespace
 
 void GraphExecutor::pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream) {
     Tensor hidden = view_hidden(n_tokens);
@@ -241,6 +275,7 @@ void GraphExecutor::masked_sample_async(const InferenceState& state, const Tenso
                                                               state.n_d_banned_tokens, vocab);
         IMP_CUDA_CHECK_LAUNCH();
     }
+    apply_stop_mask(state, lp, vocab, stream);
 
     // Constraint mask (host-computed this step, uploaded stream-ordered).
     apply_constraint_mask(state, lp, vocab, stream);
@@ -287,6 +322,7 @@ void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d
             lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
         IMP_CUDA_CHECK_LAUNCH();
     }
+    apply_stop_mask(state, lp, vocab, stream);
 
     // Repetition / frequency / presence penalties — device counter grows each
     // iteration as tokens are appended to the penalty ring.

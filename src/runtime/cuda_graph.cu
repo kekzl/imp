@@ -1,4 +1,5 @@
 #include "runtime/cuda_graph.h"
+#include "runtime/think_stop_logic.h"
 #include "core/graph_diag.h"
 #include "core/pdl.h"
 #include "core/process_diag.h"
@@ -558,6 +559,7 @@ __global__ void post_decode_step_kernel(
     int* __restrict__ d_in_think,         // [1] think block flag
     int* __restrict__ d_think_exit_step,  // [1] step </think> last closed (-1 = never)
     int* __restrict__ d_content_after_think,  // [1] real answer token seen since </think> (0/1)
+    int* __restrict__ d_stop_mask_active,     // [1] next step bans stop ids (0/1), may be null
     const uint8_t* __restrict__ d_token_is_whitespace,  // [vocab] 1 = decodes to whitespace-only
     int vocab_size,
     int ignore_eos,                   // 1 = don't stop on EOS/stop tokens
@@ -667,6 +669,17 @@ __global__ void post_decode_step_kernel(
             if (token == d_stop_ids[i])
                 should_stop = true;
         }
+    }
+    // Stop mask for the NEXT step's sampler (ban_logits_if_kernel): the same
+    // rule as the host (think_logic::stop_mask_active), with output_size ==
+    // step + 1 and the budget standing in for "a </think> can be forced".
+    if (d_stop_mask_active) {
+        const int exit_step = (track_think && d_think_exit_step) ? *d_think_exit_step : -1;
+        const bool content = d_content_after_think && *d_content_after_think != 0;
+        *d_stop_mask_active = imp::think_logic::stop_mask_active(in_think, think_budget_limit > 0, exit_step,
+                                                                 step + 1, content, ignore_eos != 0)
+                                  ? 1
+                                  : 0;
     }
 
     // Think budget: break loop to return to CPU for force_token injection.
@@ -808,6 +821,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             d_in_think_ = sv.in_think;
             d_think_exit_step_ = sv.think_exit_step;
             d_content_after_think_ = sv.content_after_think;
+            d_stop_mask_active_ = sv.stop_mask_active;
         } else {
             err = cudaMalloc(&d_think_count_, sizeof(int));
             if (err != cudaSuccess)
@@ -821,10 +835,23 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             err = cudaMalloc(&d_content_after_think_, sizeof(int));
             if (err != cudaSuccess)
                 goto fail;
+            err = cudaMalloc(&d_stop_mask_active_, sizeof(int));
+            if (err != cudaSuccess)
+                goto fail;
         }
         int zero = 0;
         int neg_one = -1;
         int init_think = config_.initial_in_think ? 1 : 0;
+        // First step's mask: the host rule on the seed state (no exit yet).
+        int init_mask = think_logic::stop_mask_active(config_.initial_in_think, config_.think_budget_limit > 0,
+                                                      -1, 0, false, config_.ignore_eos)
+                            ? 1
+                            : 0;
+        err = cudaMemcpyAsync(d_stop_mask_active_, &init_mask, sizeof(int), cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: stop_mask init failed: %s", cudaGetErrorString(err));
+            goto fail;
+        }
         err = cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("ConditionalRunner: think_count init failed: %s", cudaGetErrorString(err));
@@ -987,6 +1014,12 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         body_state.n_tokens = 1;
         body_state.n_sequences = 1;
         body_state.is_prefill = false;
+        // The stop-mask flag lives here; the id list comes with the template.
+        body_state.d_stop_mask_active = d_stop_mask_active_;
+        if (!d_stop_mask_active_) {
+            body_state.d_stop_mask_tokens = nullptr;
+            body_state.n_d_stop_mask_tokens = 0;
+        }
         body_state.temperature = config_.temperature;
         body_state.top_p = config_.top_p;
         body_state.top_k = config_.top_k;
@@ -1088,7 +1121,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      d_think_limit_, config_.think_start_id,
                                                      config_.think_end_id, config_.think_grace_tokens,
                                                      d_think_count_, d_in_think_, d_think_exit_step_,
-                                                     d_content_after_think_,
+                                                     d_content_after_think_, d_stop_mask_active_,
                                                      config_.token_is_whitespace, config_.vocab_size,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
                                                      penalty_prefix_len_, d_penalty_count_,
@@ -1219,10 +1252,13 @@ bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int co
         !up(d_think_limit_, &think_limit, sizeof(int), "think_limit"))
         return false;
     if (d_in_think_) {
+        const int mask =
+            think_logic::stop_mask_active(in_think, think_limit > 0, -1, 0, false, config_.ignore_eos) ? 1 : 0;
         if (!up(d_in_think_, &think, sizeof(int), "in_think") ||
             !up(d_think_count_, &zero, sizeof(int), "think_count") ||
             !up(d_think_exit_step_, &neg_one, sizeof(int), "think_exit") ||
-            !up(d_content_after_think_, &zero, sizeof(int), "content_after_think"))
+            !up(d_content_after_think_, &zero, sizeof(int), "content_after_think") ||
+            !up(d_stop_mask_active_, &mask, sizeof(int), "stop_mask_active"))
             return false;
     }
     *h_step_counter_ = 0;
@@ -1337,6 +1373,7 @@ void CudaGraphConditionalRunner::cleanup() {
         d_in_think_ = nullptr;
         d_think_exit_step_ = nullptr;
         d_content_after_think_ = nullptr;
+        d_stop_mask_active_ = nullptr;
         d_penalty_ring_ = nullptr;
         d_penalty_count_ = nullptr;
         penalty_prefix_len_ = 0;
@@ -1401,6 +1438,10 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_content_after_think_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_content_after_think_));
         d_content_after_think_ = nullptr;
+    }
+    if (d_stop_mask_active_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_stop_mask_active_));
+        d_stop_mask_active_ = nullptr;
     }
     if (d_penalty_ring_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_));

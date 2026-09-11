@@ -377,6 +377,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_capture.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_sampling_stop.cpp
+    src/runtime/stop_mask.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
     src/runtime/token_recycle_draft.cpp

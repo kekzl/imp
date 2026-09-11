@@ -18,6 +18,9 @@ namespace imp {
 // Defined in executor.cu (wraps ban_logits_kernel, which lives there).
 void launch_ban_logits(float* logits, const int32_t* banned_ids, int n_banned, int vocab_size,
                        cudaStream_t stream);
+// Same, gated on a device flag (*d_active != 0); graph-captured stop mask.
+void launch_ban_logits_if(float* logits, const int32_t* banned_ids, int n_banned, int vocab_size,
+                          const int* d_active, cudaStream_t stream);
 
 // The one place that decides which constrainer masks a step. There are four
 // sampling paths across these two TUs and they used to carry four copies of

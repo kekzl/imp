@@ -231,11 +231,36 @@ struct TextThinkState {
 // non-stop token has been emitted since that exit.
 inline constexpr int kMinAnswerAfterThink = 16;
 
-inline bool grace_blocks_stop(int think_exit_idx, int output_size, bool content_after_think) {
+// post_decode_step_kernel (cuda_graph.cu) evaluates the same rules on device.
+#if defined(__CUDACC__)
+#define IMP_THINK_HD __host__ __device__
+#else
+#define IMP_THINK_HD
+#endif
+
+IMP_THINK_HD inline bool grace_blocks_stop(int think_exit_idx, int output_size, bool content_after_think) {
     if (think_exit_idx < 0 || content_after_think)
         return false;
     int tokens_since_exit = output_size - think_exit_idx;
     return tokens_since_exit < kMinAnswerAfterThink;
+}
+
+// --- Sampler-side stop mask (fill_sampling_params, post_decode_step_kernel) ---
+//
+// Wherever should_stop would SUPPRESS a stop token, mask it before sampling
+// instead: a suppressed stop stays in the context, and on Qwen3.8-27B a
+// near-tie inside the think block then picks <|endoftext|>, the model
+// continues as a new document ("Human: ...") and content ends empty
+// (AUDIT_qwen38_nvfp4 P3). Bounded: in-think only while a budget can force
+// </think> (`budget_can_close` = think_budget > 0 and a </think> id exists),
+// after the close only for the kMinAnswerAfterThink grace window.
+IMP_THINK_HD inline bool stop_mask_active(bool in_think, bool budget_can_close, int think_exit_idx,
+                                          int output_size, bool content_after_think, bool ignore_eos) {
+    if (ignore_eos)
+        return false;
+    if (in_think)
+        return budget_can_close;
+    return grace_blocks_stop(think_exit_idx, output_size, content_after_think);
 }
 
 // Does a decoded token piece count as real answer content for the grace above?

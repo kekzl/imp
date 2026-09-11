@@ -878,12 +878,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             ? std::min({std::max(1, runtime_config_.speculative.recycle_slots),
                         kRowwiseTopMMax})
             : 0;
-    executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist,
-                                 d_spec_tokens_ + 1, req->repetition_penalty,
-                                 req->frequency_penalty, req->presence_penalty,
-                                 recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m,
-                                 banned_tokens_device_(stream),
-                                 static_cast<int>(banned_token_ids_.size()));
+    // Stop mask (mirrors fill_sampling_params) at the request's state when the
+    // chunk starts: a verified stop inside the think block is a rejected draft.
+    const bool mask = stop_mask_active(*req, think_end_id_);
+    const int32_t* d_ban = mask ? stop_mask_.device(vram_alloc_, stream) : banned_tokens_device_(stream);
+    const int n_ban = !d_ban ? 0 : mask ? stop_mask_.n() : static_cast<int>(banned_token_ids_.size());
+    executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist, d_spec_tokens_ + 1,
+                                 req->repetition_penalty, req->frequency_penalty, req->presence_penalty,
+                                 recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m, d_ban, n_ban);
     // One D2H covers [argmax | topm] (contiguous block, #1055); without the
     // harvest only the argmax prefix is copied.
     const size_t d2h_ints =

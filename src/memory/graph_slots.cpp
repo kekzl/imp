@@ -20,14 +20,15 @@ constexpr size_t align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
 constexpr size_t kSampleScratchBytes = kGraphSlotSampleScratchBytes;
 
 // Scalar count: position, context_len, step_counter, step_limit, think_limit,
-// think_count, in_think, think_exit_step, content_after_think, penalty_count.
-constexpr int kNumScalars = 10;
+// think_count, in_think, think_exit_step, content_after_think, stop_mask_active,
+// penalty_count.
+constexpr int kNumScalars = 11;
 
 }  // namespace
 
 // ── layout ──────────────────────────────────────────────────────────────
 //
-// device slot:  [sample scratch][10 ints][stop ids][penalty ring]
+// device slot:  [sample scratch][11 ints][stop ids][penalty ring]
 // host slot:    [ring buffer][step counter][burst done][decode scratch]
 //
 // Each sub-buffer is kSubAlign-aligned, so the strides below are what one slot
@@ -141,7 +142,8 @@ GraphSlotView GraphSlotPool::carve_(int index) const {
     v.in_think = scalars + 6;
     v.think_exit_step = scalars + 7;
     v.content_after_think = scalars + 8;
-    v.penalty_count = scalars + 9;
+    v.stop_mask_active = scalars + 9;
+    v.penalty_count = scalars + 10;
     d += align_up(kNumScalars * sizeof(int), kSubAlign);
 
     v.stop_ids = reinterpret_cast<int32_t*>(d);

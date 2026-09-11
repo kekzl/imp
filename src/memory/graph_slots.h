@@ -79,6 +79,7 @@ struct GraphSlotView {
     int* in_think = nullptr;
     int* think_exit_step = nullptr;
     int* content_after_think = nullptr;
+    int* stop_mask_active = nullptr;
     int* penalty_count = nullptr;
 
     int32_t* stop_ids = nullptr;

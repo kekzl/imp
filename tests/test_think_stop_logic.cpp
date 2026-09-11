@@ -470,3 +470,49 @@ TEST(GracePeriod, RealTextPieceIsContent) {
     EXPECT_FALSE(piece_is_whitespace(" red"));     // leading space, real word
     EXPECT_FALSE(piece_is_whitespace("\n4"));      // newline + digit
 }
+
+// ---------------------------------------------------------------------------
+// Sampler-side stop mask (fill_sampling_params / post_decode_step_kernel)
+// ---------------------------------------------------------------------------
+// A stop token that should_stop suppresses still lands in the context. On
+// Qwen3.8-27B a near-tie inside the think block then picks <|endoftext|>, the
+// model continues as a new document ("Human: ...") and the answer is empty
+// (AUDIT_qwen38_nvfp4 P3). The mask removes stop ids from the logits BEFORE
+// sampling wherever the stop would have been suppressed, so the second-best
+// token is sampled instead. Termination: in-think only while a budget can
+// force </think>; after the close only for the bounded grace window.
+
+TEST(StopMask, InThinkWithBudgetMasks) {
+    EXPECT_TRUE(stop_mask_active(/*in_think=*/true, /*budget_can_close=*/true,
+                                 /*think_exit_idx=*/-1, /*output_size=*/5,
+                                 /*content_after_think=*/false, /*ignore_eos=*/false));
+}
+
+TEST(StopMask, InThinkWithoutBudgetDoesNotMask) {
+    // No budget = nothing forces </think>; masking EOS would run to max_tokens.
+    EXPECT_FALSE(stop_mask_active(true, /*budget_can_close=*/false, -1, 5, false, false));
+}
+
+TEST(StopMask, GraceWithoutContentMasks) {
+    // </think> at 10, sampling token 11, no answer content yet.
+    EXPECT_TRUE(stop_mask_active(false, true, /*think_exit_idx=*/10, /*output_size=*/11,
+                                 /*content_after_think=*/false, false));
+}
+
+TEST(StopMask, GraceReleasesOnContent) {
+    EXPECT_FALSE(stop_mask_active(false, true, 10, 12, /*content_after_think=*/true, false));
+}
+
+TEST(StopMask, GraceHardCapReleasesWithoutContent) {
+    // kMinAnswerAfterThink == 16: 26 - 10 lifts the mask, 25 - 10 keeps it.
+    EXPECT_FALSE(stop_mask_active(false, true, 10, 26, false, false));
+    EXPECT_TRUE(stop_mask_active(false, true, 10, 25, false, false));
+}
+
+TEST(StopMask, NeverThoughtNoMask) { EXPECT_FALSE(stop_mask_active(false, true, -1, 5, false, false)); }
+
+TEST(StopMask, IgnoreEosNeverMasks) {
+    // Benchmark mode samples the model's own distribution; nothing stops anyway.
+    EXPECT_FALSE(stop_mask_active(true, true, -1, 5, false, /*ignore_eos=*/true));
+    EXPECT_FALSE(stop_mask_active(false, true, 10, 11, false, /*ignore_eos=*/true));
+}
