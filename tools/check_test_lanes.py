@@ -249,7 +249,10 @@ def main():
     # alpha/beta projection of batched GDN decode against a double CPU reference.
     # 1104 -> 1105: InThinkStopMaskKeepsStopTokensOutOfTheContext (test-e2e, GPU, IMP_TEST_MODEL_GDN):
     # logit_bias +100 on every stop id, the mask must still yield </think> plus content.
-    PINNED = 1105
+    # 1105 -> 1108: VerifyGroupsCommitToSpareAndSnapshotInPlace, VerifyGroupsConvCommitsToSpareAndSnapshotsInPlace
+    # (test-moe-gdn, GPU, no model): the batched verify's per-group commit and snapshot slots;
+    # MultiSlotFeedMatchesPerSlotBatches (test-moe-gdn): the ragged multi-slot MTP feed vs per-slot batches.
+    PINNED = 1108
 
     text = CMAKE.read_text()
     mods = module_sources(text)
