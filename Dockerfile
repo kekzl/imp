@@ -30,7 +30,7 @@ RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.co
           /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true; } \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        g++ git ninja-build ca-certificates python3 wget \
+        g++ git ninja-build ca-certificates python3 wget ccache \
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
     && echo '85947732c8eb85fbc8eb56ff950e4f3db8fc36bf4259b89b74fc947d23534e4a  /tmp/cmake.sh' | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
@@ -83,8 +83,19 @@ ARG IMP_BUILD_TESTS=OFF
 ARG IMP_BUILD_BENCH=OFF
 ARG IMP_EXTRA_CMAKE=
 
-RUN cmake -B build -G Ninja \
+# ccache in a BuildKit cache mount. Content-addressed: a hit is keyed on the
+# preprocessed source, the flags and the compiler binary, so it IS the object a
+# fresh compile would emit. The build dir is never cached (03a2cc19: a cache
+# mount on /src/build let ninja reuse stale objects). The mount is not part of
+# the layer key: an unchanged tree still resolves to a CACHED layer.
+ENV CCACHE_DIR=/ccache CCACHE_MAXSIZE=2G
+RUN --mount=type=cache,id=imp-ccache,target=/ccache \
+    ccache -z \
+    && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
         -DIMP_BUILD_TESTS=${IMP_BUILD_TESTS} \
         -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
         -DIMP_BUILD_TOOLS=ON \
@@ -95,6 +106,7 @@ RUN cmake -B build -G Ninja \
         -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
         -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
     && cmake --build build -j$(nproc) \
+    && ccache -s \
     && cp build/imp-server build/imp-cli /tmp/ \
     && ([ -f build/imp-quantize ] && cp build/imp-quantize /tmp/ || true) \
     && if [ -f build/imp-tests ]; then \

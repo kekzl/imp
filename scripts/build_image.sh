@@ -8,7 +8,8 @@
 # file that .gitignore does not cover. Anything else builds unconditionally,
 # because `COPY . .` would ship what the index does not describe.
 #
-# Measured cost of the rebuild this skips: 3.5 min per `make build`, which the
+# Measured cost of the rebuild this skips: ~6 min cold, 10-40 s from a warm
+# ccache (2026-09-11), per `make build`, which the
 # pre-commit hook (test-gpu), the pre-push hook (verify-fast) and verify-ab
 # each reached for the same tree.
 #

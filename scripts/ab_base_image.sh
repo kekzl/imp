@@ -4,7 +4,8 @@
 # <ref> (default origin/main) is checked out into a throwaway git worktree and
 # built with the same Dockerfile arguments `make build` uses, tagged
 # imp:ab-<sha8> and imp:ab-base. The tag is reused when it exists, so one main
-# sha costs one 3.5-minute build however many pushes are gated against it.
+# sha costs one build (~6 min cold, ~40 s from a warm ccache) however many
+# pushes are gated against it.
 # The worktree's own scripts/dep_build_args.sh supplies the dependency pins, so
 # the base arm is built with ITS pins, not this tree's.
 #
