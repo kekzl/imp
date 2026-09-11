@@ -14,6 +14,7 @@ there instead of retelling it.
 ### Added
 - `speculative.batch_verify` (default off): batched speculative verify on the GDN hybrid. Every decoding request forwards its last token plus one MTP draft in a single step; the 2-row recurrent state lands in a spare pool slot (one per batch slot, priced by the planner) and accept swaps slots instead of copying. Qwen3.8-27B-NVFP4-vllm, 8 unique greedy streams: 587-611 -> 704-767 tok/s, 15 streams 990-1057 -> 1099-1214; at 32 clients the spares do not fit (32 -> 18 slots, 1966 -> 1159). `docs/plans/2026-09-11-batched-mtp-verify.md`.
 ### Changed
+- Sparse decode attention scores a KV page by its key mean plus standard deviation instead of the Quest min/max corner bound (`attention.sparse_score_meanstd`, default on; `false` restores the bound). Same metadata layout, same arithmetic count. Qwen3.8-27B-NVFP4-vllm, NIAH at 5 depths x 81 908 / 126 908 tokens: 2/10 -> 10/10 at a 4096-token budget, 7/10 -> 10/10 at 8192, wall time neutral. `docs/plans/2026-08-28-sparse-decode-attention.md`.
 - Docker image build compiles through `ccache` in a BuildKit cache mount: cold 348 s, warm 10 s (comment edit) to 37 s (header with 12 includers plus one `.cu`), 595/595 compile calls cacheable. The build dir itself is still never cached.
 
 ### Fixed

@@ -480,6 +480,16 @@ sparse_recent_tokens = 256
 # exceeded: the selection only outgrows its overhead past ~12k (8k measured
 # -7 %, 16k +6 %, 32k +25 %). A sparse_topk_tokens setting is a no-op below it.
 sparse_min_ctx       = 12288
+# Page score. true (default) = mean of the page's keys plus
+# sparse_score_std_coef times their standard deviation; false = the min/max
+# corner bound (Quest). Both are sum_d (q_d*center_d + |q_d|*offset_d) over the
+# same metadata layout at the same cost; the corner bound widens with whichever
+# single token is most extreme per dimension, which is what costs it recall at
+# small budgets. Qwen3.8-27B-NVFP4, NIAH 5 depths x 2 lengths: corner 2/10 at a
+# 4096 budget and 7/10 at 8192, mean+std 10/10 at both, wall time neutral.
+sparse_score_meanstd = true
+# Offset weight for sparse_score_meanstd. 0 ranks on the mean alone.
+sparse_score_std_coef = 1.0
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload

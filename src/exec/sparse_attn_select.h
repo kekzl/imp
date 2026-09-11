@@ -1,9 +1,12 @@
 #pragma once
 
 // Sparse decode attention (attention.sparse_topk_tokens): Quest-class top-k
-// page selection. Per-block key min/max metadata bounds every query dot
-// product; the top-scoring blocks are compacted into a per-step block table
-// the unmodified paged decode kernels consume. All device-side, graph-safe.
+// page selection. Per-block key metadata scores every query dot product; the
+// top-scoring blocks are compacted into a per-step block table the unmodified
+// paged decode kernels consume. All device-side, graph-safe.
+// meanstd (attention.sparse_score_meanstd) switches the pair the metadata
+// pass stores and the score kernel reads from (min, max) to (mean, std);
+// both passes must agree, so it is one flag threaded through both calls.
 // Design: docs/plans/2026-08-28-sparse-decode-attention.md.
 
 #include "core/tensor.h"
@@ -30,7 +33,7 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
                                          const int* positions, const int* block_tables,
                                          const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
                                          int block_size, int n_tokens, int max_blocks_per_seq,
-                                         int n_sequences, cudaStream_t stream);
+                                         int n_sequences, bool meanstd, cudaStream_t stream);
 
 // Score every context block of every sequence against the current queries and
 // build a compacted block table (ascending block order, at most budget_blocks
@@ -47,6 +50,7 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
                           int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
                           int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, cudaStream_t stream);
+                          int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
+                          cudaStream_t stream);
 
 }  // namespace imp

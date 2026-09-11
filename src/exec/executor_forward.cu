@@ -621,7 +621,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                             state.block_tables, state.seq_offsets, n_kv,
                                             kvc->n_kv_heads(), kvc->head_dim(), kvc->block_size(),
                                             state.n_tokens, state.max_blocks_per_seq, state.n_sequences,
-                                            stream);
+                                            qscratch_.sparse_score_meanstd, stream);
     }
 
     // BitDecoding Phase 3: advance the residual ring state once per decode

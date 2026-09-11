@@ -31,9 +31,9 @@ constexpr int kBS = 16;  // kKVBlockSize
 static void sparse_update_key_minmax(QType t, const void* k, void* mm, const int* pos, const int* bt,
                                      int nkv, int hd, int bs, int n, int mbps, int nseq,
                                      cudaStream_t stream, const int* seq_offsets = nullptr,
-                                     const void* k_scales = nullptr) {
+                                     const void* k_scales = nullptr, bool meanstd = false) {
     sparse_update_key_minmax_all_layers(t, k, 0, k_scales, 0, mm, 0, pos, bt, seq_offsets, /*n_layers=*/1,
-                                        nkv, hd, bs, n, mbps, nseq, stream);
+                                        nkv, hd, bs, n, mbps, nseq, meanstd, stream);
 }
 
 // Deterministic value fill: distinct, sign-mixed, exactly f16-representable.
@@ -77,6 +77,29 @@ static void ref_minmax(const std::vector<half>& k_cache, int block_id, int row_e
     }
 }
 
+// Host reference for the mean/std pair: elementwise mean and population
+// standard deviation over the written slots' K rows, accumulated in double so
+// the device's fp32 Welford is the only approximation under test.
+static void ref_meanstd(const std::vector<half>& k_cache, int block_id, int row_elems, int slots,
+                        std::vector<float>& mean, std::vector<float>& sd) {
+    mean.assign(row_elems, 0.0f);
+    sd.assign(row_elems, 0.0f);
+    for (int e = 0; e < row_elems; e++) {
+        const size_t base = static_cast<size_t>(block_id) * kBS * row_elems + e;
+        double acc = 0.0;
+        for (int s = 0; s < slots; s++)
+            acc += __half2float(k_cache[base + static_cast<size_t>(s) * row_elems]);
+        const double m = acc / slots;
+        double m2 = 0.0;
+        for (int s = 0; s < slots; s++) {
+            const double d = __half2float(k_cache[base + static_cast<size_t>(s) * row_elems]) - m;
+            m2 += d * d;
+        }
+        mean[e] = static_cast<float>(m);
+        sd[e] = static_cast<float>(std::sqrt(m2 / slots));
+    }
+}
+
 class SparseMinMaxTest : public ::testing::Test {
 protected:
     static constexpr int nkv = 2;
@@ -110,6 +133,18 @@ protected:
             const __half2 v = mm[static_cast<size_t>(block_id) * row_elems + e];
             ASSERT_FLOAT_EQ(__low2float(v), mn[e]) << what << " min block " << block_id << " e " << e;
             ASSERT_FLOAT_EQ(__high2float(v), mx[e]) << what << " max block " << block_id << " e " << e;
+        }
+    }
+
+    void check_block_meanstd(int block_id, int slots, const char* what) {
+        auto mm = dread(d_mm, static_cast<size_t>(n_blocks_pool) * row_elems);
+        std::vector<float> mean, sd;
+        ref_meanstd(k_cache_h, block_id, row_elems, slots, mean, sd);
+        // fp16 carrier: one ulp at the |value| <= 16 fill range is 0.0156.
+        for (int e = 0; e < row_elems; e++) {
+            const __half2 v = mm[static_cast<size_t>(block_id) * row_elems + e];
+            ASSERT_NEAR(__low2float(v), mean[e], 0.05f) << what << " mean block " << block_id << " e " << e;
+            ASSERT_NEAR(__high2float(v), sd[e], 0.05f) << what << " std block " << block_id << " e " << e;
         }
     }
 
@@ -178,6 +213,45 @@ TEST_F(SparseMinMaxTest, PrefillSpanThenDecodeMerge) {
     cudaFree(d_pos);
     cudaFree(d_pos2);
     cudaFree(d_pos3);
+}
+
+TEST_F(SparseMinMaxTest, MeanStdMergesAcrossSpanAndDecodeSteps) {
+    // min/max merges idempotently; mean/std does not - the stored half has to
+    // be weighted by the slot count it already covers, and `slot` is that
+    // count. One 24-token prefill span, then two single-token decode merges
+    // into the same block: a restart or a double-weight shows up immediately.
+    std::vector<int> bt_h = {0, 1, 2};
+    int* d_bt = dmalloc<int>(bt_h.size());
+    dcopy(d_bt, bt_h);
+    std::vector<int> pos_h(24);
+    for (int i = 0; i < 24; i++) {
+        pos_h[i] = i;
+        write_row(i / kBS, i % kBS, i);
+    }
+    dcopy(d_k, k_cache_h);
+    int* d_pos = dmalloc<int>(pos_h.size());
+    dcopy(d_pos, pos_h);
+    sparse_update_key_minmax(QType::F16, d_k, d_mm, d_pos, d_bt, nkv, hd, kBS, 24, 0, 1, nullptr, nullptr,
+                             nullptr, /*meanstd=*/true);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    check_block_meanstd(0, kBS, "prefill full block");
+    check_block_meanstd(1, 8, "prefill partial block");
+
+    for (int step = 0; step < 2; step++) {
+        const int pos = 24 + step;
+        write_row(1, 8 + step, pos);
+        dcopy(d_k, k_cache_h);
+        std::vector<int> p1 = {pos};
+        int* d_p1 = dmalloc<int>(1);
+        dcopy(d_p1, p1);
+        sparse_update_key_minmax(QType::F16, d_k, d_mm, d_p1, d_bt, nkv, hd, kBS, 1, 0, 1, nullptr, nullptr,
+                                 nullptr, /*meanstd=*/true);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        check_block_meanstd(1, 9 + step, "decode merge");
+        cudaFree(d_p1);
+    }
+    cudaFree(d_bt);
+    cudaFree(d_pos);
 }
 
 TEST_F(SparseMinMaxTest, MultiSeqDecodeTwoTokens) {
@@ -396,7 +470,8 @@ protected:
     // q = 1 on dim 0 of each head -> score(b) == weight[b] exactly.
     // engage_blocks defaults to budget_blocks (sparse_min_ctx off).
     void run_select(const std::vector<float>& weight, int ctx_len, int budget_blocks, int sink_blocks,
-                    int recent_blocks, std::vector<int>& out_bt, int& out_ctx, int engage_blocks = 0) {
+                    int recent_blocks, std::vector<int>& out_bt, int& out_ctx, int engage_blocks = 0,
+                    bool meanstd = false, float std_coef = 1.0f) {
         if (engage_blocks <= 0)
             engage_blocks = budget_blocks;
         const int table_blocks = std::max(budget_blocks, engage_blocks);
@@ -435,7 +510,7 @@ protected:
 
         sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/1, nh, nkv, hd, kBS, mbps, budget_blocks,
                              sink_blocks, recent_blocks, engage_blocks, table_blocks, d_scores, d_sbt, d_sctx,
-                             nullptr);
+                             meanstd, std_coef, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         out_bt = dread(d_sbt, table_blocks);
         out_ctx = dread(d_sctx, 1)[0];
@@ -538,7 +613,8 @@ TEST_F(SparseSelectTest, ChunkRowsSharedTablePerRowCtx) {
     cudaMemset(d_sbt, 0xFF, 2 * budget * sizeof(int));
 
     sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/2, nh, nkv, hd, kBS, mbps, budget, sink,
-                         recent, /*engage=*/budget, /*table=*/budget, d_scores, d_sbt, d_sctx, nullptr);
+                         recent, /*engage=*/budget, /*table=*/budget, d_scores, d_sbt, d_sctx,
+                         /*meanstd=*/false, /*std_coef=*/1.0f, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     auto out = dread(d_sbt, static_cast<size_t>(2) * budget);
     auto ctx = dread(d_sctx, 2);
@@ -563,6 +639,84 @@ TEST_F(SparseSelectTest, ChunkRowsSharedTablePerRowCtx) {
 // ---------------------------------------------------------------------------
 // End-to-end: attention over an identity-compacted table is bit-identical.
 // ---------------------------------------------------------------------------
+// The two scores disagree exactly where the corner bound is loose: a page
+// whose per-dimension extremes come from DIFFERENT tokens. Page A holds one
+// +3.75 per dimension, rotated so every token carries the spike in a different
+// quarter of the dimensions, and -0.25 everywhere else; page B holds a flat
+// 1.25 in every dimension of every token. Against an all-ones query:
+//   true best dot   A: 4*3.75 + 60*(-0.25) = 0        B: 64*1.25 = 80
+//   corner bound    A: 64*3.75        = 240           B: 64*1.25 = 80   -> A
+//   mean + 1.0*std  A: 64*(0 + 0.968) = 61.9          B: 64*1.25 = 80   -> B
+// so the corner bound spends the one free budget slot on the page that has
+// nothing to offer, and mean/std does not. All values are exact in fp16.
+TEST(SparseScoreMeanStd, OutlierPageLosesTheBudgetSlotToTheConsistentPage) {
+    constexpr int nkv = 1, nh = 1, hd = 64, n_blocks = 4, ctx_len = n_blocks * kBS;
+    constexpr int row_elems = nkv * hd;
+
+    std::vector<half> k_h(static_cast<size_t>(n_blocks) * kBS * row_elems, __float2half(0.0f));
+    const auto at = [&](int b, int s, int e) -> half& {
+        return k_h[(static_cast<size_t>(b) * kBS + s) * row_elems + e];
+    };
+    for (int s = 0; s < kBS; s++)
+        for (int e = 0; e < row_elems; e++) {
+            at(1, s, e) = __float2half((e % kBS) == s ? 3.75f : -0.25f);
+            at(2, s, e) = __float2half(1.25f);
+        }
+
+    half* d_k = dmalloc<half>(k_h.size());
+    dcopy(d_k, k_h);
+    __half2* d_mm = dmalloc<__half2>(static_cast<size_t>(n_blocks) * row_elems);
+    std::vector<int> bt_h = {0, 1, 2, 3};
+    int* d_bt = dmalloc<int>(bt_h.size());
+    dcopy(d_bt, bt_h);
+    std::vector<int> pos_h(ctx_len);
+    for (int i = 0; i < ctx_len; i++)
+        pos_h[i] = i;
+    int* d_pos = dmalloc<int>(pos_h.size());
+    dcopy(d_pos, pos_h);
+    std::vector<half> q_h(static_cast<size_t>(nh) * hd, __float2half(1.0f));
+    half* d_q = dmalloc<half>(q_h.size());
+    dcopy(d_q, q_h);
+    std::vector<int> ctx_h = {ctx_len};
+    int* d_ctx = dmalloc<int>(1);
+    dcopy(d_ctx, ctx_h);
+    float* d_scores = dmalloc<float>(n_blocks);
+    int* d_sbt = dmalloc<int>(3);
+    int* d_sctx = dmalloc<int>(1);
+
+    // budget 3 = sink block 0 + recent block 3 + exactly one free slot.
+    const auto pick = [&](bool meanstd) {
+        cudaMemset(d_mm, 0x7F, static_cast<size_t>(n_blocks) * row_elems * sizeof(__half2));
+        cudaMemset(d_sbt, 0xFF, 3 * sizeof(int));
+        sparse_update_key_minmax(QType::F16, d_k, d_mm, d_pos, d_bt, nkv, hd, kBS, ctx_len, 0, 1, nullptr,
+                                 nullptr, nullptr, meanstd);
+        sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/1, nh, nkv, hd, kBS, n_blocks, /*budget=*/3,
+                             /*sink=*/1, /*recent=*/1, /*engage=*/3, /*table=*/3, d_scores, d_sbt, d_sctx,
+                             meanstd, /*std_coef=*/1.0f, nullptr);
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        return dread(d_sbt, 3);
+    };
+
+    const auto corner = pick(false);
+    const auto meanstd = pick(true);
+    EXPECT_EQ(corner[0], 0);
+    EXPECT_EQ(corner[2], 3);
+    EXPECT_EQ(corner[1], 1) << "corner bound is expected to take the outlier page";
+    EXPECT_EQ(meanstd[0], 0);
+    EXPECT_EQ(meanstd[2], 3);
+    EXPECT_EQ(meanstd[1], 2) << "mean+std must take the consistent page";
+
+    cudaFree(d_k);
+    cudaFree(d_mm);
+    cudaFree(d_bt);
+    cudaFree(d_pos);
+    cudaFree(d_q);
+    cudaFree(d_ctx);
+    cudaFree(d_scores);
+    cudaFree(d_sbt);
+    cudaFree(d_sctx);
+}
+
 TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     const int nh = 4, nkv = 2, hd = 64;
     const int ctx_len = 85;  // partial tail
@@ -615,7 +769,8 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     int* d_sbt = dmalloc<int>(8);
     int* d_sctx = dmalloc<int>(1);
     sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, 6, /*budget=*/8, 1, 1,
-                         /*engage=*/8, /*table=*/8, d_scores, d_sbt, d_sctx, nullptr);
+                         /*engage=*/8, /*table=*/8, d_scores, d_sbt, d_sctx, /*meanstd=*/false,
+                         /*std_coef=*/1.0f, nullptr);
     paged_attention_decode(Q, K, V, O2, d_sbt, d_sctx, kBS, scale, ctx_len, 0, 0.0f, nullptr, 8);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 

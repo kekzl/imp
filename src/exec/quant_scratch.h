@@ -80,6 +80,11 @@ struct QuantScratch {
     int sparse_table_blocks = 0;    // row capacity of sparse_block_tables (= engage blocks)
     int sparse_max_ctx_blocks = 0;  // capacity of a sparse_scores row
     int sparse_max_rows = 0;        // row count of the scratch buffers (batch / chunk rows)
+    // Page score (attention.sparse_score_meanstd): false = min/max corner
+    // bound, true = mean + coef*std. The metadata pass and the score kernel
+    // must read the same statistic, so both call sites take it from here.
+    bool sparse_score_meanstd = false;
+    float sparse_score_std_coef = 1.0f;
 
     // Free all buffers.
     void free(VRAMAllocator* alloc);
