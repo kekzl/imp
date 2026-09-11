@@ -431,7 +431,8 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                                       const int32_t* d_hist, int n_hist, const int32_t* d_draft,
                                       float rep_pen, float freq_pen, float pres_pen,
                                       int32_t* d_topm, int topm, const int32_t* d_banned,
-                                      int n_banned) {
+                                      int n_banned, bool allow_cutlass, const int32_t* d_banned_alt,
+                                      int n_banned_alt, const uint8_t* h_row_alt) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }
@@ -455,7 +456,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     // allow_cutlass=false: verify logits decide (and emit) the accepted batch=1
     // tokens — keep them on the FP16-activation GEMV path bit-identical to the
     // n==1 decode step, independent of gemm.nvfp4_lm_head_cutlass.
-    for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/false,
+    for_each_lm_head_batch_(n_rows, stream, allow_cutlass,
                             [&](const Tensor& lg, int row0, int csz) {
         if (penalties) {
             dim3 pgrid((V + 255) / 256, csz);
@@ -470,10 +471,13 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         // the bonus). Without the mask the verify chunk was the one path that
         // could pick e.g. <|im_start|> mid-think, ending the request with
         // empty content (deterministic on some prompts, degen_suite [stream]).
-        if (d_banned != nullptr && n_banned > 0) {
-            for (int r = 0; r < csz; ++r)
-                launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V,
-                                  d_banned, n_banned, V, stream);
+        for (int r = 0; r < csz; ++r) {
+            const bool alt = h_row_alt != nullptr && h_row_alt[row0 + r] != 0;
+            const int32_t* ban = alt ? d_banned_alt : d_banned;
+            const int nb = alt ? n_banned_alt : n_banned;
+            if (ban != nullptr && nb > 0)
+                launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, ban, nb, V,
+                                  stream);
         }
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(

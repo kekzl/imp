@@ -31,10 +31,11 @@ SSMState::~SSMState() {
 
 bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel, int n_heads,
                     int head_dim_ssm, int state_size, QType h_dtype, VRAMAllocator* alloc, int n_reserved,
-                    Backend* lazy_backend) {
+                    Backend* lazy_backend, int n_reserved_lazy) {
     n_ssm_layers_ = n_ssm_layers;
     max_sequences_ = max_sequences;
     n_reserved_ = std::max(0, n_reserved);
+    n_reserved_lazy_ = std::clamp(n_reserved_lazy, 0, n_reserved_);
     h_dtype_ = h_dtype;
     alloc_ = alloc;
 
@@ -109,7 +110,7 @@ bool SSMState::init_lazy_(Backend& be, int n_slots) {
     // The whole reservation is charged by the plan and not yet backed.
     vram_reserved_uncommitted_add(static_cast<std::ptrdiff_t>(reserve));
 
-    for (int i = 0; i < n_reserved_; ++i) {
+    for (int i = 0; i < n_reserved_ - n_reserved_lazy_; ++i) {
         if (!ensure_slot(reserved_slot(i))) {
             IMP_LOG_WARN("SSM state: could not commit reserved slot %d of %d — allocating every slot", i,
                          n_reserved_);

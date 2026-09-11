@@ -949,6 +949,16 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // docs/MODELS.md), so an MTP-drafting server lost batched speculation to
     // the flag that arms the head. The recurrent term below hid it on the
     // hybrids; on every dense model it was live.
+    // Batched verify on the hybrid (speculative.batch_verify): every decoding
+    // request forwards its last token and one draft in a single step; the
+    // step emits for every row and replaces the batched decode below. Any
+    // gate failure (a non-greedy row, no spare slot, no draft anywhere) takes
+    // the plain path this step.
+    if (ssm_state_ && decode_batch.size() > 1 && batch_verify_eligible_(decode_batch)) {
+        if (step_spec_verify_batched_(decode_batch, dec_stream))
+            return;
+    }
+
     const SpecBatchRrState rr_state{
         runtime_config_.speculative.batch_rr, ssm_state_ != nullptr,
         static_cast<int>(decode_batch.size()),

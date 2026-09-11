@@ -75,6 +75,7 @@ Engine::~Engine() {
     // Teardown allocates nothing but frees plenty; leaving the process in
     // Serving would make the next engine's init look like an I2 violation.
     set_alloc_phase(AllocPhase::Loading);
+    free_batch_verify_bufs_();
     if (const uint64_t n = steady_state_allocations(); n > 0) {
         IMP_LOG_WARN(
             "I2: %llu device allocation(s) were made while serving — "

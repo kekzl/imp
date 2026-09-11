@@ -235,7 +235,9 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    const int ssm_reserved_slots = spec_mc_reserved_slots_();
+    // Reserved pool slots: the multi-candidate verify's W-1, plus one spare per
+    // batch slot for the batched verify (recomputed after the batch clamp).
+    int ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots_();
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram(),
                                            swa_live_tokens, n_swa_layers, &native_cache_demand(),
                                            ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,
@@ -318,8 +320,10 @@ bool Engine::init_kv_cache() {
         PlanResult plan = plan_memory(shadow_plan_input(probe));
         IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
 
-        if (!plan.ok)
+        if (!plan.ok) {
             clamp_max_batch_to_plan_(probe, plan, ssm_reserved_slots, vram_budget.kv_max_blocks);
+            ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots_();
+        }
 
         if (config_.kv_cache_max_blocks > 0) {
             max_blocks = config_.kv_cache_max_blocks;  // operator pin wins over both
@@ -871,7 +875,8 @@ bool Engine::init_kv_cache() {
                                                       config_.ssm_state_dtype, &vram_alloc_,
                                                       ssm_reserved_slots,
                                                       runtime_config_.vram.lazy_commit ? vmm_backend()
-                                                                                       : nullptr);
+                                                                                       : nullptr,
+                                                      batch_verify_spare_slots_());
             if (ssm_pool_ok && ssm_state_->lazy() && scheduler_)
                 scheduler_->set_admission_gate([this] { return recurrent_slot_admissible_(); });
             if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
@@ -887,10 +892,11 @@ bool Engine::init_kv_cache() {
                     " recurrent layers; refusing to serve without it (see the SSM/GDN state "
                     "pool line above for the shortfall and the lever)");
             } else if (ssm_reserved_slots > 0) {
-                IMP_LOG_INFO("SSM state: %d slot(s) reserved past max_batch_size=%d for the "
-                             "multi-candidate verify (speculative.mtp_tree_width=%d, %.1f MiB each)",
-                             ssm_reserved_slots, config_.max_batch_size,
-                             runtime_config_.speculative.mtp_tree_width,
+                IMP_LOG_INFO("SSM state: %d slot(s) reserved past max_batch_size=%d: %d for the "
+                             "multi-candidate verify (speculative.mtp_tree_width=%d), %d batched-verify "
+                             "spares (speculative.batch_verify, committed on first use), %.1f MiB each",
+                             ssm_reserved_slots, config_.max_batch_size, spec_mc_reserved_slots_(),
+                             runtime_config_.speculative.mtp_tree_width, batch_verify_spare_slots_(),
                              ssm_state_->per_seq_bytes() / (1024.0 * 1024.0));
             }
             // Slot table for batched GDN decode. Allocated once and kept at a
@@ -1042,6 +1048,9 @@ bool Engine::init_kv_cache() {
     // Pre-allocate decode batch pool + penalty buffer
     decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq,
                                 /*with_swa_tables=*/swa_sizing_active_);
+    // Batched verify staging (init-time, sized from the pool above).
+    if (batch_verify_spare_slots_() > 0 && !ensure_batch_verify_bufs_())
+        IMP_LOG_WARN("spec-batch: staging buffers unavailable - batched verify stays off");
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
         d_penalty_tokens_ = static_cast<int32_t*>(

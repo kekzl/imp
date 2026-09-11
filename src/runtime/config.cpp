@@ -434,6 +434,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // #1638: read at engine_scheduler.cpp:1422 and :2882, its own comment calls
     // it a "kill switch for A/B", and it was bound to no key at all.
     B("speculative.batch_rr", cfg.speculative.batch_rr);
+    B("speculative.batch_verify", cfg.speculative.batch_verify);
     B("speculative.capture", cfg.speculative.capture);
     I("speculative.capture_ctx_cap", cfg.speculative.capture_ctx_cap);
 

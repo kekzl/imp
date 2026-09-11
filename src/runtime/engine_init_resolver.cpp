@@ -547,6 +547,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 // are not sequences.
                 if (per_slot_state > 0)
                     fit -= spec_mc_reserved_slots_();
+                // The batched verify's spare slot per batch slot: two slots of
+                // state per sequence.
+                if (per_slot_state > 0 && batch_verify_on_())
+                    fit /= 2;
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }
@@ -1017,12 +1021,15 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
         return;
     const size_t per_slot = probe.ssm_state_bytes /
                             static_cast<size_t>(probe.max_batch_size + std::max(0, ssm_reserved_slots));
+    // The batched verify holds one spare slot per batch slot, so a dropped
+    // batch slot frees two.
+    const size_t per_batch_slot = per_slot * (batch_verify_on_() ? 2 : 1);
     PlanInput fit_in = shadow_plan_input(probe);
     // An operator KV pin owns the pool question; only the fixed charges decide
     // the batch then.
     if (config_.kv_cache_max_blocks > 0)
         fit_in.limits.min_kv_tokens = 0;
-    const int fit = plan_fitting_batch(fit_in, per_slot);
+    const int fit = plan_fitting_batch(fit_in, per_batch_slot);
     if (fit < 1 || fit >= probe.max_batch_size)
         return;
     IMP_LOG_WARN(
@@ -1031,7 +1038,7 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
         "silence this, or free VRAM to raise it.",
         probe.max_batch_size, fit, probe.max_batch_size, probe.ssm_state_bytes / (1024.0 * 1024.0),
         plan.failure.over_by / (1024.0 * 1024.0), fit);
-    probe.ssm_state_bytes -= per_slot * static_cast<size_t>(probe.max_batch_size - fit);
+    probe.ssm_state_bytes -= per_batch_slot * static_cast<size_t>(probe.max_batch_size - fit);
     probe.max_batch_size = fit;
     config_.max_batch_size = fit;
     if (runtime_config_.runtime.max_batch_size > fit)

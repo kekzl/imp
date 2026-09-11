@@ -1311,6 +1311,35 @@ private:
     bool spec_mc_hybrid_ok_(int width) const;
     std::vector<int> h_spec_mc_slots_;
     int* d_spec_mc_slots_ = nullptr;  // sub-pointer into d_spec_stage_ (kMtpMaxTopW ints)
+    // ── Batched speculative verify (speculative.batch_verify) ──
+    // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp.
+    // N requests x 2 rows per step; group g commits into its spare slot and
+    // snapshots in place, accept swaps the two. Spares are reserved pool slots
+    // past the multi-candidate ones, one per batch slot, committed on first use.
+    struct BatchVerifyBufs {
+        int cap_seq = 0;
+        int cap_rows = 0;
+        int table_cap = 0;
+        int32_t* d_stage = nullptr;       // [tok | pos | row ctx | seq | out | snap | chunk_len, snap_n]
+        int32_t* d_row_tables = nullptr;  // [cap_rows * table_cap]
+        int32_t* d_argmax = nullptr;      // [cap_rows]
+        PinnedBuffer h_stage, h_row_tables, h_argmax;
+    } bv_;
+    std::unordered_map<int, int> spare_slot_of_;  // req.id -> spare slot
+    std::vector<int> free_spare_slots_;
+    bool spare_slots_initialized_ = false;
+    bool batch_verify_on_() const;          // config + model say yes (no batch-size term)
+    int batch_verify_spare_slots_() const;  // reserved slots to add to the pool (0 = off)
+    bool ensure_batch_verify_bufs_();       // init-time; sized from max_batch_size
+    void free_batch_verify_bufs_();
+    int acquire_spare_slot_(int req_id);
+    void release_spare_slot_(int req_id);
+    int32_t batch_verify_draft_(Request& req, bool& from_mtp);
+    const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
+    bool batch_verify_eligible_(const std::vector<std::shared_ptr<Request>>& batch) const;
+    mutable const char* bv_last_refusal_ = nullptr;  // one log line per distinct reason
+    // Returns true when it handled the step (tokens emitted for every row).
+    bool step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream);
     // Session telemetry (logged when a request finishes).
     SpecStats spec_stats_{};
 

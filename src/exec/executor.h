@@ -158,12 +158,20 @@ public:
     // (best first, post-penalty — same distribution the argmax decides on)
     // to d_topm[row * topm + rank]. Harvested by the Token-Recycling
     // adjacency drafter (speculative.token_recycling).
+    // allow_cutlass: the batched-decode LM head (W4A4 tensor-core tile) instead
+    // of the per-row FP16-activation GEMV; the batched verify's rows are
+    // batched-decode rows, whose plain step takes exactly that head.
+    // d_banned_alt / n_banned_alt / h_row_alt: a second ban list applied to
+    // the rows whose h_row_alt[row] != 0 (host array, n_rows entries) in place
+    // of d_banned - the per-request think stop mask of a batched chunk.
     void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                            const int32_t* d_hist = nullptr, int n_hist = 0,
                            const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
                            float freq_pen = 0.0f, float pres_pen = 0.0f,
                            int32_t* d_topm = nullptr, int topm = 0,
-                           const int32_t* d_banned = nullptr, int n_banned = 0);
+                           const int32_t* d_banned = nullptr, int n_banned = 0,
+                           bool allow_cutlass = false, const int32_t* d_banned_alt = nullptr,
+                           int n_banned_alt = 0, const uint8_t* h_row_alt = nullptr);
 
     // Materialize the LM-head projection of hidden_[0..n_rows) into d_out
     // ([n_rows, vocab_size] fp32) — same batched re-projection as

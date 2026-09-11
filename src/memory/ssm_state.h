@@ -40,10 +40,13 @@ public:
     // every slot up front. Reserved slots commit at init; live slots commit
     // on ensure_slot(). Null, or a backend that cannot grow, keeps the fixed
     // pool.
+    // n_reserved_lazy: the LAST n_reserved_lazy of the reserved slots are not
+    // committed at init on a lazy pool (the batched verify's spares, taken on
+    // first use through ensure_slot()); the others commit at init as before.
     [[nodiscard]] bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel,
                             int n_heads, int head_dim_ssm, int state_size, QType h_dtype = QType::F32,
                             VRAMAllocator* alloc = nullptr, int n_reserved = 0,
-                            Backend* lazy_backend = nullptr);
+                            Backend* lazy_backend = nullptr, int n_reserved_lazy = 0);
 
     // Get pointers into the state pool for a given sequence and SSM layer index.
     void* conv_state(int seq_id, int ssm_layer_idx);
@@ -118,6 +121,7 @@ private:
     int n_ssm_layers_ = 0;
     int max_sequences_ = 0;
     int n_reserved_ = 0;
+    int n_reserved_lazy_ = 0;  // trailing reserved slots committed on first use
     QType h_dtype_ = QType::F32;
     size_t conv_bytes_ = 0;       // per (seq, layer) conv state
     size_t h_bytes_ = 0;          // per (seq, layer) h state

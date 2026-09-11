@@ -331,6 +331,7 @@ int Engine::recurrent_slot(int req_id) const {
 }
 
 void Engine::release_recurrent_slot_(int req_id) {
+    release_spare_slot_(req_id);  // batched verify spare, if the request held one
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())
         return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
