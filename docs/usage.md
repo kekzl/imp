@@ -347,7 +347,12 @@ llama.cpp's `n_ctx` (top-level and under `default_generation_settings`),
 report what the KV pool can actually hold: the resolver's `max_seq_len` is a
 plan, the pool is clamped after it, and on a tight card the two differ (97204
 against 52256 on Qwen3.8-27B-NVFP4). The probes report the smaller of the two
-since #1542; `/health`'s `kv_capacity_tokens` was always the real number.
+since #1542. A growable pool (`kv_cache.growable`, default on) counts by its
+ceiling, not by what it has committed so far: at start it holds
+`kv_cache.growable_initial_pct` (25 %) of the plan and grows at admission
+(Qwen3.8-27B-NVFP4: 875 of 13264 blocks committed, 131072 advertised).
+`/health` reports both, `kv_capacity_tokens` for the commit and
+`kv_ceiling_blocks` for the ceiling.
 
 Server-only flags (not on `imp-cli`):
 

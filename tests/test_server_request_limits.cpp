@@ -271,6 +271,24 @@ TEST(ServableContext, UnknownCapacityLeavesThePlanAlone) {
     EXPECT_EQ(servable_context_tokens(8192, 0), 8192);
 }
 
+// A growable pool advertises its ceiling, not the 25 % it committed at start:
+// Qwen3.8-27B-NVFP4 on v0.40.0 came up at 875 of 13264 blocks and /v1/models
+// said 14000 tokens while a 16860-token prompt was served after one growth.
+TEST(ServableContext, GrowablePoolAdvertisesItsCeiling) {
+    EXPECT_EQ(kv_capacity_ceiling_tokens(875, 13264, 16), 13264LL * 16);
+    EXPECT_EQ(servable_context_tokens(131072, kv_capacity_ceiling_tokens(875, 13264, 16)), 131072);
+}
+
+// A fixed pool has ceiling == total; a rescue-floor pool that cannot grow keeps
+// reporting the floor (#1542 still holds there).
+TEST(ServableContext, FixedPoolAdvertisesWhatItHolds) {
+    EXPECT_EQ(kv_capacity_ceiling_tokens(3266, 3266, 16), 3266LL * 16);
+    EXPECT_EQ(kv_capacity_ceiling_tokens(16, 16, 32), 512);
+    EXPECT_EQ(servable_context_tokens(131072, kv_capacity_ceiling_tokens(16, 16, 32)), 512);
+    // ceiling below total never happens; the larger of the two is what it holds.
+    EXPECT_EQ(kv_capacity_ceiling_tokens(100, 0, 16), 1600);
+}
+
 // ---------------------------------------------------------------------------
 // Latency histogram ladders (#1577)
 // ---------------------------------------------------------------------------

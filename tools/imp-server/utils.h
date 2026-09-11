@@ -130,6 +130,13 @@ bool prompt_within_input_budget(httplib::Response& res, size_t bytes, int max_in
 // kv_capacity_tokens <= 0 means "unknown", and the plan stands.
 int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_tokens);
 
+// The capacity a growable pool may reach, in tokens: the ceiling, not what is
+// committed right now. Since kv_cache.growable_initial_pct defaulted to 25 the
+// committed count is a moving floor (875 of a 13264-block ceiling on
+// Qwen3.8-27B-NVFP4, 14000 tokens advertised for a pool that served a
+// 16860-token prompt after one growth). A fixed pool has ceiling == total.
+long long kv_capacity_ceiling_tokens(int total_blocks, int ceiling_blocks, int block_size);
+
 // True for the endpoints that speak the Anthropic dialect, whose errors have a
 // different envelope: `{"type":"error","error":{...}}` rather than
 // `{"error":{...}}`. Four call sites in main.cpp used to spell this test out

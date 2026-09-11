@@ -179,6 +179,10 @@ int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_token
     return static_cast<int>(kv_capacity_tokens);
 }
 
+long long kv_capacity_ceiling_tokens(int total_blocks, int ceiling_blocks, int block_size) {
+    return static_cast<long long>(std::max(total_blocks, ceiling_blocks)) * block_size;
+}
+
 bool is_anthropic_path(const std::string& path) { return path.rfind("/v1/messages", 0) == 0; }
 
 void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,
