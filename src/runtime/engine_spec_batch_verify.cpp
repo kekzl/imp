@@ -30,36 +30,37 @@
 namespace imp {
 
 namespace {
-// Per-row conditions the batched verify replicates: greedy argmax, no
-// penalties, no logit shaping, no constraint FSM, no logprobs.
+// Per-row conditions the batched verify replicates: greedy argmax, rep /
+// freq / presence penalties over the unbounded window (per-row device
+// histories), no logit shaping, no constraint FSM, no logprobs.
 bool batch_verify_row_ok(const Request& r) {
     const bool greedy = r.temperature <= 0.0f || r.top_k == 1;
     if (!greedy)
         return false;
-    if (r.repetition_penalty != 1.0f || r.frequency_penalty != 0.0f || r.presence_penalty != 0.0f)
-        return false;
+    const bool penalties = r.repetition_penalty != 1.0f || r.frequency_penalty != 0.0f ||
+                           r.presence_penalty != 0.0f;
+    if (penalties && r.repeat_last_n != 0)
+        return false;  // a bounded window slides per chunk row; not replicated
     if (r.dry_multiplier != 0.0f || r.mirostat != 0 || !r.logit_bias.empty())
         return false;
-    if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() || !r.grammar.empty() ||
-        !r.tool_constraint_tools.empty())
+    if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
+        !r.grammar.empty() || !r.tool_constraint_tools.empty())
         return false;
     return r.status == RequestStatus::DECODING && !r.output_tokens.empty();
 }
 }  // namespace
 
-bool Engine::batch_verify_on_() const {
-    const auto& scfg = runtime_config_.speculative;
+bool batch_verify_on(const RuntimeConfig& cfg, const Model* model) {
+    const auto& scfg = cfg.speculative;
     if (!scfg.batch_verify || !scfg.hybrid)
         return false;
-    if (!model_ || model_->config().ssm_inner_size <= 0)
-        return false;
-    return true;
+    return model != nullptr && model->config().ssm_inner_size > 0;
 }
 
-int Engine::batch_verify_spare_slots_() const {
-    if (!batch_verify_on_() || config_.max_batch_size <= 1)
+int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
+    if (!batch_verify_on(cfg, model) || max_batch_size <= 1)
         return 0;
-    return config_.max_batch_size;
+    return max_batch_size;
 }
 
 bool Engine::ensure_batch_verify_bufs_() {
@@ -76,9 +77,13 @@ bool Engine::ensure_batch_verify_bufs_() {
         b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
         return !b.empty();
     };
-    const bool ok = cudaMalloc(&bv_.d_stage, stage_ints * sizeof(int32_t)) == cudaSuccess &&
-                    cudaMalloc(&bv_.d_row_tables, table_ints * sizeof(int32_t)) == cudaSuccess &&
-                    cudaMalloc(&bv_.d_argmax, static_cast<size_t>(cap_rows) * sizeof(int32_t)) == cudaSuccess &&
+    bv_.d_stage = static_cast<int32_t*>(
+        vram_alloc_.allocate(stage_ints * sizeof(int32_t), "spec_batch_stage"));
+    bv_.d_row_tables = static_cast<int32_t*>(
+        vram_alloc_.allocate(table_ints * sizeof(int32_t), "spec_batch_row_tables"));
+    bv_.d_argmax = static_cast<int32_t*>(
+        vram_alloc_.allocate(static_cast<size_t>(cap_rows) * sizeof(int32_t), "spec_batch_argmax"));
+    const bool ok = bv_.d_stage != nullptr && bv_.d_row_tables != nullptr && bv_.d_argmax != nullptr &&
                     pin(bv_.h_stage, stage_ints * sizeof(int32_t)) &&
                     pin(bv_.h_row_tables, table_ints * sizeof(int32_t)) &&
                     pin(bv_.h_argmax, static_cast<size_t>(cap_rows) * sizeof(int32_t));
@@ -96,45 +101,41 @@ bool Engine::ensure_batch_verify_bufs_() {
 
 void Engine::free_batch_verify_bufs_() {
     if (bv_.d_stage)
-        IMP_CUDA_CHECK_LOG(cudaFree(bv_.d_stage));
+        vram_alloc_.free(bv_.d_stage);
     if (bv_.d_row_tables)
-        IMP_CUDA_CHECK_LOG(cudaFree(bv_.d_row_tables));
+        vram_alloc_.free(bv_.d_row_tables);
     if (bv_.d_argmax)
-        IMP_CUDA_CHECK_LOG(cudaFree(bv_.d_argmax));
-    bv_ = BatchVerifyBufs{};
+        vram_alloc_.free(bv_.d_argmax);
+    bv_.d_stage = bv_.d_row_tables = bv_.d_argmax = nullptr;
+    bv_.h_stage = PinnedBuffer{};
+    bv_.h_row_tables = PinnedBuffer{};
+    bv_.h_argmax = PinnedBuffer{};
+    bv_.cap_seq = bv_.cap_rows = bv_.table_cap = 0;
 }
 
 // Spare slots are the reserved pool slots past the multi-candidate ones.
 // Committed on first use (lazy pool), held for the request's lifetime.
 int Engine::acquire_spare_slot_(int req_id) {
-    auto it = spare_slot_of_.find(req_id);
-    if (it != spare_slot_of_.end())
+    auto it = bv_.spare_of.find(req_id);
+    if (it != bv_.spare_of.end())
         return it->second;
     if (!ssm_state_)
         return -1;
-    if (!spare_slots_initialized_) {
-        free_spare_slots_.clear();
+    if (!bv_.initialized) {
+        bv_.free.clear();
         const int mc = spec_mc_reserved_slots_();
         for (int i = ssm_state_->n_reserved() - 1; i >= mc; --i)
-            free_spare_slots_.push_back(ssm_state_->reserved_slot(i));
-        spare_slots_initialized_ = true;
+            bv_.free.push_back(ssm_state_->reserved_slot(i));
+        bv_.initialized = true;
     }
-    if (free_spare_slots_.empty())
+    if (bv_.free.empty())
         return -1;
-    const int slot = free_spare_slots_.back();
+    const int slot = bv_.free.back();
     if (!ssm_state_->ensure_slot(slot))
         return -1;  // stays free; the step falls back to plain decode
-    free_spare_slots_.pop_back();
-    spare_slot_of_[req_id] = slot;
+    bv_.free.pop_back();
+    bv_.spare_of[req_id] = slot;
     return slot;
-}
-
-void Engine::release_spare_slot_(int req_id) {
-    auto it = spare_slot_of_.find(req_id);
-    if (it == spare_slot_of_.end())
-        return;
-    free_spare_slots_.push_back(it->second);
-    spare_slot_of_.erase(it);
 }
 
 // One draft token for the request's next position: the pending MTP chain
@@ -156,8 +157,8 @@ int32_t Engine::batch_verify_draft_(Request& req, bool& from_mtp) {
     if (scfg.suffix) {
         const int pred_end = static_cast<int>(req.input_tokens.size() + req.prediction_tokens.size());
         SuffixDraftIndex& idx = spec_suffix_index_(req);
-        const int out_indexed =
-            std::clamp(idx.size() - pred_end, 0, static_cast<int>(req.output_tokens.size()));
+        const int out_indexed = std::clamp(idx.size() - pred_end, 0,
+                                           static_cast<int>(req.output_tokens.size()));
         idx.append(std::span(req.output_tokens).subspan(static_cast<size_t>(out_indexed)));
         nd = idx.draft(1, std::max(1, scfg.suffix_k_max));
     } else {
@@ -175,43 +176,40 @@ int32_t Engine::batch_verify_draft_(Request& req, bool& from_mtp) {
 // once per reason: a batch that never verifies must not look like one that
 // does (the pipeline gates had the same blind spot, #1646).
 const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const {
-    if (!ssm_state_ || !batch_verify_on_())
-        return "off";
-    if (batch.size() < 2)
-        return "batch_of_one";
-    if (ssm_state_->n_reserved() - spec_mc_reserved_slots_() <= 0)
-        return "no_spare_slots";
-    if (swa_sizing_active_ || config_.streaming_kv_enabled)
-        return "swa_or_streaming_kv";
-    if (kv_manager_ && kv_manager_->residual_enabled())
-        return "residual_kv";
-    if (!runtime_config_.runtime.gdn_batched_decode || d_ssm_seq_slots_ == nullptr)
-        return "gdn_batched_decode_off";
-    // A think budget whose forcing is due needs the eager step (it forces
-    // </think>); any such row sends the whole batch to the plain step.
-    for (const auto& r : batch) {
-        if (r->status != RequestStatus::DECODING)
-            continue;
-        if (!batch_verify_row_ok(*r))
-            return "row_not_greedy_or_shaped";
-        if (r->think_budget > 0.0f && r->in_think_block &&
-            think_logic::should_force_think_end(r->think_budget, think_end_id_, r->max_tokens, r->output_tokens,
-                                                think_start_id_, r->started_in_think,
-                                                runtime_config_.runtime.think_answer_reserve))
-            return "think_forcing_due";
-    }
-    return nullptr;
-}
-
-bool Engine::batch_verify_eligible_(const std::vector<std::shared_ptr<Request>>& batch) const {
-    const char* why = batch_verify_refusal_(batch);
-    if (why == nullptr)
-        return true;
-    if (batch.size() >= 2 && batch_verify_on_() && bv_last_refusal_ != why) {
-        bv_last_refusal_ = why;
+    const char* why = [&]() -> const char* {
+        if (!ssm_state_ || !batch_verify_on(runtime_config_, model_.get()))
+            return "off";
+        if (batch.size() < 2)
+            return "batch_of_one";
+        if (ssm_state_->n_reserved() - spec_mc_reserved_slots_() <= 0)
+            return "no_spare_slots";
+        if (swa_sizing_active_ || config_.streaming_kv_enabled)
+            return "swa_or_streaming_kv";
+        if (kv_manager_ && kv_manager_->residual_enabled())
+            return "residual_kv";
+        if (!runtime_config_.runtime.gdn_batched_decode || d_ssm_seq_slots_ == nullptr)
+            return "gdn_batched_decode_off";
+        // A think budget whose forcing is due needs the eager step (it forces
+        // </think>); any such row sends the whole batch to the plain step.
+        for (const auto& r : batch) {
+            if (r->status != RequestStatus::DECODING)
+                continue;
+            if (!batch_verify_row_ok(*r))
+                return "row_not_greedy_or_shaped";
+            if (r->think_budget > 0.0f && r->in_think_block &&
+                think_logic::should_force_think_end(r->think_budget, think_end_id_, r->max_tokens,
+                                                    r->output_tokens, think_start_id_, r->started_in_think,
+                                                    runtime_config_.runtime.think_answer_reserve))
+                return "think_forcing_due";
+        }
+        return nullptr;
+    }();
+    if (why != nullptr && batch.size() >= 2 && bv_.last_refusal != why &&
+        batch_verify_on(runtime_config_, model_.get())) {
+        bv_.last_refusal = why;
         IMP_LOG_INFO("spec-batch: batched verify refused by '%s' (n=%zu)", why, batch.size());
     }
-    return false;
+    return why;
 }
 
 bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream) {
@@ -230,8 +228,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     }
     const int N = static_cast<int>(reqs.size());
     auto decline = [&](const char* why) {
-        if (bv_last_refusal_ != why) {
-            bv_last_refusal_ = why;
+        if (bv_.last_refusal != why) {
+            bv_.last_refusal = why;
             IMP_LOG_INFO("spec-batch: step declined by '%s' (n=%d)", why, N);
         }
         return false;
@@ -264,6 +262,51 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     }
     if (n_drafted == 0)
         return decline("no_draft_in_batch");
+
+    // Per-row penalties: the sampler's device history slots (one per
+    // request, host output_tokens the truth). Row 2g penalizes the history
+    // (ends with t0), row 2g+1 the history plus the draft, which is written
+    // at the slot's end below; after the step the emitted tokens land there
+    // from the pinned argmax buffer, so the slot stays in sync.
+    std::vector<const int32_t*> pen_hist(static_cast<size_t>(2 * N), nullptr);
+    std::vector<int> pen_n(static_cast<size_t>(2 * N), 0), pen_slot(N, -1), pen_need(N, 0);
+    std::vector<float> pen_v(static_cast<size_t>(6 * N), 0.0f);
+    bool any_pen = false;
+    for (int g = 0; g < N; ++g) {
+        const Request& req = *reqs[g];
+        const bool needs = req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
+                           req.presence_penalty != 0.0f;
+        if (!needs)
+            continue;
+        const int need = static_cast<int>(req.output_tokens.size());
+        if (d_penalty_hist_ == nullptr || penalty_hist_slots_ <= 0 || need + 2 > penalty_hist_cap_)
+            return decline("penalty_history_unavailable");
+        const int slot = penalty_hist_slot_(req.id, reqs);
+        if (slot < 0)
+            return decline("penalty_history_unavailable");
+        auto& hs = penalty_hist_state_[static_cast<size_t>(slot)];
+        int32_t* base = d_penalty_hist_ + static_cast<size_t>(slot) * penalty_hist_cap_;
+        if (hs.synced != need) {
+            // Full (re)sync: first batch entry of this request or a diverged
+            // host history (pageable source, the same copy the plain step does).
+            if (cudaMemcpyAsync(base, req.output_tokens.data(), static_cast<size_t>(need) * sizeof(int32_t),
+                                cudaMemcpyHostToDevice, stream) != cudaSuccess)
+                return decline("penalty_history_h2d");
+            hs.synced = need;
+        }
+        pen_slot[g] = slot;
+        pen_need[g] = need;
+        pen_hist[2 * g] = base;
+        pen_n[2 * g] = need;
+        pen_hist[2 * g + 1] = base;
+        pen_n[2 * g + 1] = need + 1;
+        for (int j = 0; j < 2; ++j) {
+            pen_v[static_cast<size_t>(2 * g + j) * 3 + 0] = req.repetition_penalty;
+            pen_v[static_cast<size_t>(2 * g + j) * 3 + 1] = req.frequency_penalty;
+            pen_v[static_cast<size_t>(2 * g + j) * 3 + 2] = req.presence_penalty;
+        }
+        any_pen = true;
+    }
 
     // KV blocks for both rows of every request (positions p0, p0+1).
     std::vector<int> p0(N);
@@ -344,12 +387,27 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         return true;
     };
     const size_t stage_ints = 3ull * cap_rows + 3ull * cap_seq + 2;
-    if (!check(cudaMemcpyAsync(d, h, stage_ints * sizeof(int32_t), cudaMemcpyHostToDevice, stream), "stage H2D") ||
-        !check(cudaMemcpyAsync(bv_.d_row_tables, h_tab, static_cast<size_t>(2 * N) * table_cap * sizeof(int32_t),
+    if (!check(cudaMemcpyAsync(d, h, stage_ints * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
+               "stage H2D") ||
+        !check(cudaMemcpyAsync(bv_.d_row_tables, h_tab,
+                               static_cast<size_t>(2 * N) * table_cap * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream),
                "row tables H2D")) {
         rollback_all(N);
         return false;
+    }
+    // The draft token behind each penalized request's history (pinned
+    // source: the staged chunk tokens).
+    for (int g = 0; g < N && any_pen; ++g) {
+        if (pen_slot[g] < 0)
+            continue;
+        int32_t* base = d_penalty_hist_ + static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_;
+        if (!check(cudaMemcpyAsync(base + pen_need[g], h_tok + 2 * g + 1, sizeof(int32_t),
+                                   cudaMemcpyHostToDevice, stream),
+                   "penalty draft H2D")) {
+            rollback_all(N);
+            return false;
+        }
     }
 
     // Workspace pinned to the largest batch: every N's graph then bakes the
@@ -421,9 +479,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const int n_ban = d_ban ? static_cast<int>(banned_token_ids_.size()) : 0;
     const int32_t* d_alt = (any_alt && stop_mask_.n() > 0) ? stop_mask_.device(vram_alloc_, stream) : nullptr;
     const int n_alt = d_alt ? stop_mask_.n() : 0;
-    executor_->greedy_argmax_all(2 * N, bv_.d_argmax, stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f, nullptr, 0,
-                                 d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
-                                 any_alt ? row_alt.data() : nullptr);
+    executor_->greedy_argmax_all(2 * N, bv_.d_argmax, stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f, nullptr,
+                                 0, d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
+                                 any_alt ? row_alt.data() : nullptr, any_pen ? pen_hist.data() : nullptr,
+                                 any_pen ? pen_n.data() : nullptr, any_pen ? pen_v.data() : nullptr);
     int32_t* h_am = bv_.h_argmax.as<int32_t>();
     if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax, static_cast<size_t>(2 * N) * sizeof(int32_t),
                                cudaMemcpyDeviceToHost, stream),
@@ -452,8 +511,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
             req->output_tokens.push_back(tok);
             track_think_state(*req, tok);
             emitted++;
-            const bool hard_stop =
-                should_stop(*req, tok) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
+            const bool hard_stop = should_stop(*req, tok) ||
+                                   static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
             if (req->constraints)
                 req->constraints->update(tok);
             if (hard_stop) {
@@ -468,13 +527,25 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         row0[g] = 2 * g;
         emitted_of[g] = emitted;
+        // Device penalty history: the emitted tokens are rows 2g.. of the
+        // pinned argmax buffer, in order.
+        if (pen_slot[g] >= 0 && emitted > 0) {
+            int32_t* base = d_penalty_hist_ + static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_;
+            auto& hs = penalty_hist_state_[static_cast<size_t>(pen_slot[g])];
+            if (cudaMemcpyAsync(base + pen_need[g], h_am + 2 * g,
+                                static_cast<size_t>(emitted) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                stream) == cudaSuccess)
+                hs.synced = pen_need[g] + emitted;
+            else
+                hs.synced = -1;
+        }
         kv_manager_->touch(req->id);
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
         // State: the spare holds the state after [t0, draft], the live slot
         // the state after t0. Accept = the spare becomes the live slot.
         if (matched == 1 && req->status != RequestStatus::FINISHED) {
             recurrent_slot_of_[req->id] = spare[g];
-            spare_slot_of_[req->id] = live[g];
+            bv_.spare_of[req->id] = live[g];
         }
         if (has) {
             req->spec_verifies++;
@@ -491,20 +562,21 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // in one head pass (the chunk's hidden rows are still in place).
     static double t_verify_ms = 0.0;
     static long long t_steps = 0;
-    t_verify_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count();
+    t_verify_ms +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count();
     if (++t_steps % 100 == 0)
         IMP_LOG_INFO("spec-batch: %lld steps, forward+argmax %.2f ms/step (before the MTP feed)", t_steps,
                      t_verify_ms / t_steps);
     if (mtp_spec_decode_enabled())
         mtp_batched_feed_(reqs, row0, emitted_of, stream);
-    spec_stats_record_(any_mtp, n_drafted, acc_total, emit_total,
-                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0)
-                           .count());
+    spec_stats_record_(
+        any_mtp, n_drafted, acc_total, emit_total,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count());
     static bool logged = false;
     if (!logged) {
         logged = true;
-        IMP_LOG_INFO("spec-batch: first batched verify n=%d drafted=%d accepted=%lld emitted=%lld", N, n_drafted,
-                     acc_total, emit_total);
+        IMP_LOG_INFO("spec-batch: first batched verify n=%d drafted=%d accepted=%lld emitted=%lld", N,
+                     n_drafted, acc_total, emit_total);
     }
     return true;
 }

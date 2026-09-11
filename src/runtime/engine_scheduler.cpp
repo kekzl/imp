@@ -880,7 +880,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                    // site without the MTP exclusion the process_outputs launch
                    // has - measured on Qwen3.8-27B-NVFP4: drafted_total 1 vs
                    // 436 over a 768-token essay, 84.7 vs 104.3 tok/s.
-                   !(mtp_spec_decode_enabled() && mtp_bound_(decode_batch[0]->id)) &&
+                   !(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, decode_batch[0]->id)) &&
                    spec_verify_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
                    spec_burst_launch_ok_(*decode_batch[0]) &&
                    // Budget exhausted → the EAGER step must run: it forces
@@ -954,7 +954,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // step emits for every row and replaces the batched decode below. Any
     // gate failure (a non-greedy row, no spare slot, no draft anywhere) takes
     // the plain path this step.
-    if (ssm_state_ && decode_batch.size() > 1 && batch_verify_eligible_(decode_batch)) {
+    if (ssm_state_ && decode_batch.size() > 1 && batch_verify_refusal_(decode_batch) == nullptr) {
         if (step_spec_verify_batched_(decode_batch, dec_stream))
             return;
     }
@@ -1700,20 +1700,20 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     if (mtp_spec_decode_enabled() && model_ && model_->mtp_.has_value() &&
         model_->mtp_->loaded && gpu_batch.n_sequences == 1 && !tokens.empty()) {
         const int32_t next_token = tokens[0];
-        if (mtp_pending_prediction_ >= 0) {
+        if (mtp_pool_.pending_prediction >= 0) {
             mtp_accuracy_.total++;
-            bool match = (mtp_pending_prediction_ == next_token);
+            bool match = (mtp_pool_.pending_prediction == next_token);
             if (match) mtp_accuracy_.matches++;
             // Optional verbose log: prints (predicted, actual, match) with
             // decoded strings so accept patterns can be analyzed offline.
             const bool s_pattern_log = runtime_config_.diagnostics.mtp_pattern_log;
             if (s_pattern_log) {
                 Tokenizer* tok = model_->tokenizer();
-                std::string ps = tok ? tok->decode_token(mtp_pending_prediction_) : std::string();
+                std::string ps = tok ? tok->decode_token(mtp_pool_.pending_prediction) : std::string();
                 std::string as = tok ? tok->decode_token(next_token) : std::string();
                 IMP_LOG_INFO("MTP-PAT %s pred=%d '%s' actual=%d '%s'",
                              match ? "+" : "-",
-                             mtp_pending_prediction_, ps.c_str(),
+                             mtp_pool_.pending_prediction, ps.c_str(),
                              next_token, as.c_str());
             }
         }
@@ -1767,14 +1767,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         auto* ws_gate = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
         // A parked binding (batched verify serves several requests) becomes
         // the active one before the sync gate reads its cache position.
-        if (mtp_bound_(valid_decode[0]->id))
+        if (mtp_bound(mtp_active_, mtp_pool_, valid_decode[0]->id))
             mtp_activate_(valid_decode[0]->id);
         // Depth for THIS request: 0 when it declined the head
         // (`"speculative": {"mtp_k": 0}` or `"speculative": false`), which is
         // the one case where the process has a head armed and must not draft.
         const int mtp_req_k = mtp_chain_k_(*valid_decode[0]);
         const bool mtp_synced = ws_gate != nullptr && mtp_req_k > 0 &&
-                                mtp_bound_req_ == valid_decode[0]->id &&
+                                mtp_active_.req == valid_decode[0]->id &&
                                 ws_gate->mtp_pos == cur_pos &&
                                 (ws_gate->max_seq_len <= 0 ||
                                  ws_gate->mtp_pos + mtp_req_k < ws_gate->max_seq_len);
@@ -1862,7 +1862,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                         mtp_pending_chain_.push_back(entry);
                         chain_preds.push_back(prediction);
                         if (k == 0)
-                            mtp_pending_prediction_ = prediction;
+                            mtp_pool_.pending_prediction = prediction;
                     }
                 }
             } else {
@@ -1881,7 +1881,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     // For k=0 only, also feed pending_prediction_ (legacy 1-step
                     // accuracy counter remains in sync with chain_accept_[0]).
                     if (k == 0)
-                        mtp_pending_prediction_ = prediction;
+                        mtp_pool_.pending_prediction = prediction;
                     // Chain: next iter uses this prediction + the MTP's own h_final.
                     chain_prev_tok = prediction;
                     chain_h_prev = ws->d_h_final;
@@ -1893,19 +1893,19 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             ws->mtp_pos = std::min(ws->mtp_pos, mtp_pos_before + 1);
             // Verify-consumer bookkeeping (#847): the kept pair covers
             // next_token; the chain IS the draft for the next verify step.
-            mtp_history_.push_back(next_token);
+            mtp_active_.history.push_back(next_token);
             if (!chain_preds.empty()) {
-                mtp_pending_draft_ = std::move(chain_preds);
-                mtp_draft_ctx_ = static_cast<int>(mtp_history_.size());
+                mtp_active_.pending = std::move(chain_preds);
+                mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
             } else {
-                mtp_pending_draft_.clear();
-                mtp_draft_ctx_ = -1;
+                mtp_active_.pending.clear();
+                mtp_active_.draft_ctx = -1;
             }
         } else {
-            mtp_pending_prediction_ = -1;
+            mtp_pool_.pending_prediction = -1;
         }
     } else {
-        mtp_pending_prediction_ = -1;  // batch>1 or MTP off → clear pending
+        mtp_pool_.pending_prediction = -1;  // batch>1 or MTP off → clear pending
     }
 
     // Process outputs: logprobs extraction + token distribution

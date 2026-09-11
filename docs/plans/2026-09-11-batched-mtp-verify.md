@@ -79,8 +79,26 @@ arms, fresh server per arm, 3 waves):
 | `batch_verify=false` (head loaded, nothing drafts at batch > 1) | 586.7 / 605.7 / 610.7 | none |
 | `batch_verify=true` | 703.8 / 758.3 / 766.8 (+20..+26 %) | 516 steps, 78.0 % accept, 13.9 tok/verify, 16.9 ms/verify: 15.0 forward + argmax, 1.84 head feed + LM head + sync (14.1 rows/call) |
 
+At 32 streams the spares do not fit: the planner clamps `max_batch_size`
+32 -> 18 (5088 MiB of state for 32 + 32 slots), 32 clients then queue behind
+18 slots and the wall reads 1149 / 1159 / 1160 tok/s against 1928 / 1966 /
+1980 with 32 plain slots. The lever at full load is VRAM headroom (the FP16
+LM head, 2425 MiB, is decode-redundant), not this step.
+
 Price found on the way: `diagnostics.mtp_prenorm_h` (default on) sent the
 first build down the per-request fallback (per-pair M=1 feeds and chain
 drafts with a full-vocab GEMV each): 37 ms/verify, 356 tok/s. The batched
 feed now applies the target's final norm to the gathered rows itself.
-| 4 | scheduler: batched step replaces the plain decode when gated; pipeline chain break; graph capture keyed by N | two-image A/B @8/@16/@32, `check-degeneration` battery, perf baseline unchanged for spec-off | |
+| 4 | per-row rep / freq / presence penalties (the sampler's device history slots, the draft written behind the history, emitted tokens appended from the pinned argmax buffer), MTP KV slots on a 1 GiB budget, gates (engine.h at 700, alloc sites, lanes pin) | A/B with the server's default `repetition_penalty` 1.05 and at 15 / 18 streams | DONE 2026-09-11 (table below); `check-degeneration` and the perf baseline for spec-off still to run |
+
+Stage 4 measurement (same setup as stage 3, `--think-budget 0`, 3 waves):
+
+| streams (server batch) | client | `batch_verify=false` | `batch_verify=true` |
+|---|---|---|---|
+| 8 (8) | default `repetition_penalty` 1.05 | 592.1 / 625.7 / 619.0 | 670.5 / 713.8 / 704.7 (+13..+14 %); 73.2 % accept, 13.2 tok/verify, 17.2 ms |
+| 15 (16, clamped to 15 on) | rep 1.0 | 990.0 / 1038.9 / 1057.0 | 1098.7 / 1209.2 / 1213.5 (+11..+16 %); 80.4 % accept, 25.7 tok/verify, 18.9 ms |
+| 18 (18, clamped to 15 on) | rep 1.0 | 1146.0 / 1182.6 / 1192.6 | 842.3 / 859.4 (-27 %): 18 clients queue behind 15 slots |
+
+The lever pays while the clients fit the clamped batch; past it the queue
+costs more than the extra tokens per step return. The head at 15 streams:
+25.7 tokens per 18.9 ms step.

@@ -432,7 +432,8 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                                       float rep_pen, float freq_pen, float pres_pen,
                                       int32_t* d_topm, int topm, const int32_t* d_banned,
                                       int n_banned, bool allow_cutlass, const int32_t* d_banned_alt,
-                                      int n_banned_alt, const uint8_t* h_row_alt) {
+                                      int n_banned_alt, const uint8_t* h_row_alt, const int32_t* const* h_row_hist,
+                                      const int* h_row_hist_n, const float* h_row_pens) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }
@@ -471,6 +472,17 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         // the bonus). Without the mask the verify chunk was the one path that
         // could pick e.g. <|im_start|> mid-think, ending the request with
         // empty content (deterministic on some prompts, degen_suite [stream]).
+        // Per-row penalties (batched verify): each row's own request history.
+        if (h_row_hist != nullptr && h_row_hist_n != nullptr && h_row_pens != nullptr) {
+            for (int r = 0; r < csz; ++r) {
+                const int row = row0 + r;
+                const float* p = h_row_pens + static_cast<size_t>(row) * 3;
+                if (h_row_hist[row] != nullptr && h_row_hist_n[row] > 0 &&
+                    (p[0] != 1.0f || p[1] != 0.0f || p[2] != 0.0f))
+                    apply_penalties(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, V, h_row_hist[row],
+                                    h_row_hist_n[row], p[0], p[1], p[2], stream);
+            }
+        }
         for (int r = 0; r < csz; ++r) {
             const bool alt = h_row_alt != nullptr && h_row_alt[row0 + r] != 0;
             const int32_t* ban = alt ? d_banned_alt : d_banned;

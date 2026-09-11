@@ -886,6 +886,11 @@ capture_ctx_cap      = 32768
 # Serve batched speculation round-robin with an adaptive yield cadence (8 -> 64
 # steps backoff on empty turns). Kill switch for A/B; batch-1 unaffected.
 batch_rr             = true
+# Batched verify on the GDN hybrid: every decoding request forwards its last
+# token plus one MTP draft per step (one spare recurrent slot per batch slot,
+# halves the auto batch). Measured Qwen3.8-27B 8 streams +20..+26 %; at 32
+# streams the spares do not fit. docs/plans/2026-09-11-batched-mtp-verify.md
+batch_verify         = false
 # Do not speculate before this many tokens were generated for the request (the
 # economics guard arms at 8 verifies per request, a short one never gets there).
 # 0 = no gate.

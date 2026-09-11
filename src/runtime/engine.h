@@ -4,6 +4,7 @@
 #include "model/chat_template.h"
 #include "runtime/scheduler.h"
 #include "runtime/spec_gates.h"
+#include "runtime/spec_batch_verify_state.h"
 #include "runtime/spec_request.h"
 #include "runtime/request.h"
 #include "runtime/batch.h"
@@ -962,11 +963,10 @@ private:
     void* encoder_ws_storage_ = nullptr;  // type-erased EncoderWorkspace* (#836)
 
     // Phase 3.5 telemetry: rolling MTP-draft-accuracy across the active session.
-    // mtp_pending_prediction_ is the prediction made at the end of the
+    // mtp_pool_.pending_prediction is the prediction made at the end of the
     // PREVIOUS decode step; it gets compared to the actual next_token at the
     // start of the CURRENT step. -1 = no pending prediction (start of session,
     // batch>1, prediction call failed, etc).
-    int mtp_pending_prediction_ = -1;
     MtpAccuracy mtp_accuracy_{};
     // K>1 chain measurement: window of pending predictions. Each entry is
     // (prediction, lookahead_at_draft, intended_position). When the engine
@@ -990,49 +990,23 @@ private:
     //
     // Sync invariant: ws->mtp_pos == req->context_len() - 1 — pair i is
     // (emb(t_{i+1}), h_i), so after P pairs the head is ready to draft the
-    // token after t_P. mtp_history_ holds the covered tokens t_0..t_P
+    // token after t_P. mtp_active_.history holds the covered tokens t_0..t_P
     // (size == mtp_pos + 1) and lets a follow-up request resume the cache
     // over a shared prefix (multi-turn) via longest-common-prefix match.
-    int mtp_bound_req_ = -1;
-    std::vector<int32_t> mtp_history_;
-    std::vector<int32_t> mtp_pending_draft_;  // chain drafted for mtp_draft_ctx_
     // Multi-candidate chains (speculative.mtp_tree_width > 1): [0] is the
-    // primary chain (== mtp_pending_draft_), [1..] branch at the first
+    // primary chain (== mtp_active_.pending), [1..] branch at the first
     // position on the head's top-W ids. Same ctx/staleness contract as the
     // linear draft; empty whenever W == 1 or the device chain was
     // unavailable.
-    std::vector<std::vector<int32_t>> mtp_pending_chains_;
     // Margin gate tallies (W > 1 only): drafts that verified as a
     // multi-candidate chunk vs. as the linear chunk (head margin above
     // speculative.mtp_tree_margin). Logged with the spec stats.
-    long long mtp_tree_branched_ = 0;
-    long long mtp_tree_linear_ = 0;
-    int mtp_draft_ctx_ = -1;                  // context_len the draft targets
-    // ── Per-request bindings (batched verify) ──
-    // The fields above describe the ACTIVE binding (mtp_bound_req_ and its
-    // workspace KV slot). Other live requests keep theirs parked here;
-    // mtp_activate_ swaps a parked binding in (and selects its KV slot), so
-    // every single-request path keeps working per request unchanged. With one
-    // KV slot (batched verify off) a new request evicts the parked one, the
-    // behaviour the single workspace always had.
-    struct MtpBind {
-        int slot = 0;
-        std::vector<int32_t> history, pending;
-        std::vector<std::vector<int32_t>> chains;
-        int draft_ctx = -1;
-        int econ_verifies = 0;
-        long long econ_emitted = 0, econ_rows = 0;
-        int k_live = 0;
-        bool stale_logged = false;
-    };
-    std::unordered_map<int, MtpBind> mtp_binds_;  // parked (never the active request)
-    std::vector<int> mtp_free_slots_;
-    bool mtp_slots_initialized_ = false;
-    std::vector<std::vector<int32_t>> mtp_slot_history_;  // per slot: tokens its KV covers
-    bool mtp_bound_(int req_id) const {
-        return req_id >= 0 && (mtp_bound_req_ == req_id || mtp_binds_.count(req_id) != 0);
-    }
-    void mtp_park_active_();          // active -> mtp_binds_ (no-op when none)
+    // ── Per-request bindings (batched verify, spec_batch_verify_state.h) ──
+    // The fields above describe the ACTIVE binding (mtp_active_.req and its
+    // workspace KV slot); other live requests keep theirs parked in
+    // mtp_pool_, and mtp_activate_ swaps one in (selecting its KV slot).
+    MtpBind mtp_active_;  // the active binding (req >= 0)
+    MtpBindPool mtp_pool_;
     void mtp_activate_(int req_id);   // park the active one, load req_id's (must be bound)
     int mtp_acquire_slot_(const Request& req);  // free slot with the longest history prefix, -1 = none
     void mtp_release_(int req_id);    // request end: binding dropped, slot freed, history kept
@@ -1044,7 +1018,6 @@ private:
                            const std::vector<int>& emitted, cudaStream_t stream);
     // True when the request's context advanced without MTP pairs (async-loop
     // burst, chunked-prefill gap) — drafting stays off for the request.
-    bool mtp_stale_logged_ = false;
     // Economics guard: an MTP-filled verify step costs ~2x a loop step
     // (eager chunk) plus K chain forwards with full lm_head GEMVs plus the
     // hybrid partial-accept replay — the classic acceptance_poor gate (<15%)
@@ -1052,22 +1025,16 @@ private:
     // outright (measured -58..-77% tg on Qwen3.6-27B draft-poor prose).
     // Track emitted-per-MTP-verify and doom MTP drafting for the request
     // when the average can't beat the break-even.
-    int mtp_econ_verifies_ = 0;
-    long long mtp_econ_emitted_ = 0;
     // Chain rows actually drafted across those verifies: the economics
     // break-even (1 + f*k) must price the k that RAN, not the configured
     // ceiling, once the chain depth adapts.
-    long long mtp_econ_rows_ = 0;
     // Adaptive chain depth (AIMD): a fully accepted chain steps toward the
     // configured mtp_spec_k_, any rejection steps toward 1. Draft-poor
     // prompts converge to k=1 behavior instead of paying deep-chain verify
     // cost at low accept (k=2 measured 84.9-145.8 tok/s fixed vs 101.6-106.8
     // at k=1 on the same prompts, 2026-08-27); draft-rich prompts keep the
     // deep chain. 0 = not bound yet (falls back to mtp_spec_k_).
-    int mtp_k_live_ = 0;
-    int mtp_chain_k_() const noexcept {
-        return std::max(1, mtp_k_live_ > 0 ? mtp_k_live_ : mtp_spec_k_);
-    }
+    int mtp_chain_k_() const noexcept;  // live adaptive depth, floor 1
     // The depth THIS request resolved to: its own `speculative.mtp_k`, or the
     // server default, bounded by what the process armed. 0 = no MTP drafting
     // for this request. This is the AIMD ceiling; a caller that asked for
@@ -1346,32 +1313,14 @@ private:
     std::vector<int> h_spec_mc_slots_;
     int* d_spec_mc_slots_ = nullptr;  // sub-pointer into d_spec_stage_ (kMtpMaxTopW ints)
     // ── Batched speculative verify (speculative.batch_verify) ──
-    // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp.
-    // N requests x 2 rows per step; group g commits into its spare slot and
-    // snapshots in place, accept swaps the two. Spares are reserved pool slots
-    // past the multi-candidate ones, one per batch slot, committed on first use.
-    struct BatchVerifyBufs {
-        int cap_seq = 0;
-        int cap_rows = 0;
-        int table_cap = 0;
-        int32_t* d_stage = nullptr;       // [tok | pos | row ctx | seq | out | snap | chunk_len, snap_n]
-        int32_t* d_row_tables = nullptr;  // [cap_rows * table_cap]
-        int32_t* d_argmax = nullptr;      // [cap_rows]
-        PinnedBuffer h_stage, h_row_tables, h_argmax;
-    } bv_;
-    std::unordered_map<int, int> spare_slot_of_;  // req.id -> spare slot
-    std::vector<int> free_spare_slots_;
-    bool spare_slots_initialized_ = false;
-    bool batch_verify_on_() const;          // config + model say yes (no batch-size term)
-    int batch_verify_spare_slots_() const;  // reserved slots to add to the pool (0 = off)
+    // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
+    // state types in spec_batch_verify_state.h.
+    BatchVerifyState bv_;
     bool ensure_batch_verify_bufs_();       // init-time; sized from max_batch_size
     void free_batch_verify_bufs_();
     int acquire_spare_slot_(int req_id);
-    void release_spare_slot_(int req_id);
     int32_t batch_verify_draft_(Request& req, bool& from_mtp);
     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
-    bool batch_verify_eligible_(const std::vector<std::shared_ptr<Request>>& batch) const;
-    mutable const char* bv_last_refusal_ = nullptr;  // one log line per distinct reason
     // Returns true when it handled the step (tokens emitted for every row).
     bool step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream);
     // Session telemetry (logged when a request finishes).

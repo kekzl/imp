@@ -598,7 +598,10 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         head_dim > 0 && max_seq_len > 0) {
         const size_t n = kMtpFeedRows;
         bool bok = true;
-        bok &= alloc(reinterpret_cast<void**>(&ws.d_feed_tokens), n * sizeof(int32_t));
+        // [tokens | row slots | row pos | row src] for the multi-slot feed in
+        // one block; its gathered rows and final_norm rows alias batch
+        // scratch that is free at those points (see mtp_feed_rows_multislot).
+        bok &= alloc(reinterpret_cast<void**>(&ws.d_feed_tokens), 4 * n * sizeof(int32_t));
         bok &= alloc(&ws.d_b_emb,      n * hidden_dim * sizeof(__half));
         bok &= alloc(&ws.d_b_h_norm,   n * hidden_dim * sizeof(__half));
         bok &= alloc(&ws.d_b_fc_in,    n * 2 * hidden_dim * sizeof(__half));
@@ -613,14 +616,13 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         bok &= alloc(&ws.d_b_gate,     n * shared_d_ff * sizeof(__half));
         bok &= alloc(&ws.d_b_up,       n * shared_d_ff * sizeof(__half));
         bok &= alloc(&ws.d_b_act,      n * shared_d_ff * sizeof(__half));
-        // Ragged multi-slot feed tables and outputs.
-        bok &= alloc(reinterpret_cast<void**>(&ws.d_row_slots), n * sizeof(int));
-        bok &= alloc(reinterpret_cast<void**>(&ws.d_row_pos), n * sizeof(int));
-        bok &= alloc(reinterpret_cast<void**>(&ws.d_row_src), n * sizeof(int));
-        bok &= alloc(&ws.d_b_gather,   n * hidden_dim * sizeof(__half));
-        bok &= alloc(&ws.d_b_h_final,  n * hidden_dim * sizeof(__half));
         if (bok) {
             ws.feed_rows_cap = kMtpFeedRows;
+            ws.d_row_slots = ws.d_feed_tokens + n;
+            ws.d_row_pos = ws.d_feed_tokens + 2 * n;
+            ws.d_row_src = ws.d_feed_tokens + 3 * n;
+            ws.d_b_gather = ws.d_b_h_norm;   // gathered rows, normed in place
+            ws.d_b_h_final = ws.d_b_norm;    // free once the MLP consumed the post-norm
         } else {
             // Non-fatal: the per-pair loop still works, just slowly.
             IMP_LOG_WARN("mtp_workspace_allocate: batched-feed scratch alloc failed, "
@@ -703,11 +705,9 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.slot_pos.clear();
     ws.n_kv_slots = 1;
     ws.cur_slot = 0;
-    if (ws.d_row_slots) { cudaFree(ws.d_row_slots); ws.d_row_slots = nullptr; }
-    if (ws.d_row_pos) { cudaFree(ws.d_row_pos); ws.d_row_pos = nullptr; }
-    if (ws.d_row_src) { cudaFree(ws.d_row_src); ws.d_row_src = nullptr; }
-    frfn(ws.d_b_gather);
-    frfn(ws.d_b_h_final);
+    // Aliases into d_feed_tokens / the batch scratch, never freed on their own.
+    ws.d_row_slots = ws.d_row_pos = ws.d_row_src = nullptr;
+    ws.d_b_gather = ws.d_b_h_final = nullptr;
     if (ws.d_feed_tokens) { cudaFree(ws.d_feed_tokens); ws.d_feed_tokens = nullptr; }
     frfn(ws.d_b_emb);
     frfn(ws.d_b_h_norm);

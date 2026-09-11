@@ -152,6 +152,9 @@ struct MtpDraftWorkspace {
     // Ragged multi-slot feed scratch (mtp_feed_rows_multislot): per-row slot
     // and position tables, gather indices into the caller's hidden buffer,
     // the gathered rows, and final_norm of EVERY fed row.
+    // Aliases: the int tables carve d_feed_tokens (4 x feed_rows_cap ints),
+    // d_b_gather is d_b_h_norm (rows normed in place), d_b_h_final is
+    // d_b_norm (free once the MLP consumed the post-norm). Never freed alone.
     int*  d_row_slots     = nullptr;  // [feed_rows_cap]
     int*  d_row_pos       = nullptr;  // [feed_rows_cap]
     int*  d_row_src       = nullptr;  // [feed_rows_cap]

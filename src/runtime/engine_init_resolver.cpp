@@ -539,12 +539,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
                     model_->mtp_->loaded && per_slot_state > 0) {
                     size_t mtp_cost = 2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
-                    // Batched verify: one MTP KV slot per batch slot (K and V,
-                    // 16k rows each, engine_spec_mtp.cpp kMtpKvCap).
-                    if (batch_verify_on_() && model_->mtp_->v_proj.data != nullptr) {
-                        const size_t kv_row = static_cast<size_t>(model_->mtp_->v_proj.shape[0]) * 2;
-                        mtp_cost += static_cast<size_t>(std::max(fit, 1)) * 2 * 16384ULL * kv_row;
-                    }
+                    // Batched verify: the MTP KV slots share a 1 GiB budget
+                    // (engine_spec_mtp.cpp, enable_mtp_spec_decode).
+                    if (batch_verify_on(runtime_config_, model_.get()))
+                        mtp_cost += 1ull << 30;
                     fit -= static_cast<int>((mtp_cost + per_slot_state - 1) / per_slot_state);
                 }
                 // Slots the multi-candidate verify reserves past the batch
@@ -554,7 +552,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
                     fit -= spec_mc_reserved_slots_();
                 // The batched verify's spare slot per batch slot: two slots of
                 // state per sequence.
-                if (per_slot_state > 0 && batch_verify_on_())
+                if (per_slot_state > 0 && batch_verify_on(runtime_config_, model_.get()))
                     fit /= 2;
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
@@ -1028,7 +1026,7 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
                             static_cast<size_t>(probe.max_batch_size + std::max(0, ssm_reserved_slots));
     // The batched verify holds one spare slot per batch slot, so a dropped
     // batch slot frees two.
-    const size_t per_batch_slot = per_slot * (batch_verify_on_() ? 2 : 1);
+    const size_t per_batch_slot = per_slot * (batch_verify_on(runtime_config_, model_.get()) ? 2 : 1);
     PlanInput fit_in = shadow_plan_input(probe);
     // An operator KV pin owns the pool question; only the fixed charges decide
     // the batch then.
