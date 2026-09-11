@@ -453,11 +453,16 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             int64_t grp_shape[2] = {static_cast<int64_t>(state.ssm_n_seq) * T,
                                     static_cast<int64_t>(conv_channels)};
             Tensor xBC_g(xBC_out.data, compute_dtype_, 2, grp_shape, true);
+            // Batched verify: per-group commit/snapshot slots replace the
+            // slab snapshot (ssm_out_slots / ssm_snap_slots, inference_state.h).
+            const bool per_group = state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
             ssm_conv1d_prefill_f32_silu_grouped(
                 state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
                 static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)), state.ssm_n_seq,
                 xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream, state.d_chunk_len,
-                conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr, conv_prev);
+                (conv_prev && !per_group) ? conv_snap : nullptr,
+                (conv_prev || per_group) ? state.d_snap_n : nullptr, per_group ? nullptr : conv_prev,
+                state.ssm_out_slots, per_group ? state.ssm_snap_slots : nullptr);
             // Bucket pad rows past the last group belong to no sequence: no
             // conv ran for them, and the scan below writes no y for them.
             // Zero both so the rows that feed the (discarded) pad outputs are
@@ -774,8 +779,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 throw std::runtime_error("run_gdn: ragged prefill without device seq_offsets");
             const int scan_n_tokens = grouped ? state.ssm_seq_tokens : 1;  // ignored when row_offs != nullptr
             const int* real_n = grouped ? state.d_chunk_len : nullptr;
-            void* snap = grouped ? h_snap : nullptr;
-            const int* snap_n = snap ? state.d_snap_n : nullptr;
+            // Batched verify: per-group snapshot slots (ssm_snap_slots) replace
+            // the group-0 slab; d_snap_n still names the row.
+            const bool per_group_snap = grouped && state.ssm_out_slots && state.ssm_snap_slots;
+            void* snap = (grouped && !per_group_snap) ? h_snap : nullptr;
+            const int* snap_n = (snap || per_group_snap) ? state.d_snap_n : nullptr;
             // Ragged prefill on the chunk-parallel scan, one member at a time
             // (gdn.chunkpar_scan): the fused batched kernel walks every token
             // of every member serially on n_heads x n_seq CTAs, so a packed
@@ -853,7 +861,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
                     static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n);
+                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n,
+                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr);
             } else {
                 gdn_scan_fused_f32_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
@@ -862,7 +871,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
                     static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<float*>(snap), snap_n);
+                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<float*>(snap), snap_n,
+                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr);
             }
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;

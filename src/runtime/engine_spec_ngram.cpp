@@ -157,7 +157,7 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     // the eager tax with no speculation, which on think-heavy chat eats the
     // MTP win.
     if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) {
-        if (!(mtp_spec_decode_enabled() && mtp_bound_req_ == req.id))
+        if (!(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id)))
             return "think_budget_in_block";
         // Forcing due: the eager step must run NOW to force </think>; a
         // verify would emit past the exhausted budget instead.
@@ -448,7 +448,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // per-step chain feed), while a burst desyncs the MTP cache for the
         // rest of the generation (#847 sync gate).
         if (scfg.miss_burst > 0 && !req->spec_ngram_given_up &&
-            !(mtp_spec_decode_enabled() && mtp_bound_req_ == req->id) &&
+            !(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req->id)) &&
             spec_burst_launch_ok_(*req) &&
             try_launch_async_graph_loop(req, req->output_tokens.back(), stream,
                                         spec_effective_miss_burst_(*req))) {
@@ -1173,9 +1173,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // replay). Below ~4 emitted/verify the step loses outright — doom MTP
     // drafting for this request; the suffix matcher and miss bursts carry on.
     if (draft_from_mtp) {
-        mtp_econ_verifies_++;
-        mtp_econ_emitted_ += emitted;
-        mtp_econ_rows_ += K;
+        mtp_active_.econ_verifies++;
+        mtp_active_.econ_emitted += emitted;
+        mtp_active_.econ_rows += K;
         // Adaptive chain depth (AIMD): a fully accepted chain earns one more
         // row next draft (up to the configured k), any rejection sheds one.
         // Draft-poor prompts converge to k=1 verifies instead of paying the
@@ -1186,9 +1186,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             // the ladder back up to the server default.
             const int req_ceiling = mtp_request_k_(*req);
             if (matched >= K)
-                mtp_k_live_ = std::min(req_ceiling, mtp_chain_k_() + 1);
+                mtp_active_.k_live = std::min(req_ceiling, mtp_chain_k_() + 1);
             else
-                mtp_k_live_ = std::max(1, mtp_chain_k_() - 1);
+                mtp_active_.k_live = std::max(1, mtp_chain_k_() - 1);
         }
         constexpr int kMtpEconSample = 8;  // fair sample before judging
         // Break-even avg emitted/verify is configurable (0 disables): the
@@ -1207,14 +1207,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Price the k that RAN (avg rows/verify), not the configured ceiling:
         // with the adaptive depth above, a request parked at k_live=1 must be
         // judged against the k=1 break-even or the deeper config dooms it.
-        const float k_ran = static_cast<float>(mtp_econ_rows_) /
-                            static_cast<float>(mtp_econ_verifies_);
+        const float k_ran = static_cast<float>(mtp_active_.econ_rows) /
+                            static_cast<float>(mtp_active_.econ_verifies);
         const float min_emit = cfg_min < 0.0f ? 1.0f + kMtpEconAccept * k_ran : cfg_min;
-        if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
-            static_cast<float>(mtp_econ_emitted_) <
-                static_cast<float>(mtp_econ_verifies_) * min_emit) {
+        if (min_emit > 0.0f && mtp_active_.econ_verifies >= kMtpEconSample &&
+            static_cast<float>(mtp_active_.econ_emitted) <
+                static_cast<float>(mtp_active_.econ_verifies) * min_emit) {
             IMP_LOG_INFO("[mtp-econ] verifies=%d emitted=%lld min_emit=%.2f this_emitted=%d matched=%d",
-                         mtp_econ_verifies_, mtp_econ_emitted_, min_emit, emitted, matched);
+                         mtp_active_.econ_verifies, mtp_active_.econ_emitted, min_emit, emitted, matched);
             mtp_unbind_("uneconomic: avg emitted/verify below break-even");
         }
     }

@@ -82,9 +82,9 @@ void Engine::log_spec_stats_() const {
                      spec_stats_.other.emitted,
                      per(spec_stats_.other.emitted, spec_stats_.other.verify_steps));
     }
-    if (mtp_tree_branched_ + mtp_tree_linear_ > 0)
+    if (mtp_pool_.tree_branched + mtp_pool_.tree_linear > 0)
         IMP_LOG_INFO("[spec-ngram] mtp tree: branched=%lld linear=%lld (margin gate %.2f)",
-                     mtp_tree_branched_, mtp_tree_linear_, runtime_config_.speculative.mtp_tree_margin);
+                     mtp_pool_.tree_branched, mtp_pool_.tree_linear, runtime_config_.speculative.mtp_tree_margin);
 }
 
 }  // namespace imp

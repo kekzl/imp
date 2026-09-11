@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
+#include <stdexcept>
 #include "core/pdl_device.cuh"
 #include "core/pdl.h"
 
@@ -329,38 +330,46 @@ __global__ void ssm_conv1d_prefill_kernel(
 // Stream order puts it after every row's read of the previous window, which
 // the prefill grid itself cannot promise (rows 0..K-2 and the commit row are
 // different blocks). grid.y indexes the sequence group of the grouped form.
+// dst_slots (batched speculative verify): the window is read from slot
+// seq_slots[seq] and written to slot dst_slots[seq]; nullptr = in place.
 __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const half* __restrict__ x_in,
                                          int n_tokens, int channels, int kernel_size,
                                          const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
-                                         int64_t slot_stride) {
+                                         int64_t slot_stride, const int* __restrict__ dst_slots) {
     const int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= channels)
         return;
     const int seq = blockIdx.y;
+    float* dst_state = conv_state;
     if (seq_slots) {
-        conv_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(slot_stride);
+        float* const pool = conv_state;
+        conv_state = pool + static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(slot_stride);
+        dst_state = dst_slots ? pool + static_cast<size_t>(dst_slots[seq]) * static_cast<size_t>(slot_stride)
+                              : conv_state;
         x_in += static_cast<size_t>(seq) * n_tokens * channels;
     }
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     if (real_n <= 0)
         return;
-    float* state = conv_state + ch * kernel_size;
+    const float* src = conv_state + ch * kernel_size;
+    float* dst = dst_state + ch * kernel_size;
     for (int k = 0; k < kernel_size; k++) {
         const int src_t = real_n - kernel_size + k;
-        state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : state[src_t + kernel_size];
+        dst[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : src[src_t + kernel_size];
     }
 }
 
 static void launch_conv1d_commit(void* conv_state, const half* x_in, int n_tokens, int channels,
                                  int kernel_size, const int* d_real_n, const int* seq_slots,
-                                 int64_t slot_stride, int n_seq, cudaStream_t stream) {
+                                 int64_t slot_stride, int n_seq, cudaStream_t stream,
+                                 const int* dst_slots = nullptr) {
     if (!conv_state || n_tokens <= 0 || n_seq <= 0)
         return;
     constexpr int kThreads = 256;
     dim3 grid((channels + kThreads - 1) / kThreads, n_seq);
     ssm_conv1d_commit_kernel<<<grid, kThreads, 0, stream>>>(static_cast<float*>(conv_state), x_in, n_tokens,
                                                             channels, kernel_size, d_real_n, seq_slots,
-                                                            slot_stride);
+                                                            slot_stride, dst_slots);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -493,22 +502,36 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
                                          int n_seq, const Tensor& x_in, const Tensor& weight,
                                          const Tensor& bias, float* x_out_f32, int conv_kernel,
                                          cudaStream_t stream, const int* d_real_n, void* conv_snap,
-                                         const int* d_snap_n, const void* conv_prev) {
+                                         const int* d_snap_n, const void* conv_prev, const int* out_slots,
+                                         const int* snap_slots) {
     if (n_seq <= 0)
         return;
+    if (snap_slots && !out_slots)
+        throw std::runtime_error(
+            "ssm_conv1d_prefill_f32_silu_grouped: snap_slots needs out_slots (an in-place commit would "
+            "overwrite the window the snapshot reads)");
     // x_in is [n_seq * n_tokens, channels]; the kernel rebases per group.
     const int n_tokens = static_cast<int>(x_in.shape[0]) / n_seq;
     const int channels = static_cast<int>(x_in.shape[1]);
     constexpr int kThreads = 256;
     dim3 grid(n_tokens, (channels + kThreads - 1) / kThreads, n_seq);
+    // Per-group snapshot slots take the snapshot as a second commit launch
+    // below, not inside the grid (the grid's other rows still read the live
+    // window, and an in-place snapshot would race them).
     ssm_conv1d_prefill_f32_silu_kernel<<<grid, kThreads, 0, stream>>>(
         static_cast<float*>(conv_state_pool), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
-        static_cast<const float*>(conv_prev), seq_slots, slot_stride);
+        x_out_f32, n_tokens, channels, conv_kernel, d_real_n, snap_slots ? nullptr : static_cast<float*>(conv_snap),
+        d_snap_n, static_cast<const float*>(conv_prev), seq_slots, slot_stride);
     IMP_CUDA_CHECK_LAUNCH();
+    // Real-row commit first (reads seq_slots, writes out_slots), then the
+    // snapshot commit (reads seq_slots, writes snap_slots, in place allowed:
+    // the per-thread shift reads index k+1 before it writes index k).
     launch_conv1d_commit(conv_state_pool, static_cast<const half*>(x_in.data), n_tokens, channels, conv_kernel,
-                         d_real_n, seq_slots, slot_stride, n_seq, stream);
+                         d_real_n, seq_slots, slot_stride, n_seq, stream, out_slots);
+    if (snap_slots)
+        launch_conv1d_commit(conv_state_pool, static_cast<const half*>(x_in.data), n_tokens, channels,
+                             conv_kernel, d_snap_n, seq_slots, slot_stride, n_seq, stream, snap_slots);
 }
 
 // ---------------------------------------------------------------------------

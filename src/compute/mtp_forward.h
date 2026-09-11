@@ -24,6 +24,7 @@
 #include "core/tensor.h"
 #include "model/mtp_head.h"
 #include <cuda_runtime.h>
+#include <vector>
 
 namespace imp {
 
@@ -138,6 +139,27 @@ struct MtpDraftWorkspace {
     void* d_v_cache       = nullptr;  // [max_seq_len, num_kv_heads, head_dim] FP16
     int   mtp_pos         = 0;        // next slot to write (0..max_seq_len-1)
     int   max_seq_len     = 0;        // cache capacity
+    // Multi-slot KV (batched verify): n_kv_slots caches of max_seq_len rows
+    // in one allocation. d_k_cache / d_v_cache / mtp_pos above are the ACTIVE
+    // slot's view (mtp_select_slot), so every single-request path keeps
+    // working per slot; slot_pos holds the other slots' positions.
+    void* d_k_cache_base  = nullptr;
+    void* d_v_cache_base  = nullptr;
+    int   n_kv_slots      = 1;
+    int   cur_slot        = 0;
+    size_t kv_slot_elems  = 0;        // max_seq_len * num_kv_heads * head_dim
+    std::vector<int> slot_pos;        // [n_kv_slots] next write position per slot
+    // Ragged multi-slot feed scratch (mtp_feed_rows_multislot): per-row slot
+    // and position tables, gather indices into the caller's hidden buffer,
+    // the gathered rows, and final_norm of EVERY fed row.
+    // Aliases: the int tables carve d_feed_tokens (4 x feed_rows_cap ints),
+    // d_b_gather is d_b_h_norm (rows normed in place), d_b_h_final is
+    // d_b_norm (free once the MLP consumed the post-norm). Never freed alone.
+    int*  d_row_slots     = nullptr;  // [feed_rows_cap]
+    int*  d_row_pos       = nullptr;  // [feed_rows_cap]
+    int*  d_row_src       = nullptr;  // [feed_rows_cap]
+    void* d_b_gather      = nullptr;  // [feed_rows_cap, H]
+    void* d_b_h_final     = nullptr;  // [feed_rows_cap, H]
 
     // Routing buffer pool (n_experts, top_k both known at enable time)
     MoeRoutingBuffers routing_buf;
@@ -294,6 +316,27 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
 bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
                     const MtpHead& mtp, const Tensor& main_tok_emb,
                     MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream);
+// Ragged multi-slot feed (batched verify): row r is the pair (h_tokens[r],
+// d_hidden_all[h_src_rows[r]]) appended to KV slot h_slots[r] at position
+// h_pos[r], attending [0, h_pos[r] + 1) of that slot. Rows of one slot must
+// come in ascending positions (the append lands before the scan reads it, so
+// a later row of the same slot sees the earlier one). Writes final_norm of
+// every row to ws.d_b_h_final [n_rows, H]. Does not touch mtp_pos/slot_pos:
+// the caller advances them. Host arrays; same head requirements as
+// mtp_feed_batch, n_rows <= ws.feed_rows_cap.
+// post_norm (optional): the target's final norm applied to the gathered
+// hidden rows before the feed (diagnostics.mtp_prenorm_h, the upstream
+// convention of feeding post-norm hidden states).
+bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
+                             int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
+                             const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
+                             cudaStream_t stream, const Tensor* post_norm = nullptr,
+                             float post_norm_eps = 1e-6f, float post_norm_offset = 0.0f);
+// Make `slot` the active KV slot: saves the current slot's position, loads
+// the new one, re-points d_k_cache / d_v_cache. No-op for the active slot.
+void mtp_select_slot(MtpDraftWorkspace& ws, int slot);
+// dst[r] = src[d_idx[r]], rows of `cols` FP16 (device index array).
+void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols, int n_rows, cudaStream_t stream);
 
 // Top-W over a device logits vector into ws.d_topk (descending-logit order),
 // no D2H, no sync. `fast` is the two-pass serving kernel (pass 1: per-block
@@ -317,10 +360,11 @@ bool mtp_topw_reference(const void* d_logits, bool fp32_logits, int vocab_size, 
 // Exposed for the rope-parity unit test. Pass null d_q or d_k to skip that side.
 // n_rows > 1: Q/K hold n_rows consecutive steps ([n_rows, heads, head_dim]);
 // row r rotates at position pos + r (batched prefill feed).
+// d_row_pos (optional, device [n_rows]): per-row positions instead of pos + r.
 void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
                      float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
                      float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-                     cudaStream_t stream, int n_rows = 1);
+                     cudaStream_t stream, int n_rows = 1, const int* d_row_pos = nullptr);
 
 // Allocate the workspace from the VRAM allocator. Caller is responsible for
 // keeping ws alive (typically owned by the Engine for the lifetime of a session).
@@ -332,11 +376,14 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
                             int n_experts = 0, int top_k = 0,
                             int expert_d_ff = 0, int shared_d_ff = 0,
                             int num_heads = 0, int num_kv_heads = 0, int head_dim = 0,
-                            int max_seq_len = 0);
+                            int max_seq_len = 0, int n_kv_slots = 1);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
-// Reset the MTP-side KV cache position (start of new sequence). The K/V
-// buffers retain their allocation; only `mtp_pos` is zeroed.
-inline void mtp_kv_reset(MtpDraftWorkspace& ws) { ws.mtp_pos = 0; }
+// Reset every MTP-side KV cache position (start of new sequences). The K/V
+// buffers retain their allocation; only the positions are zeroed.
+inline void mtp_kv_reset(MtpDraftWorkspace& ws) {
+    ws.mtp_pos = 0;
+    for (auto& p : ws.slot_pos) p = 0;
+}
 
 }  // namespace imp

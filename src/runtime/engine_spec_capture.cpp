@@ -192,7 +192,10 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
 
     // Hybrids bake the recurrent-slab pointers (seq_base(slot)) into the
     // graph — key it on the slot so a slot change gets its own graph.
-    const int rec_slot = state.ssm_state ? state.ssm_seq_id : -1;
+    // The batched verify (ssm_out_slots) addresses every slot through device
+    // tables, so its graphs bake no slab pointer: keyed like a dense model.
+    const bool batched_verify = state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
+    const int rec_slot = (state.ssm_state && !batched_verify) ? state.ssm_seq_id : -1;
     const int grouped_rows = state.ssm_grouped_chunk() ? state.ssm_seq_tokens : 0;
     auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity, rec_slot, grouped_rows}];
     if (slot.exec) {
@@ -205,7 +208,9 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         // production would. Measured 2026-08-20: 0/400 differing on
         // Qwen3.8-27B-NVFP4 and Qwen3.6-35B-A3B-NVFP4, 45/400 on
         // NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4.
-        if (runtime_config_.diagnostics.spec_capture_fidelity && model_) {
+        // (Not for the batched verify: its eager forward moves the live slots
+        // in place, so a second forward of the same state cannot be staged.)
+        if (runtime_config_.diagnostics.spec_capture_fidelity && model_ && !batched_verify) {
             const bool hybrid_restore = state.ssm_state != nullptr && spec_state_scratch_ != nullptr &&
                                         rec_slot >= 0;
             const size_t vocab = static_cast<size_t>(model_->config_.vocab_size);

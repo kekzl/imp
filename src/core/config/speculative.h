@@ -133,6 +133,11 @@ struct Speculative {
     // (+2.2/+3.5% at 4/8, remaining negatives inside the +-6% intra-arm
     // trial spread). Batch-1 behavior unchanged. Kill switch for A/B.
     bool batch_rr = true;
+    // Batched verify on the GDN hybrid: every decoding request forwards 2 rows
+    // (last token + draft) in one step; needs a spare recurrent slot per
+    // batch slot (priced by the planner, halves the auto batch). Default off
+    // until measured (docs/plans/2026-09-11-batched-mtp-verify.md).
+    bool batch_verify = false;
     int k = 16;  // draft tokens per verify step (verify cost is ~flat in k)
     // Token-Recycling adjacency drafting (ACL 2025, arXiv 2408.08696;
     // plan docs/plans/2026-07-22-token-recycling-spec-tree.md):

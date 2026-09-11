@@ -431,7 +431,9 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                                       const int32_t* d_hist, int n_hist, const int32_t* d_draft,
                                       float rep_pen, float freq_pen, float pres_pen,
                                       int32_t* d_topm, int topm, const int32_t* d_banned,
-                                      int n_banned) {
+                                      int n_banned, bool allow_cutlass, const int32_t* d_banned_alt,
+                                      int n_banned_alt, const uint8_t* h_row_alt, const int32_t* const* h_row_hist,
+                                      const int* h_row_hist_n, const float* h_row_pens) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }
@@ -455,7 +457,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     // allow_cutlass=false: verify logits decide (and emit) the accepted batch=1
     // tokens — keep them on the FP16-activation GEMV path bit-identical to the
     // n==1 decode step, independent of gemm.nvfp4_lm_head_cutlass.
-    for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/false,
+    for_each_lm_head_batch_(n_rows, stream, allow_cutlass,
                             [&](const Tensor& lg, int row0, int csz) {
         if (penalties) {
             dim3 pgrid((V + 255) / 256, csz);
@@ -470,10 +472,24 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         // the bonus). Without the mask the verify chunk was the one path that
         // could pick e.g. <|im_start|> mid-think, ending the request with
         // empty content (deterministic on some prompts, degen_suite [stream]).
-        if (d_banned != nullptr && n_banned > 0) {
-            for (int r = 0; r < csz; ++r)
-                launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V,
-                                  d_banned, n_banned, V, stream);
+        // Per-row penalties (batched verify): each row's own request history.
+        if (h_row_hist != nullptr && h_row_hist_n != nullptr && h_row_pens != nullptr) {
+            for (int r = 0; r < csz; ++r) {
+                const int row = row0 + r;
+                const float* p = h_row_pens + static_cast<size_t>(row) * 3;
+                if (h_row_hist[row] != nullptr && h_row_hist_n[row] > 0 &&
+                    (p[0] != 1.0f || p[1] != 0.0f || p[2] != 0.0f))
+                    apply_penalties(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, V, h_row_hist[row],
+                                    h_row_hist_n[row], p[0], p[1], p[2], stream);
+            }
+        }
+        for (int r = 0; r < csz; ++r) {
+            const bool alt = h_row_alt != nullptr && h_row_alt[row0 + r] != 0;
+            const int32_t* ban = alt ? d_banned_alt : d_banned;
+            const int nb = alt ? n_banned_alt : n_banned;
+            if (ban != nullptr && nb > 0)
+                launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, ban, nb, V,
+                                  stream);
         }
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(
@@ -485,6 +501,36 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
             rowwise_topm(static_cast<const float*>(lg.data), csz, V, topm,
                          d_topm + static_cast<int64_t>(row0) * topm, stream);
     });
+}
+
+bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream) {
+    if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
+        return false;
+    if (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr || qscratch_.cutlass_act_sf == nullptr)
+        return false;
+    const auto& cfg = model_->config();
+    const int V = cfg.vocab_size;
+    const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
+    if (!ensure_verify_scratch(/*with_penalties=*/false))
+        return false;
+    float* pvals = static_cast<float*>(verify_argmax_scratch_);
+    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
+    for (int c = 0; c < n_rows; c += mb) {
+        const int csz = std::min(mb, n_rows - c);
+        const void* rows = static_cast<const char*>(d_rows) + static_cast<size_t>(c) * cfg.d_model * sizeof(half);
+        Tensor lg = view_tokens(logits_, csz);
+        quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz, cfg.d_model,
+                                       stream);
+        if (!gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_,
+                                           static_cast<float*>(lg.data), csz, V, cfg.d_model, nullptr, 0, stream))
+            return false;
+        dim3 grid(csz, kArgmaxSplits);
+        rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals, pidxs);
+        IMP_CUDA_CHECK_LAUNCH();
+        rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + c);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    return true;
 }
 
 void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t stream) {

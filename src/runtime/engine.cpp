@@ -75,6 +75,7 @@ Engine::~Engine() {
     // Teardown allocates nothing but frees plenty; leaving the process in
     // Serving would make the next engine's init look like an I2 violation.
     set_alloc_phase(AllocPhase::Loading);
+    free_batch_verify_bufs_();
     if (const uint64_t n = steady_state_allocations(); n > 0) {
         IMP_LOG_WARN(
             "I2: %llu device allocation(s) were made while serving — "
@@ -236,6 +237,7 @@ void Engine::reset_ssm_state(int seq_id) {
         ssm_state_->reset_sequence(slot, stream_);
     }
     release_recurrent_slot_(seq_id);
+    mtp_release_(seq_id);
 }
 
 void Engine::reset_batch_pool_cache() { decode_batch_pool_.reset_upload_cache(); }
@@ -402,6 +404,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
     }
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
+    mtp_release_(req->id);
     req->recurrent_restore.reset();  // release the snapshot buffer for recycling
     spec_suffix_idx_.erase(req->id);
     if (req->constraints)
@@ -428,6 +431,7 @@ void Engine::cancel_sequence_(const std::shared_ptr<Request>& req) {
     // completed generation to report).
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
+    mtp_release_(req->id);
     req->recurrent_restore.reset();
     req->swa_restore.reset();
     spec_suffix_idx_.erase(req->id);

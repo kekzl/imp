@@ -183,6 +183,94 @@ TEST_F(MtpFeedBatchTest, BatchedFeedMatchesPerPairLoop) {
     imp::mtp_workspace_free(ws_bat);
 }
 
+// Ragged multi-slot feed (batched verify): rows for three KV slots, one or
+// two consecutive pairs per slot, interleaved in one launch. Reference: the
+// single-slot batched feed per slot in order (mtp_select_slot). Slot KV rows
+// and every row's final_norm must match; a slot nothing fed stays untouched.
+TEST_F(MtpFeedBatchTest, MultiSlotFeedMatchesPerSlotBatches) {
+    SyntheticHead s;
+    s.build(/*seed=*/23);
+    constexpr int kSlots = 4;
+
+    imp::MtpDraftWorkspace ws_ref, ws_ms;
+    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_ref, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_ms, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+    ASSERT_EQ(ws_ref.n_kv_slots, kSlots);
+    configure_ws(ws_ref);
+    configure_ws(ws_ms);
+    cudaStream_t stream = nullptr;
+
+    // Prefix per slot (positions 0..pre-1), fed the same way on both sides.
+    const int pre[kSlots] = {5, 9, 0, 3};
+    for (int sl = 0; sl < kSlots; ++sl) {
+        if (pre[sl] == 0) continue;
+        for (auto* ws : {&ws_ref, &ws_ms}) {
+            imp::mtp_select_slot(*ws, sl);
+            ASSERT_TRUE(imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, pre[sl], s.head, s.tok_emb, *ws, kH,
+                                            stream));
+            ASSERT_EQ(ws->mtp_pos, pre[sl]);
+        }
+    }
+    // The step: slot 0 gets 2 pairs, slot 1 one pair, slot 3 two pairs, slot 2 none.
+    // Rows are interleaved; a slot's rows come in ascending position order.
+    const int n = 5;
+    const int row_slot[n] = {1, 0, 3, 0, 3};
+    const int row_off[n] = {0, 0, 0, 1, 1};  // pair index within the slot's step
+    int row_pos[n], row_src[n];
+    int32_t row_tok[n];
+    for (int r = 0; r < n; ++r) {
+        row_pos[r] = pre[row_slot[r]] + row_off[r];
+        row_src[r] = 12 + 2 * row_slot[r] + row_off[r];  // arbitrary hidden rows of the fixture
+        row_tok[r] = s.tokens[static_cast<size_t>(row_src[r])];
+    }
+
+    // Reference: per slot, the batched single-slot feed of its rows in order.
+    for (int sl : {1, 0, 3}) {
+        std::vector<int32_t> toks;
+        int first_src = -1, cnt = 0;
+        for (int r = 0; r < n; ++r)
+            if (row_slot[r] == sl) {
+                if (first_src < 0) first_src = row_src[r];
+                toks.push_back(row_tok[r]);
+                ++cnt;
+            }
+        imp::mtp_select_slot(ws_ref, sl);
+        const void* rows = static_cast<const char*>(s.d_hidden) + static_cast<size_t>(first_src) * kH * sizeof(__half);
+        ASSERT_TRUE(imp::mtp_feed_batch(toks.data(), rows, cnt, s.head, s.tok_emb, ws_ref, kH, stream));
+    }
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    imp::mtp_select_slot(ws_ref, 0);
+
+    // Multi-slot: one launch. The row order above is not slot-major on purpose.
+    ASSERT_TRUE(imp::mtp_feed_rows_multislot(row_tok, s.d_hidden, row_src, n, row_slot, row_pos, s.head, s.tok_emb,
+                                             ws_ms, kH, stream));
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    const size_t row_elems = static_cast<size_t>(kNkv) * kHd;
+    for (int sl = 0; sl < kSlots; ++sl) {
+        int fed = 0;
+        for (int r = 0; r < n; ++r) fed += row_slot[r] == sl;
+        const size_t elems = static_cast<size_t>(pre[sl] + fed) * row_elems;
+        if (elems == 0) continue;
+        const __half* kr = static_cast<const __half*>(ws_ref.d_k_cache_base) + static_cast<size_t>(sl) * ws_ref.kv_slot_elems;
+        const __half* km = static_cast<const __half*>(ws_ms.d_k_cache_base) + static_cast<size_t>(sl) * ws_ms.kv_slot_elems;
+        const __half* vr = static_cast<const __half*>(ws_ref.d_v_cache_base) + static_cast<size_t>(sl) * ws_ref.kv_slot_elems;
+        const __half* vm = static_cast<const __half*>(ws_ms.d_v_cache_base) + static_cast<size_t>(sl) * ws_ms.kv_slot_elems;
+        EXPECT_LT(rel_rms_diff(kr, km, elems), 1e-2f) << "slot " << sl << " K";
+        EXPECT_LT(rel_rms_diff(vr, vm, elems), 1e-2f) << "slot " << sl << " V";
+    }
+    // final_norm: the reference keeps only its LAST feed's last row (slot 3)
+    // in d_h_final; the multi-slot call has every row in d_b_h_final.
+    {
+        int last = -1;
+        for (int r = 0; r < n; ++r) if (row_slot[r] == 3) last = r;
+        const __half* hm = static_cast<const __half*>(ws_ms.d_b_h_final) + static_cast<size_t>(last) * kH;
+        EXPECT_LT(rel_rms_diff(ws_ref.d_h_final, hm, kH), 2e-2f) << "final_norm of the last slot-3 row";
+    }
+    imp::mtp_workspace_free(ws_ref);
+    imp::mtp_workspace_free(ws_ms);
+}
+
 // A second batch call must continue at the right cache position and RoPE
 // phase: 10 + 23 batched pairs vs 33 per-pair. A base-offset bug (rows
 // rotated or appended from position 0 again) fails this immediately.

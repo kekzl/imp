@@ -12,8 +12,10 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
         return configured;  // explicit: off (0) or a pinned depth
     if (cfg.runtime.deterministic)
         return 0;  // MTP greedy trajectories are not eager-equal
-    if (configured_batch != 1)
-        return 0;  // concurrent serving: the head binds one request, costs slots
+    // Concurrent serving: the head binds one request and costs slots - unless
+    // the batched verify is on, which drafts for every request in the batch.
+    if (configured_batch != 1 && !cfg.speculative.batch_verify)
+        return 0;
     return kMtpAutoK;
 }
 

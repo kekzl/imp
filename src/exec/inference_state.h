@@ -72,6 +72,15 @@ struct InferenceState {
     bool ssm_grouped_chunk() const {
         return is_prefill && ssm_seq_slots != nullptr && ssm_n_seq > 1 && ssm_seq_tokens > 0;
     }
+    // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md):
+    // a grouped chunk whose groups are DIFFERENT requests. Group g reads slot
+    // ssm_seq_slots[g], commits its state at d_chunk_len rows into slot
+    // ssm_out_slots[g] and its state at d_snap_n rows into slot
+    // ssm_snap_slots[g] (every group; in place when == ssm_seq_slots[g]).
+    // Device int arrays of ssm_n_seq entries; nullptr = the mc contract
+    // above (in-place commit, group-0 snapshot into spec_snap_slab).
+    const int* ssm_out_slots = nullptr;
+    const int* ssm_snap_slots = nullptr;
 
     // BitDecoding Phase 3 residual KV cache.
     //

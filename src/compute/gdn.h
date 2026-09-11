@@ -30,6 +30,11 @@ namespace imp {
 // per candidate; d_real_n then bounds every sequence's committed row, and
 // h_snap/d_snap_n (same contract as the single-sequence launchers) is written
 // from sequence 0 only. Both nullptr when ragged.
+// out_slots / snap_slots (batched speculative verify, uniform batches only):
+// per-sequence slot ids into h_state_pool. out_slots[i] receives sequence
+// i's state at d_real_n rows (nullptr = in place); snap_slots[i] receives
+// its state at d_snap_n rows, EVERY sequence (nullptr = the h_snap slab
+// contract). In-place snapshot (snap_slots[i] == seq_slots[i]) is allowed.
 void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha,
                                 const half* beta, const float* A_log, const float* dt_bias,
                                 float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
@@ -37,7 +42,8 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
                                 int state_size, int n_groups, cudaStream_t stream,
                                 int grouped_layout = 0, const int* d_real_n = nullptr,
                                 const int* seq_row_offsets = nullptr, float* h_snap = nullptr,
-                                const int* d_snap_n = nullptr);
+                                const int* d_snap_n = nullptr, const int* out_slots = nullptr,
+                                const int* snap_slots = nullptr);
 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -57,7 +63,8 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
                                  int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                                  int grouped_layout = 0, const int* d_real_n = nullptr,
                                  const int* seq_row_offsets = nullptr, __nv_bfloat16* h_snap = nullptr,
-                                 const int* d_snap_n = nullptr);
+                                 const int* d_snap_n = nullptr, const int* out_slots = nullptr,
+                                 const int* snap_slots = nullptr);
 void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
