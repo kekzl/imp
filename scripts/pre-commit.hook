@@ -102,5 +102,7 @@ echo "pre-commit (Stage 1 / GPU): staged source changes → make build + modules
 make -s build || exit 1
 for mod in $MODULES; do
     echo "pre-commit: $mod"
-    docker run --rm --gpus all -v "$HOME/models:/models" imp:test "$mod" || exit 1
+    # Absolute path: gtest threadsafe death tests re-exec argv[0] with execv
+    # (no PATH search); a bare "test-e2e" fails DeviceFaultSignalTest.
+    docker run --rm --gpus all -v "$HOME/models:/models" imp:test "/usr/local/bin/$mod" || exit 1
 done

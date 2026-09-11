@@ -251,6 +251,8 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     // differ by a lot - 97204 against 52256 on Qwen3.8-27B-NVFP4, so a prompt
     // between them was advertised as servable and was not (#1542). /health has
     // reported the real number all along; /v1/models reported the plan.
+    // A growable pool holds its ceiling, not its current commit: the scheduler
+    // grows it at admission (kv_capacity_ceiling_tokens).
     long long kv_capacity_tokens = -1;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
@@ -260,7 +262,8 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
             max_seq_len = state.max_seq_len;
             if (state.ctx && state.ctx->engine) {
                 if (const auto* kv = state.ctx->engine->kv_cache())
-                    kv_capacity_tokens = static_cast<long long>(kv->total_blocks()) * kv->block_size();
+                    kv_capacity_tokens = kv_capacity_ceiling_tokens(kv->total_blocks(), kv->ceiling_blocks(),
+                                                                    kv->block_size());
             }
         } else {
             ServerState::ObsStatus snap = state.model_status_snapshot();
@@ -392,7 +395,8 @@ static void snapshot_ctx(ServerState& state, bool& loaded, std::string& model_na
         model_name = state.model_name;
         if (state.ctx && state.ctx->engine) {
             if (const auto* kv = state.ctx->engine->kv_cache())
-                kv_capacity_tokens = static_cast<long long>(kv->total_blocks()) * kv->block_size();
+                kv_capacity_tokens = kv_capacity_ceiling_tokens(kv->total_blocks(), kv->ceiling_blocks(),
+                                                                kv->block_size());
         }
     } else {
         ServerState::ObsStatus snap = state.model_status_snapshot();
