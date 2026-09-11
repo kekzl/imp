@@ -598,6 +598,14 @@ static bool split_last_think(const std::string& text, std::string& reasoning, st
     auto think_start = reasoning.find("<think>");
     if (think_start != std::string::npos)
         reasoning = reasoning.substr(think_start + 7);
+    // Markers left inside (a budget-forced </think> the model closed again
+    // after, a re-opened block) are structure, not prose: drop them, as the
+    // streaming splitter does.
+    for (const char* marker : {"</think>", "<think>"}) {
+        const size_t len = std::char_traits<char>::length(marker);
+        for (size_t p; (p = reasoning.find(marker)) != std::string::npos;)
+            reasoning.erase(p, len);
+    }
     auto rs = reasoning.find_first_not_of("\n\r\t ");
     auto re = reasoning.find_last_not_of("\n\r\t ");
     reasoning =

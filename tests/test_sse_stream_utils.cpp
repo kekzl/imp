@@ -179,8 +179,19 @@ TEST(ExtractReasoning, LastCloseTagWins) {
     auto [reasoning, content] =
         extract_reasoning("<think>a</think>mid<think>b</think>final answer");
     EXPECT_EQ(content, "final answer");
-    // Everything before the LAST </think> is reasoning (minus the first <think>).
-    EXPECT_EQ(reasoning, "a</think>mid<think>b");
+    // Everything before the LAST </think> is reasoning; the markers inside it
+    // are structure, not prose, and never reach reasoning_content (the
+    // streaming splitter drops them the same way).
+    EXPECT_EQ(reasoning, "amidb");
+}
+
+TEST(ExtractReasoning, ForcedCloseThenModelCloseAgainLeavesNoMarker) {
+    // Think budget forced </think> mid-sentence, the model closed once more on
+    // its own ("\n</think>\n9", Qwen3.5-4B at max_tokens 48, 2026-09-11): the
+    // last-close split put the forced marker into reasoning_content as text.
+    auto [reasoning, content] = extract_reasoning("Input: A riddle/problem statement</think>\n</think>\n9");
+    EXPECT_EQ(reasoning, "Input: A riddle/problem statement");
+    EXPECT_EQ(content, "9");
 }
 
 TEST(StripThinkBlock, RemovesBlockAndKeepsAnswer) {
