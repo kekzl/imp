@@ -83,7 +83,8 @@ modules_for() {
         src/exec/*) echo "test-e2e test-moe-gdn test-compute test-attention" ;;
         src/model/*|src/quant/*) echo "test-quant test-text test-e2e test-core" ;;
         src/vision/*|src/lora/*|src/sampling/*) echo "test-e2e test-compute" ;;
-        tools/*) echo "test-core test-e2e" ;;
+        tools/imp-server/batching_engine.*) echo "test-core test-e2e" ;;
+        tools/*) echo "test-core" ;;
         *) echo ALL ;;
     esac
 }
