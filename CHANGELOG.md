@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-09-11
+
 ### Changed
 - Dependencies: CUTLASS v4.7.0 -> v4.7.1 (upstream fix for a kernel compilation failure with setmaxnreg in warp-specialized patterns; the ptxas note C7504 on `gemm_cutlass_grouped_3x.cu` still prints 8 times, it is not that failure), cpp-httplib v0.53.0 -> v0.54.1 (`parse_url` rejects bytes trailing an IPv6 host literal, Digest challenges without realm/nonce are rejected, `Server::CustomRoute()`). googletest v1.18.0, nlohmann/json v3.12.0, CUDA 13.3.1 images and all 9 action pins were already current.
 - Local gates run once per tree: `make build` skips when `imp:test` already carries the tree fingerprint (label `imp.tree`, `scripts/build_image.sh`, 3.5 min per skipped build), the pre-commit hook runs only the test modules the staged diff reaches (full suite on core/include/build changes or `IMP_PRECOMMIT_FULL=1`), and the pre-push hook runs the paired A/B instead of the single-arm perf gate on kernel diffs. Measured before: a commit cost ~7 min and a push ~10 min for one tree.
