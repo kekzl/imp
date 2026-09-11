@@ -319,7 +319,9 @@ __global__ void mtp_mrope_kernel(
     // RoPE scaling — mirrors rope.cu's rope_forward_kernel so the draft head
     // rotates identically to the verifier (issue #897). inv_scaling = 1/freq_scale;
     // ext_factor > 0 engages YaRN blending (corr_dim_0/1, attn_factor=mscale).
-    float inv_scaling, float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1) {
+    float inv_scaling, float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
+    // Per-row positions (ragged multi-slot feed); nullptr = base + row.
+    const int* __restrict__ d_row_pos = nullptr) {
     int h = blockIdx.x;
     int r = blockIdx.y;  // query row within a batched feed; 0 for M=1 decode
     if (h >= n_heads) return;
@@ -330,7 +332,8 @@ __global__ void mtp_mrope_kernel(
     for (int k = threadIdx.x; k < pairs; k += blockDim.x) {
         // Determine which section this pair belongs to.
         int pos;
-        if      (k < s01) pos = pos_t + r;
+        if (d_row_pos != nullptr) pos = d_row_pos[r];
+        else if (k < s01) pos = pos_t + r;
         else if (k < s12) pos = pos_h + r;
         else              pos = pos_w + r;
         // cos/sin with the same YaRN / linear-scaling math as the main forward.
@@ -368,21 +371,121 @@ __global__ void mtp_mrope_kernel(
 void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
                      float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
                      float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-                     cudaStream_t stream, int n_rows) {
+                     cudaStream_t stream, int n_rows, const int* d_row_pos) {
     if (rope_dim <= 0 || sec0 + sec1 + sec2 != rope_dim / 2 || n_rows <= 0) return;
     const int kBlock = 128;
     if (n_heads > 0 && d_q) {
         mtp_mrope_kernel<false><<<dim3(n_heads, n_rows), kBlock, 0, stream>>>(
             static_cast<__half*>(d_q), n_heads, head_dim, rope_dim, theta, sec0, sec1, sec2,
-            pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1);
+            pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1, d_row_pos);
         IMP_CUDA_CHECK_LAUNCH();
     }
     if (n_kv_heads > 0 && d_k) {
         mtp_mrope_kernel<true><<<dim3(n_kv_heads, n_rows), kBlock, 0, stream>>>(
             static_cast<__half*>(d_k), n_kv_heads, head_dim, rope_dim, theta, sec0, sec1, sec2,
-            pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1);
+            pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1, d_row_pos);
         IMP_CUDA_CHECK_LAUNCH();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ragged multi-slot feed kernels (batched verify): each row carries its own
+// KV slot and position.
+// ---------------------------------------------------------------------------
+__global__ void mtp_gather_rows_kernel(const __half* __restrict__ src, const int* __restrict__ idx,
+                                       __half* __restrict__ dst, int H, int n_rows) {
+    const int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (t >= static_cast<int64_t>(n_rows) * H) return;
+    const int r = static_cast<int>(t / H);
+    const int c = static_cast<int>(t % H);
+    dst[t] = src[static_cast<int64_t>(idx[r]) * H + c];
+}
+
+__global__ void mtp_kv_append_rows_kernel(const __half* __restrict__ k_step, const __half* __restrict__ v_step,
+                                          __half* __restrict__ k_base, __half* __restrict__ v_base,
+                                          const int* __restrict__ slots, const int* __restrict__ pos,
+                                          int64_t slot_elems, int row_elems, int n_rows) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n_rows * row_elems) return;
+    const int r = t / row_elems;
+    const int rem = t % row_elems;
+    const int64_t off = static_cast<int64_t>(slots[r]) * slot_elems + static_cast<int64_t>(pos[r]) * row_elems + rem;
+    k_base[off] = k_step[t];
+    v_base[off] = v_step[t];
+}
+
+// Same math as mtp_attn_kv_scan_kernel; row r attends [0, pos[r] + 1) of
+// slot slots[r].
+__global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn, const __half* __restrict__ k_base,
+                                             const __half* __restrict__ v_base, __half* __restrict__ out,
+                                             const int* __restrict__ slots, const int* __restrict__ pos,
+                                             int64_t slot_elems, int num_heads, int num_kv_heads, int head_dim,
+                                             float scale) {
+    const int h = blockIdx.x;
+    const int r = blockIdx.y;
+    if (h >= num_heads) return;
+    const int seq_len = pos[r] + 1;
+    const __half* k_cache = k_base + static_cast<int64_t>(slots[r]) * slot_elems;
+    const __half* v_cache = v_base + static_cast<int64_t>(slots[r]) * slot_elems;
+    const int tid = threadIdx.x;
+    const int gqa = num_heads / num_kv_heads;
+    const int kv_h = h / gqa;
+    extern __shared__ float s_scores[];
+    const __half* q_row = q_attn + (static_cast<int64_t>(r) * num_heads + h) * head_dim;
+    float max_score = -1.0e30f;
+    for (int t = tid; t < seq_len; t += blockDim.x) {
+        const __half* k_row = k_cache + (static_cast<int64_t>(t) * num_kv_heads + kv_h) * head_dim;
+        float acc = 0.0f;
+        for (int d = 0; d < head_dim; ++d) acc += __half2float(q_row[d]) * __half2float(k_row[d]);
+        const float scaled = acc * scale;
+        s_scores[t] = scaled;
+        if (scaled > max_score) max_score = scaled;
+    }
+    __shared__ float s_block_max;
+    if (tid == 0) s_block_max = -1.0e30f;
+    __syncthreads();
+    atomic_max_float(&s_block_max, max_score);
+    __syncthreads();
+    const float gmax = s_block_max;
+    __shared__ float s_block_sum;
+    if (tid == 0) s_block_sum = 0.0f;
+    __syncthreads();
+    float local_sum = 0.0f;
+    for (int t = tid; t < seq_len; t += blockDim.x) {
+        const float e = expf(s_scores[t] - gmax);
+        s_scores[t] = e;
+        local_sum += e;
+    }
+    atomicAdd(&s_block_sum, local_sum);
+    __syncthreads();
+    const float denom = s_block_sum;
+    const float inv_denom = (denom > 0.0f) ? (1.0f / denom) : 0.0f;
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int t = 0; t < seq_len; ++t) {
+            const __half* v_row = v_cache + (static_cast<int64_t>(t) * num_kv_heads + kv_h) * head_dim;
+            acc += s_scores[t] * inv_denom * __half2float(v_row[d]);
+        }
+        out[(static_cast<int64_t>(r) * num_heads + h) * head_dim + d] = __float2half(acc);
+    }
+}
+
+void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols, int n_rows, cudaStream_t stream) {
+    if (n_rows <= 0 || cols <= 0) return;
+    const int64_t total = static_cast<int64_t>(n_rows) * cols;
+    const int grid = static_cast<int>((total + 255) / 256);
+    mtp_gather_rows_kernel<<<grid, 256, 0, stream>>>(static_cast<const __half*>(d_src), d_idx,
+                                                     static_cast<__half*>(d_dst), cols, n_rows);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void mtp_select_slot(MtpDraftWorkspace& ws, int slot) {
+    if (slot < 0 || slot >= ws.n_kv_slots || slot == ws.cur_slot || ws.d_k_cache_base == nullptr) return;
+    ws.slot_pos[static_cast<size_t>(ws.cur_slot)] = ws.mtp_pos;
+    ws.cur_slot = slot;
+    ws.mtp_pos = ws.slot_pos[static_cast<size_t>(slot)];
+    ws.d_k_cache = static_cast<__half*>(ws.d_k_cache_base) + static_cast<size_t>(slot) * ws.kv_slot_elems;
+    ws.d_v_cache = static_cast<__half*>(ws.d_v_cache_base) + static_cast<size_t>(slot) * ws.kv_slot_elems;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,8 +494,9 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts, int top_k, int expert_d_ff, int shared_d_ff,
                             int num_heads, int num_kv_heads, int head_dim,
-                            int max_seq_len) {
+                            int max_seq_len, int n_kv_slots) {
     if (hidden_dim <= 0 || vocab_size <= 0) return false;
+    n_kv_slots = std::max(1, n_kv_slots);
     auto alloc = [](void** p, size_t bytes) {
         return cudaMalloc(p, bytes) == cudaSuccess;
     };
@@ -439,9 +543,17 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     }
     // Phase 2.2.Attn+KV buffers (cap max_seq_len)
     if (ok && num_heads > 0 && head_dim > 0 && num_kv_heads > 0 && max_seq_len > 0) {
-        size_t kv_bytes = static_cast<size_t>(max_seq_len) * num_kv_heads * head_dim * sizeof(__half);
-        ok &= alloc(&ws.d_k_cache, kv_bytes);
-        ok &= alloc(&ws.d_v_cache, kv_bytes);
+        // n_kv_slots caches in one allocation; the active-slot view starts at
+        // slot 0 (mtp_select_slot moves it).
+        ws.kv_slot_elems = static_cast<size_t>(max_seq_len) * num_kv_heads * head_dim;
+        const size_t kv_bytes = ws.kv_slot_elems * static_cast<size_t>(n_kv_slots) * sizeof(__half);
+        ok &= alloc(&ws.d_k_cache_base, kv_bytes);
+        ok &= alloc(&ws.d_v_cache_base, kv_bytes);
+        ws.d_k_cache = ws.d_k_cache_base;
+        ws.d_v_cache = ws.d_v_cache_base;
+        ws.n_kv_slots = n_kv_slots;
+        ws.cur_slot = 0;
+        ws.slot_pos.assign(static_cast<size_t>(n_kv_slots), 0);
         ws.max_seq_len = max_seq_len;
         ws.mtp_pos = 0;
     }
@@ -501,6 +613,12 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         bok &= alloc(&ws.d_b_gate,     n * shared_d_ff * sizeof(__half));
         bok &= alloc(&ws.d_b_up,       n * shared_d_ff * sizeof(__half));
         bok &= alloc(&ws.d_b_act,      n * shared_d_ff * sizeof(__half));
+        // Ragged multi-slot feed tables and outputs.
+        bok &= alloc(reinterpret_cast<void**>(&ws.d_row_slots), n * sizeof(int));
+        bok &= alloc(reinterpret_cast<void**>(&ws.d_row_pos), n * sizeof(int));
+        bok &= alloc(reinterpret_cast<void**>(&ws.d_row_src), n * sizeof(int));
+        bok &= alloc(&ws.d_b_gather,   n * hidden_dim * sizeof(__half));
+        bok &= alloc(&ws.d_b_h_final,  n * hidden_dim * sizeof(__half));
         if (bok) {
             ws.feed_rows_cap = kMtpFeedRows;
         } else {
@@ -577,8 +695,19 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_attn_out);
     frfn(ws.d_attn_residual);
     if (ws.d_mtp_position) { cudaFree(ws.d_mtp_position); ws.d_mtp_position = nullptr; }
-    frfn(ws.d_k_cache);
-    frfn(ws.d_v_cache);
+    // d_k_cache / d_v_cache are views into the slot allocation.
+    frfn(ws.d_k_cache_base);
+    frfn(ws.d_v_cache_base);
+    ws.d_k_cache = nullptr;
+    ws.d_v_cache = nullptr;
+    ws.slot_pos.clear();
+    ws.n_kv_slots = 1;
+    ws.cur_slot = 0;
+    if (ws.d_row_slots) { cudaFree(ws.d_row_slots); ws.d_row_slots = nullptr; }
+    if (ws.d_row_pos) { cudaFree(ws.d_row_pos); ws.d_row_pos = nullptr; }
+    if (ws.d_row_src) { cudaFree(ws.d_row_src); ws.d_row_src = nullptr; }
+    frfn(ws.d_b_gather);
+    frfn(ws.d_b_h_final);
     if (ws.d_feed_tokens) { cudaFree(ws.d_feed_tokens); ws.d_feed_tokens = nullptr; }
     frfn(ws.d_b_emb);
     frfn(ws.d_b_h_norm);
@@ -1476,6 +1605,198 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
     }
 
     ws.mtp_pos = base + n;
+    return true;
+}
+
+bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
+                             int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
+                             const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
+                             cudaStream_t stream, const Tensor* post_norm, float post_norm_eps,
+                             float post_norm_offset) {
+    if (!mtp.loaded || n_rows <= 0 || n_rows > ws.feed_rows_cap)
+        return false;
+    if (h_tokens == nullptr || d_hidden_all == nullptr || h_src_rows == nullptr || h_slots == nullptr ||
+        h_pos == nullptr || main_tok_emb.data == nullptr)
+        return false;
+    const bool dense_mlp = ws.n_experts == 0 && ws.shared_d_ff > 0 &&
+                           mtp.shared_expert_gate_proj.data != nullptr &&
+                           mtp.shared_expert_up_proj.data != nullptr &&
+                           mtp.shared_expert_down_proj.data != nullptr;
+    if (!dense_mlp || ws.num_heads <= 0 || ws.num_kv_heads <= 0 || ws.head_dim <= 0)
+        return false;
+    if (!mtp.input_layernorm.data || !mtp.q_proj.data || !mtp.k_proj.data || !mtp.v_proj.data ||
+        !mtp.o_proj.data || !mtp.post_attention_layernorm.data)
+        return false;
+    if (ws.d_k_cache_base == nullptr || ws.d_v_cache_base == nullptr || ws.d_row_slots == nullptr ||
+        ws.d_b_gather == nullptr || ws.d_b_h_final == nullptr)
+        return false;
+    int max_pos = 0;
+    for (int r = 0; r < n_rows; ++r) {
+        if (h_slots[r] < 0 || h_slots[r] >= ws.n_kv_slots || h_pos[r] < 0 || h_pos[r] >= ws.max_seq_len)
+            return false;
+        max_pos = std::max(max_pos, h_pos[r]);
+    }
+
+    const int H = hidden_dim;
+    const int n = n_rows;
+    const int nh = ws.num_heads;
+    const int nkv = ws.num_kv_heads;
+    const int hdh = ws.head_dim;
+    const int dff = ws.shared_d_ff;
+    const int kBlock = 256;
+
+    // 1 - tables H2D, gather the hidden rows, batched embedding lookup
+    if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens, static_cast<size_t>(n) * sizeof(int32_t),
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(ws.d_row_slots, h_slots, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
+                        stream) != cudaSuccess ||
+        cudaMemcpyAsync(ws.d_row_pos, h_pos, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
+                        stream) != cudaSuccess ||
+        cudaMemcpyAsync(ws.d_row_src, h_src_rows, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
+                        stream) != cudaSuccess)
+        return false;
+    {
+        const int64_t total = static_cast<int64_t>(n) * H;
+        const int grid = static_cast<int>((total + kBlock - 1) / kBlock);
+        mtp_gather_rows_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(d_hidden_all), ws.d_row_src,
+                                                            static_cast<__half*>(ws.d_b_gather), H, n);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    int64_t nH[2] = {n, H};
+    Tensor emb_view(ws.d_b_emb, QType::F16, 2, nH, /*on_device=*/true);
+    imp::embedding_lookup(main_tok_emb, ws.d_feed_tokens, n, emb_view, main_tok_emb.qtype, stream);
+
+    // 2 - twin pre-fc norms (after the target's final norm when asked)
+    Tensor h_view(ws.d_b_gather, QType::F16, 2, nH, true);
+    if (post_norm != nullptr && post_norm->data != nullptr)
+        imp::rmsnorm(h_view, *post_norm, h_view, post_norm_eps, stream, post_norm_offset);
+    Tensor h_n(ws.d_b_h_norm, QType::F16, 2, nH, true);
+    imp::rmsnorm(emb_view, mtp.pre_fc_norm_embedding, emb_view, 1e-6f, stream);
+    imp::rmsnorm(h_view, mtp.pre_fc_norm_hidden, h_n, 1e-6f, stream);
+
+    // 3 - concat, 4 - fc
+    {
+        int grid = (n * 2 * H + kBlock - 1) / kBlock;
+        mtp_concat_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(ws.d_b_emb),
+                                                       static_cast<const __half*>(ws.d_b_h_norm),
+                                                       static_cast<__half*>(ws.d_b_fc_in), H, n);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    {
+        int64_t in_s[2] = {n, 2 * H};
+        Tensor in_v(ws.d_b_fc_in, QType::F16, 2, in_s, true);
+        Tensor out_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
+        imp::gemm(in_v, mtp.fc, out_v, 1.0f, 0.0f, stream);
+    }
+
+    // 5 - attention block, per-row slot and position
+    {
+        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
+        Tensor in_v(ws.d_b_norm, QType::F16, 2, nH, true);
+        imp::rmsnorm(fc_v, mtp.input_layernorm, in_v, 1e-6f, stream);
+        const int q_out = static_cast<int>(mtp.q_proj.shape[0]);
+        {
+            int64_t out_s[2] = {n, q_out};
+            Tensor out_v(ws.d_b_q_full, QType::F16, 2, out_s, true);
+            imp::gemm(in_v, mtp.q_proj, out_v, 1.0f, 0.0f, stream);
+        }
+        {
+            int64_t out_s[2] = {n, nkv * hdh};
+            Tensor k_v(ws.d_b_k, QType::F16, 2, out_s, true);
+            Tensor v_v(ws.d_b_v, QType::F16, 2, out_s, true);
+            imp::gemm(in_v, mtp.k_proj, k_v, 1.0f, 0.0f, stream);
+            imp::gemm(in_v, mtp.v_proj, v_v, 1.0f, 0.0f, stream);
+        }
+        const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) * sizeof(__half);
+        if (cudaMemcpy2DAsync(ws.d_b_q_attn, static_cast<size_t>(hdh) * sizeof(__half), ws.d_b_q_full, q_src_pitch,
+                              static_cast<size_t>(hdh) * sizeof(__half), static_cast<size_t>(n) * nh,
+                              cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+            return false;
+        if (mtp.q_norm.data) {
+            int64_t q_s[2] = {static_cast<int64_t>(n) * nh, hdh};
+            Tensor q_v(ws.d_b_q_attn, QType::F16, 2, q_s, true);
+            imp::rmsnorm(q_v, mtp.q_norm, q_v, ws.rms_norm_eps, stream, ws.arch_norm_offset);
+        }
+        if (mtp.k_norm.data) {
+            int64_t k_s[2] = {static_cast<int64_t>(n) * nkv, hdh};
+            Tensor k_v(ws.d_b_k, QType::F16, 2, k_s, true);
+            imp::rmsnorm(k_v, mtp.k_norm, k_v, ws.rms_norm_eps, stream, ws.arch_norm_offset);
+        }
+        if (mtp.attn_rope && ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
+            mtp_apply_mrope(ws.d_b_q_attn, nh, ws.d_b_k, nkv, hdh, ws.rope_dim, ws.rope_theta, ws.mrope_sec0,
+                            ws.mrope_sec1, ws.mrope_sec2, /*pos=*/0, 1.0f / ws.rope_freq_scale, ws.yarn_ext_factor,
+                            ws.yarn_attn_factor, ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream, n, ws.d_row_pos);
+        }
+        {
+            int grid = (n * nkv * hdh + kBlock - 1) / kBlock;
+            mtp_kv_append_rows_kernel<<<grid, kBlock, 0, stream>>>(
+                static_cast<const __half*>(ws.d_b_k), static_cast<const __half*>(ws.d_b_v),
+                static_cast<__half*>(ws.d_k_cache_base), static_cast<__half*>(ws.d_v_cache_base), ws.d_row_slots,
+                ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        {
+            const size_t shmem_bytes = static_cast<size_t>(max_pos + 1) * sizeof(float);
+            if (shmem_bytes > 48 * 1024) {
+                static bool smem_opted_in = false;
+                if (!smem_opted_in) {
+                    cudaFuncSetAttribute(mtp_attn_kv_scan_rows_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         ws.max_seq_len * static_cast<int>(sizeof(float)));
+                    smem_opted_in = true;
+                }
+            }
+            const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
+            mtp_attn_kv_scan_rows_kernel<<<dim3(nh, n), kBlock, shmem_bytes, stream>>>(
+                static_cast<const __half*>(ws.d_b_q_attn), static_cast<const __half*>(ws.d_k_cache_base),
+                static_cast<const __half*>(ws.d_v_cache_base), static_cast<__half*>(ws.d_b_attn_out), ws.d_row_slots,
+                ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), nh, nkv, hdh, scale);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        if (mtp.attn_output_gate) {
+            int grid = (n * nh * hdh + kBlock - 1) / kBlock;
+            mtp_gate_attn_out_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_attn_out),
+                                                                  static_cast<const __half*>(ws.d_b_q_full), nh, hdh,
+                                                                  n);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        {
+            int64_t in_s[2] = {n, nh * hdh};
+            Tensor in_a(ws.d_b_attn_out, QType::F16, 2, in_s, true);
+            Tensor out_v(ws.d_b_res, QType::F16, 2, nH, true);
+            imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
+            int grid = (n * H + kBlock - 1) / kBlock;
+            mtp_add_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
+                                                        static_cast<const __half*>(ws.d_b_res), n * H);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+    }
+
+    // 6 - dense SwiGLU MLP + residual
+    {
+        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
+        Tensor pn_v(ws.d_b_norm, QType::F16, 2, nH, true);
+        imp::rmsnorm(fc_v, mtp.post_attention_layernorm, pn_v, 1e-6f, stream);
+        int64_t ff_s[2] = {n, dff};
+        Tensor gate_v(ws.d_b_gate, QType::F16, 2, ff_s, true);
+        Tensor up_v(ws.d_b_up, QType::F16, 2, ff_s, true);
+        Tensor act_v(ws.d_b_act, QType::F16, 2, ff_s, true);
+        imp::gemm(pn_v, mtp.shared_expert_gate_proj, gate_v, 1.0f, 0.0f, stream);
+        imp::gemm(pn_v, mtp.shared_expert_up_proj, up_v, 1.0f, 0.0f, stream);
+        imp::swiglu(gate_v, up_v, act_v, stream);
+        Tensor down_v(ws.d_b_res, QType::F16, 2, nH, true);
+        imp::gemm(act_v, mtp.shared_expert_down_proj, down_v, 1.0f, 0.0f, stream);
+        int grid = (n * H + kBlock - 1) / kBlock;
+        mtp_add_shared_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
+                                                           static_cast<const __half*>(ws.d_b_res), n * H);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+
+    // 7 - final_norm of every row (the chain input / LM head input per row)
+    {
+        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
+        Tensor hf_v(ws.d_b_h_final, QType::F16, 2, nH, true);
+        imp::rmsnorm(fc_v, mtp.final_norm, hf_v, 1e-6f, stream);
+    }
     return true;
 }
 

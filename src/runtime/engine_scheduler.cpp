@@ -880,7 +880,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                    // site without the MTP exclusion the process_outputs launch
                    // has - measured on Qwen3.8-27B-NVFP4: drafted_total 1 vs
                    // 436 over a 768-token essay, 84.7 vs 104.3 tok/s.
-                   !(mtp_spec_decode_enabled() && mtp_bound_req_ == decode_batch[0]->id) &&
+                   !(mtp_spec_decode_enabled() && mtp_bound_(decode_batch[0]->id)) &&
                    spec_verify_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
                    spec_burst_launch_ok_(*decode_batch[0]) &&
                    // Budget exhausted → the EAGER step must run: it forces
@@ -1765,6 +1765,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // (device-side tokens, no host hiddens) the cache is stale — skip
         // feeding so it never desynchronizes silently.
         auto* ws_gate = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        // A parked binding (batched verify serves several requests) becomes
+        // the active one before the sync gate reads its cache position.
+        if (mtp_bound_(valid_decode[0]->id))
+            mtp_activate_(valid_decode[0]->id);
         // Depth for THIS request: 0 when it declined the head
         // (`"speculative": {"mtp_k": 0}` or `"speculative": false`), which is
         // the one case where the process has a head armed and must not draft.

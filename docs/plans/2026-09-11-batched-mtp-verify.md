@@ -67,5 +67,20 @@ max_tokens = 150 reasoning tokens), the same run reads 560-578 vs 582-590:
 the n-gram source drafts nothing inside the think block, and every verify
 step then forwards 16 rows for 8-9 tokens. The MTP source (stage 3) is what
 carries that half.
-| 3 | MTP: N-slot KV, per-request binding, ragged batched feed + draft, small-M LM head on head rows | draft parity vs the single-slot path on the same pairs (argmax equal) | |
+| 3 | MTP: N-slot KV (`mtp_select_slot`, per-request bindings parked in `mtp_binds_`), one ragged head pass over every emitted pair (`mtp_feed_rows_multislot`), CUTLASS LM head on the last row per request (`lm_head_rows_argmax`), K = 1 | `MtpFeedBatchTest.MultiSlotFeedMatchesPerSlotBatches` (KV rows and final_norm vs per-slot batches) | DONE 2026-09-11 (table below) |
+
+Stage 3 measurement (dev build, Qwen3.8-27B-NVFP4-vllm, 8 streams x 300
+greedy tokens, unique prompts (`conc_client.py` with `repetition_penalty`
+1.0), `--think-budget 0`, `mtp_k=2 ngram=false verify_smallm=true` on both
+arms, fresh server per arm, 3 waves):
+
+| arm | tok/s | verify |
+|---|---|---|
+| `batch_verify=false` (head loaded, nothing drafts at batch > 1) | 586.7 / 605.7 / 610.7 | none |
+| `batch_verify=true` | 703.8 / 758.3 / 766.8 (+20..+26 %) | 516 steps, 78.0 % accept, 13.9 tok/verify, 16.9 ms/verify: 15.0 forward + argmax, 1.84 head feed + LM head + sync (14.1 rows/call) |
+
+Price found on the way: `diagnostics.mtp_prenorm_h` (default on) sent the
+first build down the per-request fallback (per-pair M=1 feeds and chain
+drafts with a full-vocab GEMV each): 37 ms/verify, 356 tok/s. The batched
+feed now applies the target's final norm to the gathered rows itself.
 | 4 | scheduler: batched step replaces the plain decode when gated; pipeline chain break; graph capture keyed by N | two-image A/B @8/@16/@32, `check-degeneration` battery, perf baseline unchanged for spec-off | |

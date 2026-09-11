@@ -491,6 +491,36 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     });
 }
 
+bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream) {
+    if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
+        return false;
+    if (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr || qscratch_.cutlass_act_sf == nullptr)
+        return false;
+    const auto& cfg = model_->config();
+    const int V = cfg.vocab_size;
+    const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
+    if (!ensure_verify_scratch(/*with_penalties=*/false))
+        return false;
+    float* pvals = static_cast<float*>(verify_argmax_scratch_);
+    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
+    for (int c = 0; c < n_rows; c += mb) {
+        const int csz = std::min(mb, n_rows - c);
+        const void* rows = static_cast<const char*>(d_rows) + static_cast<size_t>(c) * cfg.d_model * sizeof(half);
+        Tensor lg = view_tokens(logits_, csz);
+        quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz, cfg.d_model,
+                                       stream);
+        if (!gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_,
+                                           static_cast<float*>(lg.data), csz, V, cfg.d_model, nullptr, 0, stream))
+            return false;
+        dim3 grid(csz, kArgmaxSplits);
+        rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals, pidxs);
+        IMP_CUDA_CHECK_LAUNCH();
+        rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + c);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    return true;
+}
+
 void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t stream) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr)
         return;

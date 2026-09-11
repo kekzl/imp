@@ -439,6 +439,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
 
     long long acc_total = 0, emit_total = 0;
     bool any_mtp = false;
+    std::vector<int> row0(N), emitted_of(N, 0);
     for (int g = 0; g < N; ++g) {
         auto& req = reqs[g];
         const bool has = draft[g] >= 0;
@@ -465,8 +466,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
             if (req->think_budget > 0.0f && req->in_think_block != think_at_start)
                 break;
         }
-        if (from_mtp[g] && mtp_spec_decode_enabled())
-            mtp_post_verify_update_(*req, emitted, 2 * g);
+        row0[g] = 2 * g;
+        emitted_of[g] = emitted;
         kv_manager_->touch(req->id);
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
         // State: the spare holds the state after [t0, draft], the live slot
@@ -486,6 +487,16 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         emit_total += emitted;
         any_mtp = any_mtp || from_mtp[g];
     }
+    // MTP: feed every bound request's emitted pairs and draft its next token
+    // in one head pass (the chunk's hidden rows are still in place).
+    static double t_verify_ms = 0.0;
+    static long long t_steps = 0;
+    t_verify_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count();
+    if (++t_steps % 100 == 0)
+        IMP_LOG_INFO("spec-batch: %lld steps, forward+argmax %.2f ms/step (before the MTP feed)", t_steps,
+                     t_verify_ms / t_steps);
+    if (mtp_spec_decode_enabled())
+        mtp_batched_feed_(reqs, row0, emitted_of, stream);
     spec_stats_record_(any_mtp, n_drafted, acc_total, emit_total,
                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0)
                            .count());

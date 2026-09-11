@@ -538,8 +538,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 // upload fails at batch >= 16, works at <= 12; this lands 12.
                 if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
                     model_->mtp_->loaded && per_slot_state > 0) {
-                    const size_t mtp_cost =
-                        2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
+                    size_t mtp_cost = 2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
+                    // Batched verify: one MTP KV slot per batch slot (K and V,
+                    // 16k rows each, engine_spec_mtp.cpp kMtpKvCap).
+                    if (batch_verify_on_() && model_->mtp_->v_proj.data != nullptr) {
+                        const size_t kv_row = static_cast<size_t>(model_->mtp_->v_proj.shape[0]) * 2;
+                        mtp_cost += static_cast<size_t>(std::max(fit, 1)) * 2 * 16384ULL * kv_row;
+                    }
                     fit -= static_cast<int>((mtp_cost + per_slot_state - 1) / per_slot_state);
                 }
                 // Slots the multi-candidate verify reserves past the batch

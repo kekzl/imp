@@ -173,6 +173,13 @@ public:
                            bool allow_cutlass = false, const int32_t* d_banned_alt = nullptr,
                            int n_banned_alt = 0, const uint8_t* h_row_alt = nullptr);
 
+    // LM head + argmax over EXTERNAL, already-normed rows ([n_rows, d_model]
+    // FP16, e.g. the MTP head's final_norm output): the batched-decode W4A4
+    // tensor-core LM head, no output norm applied. d_out[0..n_rows). False
+    // when that LM head is not built (max_batch_size == 1) or on a GEMM
+    // failure; nothing is written then.
+    bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream);
+
     // Materialize the LM-head projection of hidden_[0..n_rows) into d_out
     // ([n_rows, vocab_size] fp32) — same batched re-projection as
     // greedy_argmax_all, but copying the rows out instead of reducing them.

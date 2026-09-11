@@ -157,7 +157,7 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     // the eager tax with no speculation, which on think-heavy chat eats the
     // MTP win.
     if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) {
-        if (!(mtp_spec_decode_enabled() && mtp_bound_req_ == req.id))
+        if (!(mtp_spec_decode_enabled() && mtp_bound_(req.id)))
             return "think_budget_in_block";
         // Forcing due: the eager step must run NOW to force </think>; a
         // verify would emit past the exhausted budget instead.
@@ -448,7 +448,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // per-step chain feed), while a burst desyncs the MTP cache for the
         // rest of the generation (#847 sync gate).
         if (scfg.miss_burst > 0 && !req->spec_ngram_given_up &&
-            !(mtp_spec_decode_enabled() && mtp_bound_req_ == req->id) &&
+            !(mtp_spec_decode_enabled() && mtp_bound_(req->id)) &&
             spec_burst_launch_ok_(*req) &&
             try_launch_async_graph_loop(req, req->output_tokens.back(), stream,
                                         spec_effective_miss_burst_(*req))) {

@@ -1008,6 +1008,40 @@ private:
     long long mtp_tree_branched_ = 0;
     long long mtp_tree_linear_ = 0;
     int mtp_draft_ctx_ = -1;                  // context_len the draft targets
+    // ── Per-request bindings (batched verify) ──
+    // The fields above describe the ACTIVE binding (mtp_bound_req_ and its
+    // workspace KV slot). Other live requests keep theirs parked here;
+    // mtp_activate_ swaps a parked binding in (and selects its KV slot), so
+    // every single-request path keeps working per request unchanged. With one
+    // KV slot (batched verify off) a new request evicts the parked one, the
+    // behaviour the single workspace always had.
+    struct MtpBind {
+        int slot = 0;
+        std::vector<int32_t> history, pending;
+        std::vector<std::vector<int32_t>> chains;
+        int draft_ctx = -1;
+        int econ_verifies = 0;
+        long long econ_emitted = 0, econ_rows = 0;
+        int k_live = 0;
+        bool stale_logged = false;
+    };
+    std::unordered_map<int, MtpBind> mtp_binds_;  // parked (never the active request)
+    std::vector<int> mtp_free_slots_;
+    bool mtp_slots_initialized_ = false;
+    std::vector<std::vector<int32_t>> mtp_slot_history_;  // per slot: tokens its KV covers
+    bool mtp_bound_(int req_id) const {
+        return req_id >= 0 && (mtp_bound_req_ == req_id || mtp_binds_.count(req_id) != 0);
+    }
+    void mtp_park_active_();          // active -> mtp_binds_ (no-op when none)
+    void mtp_activate_(int req_id);   // park the active one, load req_id's (must be bound)
+    int mtp_acquire_slot_(const Request& req);  // free slot with the longest history prefix, -1 = none
+    void mtp_release_(int req_id);    // request end: binding dropped, slot freed, history kept
+    // After a batched verify: one ragged head pass over every bound
+    // request's emitted (token, hidden-row) pairs, then one LM-head pass over
+    // the last pair of each -> the next draft per request. rows[g] = the
+    // request's first hidden row in the chunk, emitted[g] its emitted count.
+    void mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows,
+                           const std::vector<int>& emitted, cudaStream_t stream);
     // True when the request's context advanced without MTP pairs (async-loop
     // burst, chunked-prefill gap) — drafting stays off for the request.
     bool mtp_stale_logged_ = false;
