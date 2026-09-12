@@ -1,6 +1,8 @@
 # Batched MTP verify on the GDN hybrid (the concurrent-serving lever)
 
-Status (2026-09-11): in progress, branch `perf/batched-mtp-verify`. Stage
+Status (2026-09-13): stages 1-4 DONE, shipped opt-in as `speculative.batch_verify`
+(#1993, default off). The spare-slot price continues in
+[2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md). Stage
 table at the end carries the state of every stage.
 
 ## Why
