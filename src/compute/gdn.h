@@ -43,7 +43,13 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
                                 int grouped_layout = 0, const int* d_real_n = nullptr,
                                 const int* seq_row_offsets = nullptr, float* h_snap = nullptr,
                                 const int* d_snap_n = nullptr, const int* out_slots = nullptr,
-                                const int* snap_slots = nullptr);
+                                const int* snap_slots = nullptr,
+                                // Factored spare, compute/gdn_factor.cuh. fac_out receives the
+                                // rank-1 row for real_n INSTEAD of a full state copy (out_slots is
+                                // then unused); fac_in carries a pending row applied after the
+                                // state load. Both [n_seq, n_heads, fac_stride] floats.
+                                float* fac_out = nullptr, const float* fac_in = nullptr,
+                                int fac_stride = 0);
 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -64,7 +70,8 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
                                  int grouped_layout = 0, const int* d_real_n = nullptr,
                                  const int* seq_row_offsets = nullptr, __nv_bfloat16* h_snap = nullptr,
                                  const int* d_snap_n = nullptr, const int* out_slots = nullptr,
-                                 const int* snap_slots = nullptr);
+                                 const int* snap_slots = nullptr, float* fac_out = nullptr,
+                                 const float* fac_in = nullptr, int fac_stride = 0);
 void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,

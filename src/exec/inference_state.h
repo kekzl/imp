@@ -81,6 +81,17 @@ struct InferenceState {
     // above (in-place commit, group-0 snapshot into spec_snap_slab).
     const int* ssm_out_slots = nullptr;
     const int* ssm_snap_slots = nullptr;
+    // Factored spare (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md).
+    // ssm_fac_out replaces ssm_out_slots: the drafted row is carried as
+    // (g, k, delta) per head instead of a second full state slot. ssm_fac_in
+    // carries the row a previous verify left for an ACCEPTED request; the scan
+    // applies it to the state it just loaded, so it costs no state traffic.
+    // Both are the base of a [n_ssm_layers][slot][head][ssm_fac_stride] float
+    // buffer; the per-layer stride is ssm_fac_layer_stride floats.
+    float* ssm_fac_out = nullptr;
+    const float* ssm_fac_in = nullptr;
+    int ssm_fac_stride = 0;
+    int64_t ssm_fac_layer_stride = 0;
 
     // BitDecoding Phase 3 residual KV cache.
     //

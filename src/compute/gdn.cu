@@ -1,4 +1,5 @@
 #include "compute/gdn_internal.cuh"
+#include "compute/gdn_factor.cuh"
 #include "core/logging.h"
 
 #include <cuda_bf16.h>
@@ -82,7 +83,14 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     // snapshot in place (snap_slots[seq] == seq_slots[seq]): this CTA is the
     // only reader and writer of its column, and the read precedes the write.
     const int* __restrict__ out_slots = nullptr,
-    const int* __restrict__ snap_slots = nullptr) {
+    const int* __restrict__ snap_slots = nullptr,
+    // Factored spare (compute/gdn_factor.cuh): fac_in carries a pending
+    // rank-1 row applied right after the state load, fac_out receives the row
+    // for real_n instead of a second full state copy. Both [n_seq, n_heads,
+    // fac_stride]; nullptr keeps the full-state contract above.
+    float* __restrict__ fac_out = nullptr,
+    const float* __restrict__ fac_in = nullptr,
+    int fac_stride = 0) {
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
@@ -155,6 +163,12 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
         for (int s = 0; s < SS_PER; s++)
             H_reg[s] = static_cast<float>(H_col[(s_base + s) * HD]);
     }
+    // Factor rows are indexed by the recurrent SLOT, not by the batch
+    // position: a request keeps its slot across steps but moves within the
+    // batch, so indexing by seq would hand the next step another request's row.
+    const size_t fac_row = (static_cast<size_t>(seq_slots ? seq_slots[seq] : seq) * n_heads + h) *
+                           static_cast<size_t>(fac_stride);
+    gdn_factor_apply<SS_PER>(H_reg, fac_in ? fac_in + fac_row : nullptr, SS, s_base, d);
 
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce_buf[HD]
     extern __shared__ float smem[];
@@ -292,10 +306,21 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
         // no barrier needed). For the unpadded case real_n == n_tokens and
         // this is the single end-of-scan store the kernel always did.
         if (t + 1 == real_n) {
-            StateT* H_col = h_out + static_cast<size_t>(h) * SS * HD + d;
+            // Factored only when there IS a drafted row past the snapshot.
+            // Otherwise the row would describe the transition into the state
+            // the snapshot already holds and the next step would apply it a
+            // second time; the 0 sentinel below keeps the buffer defined so a
+            // stale row from an earlier step cannot survive either.
+            if (fac_out && snap_n >= 1 && real_n > snap_n) {
+                gdn_factor_store<SS_PER>(fac_out + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
+            } else {
+                if (fac_out && d == 0 && part == 0)
+                    fac_out[fac_row] = 0.0f;
+                StateT* H_col = h_out + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
-            for (int s = 0; s < SS_PER; s++)
-                H_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
+                for (int s = 0; s < SS_PER; s++)
+                    H_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
+            }
         }
         if (t + 1 == snap_n) {
             StateT* S_col = h_snap_dst + static_cast<size_t>(h) * SS * HD + d;
@@ -383,7 +408,8 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
                                 half* y, int n_seq, int n_tokens, int n_heads, int head_dim_ssm,
                                 int state_size, int n_groups, cudaStream_t stream, int grouped_layout,
                                 const int* d_real_n, const int* seq_row_offsets, float* h_snap,
-                                const int* d_snap_n, const int* out_slots, const int* snap_slots) {
+                                const int* d_snap_n, const int* out_slots, const int* snap_slots,
+                                float* fac_out, const float* fac_in, int fac_stride) {
     if (n_seq <= 0)
         return;
     if (seq_row_offsets && d_real_n)
@@ -419,7 +445,7 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         pdl::launch(gdn_scan_fused_kernel<128, 128, half, SPLIT>, dim3(grid), dim3(128 * SPLIT), size_t(smem), stream,
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
             conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
-            seq_row_offsets, out_slots, snap_slots);
+            seq_row_offsets, out_slots, snap_slots, fac_out, fac_in, fac_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         const size_t smem = (2 * 64 + 64) * sizeof(float);
@@ -427,7 +453,7 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         pdl::launch(gdn_scan_fused_kernel<64, 64, half>, dim3(grid), dim3(64), size_t(smem), stream,
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
             conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
-            seq_row_offsets, out_slots, snap_slots);
+            seq_row_offsets, out_slots, snap_slots, fac_out, fac_in, fac_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         IMP_LOG_ERROR("gdn_scan_fused_f32_batched: unsupported head_dim=%d state_size=%d", head_dim_ssm,
@@ -445,7 +471,8 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
                                  int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                                  int grouped_layout, const int* d_real_n, const int* seq_row_offsets,
                                  __nv_bfloat16* h_snap, const int* d_snap_n, const int* out_slots,
-                                 const int* snap_slots) {
+                                 const int* snap_slots, float* fac_out, const float* fac_in,
+                                 int fac_stride) {
     if (n_seq <= 0)
         return;
     if (seq_row_offsets && d_real_n)
@@ -464,7 +491,7 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
         pdl::launch(gdn_scan_fused_kernel<128, 128, half, SPLIT, __nv_bfloat16>, dim3(grid), dim3(128 * SPLIT), size_t(smem), stream,
         conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
         grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride, seq_row_offsets, out_slots,
-        snap_slots);
+        snap_slots, fac_out, fac_in, fac_stride);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -493,13 +520,13 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                     dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
                     dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
                     static_cast<float*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0),
-                    static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr));
+                    static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, half>);
         pdl::launch(gdn_scan_fused_kernel<64, 64, half>, dim3(n_heads), dim3(64), size_t(smem), stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                            static_cast<float*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr));
+                                            static_cast<float*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Fallback: per-token loop (for unsupported HD/SS sizes). The host
@@ -536,7 +563,7 @@ void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* a
                 dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
                 dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
                 static_cast<__nv_bfloat16*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0),
-                static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr));
+                static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -554,13 +581,13 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                     dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
                     dt_bias, h_state, y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
                     d_real_n, h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
-                    static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr));
+                    static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, float>);
         pdl::launch(gdn_scan_fused_kernel<64, 64, float>, dim3(n_heads), dim3(64), size_t(smem), stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                            h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr));
+                                            h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Refuse, do not approximate. This branch used to run the FP16 decode
@@ -602,7 +629,7 @@ void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const
                 dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
                 dt_bias, h_state, y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
                 d_real_n, h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
-                static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr));
+                static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

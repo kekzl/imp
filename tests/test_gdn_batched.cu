@@ -33,6 +33,7 @@
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
+#include "compute/gdn_factor.cuh"
 #include <cuda_fp16.h>
 #include "compute/gdn.h"
 #include "compute/ssm.h"
@@ -851,6 +852,137 @@ TEST_F(GdnBatchedScanTest, VerifyGroupsConvCommitsToSpareAndSnapshotsInPlace) {
 
     cudaFree(d_pool); cudaFree(d_out); cudaFree(d_w); cudaFree(d_b); cudaFree(d_x);
     cudaFree(d_live); cudaFree(d_spare); cudaFree(d_lens);
+}
+
+
+// The factored spare (compute/gdn_factor.cuh). The verify carried the drafted
+// row as a second FULL state slot per batch slot - an exact duplicate of the
+// pool. The delta rule's per-token update is g*H + k (x) delta, so the row is
+// a (g, k, delta) triple instead: 48 KiB against 1.5 MiB per layer on
+// Qwen3.8-27B. What must hold is that the next step cannot tell the two apart,
+// so this runs the real accept sequence both ways and compares the state AFTER
+// the following token, not the factors themselves.
+TEST_F(GdnBatchedScanTest, FactoredSpareReproducesTheFullSpareAfterTheNextToken) {
+    const ScanShape s{/*n_seq=*/3, /*n_tokens=*/2};
+    const std::vector<int> live{4, 0, 2};
+    const std::vector<int> spare{1, 5, 3};
+    const int conv_channels = 2 * s.n_groups * s.state_size + s.n_heads * s.head_dim;
+    const int inner = s.n_heads * s.head_dim;
+    const size_t rows = static_cast<size_t>(s.n_seq) * s.n_tokens;
+    const size_t state_elems = static_cast<size_t>(s.n_heads) * s.state_size * s.head_dim;
+    const int n_slots = 6;
+    const size_t pool_elems = static_cast<size_t>(n_slots) * state_elems;
+    const int fac_stride = imp::gdn_factor_floats_per_head(s.state_size, s.head_dim);
+    // Rows are indexed by SLOT, like the state pool, so the buffer spans slots.
+    const size_t fac_elems = static_cast<size_t>(n_slots) * s.n_heads * fac_stride;
+
+    std::vector<float> h_conv(rows * conv_channels), h_alpha_f(rows * s.n_heads), h_beta_f(rows * s.n_heads);
+    std::vector<float> h_Alog(s.n_heads), h_dtb(s.n_heads), h_pool_init(pool_elems);
+    // A third token per sequence: the step that follows the accept.
+    std::vector<float> h_conv3(static_cast<size_t>(s.n_seq) * conv_channels);
+    std::vector<float> h_alpha3_f(static_cast<size_t>(s.n_seq) * s.n_heads);
+    std::vector<float> h_beta3_f(static_cast<size_t>(s.n_seq) * s.n_heads);
+    fill(h_conv, 2281);
+    fill(h_alpha_f, 4409, -2.0f, 2.0f);
+    fill(h_beta_f, 1123, -2.0f, 2.0f);
+    fill(h_Alog, 6653, -4.0f, -0.5f);
+    fill(h_dtb, 331, -1.0f, 1.0f);
+    fill(h_pool_init, 8819, -0.5f, 0.5f);
+    fill(h_conv3, 5501);
+    fill(h_alpha3_f, 7717, -2.0f, 2.0f);
+    fill(h_beta3_f, 9931, -2.0f, 2.0f);
+    auto to_half = [](const std::vector<float>& f) {
+        std::vector<half> h(f.size());
+        for (size_t i = 0; i < f.size(); i++) h[i] = __float2half(f[i]);
+        return h;
+    };
+    const std::vector<half> h_alpha = to_half(h_alpha_f), h_beta = to_half(h_beta_f);
+    const std::vector<half> h_alpha3 = to_half(h_alpha3_f), h_beta3 = to_half(h_beta3_f);
+
+    float *d_conv = nullptr, *d_conv3 = nullptr, *d_Alog = nullptr, *d_dtb = nullptr, *d_pool = nullptr;
+    float* d_fac = nullptr;
+    half *d_alpha = nullptr, *d_beta = nullptr, *d_alpha3 = nullptr, *d_beta3 = nullptr, *d_y = nullptr;
+    int *d_live = nullptr, *d_spare = nullptr, *d_lens = nullptr;
+    auto dev = [](auto** p, size_t bytes) { ASSERT_EQ(cudaMalloc(p, bytes), cudaSuccess); };
+    dev(&d_conv, h_conv.size() * sizeof(float));
+    dev(&d_conv3, h_conv3.size() * sizeof(float));
+    dev(&d_alpha, h_alpha.size() * sizeof(half));
+    dev(&d_beta, h_beta.size() * sizeof(half));
+    dev(&d_alpha3, h_alpha3.size() * sizeof(half));
+    dev(&d_beta3, h_beta3.size() * sizeof(half));
+    dev(&d_Alog, h_Alog.size() * sizeof(float));
+    dev(&d_dtb, h_dtb.size() * sizeof(float));
+    dev(&d_pool, pool_elems * sizeof(float));
+    dev(&d_fac, fac_elems * sizeof(float));
+    dev(&d_y, rows * inner * sizeof(half));
+    dev(&d_live, live.size() * sizeof(int));
+    dev(&d_spare, spare.size() * sizeof(int));
+    dev(&d_lens, 2 * sizeof(int));
+    auto up = [](void* d, const auto& v) {
+        cudaMemcpy(d, v.data(), v.size() * sizeof(v[0]), cudaMemcpyHostToDevice);
+    };
+    up(d_conv, h_conv); up(d_conv3, h_conv3); up(d_alpha, h_alpha); up(d_beta, h_beta);
+    up(d_alpha3, h_alpha3); up(d_beta3, h_beta3); up(d_Alog, h_Alog); up(d_dtb, h_dtb);
+    up(d_live, live); up(d_spare, spare);
+    const int lens[2] = {2, 1};
+    cudaMemcpy(d_lens, lens, sizeof(lens), cudaMemcpyHostToDevice);
+
+    // Arm A, today's contract: the verify commits the drafted row into the
+    // spare slot, accept makes the spare live, the next token runs from it.
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
+                               static_cast<int64_t>(state_elems), d_y, s.n_seq, s.n_tokens, s.n_heads,
+                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1,
+                               d_lens, nullptr, nullptr, d_lens + 1, /*out_slots=*/d_spare,
+                               /*snap_slots=*/d_live);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    gdn_scan_fused_f32_batched(d_conv3, conv_channels, d_alpha3, d_beta3, d_Alog, d_dtb, d_pool, d_spare,
+                               static_cast<int64_t>(state_elems), d_y, s.n_seq, /*n_tokens=*/1, s.n_heads,
+                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> want(pool_elems);
+    cudaMemcpy(want.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Arm B, factored: no spare slot. The verify emits (g, k, delta) for the
+    // drafted row and snapshots the accepted row in place; the next token runs
+    // from the live slot with the row applied at the state load.
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_fac, 0, fac_elems * sizeof(float));
+    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
+                               static_cast<int64_t>(state_elems), d_y, s.n_seq, s.n_tokens, s.n_heads,
+                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1,
+                               d_lens, nullptr, nullptr, d_lens + 1, /*out_slots=*/nullptr,
+                               /*snap_slots=*/d_live, /*fac_out=*/d_fac, /*fac_in=*/nullptr, fac_stride);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    // The sentinel has to be live: every head must carry a non-zero decay.
+    std::vector<float> fac(fac_elems);
+    cudaMemcpy(fac.data(), d_fac, fac_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < s.n_seq; i++)
+        for (int h = 0; h < s.n_heads; h++)
+            ASSERT_GT(fac[(static_cast<size_t>(live[i]) * s.n_heads + h) * fac_stride], 0.0f)
+                << "seq " << i << " head " << h << ": g is the 'no pending row' sentinel";
+    gdn_scan_fused_f32_batched(d_conv3, conv_channels, d_alpha3, d_beta3, d_Alog, d_dtb, d_pool, d_live,
+                               static_cast<int64_t>(state_elems), d_y, s.n_seq, /*n_tokens=*/1, s.n_heads,
+                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1,
+                               nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                               /*fac_out=*/nullptr, /*fac_in=*/d_fac, fac_stride);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> got(pool_elems);
+    cudaMemcpy(got.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Same arithmetic in the same order on both arms, so F32 state makes this
+    // exact. A tolerance here would hide a wrong k or delta index.
+    for (int i = 0; i < s.n_seq; i++) {
+        const size_t a = static_cast<size_t>(spare[i]) * state_elems;
+        const size_t b = static_cast<size_t>(live[i]) * state_elems;
+        for (size_t e = 0; e < state_elems; e++)
+            ASSERT_EQ(want[a + e], got[b + e]) << "seq " << i << " elem " << e;
+    }
+
+    for (void* p : {(void*)d_conv, (void*)d_conv3, (void*)d_alpha, (void*)d_beta, (void*)d_alpha3,
+                    (void*)d_beta3, (void*)d_Alog, (void*)d_dtb, (void*)d_pool, (void*)d_fac,
+                    (void*)d_y, (void*)d_live, (void*)d_spare, (void*)d_lens})
+        cudaFree(p);
 }
 
 }  // namespace
