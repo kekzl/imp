@@ -530,7 +530,14 @@ void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> 
     if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_)
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    const int snap_end = (static_cast<int>(tokens.size()) / bs) * bs;
+    // One block short of the length, not the plain block floor: the restore
+    // caps at (total - 1) / bs blocks (swa_prefix_reuse_limit_, a restore has
+    // to leave a token to forward) AND requires entry->n_tokens == b * bs, so
+    // a snapshot saved at the full aligned length can never be matched. That
+    // is the same defect the hybrid path had (snapshot_boundary.h, measured
+    // 2026-09-09: 512-token prompt, warm cached_tokens 0); only aligned
+    // lengths change, and for those the old value was unusable.
+    const int snap_end = snapshot_boundary(static_cast<int>(tokens.size()), bs, /*min_tokens=*/0);
     if (snap_end <= 0)
         return;
     size_t key = 0;
