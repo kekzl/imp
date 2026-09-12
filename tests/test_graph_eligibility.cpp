@@ -146,3 +146,21 @@ TEST(GraphEligibility, SnapshotBoundaryIsBlockAlignedAndSkipsShortPrompts) {
     EXPECT_EQ(snapshot_boundary(15, 16, 0), 0) << "under one block there is nothing to save";
     EXPECT_EQ(snapshot_boundary(35, 0, 0), 0);
 }
+
+// The invariant both snapshot savers have to hold: what a save stores must be
+// something a restore can still admit. The restore caps at (n - 1) / bs blocks
+// and matches the stored length exactly, so a save one block too long is a
+// snapshot that is never found. The SWA saver floored the full length and lost
+// every block-aligned prompt that way until 2026-09-12; the hybrid one had the
+// same bug fixed in #1960.
+TEST(GraphEligibility, EverySnapshotBoundaryFitsUnderTheRestoreCap) {
+    for (int bs : {16, 32}) {
+        for (int n = 1; n <= 2100; ++n) {
+            const int saved = snapshot_boundary(n, bs, 0);
+            ASSERT_EQ(saved % bs, 0) << "n=" << n << " bs=" << bs;
+            ASSERT_LE(saved / bs, (n - 1) / bs)
+                << "n=" << n << " bs=" << bs << ": saved " << saved
+                << " tokens, which the (n-1)/bs restore cap can never admit";
+        }
+    }
+}

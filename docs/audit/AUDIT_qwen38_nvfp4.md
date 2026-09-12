@@ -109,4 +109,13 @@ Conclusion: the model card's reason (unit-offset norm) was wrong; a calibrated e
 | P6 AWQ qwen3_5 | #1966 | ABCD -0.55 % PPL vs RTN (4.5986 vs 4.6242), BDEG -0.23 %, BD +0.10 %; RTN stays default | tg128 295.14 (+2.77 %), pp512 12571 (+1.32 %), paired -0.15 / +0.06 % |
 | P7 greedy vs history | open | split in two: (a) the logprobs flag alone parts a cold deterministic run at token 81/127 on a 0.086-nat near-tie (different LM-head/sampling path), measured in MtpGreedyIdentityTest 2026-09-09; (b) server-history dependence still unexplained | none |
 
-Open after the campaign: SWA twin of the snapshot_boundary gap, P7 (b) (resolved 2026-09-10 as the conv1d commit race, see above), speculation gates refuse logprobs requests (a speculated request cannot report logprobs, documented nowhere). The think stop-token mask (P3 follow-up) landed 2026-09-11, see the P3 reading above.
+Closed 2026-09-12: the SWA twin of the snapshot_boundary gap. `maybe_save_swa_snapshot_span_`
+floored the full span while `swa_prefix_reuse_limit_` caps at `(total - 1) / bs` blocks AND
+requires `entry->n_tokens == b * bs`, so every block-aligned prompt saved a snapshot that could
+never be matched - the same defect #1960 fixed on the hybrid path, in a function that was
+already being handed the right value by `snapshot_end_` and discarded it. Both savers now call
+`snapshot_boundary()`. `GraphEligibility.EverySnapshotBoundaryFitsUnderTheRestoreCap` pins the
+relationship over every length up to 2100 at both block sizes, and is red under the old floor.
+Only aligned lengths change, and for those the old value was unusable.
+
+Open after the campaign: P7 (b) (resolved 2026-09-10 as the conv1d commit race, see above), speculation gates refuse logprobs requests (a speculated request cannot report logprobs, documented nowhere). The think stop-token mask (P3 follow-up) landed 2026-09-11, see the P3 reading above.
