@@ -24,3 +24,5 @@ is the other direction: text moved OUT of the roadmap.
 | [2026-08-31-mtp-multicandidate-hybrid](2026-08-31-mtp-multicandidate-hybrid.md) | CLOSED 2026-08-31, built and measured, gate not met | roadmap Closed, "speculation tree" |
 | [2026-08-31-roadmap-ledger-detail](2026-08-31-roadmap-ledger-detail.md) | record, moved out of the roadmap 2026-08-31 | - |
 | [2026-09-04-lever-ledger-detail](2026-09-04-lever-ledger-detail.md) | record, moved out of the roadmap 2026-09-04 | - |
+| [2026-09-11-batched-mtp-verify](2026-09-11-batched-mtp-verify.md) | **OPEN**: stages 1-4 shipped opt-in (#1993), default off | CHANGELOG `speculative.batch_verify` |
+| [2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md) | **OPEN**: shipped opt-in (#1996-#1998, #2002), default off | CHANGELOG `speculative.factored_spare` |
