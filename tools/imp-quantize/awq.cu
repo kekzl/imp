@@ -65,7 +65,8 @@ struct DeviceBuf {
 }  // namespace
 
 std::expected<SearchResult, std::string> search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K,
-                                                            const std::vector<float>& act_mean) {
+                                                            const std::vector<float>& act_mean,
+                                                            const std::vector<float>& act_sq) {
     if (mats.empty() || K <= 0 || static_cast<int64_t>(act_mean.size()) != K)
         return std::unexpected("search_group_scale: empty group or activation/K mismatch");
     SearchResult out;
@@ -144,10 +145,20 @@ std::expected<SearchResult, std::string> search_group_scale(const std::vector<Gr
                 for (auto& v : s)
                     v /= norm;
         }
+        // Error weight. The layer's output error is sum_j dw_j^2 E[x_j^2] once
+        // the cross terms are dropped, so E[x^2] is the right weight and
+        // (E|x|)^2 under-weights a heavy-tailed channel by its variance.
+        // Pre-IMPCAL02 calibration files carry no second moment and keep the
+        // old weight, which is what act_sq being empty means.
+        const bool have_sq = static_cast<int64_t>(act_sq.size()) == K;
         for (int64_t j = 0; j < K; j++) {
-            const float a = act_mean[static_cast<size_t>(j)];
-            const float r = a / s[static_cast<size_t>(j)];
-            w[static_cast<size_t>(j)] = r * r;
+            const float sj = s[static_cast<size_t>(j)];
+            if (have_sq) {
+                w[static_cast<size_t>(j)] = act_sq[static_cast<size_t>(j)] / (sj * sj);
+            } else {
+                const float r = act_mean[static_cast<size_t>(j)] / sj;
+                w[static_cast<size_t>(j)] = r * r;
+            }
         }
         if (cudaMemcpy(d_s.p, s.data(), s.size() * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
             cudaMemcpy(d_w.p, w.data(), w.size() * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {

@@ -7,7 +7,11 @@ namespace imp {
 
 namespace {
 
-constexpr char kMagic[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '1'};
+// 01 carried mean_abs only; 02 adds mean_sq per entry. Reading accepts both,
+// so a calibration file produced before the second moment existed still loads
+// and the search falls back to its old weight.
+constexpr char kMagic[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '2'};
+constexpr char kMagicV1[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '1'};
 // A calibration file is small (K floats per weight), so an entry claiming a
 // K in the hundreds of millions is a corrupt read, not a large model.
 constexpr int64_t kMaxK = 1 << 22;
@@ -60,6 +64,12 @@ std::string write_calibration_stats(const std::string& path, const CalibrationSt
         ok = ok && put(f, static_cast<int64_t>(e.mean_abs.size()));
         ok = ok && (e.mean_abs.empty() ||
                     std::fwrite(e.mean_abs.data(), sizeof(float), e.mean_abs.size(), f) == e.mean_abs.size());
+        // mean_sq is written at the same K, or as an explicit 0 when the
+        // producer had none, so a reader never has to guess from the length.
+        const int64_t ksq = static_cast<int64_t>(e.mean_sq.size());
+        ok = ok && put(f, ksq);
+        ok = ok && (e.mean_sq.empty() ||
+                    std::fwrite(e.mean_sq.data(), sizeof(float), e.mean_sq.size(), f) == e.mean_sq.size());
         if (!ok)
             break;
     }
@@ -76,8 +86,10 @@ std::string read_calibration_stats(const std::string& path, CalibrationStats& ou
     if (!f)
         return "cannot open " + path;
     char magic[sizeof(kMagic)] = {};
-    if (std::fread(magic, 1, sizeof(magic), f) != sizeof(magic) ||
-        std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) {
+    const bool got = std::fread(magic, 1, sizeof(magic), f) == sizeof(magic);
+    const bool v2 = got && std::memcmp(magic, kMagic, sizeof(kMagic)) == 0;
+    const bool v1 = got && std::memcmp(magic, kMagicV1, sizeof(kMagicV1)) == 0;
+    if (!v2 && !v1) {
         std::fclose(f);
         return path + " is not an imp calibration file";
     }
@@ -104,6 +116,19 @@ std::string read_calibration_stats(const std::string& path, CalibrationStats& ou
                          static_cast<size_t>(k)) {
             std::fclose(f);
             return "truncated entry " + std::to_string(i) + " in " + path;
+        }
+        if (v2) {
+            int64_t ksq = 0;
+            if (!get(f, ksq) || ksq < 0 || ksq > kMaxK) {
+                std::fclose(f);
+                return "corrupt second moment in entry " + std::to_string(i) + " of " + path;
+            }
+            e.mean_sq.resize(static_cast<size_t>(ksq));
+            if (ksq > 0 && std::fread(e.mean_sq.data(), sizeof(float), static_cast<size_t>(ksq), f) !=
+                               static_cast<size_t>(ksq)) {
+                std::fclose(f);
+                return "truncated second moment in entry " + std::to_string(i) + " of " + path;
+            }
         }
         out.entries.push_back(std::move(e));
     }

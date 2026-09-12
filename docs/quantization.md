@@ -292,6 +292,22 @@ which is what makes a `[head_dim]` norm shared by 48 heads foldable at all).
   which run produced the file. Forced, calibration file and checkpoint are bit-identical run to
   run.
 
+**Which activation moment weights the search (`--calib-weight`, 2026-09-12).** The search
+minimises `sum_j w_j * (W_scaled - dequant(W_scaled))^2`, and the shipped `w_j` is
+`(mean|x_j| / s_j)^2`. What the layer's output error actually calls for is the second moment:
+`E[(sum_j dw_j x_j)^2] = sum_j dw_j^2 E[x_j^2]` once the cross terms are dropped, and
+`E[x^2]` exceeds `E[|x|]^2` by exactly the variance, so the shipped weight under-protects a
+channel that is heavy-tailed rather than merely large. The calibration file carries the second
+moment since `IMPCAL02` (`src/quant/calibration_stats.h`); an older file loads with it absent
+and the search keeps the old weight.
+
+`--calib-weight sq` selects it, `abs` (the default) keeps the shipped one. **This is the
+instrument, not a verdict**: it is unmeasured, and the open question it exists for is roadmap
+item 6, where `--calib` still hurts at wide GQA (14B RTN 9.9252 against twin-calib 12.6016).
+Nothing may be claimed for it until an A/B on that case says so. Note the neighbouring
+refutation below: choosing the MICRO-scale by reconstruction error was refuted in #1083, but
+that is the 16-value FP4 block, a different search from this one.
+
 #### Quality, measured
 
 `imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens), calibration over

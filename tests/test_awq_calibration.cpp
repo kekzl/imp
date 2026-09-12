@@ -6,6 +6,8 @@
 // product unchanged. If that ever stops holding, a "calibrated" checkpoint is
 // silently a different model, and no quantization metric would say so.
 
+#include <fstream>
+#include <iterator>
 #include "core/fp_bits.h"
 #include "quant/awq_norm_fold.h"
 #include "quant/awq_transform.h"
@@ -87,6 +89,55 @@ TEST(AwqCalibration, StatsRoundTrip) {
     EXPECT_EQ(out.find(3, "WK"), nullptr);
     EXPECT_EQ(out.find(4, "WQ"), nullptr);
     std::filesystem::remove(path);
+}
+
+// The second moment (IMPCAL02). It is what weights the search's error, so it
+// has to survive the file, and a file written before it existed has to keep
+// loading with an EMPTY second moment rather than a fabricated one - the
+// search distinguishes those two cases.
+TEST(AwqCalibration, SecondMomentRoundTripsAndIsAbsentFromOldFiles) {
+    CalibrationStats in;
+    in.model_id = "/models/Qwen3-0.6B";
+    CalibrationEntry e;
+    e.layer = 2;
+    e.kind = "WQ";
+    e.rows = 1024;
+    e.mean_abs = {0.5f, 1.25f, 2.0f};
+    e.mean_sq = {0.75f, 2.5f, 9.0f};  // strictly above mean_abs^2: that gap is the variance
+    in.entries.push_back(e);
+
+    const std::string path = temp_path("imp_calib_sq.bin");
+    ASSERT_EQ(write_calibration_stats(path, in), "");
+    CalibrationStats out;
+    ASSERT_EQ(read_calibration_stats(path, out), "");
+    const CalibrationEntry* q = out.find(2, "WQ");
+    ASSERT_NE(q, nullptr);
+    ASSERT_EQ(q->mean_sq.size(), 3u);
+    EXPECT_FLOAT_EQ(q->mean_sq[2], 9.0f);
+    EXPECT_FLOAT_EQ(q->mean_abs[2], 2.0f);
+
+    // An IMPCAL01 file: same bytes, older magic, and no second-moment block.
+    std::vector<char> raw;
+    {
+        std::ifstream f(path, std::ios::binary);
+        raw.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    ASSERT_GE(raw.size(), 8u);
+    raw[7] = '1';
+    const std::string old_path = temp_path("imp_calib_v1.bin");
+    {
+        std::ofstream f(old_path, std::ios::binary);
+        f.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+    CalibrationStats old_out;
+    ASSERT_EQ(read_calibration_stats(old_path, old_out), "");
+    const CalibrationEntry* oq = old_out.find(2, "WQ");
+    ASSERT_NE(oq, nullptr);
+    EXPECT_EQ(oq->mean_abs.size(), 3u);
+    EXPECT_TRUE(oq->mean_sq.empty()) << "a v1 file must not claim a second moment it does not carry";
+
+    std::filesystem::remove(path);
+    std::filesystem::remove(old_path);
 }
 
 TEST(AwqCalibration, RejectsForeignAndTruncatedFiles) {

@@ -109,7 +109,7 @@ constexpr const char* kAwqAllGroups = "ABCDEG";
 // valid for.
 [[nodiscard]] std::expected<Plan, std::string> build_plan(
     const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
-    const std::string& config_json_path, const std::string& groups);
+    const std::string& config_json_path, const std::string& groups, bool weight_sq = false);
 
 // One matrix of a scale group, host-side FP16 bits, row-major [N, K].
 struct GroupMatrix {
@@ -127,7 +127,10 @@ struct SearchResult {
 // Searches alpha over [0, 1] and returns the winning scale vector.
 // All matrices must share the inner dimension K. `act_mean` is [K].
 // Returns the error text on GPU failure or bad shapes.
+// act_sq is the per-channel second moment E[x^2] and may be empty, in which
+// case the search falls back to (act_mean/s)^2 as it did before IMPCAL02.
 [[nodiscard]] std::expected<SearchResult, std::string> search_group_scale(
-    const std::vector<GroupMatrix>& mats, int64_t K, const std::vector<float>& act_mean);
+    const std::vector<GroupMatrix>& mats, int64_t K, const std::vector<float>& act_mean,
+    const std::vector<float>& act_sq = {});
 
 }  // namespace imp::awq
