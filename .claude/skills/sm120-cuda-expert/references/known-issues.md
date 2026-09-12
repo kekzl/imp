@@ -170,6 +170,7 @@ harness; both defaults stay off by measurement.
 |---|---|---|
 | Residual-accumulate into the smallm epilog (o/down/gdn-out beta=1) at 32 streams | REFUTED -0.9% median, 3/3 pairs negative (#1793) | the residual adds overlap with the next layer's GEMMs; accumulate pulls their bytes into the critical epilog. Side fix shipped: `ctx.beta` reaches the CUTLASS registry args |
 | smallm v2 pipeline kernel at M=1 | REFUTED (#1789) | L2-defeated 4-copy ring, all 6 Qwen3.8 shapes within round spread; batch=1 stays on the GEMV family |
+| smallm v2 at 33..64 rows as two 32-row launches (instead of the CUTLASS 128-row tile) | REFUTED 2026-09-12, reverted | N <= 8704 neutral at 24-stream verify and 40-stream decode; all shapes -11..-13 % (gate\|up: one CUTLASS sweep on 136 CTAs beats two small-M sweeps). Record `docs/plans/2026-09-11-batched-mtp-verify.md` |
 | Prefill parallel to decode (second workspace) | NEUTRAL, default off (#1792) | short prompts 1771 -> 1778, heavy ingest 790 -> 791, TTFT unchanged; no SM partitioning on sm_120 (green contexts dead), streams displace each other |
 | One-H2D decode-step staging (pinned mirror of the batch pool + sampler args) | NEUTRAL, closed unmerged (#1834) | 32-stream pairs -0.2/-1.1/+0.6%; the 8-14 us H2D gaps overlap host work |
 | PDL device half (`griddepcontrol.wait` + `launch_dependents`, ~45 kernels) | SHIPPED (#1833) | M=1 spec-off +1.7% (3/3), 32 streams +0.5..1.3%, idle 13.6 -> 10.8%. Blanket registrations without a wait RACED `GreedyDeterminism`: registered = waits |

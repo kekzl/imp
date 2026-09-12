@@ -115,5 +115,9 @@ bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int m
 // refusal clears the flag, and everything downstream reads this, not the flag.
 bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// MTP draft KV slots: one per batch slot whenever the batched verify runs, else 1.
+// Keyed on the verify, not on batch_verify_spare_slots: the factored spare makes
+// that 0, and the pool fell to 1 slot (1 draft per verify step at 24 streams).
+int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 
 }  // namespace imp

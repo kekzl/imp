@@ -62,6 +62,10 @@ bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int m
     return batch_verify_on(cfg, model) && max_batch_size > 1;
 }
 
+int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
+    return batch_verify_wants_bufs(cfg, model, max_batch_size) ? max_batch_size : 1;
+}
+
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
     if (!batch_verify_on(cfg, model) || max_batch_size <= 1)
         return 0;
