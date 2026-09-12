@@ -18,14 +18,12 @@ full text of each is in git history; the recipe for reading one is below.
 | `roofline_2026_06_07.md` | first roofline campaign | code (1) + docs |
 | `roofline_gptoss_2026_07_13.md` | roofline on gpt-oss | code (1) + docs |
 | `tile-fa2-dispatch-shelved.md` | the shelved tiled-FA2 dispatch | code (1) + docs |
-| `roofline_2026_07_11.md` | roofline re-measure | docs |
-| `structural_debt_2026_07_07.md`, `structural_debt_2026_07_10.md` | structure audits | docs |
-| `prefill`/`perf` snapshots: `PERF_AUDIT_2026_07_23.md`, `DISPATCH_BASELINE_2026_07_17.md` | performance audit, dispatch baseline | docs |
+| `structural_debt_2026_07_07.md` | structure audit | docs |
+| `PERF_AUDIT_2026_07_23.md` | performance audit | `imp.conf.example` |
 | `ppl_parity_2026_07_12.md` | cross-engine perplexity parity | docs |
 | `vram_audit_2026_07_07.md` | VRAM accounting snapshot | docs |
 | `cpp23_migration_2026_07_08.md` | the C++23 move | docs |
 | `housekeeping_2026_06_13.md` | the consolidation pass described below | docs |
-| `AUDIT_REPORT.md` | the soundness-hardening branch report | docs |
 
 Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
 you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in
@@ -272,6 +270,16 @@ outright (point-in-time reports, superseded; full text in git history):
   the server batteries, and manual model staging (the `imp-pull` pipeline was
   removed in #245).
 
+## 2026-09-13 consolidation: records only other records cited
+
+No living doc, source file, script or CI job referenced these. Full text:
+`git show 5b5b6486:docs/archive/<file>`.
+
+- `roofline_2026_07_11.md`: roofline re-measure.
+- `structural_debt_2026_07_10.md`: structure audit, second pass after `structural_debt_2026_07_07.md`.
+- `DISPATCH_BASELINE_2026_07_17.md`: dispatch baseline snapshot.
+- `AUDIT_REPORT.md`: soundness-hardening branch report.
+
 ---
 
-*Consolidated 2026-06-13 (housekeeping), 2026-06-20, 2026-06-29, and 2026-07-10 (root cleanup). Originals live in git history.*
+*Consolidated 2026-06-13 (housekeeping), 2026-06-20, 2026-06-29, 2026-07-10 (root cleanup) and 2026-09-13. Originals live in git history.*

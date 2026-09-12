@@ -89,7 +89,7 @@ No perf numbers in any `CLAUDE.md`; link `PERF.md`. L3 downgrades unprovenanced 
 
 ## Audit trail
 
-`docs/audit/docs-rewrite/`: `DOC_INVENTORY.md`, `CLAIM_VERIFICATION.md`, `PURGE_LOG.md` (append every removed claim with a reason), `OPEN_QUESTIONS.md`, `ONBOARDING_RUN.md`, `AGENT_EVAL.md`, `STALE.md`.
+`docs/audit/docs-rewrite/`: `PURGE_LOG.md` (append every removed claim with a reason), `OPEN_QUESTIONS.md`, `STALE.md`.
 
 ## Traps
 
