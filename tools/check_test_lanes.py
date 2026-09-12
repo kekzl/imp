@@ -255,7 +255,10 @@ def main():
     # 1108 -> 1110: MeanStdMergesAcrossSpanAndDecodeSteps and
     # OutlierPageLosesTheBudgetSlotToTheConsistentPage (test-attention, GPU, no model): the sparse page
     # score's mean/std merge against a double CPU reference, and the ranking the corner bound gets wrong.
-    PINNED = 1110
+    # 1110 -> 1111: FactoredSpareReproducesTheFullSpareAfterTheNextToken (test-moe-gdn, GPU, no model):
+    # the batched verify's drafted row carried as (g, k, delta) must leave the state after the FOLLOWING
+    # token bit-identical to the full spare slot.
+    PINNED = 1111
 
     text = CMAKE.read_text()
     mods = module_sources(text)

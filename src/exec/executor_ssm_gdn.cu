@@ -779,6 +779,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 throw std::runtime_error("run_gdn: ragged prefill without device seq_offsets");
             const int scan_n_tokens = grouped ? state.ssm_seq_tokens : 1;  // ignored when row_offs != nullptr
             const int* real_n = grouped ? state.d_chunk_len : nullptr;
+            // Factored spare: this layer's slice of the [layer][slot][head]
+            // buffer. fac_out only on a grouped verify chunk (it replaces the
+            // full-state commit there); fac_in on any shape, because the row a
+            // verify left is applied by whatever runs next.
+            const int64_t fac_off = state.ssm_fac_layer_stride * static_cast<int64_t>(ssm_idx);
+            float* const fac_out = (grouped && state.ssm_fac_out) ? state.ssm_fac_out + fac_off : nullptr;
+            const float* const fac_in = state.ssm_fac_in ? state.ssm_fac_in + fac_off : nullptr;
             // Batched verify: per-group snapshot slots (ssm_snap_slots) replace
             // the group-0 slab; d_snap_n still names the row.
             const bool per_group_snap = grouped && state.ssm_out_slots && state.ssm_snap_slots;
@@ -862,7 +869,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
                     ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n,
-                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr);
+                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr,
+                    fac_out, fac_in, state.ssm_fac_stride);
             } else {
                 gdn_scan_fused_f32_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
@@ -872,7 +880,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
                     ssize, n_groups, stream, gl, real_n, row_offs, static_cast<float*>(snap), snap_n,
-                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr);
+                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr,
+                    fac_out, fac_in, state.ssm_fac_stride);
             }
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
