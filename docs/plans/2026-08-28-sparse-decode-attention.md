@@ -190,8 +190,38 @@ SHIPPED opt-in (`attention.sparse_topk_tokens`). Standing evidence: Qwen3-8B
 32k, concurrent 3 x 25k 155.6 -> 197.7 (+27%, #1808); NVFP4-KV arm 77k 74.3 ->
 100.2 (#1818); block-size fix #1819 (`sparse_topk_tokens` doubled on
 `n_kv_heads <= 4`, configure 2N to keep an old budget). Retrieval price on
-Qwen3.8-27B: NIAH 10/10 dense, 8/10 at 8192, 5/10 at 4096, which is why it
-stays opt-in.
+Qwen3.8-27B under the original min/max corner bound: NIAH 10/10 dense, 8/10 at
+8192, 5/10 at 4096, which is why it stayed opt-in.
+
+## Page score: the corner bound was the retrieval price (2026-09-12)
+
+`max(q*min, q*max)` is identically `q*(min+max)/2 + |q|*(max-min)/2`, so the
+bound's width per dimension is set by whichever single token in the page is most
+extreme there. Replacing the stored pair with the page's own mean and standard
+deviation (arXiv 2605.27740) keeps the layout, the loads and the arithmetic
+count, and changes only what the metadata pass writes: one Welford pass plus
+Chan's merge, with `slot` as the count already covered.
+
+One image, one model (Qwen3.8-27B-NVFP4-vllm, NVFP4 KV, `kv_cache.growable=false`),
+`niah_check.py` at 5 depths x 81 908 / 126 908 prompt tokens, `sparse decode
+attention ACTIVE` asserted in every arm:
+
+| budget | min/max corner | mean + std |
+|---|---|---|
+| 4096 | 2/10 | 10/10 |
+| 8192 | 7/10 | 10/10 |
+
+Wall time on a 77k-token prompt at 128 emitted tokens, arms alternating over two
+rounds: corner 11.54 / 11.70 / 11.84 / 11.67 s, mean+std 11.53 / 11.54 / 11.56 /
+11.69 s. Neutral, so the default is now mean+std and
+`attention.sparse_score_meanstd=false` restores the corner bound.
+
+**The first run of this A/B measured nothing**: both arms read 10/10 because
+`kv_cache.growable` defaults true and `enable_key_minmax()` refuses a growable
+pool, so neither arm was sparse. The startup line
+(`Sparse decode attention: ... score ...`) proves the scratch, not the
+selection; only `sparse decode attention ACTIVE` proves the selection. The A/B
+script treats a zero count as an abort.
 
 Follow-ups live in `docs/roadmap.md` Open 3, not here: MLA models, prefill
 sparsity, and StreamingLLM eviction as the only answer under KV-pool pressure.

@@ -252,7 +252,10 @@ def main():
     # 1105 -> 1108: VerifyGroupsCommitToSpareAndSnapshotInPlace, VerifyGroupsConvCommitsToSpareAndSnapshotsInPlace
     # (test-moe-gdn, GPU, no model): the batched verify's per-group commit and snapshot slots;
     # MultiSlotFeedMatchesPerSlotBatches (test-moe-gdn): the ragged multi-slot MTP feed vs per-slot batches.
-    PINNED = 1108
+    # 1108 -> 1110: MeanStdMergesAcrossSpanAndDecodeSteps and
+    # OutlierPageLosesTheBudgetSlotToTheConsistentPage (test-attention, GPU, no model): the sparse page
+    # score's mean/std merge against a double CPU reference, and the ranking the corner bound gets wrong.
+    PINNED = 1110
 
     text = CMAKE.read_text()
     mods = module_sources(text)

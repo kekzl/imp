@@ -63,8 +63,10 @@ struct KeyReaderNvfp4 {
 // token per sequence with exclusive blocks). slot 0 initializes, otherwise
 // merge with the stored metadata - block reuse is covered because a fresh
 // block's first write is always slot 0.
-// Metadata layout per (layer, block): row_elems half2, (min, max) per
-// (kv_head, dim) element, element index e = kv_head * head_dim + d.
+// Metadata layout per (layer, block): row_elems half2 per (kv_head, dim)
+// element, element index e = kv_head * head_dim + d. The pair carries
+// (min, max), or (mean, std) under attention.sparse_score_meanstd - same
+// layout, same pass, the score kernel reads it the same way.
 // ---------------------------------------------------------------------------
 // All-layers batched variant for decode: one launch covers every KV layer
 // (grid.y). The per-layer form cost 36 launches x ~2.4-5.9 us per decode
@@ -120,6 +122,40 @@ __device__ __forceinline__ int sparse_owner_block(const int* block_tables, const
     return block_id;
 }
 
+// Mean/std twin (attention.sparse_score_meanstd). Same storage, same owner
+// scheme: the pair holds (mean, std) over the block's written slots instead of
+// (min, max). `slot` IS the count already merged (slots fill in order), so no
+// separate counter is needed. One Welford pass per element rather than
+// sum/sumsq: E[x^2]-E[x]^2 cancels away most of the mantissa once |mean| is a
+// few multiples of the spread, which is the normal case for keys.
+template <typename Reader>
+__device__ __forceinline__ void sparse_merge_block_meanstd(Reader rd, __half2* __restrict__ mm, int slot,
+                                                           int span, int row_elems) {
+    for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
+        float mean_b = 0.0f, m2_b = 0.0f;
+        for (int j = 0; j < span; j++) {
+            const float v = rd.get(slot + j, e);
+            const float d = v - mean_b;
+            mean_b += d / (float)(j + 1);
+            m2_b += d * (v - mean_b);
+        }
+        float mean = mean_b, m2 = m2_b, n = (float)span;
+        if (slot != 0) {
+            // Chan's parallel merge. M2 of the stored half is reconstructed
+            // from std, which keeps the combine exact in fp32 even though the
+            // carrier is fp16.
+            const __half2 cur = mm[e];
+            const float mean_a = __low2float(cur), sd_a = __high2float(cur);
+            const float na = (float)slot, nb = (float)span;
+            const float delta = mean_b - mean_a;
+            n = na + nb;
+            mean = mean_a + delta * nb / n;
+            m2 = sd_a * sd_a * na + m2_b + delta * delta * na * nb / n;
+        }
+        mm[e] = __floats2half2_rn(mean, sqrtf(fmaxf(m2 / n, 0.0f)));
+    }
+}
+
 template <typename Reader>
 __device__ __forceinline__ void sparse_merge_block_minmax(Reader rd, __half2* __restrict__ mm, int slot,
                                                           int span, int row_elems) {
@@ -143,7 +179,18 @@ __device__ __forceinline__ void sparse_merge_block_minmax(Reader rd, __half2* __
     }
 }
 
-template <typename CacheT>
+// kMeanStd picks which statistic the pair carries; everything around it (owner
+// resolution, span walk, strides) is shared.
+template <bool kMeanStd, typename Reader>
+__device__ __forceinline__ void sparse_merge_block(Reader rd, __half2* __restrict__ mm, int slot, int span,
+                                                   int row_elems) {
+    if constexpr (kMeanStd)
+        sparse_merge_block_meanstd(rd, mm, slot, span, row_elems);
+    else
+        sparse_merge_block_minmax(rd, mm, slot, span, row_elems);
+}
+
+template <typename CacheT, bool kMeanStd>
 __global__ void sparse_update_key_minmax_layers_kernel(
     const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
     __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
@@ -161,12 +208,13 @@ __global__ void sparse_update_key_minmax_layers_kernel(
         return;
     KeyReaderPlain<CacheT> rd{k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems,
                               row_elems};
-    sparse_merge_block_minmax(rd, mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems, slot,
-                              span, row_elems);
+    sparse_merge_block<kMeanStd>(rd, mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems, slot,
+                                 span, row_elems);
 }
 
 // NVFP4 twin: same owner scheme, two base pointers (packed nibbles + UE4M3
 // group scales). Strides are in bytes because both regions are byte arrays.
+template <bool kMeanStd>
 __global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
     const uint8_t* __restrict__ k_base, int64_t k_layer_stride_bytes,
     const uint8_t* __restrict__ sc_base, int64_t sc_layer_stride_bytes,
@@ -187,27 +235,47 @@ __global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
     KeyReaderNvfp4 rd{k_base + layer * k_layer_stride_bytes + (int64_t)block_id * block_size * row_bytes,
                       sc_base + layer * sc_layer_stride_bytes + (int64_t)block_id * block_size * sc_row,
                       row_bytes, sc_row};
-    sparse_merge_block_minmax(rd, mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems, slot,
-                              span, row_elems);
+    sparse_merge_block<kMeanStd>(rd, mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems, slot,
+                                 span, row_elems);
 }
 
 // ---------------------------------------------------------------------------
 // Block scoring. One warp per block, grid-stride over blocks (grid shape is
 // context-independent - capture-safe while ctx grows during replay).
-// score(b) = max over q heads h of sum_d max(q_h[d]*min[d], q_h[d]*max[d])
-// over h's kv head metadata - an upper bound on any softmax logit the block
-// can produce for the current query (Quest).
+// score(b) = max over q heads h of sum_d (q_h[d]*center[d] + |q_h[d]|*off[d])
+// over h's kv head metadata. Both policies share that form and differ only in
+// what the metadata pass stored:
+//   corner bound (Quest): (min, max), and max(q*min, q*max) is identically
+//     q*(min+max)/2 + |q|*(max-min)/2 - an upper bound on any softmax logit
+//     the block can produce, but one whose width is set by the single most
+//     extreme token per dimension.
+//   mean/std: the page's own centre and spread (arXiv 2605.27740). Not a
+//     bound, an estimate - top-k only ranks blocks, so admissibility buys
+//     nothing and the outlier sensitivity costs recall.
 // ---------------------------------------------------------------------------
+struct ScoreCornerBound {
+    __device__ __forceinline__ static float term(float q, float lo, float hi, float) {
+        return fmaxf(q * lo, q * hi);
+    }
+};
+struct ScoreMeanStd {
+    __device__ __forceinline__ static float term(float q, float mean, float sd, float coef) {
+        return q * mean + fabsf(q) * coef * sd;
+    }
+};
+
 constexpr int kScoreThreads = 256;
 constexpr int kScoreWarps = kScoreThreads / kWarpSize;
 constexpr int kMaxGroup = 16;  // n_heads / n_kv_heads ceiling (host-gated)
 
+template <typename Score>
 __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
                                            const __half2* __restrict__ minmax_base,
                                            const int* __restrict__ block_tables,
                                            const int* __restrict__ context_lens, float* __restrict__ scores,
                                            int n_heads, int n_kv_heads, int head_dim, int block_size,
-                                           int max_blocks_per_seq, int scores_stride, int engage_blocks) {
+                                           int max_blocks_per_seq, int scores_stride, int engage_blocks,
+                                           float std_coef) {
     const int seq = blockIdx.y;
     const int ctx_len = context_lens[seq];
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
@@ -277,10 +345,10 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
                     float acc = 0.0f;
                     const float q0 = __low2float(q01), q1 = __high2float(q01);
                     const float q2 = __low2float(q23), q3 = __high2float(q23);
-                    acc += fmaxf(q0 * __low2float(m01[0]), q0 * __high2float(m01[0]));
-                    acc += fmaxf(q1 * __low2float(m01[1]), q1 * __high2float(m01[1]));
-                    acc += fmaxf(q2 * __low2float(m23[0]), q2 * __high2float(m23[0]));
-                    acc += fmaxf(q3 * __low2float(m23[1]), q3 * __high2float(m23[1]));
+                    acc += Score::term(q0, __low2float(m01[0]), __high2float(m01[0]), std_coef);
+                    acc += Score::term(q1, __low2float(m01[1]), __high2float(m01[1]), std_coef);
+                    acc += Score::term(q2, __low2float(m23[0]), __high2float(m23[0]), std_coef);
+                    acc += Score::term(q3, __low2float(m23[1]), __high2float(m23[1]), std_coef);
                     part[h] += acc;
                 }
             }
@@ -491,7 +559,7 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
                                          const int* positions, const int* block_tables,
                                          const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
                                          int block_size, int n_tokens, int max_blocks_per_seq,
-                                         int n_sequences, cudaStream_t stream) {
+                                         int n_sequences, bool meanstd, cudaStream_t stream) {
     if (n_tokens <= 0 || n_layers <= 0)
         return;
     const int row_elems = n_kv_heads * head_dim;
@@ -506,22 +574,28 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
             IMP_LOG_ERROR("sparse_update_key_minmax: NVFP4 cache without a scale pool");
             return;
         }
-        sparse_update_key_minmax_layers_nvfp4_kernel<<<grid, threads, 0, stream>>>(
+        // Both instantiations share one signature, so the statistic is a
+        // pointer choice and the dispatch shape below stays as it was.
+        auto* kern = meanstd ? sparse_update_key_minmax_layers_nvfp4_kernel<true>
+                             : sparse_update_key_minmax_layers_nvfp4_kernel<false>;
+        kern<<<grid, threads, 0, stream>>>(
             static_cast<const uint8_t*>(k_base), k_layer_stride_bytes,
             static_cast<const uint8_t*>(k_scale_base), sc_layer_stride_bytes,
             static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, seq_offsets, row_elems,
             block_size, n_tokens, max_blocks_per_seq, n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (cache_dtype == QType::FP8_E4M3) {
-        sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3>
-            <<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
+        auto* kern = meanstd ? sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3, true>
+                             : sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3, false>;
+        kern<<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,
                                            block_tables, seq_offsets, row_elems, block_size, n_tokens,
                                            max_blocks_per_seq, n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        sparse_update_key_minmax_layers_kernel<half>
-            <<<grid, threads, 0, stream>>>(static_cast<const half*>(k_base),
+        auto* kern = meanstd ? sparse_update_key_minmax_layers_kernel<half, true>
+                             : sparse_update_key_minmax_layers_kernel<half, false>;
+        kern<<<grid, threads, 0, stream>>>(static_cast<const half*>(k_base),
                                            k_layer_stride_bytes / (int64_t)sizeof(half),
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,
                                            block_tables, seq_offsets, row_elems, block_size, n_tokens,
@@ -534,7 +608,8 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
                           int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
                           int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, cudaStream_t stream) {
+                          int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
+                          cudaStream_t stream) {
     // Fixed grid.x: work distribution adapts device-side via grid-stride, so a
     // captured graph stays correct while the context grows during replay.
     // 256 CTAs: 32 left the kernel latency-bound (151 us at 32k ctx, 19% of
@@ -542,9 +617,11 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     // free at short ctx.
     dim3 score_grid(256, n_seq);
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
-    sparse_score_blocks_kernel<<<score_grid, kScoreThreads, q_smem, stream>>>(
+    auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
+                               : sparse_score_blocks_kernel<ScoreCornerBound>;
+    score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(
         q, static_cast<const __half2*>(minmax_base), block_tables, context_lens, scores_scratch, n_heads,
-        n_kv_heads, head_dim, block_size, max_blocks_per_seq, max_blocks_per_seq, engage_blocks);
+        n_kv_heads, head_dim, block_size, max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef);
     IMP_CUDA_CHECK_LAUNCH();
 
     const int n_words = (max_blocks_per_seq + 31) / 32;

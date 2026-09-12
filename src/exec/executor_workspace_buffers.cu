@@ -523,10 +523,13 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.sparse_table_blocks = table_blocks;
                 qscratch_.sparse_max_ctx_blocks = max_ctx_blocks;
                 qscratch_.sparse_max_rows = max_batch;
+                qscratch_.sparse_score_meanstd = acfg.sparse_score_meanstd;
+                qscratch_.sparse_score_std_coef = acfg.sparse_score_std_coef;
                 IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
-                             "recent %d blocks, engage above %d tokens, scratch %.1f KiB",
+                             "recent %d blocks, engage above %d tokens, score %s, scratch %.1f KiB",
                              budget_blocks, budget_blocks * kv_bs, sink_blocks, recent_blocks,
-                             engage_blocks * kv_bs, (scores_sz + bt_sz + ctx_sz) / 1024.0);
+                             engage_blocks * kv_bs, acfg.sparse_score_meanstd ? "mean+std" : "minmax",
+                             (scores_sz + bt_sz + ctx_sz) / 1024.0);
             }
         }
     }

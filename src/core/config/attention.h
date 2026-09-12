@@ -236,5 +236,19 @@ struct Attention {
     // Blocks covering the last sparse_recent_tokens positions are always kept
     // (includes the partially filled tail block).
     int sparse_recent_tokens = 256;
+    // Page score: true = mean of the page's keys as the representative vector
+    // with their standard deviation as the offset term (arXiv 2605.27740),
+    // false = the Quest min/max corner bound. Both are
+    // sum_d (q_d*center_d + |q_d|*offset_d); only what the metadata pass
+    // stores per element differs, so the layout and the cost are the same.
+    // The corner bound is driven by whichever single token is most extreme in
+    // each dimension, which is what makes it rank badly at small budgets:
+    // Qwen3.8-27B-NVFP4, NIAH 5 depths x 2 lengths (81 908 / 126 908 tokens),
+    // corner 2/10 at a 4096 budget and 7/10 at 8192, mean+std 10/10 at both,
+    // wall time neutral (2026-09-12).
+    bool sparse_score_meanstd = true;
+    // Offset weight for sparse_score_meanstd. Larger keeps more of the
+    // spread, 0 ranks on the mean alone. Ignored by the corner bound.
+    float sparse_score_std_coef = 1.0f;
 };
 }  // namespace imp::cfg

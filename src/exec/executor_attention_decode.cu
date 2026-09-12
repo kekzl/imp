@@ -201,7 +201,8 @@
                                  qscratch_.sparse_sink_blocks, qscratch_.sparse_recent_blocks,
                                  qscratch_.sparse_engage_blocks, qscratch_.sparse_table_blocks,
                                  qscratch_.sparse_scores, qscratch_.sparse_block_tables,
-                                 qscratch_.sparse_context_lens, stream);
+                                 qscratch_.sparse_context_lens, qscratch_.sparse_score_meanstd,
+                                 qscratch_.sparse_score_std_coef, stream);
             attn_bt = qscratch_.sparse_block_tables;
             attn_ctx_lens = qscratch_.sparse_context_lens;
             attn_max_blocks = qscratch_.sparse_table_blocks;

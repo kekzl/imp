@@ -244,6 +244,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("attention.sparse_min_ctx", cfg.attention.sparse_min_ctx);
     I("attention.sparse_sink_tokens", cfg.attention.sparse_sink_tokens);
     I("attention.sparse_recent_tokens", cfg.attention.sparse_recent_tokens);
+    B("attention.sparse_score_meanstd", cfg.attention.sparse_score_meanstd);
+    F("attention.sparse_score_std_coef", cfg.attention.sparse_score_std_coef);
 
     // [moe]
     I("moe.expert_overhead_pct", cfg.moe.expert_overhead_pct);
