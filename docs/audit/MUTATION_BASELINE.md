@@ -53,7 +53,7 @@ binary that only a human on a 5090 ever runs.
 | **sampling** | **0/3** | **0 %** | |
 | **controlflow** | **0/2** | **0 %** | |
 
-After iterations 2–3 (`docs/audit/TEST_HARDENING_LOG.md`): sampling 2/3 = 67 %
+After iterations 2–3 (`git show 5b5b6486:docs/audit/TEST_HARDENING_LOG.md`): sampling 2/3 = 67 %
 (M20, M21 killed by the new `TopPTruncates*` tests), **kvcache 8/8 = 100 %**
 (M23 by `BlockHashDiscriminatesEveryTokenPosition`, which runs in CI; M35 by
 `ContentSaltSeparatesIdenticalTokenPrefixes`; M36–M42 by tests that already
