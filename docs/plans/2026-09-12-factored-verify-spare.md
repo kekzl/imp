@@ -188,3 +188,25 @@ row content.
 A second gate sits in front of all of it: `ssm_fac_in` and `ssm_tap_in` are null unless the
 previous verify accepted at least one draft, so a step with nothing pending cannot apply
 anything at all.
+
+## Correction: the 32-stream numbers drafted for one request per step (2026-09-12)
+
+`engine_spec_mtp.cpp` sized the MTP draft KV pool from `batch_verify_spare_slots() > 0`, which
+this plan sets to 0 for the factored form. One KV slot, one bound request, every other row a
+pad. Fixed by keying on the verify (`mtp_draft_kv_slots`, `tests/test_batch_verify_predicates.cpp`).
+
+Qwen3.8-27B-NVFP4-vllm, `mtp_k=2 ngram=false verify_smallm=true`, `--think-budget 0`, 24 streams
+x 300 tokens with `ignore_eos` (`tools/analysis/conc_arms_ab.sh`), 3 trials x 3 waves:
+
+| geometry | arm | tok/s (medians) | verify counters |
+|---|---|---|---|
+| mbs 32, seq 4096, before the fix | `batch_verify=false` | 1402.3 / 1435.4 / 1440.4 | - |
+| mbs 32, seq 4096, before the fix | `batch_verify=true factored_spare=true` | 1014.2 / 1023.7 / 1016.4 | 127 steps, 128 drafted, 24.28 tok/verify, 24.61 ms |
+| mbs 24, seq 1024, after the fix | `batch_verify=false` | 1493.4 / 1483.3 / 1455.1 | - |
+| mbs 24, seq 1024, after the fix | `batch_verify=true factored_spare=true` | 1226.4 / 1265.2 / 1237.8 | 410 steps, 8030 drafted, 60.2 % accept, 33.85 tok/verify, 26.12 ms |
+
+| finding | number | consequence |
+|---|---|---|
+| draft KV at 24-32 slots | `kv_cap=10922 x 24 slot(s)`; at mbs 32 / seq 4096 the plan cuts KV 8192 -> 544 blocks and clamps 32 -> 30 | the draft pool is not priced before the KV pool; the geometry above leaves room for both |
+| step price | 26.12 ms for 48 rows vs ~16.3 ms for a 24-row decode step (1.60x) | break-even needs 1.60 x 24 = 38.4 tokens per step |
+| step yield | 33.85 tokens: 19.6 of 24 requests draft, 60.2 % accepted | the gap is draft coverage and acceptance (78.0 % at 8 streams, stage 3), not the kernels |

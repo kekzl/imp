@@ -133,3 +133,19 @@ O(d_k + d_v) against O(d_k * d_v) per head. That is the TreeWY / Bole direction
 (arXiv 2608.20961, 2608.01651, which report 82-99x lower transient state memory) and it would put
 the batched verify back on 32 streams with the full KV pool. The cost to price first is the accept
 path: applying the factors writes the live state instead of swapping a pointer.
+
+## "M=64 rows leave the small-M GEMM path" is not the price (2026-09-12)
+
+Built and measured, then reverted: 33..64 rows as two 32-row `gemm_nvfp4_smallm_v2` launches
+instead of the CUTLASS 128-row tile, gated to N <= 8704 (no flag shipped).
+
+| measurement | result |
+|---|---|
+| isolated, L2-defeated ring, two halves at M=64 vs one tile at M=32 | q/o 13.94 -> 24.98 us, k/v 15.33 -> 29.52, down 35.39 -> 61.13, gate\|up pair 70.63 -> 121.69 |
+| 24 streams, batched verify (48 rows), row split on N <= 8704 | 1076.8 / 1058.9 / 1041.9 vs 1049.0 / 1071.0 / 1060.1 tok/s: neutral, step +0.2 ms |
+| same, row split on every shape (gate\|up N=17408, 136 CUTLASS CTAs) | 925.1 / 959.8 / 937.0: -11..-13 %, step +3.5..+5.2 ms |
+| plain decode, 40 streams, mbs 64 (36 decoding rows) | 1156.1 / 1154.2 / 1157.1 vs 1161.1 / 1147.1 / 1151.7: neutral |
+
+At 33..64 rows the CUTLASS tile reads each weight once at the rate two small-M sweeps reach
+together; its row padding costs math, and these GEMMs are weight-bound. The verify's price at
+24 streams is draft coverage and acceptance: `2026-09-12-factored-verify-spare.md`, correction.

@@ -63,6 +63,11 @@ def one(i, wave, out):
         "max_tokens": GEN,
         "temperature": 0,
         "stream": False,
+        # IGNORE_EOS=1: every request emits exactly max_tokens, so two arms do
+        # identical work even when their greedy trajectories differ (a
+        # speculative arm's do, docs/LIMITATIONS.md). Without it an arm that
+        # stops early runs the tail of the wave at lower concurrency.
+        "ignore_eos": os.environ.get("IGNORE_EOS", "0") == "1",
     }).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/completions", data=body,
                                  headers={"Content-Type": "application/json"})

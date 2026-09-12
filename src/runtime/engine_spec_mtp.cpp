@@ -758,7 +758,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // many slots the per-slot capacity comes out of a 1 GiB budget (floor
     // 2048 rows): a request past its slot's capacity stops drafting, the
     // verify keeps running on its own rows.
-    const int n_kv_slots = batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size) > 0 ? std::max(1, config_.max_batch_size) : 1;
+    const int n_kv_slots = mtp_draft_kv_slots(runtime_config_, model_.get(), config_.max_batch_size);
     if (n_kv_slots > 1 && mtp_num_kv_heads > 0 && mtp_head_dim > 0) {
         const size_t row_bytes = 2ull * mtp_num_kv_heads * mtp_head_dim * sizeof(__half);
         const size_t budget = 1ull << 30;
