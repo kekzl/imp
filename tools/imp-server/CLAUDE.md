@@ -1,33 +1,21 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-06
-commit: b5de0dd7
+verified: 2026-09-13
+commit: 81d22eff
 -->
 
 # tools/imp-server - the HTTP surface
 
-OpenAI, Anthropic and OpenAI-Responses dialects over one engine. Thin wire-format
-adapters on a shared core; the engine lives in `src/runtime/`.
+OpenAI, Anthropic and OpenAI-Responses dialects: thin wire-format adapters over one engine (`src/runtime/`).
 
 ## Invariants
 
-- **One shared per-token streaming driver** (`handlers_chat_stream.cpp`). The
-  three dialects are wire-format adapters over it. Do not grow a second token
-  loop: they were hand-copied once and drifted twice (#892, #941).
-- **Every error is a JSON envelope**, never a bare status with an empty body.
-  `/v1/messages*` gets the Anthropic error shape.
-- **A request the server cannot honour is a 4xx, not a best-effort answer.** An
-  uncompilable constraint, an unreadable image, a `tool_choice` naming an absent
-  function: all 400. This is a deliberate, breaking-by-design stance.
-- **The server never connects to a host a request names, unless the operator
-  opted in.** `--allow-remote-images` gates the only such path (`image_url`),
-  and even then the destination is classified before the connect and redirects
-  are not followed (#1610, `image_fetch.h`). An error string that varies with
-  the destination is the same defect wearing a different hat: it makes the
-  endpoint a port scanner.
-- **Reasoning goes to `reasoning_content`**, never into `content`. This was once
-  wrong on the streaming path only, which our own batteries could not see.
+- One shared per-token streaming driver (`handlers_chat_stream.cpp`); the three dialects adapt it. No second token loop (#892, #941).
+- Every error is a JSON envelope, never a bare status; `/v1/messages*` gets the Anthropic error shape.
+- A request the server cannot honour is a 4xx, by design: uncompilable constraint, unreadable image, `tool_choice` naming an absent function are all 400.
+- The server connects to a host a request names only with `--allow-remote-images` (`image_url`): destination classified before the connect, no redirects, error strings independent of the destination (#1610, `image_fetch.h`).
+- Reasoning goes to `reasoning_content`, never into `content`, on streaming and non-streaming paths.
 
 ## Entry points
 
@@ -41,35 +29,25 @@ adapters on a shared core; the engine lives in `src/runtime/`.
 ## Test
 
 ```
-make dev-test            # CPU lane, includes the mock API battery
-make test-server         # boots a real imp-server (needs a GPU)
+make dev-test             # CPU lane, includes the mock API battery
+make test-server          # boots a real imp-server (GPU)
 make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 ```
 
-The `Real API contract` CI job runs the API tests against the built binary
-without a GPU. Before it existed, all 82 assertions described the mock.
-
-Web UI without a GPU: `webui/dev/mock_server.py` streams imp-shaped SSE per
-token (usage chunk, swap, boot delay, failure keywords); `webui/dev/drive.js`
-runs the scenarios in the Playwright image. Commands in the file headers.
-`tests/api/mock_server.py` sends the SSE body in one write: no streaming.
+- CI job `Real API contract` runs the API tests against the built binary, no GPU.
+- Web UI without a GPU: `webui/dev/mock_server.py` (imp-shaped SSE per token) + `webui/dev/drive.js` (Playwright image); commands in the file headers.
+- `tests/api/mock_server.py` sends the SSE body in one write: it does not exercise streaming.
 
 ## Pitfalls
 
-- **Testing against the mock proves nothing about the server.** The two
-  disagreed on `n=2` for months.
-- A client that streams needs `proxy_buffering off` at any reverse proxy, or
-  every TTFT measurement equals total latency.
-- CORS is wide open on purpose (the built-in UI calls the API directly). Do not
-  "fix" it; document the proxy instead.
+- A test against the mock proves nothing about the server.
+- A streaming client needs `proxy_buffering off` at any reverse proxy, or TTFT equals total latency.
+- CORS is wide open on purpose (the built-in UI calls the API directly): document the proxy, do not "fix" it.
 
 ## Do not touch
 
-`webui/index.html` is deliberately one file with no build step and no
-dependencies. Keep it that way.
+`webui/index.html` stays one file: no build step, no dependencies.
 
 ## See also
 
-[`docs/API.md`](../../docs/API.md) for the field-by-field surface,
-[`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) for auth and proxying. Skill
-`server-api` carries the playbook.
+[`docs/API.md`](../../docs/API.md) (field-by-field surface), [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) (auth, proxying). Skill `server-api`.
