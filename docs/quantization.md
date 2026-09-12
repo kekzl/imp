@@ -301,12 +301,28 @@ channel that is heavy-tailed rather than merely large. The calibration file carr
 moment since `IMPCAL02` (`src/quant/calibration_stats.h`); an older file loads with it absent
 and the search keeps the old weight.
 
-`--calib-weight sq` selects it, `abs` (the default) keeps the shipped one. **This is the
-instrument, not a verdict**: it is unmeasured, and the open question it exists for is roadmap
-item 6, where `--calib` still hurts at wide GQA (14B RTN 9.9252 against twin-calib 12.6016).
-Nothing may be claimed for it until an A/B on that case says so. Note the neighbouring
-refutation below: choosing the MICRO-scale by reconstruction error was refuted in #1083, but
-that is the 16-value FP4 block, a different search from this one.
+`--calib-weight sq` selects it, `abs` (the default) keeps the shipped one.
+
+Measured 2026-09-12, Qwen3-0.6B BF16 -> NVFP4, one calibration file, PPL on
+`ppl_corpus_45k.txt` (13 537 tokens), `runtime.deterministic=true`, `speculative.mtp_k=0`:
+
+| arm | PPL |
+|---|---:|
+| RTN, no calibration | 29.7342 |
+| AWQ, weight `abs` | 28.1125 |
+| AWQ, weight `sq` | **27.8039** |
+
+The second moment is worth 1.10 % over the shipped weight and recovers a further 19 % of the
+gap calibration closes, at no extra cost: the same search over the same alpha grid, only the
+weight vector differs. That cost is what separates this from the neighbouring refutation below,
+where a 0.7 % gain wanted ~6x the quantization time.
+
+**The default stays `abs`.** This model has `n_rep = 2`, and the open question the flag exists
+for is roadmap item 6, at WIDE GQA (`n_rep >= 5`), where `--calib` still hurts outright (14B RTN
+9.9252 against twin-calib 12.6016). `--calib`'s own shipped rule is a different group set per
+GQA width, so a narrow-GQA result is precisely the kind that does not transfer. No wide-GQA
+BF16 source is on this host to settle it. Note also that the refutation below is a different
+search: the MICRO-scale inside the 16-value FP4 block, not this per-channel one.
 
 #### Quality, measured
 
