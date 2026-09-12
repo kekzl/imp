@@ -308,6 +308,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing.cu
     src/compute/reduce.cu
     src/compute/ssm.cu
+    src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
     src/compute/gdn_gated_norm.cu
     src/compute/hadamard.cu

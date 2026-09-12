@@ -134,4 +134,18 @@ void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t
 // Sigmoid multiply: out[i] = a[i] * sigmoid(b[i])
 void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 
+// Factored conv window for the batched speculative verify
+// (compute/ssm_conv_tap.cu, docs/plans/2026-09-12-factored-verify-spare.md).
+// The drafted row shifts the window by one, so what has to survive the step is
+// the single new tap rather than the whole window: channels halfs against
+// channels * kernel_size floats. Both pools are indexed by recurrent SLOT, so
+// a request keeps its row while it moves within the batch.
+// stash: x_in is [n_seq, n_tokens, channels] half, the row taken is real_n-1.
+// apply: advances slot's window by its stashed tap, the single-row form of
+// ssm_conv1d_commit_kernel.
+void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_real_n,
+                        const int* slots, int n_seq, cudaStream_t stream);
+void ssm_conv_tap_apply(void* conv_pool, int64_t slot_stride_floats, const void* tap_pool, int channels,
+                        int kernel_size, const int* slots, int n_seq, cudaStream_t stream);
+
 }  // namespace imp

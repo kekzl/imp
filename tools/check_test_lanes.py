@@ -258,7 +258,9 @@ def main():
     # 1110 -> 1111: FactoredSpareReproducesTheFullSpareAfterTheNextToken (test-moe-gdn, GPU, no model):
     # the batched verify's drafted row carried as (g, k, delta) must leave the state after the FOLLOWING
     # token bit-identical to the full spare slot.
-    PINNED = 1111
+    # 1111 -> 1112: StashedTapAdvancesTheWindowLikeTheTwoRowCommit (test-compute, GPU, no model): the
+    # conv half of the same spare, tap stash plus window advance against the window definition.
+    PINNED = 1112
 
     text = CMAKE.read_text()
     mods = module_sources(text)
