@@ -102,3 +102,34 @@ Stage 4 measurement (same setup as stage 3, `--think-budget 0`, 3 waves):
 The lever pays while the clients fit the clamped batch; past it the queue
 costs more than the extra tokens per step return. The head at 15 streams:
 25.7 tokens per 18.9 ms step.
+
+## What the spare slots actually cost, and why the clamp is the wrong half to break (2026-09-12)
+
+Qwen3.8-27B-NVFP4-vllm, `runtime.max_batch_size=32`, one image, startup logs:
+
+| `speculative.batch_verify` | SSM/GDN state | KV pool | batch |
+|---|---:|---:|---:|
+| off | 2544 MiB (32 slots) | 2339 blocks, `max_model_len` 131 072 | 32 |
+| on | 5088 MiB (32 slots) | 1429 blocks, `max_model_len` 33 680 | clamped to 18 |
+
+The spare is an exact duplicate: one full recurrent slot per batch slot, 79.5 MiB each on this
+model, held for the request's lifetime because accept swaps slots instead of copying. So enabling
+the batched verify at 32 slots costs the batch (32 -> 18) AND three quarters of the usable context,
+in the regime where the verify is already a measured loss (1966 -> 1159 tok/s above).
+
+**Attempted and reverted**: making `clamp_max_batch_to_plan_` drop `speculative.batch_verify`
+instead of the batch slots. It keeps `max_batch_size=32` and logs both options, but only half
+works: `compute_vram_budget` runs before the shadow plan (`engine_kv_cache_init.cpp`), so the KV
+pool stays sized against the spares (1429 blocks, not the 2339 the operator would get by setting
+`batch_verify=false` themselves) and the log then overstates what it recovered. Doing it correctly
+means deciding before the budget call, which means one captured `effective_free_vram()` snapshot
+reused across two budget computations and the probe/plan block (lines 240-325) restructured to run
+twice - in the #1103 order, in a function already at 682 of its 700-LOC ceiling. Its own change.
+
+**The structural answer** is to stop duplicating the state at all. The spare holds the state after
+two more tokens, and the gated delta rule's per-token update is a rank-1 term plus a diagonal
+decay, so the difference is two (k, v, beta) triples per layer rather than a full state matrix:
+O(d_k + d_v) against O(d_k * d_v) per head. That is the TreeWY / Bole direction
+(arXiv 2608.20961, 2608.01651, which report 82-99x lower transient state memory) and it would put
+the batched verify back on 32 streams with the full KV pool. The cost to price first is the accept
+path: applying the factors writes the live state instead of swapping a pointer.

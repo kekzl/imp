@@ -225,3 +225,39 @@ script treats a zero count as an abort.
 
 Follow-ups live in `docs/roadmap.md` Open 3, not here: MLA models, prefill
 sparsity, and StreamingLLM eviction as the only answer under KV-pool pressure.
+
+## Budget floor under the mean+std score (2026-09-12)
+
+Same harness and model as the score A/B above, `tools/analysis/sparse_score_niah_ab.sh` and a
+single-arm sweep:
+
+| budget | min/max corner | mean + std |
+|---|---|---|
+| 1024 | 0/10 | 10/10 |
+| 2048 | 1/10 | 10/10 |
+| 3072 | - | 10/10 |
+| 4096 | 2/10 | 10/10 |
+| 8192 | 7/10 | 10/10 |
+
+NIAH saturates under the new score at every budget down to 1024, so it can no longer discriminate
+between them, and a selection refinement aimed at small budgets (an uncertainty gate that widens
+the kept set on near-tied cuts, arXiv 2607.07724) has no target on this workload.
+
+The budget is also not a speed lever here. Decode throughput, prefill cancelled by measuring the
+slope between two generation lengths on the same 77k-token prompt, speculation off, three rounds:
+
+| arm | decode tok/s |
+|---|---|
+| dense | 82.0 / 82.9 / 82.7 |
+| sparse 1024 | 91.1 / 88.7 / 95.5 |
+| sparse 8192 | 96.2 / 87.4 / 89.9 |
+
+Sparse is worth about +9% over dense on this shape and 1024 against 8192 is inside the spread: only
+16 of this model's 64 layers are attention, so the pages read are a small share of a decode step.
+Configure the budget for retrieval headroom, not for speed.
+
+**Two harness traps this cost.** A single wall-clock reading at a 77k prompt prices nothing: prefill
+is ~80% of it and every budget read ~13 s. And the slope must use the tokens actually emitted, not
+the requested `max_tokens` - assuming the request value made an 8192 budget read faster than a 1024
+one. With the embedded MTP head on (the default for a single stream) the same arm spread 111 to 268
+tok/s between rounds, so speculation has to be off to price an attention-side knob.
