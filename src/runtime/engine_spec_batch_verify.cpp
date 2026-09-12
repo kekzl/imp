@@ -16,6 +16,7 @@
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
 #include "runtime/engine.h"
+#include "compute/gdn_factor.cuh"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
 #include "runtime/stop_mask.h"
@@ -57,13 +58,28 @@ bool batch_verify_on(const RuntimeConfig& cfg, const Model* model) {
     return model != nullptr && model->config().ssm_inner_size > 0;
 }
 
+bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
+    return batch_verify_on(cfg, model) && max_batch_size > 1;
+}
+
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
     if (!batch_verify_on(cfg, model) || max_batch_size <= 1)
+        return 0;
+    // The whole point of the factored form: the drafted row is (g, k, delta)
+    // plus a conv tap, so the pool stops carrying a second slot per batch slot
+    // and the planner stops charging one.
+    if (cfg.speculative.factored_spare)
         return 0;
     return max_batch_size;
 }
 
+bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
+                          BatchVerifyState& bv);
+void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
+
 bool Engine::ensure_batch_verify_bufs_() {
+    if (!batch_verify_wants_bufs(runtime_config_, model_.get(), config_.max_batch_size))
+        return true;  // nothing to stage, and that is not a failure
     if (bv_.d_stage != nullptr)
         return true;
     const int cap_seq = config_.max_batch_size;
@@ -96,7 +112,84 @@ bool Engine::ensure_batch_verify_bufs_() {
     bv_.cap_seq = cap_seq;
     bv_.cap_rows = cap_rows;
     bv_.table_cap = table_cap;
+    return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_);
+}
+
+// Factored spare pools (speculative.factored_spare). Sized over the LIVE slots
+// only: the point of the factored form is that no spare slot exists, so the
+// rows are addressed by the same slot ids the scheduler hands out.
+// A failure here disables the factored path and leaves the slot-swapping one,
+// rather than failing the verify: the two are interchangeable by construction.
+bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv) {
+    return cfg.speculative.factored_spare && bv.d_fac != nullptr;
+}
+
+bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm,
+                          VRAMAllocator& alloc, BatchVerifyState& bv) {
+    if (!cfg.speculative.factored_spare || bv.d_fac != nullptr)
+        return true;
+    const int layers = ssm ? ssm->n_ssm_layers() : 0;
+    const int slots = ssm ? ssm->max_sequences() : 0;
+    const int heads = mc.ssm_dt_rank;
+    const int hd = heads > 0 ? mc.ssm_inner_size / heads : 0;
+    const int ss = mc.ssm_state_size;
+    const int ch = mc.ssm_conv_channels();
+    if (layers <= 0 || slots <= 0 || heads <= 0 || hd <= 0 || ss <= 0 || ch <= 0) {
+        IMP_LOG_WARN("speculative.factored_spare ignored: no GDN state geometry");
+        cfg.speculative.factored_spare = false;
+        return true;
+    }
+    bv.fac_stride = gdn_factor_floats_per_head(ss, hd);
+    bv.fac_layer_stride = static_cast<int64_t>(slots) * heads * bv.fac_stride;
+    bv.tap_layer_stride = static_cast<int64_t>(slots) * ch;
+    const size_t fac_bytes = static_cast<size_t>(layers) * bv.fac_layer_stride * sizeof(float);
+    const size_t tap_bytes = static_cast<size_t>(layers) * bv.tap_layer_stride * sizeof(uint16_t);
+    bv.d_fac = static_cast<float*>(alloc.allocate(fac_bytes, "spec_factored_rows"));
+    bv.d_tap = alloc.allocate(tap_bytes, "spec_factored_taps");
+    bv.d_pending = static_cast<int*>(alloc.allocate(static_cast<size_t>(slots) * sizeof(int),
+                                                           "spec_factored_pending"));
+    bv.d_clear = static_cast<int*>(alloc.allocate(static_cast<size_t>(slots) * sizeof(int),
+                                                         "spec_factored_clear"));
+    if (bv.d_fac == nullptr || bv.d_tap == nullptr || bv.d_pending == nullptr || bv.d_clear == nullptr) {
+        IMP_LOG_WARN("speculative.factored_spare ignored: %.1f MiB of factored rows would not fit",
+                     (fac_bytes + tap_bytes) / (1024.0 * 1024.0));
+        free_factored_rows(alloc, bv);
+        cfg.speculative.factored_spare = false;
+        return true;
+    }
+    bv.h_pending = PinnedBuffer::acquire(cuda_host_pinned_allocator(), slots * sizeof(int32_t));
+    bv.h_clear = PinnedBuffer::acquire(cuda_host_pinned_allocator(), slots * sizeof(int32_t));
+    if (bv.h_pending.empty() || bv.h_clear.empty()) {
+        IMP_LOG_WARN("speculative.factored_spare ignored: pinned slot staging unavailable");
+        free_factored_rows(alloc, bv);
+        cfg.speculative.factored_spare = false;
+        return true;
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemset(bv.d_fac, 0, fac_bytes));
+    IMP_LOG_INFO("speculative.factored_spare: %d layers x %d slots, %.1f MiB of rows + %.1f MiB of conv "
+                 "taps (a spare slot pool would be %.1f MiB)",
+                 layers, slots, fac_bytes / (1024.0 * 1024.0), tap_bytes / (1024.0 * 1024.0),
+                 static_cast<double>(ssm->h_bytes()) * layers * slots / (1024.0 * 1024.0));
     return true;
+}
+
+void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv) {
+    if (bv.d_fac)
+        alloc.free(bv.d_fac);
+    if (bv.d_tap)
+        alloc.free(bv.d_tap);
+    if (bv.d_pending)
+        alloc.free(bv.d_pending);
+    if (bv.d_clear)
+        alloc.free(bv.d_clear);
+    bv.d_fac = nullptr;
+    bv.d_tap = nullptr;
+    bv.d_pending = nullptr;
+    bv.d_clear = nullptr;
+    bv.pending.clear();
+    bv.clear_slots.clear();
+    bv.h_pending = PinnedBuffer{};
+    bv.h_clear = PinnedBuffer{};
 }
 
 void Engine::free_batch_verify_bufs_() {
@@ -107,6 +200,7 @@ void Engine::free_batch_verify_bufs_() {
     if (bv_.d_argmax)
         vram_alloc_.free(bv_.d_argmax);
     bv_.d_stage = bv_.d_row_tables = bv_.d_argmax = nullptr;
+    free_factored_rows(vram_alloc_, bv_);
     bv_.h_stage = PinnedBuffer{};
     bv_.h_row_tables = PinnedBuffer{};
     bv_.h_argmax = PinnedBuffer{};
@@ -181,7 +275,10 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             return "off";
         if (batch.size() < 2)
             return "batch_of_one";
-        if (ssm_state_->n_reserved() - spec_mc_reserved_slots_() <= 0)
+        // The factored form carries the drafted row as (g, k, delta) plus a
+        // conv tap, so it reserves no slots by design and this gate would
+        // refuse every batch on the strength of that (2026-09-12).
+        if (!factored_spare_active(runtime_config_, bv_) && ssm_state_->n_reserved() - spec_mc_reserved_slots_() <= 0)
             return "no_spare_slots";
         if (swa_sizing_active_ || config_.streaming_kv_enabled)
             return "swa_or_streaming_kv";
@@ -244,7 +341,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         live[g] = recurrent_slot_for_(reqs[g]->id);
         if (live[g] < 0)
             return decline("no_live_slot");
-        spare[g] = acquire_spare_slot_(reqs[g]->id);
+        // Factored: no spare slot exists, the drafted row leaves as factors.
+        spare[g] = factored_spare_active(runtime_config_, bv_) ? live[g] : acquire_spare_slot_(reqs[g]->id);
         if (spare[g] < 0)
             return decline("spare_slot_unavailable");
     }
@@ -444,8 +542,34 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.ssm_seq_slots = d_seq;
     state.ssm_n_seq = N;
     state.ssm_seq_tokens = 2;
-    state.ssm_out_slots = d_out;
-    state.ssm_snap_slots = d_snap;
+    // Factored spare: no second slot, so no commit destination. The drafted
+    // row leaves as (g, k, delta) plus one conv tap per layer, both addressed
+    // by the live slot; the snapshot at row 1 stays the in-place one.
+    const bool factored = runtime_config_.speculative.factored_spare && bv_.d_fac != nullptr;
+    state.ssm_out_slots = factored ? nullptr : d_out;
+    state.ssm_snap_slots = factored ? d_seq : d_snap;
+    if (factored) {
+        state.ssm_fac_out = bv_.d_fac;
+        state.ssm_fac_stride = bv_.fac_stride;
+        state.ssm_fac_layer_stride = bv_.fac_layer_stride;
+        state.ssm_tap_out = bv_.d_tap;
+        state.ssm_tap_layer_stride = bv_.tap_layer_stride;
+        // Rows the LAST verify accepted: this forward applies them, to the
+        // conv window before the conv reads it and to the recurrent state
+        // inside the scan's register load.
+        if (!bv_.pending.empty()) {
+            const int np = static_cast<int>(bv_.pending.size());
+            auto* hp = static_cast<int32_t*>(bv_.h_pending.data());
+            std::copy(bv_.pending.begin(), bv_.pending.end(), hp);
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(bv_.d_pending, hp, np * sizeof(int32_t),
+                                               cudaMemcpyHostToDevice, stream));
+            state.ssm_fac_in = bv_.d_fac;
+            state.ssm_tap_in = bv_.d_tap;
+            state.ssm_tap_slots = bv_.d_pending;
+            state.ssm_tap_n = np;
+        }
+        bv_.pending.clear();
+    }
     state.d_chunk_len = d_misc;
     state.d_snap_n = d_misc + 1;
     if (capture_on) {
@@ -543,7 +667,13 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
         // State: the spare holds the state after [t0, draft], the live slot
         // the state after t0. Accept = the spare becomes the live slot.
-        if (matched == 1 && req->status != RequestStatus::FINISHED) {
+        // Factored: there is no spare. The scan wrote a row for EVERY group,
+        // so accept keeps it for the next step to apply and anything else has
+        // to clear it, or the state advances by a token nobody accepted.
+        const bool take = matched == 1 && req->status != RequestStatus::FINISHED;
+        if (factored)
+            (take ? bv_.pending : bv_.clear_slots).push_back(live[g]);
+        else if (take) {
             recurrent_slot_of_[req->id] = spare[g];
             bv_.spare_of[req->id] = live[g];
         }
@@ -558,6 +688,22 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         emit_total += emitted;
         any_mtp = any_mtp || from_mtp[g];
     }
+    // Factored: rows nobody may apply - this step's rejects, plus slots
+    // released since the last verify - get the 0 sentinel before the next
+    // forward can read them.
+    if (factored && !bv_.clear_slots.empty()) {
+        const int nc = static_cast<int>(bv_.clear_slots.size());
+        auto* hc = static_cast<int32_t*>(bv_.h_clear.data());
+        std::copy(bv_.clear_slots.begin(), bv_.clear_slots.end(), hc);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(bv_.d_clear, hc, nc * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                           stream));
+        const auto& mc = model_->config();
+        const int heads = mc.ssm_dt_rank;
+        gdn_factor_clear(bv_.d_fac, bv_.fac_layer_stride, ssm_state_->n_ssm_layers(), bv_.d_clear, nc,
+                         heads, bv_.fac_stride, stream);
+        bv_.clear_slots.clear();
+    }
+
     // MTP: feed every bound request's emitted pairs and draft its next token
     // in one head pass (the chunk's hidden rows are still in place).
     static double t_verify_ms = 0.0;

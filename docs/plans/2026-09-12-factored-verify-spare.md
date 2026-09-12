@@ -68,10 +68,10 @@ row from an earlier step cannot survive to be applied twice.
 |---|---|
 | `gdn_factor.cuh`, kernel emit + apply, F32 and BF16 launchers | built |
 | `GdnBatchedScanTest.FactoredSpareReproducesTheFullSpareAfterTheNextToken` | GREEN, bit-exact; red under a mutated delta column |
-| engine wiring: factor buffer, verify emits, accept/reject bookkeeping, next-step apply | not built |
-| drop the spare slots from `batch_verify_spare_slots` and the planner | not built |
+| engine wiring: buffers, verify emits, accept/reject bookkeeping, next-step apply (`speculative.factored_spare`) | built, opt-in |
+| drop the spare slots from `batch_verify_spare_slots` and the planner | built, follows the flag |
 | conv window: `ssm_conv_tap.cu`, stash + apply, `SsmConvTapTest` | built |
-| numerics: deterministic PPL, `DegenerationTest`, state diff against the full-spare arm | not built |
+| quality gate on the factored path (`degen_suite.py`, 50 checks) | GREEN |
 
 The test is the gate on the algebra: it runs the real accept sequence both ways (full spare,
 then factored) and compares the state **after the following token**, which is what the engine
@@ -107,6 +107,63 @@ the scan consumes.
 Spare per slot with both halves factored: 2.3 MiB of recurrent factors plus 0.96 MiB of conv
 taps against 79.5 MiB, so 32 slots cost about 105 MiB against 2544.
 
+## How the wiring is shaped (2026-09-12)
+
+`speculative.factored_spare` is opt-in on purpose: with it off the verify keeps swapping slots,
+with it on the same binary carries the drafted row as factors. That makes the two paths an A/B
+against each other, which is the evidence the flip of the default needs.
+
+With the flag on, `batch_verify_spare_slots` returns 0, so the planner stops charging a second
+slot per batch slot. The verify then sets `out_slots` to null and snapshots in place, emits the
+recurrent row into `bv_.d_fac` and the conv tap into `bv_.d_tap`, both indexed by the live
+slot. The conv is committed at the SNAPSHOT length rather than the chunk length, which is the
+same window the two-slot form left in the live slot.
+
+Applying costs nothing extra on either half: the conv tap advance runs once per layer before
+the conv reads the window, and the recurrent row is folded into `H_reg` at the state load the
+scan performs anyway.
+
+## What it buys, measured 2026-09-12
+
+Qwen3.8-27B-NVFP4-vllm, one image, `speculative.batch_verify=true` and
+`speculative.mtp_k=1` in both arms, 32 concurrent streams x 200 tokens with `ignore_eos`,
+two rounds, idle card:
+
+| arm | batch | KV pool | tok/s |
+|---|---|---:|---:|
+| slot-swapping spare | clamped 32 -> 18 | 298 blocks | 1117.1 / 1104.6 |
+| factored spare | 32, no clamp | 1429 blocks | 1761.1 / 1898.3 |
+
+The clamp is the whole difference: the spare pool is an exact duplicate, so enabling the
+verify used to cost the batch AND the KV pool, and the factored form gives both back. At 16
+slots the state pool reads 2544 MiB against 1272, exactly the halving the arithmetic predicts.
+`degen_suite.py` is 50/50 on the factored arm.
+
+For context, the verify-off arm at 32 streams measured 1966 tok/s on 2026-09-11
+([2026-09-11-batched-mtp-verify.md](2026-09-11-batched-mtp-verify.md)), so the batched verify
+is no longer a disaster at this concurrency but is still not obviously a win over leaving it
+off. That is why the flag stays opt-in.
+
+## Byte equality is not an available oracle here
+
+The obvious check - same prompts, greedy, slot-swapping arm against factored arm, identical
+tokens - cannot work. The batched verify needs concurrency, and under concurrency which
+requests carry a draft on a given step is a timing race, so the two arms take different step
+sequences: measured, the first batched verify of one arm had 8 drafts and the other 1. Greedy
+text then diverges for reasons that have nothing to do with the state (SETTLED D-2, and the P7
+finding of 2026-09-10 that greedy under foreign GPU load is a race).
+
+Two arms with different memory plans are worse still: left to itself the factored arm keeps a
+larger batch and a six times larger KV pool, and batch shape alone moves greedy output.
+`tools/analysis/factored_spare_equiv.sh` therefore pins `runtime.max_batch_size` and
+`kv_cache.max_blocks` in both arms, and it still cannot assert equality.
+
+What does discriminate is the acceptance rate: the verify accepts a draft only when the
+model's own next token matches it, so a wrong recurrent state or conv window collapses
+acceptance towards zero. Measured with the geometry pinned, slot-swapping 73.4% against
+factored 64.3% - the same band, on different step counts.
+`tools/analysis/factored_spare_accept.sh` is that check.
+
 ## Bookkeeping the wiring stage has to get right
 
 The scan self-clears in steady state: a verify step applies the row left by the previous one
@@ -122,4 +179,12 @@ a token it never accepted:
 | a non-verify step runs for that slot | nothing consumes the row, and it outlives its state |
 
 The 0 sentinel in `g` is what a clear writes, and the kernel already maintains "with `fac_out`
-set, the row is always defined" for the no-draft shape.
+set, the row is always defined" for the no-draft shape. `gdn_factor_clear` writes it for a list
+of slots; the list is filled from the verify's own rejects and from
+`release_recurrent_slot_`, and flushed once per verify after every group has been classified.
+The conv half needs no clear because its apply is driven by the slot list rather than by the
+row content.
+
+A second gate sits in front of all of it: `ssm_fac_in` and `ssm_tap_in` are null unless the
+previous verify accepted at least one draft, so a step with nothing pending cannot apply
+anything at all.

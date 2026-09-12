@@ -143,6 +143,14 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     int ssm_idx = get_ssm_layer(ssm_layer_map_, layer);
     void* conv_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
                                                       : nullptr;
+    // Factored spare: advance the accepted slots' conv windows by the drafted
+    // tap before anything reads them. Once per layer, ahead of every branch.
+    if (state.ssm_tap_in && state.ssm_tap_n > 0 && state.ssm_state && ssm_idx >= 0)
+        ssm_conv_tap_apply(state.ssm_state->conv_state(0, ssm_idx),
+                           static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
+                           static_cast<const char*>(state.ssm_tap_in) +
+                               state.ssm_tap_layer_stride * ssm_idx * 2,
+                           conv_channels, conv_kernel, state.ssm_tap_slots, state.ssm_tap_n, stream);
 
     if (conv_st) {
         if (state.is_prefill) {
@@ -455,14 +463,26 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             Tensor xBC_g(xBC_out.data, compute_dtype_, 2, grp_shape, true);
             // Batched verify: per-group commit/snapshot slots replace the
             // slab snapshot (ssm_out_slots / ssm_snap_slots, inference_state.h).
-            const bool per_group = state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
+            // Factored spare: commit the window at the SNAPSHOT length into the
+            // live slot and stash the drafted row's tap, which is the same
+            // thing as committing at both lengths into two slots.
+            const bool factored = state.ssm_tap_out != nullptr;
+            const bool per_group =
+                !factored && state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
             ssm_conv1d_prefill_f32_silu_grouped(
                 state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
                 static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)), state.ssm_n_seq,
-                xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream, state.d_chunk_len,
+                xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream,
+                factored ? state.d_snap_n : state.d_chunk_len,
                 (conv_prev && !per_group) ? conv_snap : nullptr,
-                (conv_prev || per_group) ? state.d_snap_n : nullptr, per_group ? nullptr : conv_prev,
-                state.ssm_out_slots, per_group ? state.ssm_snap_slots : nullptr);
+                (!factored && (conv_prev || per_group)) ? state.d_snap_n : nullptr,
+                per_group ? nullptr : conv_prev, factored ? nullptr : state.ssm_out_slots,
+                per_group ? state.ssm_snap_slots : nullptr);
+            if (factored)
+                ssm_conv_tap_stash(static_cast<char*>(state.ssm_tap_out) +
+                                       state.ssm_tap_layer_stride * ssm_idx * 2,
+                                   xBC_g.data, T, conv_channels, state.d_chunk_len, state.ssm_seq_slots,
+                                   state.ssm_n_seq, stream);
             // Bucket pad rows past the last group belong to no sequence: no
             // conv ran for them, and the scan below writes no y for them.
             // Zero both so the rows that feed the (discarded) pad outputs are

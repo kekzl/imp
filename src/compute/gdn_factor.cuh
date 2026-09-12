@@ -34,6 +34,12 @@ inline constexpr int gdn_factor_floats_per_head(int state_size, int head_dim) {
     return kGdnFactorPad + state_size + head_dim;
 }
 
+// Write the 0 sentinel into g for every (layer, head) of the named slots: the
+// rows of rejected drafts, finished requests and reassigned slots, which the
+// scan would otherwise apply on the next step. Defined in gdn_factor.cu.
+void gdn_factor_clear(float* fac, int64_t layer_stride, int n_layers, const int* slots, int n_slots,
+                      int n_heads, int fac_stride, cudaStream_t stream);
+
 #ifdef __CUDACC__
 
 // Apply a pending factored row to the state column this thread owns, in

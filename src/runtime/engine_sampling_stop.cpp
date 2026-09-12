@@ -339,6 +339,10 @@ void Engine::release_recurrent_slot_(int req_id) {
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())
         return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
+    // Factored spare: a request that finished right after an accept leaves a
+    // row behind, and the next tenant of this slot must not inherit it.
+    if (factored_spare_active(runtime_config_, bv_))
+        bv_.clear_slots.push_back(it->second);
     free_recurrent_slots_.push_back(it->second);
     recurrent_slot_of_.erase(it);
 }

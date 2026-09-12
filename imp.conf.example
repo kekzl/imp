@@ -901,6 +901,13 @@ batch_rr             = true
 # halves the auto batch). Measured Qwen3.8-27B 8 streams +20..+26 %; at 32
 # streams the spares do not fit. docs/plans/2026-09-11-batched-mtp-verify.md
 batch_verify         = false
+# Carry the drafted row of a batched verify as (g, k, delta) per head plus one
+# conv tap, instead of a second full recurrent slot. The spare slot is an exact
+# duplicate of the state pool (79.5 MiB per slot on Qwen3.8-27B, which clamps
+# max_batch 32 -> 18 and takes the KV pool with it); the factored form is about
+# 3.3 MiB. Opt-in while the two paths are compared against each other.
+# docs/plans/2026-09-12-factored-verify-spare.md.
+factored_spare       = false
 # Do not speculate before this many tokens were generated for the request (the
 # economics guard arms at 8 verifies per request, a short one never gets there).
 # 0 = no gate.

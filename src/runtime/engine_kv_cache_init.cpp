@@ -1046,7 +1046,10 @@ bool Engine::init_kv_cache() {
     // Pre-allocate decode batch pool + penalty buffer
     decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq,
                                 /*with_swa_tables=*/swa_sizing_active_);
-    if (batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size) > 0 && !ensure_batch_verify_bufs_())  // init-time staging
+    // The "can the verify run" gate lives inside the callee now: gating here on
+    // the SPARE SLOT COUNT left speculative.factored_spare, which reserves none
+    // by design, with no staging at all and every step refused (2026-09-12).
+    if (!ensure_batch_verify_bufs_())  // init-time staging
         IMP_LOG_WARN("spec-batch: staging buffers unavailable - batched verify stays off");
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);

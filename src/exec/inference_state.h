@@ -92,6 +92,15 @@ struct InferenceState {
     const float* ssm_fac_in = nullptr;
     int ssm_fac_stride = 0;
     int64_t ssm_fac_layer_stride = 0;
+    // Conv half of the same spare (compute/ssm_conv_tap.cu). ssm_tap_out
+    // stashes the drafted row's conv input; ssm_tap_in plus ssm_tap_slots
+    // advance the windows of the slots whose draft was accepted, before this
+    // layer's conv reads them.
+    void* ssm_tap_out = nullptr;
+    const void* ssm_tap_in = nullptr;
+    const int* ssm_tap_slots = nullptr;
+    int ssm_tap_n = 0;
+    int64_t ssm_tap_layer_stride = 0;
 
     // BitDecoding Phase 3 residual KV cache.
     //
