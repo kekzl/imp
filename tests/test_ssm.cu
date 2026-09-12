@@ -955,5 +955,77 @@ TEST(SSMConv1dTest, PrefillFirstRowsReadThePreviousWindowNotTheCommit) {
     cudaFree(d_out);
 }
 
+
+// The factored conv window (compute/ssm_conv_tap.cu). The verify's spare slot
+// carried the window after BOTH rows; the drafted row only shifts that window
+// by one, so what has to survive is the single new tap. The reference here is
+// the window definition itself, not the commit kernel, so a change to either
+// side has to agree with the contract rather than with the other side.
+TEST(SsmConvTapTest, StashedTapAdvancesTheWindowLikeTheTwoRowCommit) {
+    constexpr int channels = 320, kernel_size = 4, n_seq = 3, n_tokens = 2, n_slots = 5;
+    const std::vector<int> slots{3, 0, 4};
+    const size_t win = static_cast<size_t>(channels) * kernel_size;
+
+    std::vector<float> pool(static_cast<size_t>(n_slots) * win);
+    std::vector<half> x(static_cast<size_t>(n_seq) * n_tokens * channels);
+    for (size_t i = 0; i < pool.size(); i++) pool[i] = static_cast<float>((i * 37) % 211) * 0.25f - 20.0f;
+    for (size_t i = 0; i < x.size(); i++) x[i] = __float2half(static_cast<float>((i * 53) % 173) * 0.125f);
+
+    // Reference: the window the two-row commit leaves, and the one-row window
+    // the live slot keeps. Index k of a window at n rows reads x row n-K+k,
+    // falling back to the incoming window when that row is before the launch.
+    auto window_at = [&](int seq, int slot, int n) {
+        std::vector<float> w(channels * kernel_size);
+        for (int ch = 0; ch < channels; ch++)
+            for (int k = 0, t = n - kernel_size; k < kernel_size; k++, t++)
+                w[ch * kernel_size + k] =
+                    t >= 0 ? __half2float(x[(static_cast<size_t>(seq) * n_tokens + t) * channels + ch])
+                           : pool[static_cast<size_t>(slot) * win + ch * kernel_size + t + kernel_size];
+        return w;
+    };
+    // The live slot starts where the one-row commit left it.
+    std::vector<std::vector<float>> want(n_seq);
+    std::vector<float> start = pool;
+    for (int i = 0; i < n_seq; i++) {
+        want[i] = window_at(i, slots[i], 2);
+        const auto after1 = window_at(i, slots[i], 1);
+        std::copy(after1.begin(), after1.end(), start.begin() + static_cast<size_t>(slots[i]) * win);
+    }
+
+    float* d_pool = nullptr;
+    half *d_x = nullptr, *d_tap = nullptr;
+    int *d_slots = nullptr, *d_real = nullptr;
+    const int real_n = n_tokens;
+    auto up = [](auto** d, const void* src, size_t bytes) {
+        ASSERT_EQ(cudaMalloc(d, bytes), cudaSuccess);
+        if (src) cudaMemcpy(*d, src, bytes, cudaMemcpyHostToDevice); else cudaMemset(*d, 0, bytes);
+    };
+    up(&d_pool, start.data(), start.size() * sizeof(float));
+    up(&d_x, x.data(), x.size() * sizeof(half));
+    up(&d_tap, nullptr, static_cast<size_t>(n_slots) * channels * sizeof(half));
+    up(&d_slots, slots.data(), slots.size() * sizeof(int));
+    up(&d_real, &real_n, sizeof(int));
+
+    ssm_conv_tap_stash(d_tap, d_x, n_tokens, channels, d_real, d_slots, n_seq, nullptr);
+    ssm_conv_tap_apply(d_pool, static_cast<int64_t>(win), d_tap, channels, kernel_size, d_slots, n_seq,
+                       nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<float> got(start.size());
+    cudaMemcpy(got.data(), d_pool, got.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    // Named slots must match the two-row window; unnamed ones must be untouched,
+    // because the apply addresses by slot id and not by batch position.
+    for (int sl = 0; sl < n_slots; sl++) {
+        const auto it = std::find(slots.begin(), slots.end(), sl);
+        const bool named = it != slots.end();
+        const std::vector<float>& ref = named ? want[it - slots.begin()] : start;
+        const size_t off = named ? 0 : static_cast<size_t>(sl) * win;
+        for (size_t e = 0; e < win; e++)
+            ASSERT_EQ(got[static_cast<size_t>(sl) * win + e], ref[off + e]) << "slot " << sl << " elem " << e;
+    }
+
+    cudaFree(d_pool); cudaFree(d_x); cudaFree(d_tap); cudaFree(d_slots); cudaFree(d_real);
+}
+
 }  // namespace
 }  // namespace imp

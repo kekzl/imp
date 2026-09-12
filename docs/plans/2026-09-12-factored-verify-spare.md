@@ -70,7 +70,7 @@ row from an earlier step cannot survive to be applied twice.
 | `GdnBatchedScanTest.FactoredSpareReproducesTheFullSpareAfterTheNextToken` | GREEN, bit-exact; red under a mutated delta column |
 | engine wiring: factor buffer, verify emits, accept/reject bookkeeping, next-step apply | not built |
 | drop the spare slots from `batch_verify_spare_slots` and the planner | not built |
-| conv window: carry the drafted tap instead of the full 4-tap window | not built, and a BLOCKER for dropping the slot, see below |
+| conv window: `ssm_conv_tap.cu`, stash + apply, `SsmConvTapTest` | built |
 | numerics: deterministic PPL, `DegenerationTest`, state diff against the full-spare arm | not built |
 
 The test is the gate on the algebra: it runs the real accept sequence both ways (full spare,
@@ -78,7 +78,7 @@ then factored) and compares the state **after the following token**, which is wh
 actually consumes. F32 state makes it exact, so it carries no tolerance - a tolerance there
 would hide a wrong `k` or `delta` index.
 
-## The conv window is a blocker, not an extra
+## The conv window is a blocker, not an extra (built 2026-09-12)
 
 First reading had the conv window as an optional follow-up. It is not. A slot is one
 contiguous block holding every GDN layer's conv window AND `h_state`
@@ -92,6 +92,20 @@ prefill commit race), so it gets its own stage and its own test.
 The alternative is to keep slot-shaped spares but give the spare region a different geometry,
 which means `SsmStateCache` stops having one uniform slot stride. That is the larger change of
 the two.
+
+`compute/ssm_conv_tap.cu` carries it: `ssm_conv_tap_stash` saves the drafted row's conv input
+per slot (channels halfs, 20 KiB per layer at 10240 channels against 160 for the window) and
+`ssm_conv_tap_apply` advances a slot's window by that tap, which is the single-row form of
+`ssm_conv1d_commit_kernel`. Its own translation unit because `ssm.cu` sits at 596 of the
+600-code-LOC kernel ceiling.
+
+The wiring does not need a "suppress the commit" flag: committing the conv at the SNAPSHOT
+length and stashing the tap for the drafted row is the same thing as committing at both
+lengths into two slots, because `d_real_n` bounds only the commit, never the conv output rows
+the scan consumes.
+
+Spare per slot with both halves factored: 2.3 MiB of recurrent factors plus 0.96 MiB of conv
+taps against 79.5 MiB, so 32 slots cost about 105 MiB against 2544.
 
 ## Bookkeeping the wiring stage has to get right
 
