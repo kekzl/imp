@@ -164,37 +164,62 @@ std::vector<std::string> unlisted_consumers(const std::map<std::string, const Ra
 // activation, then tied across the producer channels the fold shares. Taking
 // the max is robustness against one kind being absent from the calibration
 // file; tying BEFORE the search is what makes the resulting scale foldable.
+// Both moments travel together: mean_abs generates the scale candidates,
+// mean_sq weights the error the search minimises (calibration_stats.h). The
+// second moment is dropped whole if ANY contributing entry lacks it, so the
+// search never mixes a true E[x^2] on some channels with a fallback on others.
 bool site_statistic(const CalibrationStats& stats, int layer, const FoldSite& site, int64_t K,
-                    const std::vector<int64_t>& tie, int64_t producer_len, std::vector<float>& out) {
+                    const std::vector<int64_t>& tie, int64_t producer_len, std::vector<float>& out,
+                    std::vector<float>& out_sq) {
     out.clear();
+    out_sq.clear();
+    bool sq_ok = true;
     for (const auto& key : site.calib_keys) {
         const CalibrationEntry* e = stats.find(layer, key);
         if (!e || static_cast<int64_t>(e->mean_abs.size()) != K)
             continue;
-        if (out.empty())
+        const bool has_sq = static_cast<int64_t>(e->mean_sq.size()) == K;
+        sq_ok = sq_ok && has_sq;
+        if (out.empty()) {
             out = e->mean_abs;
-        else
+            if (has_sq)
+                out_sq = e->mean_sq;
+        } else {
             for (size_t i = 0; i < out.size(); i++)
                 out[i] = std::max(out[i], e->mean_abs[i]);
+            if (has_sq && out_sq.size() == out.size())
+                for (size_t i = 0; i < out_sq.size(); i++)
+                    out_sq[i] = std::max(out_sq[i], e->mean_sq[i]);
+        }
     }
     if (out.empty())
         return false;
+    if (!sq_ok)
+        out_sq.clear();
+    // A tied group shares one scale, so its protective statistic is the max
+    // over the group - the same reduction for both moments.
+    const auto spread = [&](std::vector<float>& v) {
+        if (v.empty())
+            return;
+        std::vector<float> per_producer(static_cast<size_t>(producer_len), 0.0f);
+        for (int64_t i = 0; i < K; i++) {
+            const size_t t = static_cast<size_t>(tie[static_cast<size_t>(i)]);
+            per_producer[t] = std::max(per_producer[t], v[static_cast<size_t>(i)]);
+        }
+        for (int64_t i = 0; i < K; i++)
+            v[static_cast<size_t>(i)] = per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])];
+    };
     if (site.tie == TieMode::Identity)
         return true;
-    std::vector<float> per_producer(static_cast<size_t>(producer_len), 0.0f);
-    for (int64_t i = 0; i < K; i++)
-        per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])] =
-            std::max(per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])],
-                     out[static_cast<size_t>(i)]);
-    for (int64_t i = 0; i < K; i++)
-        out[static_cast<size_t>(i)] = per_producer[static_cast<size_t>(tie[static_cast<size_t>(i)])];
+    spread(out);
+    spread(out_sq);
     return true;
 }
 
 // Runs one site: search, then record the column scales and the fold. Returns
 // the error text only on a hard error; a site that cannot run is reported
 // through `plan` and leaves the checkpoint untransformed at that site.
-std::expected<void, std::string> run_site(const std::map<std::string, const RawTensor*>& index,
+std::expected<void, std::string> run_site(bool weight_sq, const std::map<std::string, const RawTensor*>& index,
                                           const CalibrationStats& stats, int layer, const FoldSite& site,
                                           Geometry geo, Plan& plan) {
     const std::string label = "layer " + std::to_string(layer) + " group " + std::string(1, site.group);
@@ -274,13 +299,13 @@ std::expected<void, std::string> run_site(const std::map<std::string, const RawT
         }
     }
 
-    std::vector<float> act;
-    if (!site_statistic(stats, layer, site, K, tie, plen, act)) {
+    std::vector<float> act, act_sq;
+    if (!site_statistic(stats, layer, site, K, tie, plen, act, act_sq)) {
         skip("no calibration entry of width " + std::to_string(K));
         return {};
     }
 
-    auto searched = search_group_scale(mats, K, act);
+    auto searched = search_group_scale(mats, K, act, weight_sq ? act_sq : std::vector<float>{});
     if (!searched)
         return std::unexpected(searched.error());
     SearchResult res = std::move(*searched);
@@ -351,7 +376,8 @@ std::vector<uint16_t> raw_to_fp16(const RawTensor& t) {
 
 std::expected<Plan, std::string> build_plan(const std::map<std::string, const RawTensor*>& index,
                                             const CalibrationStats& stats,
-                                            const std::string& config_json_path, const std::string& groups) {
+                                            const std::string& config_json_path, const std::string& groups,
+                                            bool weight_sq) {
     Plan plan;
     if (groups.empty())
         return std::unexpected("--calib-groups selects no group; use a subset of " +
@@ -435,7 +461,7 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         const auto all = layer_fold_sites(names, base, *conv, kAwqAllGroups);
         plan.groups_disabled += static_cast<int>(all.size() - selected.size());
         for (const auto& site : selected) {
-            const auto ran = run_site(index, stats, static_cast<int>(L), site, geo, plan);
+            const auto ran = run_site(weight_sq, index, stats, static_cast<int>(L), site, geo, plan);
             if (!ran)
                 return std::unexpected(ran.error());
         }

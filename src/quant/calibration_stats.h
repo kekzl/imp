@@ -16,6 +16,17 @@
 // Deliberately NOT a per-tensor Hessian: a diagonal (per-channel) statistic
 // is what the scale search below uses, and storing K floats per weight keeps
 // a calibration file for a 14B model in the low tens of MiB.
+//
+// Since IMPCAL02 an entry also carries the second moment,
+//
+//     mean_sq[j] = (1/rows) * sum_over_rows x[row][j]^2
+//
+// because that, not mean_abs squared, is what weights the layer's output
+// error: E[(sum_j dw_j x_j)^2] = sum_j dw_j^2 E[x_j^2] once the cross terms
+// are dropped, and E[x^2] exceeds E[|x|]^2 by exactly the variance. The
+// search used (mean_abs/s)^2 and therefore under-weighted the channels whose
+// activation is heavy-tailed rather than merely large. An IMPCAL01 file reads
+// back with mean_sq empty and the caller falls back to the old weight.
 
 #include <cstdint>
 #include <string>
@@ -28,6 +39,7 @@ struct CalibrationEntry {
     std::string kind;             // tensor_kind_name(), e.g. "WQ" / "W_DOWN"
     uint64_t rows = 0;            // tokens accumulated into this entry
     std::vector<float> mean_abs;  // [K] per input channel
+    std::vector<float> mean_sq;   // [K] per input channel, empty when read from an IMPCAL01 file
 };
 
 struct CalibrationStats {

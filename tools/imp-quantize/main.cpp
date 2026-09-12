@@ -110,6 +110,11 @@ struct Options {
     std::string calib_file;  // --calib: activation statistics for AWQ scaling
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
     std::string calib_groups = awq::kAwqAllGroups;
+    // Which activation moment weights the AWQ search's error. "abs" is the
+    // shipped (mean|x|/s)^2, "sq" the second moment E[x^2]/s^2 that the layer's
+    // output error actually calls for (calibration_stats.h). Opt-in until
+    // measured against roadmap item 6, where --calib still hurts at wide GQA.
+    bool calib_weight_sq = false;
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
     // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half
     // demonstrably carries the #1273 divergence, but excluding it did NOT
@@ -141,6 +146,7 @@ void usage() {
         "                Without it the quantization is plain round-to-nearest,\n"
         "                which costs measurably more quality (see the header).\n"
         "  --calib-groups ABCDEG\n"
+        "  --calib-weight abs|sq  error weight of the AWQ search (default abs)\n"
         "                Which AWQ scale groups run (default ABCDEG).\n"
         "                  A q,k,v  <- input_layernorm        C o_proj   <- v_proj\n"
         "                  B gate,up<- post_attention_norm    D down_proj<- up_proj\n"
@@ -356,6 +362,13 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "imp-quantize: unknown --format '%s' (modelopt | vllm)\n", f.c_str());
                 return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
             }
+        } else if (a == "--calib-weight") {
+            const std::string w = next();
+            if (w != "abs" && w != "sq") {
+                fprintf(stderr, "imp-quantize: unknown --calib-weight '%s' (abs | sq)\n", w.c_str());
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
+            }
+            opt.calib_weight_sq = (w == "sq");
         } else if (a == "--calib-groups") {
             opt.calib_groups = next();
             for (char& c : opt.calib_groups)
@@ -558,7 +571,7 @@ int main(int argc, char** argv) {
         printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
                stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
         auto built = awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(),
-                                     opt.calib_groups);
+                                     opt.calib_groups, opt.calib_weight_sq);
         if (!built) {
             fprintf(stderr, "%s\n", built.error().c_str());
             return 1;
