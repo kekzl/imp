@@ -138,6 +138,14 @@ struct Speculative {
     // batch slot (priced by the planner, halves the auto batch). Default off
     // until measured (docs/plans/2026-09-11-batched-mtp-verify.md).
     bool batch_verify = false;
+    // Carry the drafted row of a batched verify as (g, k, delta) plus one conv
+    // tap instead of a second full recurrent slot (compute/gdn_factor.cuh,
+    // compute/ssm_conv_tap.cu). The spare slot is an exact duplicate of the
+    // state pool - 79.5 MiB per slot on Qwen3.8-27B, which clamps max_batch
+    // 32 -> 18 and takes the KV pool with it - and the factored form is about
+    // 3.3 MiB. Opt-in while the two paths are compared against each other;
+    // docs/plans/2026-09-12-factored-verify-spare.md.
+    bool factored_spare = false;
     int k = 16;  // draft tokens per verify step (verify cost is ~flat in k)
     // Token-Recycling adjacency drafting (ACL 2025, arXiv 2408.08696;
     // plan docs/plans/2026-07-22-token-recycling-spec-tree.md):

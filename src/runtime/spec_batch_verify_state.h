@@ -28,6 +28,34 @@ struct BatchVerifyState {
     PinnedBuffer h_stage, h_row_tables, h_argmax;
     std::unordered_map<int, int> spare_of;  // req.id -> spare slot
     std::vector<int> free;
+    // Factored spare (speculative.factored_spare,
+    // docs/plans/2026-09-12-factored-verify-spare.md): the drafted row as
+    // (g, k, delta) per (layer, slot, head) plus one conv tap per
+    // (layer, slot), instead of a second full recurrent slot. Both pools are
+    // indexed by recurrent SLOT because a request keeps its slot across steps
+    // while its batch position moves.
+    float* d_fac = nullptr;
+    void* d_tap = nullptr;  // half
+    int fac_stride = 0;     // floats per (slot, head)
+    int64_t fac_layer_stride = 0;
+    int64_t tap_layer_stride = 0;
+    // Slots whose row the NEXT forward must apply, i.e. the requests whose
+    // draft was accepted. Rebuilt every verify; the device twin is what the
+    // conv tap apply walks, and the recurrent half reads the 0 sentinel a
+    // clear writes into the rows that are not on this list.
+    std::vector<int> pending;
+    int* d_pending = nullptr;
+    // Rows that must be cleared before anything can apply them: this verify's
+    // rejected groups, plus slots released since the last one (a request that
+    // finished right after an accept leaves a row behind). Separate device
+    // buffer from d_pending because the forward's tap apply may still be
+    // reading that one when the clear is queued.
+    std::vector<int> clear_slots;
+    int* d_clear = nullptr;
+    // Pinned staging for the two slot lists. A pageable cudaMemcpyAsync would
+    // read the host vector after it is cleared, and a blocking cudaMemcpy on a
+    // non-default stream synchronises the device once per step.
+    PinnedBuffer h_pending, h_clear;
     bool initialized = false;
     mutable const char* last_refusal = nullptr;  // one log line per distinct reason
 };
@@ -80,6 +108,12 @@ class Model;
 bool batch_verify_on(const RuntimeConfig& cfg, const Model* model);
 // Reserved recurrent slots the batched verify adds to the pool: one per
 // batch slot, 0 when off or at batch 1.
+// Whether the batched verify needs its staging buffers. Separate from the
+// spare-slot count because the factored form reserves no slots and still runs.
+bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// The factored path is live only once its rows exist: a geometry or allocation
+// refusal clears the flag, and everything downstream reads this, not the flag.
+bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 
 }  // namespace imp

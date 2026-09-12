@@ -12,6 +12,7 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Added
+- `speculative.factored_spare` (default off): the batched verify carries its drafted row as (g, k, delta) per head plus one conv tap instead of a second full recurrent slot, so the state pool stops carrying a duplicate. Qwen3.8-27B-NVFP4-vllm at `runtime.max_batch_size=32`, 32 streams: the slot-swapping form clamps to 18 slots with a 298-block KV pool and reads 1117/1105 tok/s, the factored form keeps 32 slots and 1429 blocks at 1761/1898. `degen_suite.py` 50/50. `docs/plans/2026-09-12-factored-verify-spare.md`.
 - `speculative.batch_verify` (default off): batched speculative verify on the GDN hybrid. Every decoding request forwards its last token plus one MTP draft in a single step; the 2-row recurrent state lands in a spare pool slot (one per batch slot, priced by the planner) and accept swaps slots instead of copying. Qwen3.8-27B-NVFP4-vllm, 8 unique greedy streams: 587-611 -> 704-767 tok/s, 15 streams 990-1057 -> 1099-1214; at 32 clients the spares do not fit (32 -> 18 slots, 1966 -> 1159). `docs/plans/2026-09-11-batched-mtp-verify.md`.
 ### Changed
 - Sparse decode attention scores a KV page by its key mean plus standard deviation instead of the Quest min/max corner bound (`attention.sparse_score_meanstd`, default on; `false` restores the bound). Same metadata layout, same arithmetic count. Qwen3.8-27B-NVFP4-vllm, NIAH at 5 depths x 81 908 / 126 908 tokens: 2/10 -> 10/10 at a 4096-token budget, 7/10 -> 10/10 at 8192, wall time neutral. `docs/plans/2026-08-28-sparse-decode-attention.md`.
