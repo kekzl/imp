@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-09-13
+
 ### Added
 - Activation calibration records the per-channel second moment `E[x^2]` alongside `mean|x|` (file magic `IMPCAL01` -> `IMPCAL02`; older files still load, with the second moment absent). `imp-quantize --calib-weight sq` weights the AWQ search's error by it instead of by `(mean|x|/s)^2`, which is what the layer's output error calls for. Measured on Qwen3-0.6B BF16 -> NVFP4: PPL 28.1125 (`abs`) against 27.8039 (`sq`), 1.10 % at identical search cost, RTN baseline 29.7342. Default stays `abs` because that model is narrow GQA and the open case in roadmap item 6 is wide GQA.
 - `speculative.factored_spare` (default off): the batched verify carries its drafted row as (g, k, delta) per head plus one conv tap instead of a second full recurrent slot, so the state pool stops carrying a duplicate. Qwen3.8-27B-NVFP4-vllm at `runtime.max_batch_size=32`, 32 streams: the slot-swapping form clamps to 18 slots with a 298-block KV pool and reads 1117/1105 tok/s, the factored form keeps 32 slots and 1429 blocks at 1761/1898 (with one draft per verify step, see Fixed). `degen_suite.py` 50/50. `docs/plans/2026-09-12-factored-verify-spare.md`.
