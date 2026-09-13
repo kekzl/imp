@@ -1,15 +1,14 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-13
+commit: 25f300a5
 -->
 
 # Limitations
 
 What imp does not do, does badly, or does without a test behind it. Things absent *by decision*:
-[`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md), with the measurement behind each. The top five
-repeat in the README.
+[`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md).
 
 ## The five a new reader should weigh first
 
@@ -24,8 +23,6 @@ repeat in the README.
 5. **Single-author project.** No support rotation, no SLO, no security response process.
 
 ## Untested code paths (every 🟡 from `FEATURES.md`)
-
-Code path exists, no gate proves it:
 
 - **Llama-4**: loads, no dedicated gate.
 - **FP8 E5M2**: the type exists, nothing exercises it.
@@ -59,8 +56,6 @@ All seven were green in `FEATURES.md` without a gate until #1680.
 
 ## Gates that do not exist
 
-Absent instruments: nothing in the tree produces the number, so no threshold can be set.
-
 - **No correctness gate against a reference implementation** (#1571). No KL divergence vs an
   fp16/bf16 forward, no perplexity-drift baseline, no tool-schema conformance rate.
   `scripts/validate_safetensors.py:11-14` lists the phases it cannot run (no BF16 checkpoint on
@@ -77,8 +72,6 @@ Absent instruments: nothing in the tree produces the number, so no threshold can
   and is `continue-on-error`; `make sanitize` fails to initialise on WSL2 (verified 2026-06-04);
   `scripts/verify.sh` never calls it. `make asan` and the `Sanitizers` job cover host code only.
   Fixing it needs a native-Linux GPU box, the same blocker as the GPU CI lane.
-
-All three need a GPU runner or a long-running machine with a card; CI has neither.
 
 ## Known-bad and known-limited behaviour
 
@@ -126,10 +119,8 @@ All three need a GPU runner or a long-running machine with a card; CI has neithe
   (the 10 % reserve floor absorbs the rest). A bind mount must be writable by the container
   user `imp` (uid 1001): Docker creates a missing host path as root, a host user's directory
   is uid 1000, both log `library reserve: could not write` and re-measure every start
-  (verified 2026-09-04 on `ghcr.io/kekzl/imp:0.37.0`). The cold-start spill lottery this bullet used to
-  describe — card at 32157 of 32607 MiB, decode throughput moving with the graph-prewarm
-  ladder instead of with the code under test — was the unplanned Q8_0 IMMA plane cache and is
-  fixed in #1899: cold Qwen3-8B-Q8_0 defaults now read 289.6 / 1462.2 / 4568.5 output tok/s
+  (verified 2026-09-04 on `ghcr.io/kekzl/imp:0.37.0`). Fixed in #1899: cold Qwen3-8B-Q8_0 now reads
+  289.6 / 1462.2 / 4568.5 output tok/s
   at c=1 / c=8 / c=32 (was 124.8 / 514.1 / 2375.3), with 1190 MiB free after init.
 
 - **JSON Schema: assertion keywords imp cannot enforce are a `400`, not a weaker grammar**
@@ -311,8 +302,8 @@ All three need a GPU runner or a long-running machine with a card; CI has neithe
   use a fresh process per arm.
 
 - **MTP speculation truncates answers: 2 of 6 prompts end after ~40 tokens with a re-statement of
-  the question (measured 2026-08-19).** Not the harmless half of the divergence entry below: the
-  truncated answer is 164 B, `finish_reason: "stop"`, its last clause the tail of the prompt.
+  the question (measured 2026-08-19).** Truncated answer: 164 B, `finish_reason: "stop"`, its last
+  clause the tail of the prompt.
   Qwen3.8-27B-NVFP4, `speculative.mtp_k=1`, `speculative.ngram=false`,
   `server.prefix_cache=false`, six prompts, `max_tokens: 400`:
 
@@ -602,14 +593,9 @@ All three need a GPU runner or a long-running machine with a card; CI has neithe
      before, 10.1 after); first-position acceptance moved 73.2 -> 75.0, inseparable from noise at
      two samples per condition.
 
-  Two of our own measurement errors in that list, the reusable part: (a) findings 5 and 6 first
-  survived because a run was repeated rather than varied (greedy decoding is deterministic; two
-  identical runs agreeing to a tenth of a point measures determinism, not the effect; vary the
-  workload). (b) The spread in (6) was read as a defect signal while the processes had generated
-  different text; acceptance depends on the text, and spread is only a signal once output is
-  identical. The 87 % reference is not yet comparable: published for this architecture class by
-  another engine, with chain depth, batch size and acceptance definition (per-token or per-chain)
-  unpinned.
+  Measurement guidance: (a) greedy decoding is deterministic; two identical runs agreeing to a
+  tenth of a point measures determinism, not the effect; vary the workload. (b) Acceptance depends
+  on the text; spread is only a signal once output is identical.
 
 - **RESOLVED (2026-08-18). MTP does not lose on a GDN hybrid; imp's MTP path lost, and no longer
   does.** Two defects in how work was launched, not what it computed (`ea547a53`):

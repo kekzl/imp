@@ -29,7 +29,7 @@ Boundaries:
 
 | Date | Scope | Record |
 |---|---|---|
-| 2026-06-07 | audit of 3 skills, 4 created, README added | [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md) |
+| 2026-06-07 | audit of 3 skills, 4 created, README added | removed 2026-09-13: `git show 25f300a5:.claude/skills/AUDIT_skills_2026_06_07.md` |
 | 2026-06-10 | post-audit sprint, PRs #608-#651 | descriptions unchanged |
 | 2026-07-09 | PRs #652-#939: dep pins in `cmake/imp-deps.cmake`, C++23/Ubuntu 26.04, auto-armed auto-merge, spec-ngram bench confound, FA2 hd=256, thinking reconcile, file-size gate | descriptions unchanged |
 | 2026-08-27 | full 13-skill audit vs PRs #1479-#1786 (#1787): blocking static gates, batched-decode regime, scheduler split, CHANGELOG cycle, ccg enrich breakage, aggregate methodology; docs-layers added | descriptions unchanged |
