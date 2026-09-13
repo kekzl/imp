@@ -172,7 +172,8 @@ TEST_F(SmallMDenseTest, BenchDecodeShape) {
            M, N, K, us, worst, bytes / (us * 1e-6) / 1e9);
     // Measured: 92.3us - the persistent grouped design also bottoms out on this dense shape
     // (parallelism is N/N-tile work items, same ~40 units that starve CUTLASS), so it is NOT
-    // wired into the dense batch path (fifth refutation for the M=32 lever, plans/qwen38-port.md).
+    // wired into the dense batch path (fifth refutation for the M=32 lever,
+    // docs/plans/2026-08-24-qwen38-port.md).
     // Bar is a regression anchor on the measurement, not a target.
     EXPECT_LT(us, 140.0);
 
