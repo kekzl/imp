@@ -1,20 +1,6 @@
-// =============================================================================
-// attention_mxfp4_prefill.cu -- MXFP4 tensor core prefill attention (sm_120)
-// =============================================================================
-//
-// Uses CUTLASS block-scaled MXFP4×MXFP4 GEMM for Q·K^T, providing ~2x
-// compute throughput over FP16 tensor cores on Blackwell's 5th-gen TCs.
-// P·V uses cuBLAS FP16 GEMM (compute-light, memory-heavy).
-//
-// Pipeline per (batch, head):
-//   1. Quantize K [seq_kv, hd] → MXFP4  (once per KV head, reused for GQA)
-//   2. Quantize Q [seq_q, hd]  → MXFP4  (per Q head)
-//   3. CUTLASS MXFP4 GEMM: S [seq_q, seq_kv] = Q_mxfp4 @ K_mxfp4^T
-//   4. Fused scale + softcap + causal mask + softmax (in-place on S)
-//   5. cuBLAS FP16 GEMM: O [seq_q, hd] = P @ V
-//
-// Decode path is unaffected — GEMV is memory-bound, scalar dequant suffices.
-// =============================================================================
+// MXFP4 tensor core prefill attention (sm_120): CUTLASS block-scaled MXFP4xMXFP4 GEMM for
+// Q.K^T (~2x FP16 TC throughput), cuBLAS FP16 GEMM for P.V. Pipeline: quantize K (once/KV
+// head, reused for GQA) and Q -> CUTLASS GEMM -> scale+softcap+causal+softmax -> cuBLAS GEMM.
 
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -115,13 +101,8 @@ __device__ __forceinline__ int mxfp4_sfatom_offset(int row, int k_group, int n_k
     return tile_base + atom_offset;
 }
 
-// =============================================================================
-// Strided MXFP4 quantization kernel
-// =============================================================================
-//
-// Reads FP16 data with arbitrary row stride (for per-head access in
-// [seq, n_heads*hd] layout), outputs contiguous MXFP4 packed + SfAtom.
-// Each thread processes one group of 32 elements.
+// Strided MXFP4 quantization: reads FP16 with arbitrary row stride (per-head access in
+// [seq,n_heads*hd] layout), outputs contiguous MXFP4 packed + SfAtom. One thread per 32-elem group.
 
 __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ input,
                                                    int input_row_stride,  // in half elements, not bytes
@@ -170,11 +151,8 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
     }
 }
 
-// =============================================================================
-// Fused scale + softcap + causal mask + softmax (in-place on FP16 S matrix)
-// =============================================================================
-//
-// One block per query row. 3-pass online softmax (max, exp+sum, normalize).
+// Fused scale + softcap + causal mask + softmax, in-place on FP16 S. One block per query row,
+// 3-pass online softmax (max, exp+sum, normalize).
 
 __global__ void mxfp4_attn_softmax_kernel(half* __restrict__ S, int seq_q, int seq_kv,
                                           int q_offset,  // global Q position offset (for causal masking)
@@ -484,12 +462,8 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
                                                                             scale, softcap, causal);
                 IMP_CUDA_CHECK_LAUNCH();
 
-                // P·V via cuBLAS: O[seq_q, hd] = S[seq_q, seq_kv] @ V[seq_kv, hd]
-                //
-                // cuBLAS column-major view (D = A @ B):
-                //   A = V^T : [hd, seq_kv],  ld = kv_row_stride
-                //   B = S^T : [seq_kv, seq_q], ld = seq_kv
-                //   D = O^T : [hd, seq_q],  ld = q_row_stride
+                // P.V via cuBLAS (D = A@B, column-major): A = V^T [hd,seq_kv] ld=kv_row_stride, B = S^T
+                // [seq_kv,seq_q] ld=seq_kv, D = O^T [hd,seq_q] ld=q_row_stride.
                 const half* V_head = V_b + g * hd;
                 half* O_head = O_b + h * hd;
 

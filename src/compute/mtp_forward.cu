@@ -1,16 +1,11 @@
-// =============================================================================
-// mtp_forward.cu — Multi-Token-Predictor draft step (Phase 2 scaffolding)
-// =============================================================================
-// See header for status. This TU implements the REDUCED forward path:
-//   emb_norm  = RMSNorm(tok_emb[prev_token_id], pre_fc_norm_embedding)
-//   h_norm    = RMSNorm(d_h_prev,               pre_fc_norm_hidden)
-//   fc_in     = concat(emb_norm, h_norm)         // [2*hidden_dim]
-//   fc_out    = fc @ fc_in                       // [hidden_dim]
-//   // TRANSFORMER BLOCK SKIPPED (Phase 2.2 future work)
-//   h_final   = RMSNorm(fc_out, final_norm)
-//   logits    = lm_head @ h_final                // [vocab]
-//   token     = argmax(logits)
-// =============================================================================
+// MTP draft REDUCED forward path (transformer block skipped, future work):
+//   emb_norm = RMSNorm(tok_emb[prev_token_id], pre_fc_norm_embedding)
+//   h_norm   = RMSNorm(d_h_prev, pre_fc_norm_hidden)
+//   fc_in    = concat(emb_norm, h_norm)          // [2*hidden_dim]
+//   fc_out   = fc @ fc_in                         // [hidden_dim]
+//   h_final  = RMSNorm(fc_out, final_norm)
+//   logits   = lm_head @ h_final                  // [vocab]
+//   token    = argmax(logits)
 
 #include "compute/warp_reduce.cuh"
 #include "compute/mtp_forward.h"
@@ -86,13 +81,9 @@ __global__ void mtp_argmax_kernel(const T* __restrict__ logits, int vocab_size,
     if (tid == 0) *out_idx = s_idx[0];
 }
 
-// ---------------------------------------------------------------------------
-// MoE residual + shared-expert combine kernel
-// ---------------------------------------------------------------------------
-// fc_out[i] += moe_out[i] + shared_out[i]   for i in [0, hidden_dim)
-// moe_out already contains the residual-added MoE output (residual was fed
-// through moe_weighted_sum_residual). We need to add shared_out which has
-// already been scaled by the sigmoid gate (via shared_expert_gate_scale).
+// MoE residual + shared-expert combine: fc_out[i] += moe_out[i] + shared_out[i].
+// moe_out already carries the residual add; shared_out is pre-scaled by
+// shared_expert_gate_scale (sigmoid gate).
 __global__ void mtp_add_shared_kernel(__half* __restrict__ fc_out,
                                        const __half* __restrict__ shared_out,
                                        int hidden_dim) {
@@ -102,26 +93,10 @@ __global__ void mtp_add_shared_kernel(__half* __restrict__ fc_out,
     fc_out[t] = __float2half(v);
 }
 
-// ---------------------------------------------------------------------------
-// Gated attention output kernel (Phase 2.2.Attn MVP, M=1, no KV history)
-// ---------------------------------------------------------------------------
-// For Qwen3.6 MTP's attn_output_gate=True attention:
-//   q_proj outputs [num_heads * 2 * head_dim], interleaved per-head as
-//   [head_0_q (head_dim), head_0_gate (head_dim), head_1_q (...), ...].
-//   The "q" half feeds Q@K dot-product attention; the "gate" half is
-//   silu'd and elementwise multiplied with the attention output.
-//
-// For M=1 with no MTP KV history, the attention softmax over a single
-// token is identically 1, so attention_out_per_head = V (broadcast from
-// num_kv_heads to num_heads via GQA). Final per-head output is
-// silu(gate) * V_broadcast.
-//
-// This kernel computes: out[h, d] = silu(gate[h, d]) * v[h / group_size, d]
-// where group_size = num_heads / num_kv_heads.
-//
-// q_full layout: [num_heads, 2, head_dim] interpreted as
-//   q_full[h, 0, d] = q[h, d]      (first head_dim per head)
-//   q_full[h, 1, d] = gate[h, d]   (second head_dim per head)
+// Gated attention, M=1, no KV history (Qwen3.6 MTP attn_output_gate=True):
+// q_proj -> [num_heads, 2, head_dim] interleaved per head as (q, gate).
+// Softmax over one token = identity, so attn_out[h] = V[h/group_size] (GQA broadcast).
+// out[h,d] = silu(gate[h,d]) * v[h/group_size,d], group_size = num_heads/num_kv_heads.
 __global__ void mtp_gated_v_broadcast_kernel(
     const __half* __restrict__ q_full,    // [num_heads, 2 * head_dim]
     const __half* __restrict__ v,         // [num_kv_heads, head_dim]
@@ -156,28 +131,11 @@ __global__ void mtp_add_kernel(__half* __restrict__ fc_out,
     fc_out[t] = __float2half(v);
 }
 
-// ---------------------------------------------------------------------------
-// MTP KV-cache append + softmax attention scan (Phase 2.2.Attn+KV)
-// ---------------------------------------------------------------------------
-// Append k[h], v[h] (one per kv-head) to the cache at position `pos`, then
-// run softmax attention over positions [0, pos+1). One CTA per Q head. Q
-// attends to its corresponding KV head (GQA: q_head h → kv_head h * NKV/NH).
-//
-// Q layout: q_full[h, 0..head_dim) is the "q" half (first head_dim of each
-//           head's 2*head_dim slice). The "gate" half is q_full[h, head_dim..)
-//           and is applied AFTER the attention via silu(gate)*attn_out.
-// K cache layout: [seq_len, num_kv_heads, head_dim] row-major.
-// V cache layout: same.
-//
-// For decode (M=1): threads in a CTA cooperatively compute Q·K dot products
-// for all cached positions, do a numerically-stable softmax, then a weighted
-// sum of V. seq_len up to a few thousand fits in shared mem with FP32 scores.
-//
-// NOTE: this version does NOT apply RoPE. Without RoPE, attention scores
-// reflect only the CONTENT similarity between query and past keys — still
-// useful for drafting (the content has positional information baked in via
-// the upstream main-model hidden states) but theoretically less precise.
-// RoPE is documented as a follow-on improvement.
+// MTP KV-cache append + softmax attention: append k[h],v[h] at pos, then softmax attention
+// over [0,pos+1), one CTA per Q head (GQA: q_head h -> kv_head h*NKV/NH).
+// Q layout: q_full[h,0..head_dim) = q half, q_full[h,head_dim..) = gate half (applied via
+// silu(gate)*attn_out AFTER attention). K/V cache: [seq_len, num_kv_heads, head_dim].
+// NOTE: no RoPE applied here; scores reflect content similarity only (RoPE is follow-on work).
 __global__ void mtp_attn_kv_scan_kernel(
     const __half* __restrict__ q_attn,   // [n_rows, num_heads, head_dim] — Q with qk-norm + RoPE applied
     const __half* __restrict__ k_cache,  // [seq_len_cap, num_kv_heads, head_dim] — RoPE pre-applied
@@ -291,25 +249,10 @@ __global__ void mtp_kv_append_kernel(
     v_cache[off] = v_step[t];
 }
 
-// ---------------------------------------------------------------------------
-// MTP mrope (Multi-RoPE) — Qwen3-VL-style RoPE with section split
-// ---------------------------------------------------------------------------
-// For Qwen3.6 mrope_section = [11, 11, 10] (half-counts) means the rope_dim/2
-// frequency pairs are split:
-//   pair k ∈ [0, 11):  section 0 (T, temporal)  → uses positions[0]
-//   pair k ∈ [11, 22): section 1 (H, height)    → uses positions[1]
-//   pair k ∈ [22, 32): section 2 (W, width)     → uses positions[2]
-//
-// For text-only tokens positions[0]=positions[1]=positions[2]=mtp_pos,
-// so mrope mathematically reduces to standard partial-rope. The kernel
-// is written generically to support multimodal positions in the future.
-//
-// NeoX style: pair k rotates (x[k], x[k+rope_dim/2]).
-// Frequency: inv_freq[k] = theta^(-2k/rope_dim), shared across sections.
-// Rotation: (x0, x1) → (x0*cos - x1*sin, x0*sin + x1*cos)
-//
-// One CTA per head. Threads handle pairs in strided fashion. Untouched dims
-// ([rope_dim, head_dim)) are unchanged.
+// MTP mrope (Qwen3-VL style, mrope_section=[11,11,10] half-counts): pair k in [0,11) ->
+// section T (positions[0]); [11,22) -> H (positions[1]); [22,32) -> W (positions[2]).
+// Text-only tokens: positions[0]=[1]=[2]=mtp_pos, so mrope reduces to standard partial-rope.
+// NeoX pairing: (x[k], x[k+rope_dim/2]) rotated by inv_freq[k]=theta^(-2k/rope_dim).
 template <bool IsKv>
 __global__ void mtp_mrope_kernel(
     __half* __restrict__ x,           // Q: [n_rows, n_heads, head_dim], K: [n_rows, n_kv_heads, head_dim]
@@ -364,10 +307,9 @@ __global__ void mtp_mrope_kernel(
     if (false) (void)IsKv;
 }
 
-// Host wrapper: apply the YaRN-aware mrope rotation to a single MTP step's
-// Q [n_heads, head_dim] and K [n_kv_heads, head_dim] in place. Text-only, so
-// the three mrope position components collapse to `pos`. Shared by the draft
-// step and the rope-parity unit test (issue #897).
+// Host wrapper: apply YaRN-aware mrope rotation to one MTP step's Q[n_heads,head_dim] and
+// K[n_kv_heads,head_dim] in place. Text-only, so the 3 mrope components collapse to `pos`.
+// Shared by the draft step and the rope-parity unit test (#897).
 void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
                      float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
                      float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
@@ -388,10 +330,8 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
     }
 }
 
-// ---------------------------------------------------------------------------
-// Ragged multi-slot feed kernels (batched verify): each row carries its own
-// KV slot and position.
-// ---------------------------------------------------------------------------
+// Ragged multi-slot feed kernels (batched verify): each row carries its own KV slot
+// and position.
 __global__ void mtp_gather_rows_kernel(const __half* __restrict__ src, const int* __restrict__ idx,
                                        __half* __restrict__ dst, int H, int n_rows) {
     const int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -765,12 +705,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         return false;
     }
 
-    // Step 1: embedding lookup for prev_token_id.
-    // CRITICAL: the main model's embedding table is NVFP4-quantized on
-    // Qwen3.6-NVFP4 (lm_head is the only ignored module). Reading it as
-    // raw FP16 produces garbage — every "embedding" decoded to the same
-    // bit pattern, locking MTP predictions to a single token regardless
-    // of input. imp::embedding_lookup handles the qtype dispatch.
+    // CRITICAL: main model's embedding table is NVFP4-quantized on Qwen3.6-NVFP4 (lm_head
+    // is the only ignored module); reading raw FP16 yields the same bit pattern for every
+    // token, locking MTP to one prediction. imp::embedding_lookup dispatches by qtype.
     if (d_prev_token != nullptr) {
         // Device-chain input: the previous step's argmax already lives on
         // device — no upload, no scratch.
@@ -779,11 +716,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::embedding_lookup(main_tok_emb, d_prev_token, /*n_tokens=*/1, out_view,
                               main_tok_emb.qtype, stream);
     } else {
-        // Upload prev_token_id to the workspace's persistent token-id slot so
-        // embedding_lookup can dispatch with the correct signature. (The
-        // graph-friendly _from_device overload also exists if needed.)
-        // Persistent rather than per-step: see the ws.d_tok comment in the
-        // header. Allocated once by mtp_workspace_allocate.
+        // Upload prev_token_id to the workspace's persistent token-id slot for embedding_lookup's
+        // dispatch signature (graph-friendly _from_device overload also exists).
+        // Persistent (not per-step): see ws.d_tok in the header; allocated once by mtp_workspace_allocate.
         if (ws.d_tok == nullptr) {
             IMP_LOG_ERROR("mtp_draft_step: token-id scratch not allocated");
             return false;
@@ -795,12 +730,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::embedding_lookup(main_tok_emb, ws.d_tok, /*n_tokens=*/1, out_view, main_tok_emb.qtype, stream);
     }
 
-    // Step 2: emb_norm = RMSNorm(emb, pre_fc_norm_embedding)
-    // imp::rmsnorm dispatcher reads x.shape[0]=rows + x.shape[1]=d_model and
-    // EARLY-RETURNS when d_model==0. A 1D Tensor [hidden_dim] would be
-    // misinterpreted as rows=hidden_dim, d_model=0 — no work would be done
-    // and the output buffer would keep its uninitialized contents.
-    // → MUST use 2D shape [1, hidden_dim].
+    // emb_norm = RMSNorm(emb, pre_fc_norm_embedding). imp::rmsnorm reads shape[0]=rows,
+    // shape[1]=d_model and early-returns when d_model==0; a 1D [hidden_dim] tensor would be
+    // misread as rows=hidden_dim, d_model=0 (no-op, uninitialized output). MUST use [1,hidden_dim].
     int64_t shape_2d[2]  = {1, hidden_dim};
     Tensor emb_view(ws.d_fc_in,   QType::F16, 2, shape_2d, /*on_device=*/true);
     Tensor h_view  (const_cast<void*>(d_h_prev), QType::F16, 2, shape_2d, true);
@@ -830,21 +762,10 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::gemm(fc_in_view, mtp.fc, fc_out_view, 1.0f, 0.0f, stream);
     }
 
-    // Step 5: transformer block.
-    //
-    // 5.A — Attention (Phase 2.2.Attn MVP): Qwen3.6 MTP uses
-    //   attn_output_gate=True (per upstream vllm `Qwen3NextAttention`):
-    //   q_proj outputs [num_heads, 2*head_dim] per-token, split per-head
-    //   into (q, gate). Standard GQA attention produces out[h] of head_dim,
-    //   then out *= silu(gate) before o_proj reduces to hidden_dim.
-    //
-    //   This MVP handles the M=1 first-draft case (no MTP KV history yet):
-    //   the softmax over a single token reduces to identity, so
-    //   attn_out[h] = V[h // GQA_group] (broadcast). The gate-output
-    //   multiplication still fires correctly. K is computed but unused.
-    //
-    //   K>=1 draft steps would attend over prior MTP K cache entries — a
-    //   full KV cache + attention kernel is future work (Phase 2.2.Attn+KV).
+    // Attention (Qwen3.6 MTP attn_output_gate=True, vllm Qwen3NextAttention): q_proj ->
+    // [num_heads,2*head_dim] split per-head into (q,gate); GQA attention -> out[h], then
+    // out *= silu(gate) before o_proj. M=1 MVP (no MTP KV history): softmax over one token
+    // is identity, so attn_out[h]=V[h//GQA_group] (broadcast); K computed but unused.
     if (ws.num_heads > 0 && ws.head_dim > 0 &&
         mtp.input_layernorm.data && mtp.q_proj.data && mtp.k_proj.data &&
         mtp.v_proj.data && mtp.o_proj.data) {
@@ -884,20 +805,15 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
         }
 
-        // 5.A.4 — Attention path:
-        //   - With KV cache present + max_seq capacity remaining: extract Q
-        //     from q_full per-head, apply fused qk-norm+RoPE on (Q,K),
-        //     append rotated K + V to cache, run softmax attention scan over
-        //     positions [0, mtp_pos+1), apply silu(gate) elementwise.
-        //   - Else (cache absent or full): fall back to M=1 broadcast MVP.
+        // Attention path: with KV cache present and capacity remaining, extract Q per-head,
+        // apply fused qk-norm+RoPE, append rotated K+V to cache, run softmax attention over
+        // [0,mtp_pos+1), apply silu(gate). Else fall back to the M=1 broadcast MVP.
         bool use_kv_scan = (ws.d_k_cache != nullptr && ws.d_v_cache != nullptr &&
                             ws.max_seq_len > 0 && ws.mtp_pos < ws.max_seq_len);
         if (use_kv_scan) {
-            // 5.A.4.pre — Extract Q (without gate) from q_full[h, 0..head_dim).
-            // q_full layout per head: [q (head_dim), gate (head_dim)] when the
-            // head is attn_output_gate=True (Qwen3.6). Nemotron has no gate
-            // half, so its q_full is already the contiguous Q buffer and the
-            // strided copy would interleave garbage from the next head.
+            // Extract Q (no gate) from q_full[h,0..head_dim). Layout per head: [q(head_dim),
+            // gate(head_dim)] when attn_output_gate=True (Qwen3.6). Nemotron has no gate half:
+            // its q_full is already contiguous Q, so this strided copy must not run for it.
             const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) *
                                        sizeof(__half);
             cudaMemcpy2DAsync(
@@ -907,10 +823,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 /*spitch=*/q_src_pitch,
                 /*width=*/static_cast<size_t>(hdh) * sizeof(__half),
                 /*height=*/static_cast<size_t>(nh), cudaMemcpyDeviceToDevice, stream);
-            // 5.A.4.qknorm — Per-head RMSNorm on Q and K (Qwen3-style).
-            // Reshape to [n_heads, head_dim] and apply rmsnorm with arch_norm_offset
-            // for Qwen3.5/3.6's gamma=1+W convention. Independent of RoPE so
-            // we can ship qk-norm without committing to standard partial-rope.
+            // Per-head RMSNorm on Q and K (Qwen3-style): reshape to [n_heads,head_dim], apply
+            // rmsnorm with arch_norm_offset for Qwen3.5/3.6's gamma=1+W convention.
+            // Independent of RoPE.
             if (mtp.q_norm.data) {
                 int64_t q_shape[2] = {nh, hdh};
                 Tensor q_view(ws.d_q_attn, QType::F16, 2, q_shape, /*on_device=*/true);
@@ -923,15 +838,11 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 imp::rmsnorm(k_view, mtp.k_norm, k_view, ws.rms_norm_eps, stream,
                              ws.arch_norm_offset);
             }
-            // 5.A.4.rope — mrope-aware Q/K rotation. For text-only tokens
-            // the 3 mrope position components are all equal to mtp_pos,
-            // reducing to standard partial-rope mathematically. The kernel
-            // is structured to support distinct T/H/W positions for future
-            // multimodal token handling. NeoX-style pairing only.
-            // Skipped entirely on a NoPE head (Nemotron-H): its main-model
-            // attention layers carry no position either — the Mamba layers do.
-            // Rotating here would put the draft in a different frame from the
-            // model it drafts for, which costs accept rate, not correctness.
+            // mrope-aware Q/K rotation; text-only tokens reduce all 3 mrope positions to mtp_pos
+            // (standard partial-rope). NeoX pairing only.
+            // Skipped on NoPE heads (Nemotron-H): main-model attention carries no position either
+            // (Mamba layers do); rotating here would put the draft in a different frame, costing
+            // accept rate, not correctness.
             if (mtp.attn_rope && ws.rope_dim > 0 &&
                 ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
                 // RoPE-scaling params mirrored from the main forward (issue #897):
@@ -955,11 +866,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     pos, nkv, hdh, /*n_rows=*/1);
                 IMP_CUDA_CHECK_LAUNCH();
             }
-            // 5.A.4.b — softmax attention scan over [0, pos+1)
-            //   shared mem: seq_len * sizeof(float). Cap with the kernel's
-            //   single-block design — at decode max_seq_len ~16K this is
-            //   16K × 4 = 64 KiB, which fits sm_120's per-SM shared-mem budget.
-            //   Use opt-in dynamic shared mem.
+            // Softmax attention scan over [0,pos+1). Shared mem = seq_len*sizeof(float); single-block
+            // design caps decode max_seq_len ~16K at 64 KiB, within sm_120's per-SM shared-mem budget.
+            // Uses opt-in dynamic shared mem.
             {
                 const int seq_len = pos + 1;
                 const int kBlock = 256;
@@ -1031,13 +940,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         (void)mtp.k_norm;
     }
 
-    // 5.B — MLP block. Two checkpoint variants:
-    //   MoE (Qwen3.6-35B sidecar): 256-expert top-8 MoE + shared expert with
-    //     sigmoid gating (imp::moe_gate_topk_fused / swiglu /
-    //     shared_expert_gate_scale primitives).
-    //   Dense (Qwen3.6-27B embedded head): a plain SwiGLU MLP — loaded onto
-    //     the shared_expert fields, no router, no sigmoid gate. Runs as
-    //     "residual + shared path" with the expert stage skipped.
+    // MLP block, two checkpoint variants: MoE (Qwen3.6-35B sidecar) 256-expert top-8 +
+    // shared expert with sigmoid gating; Dense (Qwen3.6-27B embedded head) plain SwiGLU MLP
+    // loaded onto shared_expert fields, no router/gate, runs as residual+shared path only.
     const bool mtp_has_moe = ws.n_experts > 0 && ws.top_k > 0 && ws.expert_d_ff > 0 &&
                              mtp.router.data != nullptr;
     const bool mtp_has_dense_mlp = !mtp_has_moe && ws.shared_d_ff > 0 &&
@@ -1071,14 +976,10 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                                  /*use_sigmoid=*/false, /*normalize_weights=*/true,
                                  /*score_bias=*/mtp.router_score_bias.data);
 
-        // 5.B.3 — D2H copy of expert indices + weights so the host loop can
-        //         dispatch per-expert GEMVs.
-        //
-        // Device-side path (Nemotron layout, experts restacked at upload): the
-        // GEMV takes the expert id from device memory, so nothing about the
-        // routing has to reach the host. This is the difference between a draft
-        // that can be captured and one that cannot — the host round trip below
-        // costs a full pipeline stall per draft token.
+        // D2H copy of expert indices+weights for host-loop per-expert GEMV dispatch.
+        // Device-side path (Nemotron, experts restacked at upload): GEMV reads expert id from
+        // device memory, so routing never reaches the host - the difference between a
+        // capturable draft and one that stalls the pipeline per draft token via a host round trip.
         const bool device_side_experts = mtp.experts_up_stacked.data != nullptr &&
                                          mtp.experts_down_stacked.data != nullptr;
         if (device_side_experts) {
@@ -1108,12 +1009,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                             top_k * sizeof(float), cudaMemcpyDeviceToHost, stream);
             cudaStreamSynchronize(stream);
 
-            // 5.B.4 — For each chosen expert: GEMV gate_up_packed[e] @ post_norm,
-            //         swiglu, GEMV down_packed[e] @ act, store into d_expert_outputs[k].
-            //
-            // Layout of packed tensors:
-            //   experts_gate_up_packed shape: [ne, 2*d_ff_e, hd]   FP16
-            //   experts_down_packed   shape: [ne,   hd,    d_ff_e] FP16
+            // Per chosen expert: GEMV gate_up_packed[e]@post_norm, swiglu, GEMV down_packed[e]@act,
+            // store to d_expert_outputs[k].
+            // experts_gate_up_packed: [ne,2*d_ff_e,hd] FP16; experts_down_packed: [ne,hd,d_ff_e] FP16.
             const size_t gu_per_expert_bytes = static_cast<size_t>(2) * d_ff_e * hd * sizeof(__half);
             const size_t dn_per_expert_bytes = static_cast<size_t>(hd) * d_ff_e * sizeof(__half);
 
@@ -1200,13 +1098,10 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                             cudaMemcpyDeviceToDevice, stream);
         }
 
-        // 5.B.6 — Shared expert / dense MLP: silu(gate_proj·x) * (up_proj·x),
-        //         optionally scaled by sigmoid(shared_expert_gate · x) (MoE
-        //         checkpoints only), added to moe_out (which already includes
-        //         the attention residual).
-        // The Nemotron shared expert is non-gated: up_proj + down_proj only, so
-        // gate_proj being null must not disable it the way it does for a Qwen
-        // dense-MLP head.
+        // Shared expert / dense MLP: silu(gate_proj*x) * (up_proj*x), optionally scaled by
+        // sigmoid(shared_expert_gate*x) (MoE checkpoints only), added to moe_out.
+        // Nemotron shared expert is non-gated (up_proj+down_proj only): null gate_proj must not
+        // disable it the way it does for a Qwen dense-MLP head.
         const bool shared_non_gated = mtp.experts_non_gated;
         if (d_ff_s > 0 && (mtp.shared_expert_gate_proj.data || shared_non_gated) &&
             mtp.shared_expert_up_proj.data && mtp.shared_expert_down_proj.data) {
@@ -1276,10 +1171,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 IMP_CUDA_CHECK_LAUNCH();
             }
         }
-        // Copy d_moe_out → d_fc_out (overwrite) so downstream RMSNorm reads the
-        // post-transformer hidden state. moe_weighted_sum_residual already
-        // added fc_out as residual into d_moe_out; the shared-expert addition
-        // above (if present) updates d_moe_out in place.
+        // Copy d_moe_out -> d_fc_out (overwrite) so downstream RMSNorm reads the post-transformer
+        // hidden state; moe_weighted_sum_residual already added fc_out as residual into d_moe_out.
         cudaMemcpyAsync(ws.d_fc_out, ws.d_moe_out, hd * sizeof(__half),
                         cudaMemcpyDeviceToDevice, stream);
     }
@@ -1298,10 +1191,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     if (out_token_id == nullptr && d_out_token == nullptr)
         return true;
 
-    // Step 7: logits = lm_head @ h_final. When an NVFP4 decode-cache view of
-    // the lm_head is available, use it — the full-vocab weight read dominates
-    // per-draft cost (~2.5 GB FP16 on Qwen3.6-27B's 248k vocab; NVFP4 reads
-    // ~4x less). Draft-only precision: verification stays lossless.
+    // logits = lm_head @ h_final. Prefer the NVFP4 decode-cache view of lm_head when
+    // available: full-vocab weight read dominates per-draft cost (~2.5 GB FP16 on Qwen3.6's
+    // 248k vocab); NVFP4 reads ~4x less. Draft-only precision; verification stays lossless.
     const bool nvfp4_lm = (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
     if (nvfp4_lm) {
         gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
@@ -1315,12 +1207,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
     }
 
-    // Step 8 (device chain): argmax straight into the caller's device slot —
-    // no D2H, no sync; the caller drains the chain in one copy at the end.
-    // With top_w > 0 (multi-candidate branch seed) the fast top-W kernel
-    // fills ws.d_topk instead and rank 0 lands in the caller's slot — still
-    // no D2H, no sync. Rank 0 selection can differ from the argmax kernel on
-    // EXACT logit ties (pass structure); drafts are lossless either way.
+    // argmax straight into caller's device slot: no D2H, no sync (caller drains in one copy).
+    // top_w>0: fast top-W kernel fills ws.d_topk instead, rank 0 lands in caller's slot.
+    // Rank 0 can differ from argmax on EXACT logit ties (pass structure); drafts stay lossless.
     if (d_out_token != nullptr) {
         if (top_w > 0) {
             const int w = std::min(top_w, kMtpMaxTopW);
@@ -1395,13 +1284,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Batched prefill feed (dense heads)
-// ---------------------------------------------------------------------------
-// Same math as the feed-only mtp_draft_step, at M=n_rows instead of n_rows
-// M=1 passes. The per-pair loop reads the whole head's weights once per token
-// — 425M params × 512 tokens priced Qwen3.8-27B prefill at -83% (pp512
-// 7426 → 1252 tok/s). Here every GEMM runs once per batch.
+// Batched prefill feed (dense heads): same math as mtp_draft_step at M=n_rows instead of
+// n_rows M=1 passes. Reading the whole head's weights once per token made prefill
+// prohibitively slow; here every GEMM runs once per batch.
 bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
                     const MtpHead& mtp, const Tensor& main_tok_emb,
                     MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream) {

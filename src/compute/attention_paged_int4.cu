@@ -9,12 +9,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// INT4 Paged Attention Decode Kernel
-//
-// KV cache stores 2 INT4 values per byte (low nibble = even, high nibble = odd).
+// INT4 paged attention decode: KV cache stores 2 INT4 values/byte (low nibble=even, high=odd).
 // Per-head FP16 scales stored separately. Dequant: val = int4_value * scale.
-// ---------------------------------------------------------------------------
 
 // Unpack INT4 nibble to signed integer [-8, 7]
 __device__ __forceinline__ int unpack_int4_lo(uint8_t packed) {
@@ -86,12 +82,8 @@ __global__ void paged_attention_decode_int4_kernel(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -168,14 +160,9 @@ __global__ void paged_attention_decode_int4_kernel(
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
 
-// ---------------------------------------------------------------------------
-// Pipelined Split-K: INT4 variant (cp.async prefetch, sm_90+)
-//
-// Uses cp.async to prefetch the next KV block into shared memory while
-// processing the current one. INT4 packing: ELEMS/2 bytes per lane.
-// Double-buffered K (k_buf0/k_buf1), single V buffer.
-// Scale loads remain in registers (half -> float, 1 value per token).
-// ---------------------------------------------------------------------------
+// Pipelined split-K INT4 variant (cp.async prefetch, sm_90+): prefetches next KV block into
+// smem while processing current. INT4 packing: ELEMS/2 bytes/lane. Double-buffered K, single
+// V buffer. Scale loads stay in registers (half->float, 1 value/token).
 
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_int4_pipeline_kernel(
@@ -259,12 +246,8 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;

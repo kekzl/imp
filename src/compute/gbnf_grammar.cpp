@@ -136,10 +136,9 @@ bool GbnfGrammar::compile(const std::string& src, std::string* err) {
     nullable_.clear();
     root_ = -1;
     compiled_ = false;
-    // The arena's ids index THIS rule table — a recompile invalidates all of it,
-    // memoised successors included. A ConstraintManager is POOLED, so a second
-    // grammar lands in the same object and would otherwise be decoded with the
-    // previous grammar's transitions.
+    // The arena's ids index THIS rule table; a recompile invalidates all of it, memoised successors
+    // included. ConstraintManager is POOLED, so a second grammar must not decode with the previous
+    // grammar's transitions.
     arena_.clear();
     intern_.clear();
     visited_.clear();
@@ -465,13 +464,9 @@ void GbnfGrammar::lead_bytes(const GbnfStackSet& stacks, uint8_t out[256]) const
         for (uint32_t b = 0; b < 0x80; b++)
             if (!out[b] && cs.matches(b))
                 out[b] = 1;
-        // Multi-byte lead: allow the byte if the codepoint block it opens
-        // intersects the set at all. The block's lower bound is clamped to the
-        // shortest legal encoding for that length (C0/C1, and E0/F0 below their
-        // minimum, are overlong — see utf8_extra), so a lead byte is never
-        // allowed on the strength of codepoints it cannot legally encode.
-        // Over-permissive only inside one block, and the exact check still runs
-        // when the codepoint completes.
+        // Multi-byte lead: allows the byte if the codepoint block it opens intersects the set at all.
+        // The block's lower bound is clamped to the shortest legal encoding for that length (overlong
+        // C0/C1/E0/F0 excluded), so a lead byte is never allowed on codepoints it cannot legally encode.
         auto mark_lead = [&](uint32_t b, uint32_t base, uint32_t span, uint32_t min_cp) {
             if (out[b])
                 return;

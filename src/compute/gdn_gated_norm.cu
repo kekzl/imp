@@ -10,13 +10,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Fused RMSNormGated + SiLU kernel.
-// Computes: y[t,h,:] = rmsnorm(y[t,h,:], weight) * silu(gate[t,h,:])
-//
-// Grid:  (n_tokens, n_heads)
-// Block: (head_dim)
-// ---------------------------------------------------------------------------
+// Fused RMSNormGated + SiLU: y[t,h,:] = rmsnorm(y[t,h,:], weight) * silu(gate[t,h,:]).
+// Grid (n_tokens, n_heads), block (head_dim).
 __global__ void gdn_rmsnorm_gated_silu_kernel(
     half* __restrict__ y,             // [n_tokens, n_heads * head_dim] in/out
     const half* __restrict__ gate,    // [n_tokens, n_heads * head_dim]

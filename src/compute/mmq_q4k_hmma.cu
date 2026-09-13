@@ -1,25 +1,12 @@
-// =============================================================================
-// mmq_q4k_hmma.cu -- Phase 0 stub: Q4_K x FP16 tiled GEMM via HMMA m16n8k16
-// =============================================================================
-//
-// Correctness baseline for the Q4_K HMMA GEMM project. The kernel
-// dequantizes Q4_K weight super-blocks into FP16 in shared memory, then runs
-// WMMA mma_sync (HMMA m16n8k16) on the dequantized tiles. The "in-SMEM
-// nibble decode without full materialisation" optimisation comes in a later
-// phase; this stub proves the dispatch wiring and correctness framework.
-//
-// Weight layout (Q4_K, 144 bytes per 256 elements):
-//   d       : FP16 super-block scale
-//   dmin    : FP16 super-block min
-//   scales[12]: packed 6-bit sub-block scales + 6-bit mins (8 sub-blocks of 32)
-//   qs[128] : 256 x 4-bit quants packed as 128 bytes
-//
-// Dequant formula per element e in sub-block j:
-//   val = d * sc[j] * nibble - dmin * min[j]
-//
-// Tile sizes: TILE_M=64, TILE_N=64, TILE_K=256 (one Q4_K super-block per K-step).
-// The 256-element K-chunk is processed as 16 consecutive WMMA m16n8k16 MMA
-// operations (256 / 16 = 16 K-fragments).
+// Phase 0 stub: Q4_K x FP16 tiled GEMM via HMMA m16n8k16. Correctness baseline: dequantizes
+// Q4_K weight super-blocks into FP16 in shared memory, then runs WMMA mma_sync on the
+// dequantized tiles. The "in-SMEM nibble decode without full materialisation" optimization
+// comes later; this proves dispatch wiring and correctness.
+// Q4_K layout (144 bytes/256 elements): d (FP16 super-block scale), dmin (FP16 super-block
+// min), scales[12] (packed 6-bit sub-block scales+mins, 8 sub-blocks of 32), qs[128]
+// (256 x 4-bit quants). Dequant: val = d*sc[j]*nibble - dmin*min[j] for element e in sub-block j.
+// Tile sizes: TILE_M=64, TILE_N=64, TILE_K=256 (one Q4_K super-block per K-step), processed as
+// 16 consecutive WMMA m16n8k16 ops (256/16=16 K-fragments).
 
 #include "compute/mmq_q4k_hmma.h"
 #include "core/logging.h"
@@ -57,11 +44,9 @@ constexpr int FRAGS_M = TILE_M / (WARPS_M * WMMA_M);  // 2
 constexpr int FRAGS_N = TILE_N / (WARPS_N * WMMA_N);  // 2
 constexpr int K_FRAGS = TILE_K / WMMA_K;  // 16
 
-// SMEM layout: two tiles for double-buffered dequant.
-// A tile: [TILE_M, TILE_K] FP16 = 64 * 256 * 2 = 32 KiB
-// B tile: [TILE_N, TILE_K] FP16 = 64 * 256 * 2 = 32 KiB
-// Total: 64 KiB -- fits in sm_120 shared memory (up to 228 KiB per SM).
-// No double-buffering needed for Phase 0 stub (single-stage).
+// SMEM: two tiles for double-buffered dequant. A tile [TILE_M,TILE_K] FP16 = 64*256*2 = 32
+// KiB; B tile [TILE_N,TILE_K] FP16 = 32 KiB; total 64 KiB (fits sm_120's up to 228 KiB/SM). No
+// double-buffering in this Phase 0 stub (single-stage).
 
 // Unpack 6-bit scale and min from the 12-byte packed array.
 // Matches ggml get_scale_min_k4.
@@ -76,10 +61,9 @@ __device__ __forceinline__ void get_scale_min_k4(int j, const uint8_t* q,
     }
 }
 
-// Dequantize one Q4_K super-block (256 elements) into FP16 in shared memory.
-// Called by multiple threads cooperatively. `tid` in [0, THREADS_PER_BLOCK).
-// `block_ptr` points to the 144-byte Q4_K block in global memory.
-// `smem_out` points to the shared memory destination (256 halves).
+// Dequantizes one Q4_K super-block (256 elements) into FP16 in shared memory, called
+// cooperatively by multiple threads. tid in [0,THREADS_PER_BLOCK); block_ptr points to the
+// 144-byte Q4_K block; smem_out points to the 256-half shared-memory destination.
 __device__ void dequant_q4k_block_to_smem(const uint8_t* __restrict__ block_ptr,
                                            __half* __restrict__ smem_out,
                                            int tid, int num_threads) {
@@ -108,14 +92,9 @@ __device__ void dequant_q4k_block_to_smem(const uint8_t* __restrict__ block_ptr,
     }
 }
 
-// Main kernel: tiled GEMM with Q4_K dequant in SMEM + WMMA HMMA.
-//
-// Grid: (ceil(N/TILE_N), ceil(M/TILE_M))
-// Block: THREADS_PER_BLOCK = 128
-//
-// A [M, K] FP16 row-major (activations)
-// B [N, K] Q4_K packed (weights, N rows of K/256 super-blocks)
-// C [M, K] @ B[N, K]^T -> C [M, N] FP16 row-major
+// Tiled GEMM with Q4_K dequant in SMEM + WMMA HMMA. Grid (ceil(N/TILE_N),ceil(M/TILE_M)),
+// block THREADS_PER_BLOCK=128. A[M,K] FP16 row-major; B[N,K] Q4_K packed (N rows of K/256
+// super-blocks); C = A@B^T -> [M,N] FP16 row-major.
 __global__ void mmq_q4k_hmma_kernel(
     const __half* __restrict__ A,       // [M, K]
     const uint8_t* __restrict__ B_q4k,  // N * (K/256) * 144 bytes
@@ -162,12 +141,9 @@ __global__ void mmq_q4k_hmma_kernel(
             A_s[row * TILE_K + col] = (gm < M && gk < K) ? A[gm * K + gk] : __float2half(0.0f);
         }
 
-        // --- Dequantize weight tile B[n_start : n_start+TILE_N, kb]
-        //     Each row n has its own Q4_K super-block at offset (n * blocks_per_row + kb).
-        //     All threads cooperate to dequant each row's 256 elements.
-        //
-        //     Strategy: assign rows round-robin across a group, each thread
-        //     handles multiple elements within each row.
+        // Dequantize weight tile B[n_start:n_start+TILE_N, kb]; each row is a Q4_K
+        // super-block at (n * blocks_per_row + kb), 256 elements decoded cooperatively.
+        // Rows assigned round-robin across the group; each thread handles multiple elements.
         for (int tn = 0; tn < TILE_N; ++tn) {
             int gn = n_start + tn;
             if (gn < N) {

@@ -12,24 +12,12 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// NVFP4 Paged Attention Decode
-//
-// KV cache stores 2 FP4 (E2M1) values per byte (low nibble = even, high = odd).
-// Per-token-head-group_of_16 UE4M3 (FP8 E4M3) scales stored separately.
-//
-// Layout per cache block:
-//   K_cache : [block, t_in_block, kv_head, head_dim/2]    uint8_t  (packed FP4)
-//   V_cache : same shape as K_cache
-//   K_scales: [block, t_in_block, kv_head, head_dim/16]   uint8_t  (UE4M3)
-//   V_scales: same shape as K_scales
-//
-// Dequant: val = e2m1_decode(nibble) * ue4m3_decode(scale_byte)
-//
-// Each lane covers ELEMS = HEAD_DIM/32 contiguous elems. For all imp head_dims
-// (64/128/256/512), ELEMS ≤ 16 so a lane covers a slice of exactly ONE
-// 16-element scale group. lane scale index = lane_offset / 16.
-// ---------------------------------------------------------------------------
+// NVFP4 paged attention decode. KV cache: 2 FP4 (E2M1) values/byte (low=even, high=odd);
+// per-token-head-group_of_16 UE4M3 scales stored separately.
+// Layout/block: K_cache/V_cache [block,t_in_block,kv_head,hd/2] uint8; K/V_scales
+// [block,t_in_block,kv_head,hd/16] uint8 UE4M3. Dequant: e2m1_decode(nibble)*ue4m3_decode(scale).
+// Each lane covers ELEMS=HD/32 elems; for all imp head_dims (64/128/256/512) ELEMS<=16, so a
+// lane covers exactly one 16-element scale group (lane scale index = lane_offset/16).
 
 // UE4M3 byte → float (standard FP8 E4M3, sign always 0 in NVFP4 scale role).
 __device__ __forceinline__ float ue4m3_decode(uint8_t bits) {
@@ -38,10 +26,8 @@ __device__ __forceinline__ float ue4m3_decode(uint8_t bits) {
     return static_cast<float>(v);
 }
 
-// Scale dtype tag for the NVFP4 paged attention kernels. Default E4M3 is the
-// existing NVFP4 path; UE8M0 reserves the second template arm for the
-// upcoming MXFP4-KV variant. This Slice 1 commit only adds the template parameter; the
-// UE8M0 branch is implemented in Slice 2.
+// Scale dtype tag: default E4M3 is the existing NVFP4 path; UE8M0 reserves the arm for the
+// MXFP4-KV variant.
 enum class ScaleDtype : int { E4M3 = 0, UE8M0 = 1 };
 
 // Decode one packed scale byte into a float, dispatching on SCALE_DTYPE at
@@ -70,12 +56,9 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
     return *reinterpret_cast<half2*>(&fp16x2);
 }
 
-// Load a lane's PACK packed-FP4 bytes in as few global loads as the alignment
-// allows. Every stride in the KV layout is a multiple of HEAD_DIM/2 and the
-// lane's byte offset is lane_id * PACK, so the pointer carries PACK-byte
-// alignment: HD=256 loads 4 bytes as one word instead of four LDG.E.U8.
-// __ldg, not __ldcs: the GQA-tile refutation (#1785) established that the
-// cross-head re-reads of this cache are L2 hits worth keeping.
+// Loads a lane's PACK packed-FP4 bytes in as few global loads as alignment allows: every KV
+// layout stride is a multiple of HD/2, so lane_id*PACK is PACK-byte aligned (HD=256 loads 4
+// bytes as one word). Uses __ldg not __ldcs: cross-head re-reads of this cache are L2 hits (#1785).
 template <int PACK>
 __device__ __forceinline__ void load_packed_fp4(const uint8_t* __restrict__ src, uint8_t (&out)[PACK]) {
     if constexpr (PACK % 4 == 0) {
@@ -169,12 +152,8 @@ __global__ void paged_attention_decode_nvfp4_kernel(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -203,12 +182,8 @@ __global__ void paged_attention_decode_nvfp4_kernel(
             const half2 k_scale_h2 = __float2half2_rn(k_scale);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
-            // V is loaded here, not after the softmax: its bytes do not depend
-            // on the weight, so issuing both loads up front puts the warp
-            // reduction and the two expf of online_softmax_step between issue
-            // and use. This is not the 2026-05 smem pipeline (see note below) -
-            // no prefetch across tokens, no shared memory, no extra registers
-            // beyond one PACK-byte buffer.
+            // V is loaded before the softmax weight is known: its bytes don't depend on the weight, so
+            // issuing both loads up front overlaps them with the warp reduction and the two expf calls.
             uint8_t k_bytes[ELEMS / 2];
             uint8_t v_bytes[ELEMS / 2];
             load_packed_fp4<ELEMS / 2>(K_tok + lane_offset / 2, k_bytes);
@@ -325,12 +300,8 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -398,23 +369,11 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
                                       num_splits, split_idx);
 }
 
-// Note: a pipelined splitk variant (double-buffered K + V via smem, mirroring
-// `paged_attention_splitk_int4_pipeline_kernel`) was tested 2026-05-08 and
-// regressed Qwen3-8B Q8 + NVFP4 KV decode by ~3% (147.0 → 142.7 tok/s,
-// 5 reps). Once the inner loop became HW-FP4-cvt-bound (PR landed earlier
-// today) there was no longer enough work between issuing K[t+1] and using
-// K[t] for the prefetch to hide global-memory latency. The int4 pattern
-// works because INT4 dequant is heavier (8-entry LUT + sign branch). Don't
-// re-attempt without first profiling to confirm the kernel is back to
-// memory-bound (e.g. once block_size grows past 16 or HD>512 lands).
-//
-// That verdict still stands and it is not the one above. The cost was never
-// the number of BYTES in flight, it was the number of LOAD INSTRUCTIONS: at
-// HD=256 this kernel issued 8 separate LDG.E.U8 per token because a uint8_t*
-// carries no provable alignment. `load_packed_fp4` reads the same bytes as
-// one word per operand, and both operands are issued before the reduction
-// (2026-08-30, #1817): 64.0 → 74.1 tok/s on Qwen3.8-27B-NVFP4 at 77k context,
-// 20 → 2 LDG.E.U8 in SASS, 56 registers and zero spills before and after.
+// A pipelined split-K variant (double-buffered K+V via smem) regressed this kernel: once the
+// inner loop is HW-FP4-cvt-bound, there is no longer enough work to hide K[t+1]'s prefetch
+// latency. Don't re-attempt without first confirming the kernel is memory-bound again (e.g.
+// block_size > 16 or HD > 512). Cost is LOAD INSTRUCTION count, not bytes: `load_packed_fp4`
+// reads multi-byte operands as one word instead of per-byte LDG.E.U8 (#1817).
 
 // ---------------------------------------------------------------------------
 // Host launcher
@@ -524,11 +483,8 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     }
 }
 
-// ---------------------------------------------------------------------------
-// MXFP4-KV launcher — same kernel as NVFP4 but with UE8M0 scale decode.
-// Pool layout and scale grouping are identical to NVFP4 (per design memo
-// §3.1.2); only the scale byte semantics differ (UE8M0 vs E4M3).
-// ---------------------------------------------------------------------------
+// MXFP4-KV launcher: same kernel as NVFP4 but with UE8M0 scale decode. Pool layout and scale
+// grouping match NVFP4 (design memo 3.1.2); only the scale byte semantics differ.
 
 void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                                      const uint8_t* K_scales, const uint8_t* V_scales,

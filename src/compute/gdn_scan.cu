@@ -3,33 +3,12 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Phase 1b.1 — Standalone chunkwise SSD scan prototype.
-//
-// Structural prototype for the Mamba2 SSD (Structured State-space Duality)
-// algorithm adapted for the GDN delta rule. Same numerical math as
-// `gdn_scan_fused_kernel`, but reorganised into per-chunk passes that cache
-// all CHUNK tokens' normalised K and Q in shared memory upfront, then sweep
-// the within-chunk delta-rule update.
-//
-// Phase 2 will replace the sequential within-chunk loop with the WY-rep
-// parallel matmul update (Yang et al. 2024, "Parallel Linear Attention With
-// The Delta Rule"). The chunk-cached K, Q layout established here is the
-// prerequisite — both Q · K^T (chunk-internal masked-attention) and the
-// cumulative decay propagation need all CHUNK tokens' K, Q resident at once.
-//
-// Per-block shared memory:
-//   s_k[CHUNK * SS]  — normalised K, all tokens in chunk
-//   s_q[CHUNK * SS]  — normalised Q, all tokens in chunk
-//   s_reduce[HD]     — block-reduction scratch (reused per L2 norm)
-//
-// At HD=SS=128, CHUNK=64 this is 2 * 64 * 128 * 4 + 128 * 4 = 65 KiB,
-// requiring the dynamic shared-memory opt-in (cudaFuncAttributeMaxDynamicShared
-// MemorySize). Host launcher sets it once.
-//
-// Grid:  (n_heads)              — one block per head
-// Block: (HD)                   — typically 128 threads
-// ---------------------------------------------------------------------------
+// Phase 1b.1 chunkwise SSD scan prototype (Mamba2 SSD adapted to the GDN delta rule). Same
+// math as gdn_scan_fused_kernel; caches CHUNK tokens' normalised K,Q in shared memory, then
+// sweeps the within-chunk delta-rule update. Phase 2 replaces the sweep with WY-rep parallel
+// matmul (Yang et al. 2024).
+// Shared memory: s_k[CHUNK*SS], s_q[CHUNK*SS], s_reduce[HD]; at HD=SS=128, CHUNK=64 = 65 KiB,
+// needs the dynamic-shared-memory opt-in. Grid (n_heads), block (HD).
 template <int HD, int SS, int CHUNK, typename YOut>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -71,10 +50,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     while (t_chunk_start < n_tokens) {
         const int L = (t_chunk_start + CHUNK <= n_tokens) ? CHUNK : (n_tokens - t_chunk_start);
 
-        // -------------------------------------------------------------------
-        // Phase 1: Load this chunk's K, Q (raw) into shared memory.
-        // Each thread d stores one element per token, looping over tokens.
-        // -------------------------------------------------------------------
+        // Phase 1: load this chunk's raw K,Q into shared memory; thread d stores one element per
+        // token, looping over tokens.
         if (d < SS) {
             for (int t_local = 0; t_local < L; t_local++) {
                 const int t_global = t_chunk_start + t_local;
@@ -85,12 +62,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         }
         __syncthreads();
 
-        // -------------------------------------------------------------------
-        // Phase 2: L2-normalise K, Q for each token in the chunk.
-        // Per-token reduction (sequential across tokens, parallel across SS).
-        // Uses the SAME formula as gdn_scan_fused_kernel (rsqrt of max(sum_sq,
-        // 1e-12)) for bit-equivalent numerics.
-        // -------------------------------------------------------------------
+        // Phase 2: L2-normalise K,Q per chunk token (sequential across tokens, parallel across SS).
+        // Uses rsqrt(max(sum_sq,1e-12)), same formula as gdn_scan_fused_kernel, for bit-equivalent numerics.
         for (int t_local = 0; t_local < L; t_local++) {
             float* k_row = s_k + t_local * SS;
             float* q_row = s_q + t_local * SS;
@@ -125,12 +98,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
             __syncthreads();
         }
 
-        // -------------------------------------------------------------------
-        // Phase 3: Sequential per-token delta-rule update within chunk.
-        // Reads K̃, Q̃ from shared memory; same math as gdn_scan_fused_kernel.
-        // Phase 2 of the design doc replaces this loop with the WY-rep
-        // parallel matmul update.
-        // -------------------------------------------------------------------
+        // Phase 3: sequential per-token delta-rule update within the chunk, reading K~,Q~ from
+        // shared memory; same math as gdn_scan_fused_kernel. Phase 2 (WY-rep) replaces this loop.
         for (int t_local = 0; t_local < L; t_local++) {
             const int t_global = t_chunk_start + t_local;
             const float* row = conv_f32 + static_cast<size_t>(t_global) * conv_channels;
@@ -184,34 +153,16 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 2a — WY-representation parallel delta-rule scan prototype.
-//
-// Numerically equivalent to gdn_scan_fused_kernel but factors the
-// chunk-internal sequential dependency into a forward triangular solve +
-// matrix-matrix products. Reference: Yang et al. 2024, "Parallel Linear
-// Attention With The Delta Rule".
-//
-// Algorithm per chunk of L tokens:
-//   1. Cache K̃, Q̃ in shared memory (post L2 norm)
-//   2. Compute Gram matrices KK, QK, KH, QH (matmuls vs the in-register H_0)
-//   3. Build the L×L triangular coefficient matrix T and bias vectors c_t
-//   4. Forward solve u_t = c_t - Σ_{j<t} T[t,j] u_j (sequential over t,
-//      parallel over HD output dim — thread d owns column d of U)
-//   5. Compute y_t = scale · (D[0..t+1] QH[t,:] + Σ_{j≤t} D[j+1..t+1] · QK[t,j] · u_j)
-//   6. Update H_L = D[0..L] H_0 + Σ_t D[t+1..L] k̃_t u_t^T
-//
-// Cumulative decay D[a..b] = Π_{i=a..b-1} g_i carried in log-space to dodge
-// underflow over L=32 tokens with possibly tiny g (sequential kernel caps
-// g_t at e^-20).
-//
-// CHUNK=32 (not 64) to fit the L^2 + L×HD scratch buffers within the 100 KiB
-// sm_120 per-block opt-in cap. At HD=SS=128, CHUNK=32 → ~92 KiB dynamic smem.
-//
-// Phase 2b will swap the explicit per-thread shared-memory matmul loops for
-// CUTLASS / cute MMA tile dispatches. The numerical structure here mirrors
-// what the Tensor Core path needs, so 2b is a localized replacement.
-// ---------------------------------------------------------------------------
+// Phase 2a WY-rep parallel delta-rule scan (Yang et al. 2024). Per L-token chunk:
+//   1. Cache K~,Q~ in shared memory (post L2 norm)
+//   2. Gram matrices KK,QK,KH,QH (matmuls vs in-register H_0)
+//   3. Build L x L triangular coefficient matrix T and bias vectors c_t
+//   4. Forward solve u_t = c_t - sum_{j<t} T[t,j] u_j (sequential over t, parallel over HD;
+//      thread d owns column d of U)
+//   5. y_t = scale * (D[0..t+1] QH[t,:] + sum_{j<=t} D[j+1..t+1] * QK[t,j] * u_j)
+//   6. H_L = D[0..L] H_0 + sum_t D[t+1..L] k~_t u_t^T
+// Cumulative decay D[a..b] = prod_{i=a..b-1} g_i in log-space (avoids underflow; g capped e^-20).
+// CHUNK=32: L^2 + L*HD scratch must fit the 100 KiB sm_120 opt-in cap (HD=SS=128 -> ~92 KiB).
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -357,15 +308,10 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         }
         __syncthreads();  // STEP 3 reads s_kh, s_kk; STEP 4 reads s_u; STEP 5 reads s_qh, s_qk.
 
-        // ---------------- STEP 3+4: triangular solve for u_t ----------------
-        // Sequential over t (intra-chunk), parallel over HD output dim (one per thread).
-        // u_t[d] = c_t[d] - Σ_{j<t} T[t,j] u_j[d]
-        //
-        // NB: thread d writes s_u[t·HD + d] and only reads s_u[j·HD + d] for
-        // j < t — its OWN column from previous iterations. No cross-thread
-        // reads of s_u inside the loop, so the per-iteration __syncthreads()
-        // is unnecessary. One sync after the loop is needed before Step 5
-        // (which DOES read other threads' u columns via QK matmul).
+        // Step 3+4 triangular solve for u_t, sequential over t, parallel over HD (one thread per
+        // output dim). u_t[d] = c_t[d] - sum_{j<t} T[t,j] u_j[d]. Thread d only reads/writes its own
+        // column s_u[*][d], so no per-iteration __syncthreads(); one sync after the loop before Step 5
+        // (which reads other threads' u columns via the QK matmul).
         for (int t_loc = 0; t_loc < L; t_loc++) {
             const int t = t_chunk_start + t_loc;
             const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
@@ -400,18 +346,10 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
             y_out[static_cast<size_t>(t) * inner + h * HD + d] = __float2half(y * scale);
         }
 
-        // ---------------- STEP 6: H_L = D[0..L] H_0 + Σ_t D[t+1..L] k̃_t u_t^T ----------------
-        // Tuning (2026-05-24):
-        //   - Hoist D[t+1..L] = exp(logD[L] - logD[t+1]) out of the (s, t) double
-        //     loop. The decay factor depends only on t, so computing it L*SS times
-        //     per chunk per head is wasted work. Precompute once into s_g (which
-        //     is reusable scratch by this point in the chunk).
-        //   - Loop interchange (t outer, s inner). The inner loop now walks
-        //     s_k[t*SS + s] with stride 1 in s, instead of the natural (s, t)
-        //     order's stride-SS column access. Sequential reads → much better
-        //     L1/coalescing.
-        //   - Hoist the per-thread per-t coefficient (D[t+1..L] · u_t[d]) out of
-        //     the s loop so the inner s loop is one FMA per element.
+        // Step 6: H_L = D[0..L]*H_0 + sum_t D[t+1..L] k~_t u_t^T. D[t+1..L] hoisted out of the (s,t)
+        // loop (depends only on t). Loop order is (t outer, s inner): sequential smem access to
+        // s_k[t*SS+s] instead of stride-SS column access. Per-thread per-t coefficient
+        // (D[t+1..L]*u_t[d]) hoisted out of the s loop so the inner loop is one FMA per element.
         {
             const float D_0L = expf(s_logD[L]);
             if (d < L) {
@@ -449,39 +387,22 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
 // Host launchers
 // ---------------------------------------------------------------------------
 
-// Phase 1b.1 — Standalone chunkwise SSD scan host launcher.
-//
-// Dispatches to `gdn_scan_chunkwise_kernel<HD, SS, CHUNK>` for the supported
-// (HD, SS, CHUNK) combinations and falls back to a chunk-iterating wrapper
-// around `gdn_scan_fused_f32` otherwise. The chunkwise kernel produces output
-// bit-near-equivalent to `gdn_scan_fused_kernel` (FP16 1e-3, FP32 state 1e-5
-// tolerances per Phase 1a), validated by ChunkBoundaryHandoff +
-// ChunkwiseProtoMatchesFused tests.
-//
-// Phase 2 will replace the within-chunk sequential delta-rule loop in
-// `gdn_scan_chunkwise_kernel` with the WY-rep parallel matmul update (Yang
-// et al. 2024, "Parallel Linear Attention With The Delta Rule"). Until then
-// the prototype is structural-only and gives no perf win over the sequential
-// fused kernel; it establishes the chunked shared-memory layout that the
-// SSD matmul will need.
-//
-// Phase 0 verdict (ncu): Memory 5.47 % peak / Compute 5.47 % peak /
-//   Achieved Occ 8.33 % → PROCEED.
-// Templated dispatcher used by both gdn_scan_chunkwise_f32 (YOut=half) and
-// gdn_scan_chunkwise_fp32out (YOut=float). Keeps the kernel-template + smem
-// + opt-in logic in one place — the two host launchers only differ in the
-// y_out element type and the fallback they use for unsupported shapes.
+// Phase 1b.1 chunkwise SSD scan host launcher: dispatches to gdn_scan_chunkwise_kernel
+// <HD,SS,CHUNK> for supported shapes, else falls back to a chunk-iterating wrapper around
+// gdn_scan_fused_f32. Output is bit-near-equivalent to gdn_scan_fused_kernel (FP16 1e-3,
+// FP32 state 1e-5 tolerance), validated by ChunkBoundaryHandoff + ChunkwiseProtoMatchesFused.
+// Templated dispatcher shared by gdn_scan_chunkwise_f32 (YOut=half) and
+// gdn_scan_chunkwise_fp32out (YOut=float).
 template <typename YOut, typename FusedFallback>
 static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels, const half* alpha,
                                         const half* beta, const float* A_log, const float* dt_bias,
                                         float* h_state, YOut* y, int n_tokens, int n_heads, int head_dim_ssm,
                                         int state_size, int n_groups, cudaStream_t stream, int chunk_size,
                                         int grouped_layout, const int* d_real_n, FusedFallback fused) {
-    // Padded verify chunk (#847): the host cannot split a device-side length
-    // across chunks, and neither the chunkwise fast kernel nor the wrapper
-    // loop is device-length-aware. Run the whole (small — verify buckets are
-    // ≤ k_max+1 tokens) padded chunk through one sequential fused call, which
-    // commits the state at the real last row.
+    // Padded verify chunk (#847): host cannot split a device-side length across chunks, and
+    // neither the chunkwise kernel nor the wrapper loop is device-length-aware. The whole
+    // (small, <= k_max+1 token) padded chunk runs through one sequential fused call, committing
+    // state at the real last row.
     if (d_real_n != nullptr) {
         fused(conv_f32, alpha, beta, h_state, y, n_tokens, d_real_n);
         return;
@@ -523,10 +444,9 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
         }
     }
 
-    // Fallback: chunk-iterating wrapper around the sequential fused kernel.
-    // Used for non-default chunk sizes, unsupported HD/SS combos, and the
-    // tail-chunk path where n_tokens < chunk_size. h_state mutates in-place
-    // across the per-chunk calls; same-stream submission keeps ordering.
+    // Fallback: chunk-iterating wrapper around the sequential fused kernel, used for non-default
+    // chunk sizes, unsupported HD/SS combos, and tail chunks (n_tokens < chunk_size). h_state
+    // mutates in-place across per-chunk calls; same-stream submission keeps ordering.
     const int inner = n_heads * head_dim_ssm;
     int t = 0;
     while (t < n_tokens) {
@@ -552,19 +472,16 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
         });
 }
 
-// FP32-output chunkwise launcher. Mirrors `gdn_scan_chunkwise_f32` for the
-// `gdn.fp32_scan` path where the scan output must stay FP32 all the way
-// through RMSNorm+Gate+SiLU (Qwen 3.6 L0 sign-flip root cause; see comment
-// at executor_ssm_gdn.cu:483-486).
+// FP32-output chunkwise launcher for gdn.fp32_scan: scan output must stay FP32 through
+// RMSNorm+Gate+SiLU (Qwen 3.6 L0 sign-flip root cause; see executor_ssm_gdn.cu:483-486).
 void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                                 const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                                 int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                                 cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
                                 float* h_snap, const int* d_snap_n) {
-    // The snapshot row is expressed in whole-range coordinates, so it only
-    // travels when the range IS one chunk. A verify chunk is a handful of rows
-    // against a 64-row chunk size, so it always is; a long prefill is not, and
-    // has no use for it.
+    // Snapshot row is in whole-range coordinates, so it only travels when the range is one
+    // chunk. A verify chunk (a few rows vs a 64-row chunk size) always qualifies; a long
+    // prefill does not.
     const bool single_chunk = (chunk_size <= 0 || n_tokens <= chunk_size);
     float* const snap = single_chunk ? h_snap : nullptr;
     const int* const snap_n = single_chunk ? d_snap_n : nullptr;
@@ -579,33 +496,26 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
         });
 }
 
-// Phase 2a WY-rep host launcher. Currently HD=SS=128 + CHUNK=32 only; other
-// shapes fall back to `gdn_scan_fused_f32`. Output is FP16 only — Phase 2a
-// is a correctness reference; the FP32-out and Phase 2b TC-MMA variants come
-// later.
+// Phase 2a WY-rep host launcher: HD=SS=128 + CHUNK=32 only, else falls back to
+// gdn_scan_fused_f32. FP16 output only (correctness reference); FP32-out and the Phase 2b
+// TC-MMA variants come later.
 void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                                const float* A_log, const float* dt_bias, float* h_state, half* y,
                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                                cudaStream_t stream, int grouped_layout) {
     if (head_dim_ssm == 128 && state_size == 128 && n_tokens >= 1) {
         constexpr int HD = 128, SS = 128, CHUNK = 32;
-        // Shared-memory budget for the WY kernel:
-        //   s_k + s_q       = 2 * CHUNK * SS         = 32 KiB
-        //   s_u + s_kh + s_qh = 3 * CHUNK * HD       = 48 KiB
-        //   s_kk + s_qk     = 2 * CHUNK * CHUNK      =  8 KiB
-        //   s_g + s_beta + s_logD + s_reduce        ≈  1 KiB
-        // Total ~89 KiB → needs the dynamic-shared opt-in.
+        // WY kernel shared-memory budget: s_k+s_q = 2*CHUNK*SS = 32 KiB; s_u+s_kh+s_qh = 3*CHUNK*HD
+        // = 48 KiB; s_kk+s_qk = 2*CHUNK*CHUNK = 8 KiB; s_g+s_beta+s_logD+s_reduce ~= 1 KiB.
+        // Total ~89 KiB, needs the dynamic-shared opt-in.
         const size_t smem =
             (2 * CHUNK * SS + 3 * CHUNK * HD + 2 * CHUNK * CHUNK + 2 * CHUNK + (CHUNK + 1) + HD) *
             sizeof(float);
         static bool attr_set = false;
         if (!attr_set) {
-            // sm_120 caps `cudaFuncAttributeMaxDynamicSharedMemorySize` at 99 KiB
-            // (sharedMemPerBlockOptin = 101376 B). Setting above that returns
-            // cudaErrorInvalidValue and the kernel falls back to the 48 KiB
-            // default → kernel launch fails with "invalid argument" since the
-            // request (~89 KiB) exceeds the default. Use 96 KiB (matches the
-            // existing reference kernel's opt-in).
+            // sm_120 caps cudaFuncAttributeMaxDynamicSharedMemorySize at 99 KiB (sharedMemPerBlockOptin
+            // = 101376 B); above that returns cudaErrorInvalidValue and falls back to the 48 KiB
+            // default, which fails launch since the ~89 KiB request exceeds it. Use 96 KiB.
             cudaFuncSetAttribute(
                 reinterpret_cast<const void*>(&gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK>),
                 cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);

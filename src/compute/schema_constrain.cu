@@ -12,26 +12,21 @@
 
 namespace imp {
 
-// Max simulated frame-stack depth. Each '{'/'[' nesting level holds ~2 frames
-// (container frame + value frame), so 192 frames ~= 96 nesting levels. Only
-// reachable via recursive $ref schemas; hitting the cap forces closure (still
-// schema-valid — any finite nesting satisfies a recursive schema).
+// Max simulated frame-stack depth: each {/[ nesting level holds ~2 frames (container +
+// value), so 192 frames ~= 96 nesting levels. Reachable only via recursive $ref schemas;
+// hitting the cap forces closure (still schema-valid for any finite nesting).
 static constexpr size_t kMaxSchemaStackDepth = 192;
 
-// Digits an `integer` may run to (#1540). int64 is 19 digits wide, and a JSON
-// integer past it is not a value the caller can read back into anything - the
-// schema's own `maximum` would be the precise bound, but it is refused at parse
-// time as unenforceable (#1567). Applies to `integer` only; `number` keeps its
-// JSON-legal mantissa.
+// Digits an `integer` may run to (#1540): int64 is 19 digits, past which no caller can
+// read the value back. `maximum` would be the precise bound but is refused at parse time
+// as unenforceable (#1567). Applies to `integer` only; `number` keeps its JSON-legal mantissa.
 static constexpr int kMaxIntegerDigits = 19;
 
-// Effective item ceiling for an array frame: explicit "maxItems" wins; an
-// enum-items array without one is capped at the enum's cardinality — a list
-// that repeats an enum member more often than the enum has members carries no
-// information, and an unbounded enum array is the observed degeneration loop
-// of a reasoning model whose think block was budget-force-closed (#1014:
-// `["tech","tech","tech",...` until max_tokens). Same anti-runaway class as
-// the number-digit cap (#751). INT_MAX = unbounded.
+// Effective item ceiling for an array frame: explicit maxItems wins; an enum-items array
+// without one caps at the enum's cardinality (repeating a member more than the enum has
+// carries no information; unbounded is the observed degeneration loop of a budget-closed
+// reasoning model, #1014). Same anti-runaway class as the digit cap (#751). INT_MAX =
+// unbounded.
 static int effective_max_items(const SchemaNode* root, const SchemaNode* array_node) {
     if (!array_node)
         return INT_MAX;
@@ -43,37 +38,30 @@ static int effective_max_items(const SchemaNode* root, const SchemaNode* array_n
     return INT_MAX;
 }
 
-// ---------------------------------------------------------------------------
-// Qwen-Coder XML tool-call body (SchemaType::XML_TOOL_CALL):
+// Qwen-Coder XML tool-call body (XML_TOOL_CALL):
 //   <function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n...</function>
-// Tags are literal, the name/keys are unquoted enums, and VALUES are raw text
-// (multi-line, unescaped) ending at the "\n</parameter>" delimiter.
-// ---------------------------------------------------------------------------
+// Tags literal, name/keys unquoted enums, VALUES raw text (multi-line, unescaped) ending
+// at "\n</parameter>".
 
 static const char* const kXmlFnOpen = "<function=";
 static const std::string kXmlParamOpen = "\n<parameter=";
 static const std::string kXmlFnClose = "\n</function>";
 static const std::string kXmlParamDelim = "\n</parameter>";
 
-// Delimiter tracker for the raw-value phase: one KMP step over the delimiter.
-// Chars are never rejected (any text is a legal value) — a dead partial match
-// falls back and re-tries, so values containing partial delimiters
-// ("\n</param" + more text, "\n\n</parameter>") track correctly. The closed
-// form below relies on the delimiter's first char '\n' appearing nowhere else
-// in it, which makes every KMP border 0 — a mismatch can only fall back to
-// "did this char restart a match".
+// Delimiter tracker for the raw-value phase: one KMP step over the delimiter. Chars are
+// never rejected (any text is a legal value); a dead partial match falls back and retries.
+// Relies on the delimiter's first char '\n' appearing nowhere else in it, making every
+// KMP border 0 - a mismatch can only ask "did this char restart a match".
 static int xml_delim_step(const std::string& target, int len, char c) {
     if (len < static_cast<int>(target.size()) && c == target[len])
         return len + 1;
     return c == target[0] ? 1 : 0;
 }
 
-// The chosen tool's parameter schema for an XML body frame (root defs entry,
-// same layout as TOOL_CALL's dynamic "arguments" binding). REVERSE scan: a
-// tool's hoisted "<tool>/<def>" entries precede the tool entries, so a tool
-// whose (request-supplied, unvalidated) name collides with a hoisted key —
-// e.g. a tool literally named "a/B" next to tool "a" hoisting $def "B" —
-// must still bind its own entry, which always comes later.
+// Chosen tool's parameter schema for an XML body frame (root defs entry). REVERSE scan:
+// hoisted "<tool>/<def>" entries precede tool entries, so a tool whose name collides with
+// a hoisted key (e.g. tool "a/B" next to tool "a" hoisting $def "B") still binds its own
+// entry, which always comes later.
 static const SchemaNode* xml_tool_params(const SchemaNode* root, const std::string& chosen) {
     if (!root)
         return nullptr;
@@ -118,15 +106,12 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
         std::string text = tok.decode_token(i);
         token_texts_[i] = text;
         token_categories_[i] = classify_token(text);
-        // XML tool-call schemas ONLY: classify_token gives category 0 to every
-        // token with a byte outside printable ASCII — mixed text+control code
-        // tokens ("):\n    def") AND all multi-byte UTF-8/CJK tokens (~40% of
-        // the Qwen vocab) — and the mask kernel requires category AND allow,
-        // so they could never appear in a raw XML value whose whole point is
-        // arbitrary multi-line text. Retag them CAT_STRING_CHAR so the
-        // per-token simulation decides. Scoped to XML schemas: for plain JSON
-        // constrainers the category-0 prefilter is a load-bearing cost cutoff
-        // (see compute_token_allow_mask) and its behavior must not change.
+        // XML tool-call schemas ONLY: classify_token gives category 0 to any token with a
+        // non-printable-ASCII byte (mixed text+control tokens, all multi-byte UTF-8/CJK tokens,
+        // ~40% of the Qwen vocab), but category AND allow gates the mask, so such tokens could
+        // never appear in a raw XML value. Retag CAT_STRING_CHAR so per-token simulation decides.
+        // Scoped to XML: for plain JSON the category-0 prefilter is a load-bearing cost cutoff
+        // (compute_token_allow_mask) and must not change.
         if (schema_->type == SchemaType::XML_TOOL_CALL && token_categories_[i] == 0 && !text.empty())
             token_categories_[i] = CAT_STRING_CHAR;
     }
@@ -154,12 +139,9 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
 void SchemaConstrainer::reset() {
     stack_.clear();
     if (strict_optional_envelope_) {
-        // Strict OPTIONAL tool call: the model may or may not call. Leave the
-        // stack EMPTY — the tool-aware preamble gate is ACTIVE (mask bypassed),
-        // so free text / a plain answer passes through unconstrained. update()
-        // installs the body frame (engage_tool_body) only if the gate detects
-        // the opener; until then apply_mask/forced_text no-op on the empty stack
-        // behind the active gate.
+        // Strict OPTIONAL tool call: leave the stack EMPTY while the tool-aware preamble gate is
+        // ACTIVE (mask bypassed), so free text passes unconstrained. update() installs the body
+        // frame (engage_tool_body) only once the gate detects the opener.
     } else if (!envelope_open_.empty()) {
         // Envelope wrapper frame: forces the open literal, then hosts the root
         // value; when the value pops it flips to ENVELOPE_CLOSE (#1002).
@@ -178,11 +160,9 @@ void SchemaConstrainer::reset() {
 }
 
 void SchemaConstrainer::engage_tool_body() {
-    // Install the post-ENVELOPE_OPEN state: an envelope frame armed to force the
-    // close literal after the body pops (mirrors ENVELOPE_OPEN's completion at
-    // sim_advance), plus the TOOL_CALL body value-frame on top. The model has
-    // already emitted the open tag (absorbed by the gate); the body FSM enforces
-    // the arguments, then the close literal is forced, then EOS.
+    // Post-ENVELOPE_OPEN state: an envelope frame armed to force the close literal after the
+    // body pops, plus the TOOL_CALL body value-frame on top. The model already emitted the
+    // open tag (absorbed by the gate); body FSM enforces args, then close literal, then EOS.
     SchemaFrame env;
     env.node = schema_.get();
     env.phase = SchemaPhase::ENVELOPE_CLOSE;
@@ -221,15 +201,12 @@ static bool tool_call_key_available(const std::string& key, const std::set<std::
     return key == "arguments" && !emitted.count("arguments");
 }
 
-// `additionalProperties: true` (and a bare {"type":"object"}, which JSON Schema
-// defines the same way): keys the schema does not declare are legal and their
-// values are undescribed. Parsed since #1564 and read by nothing until #1729,
-// so the FSM behaved as if every object were additionalProperties:false and a
-// free-form object could only ever be {}.
-//
-// TOOL_CALL is deliberately excluded: its two keys are ORDERED and its
-// arguments bind a chosen tool's schema, so an extra key there is a desync,
-// not an extension.
+// additionalProperties:true (and bare {"type":"object"}, JSON Schema treats them the
+// same): undeclared keys are legal with undescribed values. Parsed since #1564 but read
+// by nothing until #1729 - the FSM treated every object as additionalProperties:false,
+// so a free-form object could only ever be {}.
+// TOOL_CALL is excluded: its two keys are ORDERED and arguments bind a chosen tool's
+// schema, so an extra key there is a desync, not an extension.
 static bool object_allows_additional(const SchemaNode* n) {
     return n && n->type == SchemaType::OBJECT && n->additional_properties;
 }
@@ -281,10 +258,9 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
     const auto& f = top();
     switch (f.phase) {
         case SchemaPhase::VALUE_START: {
-            // No insignificant whitespace: a reasoning model whose top token is
-            // a newline would otherwise stall forever (whitespace is always
-            // re-allowed, never forcing structural progress). Compact JSON only
-            // — whitespace *inside* string values is CAT_STRING_CHAR, untouched.
+            // No insignificant whitespace: a reasoning model whose top token is a newline would
+            // otherwise stall forever (whitespace is always re-allowed, never forcing progress).
+            // Compact JSON only; whitespace inside string values is CAT_STRING_CHAR, untouched.
             uint16_t mask = 0;
             if (!f.node)
                 return mask | CAT_VALUE_START;
@@ -428,12 +404,10 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
 
         case SchemaPhase::NUMBER_VALUE: {
             uint16_t m = CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
-            // Cap the digit run so a model that degenerates into a digit loop
-            // (e.g. "age":42000000…) can't run an unbounded number to max_tokens
-            // and leave the JSON unterminated (#751). f.string_len counts digits;
-            // once it hits the cap, drop continue-number so the number must close
-            // — the result is a valid (if large) JSON number, not a runaway. The
-            // cap (40) is far beyond any real int64 (≤19) / double (~17 sig) value.
+            // Caps the digit run (#751) so a degenerate digit loop (e.g. "age":42000000...) cannot
+            // run to max_tokens leaving the JSON unterminated. At the cap, drop continue-number so the
+            // number must close: a valid (if large) JSON number, not a runaway. Cap (40) exceeds any
+            // real int64 (<=19) / double (~17 sig) value.
             constexpr int kMaxNumberDigits = 40;
             if (f.string_len < kMaxNumberDigits)
                 m |= CAT_NUMBER_CONT;
@@ -482,28 +456,16 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     if (stack_.empty())
         return;
 
-    // Full per-token legality: a candidate token is allowed only if simulating
-    // its entire text from the current FSM state stays legal at every char.
-    // This is what the first-char category mask cannot do — it catches
-    // multi-char tokens that span phase transitions (`{}` closing an object
-    // with unmet required keys, `":"` as a bogus enum value, `"Why` opening a
-    // non-existent key, `0.98` for an integer). The category mask still runs
-    // alongside (it governs EOS / whitespace / structural first-char), so a
-    // token must pass BOTH. token_legal() handles empty (EOS/special) tokens by
-    // deferring to the category mask.
-    //
-    // Cost control (this loop runs per decode step over the whole vocab, and
-    // token_legal deep-copies the frame stack per candidate — it dominated
-    // json_schema decode at 151k tokens):
-    //  - category prefilter: the kernel ANDs category and allow, so a token
-    //    that fails the category mask is masked regardless of allow — skip
-    //    its simulation entirely. In structural phases the category mask is
-    //    narrow and this eliminates almost all simulations.
-    //  - in-string O(1) shortcut (mirrors JsonConstrainer): in a free string
-    //    value, any token without '"', '\\' or a raw control char stays
-    //    inside the string by construction — sim_advance would accept every
-    //    char without touching the stack, so skip the simulation. Pattern /
-    //    enum / key strings still simulate (prefix & regex constraints).
+    // Full per-token legality: a candidate is allowed only if simulating its whole text stays
+    // legal at every char - catches multi-char tokens spanning phase transitions (`{}` on
+    // unmet required keys, `":"` as a bogus enum value, `0.98` for an integer) that the
+    // first-char category mask misses. Category mask still runs alongside (governs
+    // EOS/whitespace/structural first-char); a token must pass BOTH.
+    // Cost control (runs per decode step over the whole vocab; token_legal deep-copies the
+    // frame stack per candidate): category prefilter skips simulation for tokens the category
+    // mask already fails; in a free string value, any token without '"','\\' or a raw control
+    // char stays inside the string by construction, so simulation is skipped (pattern/enum/key
+    // strings still simulate).
     need_token_allow_ = true;
     const SchemaPhase phase = top().phase;
     // A free value whose grammar sits inside a string is the same regime as a
@@ -513,17 +475,12 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     const bool free_string = (phase == SchemaPhase::STRING_VALUE) ||
                              (free_value_phase &&
                               top().free_grammar.current_state == JsonState::IN_STRING);
-    // XML cost control — the XML phases delegate the whole vocab to the
-    // per-token simulation (category 0xFFFF), which deep-copies the frame
-    // stack per candidate; unchecked that is ~150k stack copies per decode
-    // step (the exact regime the comment above exists for). Two shortcuts:
-    //  - tag phases have a tiny legal-first-char set: probe all 256 first
-    //    chars ONCE on a cloned stack and reject by first byte (a token whose
-    //    first char is an illegal transition can never be legal).
-    //  - open raw values accept ANY text; a token is only ever illegal if the
-    //    "\n</parameter>" delimiter COMPLETES inside it (its tail then falls
-    //    into the tag grammar). Run the int-only delimiter automaton over the
-    //    token first; only completing tokens pay the full simulation.
+    // XML cost control: XML phases delegate the whole vocab to per-token simulation
+    // (category 0xFFFF), which deep-copies the frame stack per candidate (unchecked, near the
+    // full vocab per step). Two shortcuts: tag phases probe all 256 first chars once on a
+    // cloned stack and reject by first byte; open raw values accept any text and are illegal
+    // only if the "\n</parameter>" delimiter completes inside them (run the int-only delimiter
+    // automaton first; only completing tokens pay the full simulation).
     const bool xml_raw = (phase == SchemaPhase::XML_RAW_VALUE);
     const bool xml_raw_open = xml_raw && top().xml_value_open;
     // The envelope phases and the XML body's VALUE_START are the same
@@ -586,21 +543,13 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
         }
         token_allow_[i] = token_legal(text) ? 1 : 0;
     }
-    // EOS must not stop generation mid-value: its rendered text ("<|im_end|>")
-    // would pass the anything-goes value scan above. Post-loop so no shortcut
-    // can re-allow it.
-    //
-    // This used to be gated on `xml_raw` while the hazard it describes belongs
-    // just as much to the JSON free-string shortcut a few lines up (#1199).
-    // "<|im_end|>" is plain printable ASCII, so classify_token hands it
-    // CAT_STRING_CHAR and the category mask does NOT govern it inside a string
-    // — contrary to what the comment on compute_token_allow_mask assumes. A
-    // model that reached for EOS mid-string therefore ended the request with
-    // the document still open, and the caller got a 200 carrying invalid JSON.
-    //
-    // Unconditional is correct: reaching this function means the stack is
-    // non-empty, and apply_mask returns before it when the root value is
-    // complete — that is the one place EOS is legal, and there it is forced.
+    // EOS must not stop generation mid-value: its rendered text ("<|im_end|>") would pass the
+    // anything-goes value scan above, so this check runs post-loop. The hazard is not XML-only
+    // (#1199): "<|im_end|>" is plain ASCII, so classify_token tags it CAT_STRING_CHAR and the
+    // category mask does not govern it inside a string. A model reaching EOS mid-string ended
+    // the request with the document open, returning a 200 with invalid JSON.
+    // Unconditional is correct: this function only runs on a non-empty stack; apply_mask
+    // returns earlier when the root value is complete, the one place EOS is legal.
     for (int32_t e : eos_tokens_)
         if (e >= 0 && e < vocab_size_)
             token_allow_[e] = 0;
@@ -644,11 +593,9 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
     uint16_t cat_mask = compute_category_mask();
     compute_token_allow_mask(cat_mask);
 
-    // Empty-allow guard: an over-tight schema/state combination (e.g.
-    // {"type":"object"} without properties — the key phase knows no legal
-    // key) can reject every token. All logits then go to -FLT_MAX and greedy
-    // argmax degenerates to token id 0 ("!!!!" spam on byte-level BPE
-    // vocabs). Force a clean EOS finish instead.
+    // Empty-allow guard: an over-tight schema/state (e.g. {"type":"object"} without
+    // properties) can reject every token, sending all logits to -FLT_MAX so greedy argmax
+    // degenerates to token id 0 ("!!!!" spam on byte-level BPE). Force a clean EOS instead.
     if (need_token_allow_) {
         size_t n_allowed = 0;
         for (int i = 0; i < vocab_size_ && n_allowed == 0; i++) {
@@ -742,15 +689,11 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
     if (!initialized_ || preamble_.active() || stack_.empty())
         return 0;
 
-    // Walk a cloned frame stack. Per state, derive a SUPERSET of the legal
-    // next chars from the phase (small: structural chars, matching property
-    // / enum next-chars, the literal target) and test each candidate via
-    // sim_advance — the grammar's single source of truth, so required-key
-    // gating, trailing-comma bans and enum/key prefix narrowing all apply.
-    // Exactly one legal candidate → the char is forced; append and advance
-    // the clone. Phases whose legal-char set is open-ended (free string
-    // content, escapes, numbers, patterns) stop the walk — never force
-    // there.
+    // Walk a cloned frame stack: derive a SUPERSET of legal next chars from the phase
+    // (structural chars, matching property/enum next-chars, literal target), test each via
+    // sim_advance (the single source of truth), so required-key gating, comma bans and
+    // prefix narrowing all apply. Exactly one legal candidate forces the char and advances.
+    // Open-ended phases (free string content, escapes, numbers, patterns) stop the walk.
     std::vector<SchemaFrame> stk = stack_;
     while (static_cast<int>(out.size()) < max_chars && !stk.empty()) {
         const SchemaFrame& f = stk.back();
@@ -794,11 +737,9 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 cands = "\"}";  // sim_advance rejects '}' while required keys are unmet
                 break;
             case SchemaPhase::OBJECT_KEY: {
-                // Next chars of unemitted properties matching the buffer;
-                // '"' closes iff the buffer is a complete key (sim decides).
-                // Without a node the key is unconstrained (any string char
-                // is legal) — the candidate set below would not be a
-                // superset, so never force there.
+                // Next chars of unemitted properties matching the buffer; '"' closes iff the buffer is a
+                // complete key (sim decides). Without a node the key is unconstrained (any string char
+                // legal) - the candidate set would not be a superset, so never force there.
                 if (!f.node || object_allows_additional(f.node))
                     return static_cast<int>(out.size());
                 cands = "\"";
@@ -939,14 +880,10 @@ static void sim_fixup_parent(std::vector<SchemaFrame>& stk) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Transition simulator — the single source of truth for the schema grammar.
-// Drives the real update path (on stack_) and per-token mask legality (on a
-// cloned stack). Returns false on any illegal transition, so a multi-char
-// token that spans phase transitions (`{}`, `":"`, `"Why`, integer `0.98`,
-// trailing comma) is rejected as a whole rather than slipping past the
-// first-char category mask.
-// ---------------------------------------------------------------------------
+// Transition simulator: single source of truth for the schema grammar. Drives both the
+// real update path (on stack_) and per-token mask legality (on a cloned stack). Returns
+// false on any illegal transition, rejecting a multi-char token spanning phase
+// transitions (`{}`, `":"`, `"Why`, `0.98`, trailing comma) as a whole.
 bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const {
     if (stk.empty())
         return false;  // trailing content after the root value completed
@@ -1139,11 +1076,10 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 f.phase = SchemaPhase::OBJECT_AFTER_KEY;
                 return true;
             }
-            // No escapes in keys (#850): accepting '\' and dropping it let
-            // the NEXT char match the property prefix while the emitted
-            // text carried the escape — `{"\number_x":5}` passed the mask.
-            // Property names are matched on raw chars (escapes were never
-            // decoded), so no legal key needs one.
+            // No escapes in keys (#850): accepting '\' and dropping it let the NEXT char match the
+            // property prefix while the emitted text still carried the escape - `{"\number_x":5}`
+            // passed the mask. Property names match on raw chars (escapes never decoded), so no
+            // legal key needs one.
             if (c == '\\')
                 return false;
             if (!f.node || !is_valid_key_prefix(f.node, f.key_buffer + c, f.emitted_keys))
@@ -1161,10 +1097,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 // TOOL_CALL "arguments" resolves to the parameter schema of
                 // the tool chosen by the completed "name" enum (#1002).
                 if (f.node && f.node->type == SchemaType::TOOL_CALL && f.current_key == "arguments") {
-                    // Reverse scan: tool entries follow their hoisted
-                    // "<tool>/<def>" entries, so a tool name colliding with a
-                    // hoisted key still binds its own entry (see
-                    // xml_tool_params).
+                    // Reverse scan: tool entries follow their hoisted "<tool>/<def>" entries, so a tool name
+                    // colliding with a hoisted key still binds its own entry (see xml_tool_params).
                     prop = nullptr;
                     for (auto it = schema_->defs.rbegin(); it != schema_->defs.rend(); ++it) {
                         if (it->first == f.chosen_tool) {
@@ -1180,9 +1114,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     SchemaFrame nf;
                     nf.node = nullptr;
                     nf.phase = SchemaPhase::FREE_VALUE;
-                    // Seeded in AFTER_COLON, not START: START accepts only '{'
-                    // and '[', while an undescribed value may be any JSON value.
-                    // AFTER_COLON pushes AFTER_VALUE for every value form, so
+                    // Seeded in AFTER_COLON, not START: START accepts only '{' and '[', while an undescribed
+                    // value may be any JSON value. AFTER_COLON pushes AFTER_VALUE for every value form, so
                     // that single stack entry is this frame's completion marker.
                     nf.free_grammar.reset();
                     nf.free_grammar.current_state = JsonState::AFTER_COLON;
@@ -1196,26 +1129,19 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
         }
 
         case SchemaPhase::FREE_VALUE: {
-            // A value the schema does not describe. The JSON grammar owns it;
-            // this frame only decides where it ENDS, because the char that ends
-            // a number belongs to the parent object, not to the value.
-            //
-            // No insignificant whitespace, for the reason VALUE_START gives: a
-            // free value must not reopen the newline escape hatch.
+            // A value the schema does not describe: the JSON grammar owns it, this frame only decides
+            // where it ENDS (the char that ends a number belongs to the parent, not the value).
+            // No insignificant whitespace, same reason as VALUE_START: a free value must not reopen
+            // the newline escape hatch.
             if (space && f.free_grammar.current_state != JsonState::IN_STRING &&
                 f.free_grammar.current_state != JsonState::IN_STRING_ESCAPE)
                 return false;
-            // Containers, strings and literals end ON their last character and
-            // are handled below. A number is the one value with no closing
-            // char: it ends at the first char that does not continue it, and
-            // that char is the parent's ',' or '}'. Decided on a COPY, because
-            // asking the real grammar would consume the char in the wrong
-            // context (its own IN_NUMBER handler re-processes it as if the
-            // enclosing object were the grammar's, not the schema's).
-            // Only when the number IS this frame's whole value: the single
-            // stack entry is the AFTER_VALUE seeded on entry. A number nested
-            // deeper (inside an object or array of the free value) is the
-            // grammar's own business, and its delimiter is too.
+            // Containers/strings/literals end ON their last char (handled below); a number has no
+            // closing char - it ends at the first char that doesn't continue it, which belongs to the
+            // parent's ',' or '}'. Decided on a COPY: asking the real grammar would consume the char
+            // in the wrong context (its IN_NUMBER handler reprocesses it as the enclosing object's).
+            // Only applies when the number is this frame's whole value (the single AFTER_VALUE stack
+            // entry seeded on entry); a nested number is the grammar's own business.
             if (f.free_grammar.current_state == JsonState::IN_NUMBER &&
                 f.free_grammar.state_stack.size() == 1 &&
                 f.free_grammar.state_stack.back() == JsonState::AFTER_VALUE) {
@@ -1336,10 +1262,9 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 sim_fixup_parent(stk);
                 return true;
             }
-            // JSON forbids raw control chars (U+0000–U+001F) inside strings —
-            // they must arrive escaped (\n, \uXXXX). Multi-char tokens whose
-            // first char passes the category mask (e.g. `"<newline>`) used to
-            // smuggle them through, producing unparseable output.
+            // JSON forbids raw control chars (U+0000-U+001F) in strings; they must arrive escaped
+            // (\n, \uXXXX). Multi-char tokens whose first char passes the category mask (e.g.
+            // `"<newline>`) used to smuggle them through, producing unparseable output.
             if (static_cast<unsigned char>(c) < 0x20)
                 return false;
             return true;  // any content char
@@ -1386,18 +1311,12 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 }
                 if (f.num_leading_zero)
                     return false;  // JSON forbids leading zeros: `0` then digit
-                // #1540: an unconstrained `integer` had no digit bound, so
-                // above temperature 0 the sampler could sit in the digit state
-                // and emit 1020000000000000000000000000000000000000. JSON puts
-                // no bound on an integer literal, but every practical consumer
-                // does: int64 is 19 digits, and a value past it is not a number
-                // the caller can read back. `maximum` would be the precise
-                // bound - it is refused at parse time as unenforceable (#1567),
-                // so this is the floor that keeps the output usable.
-                //
-                // The FSM masks further digits rather than erroring: at 19
-                // digits the value is complete and legal, so the model's next
-                // legal tokens are the ones that close it.
+                // #1540: an unconstrained `integer` had no digit bound, so above temperature 0 the sampler
+                // could emit dozens of digits. int64 is 19 digits, past which no caller can read the value
+                // back; `maximum` would be precise but is refused at parse time as unenforceable (#1567),
+                // so this is the floor keeping output usable.
+                // FSM masks further digits rather than erroring: at 19 digits the value is complete and
+                // legal, so the model's next legal tokens are the ones that close it.
                 if (is_int && f.string_len >= kMaxIntegerDigits)
                     return false;
                 f.string_len++;
@@ -1629,11 +1548,10 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 if (c != '\n')
                     return false;
                 f.xml_value_open = true;
-                // The opener doubles as the delimiter's first char: a model
-                // closing an empty value as '>\n</parameter>' (one newline,
-                // not the template's canonical '>\n\n</parameter>') must not
-                // have its close tag swallowed as value text — the value
-                // would then never close and EOS stays masked to max_tokens.
+                // The opener doubles as the delimiter's first char: a model closing an empty value as
+                // '>\n</parameter>' (one newline, not the canonical '>\n\n</parameter>') must not have its
+                // close tag swallowed as value text, or the value never closes and EOS stays masked to
+                // max_tokens.
                 f.xml_delim_match = 1;
                 return true;
             }

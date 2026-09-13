@@ -1,14 +1,9 @@
-// Narrow FP16 GEMM, up to two (W, C) pairs per launch (header: the contract).
-//
-// Grid (n16 tiles over both pairs) x kSplit. A CTA owns one 16-column tile and
-// one K range; its 8 warps take the k16 steps of that range round-robin and
-// each accumulates the whole 32x16 tile (2 m16 x 2 n8 mma.sync m16n8k16, FP32).
-// Reduce: warps -> smem -> one FP32 partial per CTA in ws[ks][m][col]; the
-// last CTA of a tile (atomic ticket) sums the kSplit partials in index order
-// and writes C. Fixed order = bitwise deterministic.
-//
-// Operand fragments come straight from global memory (u32 per lane, L2 hits:
-// the weight is 0.5 MiB per pair, the activation 320 KiB at M=32, K=5120).
+// Narrow FP16 GEMM, up to two (W,C) pairs per launch. Grid (n16 tiles over both pairs) x
+// kSplit. A CTA owns one 16-column tile and one K range; its 8 warps take the k16 steps
+// round-robin, each accumulating the whole 32x16 tile (2 m16 x 2 n8 mma.sync m16n8k16, FP32).
+// Reduce: warps -> smem -> one FP32 partial per CTA in ws[ks][m][col]; the last CTA of a tile
+// (atomic ticket) sums the kSplit partials in index order and writes C. Fixed order = bitwise
+// deterministic. Operand fragments come straight from global memory (u32/lane, L2 hits).
 
 #include "compute/gemm_f16_narrow_smallm.h"
 #include "core/logging.h"

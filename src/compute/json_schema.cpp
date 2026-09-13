@@ -10,11 +10,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Minimal JSON parser for schema documents (no external dependencies).
-// Only handles the subset needed for JSON Schema: objects, arrays, strings,
+// Minimal JSON parser for schema documents (no external deps): objects, arrays, strings,
 // numbers, booleans, null. No comments, no trailing commas.
-// ---------------------------------------------------------------------------
 
 class SchemaParser {
 public:
@@ -23,11 +20,8 @@ public:
     std::unique_ptr<SchemaNode> parse() {
         skip_ws();
         auto node = parse_schema_object();
-        // #1564: the object loop breaks on anything that is not ',' and the
-        // closing expect() was discarded, so a desync inside the document
-        // returned a truncated tree that still looked like a parse. Trailing
-        // input is the outermost symptom of that and the cheapest place to
-        // catch a shape nothing else noticed.
+        // #1564: an object loop can desync and silently return a truncated tree.
+        // Trailing input after the top-level object is the cheapest place to catch that.
         skip_ws();
         if (!eof())
             fail("trailing input after the schema object");
@@ -42,10 +36,9 @@ public:
     bool ref_error_ = false;
     bool ref_error() const { return ref_error_; }
 
-    // Set when the document is structurally unparseable or uses a keyword this
-    // build cannot enforce. Same contract as ref_error_: the whole parse fails,
-    // and the caller turns that into a 400. Silently dropping the keyword would
-    // answer a bounded request with an unbounded grammar.
+    // Set when the document uses a keyword this build cannot enforce. Same
+    // contract as ref_error_: parse fails, caller returns 400 rather than
+    // silently answering a bounded request with an unbounded grammar.
     bool parse_error() const { return parse_error_; }
     const std::string& error_reason() const { return error_reason_; }
 
@@ -179,15 +172,9 @@ private:
                         s += '\f';
                         break;
                     case 'u': {
-                        // \uXXXX -> UTF-8. This used to skip the four hex
-                        // digits and append a literal '?', which is not a
-                        // near-miss: json.dumps defaults to ensure_ascii=True,
-                        // so a schema round-tripped through any Python client
-                        // arrives with EVERY non-ASCII character escaped - and
-                        // parse_string() is the reader for enum values,
-                        // property names, `required` entries and `pattern`, so
-                        // the grammar then forced the model to emit '?' where
-                        // the caller asked for a character (#1563).
+                        // \uXXXX -> UTF-8. json.dumps's ensure_ascii=True means schemas commonly
+                        // arrive with every non-ASCII char escaped; parse_string() feeds enum
+                        // values, property names, `required` and `pattern` (#1563).
                         uint32_t cp = 0;
                         if (!read_hex4(cp))
                             return s;  // truncated escape: stop, do not invent
@@ -334,10 +321,9 @@ private:
         return result;
     }
 
-    // Assertion keywords this build parses past but cannot enforce. Split from
-    // annotations on purpose: `format`, `title`, `description`, `examples`,
-    // `default`, `deprecated`, `readOnly`, `writeOnly` change no legal value
-    // and stay silently ignored, which is what the spec says they do.
+    // Assertion keywords this build parses past but cannot enforce. Distinct from
+    // annotations (`format`, `title`, `description`, etc.) which the spec
+    // defines as silently ignored.
     static bool is_unenforceable_keyword(const std::string& k) {
         static const char* kUnenforceable[] = {
             "minimum",
@@ -465,20 +451,16 @@ private:
                 node->required = parse_string_array();
             } else if (key == "additionalProperties") {
                 saw_additional_properties = true;
-                // #1564: parse_bool() returns false WITHOUT consuming when the
-                // value is not true/false, so the schema-object form left pos_
-                // on '{'. The key loop then saw '{' instead of ',', broke, and
-                // every key after this one was dropped - including
-                // `properties`, which downgrades the request to json_object at
-                // constraint_manager.cpp:138. Consume the value either way.
+                // #1564: parse_bool() doesn't consume on a non-bool value, leaving pos_
+                // stuck and dropping every key after this one (constraint_manager.cpp:138).
+                // Consume the value either way.
                 skip_ws();
                 if (peek() == 't' || peek() == 'f') {
                     node->additional_properties = parse_bool();
                 } else {
-                    // The schema form ({"type": "..."}) is legal and common
-                    // (Pydantic emits it for Dict[str, T]). imp does not
-                    // enforce a schema on extra keys, so this reads as the
-                    // permissive `true` - a weaker constraint, not a wrong one.
+                    // The schema form ({"type": "..."}) is legal (Pydantic Dict[str, T]).
+                    // imp does not enforce a schema on extra keys, so this reads as
+                    // permissive `true` - weaker, not wrong.
                     skip_value();
                     node->additional_properties = true;
                 }
@@ -501,14 +483,9 @@ private:
                 } else {
                     skip_ws();
                     while (!eof() && peek() != ']') {
-                        // #1564: parse_string() also returns "" without
-                        // consuming. A non-string member therefore produced
-                        // enum_values == {""} and left pos_ on the member, so
-                        // the rest of the schema was dropped AND the only legal
-                        // output became the empty string. The FSM emits an enum
-                        // as quoted string content (schema_constrain.cu:790),
-                        // so a numeric or boolean member has no representation:
-                        // refuse rather than constrain to something else.
+                        // #1564: a non-string enum member has no representation - the FSM emits
+                        // enum as quoted string content (schema_constrain.cu:733). Refuse rather
+                        // than constrain to something else.
                         if (peek() != '"') {
                             fail(
                                 "enum members must be strings; a number, boolean or null "
@@ -602,18 +579,15 @@ private:
                     node->type = SchemaType::ENUM;
                 }
             } else if (is_unenforceable_keyword(key)) {
-                // #1567: these are assertions, not annotations. Dropping one
-                // answers a request that bounded its output with a grammar that
-                // does not - the exact failure #1540/#751 describes, reached by
-                // a caller who did bound the field. docs/API.md: "A constraint
+                // #1567: these are assertions, not annotations - dropping one answers a
+                // bounded request with an unbounded grammar. docs/API.md: "A constraint
                 // imp cannot compile is a 400, not an unconstrained answer."
                 fail("schema keyword '" + key + "' is not enforceable by this build");
                 skip_value();
             } else {
-                // Skip unknown fields and pure annotations ($schema, title,
-                // description, examples, default, format - which is an
-                // annotation in Draft 2020-12 unless the format-assertion
-                // vocabulary is in use, and imp does not claim it).
+                // Skip unknown fields and pure annotations ($schema, title, description,
+                // examples, default, format - an annotation in Draft 2020-12 unless the
+                // format-assertion vocabulary is in use, which imp does not claim).
                 skip_value();
             }
 
@@ -628,23 +602,15 @@ private:
         if (!expect('}'))
             fail("schema object is not closed; a value before this point was not consumed");
 
-        // Enum takes precedence over a co-declared "type". Key order in the
-        // object is not significant in JSON, and clients commonly emit
-        // {"type":"string","enum":[...]} — a later "type":"string" must NOT
-        // demote the node back to a free string (the constrainer would then
-        // accept any value). Resolve this order-independently.
+        // Enum takes precedence over a co-declared "type" (JSON key order is not
+        // significant; {"type":"string","enum":[...]} must not demote back to a
+        // free string, which the constrainer would then accept any value for).
         if (!node->enum_values.empty() && node->type != SchemaType::REF)
             node->type = SchemaType::ENUM;
 
-        // An object that declares no properties and says nothing about
-        // additionalProperties is free-form: JSON Schema's default for the
-        // keyword is `true`, and with no declared key there is nothing else the
-        // node could mean. Without this the FSM knows no legal key and the only
-        // document it can emit is {} (#1729).
-        //
-        // Deliberately NOT applied to an object that does declare properties:
-        // the spec's default would loosen every tool schema in the tree, and
-        // the strictness there is what callers ask for.
+        // #1729: an object with no properties/additionalProperties defaults to
+        // free-form (`true`), else the FSM's only legal doc is {}. Not applied
+        // when properties ARE declared - that would loosen tool-schema strictness.
         if (node->type == SchemaType::OBJECT && node->properties.empty() &&
             !saw_additional_properties)
             node->additional_properties = true;
@@ -795,16 +761,9 @@ static void rewrite_refs(SchemaNode* node, const std::map<std::string, std::stri
         rewrite_refs(def.get(), rename);
 }
 
-// Shared per-tool loop for both tool-call roots: parses every parameter
-// schema, applies the enforceability gates, hoists per-tool $defs into the
-// root under the "<tool>/<def>" namespace, and records (tool name, parameter
-// schema) in root->defs. `names` receives the tool names in order. Returns
-// false when any tool is unenforceable (caller declines the whole set).
-// xml: the Qwen-Coder XML dialect writes names/keys UNQUOTED inside
-// <function=NAME>/<parameter=KEY> tags and can only express object
-// properties — an ENUM params schema (legal for the JSON dialect, where
-// "arguments" IS the enum string) has no XML representation, and a name/key
-// containing '<', '>' or a newline can never complete its tag.
+// Shared per-tool loop: parses each tool's schema, hoists its $defs into
+// root->defs under "<tool>/<def>", returns false if any tool is unenforceable.
+// xml: names/keys are UNQUOTED in tags, so enum params or '<','>','\n' have no XML form.
 static bool xml_tag_name_ok(const std::string& s) {
     return s.find_first_of("<>\n") == std::string::npos;
 }
@@ -818,10 +777,9 @@ static bool collect_tool_defs(const std::vector<std::pair<std::string, std::stri
             return false;
         auto params = parse_json_schema(params_json);
         const SchemaNode* res = params ? resolve_schema_ref(params.get(), params.get()) : nullptr;
-        // Enforceable structure only. A free-form object is representable
-        // since #1729 - its keys are free and its values undescribed - but
-        // only in the JSON dialect: the XML dialect renders parameter KEYS as
-        // tags, and a schema that declares none has no tag to render.
+        // #1729: a free-form object (free keys, undescribed values) is
+        // representable only in the JSON dialect - the XML dialect renders
+        // parameter keys as tags, and a schema with none has no tag to render.
         const bool free_form_object = res && res->type == SchemaType::OBJECT &&
                                       res->properties.empty() && res->additional_properties;
         const bool enforceable =
@@ -835,15 +793,9 @@ static bool collect_tool_defs(const std::vector<std::pair<std::string, std::stri
                 if (!xml_tag_name_ok(key))
                     return false;
         }
-        // Hoist any per-tool $defs into the TOOL_CALL root (#1002 stage 2).
-        // REF resolution in schema_constrain.cu always searches the TOOL_CALL
-        // root's defs, so a tool's nested models (pydantic/zod emit $defs+$ref
-        // for every nested model) must live there. The namespace key
-        // "<tool>/<def>" carries a '/', which parse_json_schema forbids in any
-        // $ref-derived name (and no function name contains one), so a hoisted
-        // key can never collide with a tool name or another tool's hoisted def.
-        // "#" self-refs (recursive root schema) rewrite to the tool name, whose
-        // root->defs entry IS this param schema — so `arguments` chases it back.
+        // #1002 stage 2: hoist per-tool $defs into TOOL_CALL root (schema_constrain.cu
+        // resolves REFs only there). "<tool>/<def>" keys contain '/', which no other
+        // name can, so they never collide; "#" self-refs rewrite to the tool name.
         if (!params->defs.empty()) {
             std::map<std::string, std::string> rename;
             rename["#"] = name;
@@ -906,17 +858,13 @@ std::unique_ptr<SchemaNode> build_xml_tool_call_schema(
     return root;
 }
 
-// ===========================================================================
-// RegexNfa — Thompson-construction NFA over bytes for the supported subset.
-// All host-side; never compiled into device code.
-// ===========================================================================
+// RegexNfa: Thompson-construction NFA over bytes for the supported regex
+// subset. All host-side; never compiled into device code.
 
 int RegexNfa::new_state() {
-    // #1608: the {n,m} builder allocates per clone and the nested form
-    // multiplies, so the state count is the resource an attacker actually
-    // spends. Once the budget is gone the parse is an error and every caller
-    // unwinds through the `error_` checks; returning the last valid index keeps
-    // the add_edge()/add_epsilon() calls already in flight in bounds.
+    // #1608: {n,m} clones multiply state count, the resource a hostile pattern
+    // spends. Past kMaxStates the parse errors; returning the last valid index
+    // keeps in-flight add_edge()/add_epsilon() calls in bounds.
     if (states_.size() >= kMaxStates) {
         error_ = true;
         return states_.empty() ? 0 : static_cast<int>(states_.size()) - 1;
@@ -994,13 +942,9 @@ bool RegexNfa::parse_atom(Frag& out) {
 
     if (c == '(') {
         pos_++;  // consume '('
-        // `(?:…)` is a non-capturing group. Nothing here captures and
-        // backreferences are refused upstream, so the marker carries no
-        // matching semantics — skip it and parse the body as an ordinary group.
-        // Without this, `?` was read as a quantifier with no atom and `:` as a
-        // literal, so `(?:a|b)c` compiled to `(:a|b)c`: it matched "bc", not
-        // "ac", while reporting a successful compile. A wrong pattern enforced
-        // silently is the one failure mode this parser must not have.
+        // `(?:...)` is non-capturing; nothing here captures and backreferences are
+        // refused upstream, so skip the marker and parse the body as an ordinary
+        // group. A silently wrong compiled pattern is the one failure mode to avoid.
         if (pos_ + 1 < src_->size() && (*src_)[pos_] == '?' && (*src_)[pos_ + 1] == ':')
             pos_ += 2;
         if (!parse_alt(out))
@@ -1251,10 +1195,8 @@ bool RegexNfa::parse_repeat(Frag& out) {
         if (!comma)
             m = n;  // {n}
 
-        // #1608: n is a clone count. `a{2000000000}` ran a two-billion
-        // iteration loop, each iteration re-parsing the atom and allocating
-        // states, on an HTTP worker thread at admission time. The GBNF parser
-        // has had this same bound since it was written.
+        // #1608: n is a clone count; unbounded n costs one parse+alloc per clone
+        // on an HTTP worker thread at admission time. Capped at kMaxRepeat.
         if (n > kMaxRepeat || m > kMaxRepeat) {
             error_ = true;
             return false;
@@ -1278,11 +1220,8 @@ bool RegexNfa::parse_repeat(Frag& out) {
             pos_ = 0;
             error_ = false;
             bool ok = parse_repeat(f);  // atom may itself be a repeat-free atom
-            // The clone's own error has to survive the restore. It did not:
-            // error_ was overwritten with prev_err and THEN read, so `!error_`
-            // reported the state before the clone. That also swallowed the
-            // state-budget signal new_state() raises (#1608), which is what
-            // stops the nested `(((a{100}){100}){100})` form.
+            // #1608: the clone's error must survive the restore, else new_state()'s
+            // state-budget signal is lost and nested `(((a{100}){100}){100})` isn't stopped.
             bool inner_err = error_;
             src_ = prev_src;
             pos_ = prev_pos;
@@ -1369,10 +1308,9 @@ bool RegexNfa::parse_concat(Frag& out) {
 
 // alt := concat ('|' concat)*
 bool RegexNfa::parse_alt(Frag& out) {
-    // #1609: parse_atom() recurses back into parse_alt() for a group, so a
-    // pattern of '(' costs one frame per byte - the cheapest stack overflow in
-    // the request surface. parse_alt is the single point that closes the
-    // mutual recursion, so one guard here covers all four functions.
+    // #1609: parse_atom() recurses into parse_alt() for a group, so '(' costs
+    // one stack frame per byte. parse_alt is the single point closing the
+    // mutual recursion, so one depth guard here covers all four functions.
     if (depth_ >= kMaxDepth) {
         error_ = true;
         return false;

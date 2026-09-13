@@ -1,17 +1,9 @@
-// =============================================================================
-// mmq_q8_imma.cu — INT8 IMMA prefill GEMM family (sm_120a)
-// =============================================================================
-//
-// Fused-dequant prefill GEMMs on the int8 tensor cores for Q8_0 and Q4_K
-// (dense + MoE-grouped). See mmq_q8_imma.h for the contract and the design
-// notes vs the 2026-05-18 phase-2B ceiling (SMEM-staged scales, 128x128x64
-// tiles, +16-B row pad killing 28.3M bank conflicts, one syncthreads pair
-// per K-step; 3-stage cp.async REGRESSED -21% — do not re-add).
-//
-// Unified math (α/β form; Q8_0 repacks with α=d, β=0):
-//   out[m,n] = Σ_kb d_a[m,kb] · ( α[n,kb]·Σ_{k∈kb} a_s8·w_s8 + β[n,kb]·rs[m,kb] )
-// where rs is the int rowsum of the quantized activation sub-block (couples
-// to Q4_K's collapsed (q-8)+dmin terms, see mmq_q4k_imma_layout.h).
+// INT8 IMMA prefill GEMM family (sm_120a) for Q8_0 and Q4_K, dense + MoE-grouped.
+// Contract: mmq_q8_imma.h. 3-stage cp.async pipelining regressed here, do not re-add.
+// Unified math (alpha/beta form; Q8_0: alpha=d, beta=0): out[m,n] = Σ_kb d_a[m,kb] · ( α[n,kb]·Σ_{k∈kb}
+// a_s8·w_s8 + β[n,kb]·rs[m,kb] )
+// rs = int rowsum of the quantized activation sub-block; couples to Q4_K's collapsed (q-8)+dmin terms
+// (mmq_q4k_imma_layout.h).
 
 #include "compute/mmq_q8_imma.h"
 #include "compute/mmq_q8_imma_internal.cuh"
@@ -28,13 +20,10 @@ namespace imp {
 
 namespace {
 
-// One K-step tile load, all 256 threads cooperating (loops are fully
-// unrolled compile-time for both BM variants):
-//   A   [BM][kBK]  s8     M-tail rows zero-filled
-//   B   [kBN][kBK] s8     weight rows always full (N % kBN == 0 gate)
-//   Asc [BM][2]    half   activation scale, d-plane cols (kb0, kb0+1)
-//   Ars [BM][2]    float  activation rowsum, same cols
-//   Bsc [kBN][2][2] half  weight (α, β) interleaved for both kb cols
+// One K-step tile load, all 256 threads cooperating, loops unrolled for both BM variants:
+//   A[BM][kBK] s8, M-tail zero-filled; B[kBN][kBK] s8, weight rows always full (N % kBN == 0)
+//   Asc[BM][2] half / Ars[BM][2] float: activation scale/rowsum, d-plane cols (kb0, kb0+1)
+//   Bsc[kBN][2][2] half: weight (α, β) interleaved for both kb cols
 template <int BM, bool WB>
 __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A,
                                            const __half* __restrict__ Asc,
@@ -75,15 +64,12 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
     }
 }
 
-// out = (or +=, BETA1) the α/β-scaled IMMA over [BM,kBN] tiles. Grouped MoE
-// form: gridDim.z = ne with device expert_offsets; dense passes offsets ==
-// nullptr (z extent 1).
-// SPLITK (dense-only): gridDim.z = K-split index instead of expert. With a
-// single M-tile the grid is only N/kBN blocks — far too few to hide the
-// K-loop latency (the spec-decode verify bottleneck, issue #667). Each split
-// computes ks_per_split K-steps and stores its fp32 partial tile to
-// split_out[z][M][N]; mmq_splitk_finalize_kernel reduces the slices (fixed
-// order — bit-reproducible) and applies the beta/residual form.
+// out = alpha/beta-scaled IMMA over [BM,kBN] tiles, += when BETA1.
+// MoE: gridDim.z = ne, indexed via expert_offsets; dense passes offsets = nullptr (z=1).
+// SPLITK (dense-only): gridDim.z = K-split index; a single M-tile grid (N/kBN blocks) is too small to hide
+// K-loop latency (spec-decode verify bottleneck, issue #667).
+// Each split writes ks_per_split K-steps to split_out[z][M][N]; mmq_splitk_finalize_kernel reduces in fixed
+// order (bit-reproducible) and applies beta/residual.
 template <int BM, bool BETA1, bool WB /* weight beta term (Q4_K); false = pure alpha (Q8_0) */,
           bool SPLITK = false>
 __global__ void __launch_bounds__(kThreads)
@@ -222,8 +208,7 @@ __global__ void __launch_bounds__(kThreads)
                         acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
                         acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
                     } else {
-                        // pure-alpha Q8_0 fast path (the unified beta form
-                        // cost Q8 ~6%: 11.4k -> 10.7k pp512, fixed here)
+                        // pure-alpha fast path: the unified beta form costs Q8_0 throughput
                         acc[mf][nf][0] += (da_lo * al) * static_cast<float>(c0);
                         acc[mf][nf][1] += (da_lo * ah) * static_cast<float>(c1);
                         acc[mf][nf][2] += (da_hi * al) * static_cast<float>(c2);
@@ -236,7 +221,7 @@ __global__ void __launch_bounds__(kThreads)
     }
 
     // SPLITK epilogue: store the fp32 partial tile to this split's slice;
-    // the finalize kernel reduces slices and applies beta/residual.
+    // mmq_splitk_finalize_kernel reduces slices and applies beta/residual.
     if constexpr (SPLITK) {
         float* Cs = split_out + static_cast<size_t>(blockIdx.z) * (static_cast<size_t>(M) * N);
 #pragma unroll
@@ -282,8 +267,7 @@ __global__ void __launch_bounds__(kThreads)
     }
 }
 
-// Reduce the SPLITK partial slices (fixed order — bit-reproducible) and
-// apply the beta form: out = sum (beta 0) or out += sum (beta 1).
+// Reduce SPLITK partial slices in fixed order (bit-reproducible); beta 0: out = sum, beta 1: out += sum.
 __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, int n_splits,
                                            int total, __half* __restrict__ out, int beta1) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -294,39 +278,17 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
     out[idx] = beta1 ? __hadd(out[idx], __float2half(v)) : __float2half(v);
 }
 
-// -----------------------------------------------------------------------------
-// Q6_K RAW-read kernel (per-16 scales, symmetric — no beta/rowsum term).
-//
-// The 210-B super-blocks are only 2-aligned (blocks cp.async at all sizes),
-// so a one-time 224-B-stride repack (plain byte copy, +6.7% of the Q6_K
-// bytes — ~110 MB for the 30B down_proj experts) restores 16-B alignment;
-// the forge 2026-05-28 "2-aligned quant repack" finding, applied here.
-//
-// Per-16 scale granularity vs the k32 MMA: HALF-MMA SPLIT — issue the
-// m16n8k32 twice per sub-block, once as (b0, 0) and once as (0, b1); the
-// zeroed operand register makes each MMA return the 16-wide partial sum,
-// which gets its own α = d·sc16. Same int-op count as a k16 MMA pair,
-// zero layout restructuring.
-//
-// Quad mapping (see dequant_gpu.cu Q6_K header): K-step ks covers sub-block
-// pair j = (2ks)%8, j+1 → group g = j>>2, quads (j%4, j%4+1). The pair
-// shares ql bytes [g*64 .. +63] (quad&1 selects the 32-byte half, quad>=2
-// the nibble) and qh bytes [g*32 .. +31] (shift quad*2).
-// -----------------------------------------------------------------------------
+// Q6_K RAW-read kernel: per-16 scales, symmetric, no beta/rowsum term.
+// 210-B super-blocks are only 2-aligned; a one-time 224-B-stride repack (+6.7% bytes) restores 16-B alignment
+// for cp.async.
+// Per-16 scale granularity vs k32 MMA: HALF-MMA SPLIT, issue m16n8k32 twice per sub-block as (b0,0) and
+// (0,b1); the zeroed operand yields the 16-wide partial sum with its own alpha=d*sc16 (same int-op count as a
+// k16 MMA pair).
+// Quad mapping (dequant_gpu.cu Q6_K header): K-step ks covers sub-block pair j=(2ks)%8, j+1 -> group g=j>>2,
+// quads (j%4, j%4+1).
+// Pair shares ql bytes [g*64..+63] (quad&1 selects the 32-byte half, quad>=2 the nibble) and qh bytes
+// [g*32..+31] (shift quad*2).
 
-// TUNING LADDER 2026-06-07 (Qwen3-8B Q8_0 pp512, baseline 12 131 tok/s) —
-// three refuted attempts, kernel is at its local optimum in this structure:
-//   __launch_bounds__(256,2):  9 768 (-19%) — 184-reg kernel spills under
-//                              the 128-reg cap; 64-fp32 accumulator file.
-//   NT=64 tile (acc 32):       9 685 (-20%) — bigger tiles win, matching
-//                              the 2026-05-18 phase-2B finding (+108% from
-//                              tile growth). 1 CTA/SM stands.
-//   ldmatrix.x4 A+B fetch:    11 619 (-4%)  — smem fetch is NOT the binding
-//                              constraint after the +16-B row pad; matches
-//                              the 2B.5 neutral-to-negative result.
-// Remaining structural ideas (BK=128 sync-halving w/ dynamic smem, warp
-// specialization) are larger rewrites; the model-level gap vs llama.cpp is
-// 1.13x — the smallest on the board. Spend elsewhere first.
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
@@ -432,11 +394,10 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
     const size_t w_stride = static_cast<size_t>(N) * K;
     const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
 
-    // Dense small-M split-K: with one M-tile the grid is N/kBN blocks (~20 on
-    // a 2.5k-wide weight) — far too few to hide the K-loop latency. The call
-    // costs ~35 µs regardless of N, which is the spec-decode verify
-    // bottleneck (issue #667). Split the K-steps across gridDim.z into fp32
-    // partial slices and reduce; the finalize kernel applies beta/residual.
+    // Dense small-M split-K: one M-tile makes the grid too small (~20 blocks on a 2.5k-wide
+    // weight) to hide K-loop latency, costing ~35us regardless of N (spec-decode verify
+    // bottleneck, issue #667). Splits K-steps across gridDim.z into fp32 partials, reduced
+    // and beta/residual-applied by mmq_splitk_finalize_kernel.
     if (d_offsets == nullptr && M <= 32) {
         const int ksteps_total = K / kBK;
         const int n_tiles = (N + kBN - 1) / kBN;
@@ -530,10 +491,9 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 
 void mmq_q8_imma_release_all() {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
-    // g_imma_splitk and g_imma_act are arena-owned since A7 step 8 — ~Engine closes the
-    // arena; only the guards are re-armed here. The weight/Q6_K repack caches
-    // below are still direct allocations: they are model-resident (T1, A7
-    // step 6), keyed by source weight pointer, and outlive nothing else here.
+    // g_imma_splitk/g_imma_act are arena-owned since A7 step 8 (~Engine closes arena; only
+    // guards re-armed here). Weight/Q6_K repack caches are direct allocations: model-resident
+    // (T1, A7 step 6), keyed by source weight pointer, outlive nothing else here.
     g_imma_splitk = SplitKScratch{};
     for (auto& [_, w] : g_imma_weights) {
         cudaFree(w.qs);
@@ -555,12 +515,9 @@ void mmq_q8_imma_release_all() {
 }
 
 namespace {
-// Nothing called mmq_q8_imma_release_all() outside tests, so the weight planes
-// — up to 8.6 GiB of them — outlived the model they were built from: a second
-// model in the same process kept paying for the first one's planes, and the
-// map is keyed by SOURCE POINTER, so a recycled allocation with the same (N, K)
-// would have been served the previous model's weights. Teardown runs the
-// registered hooks (core/cuda_static_reset.h), which is where this belongs.
+// Weight planes (up to 8.6 GiB) are keyed by SOURCE POINTER: without a teardown call, a
+// second model reuses a recycled allocation and gets served the first model's weights.
+// Teardown runs the registered hooks (core/cuda_static_reset.h).
 void mmq_q8_imma_reset_static_cuda_state() { mmq_q8_imma_release_all(); }
 IMP_REGISTER_CUDA_STATIC_RESET(mmq_q8_imma_reset_static_cuda_state);
 }  // namespace

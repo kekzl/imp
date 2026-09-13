@@ -1,15 +1,10 @@
 #ifndef IMP_COMPUTE_MMQ_Q8_IMMA_INTERNAL_CUH
 #define IMP_COMPUTE_MMQ_Q8_IMMA_INTERNAL_CUH
 
-// =============================================================================
-// mmq_q8_imma_internal.cuh — shared internals for the INT8 IMMA prefill GEMM
-// family (sm_120a). Split out of mmq_q8_imma.cu (recompile-blast-radius gate).
-//
-// Holds the tile constants, the cp.async primitives, and the cross-TU template
-// kernel declarations. Definitions live in the per-format .cu files
-// (mmq_q8_imma_q4k.cu / _q6k.cu / _q51.cu); the dispatch in mmq_q8_imma.cu
-// launches them. Kept BYTE-IDENTICAL to the original inline code.
-// =============================================================================
+// Shared internals for the INT8 IMMA prefill GEMM family (sm_120a), split out of
+// mmq_q8_imma.cu (recompile-blast-radius gate).
+// Tile constants, cp.async primitives, cross-TU kernel declarations; definitions live in
+// mmq_q8_imma_q4k/_q6k/_q51.cu, dispatch in mmq_q8_imma.cu. Keep byte-identical.
 
 #include <mutex>
 #include <unordered_map>
@@ -92,12 +87,11 @@ constexpr size_t q6k_smem_bytes(int BM) {
             static_cast<size_t>(BM) * 4);
 }
 
-// ── State owned by mmq_q8_imma_scratch.cu ────────────────────────────
-// Declared here, not file-static, because the dispatch in mmq_q8_imma.cu reads
-// the scratch pointers directly when it builds its kernel arguments. The
-// weight caches are model-resident direct allocations (T1, A7 step 6 will move
-// them); the activation triple and the split-K slice come from the T2 arena
-// and carry the generation they were taken at (A7 step 8 / AUDIT B13).
+// State owned by mmq_q8_imma_scratch.cu, declared here (not file-static) because
+// mmq_q8_imma.cu's dispatch reads scratch pointers directly for kernel args.
+// Weight caches are model-resident direct allocations (T1, A7 step 6 will move them);
+// activation triple + split-K slice come from the T2 arena, carrying their generation
+// (A7 step 8 / AUDIT B13).
 struct WeightPlanes {
     int8_t* qs = nullptr;
     __half* sc = nullptr;  // interleaved (alpha, beta) [N][K/32][2]

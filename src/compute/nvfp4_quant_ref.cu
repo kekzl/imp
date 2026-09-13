@@ -1,23 +1,10 @@
-// =============================================================================
-// nvfp4_quant_ref.cu -- Reference NVFP4 quantization (round-trip validation)
-// =============================================================================
-//
-// Follows thu-ml/SageAttention's scaled_fp4_quant_kernel (Apache-2.0, subtree
-// sageattention3_blackwell), simplified to a linear storage layout. Used to
-// validate that the FP16→NVFP4 quant math produces sensible values before
-// Project B's Stage-3 integration into the actual FMHA kernel (which needs the
-// HW scale-interleaving).
-//
-// What is inherited is the `cvt.rn.satfinite.e2m1x2.f32` packing idiom below
-// and the E2M1 code layout; the group loop, the FP8 scale round-trip and the
-// storage are imp's. This file is compiled into `libimp` and therefore into the
-// published image, so it is listed in THIRD_PARTY_LICENSES.md next to
-// nvfp4_quant_hw.cu rather than carrying an attribution the licence file does
-// not cover.
-//
-// Key PTX instruction: cvt.rn.satfinite.e2m1x2.f32
-//   (sm_120 + CUDA 13.2 — verified by probe commit b9ec21a)
-// =============================================================================
+// Reference NVFP4 quantization (round-trip validation). Follows thu-ml/SageAttention's
+// scaled_fp4_quant_kernel (Apache-2.0, subtree sageattention3_blackwell), simplified to a
+// linear storage layout; validates FP16->NVFP4 quant math before Project B's Stage-3 FMHA integration.
+// Inherited: cvt.rn.satfinite.e2m1x2.f32 packing idiom + E2M1 code layout. Group loop, FP8
+// scale round-trip, storage are imp's. Compiled into libimp/published image: listed in
+// THIRD_PARTY_LICENSES.md next to nvfp4_quant_hw.cu.
+// Key PTX: cvt.rn.satfinite.e2m1x2.f32 (sm_120 + CUDA 13.2, verified by probe commit b9ec21a).
 
 #include "compute/nvfp4_quant_ref.h"
 #include "core/logging.h"
@@ -47,22 +34,16 @@ __device__ __forceinline__ uint32_t fp32x8_to_e2m1x8(const float2* vals /* [4] *
     return val;
 }
 
-// ---------------------------------------------------------------------------
-// E2M1 (4-bit) → FP32 LUT. E2M1 values: {±0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6}.
-// Code layout (SageAttention3 & NVFP4 standard):
-//   bit 3 = sign, bits 2..0 = magnitude code 0..7
-//   magnitude: 0→0, 1→0.5, 2→1.0, 3→1.5, 4→2.0, 5→3.0, 6→4.0, 7→6.0
-// ---------------------------------------------------------------------------
+// E2M1 (4-bit) -> FP32 LUT: {+-0, +-0.5, +-1, +-1.5, +-2, +-3, +-4, +-6}.
+// bit3=sign, bits2..0=magnitude code: 0->0, 1->0.5, 2->1.0, 3->1.5, 4->2.0, 5->3.0, 6->4.0, 7->6.0.
 __device__ __forceinline__ float e2m1_nibble_to_fp32(uint8_t nib) {
     static const float mags[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
     float m = mags[nib & 0x7];
     return (nib & 0x8) ? -m : m;
 }
 
-// ---------------------------------------------------------------------------
-// Quant kernel: each thread handles 16 FP16 elements.
-//   blockDim.x = threads; gridDim.x covers ceil(n_elements / (16 * blockDim.x))
-// ---------------------------------------------------------------------------
+// Quant kernel: each thread handles 16 FP16 elements. blockDim.x=threads;
+// gridDim.x covers ceil(n_elements/(16*blockDim.x)).
 __global__ void nvfp4_quant_linear_kernel(const half* __restrict__ input,
                                           uint8_t* __restrict__ nvfp4_out,  // [n_elements / 2]
                                           uint8_t* __restrict__ sf_out,     // [n_elements / 16]

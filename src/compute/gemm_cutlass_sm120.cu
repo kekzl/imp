@@ -1,22 +1,12 @@
-// CUTLASS sm_120 block-scaled NVFP4×NVFP4 GEMM for prefill acceleration.
-//
-// Uses CUTLASS 4.4.1 Example 79a pattern: Warp-Specialized persistent kernel
-// with block-scaled tensor core MMA (mma.sync.aligned.block_scale) on
-// Blackwell GeForce (sm_120).
-//
-// Both A (activation) and B (weight) use nv_float4_t<float_e2m1_t> with
-// float_ue4m3_t unsigned scale factors in SfAtom interleaved layout.
-// Output D is FP16 (cutlass::half_t) for direct use in the inference pipeline.
-//
-// Weight format conversion (once at init):
-//   - Borrow packed FP4 pointer [N, K/2] (K-contiguous RowMajor)
-//   - Convert micro_scales from linear [N, K/16] to SfAtom UE4M3 layout
-//   - tensor_scale is NOT absorbed into scale factors (to avoid UE4M3
-//     denormalized range precision loss); instead applied as GEMM alpha
-//
-// Activation quantization (per-prefill-call):
-//   - FP16 [M, K] → NVFP4 packed [M, K/2] + SfAtom UE4M3 scales
-//
+// CUTLASS sm_120 block-scaled NVFP4xNVFP4 GEMM for prefill (CUTLASS 4.4.1 Example 79a
+// pattern, warp-specialized persistent kernel, mma.sync.aligned.block_scale on GeForce
+// Blackwell). A and B use nv_float4_t<float_e2m1_t> with float_ue4m3_t scales in
+// SfAtom interleaved layout; output D is FP16.
+// Weight conversion (once at init): borrow packed FP4 [N,K/2] K-contiguous RowMajor;
+// convert micro_scales from linear [N,K/16] to SfAtom UE4M3; tensor_scale is NOT
+// absorbed into scales (avoids UE4M3 denormal precision loss), applied as GEMM alpha
+// instead. Activation quantization per prefill call: FP16 [M,K] -> NVFP4 packed
+// [M,K/2] + SfAtom UE4M3 scales.
 
 #include "compute/gemm_cutlass_sm120.h"
 #include "model/model_config.h"
@@ -47,10 +37,8 @@
 
 using namespace cute;
 
-// ---------------------------------------------------------------------------
-// CUTLASS GEMM type configuration: NVFP4 × NVFP4 → FP16
-// Based on Example 79a but with half_t output instead of bfloat16_t.
-// ---------------------------------------------------------------------------
+// CUTLASS GEMM type config: NVFP4 x NVFP4 -> FP16, based on Example 79a but half_t
+// output instead of bfloat16_t.
 
 using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
 using LayoutATag = cutlass::layout::RowMajor;
@@ -92,25 +80,21 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
 // Stream-K variant of the cooperative 128x128 tile (gemm.nvfp4_cutlass_streamk).
-// Data-parallel tiling quantises to waves: at M=512 the N=5120 projections
-// are 4x40 = 160 CTAs on 170 SMs (0.94 waves, one CTA per SM, no second CTA
-// to hide latency), which is where the 79.8% @pp4096 vs 64.9% @pp512 of
-// roofline run 1d5b9230 comes from. Stream-K hands every SM an equal share
-// of the MAC iterations and reduces the K-split partials through the
-// scheduler workspace. Same mainloop/epilogue, only the tile scheduler tag
-// differs (CUTLASS maps StreamKScheduler on Sm120 to the Sm100 stream-K
-// scheduler inside the sm90 cooperative kernel).
+// Data-parallel tiling quantizes to waves: at M=512 the N=5120 projections are 4x40=
+// 160 CTAs on 170 SMs (0.94 waves, 1 CTA/SM, no second CTA to hide latency) - this caps
+// pp512 roofline efficiency below pp4096's. Stream-K gives every SM an equal share of
+// MAC iterations and reduces K-split partials through the scheduler workspace; same
+// mainloop/epilogue, only the tile scheduler tag differs (CUTLASS maps
+// StreamKScheduler on Sm120 to the Sm100 stream-K scheduler inside the sm90
+// cooperative kernel).
 using GemmKernelStreamK = cutlass::gemm::kernel::GemmUniversal<
     Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, cutlass::gemm::StreamKScheduler>;
 using GemmStreamK = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelStreamK>;
 
-// ---------------------------------------------------------------------------
-// FP32-output variant (large-N cooperative tile only). The LM head writes FP32
-// logits (the samplers read `const float*`), so the batched-decode LM head GEMM
-// (N = vocab » kSmallNThreshold) needs a float epilogue rather than the half_t
-// output above. ElementC = ElementD = float keeps the (unused, beta=0) C and D
-// pointers the same type so the shared impl reinterprets one buffer for both.
-// ---------------------------------------------------------------------------
+// FP32-output variant (large-N cooperative tile only): the LM head writes FP32 logits
+// (samplers read const float*), so the batched-decode LM head GEMM (N=vocab >>
+// kSmallNThreshold) needs a float epilogue. ElementC=ElementD=float keeps the unused
+// beta=0 C/D pointers the same type so the shared impl reinterprets one buffer for both.
 using ElementDFp32 = float;
 using ElementCFp32 = float;
 constexpr int AlignmentDFp32 = 128 / cutlass::sizeof_bits<ElementDFp32>::value;  // 4
@@ -141,17 +125,12 @@ using GemmFp32 = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelFp32>;
 static_assert(Gemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 16,
               "CUTLASS SFVecSize mismatch — expected 16 for nv_float4_t");
 
-// ---------------------------------------------------------------------------
-// Small-N variant: pingpong schedule + 128x64x128 tile.
-// The default cooperative 128x128 tile starves the GPU on small-N GEMMs
-// (kv_proj N=1024 at M=512: 32 CTAs on 170 SMs). Pingpong with a 64-wide
-// N-tile doubles the CTA count and overlaps two consumer warpgroups:
-// measured 2026-06-07 (standalone config sweep on Qwen3-14B shapes, #596)
-// 2.1x on 512x1024x5120 (27.0us -> 12.8us). It LOSES ~25% on large-N
-// shapes, hence the dispatch threshold below. The SfAtom scale layout is
-// tile-shape-independent (128-row x 4-group atoms from SFVecSize=16), so
-// both variants consume identical A/B scale buffers.
-// ---------------------------------------------------------------------------
+// Small-N variant: pingpong schedule + 128x64x128 tile. The default cooperative
+// 128x128 tile starves the GPU on small-N GEMMs (e.g. kv_proj N=1024 at M=512: 32 CTAs
+// on 170 SMs); pingpong's 64-wide N-tile doubles CTA count and overlaps two consumer
+// warpgroups. Loses on large-N (hence the dispatch threshold). SfAtom scale layout is
+// tile-shape-independent (128-row x 4-group atoms, SFVecSize=16), so both variants
+// share identical A/B scale buffers.
 using ThreadBlockShapeSmallN = Shape<_128, _64, _128>;
 
 using CollectiveEpilogueSmallN = typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -181,29 +160,16 @@ static_assert(GemmSmallN::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVe
 static constexpr int kSmallNThreshold = 2048;
 
 // Stream-K (mode 1) is handed to the scheduler's heuristic only where the
-// data-parallel 128x128 grid leaves a short tail wave: at least one full
-// wave, and a last wave at most half full. Measured 2026-09-01 (isolated,
-// weight ring > L2, N=5120 K=5120 unless noted): 200 CTAs (tail 0.18)
-// 42.3 -> 36.3 us, 240 (0.41) 42.6 -> 40.9, 544 = N=17408 (0.20) 98.1 ->
-// 84.6; but 80 CTAs 21.2 -> 22.9, 320 (0.88) 46.5 -> 47.8, and the
-// 160-CTA pp512 projections (0.94 waves, no tail to fill) 27.3 -> 30.2
-// forced, where the heuristic itself picks data-parallel. Mode 2 forces
-// stream-K at every shape (A/B), 0 disables.
+// data-parallel 128x128 grid leaves a short tail wave: at least one full wave and a
+// last wave at most half full. Mode 2 forces stream-K at every shape (A/B testing);
+// 0 disables.
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// SfAtom layout computation (hardware-independent arithmetic)
-// ---------------------------------------------------------------------------
-// SfAtom for K-major, SFVecSize=16:
-//   Shape:  ((32, 4), (16, 4))
-//   Stride: ((16, 4), ( 0, 1))
-//
-// Each atom covers 128 rows × 4 scale-groups (= 64 data elements in K).
-// Atom size = 128 * 4 = 512 bytes.
-//
-// tile_to_shape tiles atoms to cover (rows, K) with Step<_2, _1>:
-//   K dimension tiles are inner (faster-changing), row tiles are outer.
+// SfAtom layout (hardware-independent), K-major SFVecSize=16: Shape ((32,4),(16,4)),
+// Stride ((16,4),(0,1)). Each atom covers 128 rows x 4 scale-groups (=64 K elements);
+// atom size = 128*4 = 512 bytes. tile_to_shape tiles atoms over (rows,K) with
+// Step<_2,_1>: K-dim tiles are inner (faster-changing), row tiles outer.
 
 static constexpr int kSFVecSize = 16;
 static constexpr int kAtomRows = 128;                          // 32 * 4
@@ -236,10 +202,10 @@ size_t cutlass_nvfp4_sf_size(int rows, int K) {
 // GPU kernels for weight conversion
 // ---------------------------------------------------------------------------
 
-// Convert micro_scales from linear layout to SfAtom layout (NO tensor_scale absorption).
-// tensor_scale is deferred to the GEMM epilogue alpha parameter for precision.
-// Source: [N, K/16] FP8 E4M3 (signed, but always positive for scale factors)
-// Dest:   SfAtom layout UE4M3 (unsigned, just micro_scale — NOT combined)
+// Converts micro_scales from linear to SfAtom layout (no tensor_scale absorption;
+// deferred to the GEMM epilogue alpha for precision). Source [N,K/16] FP8 E4M3
+// (signed, always positive for scales); dest SfAtom UE4M3 (unsigned micro_scale only,
+// not combined).
 __global__ void convert_scales_sfatom_kernel(const uint8_t* __restrict__ src_ms,  // [N, K/16] linear
                                              uint8_t* __restrict__ dst_sf,        // SfAtom layout
                                              int N, int K, int n_k_tiles) {
@@ -252,18 +218,17 @@ __global__ void convert_scales_sfatom_kernel(const uint8_t* __restrict__ src_ms,
     int n = idx / K_groups;
     int k_group = idx % K_groups;
 
-    // Read signed E4M3 micro-scale, drop its sign (always positive for scales),
-    // then re-encode as UE4M3 via the shared float↔E4M3 helper. UE4M3 is
-    // bit-identical to positive E4M3, so float_to_fp8_e4m3 with a positive
-    // argument yields the UE4M3 byte directly (sign bit = 0).
+    // Reads signed E4M3 micro-scale, drops the sign (always positive for scales),
+    // re-encodes as UE4M3 via the shared float<->E4M3 helper: UE4M3 is bit-identical to
+    // positive E4M3, so float_to_fp8_e4m3 on a positive argument yields the UE4M3 byte
+    // directly (sign bit=0).
     float combined = fabsf(fp8_e4m3_to_float_fast(src_ms[idx]));
     dst_sf[sfatom_offset(n, k_group, n_k_tiles)] = float_to_fp8_e4m3(combined);
 }
 
-// MoE variant: one launch converts SF for all `ne` experts. Source has stride
-// N*K_groups bytes per expert; destination has stride cutlass_nvfp4_sf_size(N,K)
-// bytes per expert. blockIdx.y selects the expert; the inner work is identical
-// to the single-tensor kernel above.
+// MoE variant: one launch converts SF for all `ne` experts. Source stride N*K_groups
+// bytes/expert; dest stride cutlass_nvfp4_sf_size(N,K) bytes/expert. blockIdx.y selects
+// the expert; inner work identical to the single-tensor kernel.
 __global__ void convert_scales_sfatom_moe_kernel(const uint8_t* __restrict__ src_ms,
                                                  uint8_t* __restrict__ dst_sf, int N, int K,
                                                  int n_k_tiles, size_t native_stride_per_expert,
@@ -317,29 +282,14 @@ __device__ __forceinline__ uint8_t pack_fp4_pair_hw(float v0, float v1) {
 #endif
 }
 
-// Given 16 pre-computed float values + their absmax, encode UE4M3 scale and
-// pack FP4 bytes. The caller supplies the values (so this helper is reusable
-// for fused paths like SwiGLU+quantize where values come from a computation
-// rather than a direct FP16 load).
-// The UE4M3 scale saturates at 448, so a micro-block whose absmax exceeds
-// 448*6 = 2688 has its scale clipped and its values quantised against a scale
-// that is too small - silently, because `float_to_fp8_e4m3` clamps and returns
-// (#1544). Measured headroom on the models here, largest per-16-block absmax
-// over a 4096-token prefill:
-//
-//   Gemma-4-12B-NVFP4              2468   92% of the limit
-//   Nemotron-3-Nano-30B-A3B-NVFP4  <1500
-//
-// So it does not fire today, and Gemma-4 is 8% away from it. The flag below
-// says so if it ever does; `nvfp4_report_scale_clipping()` reads it at engine
-// shutdown.
-//
-// A device `printf` here instead of a flag would be more direct, and costs
-// more than it looks: it gave FIVE quantiser kernels an 8-byte local frame
-// (`make kernel-resources`: quantize_fp16_nvfp4_cutlass_kernel and four
-// siblings, stack 0 -> 8), because the call has to be set up whether or not it
-// is taken. A flag store leaves the kernels at stack=0. The cost is one float
-// compare in a function that has already computed `local_absmax`.
+// Given 16 precomputed values + absmax, encodes UE4M3 scale and packs FP4 bytes
+// (reusable for fused paths like SwiGLU+quantize). UE4M3 scale saturates at 448: a
+// micro-block with absmax > 448*6=2688 gets a scale clipped silently
+// (float_to_fp8_e4m3 clamps and returns, #1544). g_nvfp4_scale_clipped flags this at
+// engine shutdown via nvfp4_report_scale_clipping(). A device printf here costs more
+// than it looks: it gave five quantizer kernels an 8-byte local stack frame (make
+// kernel-resources) because the call must be set up whether or not taken; a flag
+// store leaves kernels at stack=0 for one float compare.
 __device__ unsigned int g_nvfp4_scale_clipped = 0;
 
 __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float vals[kSFVecSize],
@@ -447,11 +397,10 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
     if (!sfa)
         return;
 
-    // Fused-gather path: input is the pre-permute MoE input in token order,
-    // and `gather[row]` indexes the source token for this expert-sorted row.
-    // Saves the gathered FP16 intermediate when the upstream moe_gather is
-    // skipped — that skip is gated on a lazy-gather addition in the legacy
-    // MoE fallback path (see plan in docs/plans/moe_prefill_cudagraph_*.md).
+    // Fused-gather path: input is pre-permute MoE input in token order; gather[row]
+    // indexes the source token for this expert-sorted row. Saves the gathered FP16
+    // intermediate when the upstream moe_gather is skipped (gated on a lazy-gather
+    // addition in the legacy MoE fallback, see docs/plans/moe_prefill_cudagraph_*.md).
     const int src_row = (gather != nullptr) ? gather[row] : row;
     quantize_micro_block_nvfp4(input + static_cast<int64_t>(src_row) * K, k_group,
                                packed_out + static_cast<int64_t>(row) * (K / 2),
@@ -571,9 +520,8 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
               K, kSFVecSize);
 
     // SfAtom padding bytes are pre-zeroed once at workspace allocation
-    // (executor_workspace_buffers.cu). The kernel only writes valid (row, k_group)
-    // cells; padding stays zero. Avoids a cudaMemsetAsync per call (~6720 in
-    // Llama Q8 W1 prefill).
+    // (executor_workspace_buffers.cu). The kernel only writes valid (row,k_group) cells; padding
+    // stays zero. Avoids a cudaMemsetAsync per call.
 
     int K_groups = K / kSFVecSize;
     int total_mb = M * K_groups;
@@ -634,14 +582,10 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// Fused activation + NVFP4 CUTLASS quantize — M1 from the phase-5 review §2.2
-// (archived in #604).
-// Reads gate + up from HBM, computes SwiGLU/GeGLU/ReLU² in registers, and writes
-// only the packed FP4 + SFA. Replaces the apply_expert_activation + quantize_..._moe
-// pair in the device-args MoE prefill path; saves one full HBM round-trip of the
-// swiglu intermediate (the activation tensor is never materialized in HBM).
-// ---------------------------------------------------------------------------
+// Fused activation + NVFP4 CUTLASS quantize (phase-5 review section 2.2, #604): reads gate+up
+// from HBM, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed FP4 + SFA. Replaces
+// apply_expert_activation + quantize_..._moe, saving one HBM round-trip of the swiglu
+// intermediate (never materialized in HBM).
 
 // Compile-time activation tag: keeps the inner branch a no-op in PTX.
 template <int kAct>
@@ -822,14 +766,10 @@ size_t gemm_nvfp4_cutlass_sm120_streamk_workspace(int M, int N, int K) {
 size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K) {
     size_t ws = (N <= kSmallNThreshold) ? cutlass_workspace_for<GemmSmallN>(M, N, K)
                                         : cutlass_workspace_for<Gemm>(M, N, K);
-    // The engine sizes one workspace at its MAX (M, N, K) and the GEMM
-    // refuses (falls back to the dequant path) when a launch needs more.
-    // Stream-K's workspace is NOT monotone in the shape: the heuristic at the
-    // max shape is data-parallel (0 B; first cut, every pp512 gate/up launch
-    // fell back to dequant+cuBLAS, 22k -> 4.2k tok/s), and the forced
-    // decomposition needs MORE at 512x8192 (16.8 MB, all 256 tiles split)
-    // than at 4096x8192 (11.7 MB, only the tail wave split). So sweep every
-    // 128-tile grid up to (M, N) and keep the largest forced-stream-K
+    // Engine sizes one workspace at its MAX (M,N,K); the GEMM falls back to the dequant path when
+    // a launch needs more. Stream-K's workspace is NOT monotone in shape (the heuristic at the max
+    // shape picks data-parallel = 0B, while a forced decomposition needs MORE at a smaller M than
+    // at the largest). Sweep every 128-tile grid up to (M,N) and keep the largest forced-stream-K
     // workspace; host-side arithmetic, once at init.
     if (N > kSmallNThreshold && imp::process_diag_nvfp4_cutlass_streamk() != 0) {
         const int m_tiles = (M + 127) / 128, n_tiles = (N + 127) / 128;
@@ -933,13 +873,10 @@ static bool gemm_nvfp4_cutlass_sm120_impl(const void* a_data, const void* a_sf, 
         return false;
     }
 
-    // The caller's workspace is the whole workspace. A7 step 8 deleted the
-    // cudaFree+cudaMalloc grow path that used to sit here: it ran at GEMM time,
-    // on a code path reachable under CUDA-graph capture (where cudaMalloc is
-    // illegal), to serve a case every in-tree caller already sizes against —
-    // each one asks gemm_nvfp4_cutlass_sm120_workspace() for the same (or a
-    // larger) shape and passes the answer. Refusing lets the dispatch fall back
-    // to the dequant path with correct output; allocating here could not
+    // The caller's workspace is the whole workspace: A7 step 8 deleted the cudaFree+cudaMalloc grow
+    // path here, which ran at GEMM time on a path reachable under CUDA-graph capture (illegal
+    // there) to serve a case every in-tree caller already sizes against. Refusing lets the
+    // dispatch fall back to the dequant path with correct output; allocating here could not
     // (docs/internals/MEMORY.md A5.3).
     size_t needed = GemmT::get_workspace_size(args);
     if (needed > workspace_size) {
@@ -1009,10 +946,8 @@ size_t gemm_nvfp4_cutlass_sm120_fp32_workspace(int M, int N, int K) {
 
 bool cutlass_sm120_nvfp4_available() { return true; }
 
-// Read the clip flag once and say so. Called from gemm_cleanup(), i.e. at
-// engine shutdown: the event is a "should never happen", and reporting it there
-// keeps the check out of every prefill. A cudaMemcpyFromSymbol synchronises,
-// which is why it does not sit on the hot path (#1544).
+// Reads the clip flag once, from gemm_cleanup() (engine shutdown): a "should never happen"
+// event, checked there to keep it off the hot path. cudaMemcpyFromSymbol synchronises (#1544).
 void nvfp4_report_scale_clipping() {
     unsigned int clipped = 0;
     if (cudaMemcpyFromSymbol(&clipped, g_nvfp4_scale_clipped, sizeof(clipped)) != cudaSuccess ||

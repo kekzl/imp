@@ -43,10 +43,8 @@ void mla_latent_cache_write(const half* latent, const half* k_assembled, half* c
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// Absorbed decode attention (one block per head)
-// ---------------------------------------------------------------------------
-// Shared-memory block reduction helpers (256 threads).
+// Absorbed decode attention (one block per head). Shared-memory block reduction helpers
+// (256 threads).
 __device__ __forceinline__ float block_reduce_max(float v, float* sh) {
     const int tid = threadIdx.x;
     sh[tid] = v;

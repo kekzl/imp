@@ -1,20 +1,11 @@
 #pragma once
 
-// Capture-safe sm_120 FP16 dense GEMM. cuBLASLt fails with
-// CUBLAS_STATUS_INTERNAL_ERROR (status 14) under stream capture on
-// consumer Blackwell (sm_120). CUTLASS 4.5's sm_120 CollectiveBuilder
-// only ships F8F6F4 MMA, so dense FP16 must be hand-tuned for sm_120
-// directly. This file declares the dispatch entry point.
-//
-// Implementation uses nvcuda::wmma (HMMA m16n8k16) — the same tensor
-// core path that compiles to mma.sync on sm_120. All decisions are
-// device-side, no host-side cuBLAS heuristics — fully graph-safe.
-//
-// Layout convention matches cuBLAS's GEMM with OP_T on B:
-//   A: [M, K] row-major FP16
-//   B: [N, K] row-major FP16 (semantically B^T in the GEMM)
-//   D: [M, N] row-major FP16
-//   D = alpha * A @ B^T + beta * D
+// Capture-safe sm_120 FP16 dense GEMM: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR
+// under stream capture on sm_120. CUTLASS 4.5's sm_120 CollectiveBuilder only ships
+// F8F6F4 MMA, so dense FP16 needs a hand-tuned kernel here (nvcuda::wmma HMMA m16n8k16,
+// compiling to mma.sync). All decisions are device-side, fully graph-safe.
+// Layout matches cuBLAS OP_T on B: A[M,K] row-major, B[N,K] row-major (semantically
+// B^T), D[M,N] row-major; D = alpha*A@B^T + beta*D.
 
 #include <cuda_runtime.h>
 #include <cstddef>

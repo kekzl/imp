@@ -8,20 +8,13 @@
 
 namespace imp {
 
-// Each thread handles one (token, kv_head, head_dim_elem) triple.
-// Grid: (ceil(n_past / TOKENS_PER_BLOCK), nkv).
-// Block: TOKENS_PER_BLOCK * (hd / VEC) threads (tunable; here 256 threads).
-//
-// We use a flat 1D thread index inside the block over (token_in_block, hd_elem)
-// to keep the kernel simple and let the compiler vectorize the half loads.
-//
-// NOTE: __ldcs is a streaming hint — KV bytes don't pollute L2, matching
-// paged_attention_decode_fp8 / decode_int8 / decode behavior.
-//
-// d_n_past (all kernels): optional DEVICE override of the n_past bound. When
-// set, the host n_past only sized the (oversized) grid and the real token
-// count is read from device — the graph-captured verify path (#847) replays
-// a baked grid while the context grows between replays.
+// Each thread handles one (token, kv_head, head_dim_elem) triple. Grid (ceil(n_past/
+// TOKENS_PER_BLOCK), nkv), block TOKENS_PER_BLOCK*(hd/VEC) threads. Flat 1D thread index over
+// (token_in_block, hd_elem) lets the compiler vectorize the half loads. __ldcs is a streaming
+// hint: KV bytes don't pollute L2 (matches paged_attention_decode_fp8/int8/decode). d_n_past
+// (optional device override): when set, host n_past only sizes the grid and the real token
+// count is read from device, for the graph-captured verify path (#847) replaying a baked grid
+// while context grows between replays.
 
 static constexpr int TOKENS_PER_BLOCK = 8;
 
@@ -51,10 +44,9 @@ __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* 
 
     half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
     if (phys_block < 0) {
-        // -1 sentinel: SWA trailing-free hole (kv_cache.swa_sizing) or
-        // StreamingLLM-evicted block. Rows this far back are never consumed
-        // (the chunk attention kernels skip pre-window tiles) — zero-fill so
-        // the gathered buffer stays deterministic and NaN-free.
+        // -1 sentinel: SWA trailing-free hole (kv_cache.swa_sizing) or StreamingLLM-evicted block.
+        // Rows this far back are never consumed (chunk attention kernels skip pre-window tiles);
+        // zero-fill so the gathered buffer stays deterministic and NaN-free.
         for (int d = d_lane; d < hd; d += threads_per_token)
             dst_row[d] = __float2half(0.0f);
         return;
@@ -148,11 +140,10 @@ void paged_kv_gather_fp8_to_fp16(half* dst, const __nv_fp8_e4m3* src, const int*
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// NVFP4 → FP16 dequant gather. Same TOKENS_PER_BLOCK / threads_per_token grid
-// as the FP16/FP8 variants. Per (token, hd) elem: read packed FP4 byte → decode
-// to half2 via `cvt.rn.f16x2.e2m1x2` PTX → pick the correct nibble's half →
-// multiply by per-group-of-16 UE4M3 scale → store as FP16. Matches the write
-// path in `write_kv_cache_nvfp4_kernel`.
+// NVFP4 -> FP16 dequant gather. Same TOKENS_PER_BLOCK/threads_per_token grid as the FP16/FP8
+// variants. Per (token,hd) elem: read packed FP4 byte, decode to half2 via
+// cvt.rn.f16x2.e2m1x2 PTX, pick the correct nibble's half, multiply by the per-group-of-16
+// UE4M3 scale, store as FP16. Matches write_kv_cache_nvfp4_kernel.
 __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
     half* __restrict__ dst,
     const uint8_t* __restrict__ src_packed,    // [block, slot, nkv, hd/2]
@@ -235,10 +226,8 @@ void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// MXFP4-KV gather: identical to NVFP4 gather but decodes UE8M0 scales
+// MXFP4-KV gather: identical to the NVFP4 gather but decodes UE8M0 scales
 // (pure-exponent 2^(bits-127)) instead of E4M3.
-// ---------------------------------------------------------------------------
 __global__ void paged_kv_gather_mxfp4_kv_to_fp16_kernel(
     half* __restrict__ dst,
     const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]
@@ -319,10 +308,9 @@ void paged_kv_gather_mxfp4_kv_to_fp16(half* dst, const uint8_t* src_packed,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// INT4 → FP16 dequant gather. Symmetric 4-bit, per-head FP16 scale.
-// Packed layout: low nibble = even d, high nibble = odd d (sign-extend 4-bit
-// signed → int8 → multiply by half scale → store FP16). Matches
-// write_kv_cache_int4_kernel / paged_attention_decode_int4.
+// INT4 -> FP16 dequant gather. Symmetric 4-bit, per-head FP16 scale. Packed layout: low
+// nibble = even d, high nibble = odd d (sign-extend 4-bit signed -> int8 -> multiply by half
+// scale -> store FP16). Matches write_kv_cache_int4_kernel / paged_attention_decode_int4.
 __global__ void paged_kv_gather_int4_to_fp16_kernel(
     half* __restrict__ dst,
     const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]

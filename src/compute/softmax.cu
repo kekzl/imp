@@ -55,14 +55,9 @@ __device__ float block_reduce_sum_softmax(float val) {
     return val;
 }
 
-// --------------------------------------------------------------------------
-// Online softmax FP32 kernel: 2 passes
-// Pass 1: compute max AND sum(exp(x - running_max)) in a single traversal
-//         using the online softmax trick (Milakov & Gimelshein 2018)
-// Pass 2: normalize output[i] = exp(x[i] - max) / sum
-//
-// One block per row. Block: 256 threads.
-// --------------------------------------------------------------------------
+// Online softmax FP32 (Milakov & Gimelshein 2018), 2 passes: pass 1 computes max and
+// sum(exp(x-running_max)) in one traversal; pass 2 normalizes output[i]=exp(x[i]-max)/sum.
+// One block per row, 256 threads.
 __global__ void softmax_fp32_kernel(const float* __restrict__ input, float* __restrict__ output, int cols) {
     const int row = blockIdx.x;
     const float* in_row = input + static_cast<int64_t>(row) * cols;

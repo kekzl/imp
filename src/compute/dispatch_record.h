@@ -1,30 +1,14 @@
 #pragma once
 
-// Which kernels a request ACTUALLY ran (#1205).
-//
-// imp resolves a model to a specific set of kernels through several chains —
-// six attention-prefill tiers, five MoE-prefill branches, a KV-dtype decode
-// switch — and every one of them declines by returning `false` with no log.
-// The result was that a model silently taking a slower or lower-quality path
-// was invisible: the audit's "no resolved-path dump exists, so every future
-// routing regression is invisible" finding.
-//
-// This records the branch that WON, at the point it wins, from inside the real
-// dispatch. That is the whole design constraint: a *predicted* path (running
-// the pure routing models from select_attn_prefill_path() at init) would be a
-// third copy of the routing rules and could be wrong exactly when it matters.
-// What is recorded here cannot disagree with what ran, because it is set by the
-// code that ran.
-//
-// Cost: one thread_local store per branch taken, on paths that are already
-// doing a kernel launch. No allocation, no logging, no synchronisation. Under
-// CUDA-graph capture the store happens at capture time — which is the correct
-// moment, since replay repeats exactly the captured path.
-//
-// Threading: thread_local, following the graph_diag::g_phase precedent. The
-// BatchingEngine worker thread is the sole caller of Engine::step()/forward, so
-// per-thread state is per-engine state here; a second inference thread simply
-// gets its own record rather than corrupting a shared one.
+// Records which kernel path a request ACTUALLY ran (#1205): six attention-prefill tiers, five
+// MoE-prefill branches and a KV-dtype decode switch each decline silently, so a model taking a
+// slower/lower-quality path was invisible. Records the branch that WON at the point it wins,
+// from inside the real dispatch - not a predicted path from the pure routing models (which would
+// be a third copy of the rules and could disagree with what actually ran).
+// Cost: one thread_local store per branch taken, no allocation/logging/sync. Under CUDA-graph
+// capture the store happens at capture time, which is correct since replay repeats the captured path.
+// Threading: thread_local (graph_diag::g_phase precedent) - the BatchingEngine worker thread is
+// the sole caller of Engine::step()/forward, so per-thread state is per-engine state here.
 
 #include "compute/dispatch_paths.h"
 

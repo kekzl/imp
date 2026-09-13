@@ -17,10 +17,8 @@ namespace imp {
 
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
-// ---------------------------------------------------------------------------
-// cuBLAS handle (lazily initialized, process-lifetime)
-// Uses cublasGemmEx — the same proven path as gemm.cu's gemm().
-// ---------------------------------------------------------------------------
+// cuBLAS handle, lazily initialized, process-lifetime. Uses cublasGemmEx, the same proven
+// path as gemm.cu's gemm().
 static cublasHandle_t s_grouped_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
 
 static cublasHandle_t get_cublas_handle() {
@@ -95,19 +93,10 @@ static cublasComputeType_t dtype_to_compute(QType dt) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// gemm_moe_batched: single cublasGemmBatchedEx call for all active MoE experts.
-//
-// Groups all experts with non-zero token counts into one batched call.
-// This eliminates per-expert kernel launch overhead (critical for 128-expert
-// models like Qwen3-Coder where serial dispatch causes 9,216 launches/pass).
-//
-// All experts share the same K and N dimensions (same weight shape), but have
-// different M (token count). cublasGemmBatchedEx requires uniform M across
-// batches, so we group experts by M and issue one call per unique M value.
-// In practice during prefill, most experts have similar M (tokens are spread
-// roughly evenly), so this is typically 2-5 calls instead of 128.
-// ---------------------------------------------------------------------------
+// gemm_moe_batched: one cublasGemmBatchedEx call for all experts with nonzero token counts,
+// eliminating per-expert kernel launch overhead (critical for 128-expert models). All experts
+// share K,N but differ in M; cublasGemmBatchedEx requires uniform M per batch, so experts are
+// grouped by M (typically 2-5 calls instead of one per expert).
 void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs,
                       int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs,
                       QType output_dtype, const float* a_scales, const float* b_scales) {
@@ -118,15 +107,10 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     if (n_experts == 0)
         return;
 
-    // -----------------------------------------------------------------------
-    // CUTLASS grouped GEMM: single persistent kernel for all experts.
-    // Only applies to FP16 without per-expert scales (non-FP8 path).
-    // -----------------------------------------------------------------------
-    // CUTLASS 2.x GemmGrouped wrapper was removed 2026-04-20 — benchmark on Gemma-4
-    // Q5_K_M showed cuBLAS grouped path is ~14% faster on prefill and equivalent
-    // on decode on SM120. NVIDIA optimized cublasLtMatmulGrouped in CUDA 13.2+,
-    // making the hand-rolled 2.x wrapper redundant. cuBLAS dispatch below handles
-    // all cases previously routed through CUTLASS 2.x.
+    // CUTLASS grouped GEMM: single persistent kernel for all experts, FP16 without per-expert
+    // scales only (non-FP8 path). The CUTLASS 2.x GemmGrouped wrapper was removed: cuBLAS grouped
+    // is faster on prefill and equivalent on decode on sm_120 since NVIDIA optimized
+    // cublasLtMatmulGrouped in CUDA 13.2+; cuBLAS dispatch below handles all cases it covered.
 
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);

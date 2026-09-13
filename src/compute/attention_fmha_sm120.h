@@ -6,25 +6,12 @@
 
 namespace imp {
 
-// Native sm_120 FMHA for prefill attention.
-//
-// Uses WMMA HMMA fragments (mma.sync.m16n8k16.f16, mma.sync.m16n8k32.e4m3) —
-// NOT wgmma: wgmma.mma_async / TMEM / tcgen05 are Hopper-and-later (sm_90+/
-// SM100+) and unavailable on Consumer Blackwell (sm_120a). FA4 is therefore
-// permanently incompatible with this target. See the phase-2 perf review §3
-// (archived in #604).
-//
-// Supports: FP16, causal masking, softcap, sliding window, GQA.
-// Head dims: 64, 96, 128, 256. Falls back for unsupported configs.
-//
-// Q: [batch, seq_q, n_heads, head_dim]
-// K,V: [batch, seq_kv, n_kv_heads, head_dim]
-// O: [batch, seq_q, n_heads, head_dim]
-//
-// Returns true on success, false if config unsupported (caller falls back).
-// sinks: optional per-head learned attention sinks ([n_heads] FP16, gpt-oss
-// #547) — a virtual extra logit column with no V contribution, folded into
-// the online-softmax init (m = sink, l = 1). nullptr = no sinks.
+// Native sm_120 FMHA for prefill: WMMA HMMA fragments (mma.sync.m16n8k16.f16,
+// mma.sync.m16n8k32.e4m3) - NOT wgmma/TMEM/tcgen05 (sm_90+/sm_100+ only, unavailable on sm_120a).
+// Supports FP16, causal, softcap, sliding window, GQA. Head dims 64/96/128/256; falls back
+// otherwise. Q:[batch,seq_q,n_heads,hd] K,V:[batch,seq_kv,n_kv_heads,hd] O: same as Q.
+// sinks (gpt-oss #547): optional [n_heads] FP16, virtual extra logit column with no V
+// contribution, folded into online-softmax init (m=sink, l=1). nullptr = off.
 bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                         bool causal, int sliding_window, float softcap, cudaStream_t stream,
                         int q_offset = 0, const half* sinks = nullptr);
@@ -36,28 +23,15 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
                             int q_offset = 0);
 
-// FA2 variant ("echtes FA"): true register-resident FlashAttention-2.
-// QK^T in FP8 E4M3 (m16n8k32), softmax + P kept in REGISTERS (no S/P/O smem
-// round-trip), PV via hand-written mma.sync.m16n8k16 (f16) — exploiting the
-// layout identity between the m16n8 accumulator output and the m16n8k16 A
-// operand, so P feeds PV with no transpose. Only K (fp8) + V (f16) are staged
-// in smem → one __syncthreads per KV tile. Each warp owns 16 query rows and
-// runs its online softmax independently (no cross-warp reduction).
-// Target: long-context prefill where the smem-materializing fp8 kernel is
-// barrier-bound (ncu: 14.5% compute, 75.7% L1/TEX). Head dims: 128 (first).
-//
-// fp16_qk=true switches QK^T to mma.m16n8k16.f16 (Q staged as f16 in smem,
-// K read from f16 smem directly): half the score throughput, but NO e4m3
-// score noise — safe below fmha_prefill_threshold where the fp8 variants
-// compound per-layer noise into prompt-blind output (#511/#512). Bq=64 only
-// (f16 Q tile at Bq=128 exceeds the sm_120 smem opt-in).
-//
-// d_kv_len: optional DEVICE int overriding the KV length. When set, K.shape[1]
-// only carries the buffer CAPACITY (batch stride, prefetch upper bound) and
-// the kernel reads the real seq_kv from device, deriving q_offset as
-// seq_kv - seq_q (chunked continuation invariant). Grid dims depend only on
-// seq_q, so a captured graph replays correctly as the context grows between
-// replays (#847 graph-captured verify). fp16_qk path only.
+// FA2 ("echtes FA"): true register-resident FlashAttention-2. QK^T in FP8 E4M3 (m16n8k32),
+// softmax+P kept in registers (no S/P/O smem round-trip), PV via hand-written mma.m16n8k16 f16 -
+// exploits the layout identity between the QK accumulator and the PV A-operand (no transpose).
+// Only K(fp8)+V(f16) staged in smem, one syncthreads/KV tile. Each warp: 16 rows, independent
+// online softmax. Head dims: 128 (first). fp16_qk=true: QK via mma.m16n8k16.f16 (Q/K in smem as
+// f16) - no e4m3 noise, safe below fmha_prefill_threshold (#511/#512). Bq=64 only.
+// d_kv_len: optional device int overriding KV length (K.shape[1] is only buffer capacity);
+// kernel derives q_offset=seq_kv-seq_q. Grid depends only on seq_q, so a captured graph replays
+// correctly as context grows (#847). fp16_qk path only.
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
                             int q_offset = 0, bool fp16_qk = false, const int* d_kv_len = nullptr);

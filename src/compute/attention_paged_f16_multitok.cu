@@ -1,28 +1,11 @@
-// F16 paged decode attention, TOK tokens per warp iteration, HPC Q heads per
-// CTA (attention.paged_f16_multitok, 2026-09-03).
-//
-// The cooperative GQA kernel (attention_paged.cu) stages each KV block into
-// shared memory with one 2-byte load per element and a runtime head_dim
-// division per element, then walks one token per warp iteration. ncu at
-// 32 x 1100 (32/8 heads, HD=128): 316 us, DRAM 22%, warps active 51%, top
-// stall long_scoreboard 6.2, 213M instructions for 144 MB of KV. Here a lane
-// holds HEAD_DIM/32 contiguous elements and loads its 8 or 16 bytes of a K
-// row straight from global, TOK rows before any reduction; the K row is
-// converted once and dotted against HPC Q heads, so a CTA of NUM_WARPS warps
-// reads the KV group once for HPC heads and the grid has
-// n_kv_heads x (n_q_per_kv / HPC) CTAs per sequence. The softmax state is
-// the unnormalised (m, l, o) form per head, normalised once at the end so
-// the shared cross-warp merge is unchanged. HD=128/256; sliding window via
-// the effective start and the StreamingLLM sentinel like the FP8 kernel;
-// sink-token (n_sinks) geometry stays on the cooperative kernel.
-//
-// The split-K instance (batch x heads below the CTA target, i.e. single
-// stream at long context) walks its share of the blocks and writes one
-// (m, l, o) partial per head for the shared reduce kernel. The per-head
-// split-K pipeline kernel re-reads the KV group once per Q head through L2:
-// batch 1 x 32k on 32/8 measured 178.9 us (750 GB/s) against 91.1 us
-// (1474 GB/s) on the 8/8 MHA shape with the same bytes (2026-09-03); the
-// HPC sharing removes that factor.
+// F16 paged decode, TOK tokens/warp iteration, HPC Q heads/CTA (attention.paged_f16_multitok).
+// A lane holds HEAD_DIM/32 contiguous elements, loads TOK rows straight from global before any
+// reduction; the K row is converted once and dotted against HPC Q heads. Grid: n_kv_heads x
+// (n_q_per_kv/HPC) CTAs/sequence. Softmax state is unnormalized (m,l,o), normalized once at the
+// end so the cross-warp merge is unchanged. HD=128/256; sliding window + StreamingLLM sentinel
+// as in the FP8 kernel; sink-token geometry stays on the cooperative kernel.
+// Split-K instance (batch x heads below the CTA target): walks its block share and writes one
+// (m,l,o) partial/head for the shared reduce kernel.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/pdl_device.cuh"

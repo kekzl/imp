@@ -1,35 +1,12 @@
-// FP8 E4M3 paged decode attention, HD=128, with LPR lanes per KV row, TOK
-// rows per lane group per iteration and HPC Q heads per CTA
-// (attention.paged_fp8_multitok with Q-head grouping, 2026-09-08).
-//
-// The four-token kernel (attention_paged_fp8_multitok.cu) spreads one
-// 128-byte K row over the 32 lanes of a warp: 4 bytes per lane, a 5-shuffle
-// reduction per head and token, and each of the ratio Q heads of a KV group
-// is a CTA of its own that re-reads the group through L2 and re-converts
-// every byte. ncu at 32 x 1100 after the paired cvt (2026-09-03): issue
-// 65%, DRAM ~35%, ~36 warps/SM, i.e. instruction-bound. Here LPR lanes hold
-// one row (128 / LPR bytes per lane, one 16- or 8-byte load), a warp holds
-// 32 / LPR rows per load instruction, a dot reduces over log2(LPR) shuffles,
-// and a CTA carries HPC Q heads of one KV head: a row is loaded and
-// converted once and dotted against HPC q slices read from shared memory
-// (kept out of registers so two CTAs fit an SM). The warp walks its blocks
-// through a cursor and keeps the K and V rows of the NEXT row group in
-// flight while it reduces the current one, across block boundaries; the
-// block table entry is read one block ahead. Each lane group runs its own
-// online softmax over the rows it saw; the groups of a warp merge over
-// shuffles at the end, then the shared cross-warp merge runs per head after
-// a shared-memory relayout to its 4-dims-per-lane form. Grid
-// (batch, n_kv_heads x n_q_per_kv / HPC); sliding window via the effective
-// start, the StreamingLLM sentinel, softcap and learned sinks as in the
-// four-token kernel.
-//
-// Shipped instance <LPR 16, TOK 2, HPC 1..5> (microbench 32 x 1100, 40/8,
-// 2026-09-08, ptxas registers in brackets): the four-token kernel 95.3 us;
-// 8 lanes x 16 bytes, TOK 2: 54.8 [217, one CTA per SM]; 16 lanes, TOK 4:
-// 63.9 [148]; 16 lanes, TOK 2: 54.7 [128, two CTAs per SM]. 32 x 4096:
-// 334.6 -> 186.2 us (1442 GB/s). Reading q from registers instead of shared
-// memory cost 17 registers and the second CTA (66.4 us); issuing V after the
-// softmax instead of with K read 63.6.
+// FP8 E4M3 paged decode, HD=128, LPR lanes/KV row, TOK rows/lane-group/iteration, HPC Q
+// heads/CTA (attention.paged_fp8_multitok with Q-head grouping). LPR lanes hold one row
+// (128/LPR bytes/lane), a warp holds 32/LPR rows/load, a dot reduces over log2(LPR) shuffles;
+// a CTA holds HPC Q heads of one KV head, converting each row once and dotting against HPC q
+// slices in shared memory (kept out of registers so two CTAs fit an SM). The warp prefetches
+// the next row group's K/V while reducing the current one across block boundaries. Each lane
+// group runs its own online softmax; groups merge over shuffles, then the cross-warp merge runs
+// per head after a relayout to its 4-dims-per-lane form. Grid (batch, n_kv_heads*n_q_per_kv/HPC);
+// sliding window/StreamingLLM/softcap/sinks as in the four-token kernel.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/pdl_device.cuh"

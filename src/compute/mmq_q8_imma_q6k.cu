@@ -1,13 +1,7 @@
-// =============================================================================
-// mmq_q8_imma_q6k.cu — Q6_K RAW-read IMMA prefill kernel (sm_120a)
-// =============================================================================
-//
-// Split out of mmq_q8_imma.cu (recompile-blast-radius gate). Tile constants,
-// the cp.async primitives, the Q6 staging strides and q6k_smem_bytes() are
-// shared via mmq_q8_imma_internal.cuh; the kernel template is declared there
-// and launched from the dispatch in mmq_q8_imma.cu. The one-time 224-B repack
-// kernel (q6k_repack_kernel) stays with its launch wrapper in mmq_q8_imma.cu.
-// Kept BYTE-IDENTICAL to the original inline code.
+// Q6_K RAW-read IMMA prefill kernel (sm_120a). Split out of mmq_q8_imma.cu
+// (recompile-blast-radius gate); shared tile constants/cp.async/Q6 staging strides/
+// q6k_smem_bytes() in mmq_q8_imma_internal.cuh; kernel launched from mmq_q8_imma.cu dispatch,
+// which also keeps the one-time 224-B repack kernel. Byte-identical to original.
 
 #include "compute/mmq_q8_imma_internal.cuh"
 
@@ -17,25 +11,15 @@ namespace imp {
 
 namespace {
 
-// -----------------------------------------------------------------------------
-// Q6_K RAW-read kernel (per-16 scales, symmetric — no beta/rowsum term).
-//
-// The 210-B super-blocks are only 2-aligned (blocks cp.async at all sizes),
-// so a one-time 224-B-stride repack (plain byte copy, +6.7% of the Q6_K
-// bytes — ~110 MB for the 30B down_proj experts) restores 16-B alignment;
-// the forge 2026-05-28 "2-aligned quant repack" finding, applied here.
-//
-// Per-16 scale granularity vs the k32 MMA: HALF-MMA SPLIT — issue the
-// m16n8k32 twice per sub-block, once as (b0, 0) and once as (0, b1); the
-// zeroed operand register makes each MMA return the 16-wide partial sum,
-// which gets its own α = d·sc16. Same int-op count as a k16 MMA pair,
-// zero layout restructuring.
-//
-// Quad mapping (see dequant_gpu.cu Q6_K header): K-step ks covers sub-block
-// pair j = (2ks)%8, j+1 → group g = j>>2, quads (j%4, j%4+1). The pair
-// shares ql bytes [g*64 .. +63] (quad&1 selects the 32-byte half, quad>=2
-// the nibble) and qh bytes [g*32 .. +31] (shift quad*2).
-// -----------------------------------------------------------------------------
+// Q6_K RAW-read kernel (per-16 scales, symmetric, no beta/rowsum term).
+// 210-B super-blocks are only 2-aligned; one-time 224-B-stride repack (+6.7% bytes)
+// restores 16-B alignment for cp.async.
+// Per-16 scale vs k32 MMA: HALF-MMA SPLIT, issue m16n8k32 twice as (b0,0) and (0,b1);
+// zeroed operand yields the 16-wide partial sum with its own alpha=d*sc16 (same int-op
+// count as a k16 MMA pair).
+// Quad mapping (dequant_gpu.cu Q6_K header): K-step ks covers sub-block pair j=(2ks)%8,
+// j+1 -> group g=j>>2, quads (j%4, j%4+1); pair shares ql bytes [g*64..+63] (quad&1
+// selects 32-B half, quad>=2 the nibble) and qh bytes [g*32..+31] (shift quad*2).
 
 template <int BM>
 __device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict__ A,

@@ -1,11 +1,6 @@
-// =============================================================================
-// mmq_q8_imma_q4k.cu — Q4_K RAW-read IMMA prefill kernel (sm_120a)
-// =============================================================================
-//
-// Split out of mmq_q8_imma.cu (recompile-blast-radius gate). Tile constants and
-// the cp.async primitives are shared via mmq_q8_imma_internal.cuh; the kernel
-// template is declared there and launched from the dispatch in mmq_q8_imma.cu.
-// Kept BYTE-IDENTICAL to the original inline code.
+// Q4_K RAW-read IMMA prefill kernel (sm_120a). Split out of mmq_q8_imma.cu
+// (recompile-blast-radius gate); tile constants/cp.async in mmq_q8_imma_internal.cuh,
+// kernel template declared there, launched from mmq_q8_imma.cu dispatch. Byte-identical to original.
 
 #include "compute/mmq_q8_imma_internal.cuh"
 
@@ -15,17 +10,12 @@ namespace imp {
 
 namespace {
 
-// -----------------------------------------------------------------------------
-// Q4_K RAW-read kernel: reads the GGUF 144-B super-blocks directly — zero
-// extra weight VRAM (the plane-repack variant duplicated all expert weights
-// and hit the 32-GB wall on Qwen3-30B MoE: pp512 8x SLOWER under UVM
-// paging). One 64-wide K-step = exactly one 32-byte nibble group per B row
-// (sub-block pair = low/high nibbles of the same bytes), so the B-fragment
-// fetch is one u32 load + shift/mask/vsub4. The (α, β) scale pairs are
-// computed from the staged 16-B block headers in a cooperative pass after
-// the tile lands (α = d·sc6, β = 8·α − dmin·m6; algebra identical to the
-// mmq_q4k_imma_reorder form, see mmq_q4k_imma_layout.h).
-// -----------------------------------------------------------------------------
+// Q4_K RAW-read kernel: reads GGUF 144-B super-blocks directly, zero extra weight VRAM
+// (plane-repack duplicated all expert weights, hit 32-GB wall on Qwen3-30B MoE: pp512
+// 8x slower under UVM paging). One 64-wide K-step = one 32-byte nibble group per B row
+// (sub-block pair = low/high nibbles); B-fragment fetch = one u32 load + shift/mask/vsub4.
+// alpha/beta computed from staged 16-B block headers after tile lands (alpha=d*sc6,
+// beta=8*alpha-dmin*m6; same algebra as mmq_q4k_imma_reorder, see mmq_q4k_imma_layout.h).
 
 __device__ __forceinline__ void q4k_scale_min(int j, const uint8_t* q, uint32_t& sc,
                                               uint32_t& mn) {

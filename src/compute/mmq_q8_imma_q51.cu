@@ -1,11 +1,6 @@
-// =============================================================================
-// mmq_q8_imma_q51.cu — Q5_1 RAW-read IMMA prefill kernel (sm_120a)
-// =============================================================================
-//
-// Split out of mmq_q8_imma.cu (recompile-blast-radius gate). Tile constants and
-// the cp.async primitives are shared via mmq_q8_imma_internal.cuh; the kernel
-// template is declared there and launched from the dispatch in mmq_q8_imma.cu.
-// Kept BYTE-IDENTICAL to the original inline code.
+// Q5_1 RAW-read IMMA prefill kernel (sm_120a). Split out of mmq_q8_imma.cu
+// (recompile-blast-radius gate); tile constants/cp.async in mmq_q8_imma_internal.cuh,
+// kernel template declared there, launched from mmq_q8_imma.cu dispatch. Byte-identical to original.
 
 #include "compute/mmq_q8_imma_internal.cuh"
 
@@ -15,19 +10,12 @@ namespace imp {
 
 namespace {
 
-// -----------------------------------------------------------------------------
-// Q5_1 RAW-read kernel (legacy 32-elem blocks, asymmetric).
-//
-// block_q5_1 = {half d; half m; u8 qh[4]; u8 qs[16]} = 24 B. One K-step =
-// two consecutive blocks = 48 contiguous bytes, and kb0 is always even so
-// the pair starts 16-B aligned (48·n) — NO repack needed, 3× cp.async-16
-// per row per K-step.
-//
-// w = d·q + m with q ∈ 0..31  →  q_sym = q − 16:  w = d·q_sym + (16d + m)
-// → exactly the kernel's α/β form (α = d, β = 16d + m), reusing the same
-// rowsum coupling as Q4_K. The 5th bit comes from qh: element j (0..15) =
-// qs[j]&0xF | bit(qh, j)<<4; element j+16 = qs[j]>>4 | bit(qh, j+16)<<4.
-// -----------------------------------------------------------------------------
+// Q5_1 RAW-read kernel (legacy 32-elem blocks, asymmetric): block_q5_1 =
+// {half d; half m; u8 qh[4]; u8 qs[16]} = 24B. One K-step = 2 consecutive blocks
+// = 48B, kb0 always even so pair is 16-B aligned (48*n): no repack, 3x cp.async-16/row/K-step.
+// w = d*q+m, q in [0,31], q_sym=q-16: w = d*q_sym + (16d+m) -> alpha=d, beta=16d+m
+// (same rowsum coupling as Q4_K). 5th bit from qh: elem j = qs[j]&0xF | bit(qh,j)<<4;
+// elem j+16 = qs[j]>>4 | bit(qh,j+16)<<4.
 
 constexpr int kQ51Row = 48 + 16;  // staged pair row + pad
 

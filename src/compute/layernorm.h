@@ -21,13 +21,11 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps = 1e-
 void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, int rows, int d_model,
                            float eps, cudaStream_t stream, float weight_offset);
 
-// Batched-decode producer fusion: rmsnorm + NVFP4 activation quantize in one
-// kernel. Writes the same FP16 `out` as rmsnorm() (bit-identical) plus the
-// packed nibbles [rows, d/2] and FP8 micro-scales [rows, d/16] the small-M
-// NVFP4 GEMM reads (plain layout, tensor_scale 1.0 — bit-identical to
-// quantize_fp16_to_nvfp4_into on the stored FP16). Returns false when the
-// shape is outside the fused envelope (F16, rows 2..64, d % 256 == 0,
-// d <= 8192); the caller must then fall back to rmsnorm().
+// Batched-decode producer fusion: rmsnorm + NVFP4 activation quantize in one kernel. Writes
+// the same FP16 `out` as rmsnorm() (bit-identical) plus packed nibbles [rows,d/2] and FP8
+// micro-scales [rows,d/16] the small-M NVFP4 GEMM reads (plain layout, tensor_scale 1.0,
+// bit-identical to quantize_fp16_to_nvfp4_into on the stored FP16). Returns false outside the
+// fused envelope (F16, rows 2..64, d%256==0, d<=8192); caller falls back to rmsnorm().
 bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
                    uint8_t* xq_scales, float eps = 1e-5f, cudaStream_t stream = nullptr,
                    float weight_offset = 0.0f);
@@ -44,9 +42,9 @@ void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight, float* out
                           float eps = 1e-5f, cudaStream_t stream = nullptr, float weight_offset = 0.0f);
 
 // True LayerNorm with residual add (#836, encoder post-LN):
-//   out = ((x + residual) - mean) / sqrt(var + eps) * weight + bias
-// x/residual/out: [rows, d_model] FP16; weight/bias: [d_model] F32 or F16.
-// residual may be empty (Tensor{}) for the post-embedding norm.
+//   out = ((x+residual) - mean) / sqrt(var+eps) * weight + bias
+// x/residual/out: [rows,d_model] FP16; weight/bias: [d_model] F32 or F16. residual may be
+// empty (Tensor{}) for the post-embedding norm.
 void layernorm_residual(const Tensor& x, const Tensor& residual, const Tensor& weight,
                         const Tensor& bias, Tensor& out, float eps = 1e-12f,
                         cudaStream_t stream = nullptr);

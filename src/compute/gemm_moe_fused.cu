@@ -8,24 +8,13 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Fused Q6_K × FP16 GEMM kernel for MoE expert prefill projections.
-//
-// Eliminates the intermediate FP16 dequantization buffer by reading Q6_K
-// weights directly and multiplying with FP16 input activations.
-// Reduces DRAM traffic by ~5x vs dequant-then-GEMM.
-//
-// Grid:  (ceil(N / FUSED_WARPS), n_experts)
-// Block: 256 threads (8 warps)
-//
-// Each warp computes one output row for one expert across all assigned tokens.
-// All 32 lanes cooperatively dequant the SAME Q6_K block (lane L handles
-// elements L*8..L*8+7), giving coalesced reads within 2 cache lines.
-// FP16 activations naturally cache in L1 (all rows of same expert share them).
-//
-// M_TILE=8 keeps register pressure low for high occupancy (~40 warps/SM).
-// Weight data re-read per M_TILE hits L2 cache (row data = 1.7 KB fits easily).
-// ---------------------------------------------------------------------------
+// Fused Q6_K x FP16 GEMM for MoE expert prefill: reads Q6_K weights directly, multiplies with
+// FP16 activations, eliminating the intermediate FP16 dequant buffer. Grid
+// (ceil(N/FUSED_WARPS), n_experts), block 256 threads (8 warps). Each warp computes one output
+// row for one expert across all assigned tokens; all 32 lanes cooperatively dequant the SAME
+// Q6_K block (lane L handles elements L*8..L*8+7, coalesced within 2 cache lines). M_TILE=8
+// keeps register pressure low for high occupancy; weight re-read per M_TILE hits L2 (row is
+// 1.7 KB).
 
 constexpr int FUSED_WARPS = 8;
 constexpr int FUSED_BLOCK = FUSED_WARPS * 32;

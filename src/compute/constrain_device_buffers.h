@@ -1,11 +1,8 @@
 #pragma once
 
-// The device buffers all four constrainers need (audit finding F-18).
-//
-// Deliberately separate from constrain_common.h: that header carries the JSON
-// category classifier and only compiles when the includer has already pulled in
-// the CAT_* flags, so grammar/ and regex/ — which have no categories — could not
-// include it. Buffers are not category logic.
+// Device buffers all four constrainers need (audit finding F-18). Kept separate from
+// constrain_common.h: that header carries the JSON category classifier and only compiles once
+// the includer has CAT_* flags, so grammar/regex (no categories) could not include it.
 
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -15,23 +12,12 @@
 
 namespace imp {
 
-//
-// GrammarConstrainer, JsonConstrainer, RegexConstrainer and SchemaConstrainer
-// each declared their own `d_token_allow_` (and two of them their own
-// `d_token_categories_` / `d_allowed_mask_`), each with its own cudaMalloc, its
-// own cudaFree and its own failure convention — four lifetimes to get right for
-// one set of buffers, and four entries on the I1 allocation allowlist.
-//
-// The differences between the four were not design. Three nulled the pointer on
-// a failed allocation and one did not; one allocated the allow list lazily
-// inside apply_mask() until #1104, where a failure mid-decode returned without
-// masking and the request answered prose where JSON was promised.
-//
-// What is shared is the *storage*. The mask logic stays in the four classes —
-// they are genuinely different grammars, and merging them was rejected.
-//
-// Allocation happens at init and fails loudly, which is the invariant #1104
-// established: a constrainer that cannot mask must never look initialised.
+// Replaces four constrainers' separately-managed d_token_allow_/_categories_/_mask_ buffers
+// (four lifetimes, four I1 allocation-allowlist entries) with one shared storage; mask LOGIC
+// stays in the four classes (genuinely different grammars).
+// INVARIANT (#1104): allocation happens at init and fails loudly - a constrainer that cannot
+// mask must never look initialised. (Previously one class allocated lazily inside apply_mask()
+// and a mid-decode failure returned without masking, answering prose where JSON was promised.)
 class ConstrainDeviceBuffers {
 public:
     ConstrainDeviceBuffers() = default;

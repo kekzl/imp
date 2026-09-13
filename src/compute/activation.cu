@@ -11,10 +11,7 @@
 
 namespace imp {
 
-// --------------------------------------------------------------------------
-// SwiGLU FP32 vectorized kernel (float4 path)
 // out = silu(gate) * up = gate * sigmoid(gate) * up
-// --------------------------------------------------------------------------
 __global__ void swiglu_fp32_vec4_kernel(const float* __restrict__ gate, const float* __restrict__ up,
                                         float* __restrict__ out, int64_t n) {
     const int64_t vec_n = n / 4;
@@ -55,10 +52,7 @@ __global__ void swiglu_fp32_kernel(const float* __restrict__ gate, const float* 
     }
 }
 
-// --------------------------------------------------------------------------
-// SwiGLU FP16 kernel (load half, compute in float, store half)
-// Processes 2 elements at a time using half2 / float conversion
-// --------------------------------------------------------------------------
+// Loads half, computes in float, stores half; processes 2 elements per iter via half2.
 __global__ void swiglu_fp16_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
                                    __half* __restrict__ out, int64_t n) {
     const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
@@ -140,11 +134,8 @@ __global__ void geglu_fp32_vec4_kernel(const float* __restrict__ gate, const flo
     }
 }
 
-// --------------------------------------------------------------------------
-// gpt-oss clamped GLU kernels (issue #547):
-//   gate_c = min(gate, 7);  up_c = clamp(up, -7, 7)
-//   out = (up_c + 1) * gate_c * sigmoid(1.702 * gate_c)
-// --------------------------------------------------------------------------
+// gpt-oss clamped GLU (#547): gate_c = min(gate, 7), up_c = clamp(up, -7, 7).
+// out = (up_c + 1) * gate_c * sigmoid(1.702 * gate_c)
 __device__ __forceinline__ float gpt_oss_glu_elem(float g, float u) {
     constexpr float kLimit = 7.0f;
     constexpr float kAlpha = 1.702f;
@@ -188,10 +179,7 @@ __global__ void gpt_oss_glu_fp32_vec4_kernel(const float* __restrict__ gate, con
     }
 }
 
-// --------------------------------------------------------------------------
-// GELU FP32 vectorized kernel
 // gelu(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-// --------------------------------------------------------------------------
 static constexpr float GELU_SQRT_2_OVER_PI = 0.7978845608028654f;
 static constexpr float GELU_COEFF = 0.044715f;
 
@@ -257,10 +245,7 @@ __global__ void gelu_fp16_kernel(const __half* __restrict__ x, __half* __restric
     }
 }
 
-// --------------------------------------------------------------------------
-// Host dispatch helpers — gated (2-input) and unary (1-input) activation
-// launch with FP32 vec4/scalar + FP16 half2 paths.
-// --------------------------------------------------------------------------
+// Host dispatch: gated (2-input) and unary (1-input) activations, FP32 vec4/scalar + FP16 half2.
 
 // Gated activation dispatch: out = act(gate) * up
 // Handles FP32 (vec4 + scalar fallback) and FP16 (half2, PDL-enabled).
@@ -306,15 +291,9 @@ static void dispatch_gated_activation(const Tensor& gate, const Tensor& up, Tens
     }
 }
 
-// --------------------------------------------------------------------------
-// Fused SwiGLU + NVFP4 activation quantize — the batched-decode producer
-// fusion for the down-projection input. One thread per 16-value micro-block:
-// silu(gate)*up in float (same arithmetic as swiglu_fp16_kernel), rounded to
-// FP16 and stored (bit-identical `out`), then the ROUNDED values are packed
-// to NVFP4 nibbles + FP8 micro-scale (plain layout, tensor_scale 1.0 —
-// bit-identical to quantize_fp16_to_nvfp4_into on the stored FP16). Kills
-// the down GEMM's quantize launch + its [M,K] FP16 re-read.
-// --------------------------------------------------------------------------
+// Fused SwiGLU + NVFP4 quantize (batched-decode producer fusion for down-proj input).
+// One thread per 16-value micro-block: silu(gate)*up rounded to FP16 (bit-identical to
+// swiglu_fp16_kernel), packed to NVFP4 nibbles + FP8 micro-scale, tensor_scale 1.0.
 __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
                                          __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
                                          uint8_t* __restrict__ xq_scales, int64_t total_mb) {
@@ -379,11 +358,8 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stre
                               swiglu_fp16_kernel, true, stream);
 }
 
-// --------------------------------------------------------------------------
-// Host dispatch: fused swiglu + NVFP4 quantize (see kernel comment).
-// Returns false outside the fused envelope; caller falls back to swiglu()
-// + the GEMM dispatch's own quantize.
-// --------------------------------------------------------------------------
+// Host dispatch for the fused swiglu+NVFP4 kernel (see kernel comment).
+// Returns false outside the fused envelope; caller falls back to swiglu() + GEMM's own quantize.
 bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
                            uint8_t* xq_scales, cudaStream_t stream) {
     if (gate.qtype != QType::F16 || up.qtype != QType::F16 || out.qtype != QType::F16)
@@ -460,13 +436,8 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream) {
     }
 }
 
-// --------------------------------------------------------------------------
-// Shared-expert sigmoid gate (Qwen3-Next / Qwen3.6):
-//   per row r: gate = sigmoid( sum_d x[r,d] * W[d] )
-//   y[r,:]   *= gate
-// One block per row, block reduces the dot product in shared memory and then
-// rescales the entire row of y in place.
-// --------------------------------------------------------------------------
+// Shared-expert sigmoid gate (Qwen3-Next/Qwen3.6): gate=sigmoid(sum_d x[r,d]*W[d]); y[r,:]*=gate.
+// One block per row; block reduces the dot product in shared memory, then rescales y in place.
 __global__ void shared_expert_gate_scale_kernel(
     const __half* __restrict__ x,  // [n, d_model]
     const __half* __restrict__ W,  // [d_model] — FP16 (upload converts F32→FP16)

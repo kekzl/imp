@@ -1,23 +1,10 @@
-// =============================================================================
-// mmq_q8_imma_scratch.cu — everything the IMMA prefill family OWNS
-// =============================================================================
-//
-// Split out of mmq_q8_imma.cu (recompile-blast-radius gate, CLAUDE.md "File
-// Layout & Size"). The dispatch and the kernel launches stay there; what lives
-// here is the memory: the Q8_0 weight planes, the Q6_K repack, the activation
-// triple, the split-K partials, and the preallocation that takes the last two
-// from the T2 arena at their planned bound.
-//
-// The split follows the ownership boundary rather than a line count, and it is
-// the boundary the next migration needs: the two weight caches below are still
-// direct allocations because they are MODEL-resident (T1, A7 step 6), while the
-// activation and split-K scratches are engine-persistent (T2) and already moved
-// (A7 step 8, AUDIT B13). Keeping them in one file makes that difference — and
-// the fact that it is deliberate — visible in one place.
-//
-// The state is declared in mmq_q8_imma_internal.cuh rather than kept
-// file-static, because the dispatch in mmq_q8_imma.cu reads the scratch
-// pointers directly when it builds its kernel arguments.
+// Owns IMMA prefill family memory (recompile-blast-radius split from mmq_q8_imma.cu):
+// Q8_0 weight planes, Q6_K repack, activation triple, split-K partials, and the
+// preallocation that takes the latter two from the T2 arena at their planned bound.
+// Q8_0/Q6_K weight caches are direct allocations (MODEL-resident, T1/A7 step 6);
+// activation/split-K scratches are engine-persistent (T2, moved in A7 step 8/AUDIT B13).
+// State lives in mmq_q8_imma_internal.cuh (not file-static): mmq_q8_imma.cu's dispatch
+// reads the scratch pointers directly for kernel args.
 
 #include "compute/mmq_q8_imma.h"
 #include "compute/mmq_q8_imma_internal.cuh"
@@ -31,10 +18,8 @@
 
 namespace imp {
 
-// The three kernels that PREPARE the buffers owned here: the Q8_0 plane
-// split, the Q6_K 224-B repack, and the activation quantizer. They moved with
-// their data — a kernel whose only job is to fill one of these buffers is part
-// of that buffer's story, not of the dispatch's.
+// Kernels that PREPARE these buffers (Q8_0 plane split, Q6_K 224-B repack, activation
+// quantizer) live here with their data, not with the dispatch.
 namespace {
 __global__ void q6k_repack_kernel(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
                                   size_t n_blocks) {
@@ -49,10 +34,8 @@ __global__ void q6k_repack_kernel(const uint8_t* __restrict__ src, uint8_t* __re
 }
 
 
-// -----------------------------------------------------------------------------
-// Q8_0 SoA split: raw 34-B blocks {half d; int8 qs[32]} (2-aligned! memcpy
-// only) → qs plane [N][K] s8 + interleaved (α=d, β=0) plane [N][K/32][2].
-// -----------------------------------------------------------------------------
+// Q8_0 SoA split: raw 34-B blocks {half d; int8 qs[32]} (2-aligned, memcpy only) ->
+// qs plane[N][K] s8 + interleaved (alpha=d, beta=0) plane[N][K/32][2].
 __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restrict__ qs_plane,
                                 __half* __restrict__ sc_plane, int n_blocks_total) {
     const int b = blockIdx.x * blockDim.x + threadIdx.x;
@@ -110,22 +93,11 @@ std::unordered_map<const void*, WeightPlanes> g_imma_weights;
 std::unordered_map<const void*, Q6kRepack> g_imma_q6k;
 ActScratch g_imma_act;
 
-// The weight caches below are the largest single VRAM consumer imp had that
-// nothing planned: 1.125 B per Q8_0 weight element, taken lazily on the FIRST
-// prefill of each tensor, and best-effort — a failed cudaMalloc silently drops
-// that GEMM to the dequant path. On Qwen3-8B-Q8_0 that is up to 8.6 GiB, and
-// because it takes whatever the KV pool left over, it took a DIFFERENT amount
-// on every start: 5612 MiB cold, 7839 with vram.library_reserve_mb=6782, 7942
-// at 12000 (#1899). The plan charged none of it — it landed in the A1.5
-// "library reserve" residual, was read as a cuBLAS charge, and the card ran
-// full, after which WDDM spilled whichever allocation the startup path had
-// touched last (the graph-prewarm ladder decided the victim).
-//
-// So the size is now decided by the planner (vram_budget's imma_plane_bytes,
-// the same arithmetic as below) and enforced here: a take past the budget
-// declines exactly like an allocation failure. SIZE_MAX (the default) is
-// uncapped — tests and standalone tools that never planned one; a planned
-// budget of 0 means "no planes", not "unlimited".
+// Q8_0 weight caches (up to 8.6 GiB, 1.125B/element) are taken lazily on first prefill,
+// best-effort: cudaMalloc failure drops that GEMM to the dequant path (#1899).
+// Size is decided by the planner (vram_budget's imma_plane_bytes) and enforced here:
+// a take past the budget declines like an allocation failure. SIZE_MAX (default) =
+// uncapped (tests/standalone tools); a planned budget of 0 means "no planes".
 size_t g_imma_plane_budget = SIZE_MAX;
 size_t g_imma_plane_used = 0;
 bool g_imma_plane_budget_hit = false;
@@ -147,10 +119,9 @@ bool imma_plane_budget_take(size_t need, const char* what, int64_t N, int64_t K)
         return true;
     if (!g_imma_plane_budget_hit) {
         g_imma_plane_budget_hit = true;
-        // The shape is in the message on purpose: the planner scans the model's
-        // tensor list, the allocator keys on source pointers, and the two can
-        // disagree (a tensor the scan does not know about, a re-registered
-        // weight). Naming the take that overran is what makes that debuggable.
+        // Shape is named in the message deliberately: planner scans the tensor list, allocator
+        // keys on source pointers, and the two can disagree (unscanned tensor, re-registered
+        // weight). Naming the take that overran makes it debuggable.
         IMP_LOG_WARN(
             "mmq_q8_imma: %s cache reached its planned budget (%.0f MiB used, %.0f MiB "
             "planned, %.0f MiB wanted for N=%lld K=%lld) — the remaining prefill GEMMs run "
@@ -181,10 +152,9 @@ bool imma_stream_capturing(cudaStream_t stream) {
 }
 
 bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing) {
-    // Q8_0 only: the SoA planes cost 1.06x the source — fine for dense Q8
-    // models, but Q4_K (esp. MoE experts) reads the raw blocks in-kernel
-    // instead (the plane variant duplicated all expert weights and hit the
-    // 32-GB VRAM wall on Qwen3-30B: pp512 8x SLOWER under UVM paging).
+    // Q8_0 only: SoA planes cost 1.06x source, fine for dense Q8 models. Q4_K (esp. MoE
+    // experts) reads raw blocks in-kernel instead: the plane variant duplicated all expert
+    // weights and hit the 32-GB VRAM wall on Qwen3-30B (pp512 8x slower under UVM paging).
     auto it = g_imma_weights.find(src);
     if (it != g_imma_weights.end() && it->second.N == N && it->second.K == K) return true;
     if (capturing) return false;  // never allocate inside graph capture
@@ -232,15 +202,11 @@ bool imma_ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool
     return true;
 }
 
-// T2 (A7 step 8), and this is the migration that closes AUDIT B13. The three
-// buffers below are kernel PARAMETERS baked into instantiated CUDA graphs; the
-// cudaFree+cudaMalloc pair this replaces made a replayed graph read a freed
-// address whenever a later, larger eager call grew them. A bump arena never
-// frees, so a grow hands out a NEW slice and leaves the old one valid — the
-// captured graph keeps reading the buffer it was captured with, at the size it
-// was captured for. Growing does strand the previous slice, which is why
-// exec_t2_demand charges the bound up front (`imma_scratch`) and a grow past it
-// says so.
+// T2 (A7 step 8), closes AUDIT B13: these 3 buffers are kernel params baked into
+// instantiated CUDA graphs. cudaFree+cudaMalloc made a replayed graph read freed memory
+// on grow; a bump arena never frees, so a grow hands out a new slice, old one stays valid.
+// Growing strands the previous slice, so exec_t2_demand charges the bound up front
+// (`imma_scratch`); a grow past it is logged.
 bool imma_ensure_act(int M, int K, bool capturing) {
     const size_t mk = static_cast<size_t>(M) * K;
     const size_t msubs = static_cast<size_t>(M) * (K / 32);
@@ -251,10 +217,9 @@ bool imma_ensure_act(int M, int K, bool capturing) {
         g_imma_act = ActScratch{};  // the arena was closed under us
     if (capturing) return false;
     if (g_imma_act.xs8) {
-        // Only reachable when mmq_q8_imma_preallocate()'s bound was too small:
-        // the preallocation takes the charged (rows, K) up front precisely so
-        // the staircase of intermediate takes — each one stranded in the bump
-        // arena — cannot happen.
+        // Reachable only if mmq_q8_imma_preallocate()'s bound was too small: preallocation takes
+        // the charged (rows, K) up front so a staircase of intermediate takes (each stranded in
+        // the bump arena) cannot happen.
         IMP_LOG_WARN("mmq_q8_imma: activation scratch regrew to M=%d K=%d (%.1f MiB) past the "
                      "preallocated bound — re-measure exec_imma_scratch_shape()",
                      M, K, (mk + msubs * 6) / (1024.0 * 1024.0));
@@ -279,10 +244,9 @@ bool imma_ensure_act(int M, int K, bool capturing) {
 
 SplitKScratch g_imma_splitk;
 
-// T2, same B13 argument as imma_ensure_act above — this buffer is a graph parameter
-// too. The bound is provable rather than measured: the caller only takes this
-// path at M <= 32, and its tile guard caps N * used at 512 * kBN, so
-// kExecImmaSplitkBytes covers every shape (see exec/workspace_sizes.h).
+// T2, same B13 argument as imma_ensure_act: this buffer is also a graph parameter.
+// Bound is provable: caller only takes this path at M<=32, tile guard caps N*used at
+// 512*kBN, so kExecImmaSplitkBytes covers every shape (see exec/workspace_sizes.h).
 bool imma_ensure_splitk(size_t floats, bool capturing) {
     const uint64_t gen = engine_arena().generation();
     if (g_imma_splitk.buf && g_imma_splitk.gen == gen && g_imma_splitk.cap >= floats) return true;
@@ -306,10 +270,9 @@ bool imma_ensure_splitk(size_t floats, bool capturing) {
 }
 
 void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
-    // NO memoization: workspace buffers (moe gathered, layer activations) are
-    // REUSED across layers with the same pointer — a (ptr, M, K) memo served
-    // layer-1 activations to every later layer (PPL 31.6 → 441k, found
-    // 2026-06-07). The kernel costs ~7 µs; quantize unconditionally.
+    // NO memoization: workspace buffers (moe gathered, layer activations) are REUSED across
+    // layers with the same pointer; a (ptr,M,K) memo served layer-1 activations to every
+    // later layer (PPL 31.6 -> 441k). Kernel costs ~7us; quantize unconditionally.
     const int total_warps = M * (K / 32);
     const int blocks = min(2048, (total_warps + 7) / 8);
     quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_imma_act.xs8, g_imma_act.xscale,
@@ -318,12 +281,10 @@ void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
 }
 
 
-// Take the activation triple and the split-K slice ONCE, at the bound
-// exec_t2_demand charged (A7 step 8). Called from Engine::init after the T2
-// arena is open. Without it imma_ensure_act()/imma_ensure_splitk() would climb a
-// staircase of ever-larger takes — every intermediate one stranded, because a
-// bump arena has no free — and the sum of that staircase is not what the plan
-// reserved.
+// Takes activation triple + split-K slice ONCE at the exec_t2_demand bound (A7 step 8),
+// called from Engine::init after the T2 arena opens. Without it, imma_ensure_act/
+// imma_ensure_splitk climb a staircase of ever-larger takes; a bump arena has no free,
+// so each intermediate one is stranded and the sum exceeds what the plan reserved.
 void mmq_q8_imma_preallocate(int rows, int k) {
     if (rows <= 0 || k <= 0)
         return;

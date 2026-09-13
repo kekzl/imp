@@ -1,27 +1,13 @@
 #pragma once
-// =============================================================================
-// encoder_forward.h — encoder-only embedder forward (#836, nomic-bert)
-// =============================================================================
-//
-// Self-contained bidirectional encoder pass (post-LN BERT variant with rotary
-// positions and SwiGLU FFN — the nomic-embed recipe). Deliberately independent
-// of GraphExecutor: no KV cache, no CUDA graphs, no sampling. Reuses the
-// shared primitives (embedding_lookup, gemm, rope_forward,
-// attention_cublas_prefill, swiglu, layernorm_residual).
-//
-// Per input:
-//   h = LayerNorm(tok_emb[t] + token_types[0])           (post-embedding LN)
-//   12 x [ q,k,v = h @ Wq/Wk/Wv ; rope(q,k) ;
-//          a = softmax(qk^T)v (bidirectional) @ Wo ;
-//          h = LayerNorm(h + a) ;                        (attn_output_norm)
-//          f = swiglu(h@Wg, h@Wu) @ Wd ;
-//          h = LayerNorm(h + f) ]                        (layer_output_norm)
-//   out = L2-normalize(mean(h, axis=0))
-//
-// Weights arrive Q8_0 from GGUF; encoder_workspace_init dequantizes them ONCE
-// to FP16 side buffers (~230 MB for nomic's 137M params) so the forward is
-// plain FP16 GEMMs.
-// =============================================================================
+// Encoder-only embedder forward (#836, nomic-bert): self-contained bidirectional encoder
+// (post-LN BERT + rotary positions + SwiGLU FFN, the nomic-embed recipe). Independent of
+// GraphExecutor - no KV cache, no CUDA graphs, no sampling. Reuses embedding_lookup, gemm,
+// rope_forward, attention_cublas_prefill, swiglu, layernorm_residual.
+// Per input: h = LayerNorm(tok_emb[t] + token_types[0]); 12x [ q,k,v = h@Wq/Wk/Wv; rope(q,k);
+//   a = softmax(qk^T)v (bidirectional) @ Wo; h = LayerNorm(h+a); f = swiglu(h@Wg,h@Wu)@Wd;
+//   h = LayerNorm(h+f) ]; out = L2-normalize(mean(h, axis=0)).
+// Weights arrive Q8_0 from GGUF; encoder_workspace_init dequantizes them ONCE to FP16 side
+// buffers so the forward is plain FP16 GEMMs.
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>

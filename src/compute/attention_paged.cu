@@ -14,78 +14,20 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Device helpers — apply_softcap, write_empty_split_sentinel,
-// online_softmax_step, ContextRange, compute_context_range, and
-// block_token_range live in attention_paged_common.cuh.
-// ---------------------------------------------------------------------------
+// Device helpers (apply_softcap, write_empty_split_sentinel, online_softmax_step, ContextRange,
+// compute_context_range, block_token_range) live in attention_paged_common.cuh.
 
-// ---------------------------------------------------------------------------
-// Paged Attention -- Decode Kernel (single-query per sequence)
-// ---------------------------------------------------------------------------
-//
-// Each thread block handles one (batch, head) pair.
-// Q:       [batch, 1, n_heads, head_dim]           -- FP16
-// K_cache: [num_blocks, n_kv_heads, block_size, head_dim] -- FP16 (paged)
-// V_cache: [num_blocks, n_kv_heads, block_size, head_dim] -- FP16 (paged)
-// O:       [batch, 1, n_heads, head_dim]           -- FP16
-//
-// block_tables:  [batch, max_num_blocks] int32
-// context_lens:  [batch] int32
-//
-// Algorithm (two-pass online softmax):
-//   Pass 1 -- compute Q.K scores and track running max per warp group,
-//             then do a cross-warp reduction to get the global max and
-//             the global sum-of-exp.
-//   Pass 2 -- recompute exp(score-max) * V and accumulate, then normalise.
-//
-// For simplicity and clarity we use a single-pass approach where each
-// thread group iterates over KV blocks, maintains running softmax state
-// (max, sum-of-exp, weighted-V accumulator), and then does a final
-// cross-thread reduction.
-//
-// Thread mapping:
-//   256 threads = 8 warps.
-//   head_dim elements are distributed across threads for dot products.
-//   Each thread handles head_dim / 256 elements (if hd=128: not evenly
-//   divisible). Better: each warp handles a range of KV positions and
-//   all threads in the warp cooperate on the dot product across head_dim.
-//
-// Practical design:
-//   BLOCK_THREADS = 256, WARP_SIZE = 32, NUM_WARPS = 8.
-//   Distribute KV tokens across warps: each warp processes a strided
-//   subset of the context tokens.
-//   Within a warp, the 32 threads cooperate on the head_dim dot product:
-//     each thread handles ceil(head_dim/32) elements.
-//   After the dot product, a warp reduction gives the full score.
-//   Each warp tracks its own (max, l, O_acc[head_dim]).
-//   After iterating all assigned tokens, cross-warp reduction merges the
-//   8 partial softmax states into the final result.
-// ---------------------------------------------------------------------------
+// Paged Attention decode (single query/sequence). One block per (batch,head). Q:[batch,1,
+// n_heads,hd] K/V_cache:[num_blocks,n_kv_heads,block_size,hd] O:[batch,1,n_heads,hd] FP16;
+// block_tables:[batch,max_num_blocks] int32, context_lens:[batch] int32.
+// 256 threads (8 warps): each warp strides a subset of KV tokens, cooperates across head_dim
+// for the dot product, tracks its own (max,l,O_acc), then cross-warp reduction merges the 8
+// partial softmax states into the final result.
 
-// ---------------------------------------------------------------------------
-// GQA-aware Paged Attention Decode Kernel
-// ---------------------------------------------------------------------------
-//
-// Key optimization: with GQA (e.g. 32 Q heads, 4 KV heads, ratio=8), the
-// original kernel launches 32 blocks where groups of 8 read the exact same
-// K/V data independently. This kernel instead launches per KV head and
-// processes all Q heads sharing that KV head, loading K/V into shared memory
-// once and reusing it across all Q heads.
-//
-// Grid: (batch, n_kv_heads)
-// Block: GQA_BLOCK_THREADS threads
-//
-// Thread mapping:
-//   n_q_per_kv = n_heads / n_kv_heads (e.g. 8 or 16)
-//   Each Q head gets warps_per_q warps (4 for ratio<=8, 2 for ratio>8)
-//   Total warps = n_q_per_kv * warps_per_q (always <= 32)
-//   Total threads <= 1024
-//
-// Shared memory: K tile [block_size, head_dim] + V tile [block_size, head_dim]
-//   loaded cooperatively by all threads, then each Q head's warps compute
-//   dot products and accumulate from the shared tile.
-// ---------------------------------------------------------------------------
+// GQA-aware Paged Attention decode: launches per KV head (not per Q head), loading K/V into
+// smem once and reusing across all Q heads sharing it (vs one block per Q head re-reading the
+// same K/V independently). Grid:(batch,n_kv_heads). n_q_per_kv=n_heads/n_kv_heads Q heads share
+// warps_per_q warps each (4 if ratio<=8, else 2); total warps <= 32, threads <= 1024.
 
 // For GQA kernel: up to 16 Q heads per KV head
 // warps_per_q is a runtime parameter: 4 for ratio<=8, 2 for ratio>8
@@ -144,11 +86,8 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     for (int i = 0; i < elems_per_thread; i++)
         o_reg[i] = 0.0f;
 
-    // ---- Shared memory for K/V tile (double-buffered FP16) ----
-    // Two FP16 buffers use the same total smem as one FP32 buffer:
-    //   FP32 single: 2 * block_size * head_dim * 4 = 16 KiB (bs=16, hd=128)
-    //   FP16 double: 4 * block_size * head_dim * 2 = 16 KiB
-    // FP16→FP32 conversion happens during compute (negligible cost on Hopper+).
+    // Double-buffered FP16 K/V smem uses the same total size as one FP32 buffer: FP32 single =
+    // 2*block_size*head_dim*4B; FP16 double = 4*block_size*head_dim*2B (e.g. 16 KiB at bs=16,hd=128).
     extern __shared__ __align__(32) char smem_gqa[];
     half* s_kv_h = reinterpret_cast<half*>(smem_gqa);
     const int tile_elems = block_size * head_dim;
@@ -356,11 +295,8 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read (#963). The host-side
-        // eviction keeps the kernels' window range valid — this guard is
-        // defense-in-depth so any future range drift degrades to a skipped
-        // block instead of an illegal access / silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in block_table; a negative physical block would be
+        // an OOB KV read (#963). Defense-in-depth: skip the block instead of an illegal access.
         if (phys_block < 0)
             continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -462,11 +398,9 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
     }
 }
 
-// Generic non-templated fallback for arbitrary head_dim (e.g. tests with head_dim=8).
-// Uses strided lane mapping with bounds checks. No vectorization.
-// v_head_dim: when non-zero and != head_dim, read only v_head_dim elements from V
-// (V slots are head_dim-sized; only first v_head_dim are valid). Output O is
-// [batch, n_heads, v_head_dim]. For standard models pass v_head_dim == head_dim.
+// Generic non-templated fallback for arbitrary head_dim (e.g. tests, head_dim=8): strided lane
+// mapping with bounds checks, no vectorization. v_head_dim!=head_dim: read only v_head_dim
+// elements from V (slots are head_dim-sized); output O is [batch,n_heads,v_head_dim].
 __global__ void paged_attention_decode_kernel_generic(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
@@ -518,11 +452,8 @@ __global__ void paged_attention_decode_kernel_generic(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read (#963). The host-side
-        // eviction keeps the kernels' window range valid — this guard is
-        // defense-in-depth so any future range drift degrades to a skipped
-        // block instead of an illegal access / silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in block_table; a negative physical block would be
+        // an OOB KV read (#963). Defense-in-depth: skip the block instead of an illegal access.
         if (phys_block < 0)
             continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -619,18 +550,9 @@ __global__ void paged_attention_decode_kernel_generic(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Split-K Paged Attention -- Phase 1: partial attention over context splits
-// ---------------------------------------------------------------------------
-//
-// Grid: (batch, n_heads, num_splits)
-// Each block processes a subset of KV blocks and writes partial softmax state
-// (max, log_sum_exp, O_accumulator) to global scratch buffers.
-// Phase 2 reduces these partials into the final output.
-//
-// This increases SM utilization from n_heads blocks to n_heads * num_splits.
-// E.g. 32 heads * 8 splits = 256 blocks >> 170 SMs on RTX 5090.
-// ---------------------------------------------------------------------------
+// Split-K Phase 1: each block processes a KV-block subset, writing partial softmax state
+// (max, log_sum_exp, O_acc) to scratch. Phase 2 reduces partials into the final output.
+// Grid:(batch,n_heads,num_splits) raises SM utilization from n_heads blocks to n_heads*num_splits.
 
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_kernel(
@@ -674,10 +596,8 @@ __global__ void paged_attention_splitk_kernel(
         }
     }
 
-    // ---- Determine KV block range for this split ----
-    // NOTE: n_sinks is threaded into the kernel signature for API parity but
-    // streaming (sinks+window) is only implemented in the GQA kernel variant.
-    // This path falls back to classical sliding-window by passing n_sinks=0.
+    // n_sinks is threaded into the signature for API parity; sinks+window streaming is only
+    // implemented in the GQA kernel variant. This path falls back to sliding-window with n_sinks=0.
     const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
     const int effective_start = range_.effective_start;
     const int first_block = range_.first_block;
@@ -714,11 +634,8 @@ __global__ void paged_attention_splitk_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read (#963). The host-side
-        // eviction keeps the kernels' window range valid — this guard is
-        // defense-in-depth so any future range drift degrades to a skipped
-        // block instead of an illegal access / silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in block_table; a negative physical block would be
+        // an OOB KV read (#963). Defense-in-depth: skip the block instead of an illegal access.
         if (phys_block < 0)
             continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -840,23 +757,9 @@ __global__ void paged_attention_splitk_kernel(
                                       split_idx);
 }
 
-// ---------------------------------------------------------------------------
-// Pipelined Split-K: overlaps V[t]+K[t+1] loads with K[t] dot product
-// ---------------------------------------------------------------------------
-//
-// Each thread copies 8 bytes (4 halves) per cp.async call.
-// Per-warp smem: k_buf[2][HEAD_DIM] + v_buf[HEAD_DIM] = 3 * HEAD_DIM halfs
-// 8 warps × 3 × HEAD_DIM × 2B = 6 KiB for HD=128 (trivial vs reduction smem)
-//
-// Pipeline stages per token iteration:
-//   1. cp.async(smem_v, V[t])        — start V[t] load
-//   2. cp.async(smem_k[next], K[t+1]) — start K[t+1] load
-//   3. commit; wait_group<1>          — wait for K[t] (from prior iter)
-//   4. dot = Q · smem_k[cur]         — compute while V[t] + K[t+1] in flight
-//   5. softmax update
-//   6. wait_group<0>                  — wait for V[t]
-//   7. O += weight * smem_v           — accumulate V
-// ---------------------------------------------------------------------------
+// Pipelined Split-K: overlaps V[t]+K[t+1] loads with K[t]'s dot product via cp.async. Per-warp
+// smem: k_buf[2][HD]+v_buf[HD] = 3*HD halfs. Pipeline: cp.async V[t] and K[t+1] -> wait_group<1>
+// for K[t] -> dot while V[t]/K[t+1] in flight -> softmax update -> wait_group<0>, O += weight*V.
 
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_pipeline_kernel(
@@ -894,10 +797,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
         }
     }
 
-    // ---- Determine KV block range for this split ----
-    // NOTE: n_sinks is threaded into the kernel signature for API parity but
-    // streaming (sinks+window) is only implemented in the GQA kernel variant.
-    // This path falls back to classical sliding-window by passing n_sinks=0.
+    // n_sinks is threaded into the signature for API parity; sinks+window streaming is only
+    // implemented in the GQA kernel variant. This path falls back to sliding-window with n_sinks=0.
     const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
     const int effective_start = range_.effective_start;
     const int first_block = range_.first_block;
@@ -941,11 +842,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read (#963). The host-side
-        // eviction keeps the kernels' window range valid — this guard is
-        // defense-in-depth so any future range drift degrades to a skipped
-        // block instead of an illegal access / silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in block_table; a negative physical block would be
+        // an OOB KV read (#963). Defense-in-depth: skip the block instead of an illegal access.
         if (phys_block < 0)
             continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -1062,11 +960,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                                       split_idx);
 }
 
-// ---------------------------------------------------------------------------
-// Split-K Phase 2: reduce partial results across splits
-// ---------------------------------------------------------------------------
-// Grid: (batch, n_heads), Block: 128 threads
-// Each block merges num_splits partial results for one (batch, head) pair.
+// Split-K Phase 2: reduces num_splits partial results into the final output. Grid:(batch,
+// n_heads), Block: 128 threads; each block merges one (batch,head) pair's partials.
 
 __global__ void paged_attention_reduce_kernel(
     const float* __restrict__ partial_out,  // [batch, n_heads, num_splits, (2+head_dim)]
@@ -1084,20 +979,11 @@ __global__ void paged_attention_reduce_kernel(
     __shared__ float s_global_max;
     __shared__ float s_global_l;
 
-    // The per-split (m, l) pair sits `partial_stride` floats apart (520 B at
-    // head_dim=128), so reading them one at a time from a single thread costs
-    // one un-overlapped memory latency each while the rest of the block waits
-    // at the __syncthreads() below. That serial walk is this kernel's cost:
-    // measured at ctx 8k on Qwen3-Coder-30B-A3B (num_splits=85, so 170 serial
-    // reads) it is 13.0 us per launch at 110 GB/s, 6.1 % of peak, occupancy
-    // 8.3 %, and 8.2 % of the whole decode step across 48 layers.
-    //
-    // Stage them with a parallel load first, then reduce in the SAME serial
-    // order, so the result is bit-identical and only the latency is parallel.
-    // Splits are NOT capped at 32 here: paged_attention_splitk_fp8_tile_gqa_splits
-    // returns ceil(2*n_sms / (batch*n_kv_heads)), which is 85 at 4 KV heads and
-    // rises as KV heads drop, bounded only by the split-K scratch. The loop and
-    // the generous bound cover that; anything larger keeps the original path.
+    // Per-split (m,l) pairs sit partial_stride floats apart; a single thread reading them serially
+    // costs one un-overlapped memory latency each while the block waits at the syncthreads below.
+    // Stage them with a parallel load first, then reduce in the SAME serial order (bit-identical,
+    // only the latency is parallel). Splits are not capped at 32; kMaxStagedSplits=256 covers the
+    // generous bound from paged_attention_splitk_fp8_tile_gqa_splits, bounded by scratch elsewhere.
     constexpr int kMaxStagedSplits = 256;
     __shared__ float s_m[kMaxStagedSplits];
     __shared__ float s_l[kMaxStagedSplits];
@@ -1140,10 +1026,9 @@ __global__ void paged_attention_reduce_kernel(
     float gl = s_global_l;
     float inv_gl = (gl > 0.0f) ? (1.0f / gl) : 0.0f;
 
-    // The split weight depends only on s, but the loop below ran expf() for it
-    // once per (thread, split): 10880 calls per block at head_dim=128 and
-    // num_splits=85, for 85 distinct values. Compute each once. Same expf on the
-    // same input, so the weights are bit-identical.
+    // Split weight depends only on s but the loop previously called expf() once per (thread,split)
+    // for the same per-split value; compute each once instead. Same expf on the same input, so the
+    // weights are bit-identical.
     if (staged) {
         for (int s = tid; s < num_splits; s += blockDim.x)
             s_w[s] = expf(s_m[s] - gmax);  // expf, not __expf: must stay bit-identical
@@ -1200,13 +1085,10 @@ void paged_attention_unsupported_head_dim(const char* fn, int head_dim) {
 }
 
 bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim) {
-    // Read off the `case` labels of each dtype's decode launchers, 2026-08-22:
-    //   attention_paged.cu        64 96 128 256 512   (F16)
-    //   attention_paged_fp8.cu    64 96 128 256 512
-    //   attention_paged_int8.cu   64 96 128 256
-    //   attention_paged_int4.cu   64 96 128 256
-    //   attention_paged_nvfp4*.cu 64    128 256 512   (no 96; the MXFP4_KV
-    //                             launcher shares this template set, A1-5)
+    // Per-dtype decode launcher head_dim support:
+    //   attention_paged.cu(F16)/attention_paged_fp8.cu: 64 96 128 256 512
+    //   attention_paged_int8.cu/int4.cu: 64 96 128 256
+    //   attention_paged_nvfp4*.cu (incl. MXFP4_KV, A1-5): 64 128 256 512 (no 96)
     switch (kv_dtype) {
         case QType::F16:
         case QType::FP8_E4M3:
@@ -1258,18 +1140,12 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
                         NUM_WARPS * vhd * sizeof(float);
 
-    // ---- Decide whether to use split-K ----
-    // Split-K improves SM utilization when n_heads * batch_size is small
-    // relative to the GPU SM count. This handles both GQA and MHA models —
-    // the split-K kernel maps kv_head = head_idx / (n_heads / n_kv_heads).
-    //
-    // MLA (vhd != head_dim): split-K kernels are templated on standard head_dims
-    // (64/96/128/256/512) and don't support asymmetric V dims. Force num_splits=1
-    // so the generic kernel handles MLA correctly.
-    // F16 multitok kernels (attention.paged_f16_multitok): up to four Q heads
-    // per CTA share the KV reads, so the CTA count the split-K rule sees is
-    // batch x n_kv_heads x groups, not batch x n_heads. 0 = shape not served
-    // (sink tokens, HD outside 128/256, ratio > 8) -> the per-head kernels.
+    // Split-K improves SM utilization when n_heads*batch_size is small vs SM count; split-K maps
+    // kv_head = head_idx/(n_heads/n_kv_heads) for both GQA and MHA.
+    // MLA (vhd!=head_dim): split-K kernels are templated on standard head_dims and don't support
+    // asymmetric V dims, so num_splits=1 forces the generic kernel.
+    // F16 multitok (paged_f16_multitok): CTA count is batch*n_kv_heads*groups, not batch*n_heads
+    // (up to 4 Q heads/CTA share KV reads); 0 = shape not served, falls back to per-head kernels.
     const int n_q_per_kv_mt = (n_kv_heads > 0) ? n_heads / n_kv_heads : 0;
     const int mt_hpc = (process_diag_paged_f16_multitok() > 1 && n_sinks == 0 && n_q_per_kv_mt > 0)
                            ? paged_attention_f16_multitok_heads_per_cta(head_dim, n_q_per_kv_mt,
@@ -1280,13 +1156,9 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     int num_splits = 1;
     const bool is_mla_asymmetric = (vhd != head_dim);
 
-    // Flash-decode style split-K: parallelize KV sequence across multiple CTAs.
-    // Each split processes a chunk of KV blocks independently with per-warp
-    // online softmax, then a lightweight Phase 2 kernel merges partial results.
-    //
-    // Strategy: always split when context is long enough to benefit, not just
-    // when SMs are underutilized. For batch=1 decode on RTX 5090 (170 SMs),
-    // aggressive splitting gives 2-3× speedup on long contexts (>1K tokens).
+    // Flash-decode split-K: parallelizes KV sequence across CTAs, each processing a KV-block chunk
+    // independently (per-warp online softmax), merged by a lightweight Phase 2 reduce. Splits
+    // aggressively even when SMs aren't underutilized - beneficial for batch=1 long-context decode.
     int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     static int num_sms = kpar_n_sms();  // cached SM count query
     if (!is_mla_asymmetric && num_ctx_blocks >= 4 && s_splitk_scratch != nullptr) {
@@ -1327,10 +1199,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // Split-K path: Phase 1 + Phase 2 (handles both GQA and MHA)
         float* partial = static_cast<float*>(s_splitk_scratch);
 
-        // Clear any inherited error so the post-Phase-1 check below reflects only
-        // THIS launch — letting us fall back to the single-split GQA/MHA path
-        // (correctness-equivalent, just no split-K parallelism) instead of
-        // emitting garbage if the split-K kernel launch fails.
+        // Clears any inherited CUDA error so the post-Phase-1 check reflects only THIS launch, letting
+        // a real split-K failure fall back to the single-split path instead of emitting garbage.
         (void)cudaGetLastError();
 
         dim3 grid1(batch_size, n_heads, num_splits);
@@ -1417,17 +1287,13 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
 #undef LAUNCH_SPLITK
         }
 
-        // Did the split-K Phase-1 launch succeed? If not (e.g. a kernel whose
-        // dynamic smem exceeds the 48 KiB default without an opt-in, or device
-        // state left by another model in this process), drain the error and fall
-        // back to the single-split GQA/MHA path below — correctness-equivalent,
-        // just without split-K parallelism — instead of running the reduce over
-        // never-written partials and emitting garbage.
+        // Checks whether split-K Phase 1 launched (e.g. dynamic smem over the 48 KiB default without
+        // opt-in, or stale device state from another model). On failure, drain the error and fall back
+        // to the single-split GQA/MHA path - correctness-equivalent, avoids reducing never-written partials.
         cudaError_t e_splitk = cudaGetLastError();
-        // process_diag_force_splitk_fallback() is a test-only hook: it forces the
-        // fallback on a clean launch so the path can be verified against the
-        // split-K result (Phase 1 wrote only `partial`, never O, so skipping
-        // Phase 2 and re-dispatching writes O exactly once).
+        // process_diag_force_splitk_fallback() is a test-only hook: forces the fallback on a clean
+        // launch so the path can be verified against the split-K result (Phase 1 wrote only `partial`,
+        // so re-dispatching writes O exactly once).
         if (e_splitk != cudaSuccess || process_diag_force_splitk_fallback()) {
             if (e_splitk != cudaSuccess)
                 IMP_LOG_WARN("paged_attention_decode: split-K launch failed (%s) "
@@ -1471,20 +1337,11 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 dim3 grid(batch_size, n_kv_heads);
                 dim3 block(gqa_threads);
 
-                // Opt-in to extended shared memory for large head_dim. Gemma-4 has a
-                // dual geometry: sliding layers use hd=256 (gqa_smem ~32 KiB, no
-                // opt-in), but GLOBAL layers use hd=512 (gqa_smem ~64 KiB, opt-in
-                // REQUIRED). The opt-in cap is PER (kernel, current dynamic-smem
-                // value): `paged_attention_gqa_kernel` is a single non-templated
-                // function reused across every model/head_dim in the process, so a
-                // one-shot `static bool` guard would freeze the cap at whatever the
-                // first >48 KiB caller needed and starve a later larger request.
-                // Re-arm it for the largest value seen instead. cudaFuncSetAttribute
-                // is idempotent and cheap; a stale error from it (e.g. left by a
-                // previously-loaded model's func-attribute call in the same process)
-                // would otherwise make THIS launch return cudaErrorInvalidValue and
-                // bail to garbage, so set it every time the requested smem grows and
-                // drain any error it leaves.
+                // Opt-in extended smem for large head_dim (Gemma-4: sliding hd=256 ~32KiB no opt-in needed;
+                // global hd=512 ~64KiB needs it). paged_attention_gqa_kernel is one non-templated function
+                // reused by every model, so re-arm cudaFuncSetAttribute for the largest value seen each call
+                // (a one-shot static guard would freeze the cap); drain any stale error from a prior model's
+                // call.
                 if (gqa_smem > 48 * 1024) {
                     static size_t s_gqa_smem_optin = 0;
                     if (gqa_smem > s_gqa_smem_optin) {

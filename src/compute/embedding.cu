@@ -10,11 +10,8 @@
 
 namespace imp {
 
-// --------------------------------------------------------------------------
-// Embedding vector type traits: maps element type to 4-element vector type
-// FP32: float  -> float4 (16 bytes), FP16: __half -> float2 (8 bytes),
-// BF16: uint16 -> uint2  (8 bytes).  All pack 4 elements per vector load.
-// --------------------------------------------------------------------------
+// Embedding vector type traits: FP32 float->float4 (16B), FP16 __half->float2 (8B),
+// BF16 uint16->uint2 (8B). All pack 4 elements per vector load.
 template <typename T>
 struct EmbedVecTraits;
 template <>
@@ -50,10 +47,7 @@ __global__ void embedding_lookup_scalar_kernel(const T* __restrict__ table,
 template __global__ void embedding_lookup_scalar_kernel<float>(const float*, const int32_t*, float*, int);
 template __global__ void embedding_lookup_scalar_kernel<__half>(const __half*, const int32_t*, __half*, int);
 
-// --------------------------------------------------------------------------
-// Vectorized embedding kernel: copies 4 elements per vector load/store
-// Grid: (n_tokens), Block: 256
-// --------------------------------------------------------------------------
+// Vectorized embedding kernel: copies 4 elements per vector load/store. Grid:(n_tokens), Block:256.
 template <typename T>
 __global__ void embedding_lookup_vec_kernel(const T* __restrict__ table,
                                             const int32_t* __restrict__ token_ids, T* __restrict__ out,
@@ -129,10 +123,7 @@ static __device__ __forceinline__ half dequant_q6k_element(const uint8_t* __rest
     return __float2half(val);
 }
 
-// --------------------------------------------------------------------------
-// Q8_0 embedding lookup: dequantize only the needed rows on the fly.
-// Grid: (n_tokens), Block: 256
-// --------------------------------------------------------------------------
+// Q8_0 embedding lookup: dequantizes only the needed rows on the fly. Grid:(n_tokens), Block:256.
 __global__ void embedding_lookup_q8_0_kernel(const uint8_t* __restrict__ table_raw,
                                              const int32_t* __restrict__ token_ids, half* __restrict__ out,
                                              int d_model) {
@@ -149,10 +140,7 @@ __global__ void embedding_lookup_q8_0_kernel(const uint8_t* __restrict__ table_r
     }
 }
 
-// --------------------------------------------------------------------------
-// Q6_K embedding lookup: dequantize only the needed rows on the fly.
-// Grid: (n_tokens), Block: 256
-// --------------------------------------------------------------------------
+// Q6_K embedding lookup: dequantizes only the needed rows on the fly. Grid:(n_tokens), Block:256.
 __global__ void embedding_lookup_q6k_kernel(const uint8_t* __restrict__ table_raw,
                                             const int32_t* __restrict__ token_ids, half* __restrict__ out,
                                             int d_model) {
@@ -222,10 +210,8 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
     }
 }
 
-// --------------------------------------------------------------------------
-// Overload with quantization type for raw quantized embedding tables.
-// Falls through to standard dtype-based dispatch for non-quantized types.
-// --------------------------------------------------------------------------
+// Overload with quantization type for raw quantized embedding tables; falls through to
+// standard dtype-based dispatch for non-quantized types.
 void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_tokens, Tensor& out, QType qtype,
                       cudaStream_t stream) {
     if (n_tokens == 0)
@@ -254,12 +240,8 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
     embedding_lookup(table, token_ids, n_tokens, out, stream);
 }
 
-// --------------------------------------------------------------------------
-// Device-side embedding lookup: reads token ID from device memory.
-// For async decode where the sampled token stays on GPU.
-// Reads d_token_id[0] in the kernel instead of a host-provided array.
-// Only supports n_tokens=1 (single decode step).
-// --------------------------------------------------------------------------
+// Device-side embedding lookup: reads the token id from device memory (d_token_id[0]) instead
+// of a host array, for async decode where the sampled token stays on GPU. n_tokens=1 only.
 
 // FP16 device-side embedding (vectorized, reads token ID from device memory)
 __global__ void embedding_lookup_fp16_device_kernel(const __half* __restrict__ table,

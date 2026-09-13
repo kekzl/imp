@@ -6,20 +6,13 @@
 
 namespace imp {
 
-// Block-diagonal Walsh-Hadamard transform on FP16 vectors.
-//
-// Applies the normalized WHT (1/sqrt(block_size)) independently to each
-// contiguous block of `block_size` elements along the K dimension.
-// This is the "online rotation" step needed for MR-GPTQ / QuTLASS:
-//   X_rotated = X @ H_k  (block-diagonal Hadamard)
-//
-// The WHT uses the butterfly (Cooley-Tukey) decomposition:
-//   log2(block_size) stages of paired add/sub operations.
-// For block_size <= 32: pure warp-shuffle implementation (no shared memory).
-// For block_size 64/128: warp shuffle + shared memory for cross-warp stages.
-//
-// input/output: [M, K] FP16 on device. K must be divisible by block_size.
-// In-place: output == input is supported.
+// Block-diagonal Walsh-Hadamard transform on FP16 vectors: applies the normalized WHT
+// (1/sqrt(block_size)) independently to each contiguous block of block_size elements along K.
+// The "online rotation" step for MR-GPTQ/QuTLASS: X_rotated = X @ H_k (block-diagonal
+// Hadamard), via butterfly (Cooley-Tukey) decomposition, log2(block_size) stages of paired
+// add/sub. block_size<=32: pure warp-shuffle; 64/128: warp shuffle + shared memory for
+// cross-warp stages. input/output: [M,K] FP16 device, K divisible by block_size; in-place
+// (output==input) supported.
 
 void hadamard_transform_fp16(const half* input, half* output, int M, int K, int block_size,
                              cudaStream_t stream = nullptr);

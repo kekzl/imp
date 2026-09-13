@@ -19,28 +19,13 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// gemm_dispatch — proxy entry point for prefill / multi-token GEMM.
-//
-// Phase-2 shim: reconstructs a per-tier descriptor from handle.payload and
-// calls the existing low-level GEMM.  No consumers call this path yet (that
-// is Phase 3); correctness is verified by the WeightDispatch* test suite.
-//
-// Activation-quantization notes
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// FP8 / CUTLASS_NVFP4 / MXFP4 require the activation to be pre-quantized
-// before the weight GEMM.  In the full runtime this is done by the caller
-// using its private scratch buffers (qscratch_).  In the dispatch proxy we
-// carve the passed workspace into three sub-regions:
-//
-//   [0 .. M*K/2)            packed FP4 activation  (CUTLASS/MXFP4 only)
-//   [M*K/2 .. M*K/2+sf)     SfAtom scale factors   (CUTLASS/MXFP4 only)
-//   [aligned past sf ..)    cuBLAS/CUTLASS workspace
-//
-// For FP8, workspace bytes [0..M*K) hold the FP8 activation and bytes
-// [M*K .. M*K+sizeof(float)) hold d_act_scale.  If workspace is too small
-// for any of these arrangements, we fall back to gemm_nvfp4 / plain gemm.
-// ---------------------------------------------------------------------------
+// gemm_dispatch: proxy entry point for prefill/multi-token GEMM. Phase-2 shim
+// reconstructing a per-tier descriptor from handle.payload; no consumers yet (Phase 3).
+// FP8/CUTLASS_NVFP4/MXFP4 need the activation pre-quantized before the weight GEMM. The
+// dispatch proxy carves the workspace into: [0..M*K/2) packed FP4 activation
+// (CUTLASS/MXFP4); [M*K/2..+sf) SfAtom scales (CUTLASS/MXFP4); [aligned past sf..)
+// cuBLAS/CUTLASS workspace. FP8: [0..M*K) FP8 activation, [M*K..+sizeof(float)) d_act_scale.
+// Too-small workspace falls back to gemm_nvfp4 / plain gemm.
 
 void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha,
                    float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream) {
@@ -53,12 +38,9 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             return;
         }
 
-        // ---- FP8 E4M3 ---------------------------------------------------
-        // Weight is pre-quantized FP8 E4M3 [N, K].
-        // If the activation x is already FP8_E4M3, call gemm_cublaslt with
-        // both FP8 operands and the weight's d_scale.
-        // If x is FP16, use the FP16×FP8 mixed path (gemm_cublaslt_generic
-        // handles mixed dtype via cuBLASLt algorithm selection).
+        // FP8 E4M3: weight is pre-quantized [N,K]. x already FP8_E4M3: gemm_cublaslt with both
+        // FP8 operands + the weight's d_scale. x FP16: mixed FP16xFP8 path (gemm_cublaslt_generic
+        // via cuBLASLt algorithm selection).
         case StorageTier::FP8: {
             int64_t wshape[2] = {w.shape[0], w.shape[1]};
             Tensor w_tensor(w.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
@@ -70,50 +52,35 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             return;
         }
 
-        // ---- NVFP4 -------------------------------------------------------
-        // Weight is NVFP4 (packed nibbles + FP8 E4M3 micro-scales + host
-        // tensor_scale).  In the Phase-2 shim payload.nvfp4.tensor_scale is
-        // nullptr (no device-side fp32 copy).  We reconstruct a temporary
-        // NvFP4QuantResult using tensor_scale=1.0f as the fallback value and
-        // call gemm_nvfp4 which internally dequants → FP16 GEMM for M>1.
-        //
-        // NOTE: if tensor_scale != 1.0 the result will be scaled incorrectly.
-        // Phase 3 migration MUST ensure the handle carries a valid device ptr
-        // (or store the host value in an extra field) before consumers call
-        // this path.
+        // NVFP4: weight is packed nibbles + FP8 E4M3 micro-scales + host tensor_scale. Phase-2
+        // shim: payload.nvfp4.tensor_scale is null (no device fp32 copy), so a temporary
+        // NvFP4QuantResult is built with tensor_scale=1.0 fallback; gemm_nvfp4 dequants -> FP16
+        // GEMM for M>1.
+        // NOTE: wrong result if tensor_scale != 1.0. Phase 3 must carry a valid device ptr (or the
+        // host value) before consumers use this path.
         case StorageTier::NVFP4: {
             NvFP4QuantResult tmp;
             tmp.packed_data = w.payload.nvfp4.data;
             tmp.micro_scales = w.payload.nvfp4.block_scales;
-            // tensor_scale: payload.nvfp4.tensor_scale is a HOST float pointer
-            // borrowed from the wcache_.nvfp4 entry (stable address). Read it
-            // directly — using cudaMemcpyDeviceToHost on a host pointer is
-            // undefined and silently corrupts the scale.  This was the Phase-1
-            // fix in executor_pre_dequant.cu / executor_ffn.cu / etc.; this
-            // dispatch path was missed.
+            // tensor_scale: payload.nvfp4.tensor_scale is a HOST float pointer (stable address from
+            // wcache_.nvfp4). Read directly - cudaMemcpyDeviceToHost on a host pointer is undefined
+            // and silently corrupts the scale. This was the Phase-1 fix in executor_pre_dequant.cu /
+            // executor_ffn.cu / etc.; this dispatch path was missed.
             tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr) ? *w.payload.nvfp4.tensor_scale
                                                                          : 1.0f;
             tmp.N = w.shape[0];
-            // Logical K = the activation's K (GEMM contract: x is [M, K], so
-            // x.shape[1] IS the logical K). Deriving K from the weight handle is
-            // unsafe here: shape[1] is PACKED (K/2) for prequant-loaded NVFP4
-            // weights but LOGICAL for handles built elsewhere (e.g. the
-            // WeightDispatchTest fixture) — an inconsistent convention. The old
-            // `= w.shape[1]` took the packed value, so the M>1 dequant→cuBLAS GEMM
-            // fallback aborted "B.shape[1]=<2K> must equal weight K=<K>" whenever a
-            // prefill reached this shim with a prequant weight — e.g. a native-NVFP4
-            // model whose CUTLASS prefill workspace was starved by a large KV budget
-            // (server agentic long-context defaults), forcing the dequant fallback.
+            // Logical K = the activation's K (x is [M,K], x.shape[1] IS logical K). Deriving K from
+            // the weight handle is unsafe: shape[1] is PACKED (K/2) for prequant-loaded NVFP4 but
+            // LOGICAL for handles built elsewhere - an inconsistent convention. The old `=w.shape[1]`
+            // took the packed value, aborting the M>1 dequant->cuBLAS fallback with "B.shape[1]=<2K>
+            // must equal weight K=<K>" whenever prefill reached this shim with a prequant weight.
             tmp.K = static_cast<int>(x.shape[1]);
 
             int M = static_cast<int>(x.shape[0]);
-            // Diagnostic: diagnostics.nvfp4_force_dequant
-            // routes the M=1 decode path through gemm_nvfp4 (dequant→cuBLAS
-            // GEMV) instead of the native gemv_nvfp4_kpar kernel. Used to
-            // bisect Mistral-Small-3.2-NVFP4 long-form repetition loops — if
-            // forcing dequant fixes coherence, the bug is in gemv_nvfp4_kpar
-            // (numerical drift over many decode steps). Mirrors the Gemma-4
-            // MoE M>1 fallback pattern.
+            // diagnostics.nvfp4_force_dequant routes the M=1 decode path through gemm_nvfp4
+            // (dequant->cuBLAS GEMV) instead of the native gemv_nvfp4_kpar kernel. Used to bisect
+            // Mistral-Small-3.2-NVFP4 long-form repetition loops: if forcing dequant fixes coherence,
+            // the bug is numerical drift in gemv_nvfp4_kpar. Mirrors the Gemma-4 MoE M>1 fallback.
             const bool force_dequant = imp::process_diag_nvfp4_force_dequant();
             if (M == 1 && !force_dequant && beta == 0.0f) {
                 // GEMV path (no beta — gemv_nvfp4_kpar overwrites output)
@@ -126,12 +93,9 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             return;
         }
 
-        // ---- CUTLASS NVFP4 -----------------------------------------------
-        // Weight is CutlassNvFP4Weight (SfAtom layout).
-        // For M=1 decode: NVFP4 GEMV path (same as NVFP4 tier).
-        // For M>1 prefill: quantize activation → NVFP4 CUTLASS format using
-        // workspace, then call gemm_nvfp4_cutlass_sm120.  Falls back to
-        // gemm_nvfp4 (dequant) if workspace is too small.
+        // CUTLASS NVFP4: weight is CutlassNvFP4Weight (SfAtom layout). M=1 decode: same NVFP4 GEMV
+        // path. M>1 prefill: quantize activation to NVFP4 CUTLASS format via workspace, call
+        // gemm_nvfp4_cutlass_sm120; falls back to gemm_nvfp4 (dequant) if workspace too small.
         case StorageTier::CUTLASS_NVFP4: {
             int M = static_cast<int>(x.shape[0]);
             int K = static_cast<int>(x.shape[1]);
@@ -149,10 +113,9 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             cw.sf_bytes = cutlass_nvfp4_sf_size(N, K);
 
             if (M == 1) {
-                // Decode via CUTLASS_NVFP4: the payload holds SfAtom (not per-16 FP8
-                // micro_scales), so gemv_nvfp4_kpar cannot be used directly.
-                // Use gemm_nvfp4_cutlass_sm120 with a M=1 quantized activation if
-                // workspace is large enough; otherwise log an error.
+                // Decode via CUTLASS_NVFP4: payload holds SfAtom (not per-16 FP8 micro_scales), so
+                // gemv_nvfp4_kpar cannot be used directly. Uses gemm_nvfp4_cutlass_sm120 with an M=1
+                // quantized activation if workspace is large enough; else logs an error.
                 size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
                 size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
                 size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
@@ -210,11 +173,9 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             return;
         }
 
-        // ---- MXFP4 -------------------------------------------------------
-        // Weight is CutlassMxFP4Weight (UE8M0 SfAtom scales + linear_scales).
-        // For M=1 decode: gemv_mxfp4_kpar (uses linear_scales).
-        // For M>1 prefill: quantize activation → MXFP4 cutlass, then GEMM.
-        // Falls back to NVFP4 dequant path if workspace is insufficient.
+        // MXFP4: weight is CutlassMxFP4Weight (UE8M0 SfAtom scales + linear_scales). M=1 decode:
+        // gemv_mxfp4_kpar (linear_scales). M>1 prefill: quantize activation to MXFP4 cutlass, then
+        // GEMM. Falls back to the NVFP4 dequant path if workspace is insufficient.
         case StorageTier::MXFP4: {
             int M = static_cast<int>(x.shape[0]);
             int K = static_cast<int>(x.shape[1]);
@@ -278,12 +239,10 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
 
         case StorageTier::FP32:
         case StorageTier::Undefined: {
-            // Was IMP_LOG_FATAL + return, which logs and leaves the output
-            // holding whatever it held. IMP_LOG_FATAL does not abort - only
-            // IMP_CHECK does - so "FATAL" here bought a log line and nothing
-            // else. Throws for the same reason the CUTLASS_NVFP4 case below
-            // does (#1508): no tier accepted is an error, not a degraded
-            // answer (SETTLED.md S-22), and imp_api.cpp turns it into ImpError.
+            // Was IMP_LOG_FATAL + return, leaving output holding whatever it held: IMP_LOG_FATAL does
+            // not abort (only IMP_CHECK does), so "FATAL" bought a log line and nothing else. Throws
+            // instead (same reason as the CUTLASS_NVFP4 case, #1508): no tier accepted is an error,
+            // not a degraded answer (SETTLED.md S-22); imp_api.cpp turns it into ImpError.
             char msg[128];
             snprintf(msg, sizeof(msg), "gemm_dispatch: handle in invalid tier %d",
                      std::to_underlying(w.primary_tier));
@@ -340,31 +299,20 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
             return;
         }
 
-        // ---- CUTLASS_NVFP4 -----------------------------------------------
-        // Decode path: CUTLASS_NVFP4 payload does not carry NvFP4 micro_scales
-        // in the phase-2 shim (only SfAtom layout is stored).  We cannot
-        // directly call gemv_nvfp4_kpar (which needs per-16 FP8 micro_scales).
-        //
-        // Fallback: call gemv_fp8 using the FP4-packed data interpreted as
-        // FP8_E4M3 (wrong dtype but same pointer width) — this is NOT
-        // numerically correct and should not be used in production until
-        // Phase 3 migrates this path to carry the correct NvFP4QuantResult.
-        //
-        // For now: log an error and return (stub behavior for Phase 2).
+        // Decode CUTLASS_NVFP4: phase-2 shim payload carries only SfAtom layout, not per-16 FP8
+        // micro_scales, so gemv_nvfp4_kpar cannot be called directly.
+        // Fallback: gemv_fp8 on the FP4-packed data reinterpreted as FP8_E4M3 (wrong dtype, same
+        // pointer width) - NOT numerically correct, not for production until Phase 3 carries the
+        // real NvFP4QuantResult. For now: log an error and return (stub, Phase 2).
         case StorageTier::CUTLASS_NVFP4: {
-            // Unreachable today and it must stay an error rather than a silent
-            // return. CUTLASS_NVFP4 is a prefill tier (M>1); decode reaches the
-            // NVFP4 GEMV through the consumer, and `decode_tier` is only ever
-            // assigned `tier`, FP8 or NVFP4 (pre_dequant_phase4_tensor_registry.cu
-            // :90,96,98,100), so no caller can route here.
-            //
-            // Until 2026-08-21 this branch logged and returned WITHOUT WRITING
-            // `y`, i.e. it left the output holding whatever the workspace held
-            // before, behind one ERROR line. That is the shape #654 removed from
-            // attention_prefill_dispatch, and SETTLED.md S-22 records why: "no
-            // tier accepted" is an error, not a degraded answer. An unreachable
-            // branch is exactly where a silent-wrong-output path survives, because
-            // nothing exercises it to prove otherwise.
+            // Unreachable today, and must stay an error rather than a silent return: CUTLASS_NVFP4 is
+            // a prefill tier (M>1); decode reaches the NVFP4 GEMV through the consumer, and
+            // decode_tier is only ever assigned tier/FP8/NVFP4
+            // (pre_dequant_phase4_tensor_registry.cu:90,96,98,100), so no caller routes here.
+            // Before 2026-08-21 this branch logged and returned WITHOUT WRITING `y` (the shape #654
+            // removed from attention_prefill_dispatch; SETTLED.md S-22: "no tier accepted" is an
+            // error, not a degraded answer). An unreachable branch is exactly where a silent-wrong-
+            // output path survives, since nothing exercises it to prove otherwise.
             char msg[192];
             snprintf(msg, sizeof(msg),
                      "gemv_dispatch: CUTLASS_NVFP4 is not directly callable for decode "
@@ -398,10 +346,9 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
         }
 
         default: {
-            // Same class as the branch above, and worse for a structural
-            // reason: this is the `default:`, i.e. the branch that catches a
-            // tier nobody anticipated. That is the case in which continuing
-            // with an unwritten output is least affordable.
+            // Same class as the branch above, worse structurally: this is `default:`, the branch
+            // catching a tier nobody anticipated - the case where continuing with an unwritten output
+            // is least affordable.
             char msg[128];
             snprintf(msg, sizeof(msg), "gemv_dispatch: handle in invalid tier %d",
                      std::to_underlying(w.primary_tier));

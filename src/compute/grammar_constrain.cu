@@ -140,10 +140,9 @@ void GrammarConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_
         return;
 
     const std::vector<uint8_t>& allow = allow_for_current_state(vocab_size);
-    // The allow list covers the tokenizer's vocabulary; the logits row can be
-    // wider than that on a checkpoint with a padded lm_head. Upload only what
-    // the buffer holds. The kernel masks everything at or above n_classified
-    // without reading the list, so the padding ids need no entry.
+    // The allow list covers the tokenizer vocabulary; the logits row can be wider on a checkpoint
+    // with a padded lm_head. Upload only what the buffer holds; the kernel masks everything at or
+    // above n_classified without reading the list, so padding ids need no entry.
     const int n_classified = std::min(vocab_size, vocab_size_);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), allow.data(), static_cast<size_t>(n_classified),
                                        cudaMemcpyHostToDevice, stream));

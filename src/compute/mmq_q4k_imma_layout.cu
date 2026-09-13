@@ -1,33 +1,10 @@
-// =============================================================================
-// mmq_q4k_imma_layout.cu — Phase 2A reorder kernel
-// =============================================================================
-//
-// The "Q4_K → INT8 reordering" step (Phase 2A) of the INT8 IMMA direct-GEMM
-// experiment. Its design and findings memos are gone; what the experiment
-// measured is in docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
-//
-// Decodes one Q4_K super-block per CTA. For each sub-block j ∈ [0, 8):
-//
-//   sc[j]  — 6-bit sub-block scale  (from scales[12], unpacked via get_scale_min_k4)
-//   m[j]   — 6-bit sub-block min    (same)
-//   α[j]   = d_super * sc[j]
-//   β[j]   = 8 * d_super * sc[j] - dmin_super * m[j]
-//
-// And for each element q in sub-block j:
-//   q_sym  = q - 8         (∈ [-8, 7], fits cleanly in int8_t)
-//   fp16   = α[j] * q_sym + β[j]
-//
-// The (q - 8) shift absorbs the unsigned-to-signed quantization into the GEMM
-// epilogue. β couples to the activation row-sum via the standard
-// (q_sym + 8) * a  =  q_sym * a + 8 * a  identity.
-//
-// Layout reference:
-//   Q4_K block: [d:fp16, dmin:fp16, scales[12]:u6×16, qs[128]:nibbles].
-//   Sub-block j ∈ [0,8) → 32 elements stored as:
-//     j even (j=0,2,4,6): low nibbles of qs[(j/2)*32 + 0 .. +31]
-//     j odd  (j=1,3,5,7): high nibbles of qs[(j/2)*32 + 0 .. +31]
-//   (See ggml dequantize_row_q4_K — outer loop j∈{0,64,128,192} reads 32 bytes,
-//    inner loop produces 32 low nibbles then 32 high nibbles.)
+// Q4_K -> INT8 reorder (Phase 2A of the INT8 IMMA direct-GEMM experiment).
+// See docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
+// Decodes one Q4_K super-block per CTA. Per sub-block j in [0,8): sc[j]/m[j] 6-bit scale/min;
+// alpha[j]=d_super*sc[j]; beta[j]=8*d_super*sc[j]-dmin_super*m[j]; q_sym=q-8 in [-8,7];
+// fp16 = alpha[j]*q_sym + beta[j].
+// Layout: Q4_K block {d,dmin:fp16; scales[12]:u6x16; qs[128]:nibbles}; sub-block j even/odd
+// = low/high nibbles of qs[(j/2)*32 .. +31].
 
 #include "compute/mmq_q4k_imma_layout.h"
 #include "core/logging.h"
@@ -106,17 +83,9 @@ __global__ void mmq_q4k_imma_reorder_kernel(const uint8_t* __restrict__ q4k_bloc
         eff_beta[alpha_idx] = __float2half(s_beta[tid]);
     }
 
-    // Decode nibbles → symmetric s8. 256 elements per super-block ÷ 32 threads = 8 per thread.
-    // The Q4_K layout interleaves sub-blocks as (j even = low nibbles, j odd = high nibbles)
-    // over the 32-byte qs slabs of 64 elements each.
-    //
-    // For element k_in_super ∈ [0, 256):
-    //   group   = k_in_super / 64       (0..3)
-    //   in_grp  = k_in_super % 64       (0..63)
-    //   is_high = in_grp >= 32          (1 if high nibble, 0 if low)
-    //   byte_in_group = in_grp % 32     (0..31)
-    //   byte_in_qs   = group * 32 + byte_in_group
-    //   sub_block     = group * 2 + is_high
+    // Decode nibbles -> symmetric s8: 256 elems/super-block, 32 threads, 8 per thread.
+    // For k in [0,256): group=k/64, in_grp=k%64, is_high=(in_grp>=32), byte_in_group=in_grp%32,
+    // byte_in_qs=group*32+byte_in_group, sub_block=group*2+is_high.
     const int8_t* w_row = reinterpret_cast<const int8_t*>(w_sym_s8);
     int8_t* w_super = const_cast<int8_t*>(w_row) +
                       static_cast<size_t>(row) * static_cast<size_t>(K) +

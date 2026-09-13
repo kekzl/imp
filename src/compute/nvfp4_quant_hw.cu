@@ -1,35 +1,11 @@
-// =============================================================================
-// nvfp4_quant_hw.cu -- NVFP4 quantization with HW MMA scale layout
-// =============================================================================
-//
-// Adapted from thu-ml/SageAttention, subtree sageattention3_blackwell (Apache-2.0 License),
-// sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu.
-// Copyright (c) 2025 SageAttention team.
-//
-// Modifications from the original:
-//   - Stripped the `permute` path (imp's attention doesn't need it at the
-//     quant step — permutation happens inside the FMHA tile loop).
-//   - Adapted to imp's coding style, logging, and namespace.
-//   - Simplified dispatch: only head_dim ∈ {64, 128} supported.
-//   - Added a matching dequant kernel that inverts the HW layout for
-//     round-trip validation.
-//
-// Key PTX instruction:
-//   cvt.rn.satfinite.e2m1x2.f32 byte, f32_hi, f32_lo
-//
-// Scale layout (critical for MMA consumption) — from lines 245-256 of the
-// upstream file. For CVT_FP4_ELTS_PER_THREAD=16 (head_dim=128):
-//   offset_local = (col_id_local / 4) * 256
-//                + (col_id_local % 4)
-//                + (token_id_local / 16) * 4
-//                + (token_id_local % 16) * 16
-//   where col_id_local = 0..7  (scale groups along K dim)
-//         token_id_local = 0..63 (row within the current 64-token block)
-//
-// For CVT_FP4_ELTS_PER_THREAD=8 (head_dim=64):
-//   Only even threadIdx writes scale, after cross-lane max combine.
-//
-// =============================================================================
+// Adapted from thu-ml/SageAttention, sageattention3_blackwell/sageattn3/quantization/
+// fp4_quantization_4d.cu (Apache-2.0). Copyright (c) 2025 SageAttention team.
+// PTX: cvt.rn.satfinite.e2m1x2.f32 byte, f32_hi, f32_lo.
+// Scale layout (upstream fp4_quantization_4d.cu:245-256), CVT_FP4_ELTS_PER_THREAD=16
+// (head_dim=128): offset_local = (col_id_local/4)*256 + (col_id_local%4) +
+// (token_id_local/16)*4 + (token_id_local%16)*16; col_id_local in [0,8), token_id_local in [0,64).
+// CVT_FP4_ELTS_PER_THREAD=8 (head_dim=64): only even threadIdx writes scale, after
+// cross-lane max combine.
 
 #include "compute/nvfp4_quant_hw.h"
 #include "core/logging.h"
@@ -40,9 +16,7 @@ namespace imp {
 
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
 
-// ---------------------------------------------------------------------------
-// FP32→E2M1 packed conversion (4 float2 → uint32 holding 8 E2M1 nibbles).
-// ---------------------------------------------------------------------------
+// FP32 to E2M1 packed conversion: 4 float2 to uint32 holding 8 E2M1 nibbles.
 __device__ __forceinline__ uint32_t fp32x8_to_e2m1x8_hw(const float2* v) {
     uint32_t out;
     asm volatile(
@@ -60,20 +34,15 @@ __device__ __forceinline__ uint32_t fp32x8_to_e2m1x8_hw(const float2* v) {
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// E2M1 (4-bit) → FP32 LUT (for dequant reference).
-// E2M1 encoding (sign + 3-bit mag): ±{0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}.
-// ---------------------------------------------------------------------------
+// E2M1 (4-bit): sign + 3-bit magnitude, values +-{0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}.
 __device__ __forceinline__ float e2m1_to_fp32_hw(uint8_t nib) {
     static const float mags[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
     float m = mags[nib & 0x7];
     return (nib & 0x8) ? -m : m;
 }
 
-// ---------------------------------------------------------------------------
-// HW scale offset for CVT_FP4_ELTS_PER_THREAD=16 (head_dim=128).
-// Formula from upstream fp4_quantization_4d.cu:245-249.
-// ---------------------------------------------------------------------------
+// HW scale offset for CVT_FP4_ELTS_PER_THREAD=16 (head_dim=128); formula from upstream
+// fp4_quantization_4d.cu:245-249.
 __device__ __forceinline__ uint32_t
 hw_scale_offset_hd128(uint32_t col_id_local,    // 0..7 (scale group along K)
                       uint32_t token_id_local)  // 0..63 (row in current 64-token block)
@@ -82,23 +51,15 @@ hw_scale_offset_hd128(uint32_t col_id_local,    // 0..7 (scale group along K)
            (token_id_local % 16) * 16;
 }
 
-// ---------------------------------------------------------------------------
-// Vector type
-// ---------------------------------------------------------------------------
 template <typename T>
 struct PackedVec16 {
     // For T=half, each slot holds 2 elements (half2). 16 elems = 8 slots.
     typename std::conditional<std::is_same<T, half>::value, half2, half2>::type elts[8];
 };
 
-// ---------------------------------------------------------------------------
-// Quant kernel: each thread handles 16 elements (one scale group).
-// Grid layout:
-//   blockIdx.x = token_block (covers BLOCK_SIZE tokens; BLOCK_SIZE = 64)
-//   blockIdx.y = batch
-//   blockIdx.z = head
+// Quant kernel: each thread handles 16 elements (one scale group). Grid layout:
+//   blockIdx.x = token_block (BLOCK_SIZE=64 tokens), blockIdx.y = batch, blockIdx.z = head
 //   threadIdx.x = (token_within_block * NUM_THREADS_PER_TOKEN) + col_scale_group
-// ---------------------------------------------------------------------------
 template <uint32_t HEAD_DIM, uint32_t BLOCK_SIZE>
 __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* __restrict__ nvfp4_out,
                                       uint8_t* __restrict__ sf_out, int batch_size, int n_heads, int n_tokens,
@@ -149,7 +110,6 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
     sc = float(reinterpret_cast<__nv_fp8_e4m3&>(sc_fp8));
     float inv_sc = (sc == 0.0f) ? 0.0f : 1.0f / sc;
 
-    // Apply inverse scale → FP32 pairs.
     float2 fp2[8];
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
@@ -171,7 +131,6 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
         reinterpret_cast<uint64_t*>(dst)[0] = (static_cast<uint64_t>(e2m1_hi) << 32) | e2m1_lo;
     }
 
-    // Store scale at HW offset.
     uint8_t* sf_base = sf_out + batch_id * stride_bz_output_sf + head_id * stride_h_output_sf +
                        (token_id / 64) * 64 * stride_seq_output_sf;
     uint32_t token_id_local = token_id % 64;
@@ -193,10 +152,7 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dequant kernel: inverse of the above for round-trip validation.
-// Same grid: one thread per 16-element group.
-// ---------------------------------------------------------------------------
+// Dequant kernel: inverse of the quant kernel above; one thread per 16-element group.
 template <uint32_t HEAD_DIM, uint32_t BLOCK_SIZE>
 __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
                                         const uint8_t* __restrict__ sf_in, half* __restrict__ output,
@@ -215,7 +171,6 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
     if (token_id >= n_tokens)
         return;
 
-    // Load scale from HW offset.
     const uint8_t* sf_base = sf_in + batch_id * stride_bz_input_sf + head_id * stride_h_input_sf +
                              (token_id / 64) * 64 * stride_seq_input_sf;
     uint32_t token_id_local = token_id % 64;
@@ -250,9 +205,6 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Host entry points
-// ---------------------------------------------------------------------------
 bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, int batch_size, int n_heads,
                          int n_tokens, int head_dim, int stride_bz_input, int stride_h_input,
                          int stride_seq_input, int stride_bz_output, int stride_h_output,

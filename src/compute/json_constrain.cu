@@ -29,12 +29,11 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
         token_categories_[i] = classify_token(text);
     }
 
-    // EOS gets a dedicated category: classify_token sees the rendered text
-    // ("<|im_end|>" → STRING_CHAR), so in the DONE state (whitespace-only
-    // mask) EOS was blocked and a completed JSON could never terminate —
-    // every json_mode request ran to max_tokens and finished with "length".
-    // CAT_EOS is allowed ONLY in DONE — allowing it everywhere lets a
-    // json-reluctant model emit EOS as its very first token (0 completions).
+    // EOS gets a dedicated category: classify_token sees the rendered text ("<|im_end|>" ->
+    // STRING_CHAR), so in the DONE state (whitespace-only mask) EOS was blocked and a completed
+    // JSON could never terminate (every json_mode request ran to max_tokens, finish="length").
+    // CAT_EOS is allowed ONLY in DONE: allowing it everywhere lets a json-reluctant model emit EOS
+    // as its first token (0 completions).
     eos_ids_ = tok.eos_ids();
     for (int32_t eid : eos_ids_) {
         if (eid >= 0 && eid < vocab_size_)
@@ -48,16 +47,11 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     if (!dev_.alloc_allowed_mask("JsonConstrainer"))
         return false;
 
-    // Per-token allow list. Allocated HERE, not on first use (issue #1104).
-    // The lazy version allocated it inside apply_mask() — i.e. mid-decode, on
-    // the serving path — and on a model that loads with no free VRAM left
-    // (#1103) the allocation failed and apply_mask returned WITHOUT applying
-    // any mask and without logging. The request then decoded unconstrained and
-    // returned prose where JSON was promised: deterministic, first request per
-    // process, invisible in `imp_constrained_eager_fallback_total` because no
-    // fallback was taken. The three sibling constrainers (regex, grammar,
-    // schema) have always allocated this at init and failed the load loudly;
-    // this one was the outlier.
+    // Per-token allow list allocated HERE at init, not lazily inside apply_mask() (#1104): a lazy
+    // allocation on a model that loads with no free VRAM left (#1103) failed silently and
+    // apply_mask returned without applying any mask or logging, so the request decoded
+    // unconstrained (deterministic, invisible in imp_constrained_eager_fallback_total). The other
+    // three constrainers (regex, grammar, schema) already allocate at init and fail the load loudly.
     if (!dev_.alloc_token_allow("JsonConstrainer", vocab_size_))
         return false;
 
@@ -96,29 +90,18 @@ uint16_t JsonGrammar::compute_allowed_mask() const {
     // see advance_char. (EOS has its own CAT_EOS bit, allowed in DONE only.)
     constexpr int kMaxWsRun = 32;
 
-    // Force-close near the budget (#1104). A constrainer can forbid illegal
-    // tokens but cannot force termination, so a model inside a long string or
-    // a whitespace flood runs to max_tokens and returns a truncated document
-    // that no client can parse. Once only just enough tokens remain to shut
-    // everything that is open, narrow the mask to exactly the closers. The
-    // estimate deliberately errs high (the string's parent frame is already on
-    // the stack), because closing a few tokens early is strictly better than
-    // returning unparseable output. Disabled while the budget is unknown (-1).
+    // Force-close near the budget (#1104): a constrainer can forbid illegal tokens but cannot
+    // force termination, so a long string/whitespace flood runs to max_tokens and truncates.
+    // Once only just enough tokens remain to close everything open, narrow the mask to exactly the
+    // closers. The estimate errs high on purpose: closing early beats unparseable output. Disabled
+    // while the budget is unknown (-1).
     force_close_active = false;
     if (remaining_budget >= 0 && current_state != JsonState::DONE) {
-        // A closer is not legal in every state, and demanding one where the
-        // grammar forbids it is worse than not narrowing at all: the safety
-        // net below then retries with the ordinary mask, the model carries on
-        // freely, and the document is truncated anyway. Measured on
-        // Qwen3.6-35B-A3B-NVFP4 at max_tokens=40 — the narrowing fired in
-        // ARRAY_NEED_VALUE, where #1096 forbids ']' precisely so `[1,]` cannot
-        // happen, so nothing was allowed and the reply came back unparseable
-        // (#1291).
-        //
-        // So the narrowing first has to walk OUT of a state that owes
-        // something, and the budget has to cover that walk. escape_mask is the
-        // cheapest legal step; escape_cost is how many tokens the whole walk
-        // takes, counted high on purpose — closing early beats not closing.
+        // A closer is not legal in every state; demanding one where the grammar forbids it is worse
+        // than not narrowing (the safety net retries with the ordinary mask, and the document
+        // truncates anyway - #1291). So narrowing first walks OUT of a state that owes something, and
+        // the budget must cover that walk: escape_mask is the cheapest legal step, escape_cost is the
+        // walk length, counted high on purpose since closing early beats not closing.
         uint16_t escape_mask = 0;
         int escape_cost = 0;
         switch (current_state) {
@@ -164,18 +147,13 @@ uint16_t JsonGrammar::compute_allowed_mask() const {
             default:
                 break;  // OBJECT_START / ARRAY_START / *_AFTER_VALUE / IN_NUMBER take a closer
         }
-        // state_stack holds only the RETURN states of *nested* values, not the
-        // container we are currently inside — at `{"a"` the stack is empty
-        // while a '}' is still owed. Count that container explicitly, or the
-        // narrowing releases one token too early and the document is truncated
-        // anyway (observed: needed=0 in AFTER_KEY with an object still open).
+        // state_stack holds only the RETURN states of nested values, not the container currently
+        // inside: at `{"a"` the stack is empty while a '}' is still owed. Count that container
+        // explicitly, or the narrowing releases one token too early and truncates anyway.
         const bool in_container = (current_state != JsonState::START && current_state != JsonState::DONE);
-        // +1 margin: the escape step can itself push a frame (a forced number
-        // enters IN_NUMBER inside its container), so an estimate that is exact
-        // at the moment it is taken can still land one token short. Measured
-        // on the #1291 repro: without it the walk emits `-1]` and runs out
-        // before the `}`. Erring high costs a token of content; erring low
-        // costs the whole document.
+        // +1 margin: the escape step can itself push a frame (a forced number enters IN_NUMBER inside
+        // its container), so an estimate exact at the moment taken can still land one token short
+        // (#1291). Erring high costs a token of content; erring low costs the whole document.
         const int needed = static_cast<int>(state_stack.size()) + (in_container ? 1 : 0) + escape_cost + 1;
         if (remaining_budget <= needed) {
             force_close_active = true;
@@ -189,10 +167,9 @@ uint16_t JsonGrammar::compute_allowed_mask() const {
 
     switch (current_state) {
         case JsonState::START:
-            // Must start with { or [. (Forcing object-only at the root was
-            // tried and reverted: a json-reluctant model then fights the
-            // mask with whitespace floods instead of emitting a minimal
-            // valid document.)
+            // Must start with { or [. (Forcing object-only at the root was tried and reverted: a
+            // json-reluctant model then fights the mask with whitespace floods instead of emitting a
+            // minimal valid document.)
             mask |= CAT_OPEN_BRACE | CAT_OPEN_BRACKET;
             break;
 
@@ -261,9 +238,8 @@ uint16_t JsonGrammar::compute_allowed_mask() const {
             break;
 
         case JsonState::DONE:
-            // Parsing complete — only EOS (and capped whitespace). CAT_EOS
-            // must stay allowed even when the WS-run cap zeroes whitespace,
-            // otherwise every token is -inf and greedy argmax degenerates to
+            // Parsing complete: only EOS (and capped whitespace). CAT_EOS must stay allowed even when the
+            // WS-run cap zeroes whitespace, otherwise every token is -inf and greedy argmax degenerates to
             // token id 0 ('!' on byte-level BPE vocabs).
             mask |= CAT_EOS;
             break;
@@ -278,21 +254,13 @@ uint16_t JsonGrammar::compute_allowed_mask() const {
 }
 
 bool JsonGrammar::advance_char(char c) {
-    // Skip whitespace in non-string states — but count the run. JSON allows
-    // unlimited inter-token whitespace, and a model that doesn't want to emit
-    // JSON exploits that as an escape hatch (greedy decode emits newlines
-    // until max_tokens). compute_allowed_mask() drops CAT_WHITESPACE once the
-    // run exceeds the cap, forcing a structural token (or EOS) instead.
-    //
-    // Returns true when the char is a legal continuation in the current FSM
-    // state. update() ignores the result (tolerant, as before); the
-    // whole-token simulation in apply_mask() uses it to reject tokens whose
-    // FIRST char passes the category mask but whose tail violates the
-    // grammar (e.g. the single token "[]." — '.' after a completed value).
-    // Whitespace TERMINATES a number, it does not continue one: "1.  1" is not
-    // a JSON number, yet the blanket skip below kept the FSM in IN_NUMBER and
-    // let the emitted text interleave digits with spaces (#1104). Close the
-    // number first, then let the whitespace be skipped in the parent state.
+    // Skips whitespace in non-string states but counts the run: JSON allows unlimited inter-token
+    // whitespace, exploitable as an escape hatch (greedy decode emits newlines to max_tokens).
+    // compute_allowed_mask() drops CAT_WHITESPACE once the run exceeds the cap. Returns true when
+    // the char is a legal FSM continuation; the whole-token simulation in apply_mask() uses it to
+    // reject tokens whose first char passes but whose tail violates the grammar. Whitespace
+    // TERMINATES a number, it does not continue one: skip only after closing IN_NUMBER first, or
+    // digits and spaces interleave illegally (#1104).
     if (current_state == JsonState::IN_NUMBER && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
         if (num_need_digit)
             return false;  // "1." / "1e" / "-" cannot end here
@@ -308,12 +276,10 @@ bool JsonGrammar::advance_char(char c) {
     ws_run = 0;
 
     switch (current_state) {
-        // Stack discipline: every opener pushes its CONTINUATION — the state
-        // the parser resumes in after the construct closes — and every close
-        // pops and *uses* it (empty stack -> DONE). The old code popped the
-        // continuation but then peeked the grandparent's entry instead, so a
-        // nested array closing inside an object left the FSM in array
-        // context, accepting `,"bare-string"` + `]]` (#1067).
+        // Stack discipline: every opener pushes its CONTINUATION (the state resumed after the
+        // construct closes), every close pops and USES it (empty stack -> DONE). Peeking the
+        // grandparent's entry instead of using the popped continuation let a nested array closing
+        // inside an object stay in array context, accepting `,"bare-string"` + `]]` (#1067).
         case JsonState::START:
             // Root construct: continuation after it closes is DONE, which the
             // empty-stack fallback in the close handlers provides — no push.
@@ -471,10 +437,10 @@ bool JsonGrammar::advance_char(char c) {
                     current_state = JsonState::DONE;
                 }
             } else if (static_cast<unsigned char>(c) < 0x20) {
-                // JSON forbids raw control chars (U+0000–U+001F) inside
-                // strings — they must arrive escaped. Multi-char tokens whose
-                // first char passes the category mask (e.g. `"<newline>`)
-                // used to smuggle them through.
+                // JSON forbids raw control chars (U+0000-U+001F) inside strings; they must arrive escaped.
+                // Multi-char tokens whose first char passes the category mask (e.g. a leading newline inside
+                // a
+                // string) used to smuggle them through.
                 return false;
             }
             // Otherwise stay in IN_STRING
@@ -555,14 +521,10 @@ bool JsonGrammar::advance_char(char c) {
 }
 
 bool JsonConstrainer::sim_token_valid(const std::string& text) {
-    // Snapshot → strict-advance over the whole token text → restore.
-    // advance_char is the single grammar source of truth (no parallel FSM).
-    //
-    // One struct copy since #1729. This used to save and restore eleven fields
-    // by hand, and the number sub-state had to be added to that list after
-    // #1104 found it missing: a simulated token that walked into a number left
-    // num_seen_frac/num_need_digit mutated on the real state. A field added to
-    // the grammar now round-trips because it is in the grammar.
+    // Snapshot -> strict-advance over the whole token text -> restore. advance_char is the single
+    // grammar source of truth (no parallel FSM). One struct copy (#1729) replaces hand-saving
+    // eleven fields; the number sub-state had to be added after #1104 found it missing, mutating
+    // the real state during simulation. A field added to the grammar now round-trips automatically.
     const JsonGrammar saved = g_;
     bool ok = true;
     for (char c : text) {
@@ -586,12 +548,10 @@ void JsonConstrainer::update(int32_t token) {
     }
 }
 
-// Inside a string, a token that carries no '"' and no '\\' cannot change the
-// FSM state — the old shortcut concluded from that it must be legal and skipped
-// the whole-token simulation. It can still be ILLEGAL: JSON forbids raw control
-// characters (U+0000-U+001F) in strings, advance_char rejects them, and the
-// shortcut walked straight past that guard. A model then emitted a raw newline
-// inside a string and the reply did not parse (#1104).
+// Inside a string, a token with no '"' or '\\' cannot change FSM state, but can still be
+// ILLEGAL: JSON forbids raw control characters (U+0000-U+001F), advance_char rejects them, and
+// the old shortcut skipped that guard, letting a raw newline inside a string through unparsed
+// (#1104).
 static bool string_token_needs_simulation(const std::string& text) {
     for (char c : text) {
         if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20)
@@ -609,24 +569,20 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
 
     uint16_t mask = compute_allowed_mask();
 
-    // Whole-token validation: the category bitmask only inspects a token's
-    // FIRST character class, so multi-char tokens could smuggle grammar
-    // violations past it (the single token "[]." closes the document and
-    // appends an illegal '.'). Simulate every category-passing candidate
-    // through the FSM (advance_char strict mode) and build a per-token
-    // allow list. Hot-path shortcut: inside strings, tokens without '"'
-    // or '\\' can never change FSM state — skip the simulation.
+    // Whole-token validation: the category bitmask only inspects a token's first character class,
+    // so multi-char tokens can smuggle grammar violations past it. Simulates every category-
+    // passing candidate through the FSM (advance_char strict mode) to build a per-token allow
+    // list. Hot-path shortcut: inside strings, tokens without '"' or '\\' can never change FSM
+    // state, skip the simulation.
     if (token_allow_.size() != static_cast<size_t>(vocab_size))
         token_allow_.assign(vocab_size, 0);
     const bool in_string = g_.current_state == JsonState::IN_STRING ||
                            g_.current_state == JsonState::IN_STRING_ESCAPE;
     size_t n_allowed = 0;
-    // vocab_size is the LOGITS width (model vocab); token_categories_ /
-    // token_texts_ only cover the TOKENIZER vocab (vocab_size_). SafeTensors
-    // models pad the lm_head past the tokenizer vocab (Qwen3-8B-NVFP4: 151936
-    // vs 151669) — iterating to vocab_size read token_texts_ out of bounds
-    // (host SIGBUS, killed imp-server on the first json_mode request).
-    // Padding ids stay allow=0 and the kernel masks them via n_classified.
+    // vocab_size is the LOGITS width (model vocab); token_categories_/token_texts_ only cover the
+    // TOKENIZER vocab (vocab_size_). SafeTensors models pad the lm_head past the tokenizer vocab
+    // (e.g. Qwen3-8B-NVFP4: 151936 vs 151669); iterating to vocab_size read token_texts_ out of
+    // bounds (host SIGBUS). Padding ids stay allow=0, masked via n_classified.
     const int n_classified = std::min(vocab_size, vocab_size_);
     for (int i = 0; i < n_classified; i++) {
         uint8_t allow = 0;
@@ -644,13 +600,11 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
         n_allowed += allow;
     }
 
-    // Force-close safety net: the narrowed mask offers only closers, and a
-    // closer is not legal in every state — after a key the grammar demands
-    // ':' and a value first. Narrowing there leaves nothing legal, which used
-    // to drop straight into the EOS guard below and end the reply mid-document
-    // with finish_reason="stop" (worse than the truncation it was meant to
-    // prevent). Retry once with the ordinary mask: force-close may help, it
-    // must never make the outcome worse.
+    // Force-close safety net: the narrowed mask offers only closers, which isn't legal in every
+    // state (e.g. after a key the grammar demands ':' and a value). Narrowing there used to leave
+    // nothing legal, dropping into the EOS guard and ending the reply mid-document
+    // (finish_reason="stop", worse than the truncation it prevents). Retry once with the ordinary
+    // mask: force-close may help, it must never make the outcome worse.
     if (n_allowed == 0 && g_.force_close_active) {
         const int saved = g_.remaining_budget;
         g_.remaining_budget = -1;  // disable narrowing for this recompute
@@ -685,10 +639,9 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     }
 
     if (!dev_.has_token_allow()) {
-        // Unreachable after a successful initialize(), which is the point: a
-        // constrainer that cannot mask must SAY so rather than let the request
-        // decode unconstrained and look like a model that ignored the schema
-        // (issue #1104).
+        // Unreachable after a successful initialize() - the point: a constrainer that cannot mask must
+        // SAY so rather than let the request decode unconstrained and look like a model that ignored
+        // the schema (#1104).
         static std::once_flag once;
         std::call_once(once, [] {
             IMP_LOG_ERROR(
@@ -697,11 +650,10 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
         });
         return;
     }
-    // Clamp to what initialize() reserved. The model's lm_head can be WIDER
-    // than the tokenizer (padding rows), and the host list is sized to the
-    // model — but the kernel returns before touching token_allow[idx] for
-    // idx >= n_classified, so the tokenizer-sized device buffer is exactly
-    // enough and copying the model width would run off the end of it.
+    // Clamps to what initialize() reserved: the model's lm_head can be wider than the tokenizer
+    // (padding rows), and the host list is sized to the model, but the kernel returns before
+    // touching token_allow[idx] for idx >= n_classified, so the tokenizer-sized device buffer is
+    // exactly enough; copying the model width would run off the end of it.
     const size_t allow_bytes = std::min(static_cast<size_t>(vocab_size), static_cast<size_t>(vocab_size_));
     IMP_CUDA_CHECK_LOG(
         cudaMemcpyAsync(dev_.token_allow(), token_allow_.data(), allow_bytes, cudaMemcpyHostToDevice, stream));

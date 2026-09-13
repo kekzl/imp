@@ -1,22 +1,10 @@
-// Token-tiled FP8 split-K decode attention (head_dim=128, block_size % 16 == 0).
-//
-// The per-token pipeline kernel (attention_paged_fp8.cu) serializes on a
-// global->smem round-trip every token: V[t] and K[t+1] are committed in one
-// cp.async group, so the PV accumulate waits on the K[t+1] fetch each
-// iteration. At 16k ctx that chain leaves the kernel latency-bound at ~10%
-// DRAM while attention is ~70% of decode wall-clock (PERF_LOG 06-18).
-//
-// This variant loads one whole KV page (16 tokens x 128 B K + V) per warp
-// with bulk cp.async (double-buffered across the warp's page iterations) and
-// computes 16 QK dots in parallel from smem — lane j handles token j&15,
-// dim-half j>>4 — followed by one tile-wise online-softmax update. The
-// per-token serial chain (smem wait -> 5-shuffle reduce -> exp) collapses to
-// one max/exp step per 16 tokens, and the only exposed global latency is the
-// first page per warp.
-//
-// Only head_dim==128 && block_size % 16 == 0 dispatches here (the FP8-KV
-// flagship shapes); everything else stays on the pipeline kernel. Warps
-// iterate 16-token chunks (a page is 1+ chunks; chunks never straddle pages).
+// Token-tiled FP8 split-K decode (head_dim=128, block_size % 16 == 0). The per-token pipeline
+// kernel serializes on a global->smem round-trip every token (V[t]/K[t+1] committed together,
+// so PV waits on K[t+1]); at long context this is latency-bound despite low DRAM use.
+// This variant bulk-loads one whole KV page (16 tokens x 128B K+V) per warp via double-buffered
+// cp.async and computes 16 QK dots in parallel from smem, collapsing the per-token serial chain
+// to one max/exp step per 16 tokens. Only hd==128 && block_size%16==0 dispatches here; warps
+// iterate 16-token chunks that never straddle a page.
 
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
@@ -50,11 +38,9 @@ __device__ __forceinline__ half2 fp8x2_to_half2(uint32_t two_bytes) {
     return h;
 }
 
-// Issue the bulk cp.async of one 16-token KV chunk (K + V) into a warp's tile
-// buffers. 16 rows x 128 B per tile; each lane copies four 16 B pieces per
-// tile. All 16 slots are always loaded (chunks never straddle a page and the
-// physical page is fully allocated); invalid tokens are masked in compute.
-// k_src/v_src point at the chunk's first token slot for this kv head.
+// Bulk cp.async of one 16-token KV chunk (K+V) into a warp's tile buffers: 16 rows x 128B/tile,
+// each lane copies four 16B pieces. All 16 slots always loaded (chunks never straddle a page);
+// invalid tokens are masked in compute.
 __device__ __forceinline__ void tile_load(uint8_t* k_tile, uint8_t* v_tile, const uint8_t* k_src,
                                           const uint8_t* v_src, int kv_slot_stride, int lane) {
 #pragma unroll
@@ -165,11 +151,9 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     const int chunk_begin = split_start * chunks_per_page;
     const int chunk_end = split_end * chunks_per_page;
 
-    // StreamingLLM eviction leaves -1 sentinels in the block table, and a
-    // negative physical block is an OOB read (#1678). This kernel prefetches
-    // through a cp_async ring, so it cannot `continue` past one the way the
-    // non-tiled twins do: the address is clamped into the pool and the tokens
-    // are dropped by the validity mask below instead.
+    // StreamingLLM eviction leaves -1 sentinels in the block table (#1678); this kernel prefetches
+    // via a cp_async ring so it cannot `continue` past one - the address is clamped into the pool
+    // and invalid tokens are dropped by the validity mask instead.
     auto page_live = [&](int ch) { return bt[ch / chunks_per_page] >= 0; };
     auto chunk_src = [&](int ch, const uint8_t* __restrict__ cache) {
         const int page = ch / chunks_per_page;
@@ -283,22 +267,12 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
                                       num_splits, split_idx);
 }
 
-// ---------------------------------------------------------------------------
-// GQA-batched variant: grid.y = n_kv_heads; one block computes ALL
-// G = n_heads/n_kv_heads Q heads of its KV head (warp w = Q head w), sharing
-// each KV tile in block-local smem. The per-head tile kernel reads every KV
-// byte G times through L2 (one block per Q head); this variant reads it once,
-// cutting L2 traffic /G on the L2-bound long-ctx path. Smem drops from 73 KB
-// (8 private double-buffered warp pipelines) to 18 KB (one shared
-// kGqaStages-deep pipeline), so blocks are multi-resident per SM and latency
-// hiding moves from warps-within-block to blocks-per-SM. Chunks advance
-// block-serially (2 __syncthreads per 16-token chunk); parallelism is
-// recovered via a higher split count chosen by the launcher's geometry-aware
-// heuristic.
-//
-// Each warp holds a complete split result for a distinct head, so there is no
-// cross-warp reduce: warps write (m, l, O_unnormalized-at-m) partials directly,
-// which is exactly the format paged_attention_reduce_kernel merges.
+// GQA-batched variant: grid.y = n_kv_heads, one block computes all G = n_heads/n_kv_heads Q
+// heads (warp w = Q head w), sharing each KV tile in block-local smem instead of reading it G
+// times through L2. Smem drops from 73KB (8 private pipelines) to 18KB (one shared kGqaStages
+// pipeline); blocks advance chunks block-serially, parallelism recovered via a higher split
+// count. Each warp holds a complete split result for its head, so no cross-warp reduce - warps
+// write (m,l,O_unnormalized) partials directly, matching paged_attention_reduce_kernel's format.
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -390,11 +364,9 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const int chunk_begin = split_start * chunks_per_page;
     const int chunk_end = split_end * chunks_per_page;
 
-    // StreamingLLM eviction leaves -1 sentinels in the block table, and a
-    // negative physical block is an OOB read (#1678). This kernel prefetches
-    // through a cp_async ring, so it cannot `continue` past one the way the
-    // non-tiled twins do: the address is clamped into the pool and the tokens
-    // are dropped by the validity mask below instead.
+    // StreamingLLM eviction leaves -1 sentinels in the block table (#1678); this kernel prefetches
+    // via a cp_async ring so it cannot `continue` past one - the address is clamped into the pool
+    // and invalid tokens are dropped by the validity mask instead.
     auto page_live = [&](int ch) { return bt[ch / chunks_per_page] >= 0; };
     auto chunk_src = [&](int ch, const uint8_t* __restrict__ cache) {
         const int page = ch / chunks_per_page;
@@ -406,11 +378,9 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
 
-    // kStages-deep prefetch ring: the block-serial chunk walk exposes one
-    // global->smem latency per chunk with a 2-deep buffer (the per-head tile
-    // kernel hides it behind 8 independent warp pipelines; here all warps step
-    // the same chunk). Every iteration commits exactly ONE cp.async group
-    // (empty groups past the tail keep the count aligned), so
+    // kStages-deep prefetch ring: block-serial chunk walk exposes one global->smem latency per
+    // chunk with a 2-deep buffer (all warps step the same chunk, unlike the per-head kernel's 8
+    // independent pipelines). Every iteration commits exactly one cp.async group so
     // wait_group<kStages-1> always completes the current chunk's load.
     for (int i = 0; i < kGqaStages - 1; i++) {
         if (chunk_begin + i < chunk_end)
@@ -540,28 +510,17 @@ void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cach
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Split count for the GQA variant's geometry: with grid.y = n_kv_heads (G x
-// fewer head-blocks than the per-head kernel) and multi-resident blocks,
-// target 2*SMs concurrent blocks, capped by the page count and the split-K
-// scratch size. Measured @16k (Coder-30B, batch*n_kv_heads = 4): e2e decode is
-// flat for s in [85..128] and drops below (kernel underfill) as well as above
-// (the reduce kernel's partial traffic scales with s) — 2*SMs sits at the
-// plateau's cheap end.
+// Split count for the GQA variant: grid.y=n_kv_heads (G x fewer head-blocks) with multi-resident
+// blocks, targets 2*SMs concurrent blocks, capped by page count and split-K scratch size.
 int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,
                                                int block_size, int max_context_len) {
     const int sms = kpar_n_sms();
     const int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     const int bh_kv = batch_size * n_kv_heads;
-    // Target 2 blocks per SM. This factor is a measured optimum in BOTH
-    // directions, not a guess: capping split-K lower regressed 21-35 %
-    // (2026-07-13), and raising it costs decode monotonically -- at ctx 8k on
-    // Qwen3-Coder-30B-A3B, 2/3/4 waves give 340/512/680 blocks and
-    // 317.25/308.15/302.32 tok/s, losing in 5 of 5 rounds (2026-08-14, measured
-    // after the split-K reduce got 21.9 % faster, so the reduce is not the cost).
-    // The kernel is not bandwidth-bound at M=1 despite sitting at 31 % of peak:
-    // its long-scoreboard stall is 1.64 against the lm_head GEMV's 18.4 at 93 %,
-    // so more blocks buy per-split overhead, not overlap. See the
-    // sm120-cuda-expert known-issues entry before retrying either direction.
+    // Targets 2 blocks/SM: a measured optimum in both directions (lower regresses, higher costs
+    // decode monotonically) - the kernel is not bandwidth-bound at M=1 despite ~31% of peak; its
+    // stall profile shows more blocks buy per-split overhead, not overlap. See sm120-cuda-expert
+    // known-issues before retrying either direction.
     int s = (2 * sms + bh_kv - 1) / bh_kv;
     s = min(s, num_ctx_blocks);
     void* sk_ptr = nullptr;

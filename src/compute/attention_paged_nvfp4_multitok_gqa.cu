@@ -1,16 +1,8 @@
-// NVFP4 paged decode attention, four tokens per warp iteration, HPC Q heads
-// per CTA sharing each dequantised K/V row (2026-09-03).
-//
-// The multitok kernels (attention_paged_nvfp4_multitok.cu) run one CTA per
-// (batch, Q head[, split]); every Q head of a KV group re-reads and
-// re-dequantises the same nibbles. Same KV bytes, batch 1 with the split-K
-// scratch registered: 24/4 heads HD=256 at 77k 207.8 us (427 GB/s) against
-// 62.4 us (1423 GB/s) on the 4/4 MHA shape; 32/8 HD=128 at 32k 86.3 us
-// against 30.1 us on 8/8. Here a CTA holds HPC Q heads of one KV head:
-// the K row is loaded and converted once, dotted against HPC q vectors, the
-// V row converted once and accumulated into HPC outputs; the grid is
-// (batch, n_kv_heads x groups[, splits]). Unnormalised (m, l, o) per head
-// with one division at the end so the shared merges are unchanged.
+// NVFP4 paged decode, 4 tokens/warp, HPC Q heads/CTA sharing each dequantized K/V row (vs the
+// multitok kernel's one CTA per Q head re-reading/re-dequantizing the same nibbles). A CTA
+// holds HPC Q heads of one KV head: loads/converts the K row once, dots against HPC q vectors,
+// converts V once, accumulates into HPC outputs. Grid (batch, n_kv_heads*groups[,splits]).
+// Unnormalized (m,l,o) per head, one division at the end.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/pdl_device.cuh"

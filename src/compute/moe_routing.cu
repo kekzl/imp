@@ -11,16 +11,9 @@
 
 namespace imp {
 
-// ============================================================================
-// Kernel 1: Top-k gating
-//
-// One block per token.  Each block processes one row of gate_logits
-// [n_experts], computes softmax, selects top-k experts, normalizes weights.
-//
-// Outputs:
-//   expert_indices[token * top_k + j]  -- j-th selected expert for token
-//   expert_weights[token * top_k + j]  -- normalized weight for j-th expert
-// ============================================================================
+// Top-k gating: one block per token, processes gate_logits[n_experts], softmax, top-k
+// select, normalize weights.
+// expert_indices[token*top_k+j] = j-th selected expert; expert_weights[...] = its normalized weight.
 
 __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k,
                                    int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights,
@@ -101,10 +94,9 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
     }
     __syncthreads();
 
-    // Parallel top-k selection: find top_k experts using block-wide argmax reduction.
-    // Each iteration finds the global max, records it, and masks it out.
-    // When score_bias is provided, select based on biased scores (s_sel_probs)
-    // but use UNBIASED scores (s_probs) for weight values.
+    // Parallel top-k: block-wide argmax reduction, each iteration finds global max, records,
+    // masks it out. With score_bias: select on biased scores (s_sel_probs) but weight values
+    // use UNBIASED scores (s_probs).
     {
         // Shared memory for argmax reduction across warps
         __shared__ float s_warp_max[NUM_WARPS];
@@ -181,16 +173,10 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
     }
 }
 
-// ============================================================================
-// Fused kernel: Gate GEMV + softmax/sigmoid + top-k selection
-//
-// For n=1 decode: combines gate weight dot-products with routing in a single
-// kernel, eliminating the intermediate FP32 logits buffer and 1 kernel launch.
-//
-// 1 block × 256 threads (8 warps). Each warp computes ceil(n_experts/8) dot
-// products, stores logits to shared memory, then all threads cooperate on
-// softmax/sigmoid + top-k selection (same algorithm as topk_gating_kernel).
-// ============================================================================
+// Fused gate GEMV + softmax/sigmoid + top-k (decode M=1): avoids intermediate FP32 logits
+// buffer + 1 kernel launch. 1 block x 256 threads (8 warps); each warp computes
+// ceil(n_experts/8) dot products into shared logits, then all threads cooperate on
+// softmax/sigmoid + top-k (same algorithm as topk_gating_kernel).
 
 __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  // [n_experts, d_model] FP16
                                             const half* __restrict__ x,       // [d_model] FP16 input
@@ -362,15 +348,9 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
     }
 }
 
-// ============================================================================
-// Fused count + scan + scatter kernel (single launch)
-//
-// Replaces: 2× zero_int32 + count_tokens_per_expert + exclusive_scan +
-//           scatter_token_ids_with_flat_idx = 5 kernel launches → 1.
-//
-// Single block.  Shared memory holds expert_counts and write_pos arrays.
-// Requires n_experts ≤ 1024 (covers all current models).
-// ============================================================================
+// Fused count+scan+scatter (single launch), replaces 2x zero_int32 + count_tokens_per_expert
+// + exclusive_scan + scatter_token_ids_with_flat_idx (5 launches -> 1).
+// Single block; shared mem holds expert_counts + write_pos. Requires n_experts <= 1024.
 
 __global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* __restrict__ expert_indices,
                                                                 int n_tokens, int top_k, int n_experts,
@@ -423,23 +403,11 @@ __global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* _
     }
 }
 
-// ============================================================================
-// Deterministic fused count + scan + scatter kernel (opt-in).
-//
-// Same outputs as moe_fused_permute_kernel, but the per-expert bucket slot a
-// token lands in is a pure function of (expert, flat_idx) — independent of
-// warp scheduling. The default kernel uses atomicAdd on s_write_pos, so the
-// order of tokens within an expert bucket varies run-to-run; that ordering
-// feeds the gather/grouped-GEMM and (for the atomic scatter path) the FP
-// accumulation order, breaking reproducibility.
-//
-// Strategy: thread 0 does the scan (as before), then walks flat_idx in
-// ascending order, appending each assignment to its expert bucket. Because
-// flat_idx is visited in a fixed sequential order, slot assignment is stable.
-// n_experts and total are small for decode/short prefill, so the single-thread
-// scatter is acceptable for an opt-in reproducibility mode (default path is
-// untouched).
-// ============================================================================
+// Deterministic fused count+scan+scatter (opt-in): default kernel's atomicAdd on
+// s_write_pos makes bucket order run-to-run varying, breaking reproducibility of the
+// gather/grouped-GEMM and FP accumulation order.
+// Strategy: thread 0 scans, then walks flat_idx ascending, appending to each expert's
+// bucket -> stable slot assignment. n_experts/total small enough for single-thread scatter.
 
 __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     const int32_t* __restrict__ expert_indices, int n_tokens, int top_k, int n_experts,
@@ -477,19 +445,10 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     }
     __syncthreads();
 
-    // Phase 4: deterministic scatter. A token's slot inside its expert bucket
-    // is its rank among the EARLIER flat indices routed to that expert, which
-    // is what makes the layout independent of warp scheduling.
-    //
-    // This was one thread walking all `total` entries: 4096 dependent
-    // shared-memory read-modify-writes for a 512-token top_k=8 chunk. Once the
-    // combine was fixed it became the dominant cost of deterministic MoE
-    // routing, 0.178 ms against the combine's 0.013 ms (#1546).
-    //
-    // One blockDim-sized chunk at a time produces the IDENTICAL layout: chunks
-    // are visited in index order, and inside a chunk a thread counts only
-    // lower thread ids, so the rank is still "how many earlier indices chose
-    // this expert".
+    // Deterministic scatter: a token's slot within its expert bucket = its rank among earlier
+    // flat indices routed to the same expert (#1546), making layout independent of scheduling.
+    // One blockDim-sized chunk at a time, chunks in index order, threads counting only lower
+    // thread ids -> identical layout to a full single-thread walk.
     int32_t* s_chunk = smem + 2 * n_experts;  // [blockDim.x]
     const int block_n = static_cast<int>(blockDim.x);
     for (int base = 0; base < total; base += block_n) {

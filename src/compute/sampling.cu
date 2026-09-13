@@ -65,19 +65,15 @@ __global__ void argmax_kernel(const float* __restrict__ logits, int vocab_size,
     }
 }
 
-// Multi-block argmax: distributes work across ARGMAX_NBLOCKS blocks so all SMs
-// participate.  The single-block kernel above uses 1 SM and takes ~190 us for
-// vocab=152K; this version takes ~10 us.
-//
-// Scratch layout (passed as d_scratch, ARGMAX_SCRATCH_BYTES total):
-//   float    partial_vals [ARGMAX_NBLOCKS]
-//   int32_t  partial_idxs [ARGMAX_NBLOCKS]
+// Multi-block argmax: spreads work across ARGMAX_NBLOCKS blocks so all SMs participate,
+// instead of the single-block kernel's 1 SM.
+// Scratch (d_scratch, ARGMAX_SCRATCH_BYTES): float partial_vals[ARGMAX_NBLOCKS],
+// int32_t partial_idxs[ARGMAX_NBLOCKS].
 
-// Phase 1: each block scans its stripe and writes its local max to partials.
-// Shared body — the row-batched kernel below resolves per-row pointers from
-// blockIdx.y and runs the identical stripe walk (gridDim.x is ARGMAX_NBLOCKS
-// in both, so the reduction geometry — and therefore the token — is
-// bit-identical to the per-row launch).
+// Phase 1: each block scans its stripe, writes its local max to partials. Shared body:
+// the row-batched kernel resolves per-row pointers from blockIdx.y and runs the identical
+// walk (gridDim.x=ARGMAX_NBLOCKS in both), so per-row and per-launch results are
+// bit-identical.
 __device__ __forceinline__ void argmax_partial_body(const float* __restrict__ logits, int vocab_size,
                                                     float* __restrict__ partial_vals,
                                                     int32_t* __restrict__ partial_idxs) {
@@ -186,10 +182,9 @@ __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows
     argmax_reduce_body(pv, pi, ARGMAX_NBLOCKS, r.d_result);
 }
 
-// Result scratch of the synchronous sample_greedy overload. File-scope so the
-// reset hook can reach it: it used to be a function-local static that no
-// teardown nulled, so the second engine in a process read the first one's
-// closed arena (AUDIT_arch_2026 B-2).
+// Result scratch of the synchronous sample_greedy overload. File-scope so the reset hook
+// can reach it: a function-local static went unreset by any teardown, so a second engine
+// in the process read the first one's closed arena (AUDIT_arch_2026 B-2).
 namespace {
 int32_t* s_greedy_result = nullptr;
 bool s_greedy_result_owned = false;  // cudaMalloc fallback (arena closed), freed here
@@ -207,16 +202,11 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    // Four bytes, allocated ONCE. This used to cudaMalloc and cudaFree per call
-    // — an I2 violation on a sampling path, and the kind that hides because the
-    // allocation is trivially small (docs/internals/MEMORY.md A3.2). The
-    // buffer is write-then-read within this call and reused by every later one,
-    // so engine-persistent is the correct tier.
-    //
-    // This overload is itself the fallback the executor takes when its own
-    // d_sample_result_ is unavailable, and single-engine-per-process is the
-    // supported deployment (memory/vram_query.h), so a file-static is safe here
-    // in exactly the way it would not be for a per-request buffer.
+    // Four bytes, allocated ONCE (was cudaMalloc/cudaFree per call, an I2 violation hidden by
+    // its trivial size, docs/internals/MEMORY.md A3.2). Write-then-read within this call and
+    // reused by every later one: engine-persistent is correct.
+    // This overload is the executor's fallback when d_sample_result_ is unavailable;
+    // single-engine-per-process (memory/vram_query.h) makes a file-static safe here.
     int32_t* d_result = s_greedy_result;
     if (!d_result) {
         if (auto slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {

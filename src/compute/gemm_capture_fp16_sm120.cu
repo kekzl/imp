@@ -1,34 +1,13 @@
-// Capture-safe sm_120 FP16 dense GEMM via WMMA HMMA tensor cores.
-//
-// Drop-in replacement for cublasLtMatmul when the stream is in capture
-// mode. cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR on the first
-// GEMM under cudaStreamCapture on sm_120 — its algorithm heuristic and
-// internal workspace allocation paths are not capture-safe. This
-// hand-tuned WMMA kernel keeps all decisions on-device (no host
-// heuristics, no cudaMalloc inside the captured region) so it composes
-// cleanly with CUDA graph capture.
-//
-// Geometry (v3 — cp.async pipeline + per-shape BM dispatch):
-//   - Block tile BM × BN × BK = (64 or 128) × 128 × 32, 4 warps in 2×2 layout.
-//     BM=64 variant: per-warp 32×64 → 2×4 FRAGS × 2 K-frags = 16 MMAs/iter/warp.
-//     BM=128 variant: per-warp 64×64 → 4×4 FRAGS × 2 K-frags = 32 MMAs/iter/warp.
-//   - WMMA fragment: 16×16×16 (HMMA m16n8k16), FP32 accumulator.
-//   - Stages: 2 SMEM tiles (double-buffer), cp.async.cg with 16B chunks (8 halves).
-//
-// Dispatch heuristic (gemm_capture_fp16_sm120):
-//   - BM=64 when total blocks at BM=128 would underfill the 170 SMs (small M
-//     or small N). Trades per-block work for SM-saturation: 2× M-blocks at half
-//     the per-block work, runs at 3 blocks/SM (vs 2 at BM=128) thanks to
-//     smaller SMEM footprint.
-//   - BM=128 when blocks already saturate the SM array — larger per-warp work
-//     amortizes launch overhead and lowers L2 traffic per block.
-//
-// Layout: A row-major [M, K], B row-major [N, K] (semantically B^T in
-// the GEMM, matching cuBLAS OP_T), D row-major [M, N]. Output:
-//   D = alpha * A @ B^T + beta * D
-//
-// M and N must be multiples of BM and BN respectively; K must be a multiple
-// of BK=32.
+// Capture-safe sm_120 FP16 dense GEMM via WMMA HMMA tensor cores: drop-in replacement
+// for cublasLtMatmul when the stream is capturing (cuBLASLt's heuristic and internal
+// workspace allocation are not capture-safe on sm_120). All decisions are on-device.
+// Geometry (v3, cp.async pipeline + per-shape BM dispatch): block tile BM x BN x BK =
+// (64 or 128) x 128 x 32, 4 warps in 2x2 layout. BM=64: per-warp 32x64 -> 2x4 frags x 2
+// K-frags = 16 MMAs/iter/warp. BM=128: per-warp 64x64 -> 4x4 frags x 2 K-frags = 32
+// MMAs/iter/warp. WMMA fragment 16x16x16 (HMMA m16n8k16), FP32 accumulator. 2 SMEM
+// tiles (double-buffer), cp.async.cg with 16B chunks.
+// Layout: A row-major [M,K], B row-major [N,K] (semantically B^T), D row-major [M,N];
+// D = alpha*A@B^T + beta*D. M,N must be multiples of BM,BN; K must be a multiple of BK=32.
 
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "core/logging.h"
@@ -45,24 +24,21 @@ using namespace nvcuda;
 // Common (non-BM-dependent) constants.
 constexpr int BN = 128;
 constexpr int BK = 32;
-// SMEM stride equals BK (no padding): tested an 8-half pad to break the apparent
-// 4-way bank conflict on ldmatrix.x4 reads (BK=32 halves = 64-byte stride aligns
-// lanes 0/2/4/6 on the same bank), but it regressed 10-17% on every shape ≥ N=128.
-// ldmatrix on sm_120 evidently handles the 64-byte-stride pattern via its own
-// swizzle/broadcast unit, or the cost of conflicts is dominated by something
-// else (compute-pipe stalls, register-file pressure). Keeping the simple layout.
+// SMEM stride = BK (no padding): an 8-half pad to break the apparent ldmatrix.x4 bank
+// conflict (BK=32 halves = 64B stride aligns lanes 0/2/4/6 on one bank) regressed
+// 10-17% on every shape >= N=128. ldmatrix on sm_120 apparently absorbs this pattern
+// via its own swizzle/broadcast unit; keep the simple unpadded layout.
 constexpr int BK_SMEM = BK;
 
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
 
-// 4 warps in 2×2 layout per block. Tested 8 warps (2×4) — regressed 8-22%
-// across all shapes despite halving reg pressure (246 → 124). Root cause:
-// 2× more total SMEM-fragment loads (each warp still reads its own A frags
-// from SMEM; with 4 wn instead of 2 wn, each A row is loaded 4× redundantly
-// vs 2×), plus 8-warp __syncthreads is more expensive. Lower reg pressure
-// doesn't help when the kernel is compute/MMA-pipeline-bound, not reg-bound.
+// 4 warps in 2x2 layout: 8 warps (2x4) regressed 8-22% despite halving register
+// pressure (246->124). Root cause: 2x more total SMEM-fragment loads (each warp still
+// reads its own A frags; 4 wn vs 2 wn means each A row loads 4x redundantly vs 2x),
+// plus a costlier 8-warp __syncthreads. Kernel is compute/MMA-pipeline-bound, not
+// register-bound.
 constexpr int WARPS_PER_BLOCK = 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 constexpr int WARPS_M = 2;
@@ -91,10 +67,9 @@ __device__ __forceinline__ void cp_async_wait_group() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
-// Issue all cp.async loads for a single (A, B) tile. Templated on BM so the
-// chunk-loop trip counts are compile-time constants and ptxas straightlines
-// the 8 cp.async issues (for BM=128) or 6 (for BM=64) into a back-to-back
-// pipeline-friendly sequence.
+// Issues all cp.async loads for one (A,B) tile. Templated on BM so the chunk-loop trip
+// counts are compile-time constants and ptxas straightlines the cp.async issues (8 for
+// BM=128, 6 for BM=64) into a back-to-back pipeline-friendly sequence.
 template <int BM>
 __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, const __half* A,
                                                 const __half* B, int block_m, int block_n,
@@ -264,13 +239,11 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     }
 }
 
-// Choose BM based on shape. BM=64 wins when SM saturation matters more than
-// per-block compute amortization (small total block count). BM=128 wins when
-// the M×N grid already produces ≥ ~1 wave of blocks (≥ 170 SMs at 2 blocks/SM).
-// Threshold derived from a cross-shape A/B sweep on RTX 5090 (170 SMs, 2 blocks/SM
-// for BM=128, 3 blocks/SM for BM=64): switch-over lies between 128 BM=128-blocks
-// (BM=64 wins big, ~30% improvement) and 256 BM=128-blocks (BM=128 wins, ~15%).
-// 200 splits the regime cleanly across the production shapes benched.
+// BM=64 wins when SM saturation matters more than per-block compute amortization
+// (small total block count); BM=128 wins when the grid already saturates the SM array
+// (>= ~1 wave at 2 blocks/SM). Threshold (170 SMs, 2 blocks/SM at BM=128, 3 at BM=64):
+// BM=64 clearly wins below ~128 BM=128-equivalent blocks, BM=128 above ~256;
+// kBlockSaturationThreshold=200 splits the regime.
 constexpr int kBlockSaturationThreshold = 200;
 
 bool should_use_bm64(int M, int N) {
@@ -294,12 +267,11 @@ bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N
                               float beta, cudaStream_t stream) {
     if (!capture_gemm_fp16_sm120_available()) return false;
     if (M <= 0 || N <= 0 || K <= 0) return false;
-    // K must be a multiple of BK=32 (cp.async chunks fill full tiles). N and M
-    // partial tiles are handled by both the load (cp.async src-size=0 zero-fill
-    // for g_row/g_col past N/M) and the store (masked `g_col >= N`), so any
-    // positive N is safe — a narrow N < BN just wastes part of the BN=128 tile.
-    // Accepting it is what matters under capture: cuBLASLt would else fail with
-    // status 14 and abort the whole decode graph (#934, GDN N=32 projections).
+    // K must be a multiple of BK=32 (cp.async chunks fill full tiles). Any positive N is
+    // safe: the load zero-fills past N/M (cp.async src-size=0) and the store masks
+    // g_col>=N; a narrow N<BN just wastes part of the tile. This matters under capture:
+    // cuBLASLt would fail with status 14 and abort the whole decode graph otherwise (#934,
+    // GDN N=32 projections).
     if (K % BK != 0) return false;
 
     bool use_bm64 = should_use_bm64(M, N);
@@ -309,11 +281,10 @@ bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N
     dim3 grid((N + BN - 1) / BN, (M + BM_v - 1) / BM_v);
     dim3 block(THREADS_PER_BLOCK);
 
-    // Both variants use 2-stage cp.async pipelining. Tested 3-stage on BM=64 —
-    // regressed 2-5% across shapes because the SMEM growth (12 → 18 KiB/stage)
-    // dropped occupancy from 3 → 2 blocks/SM, and the deeper pipeline didn't
-    // recover that loss (kernel is not memory-bound, ~160 TF vs 838 TF peak →
-    // bottleneck is compute scheduling / register pressure, not load latency).
+    // Both variants use 2-stage cp.async pipelining. 3-stage on BM=64 regressed 2-5%: SMEM
+    // growth (12->18 KiB/stage) dropped occupancy 3->2 blocks/SM, and the deeper pipeline
+    // didn't recover the loss (kernel is compute-scheduling/register-bound, not
+    // load-latency-bound).
     constexpr size_t smem_bytes_bm64  = 2 * ((64 + BN) * BK_SMEM) * sizeof(__half);
     constexpr size_t smem_bytes_bm128 = 2 * ((128 + BN) * BK_SMEM) * sizeof(__half);
     size_t smem_bytes                  = use_bm64 ? smem_bytes_bm64 : smem_bytes_bm128;

@@ -1,23 +1,10 @@
 #pragma once
-// =============================================================================
-// mtp_forward.h — Multi-Token-Predictor draft step
-// =============================================================================
-//
-// One draft-token forward pass through the MTP head.
-//
-// Phase status:
-//   - 2.1 (shipped PR #172): reduced forward (emb → pre_fc_norm → fc →
-//          final_norm → lm_head → argmax). Skips the transformer block.
-//          Acceptance rate will be far below trained-MTP optimum.
-//   - 2.2.MoE (this file): MoE block plumbed via existing imp::gemm /
-//          swiglu / moe_gate_topk_fused / shared_expert_gate_scale
-//          primitives. Attention block still a passthrough (architectural
-//          shape ambiguity — q_proj outputs 8192 but o_proj inputs 4096
-//          on Qwen3.6 MTP, doesn't match standard GQA conventions; needs
-//          upstream-reference investigation before correct implementation).
-//   - 2.2.Attn (future): full attention block.
-//
-// =============================================================================
+// MTP draft-token forward pass through the MTP head.
+// Phase 2.1 (PR #172): reduced forward (emb->pre_fc_norm->fc->final_norm->lm_head->argmax),
+// skips transformer block, acceptance rate below trained-MTP optimum.
+// Phase 2.2.MoE (this file): MoE block via imp::gemm/swiglu/moe_gate_topk_fused/
+// shared_expert_gate_scale; attention still passthrough (q_proj 8192 vs o_proj 4096
+// mismatch vs standard GQA, needs upstream-reference investigation). 2.2.Attn: future.
 
 #include "compute/moe_routing.h"  // MoeRoutingBuffers
 #include "memory/host_pinned.h"
@@ -66,38 +53,30 @@ struct MtpDraftWorkspace {
     // and the multi-candidate branch seed: chains 1..W-1 start from ranks
     // 1..W-1 here).
     int*  d_topk = nullptr;
-    // [kMtpTopWBlocks * kMtpMaxTopW] float / int — partial per-block top-W
-    // (value, id) pairs for the two-pass serving top-W kernel. The probe's
-    // single-CTA kernel scans the whole vocabulary once per width (713 us on
-    // a 248k vocab — measurement-grade); serving cannot pay that per verify,
-    // so pass 1 splits the vocab across blocks and pass 2 merges.
+    // [kMtpTopWBlocks*kMtpMaxTopW] float/int: partial per-block top-W (value,id) pairs for
+    // the two-pass serving top-W kernel. Probe's single-CTA kernel scans the full vocab per
+    // width (too slow for serving); pass 1 splits vocab across blocks, pass 2 merges.
     float* d_topk_part_val = nullptr;
     int* d_topk_part_idx = nullptr;
-    // [kMtpMaxTopW] float — the top-W logit values in rank order (serving
-    // kernel only). d_topk_val[0] - d_topk_val[1] is the head's own top-1/
-    // top-2 margin, the signal speculative.mtp_tree_margin gates the branch
-    // on: a confident head does not pay for a second candidate.
+    // [kMtpMaxTopW] float: top-W logit values in rank order (serving kernel only).
+    // d_topk_val[0]-d_topk_val[1] is the head's top-1/top-2 margin; gates
+    // speculative.mtp_tree_margin (a confident head skips the second candidate).
     float* d_topk_val = nullptr;
-    // [kMtpMaxTopW * kMtpMaxChainK] int — device-side chain slots, chain c at
-    // [c * kMtpMaxChainK]: step i's argmax lands in slot i and feeds step
-    // i+1's embedding lookup without a host round-trip; one D2H drains all
-    // chains at the end. The linear path is chain 0, byte-compatible with the
-    // old single-chain layout.
+    // [kMtpMaxTopW*kMtpMaxChainK] int: device-side chain slots; chain c at
+    // [c*kMtpMaxChainK], step i's argmax lands in slot i, feeding step i+1's embedding
+    // lookup without a host round-trip. One D2H drains all chains at the end.
+    // Chain 0 is the linear path, byte-compatible with the old single-chain layout.
     int32_t* d_chain_tokens = nullptr;
-    // [hidden_dim] FP16 — h_final of the last FEED pair, snapshotted before
-    // chain 0's first continuation overwrites d_h_final. Chains 1..W-1 branch
-    // at the first position, so their first continuation forward needs
-    // exactly this hidden.
+    // [hidden_dim] FP16: h_final of the last FEED pair, snapshotted before chain 0's first
+    // continuation overwrites d_h_final. Chains 1..W-1 branch at the first position and
+    // need exactly this hidden for their first continuation.
     void* d_h_final_snap = nullptr;
     // [1] int — persistent argmax scratch for the host-path draft step
     // (replaces a per-draft cudaMallocAsync/cudaFreeAsync pair).
     int*  d_argmax = nullptr;
-    // [1] int32 — persistent token-id scratch for the host-chain draft step,
-    // the input twin of d_argmax above. The host path used to cudaMalloc four
-    // bytes per draft step and free them with cudaFreeAsync (AUDIT B10): the
-    // wrong allocator for that pointer, and a serving-phase allocation on the
-    // one MTP arm every MoE model takes (the device-chain arm needs
-    // n_experts == 0). Persistent here, so it is neither.
+    // [1] int32: persistent token-id scratch for the host-chain draft step (input twin of
+    // d_argmax). Host path used to cudaMalloc/cudaFreeAsync 4 bytes per draft step (AUDIT
+    // B10, wrong allocator + a serving-phase allocation). Persistent here avoids both.
     int32_t* d_tok = nullptr;
 
     // ---- Phase 2.2 MoE scratch ----
@@ -130,31 +109,26 @@ struct MtpDraftWorkspace {
     void* d_attn_residual = nullptr;  // [hidden_dim] FP16 — o_proj output (added to fc_out)
     int*  d_mtp_position  = nullptr;  // [1] int — current MTP cache position (for RoPE)
 
-    // ---- Phase 2.2.Attn+KV — MTP-side KV cache (per-session, M=1 only) ----
-    // K and V cache accumulate across MTP draft calls. Each call appends one
-    // row at position `mtp_pos`, then runs softmax attention over positions
-    // [0, mtp_pos+1). For Qwen3.6 max_seq=16K: 16384 × 2 × 256 × 2 bytes = 16 MiB
-    // each = 32 MiB total. Reset on new sequence via mtp_kv_reset().
+    // Phase 2.2.Attn+KV: MTP-side KV cache (per-session, M=1 only). K/V accumulate across
+    // draft calls; each call appends one row at mtp_pos, then attends [0,mtp_pos+1).
+    // Qwen3.6 max_seq=16K: 16384*2*256*2 bytes = 16 MiB each, 32 MiB total. Reset via mtp_kv_reset().
     void* d_k_cache       = nullptr;  // [max_seq_len, num_kv_heads, head_dim] FP16
     void* d_v_cache       = nullptr;  // [max_seq_len, num_kv_heads, head_dim] FP16
     int   mtp_pos         = 0;        // next slot to write (0..max_seq_len-1)
     int   max_seq_len     = 0;        // cache capacity
-    // Multi-slot KV (batched verify): n_kv_slots caches of max_seq_len rows
-    // in one allocation. d_k_cache / d_v_cache / mtp_pos above are the ACTIVE
-    // slot's view (mtp_select_slot), so every single-request path keeps
-    // working per slot; slot_pos holds the other slots' positions.
+    // Multi-slot KV (batched verify): n_kv_slots caches of max_seq_len rows in one
+    // allocation. d_k_cache/d_v_cache/mtp_pos are the ACTIVE slot's view (mtp_select_slot);
+    // slot_pos holds the other slots' positions.
     void* d_k_cache_base  = nullptr;
     void* d_v_cache_base  = nullptr;
     int   n_kv_slots      = 1;
     int   cur_slot        = 0;
     size_t kv_slot_elems  = 0;        // max_seq_len * num_kv_heads * head_dim
     std::vector<int> slot_pos;        // [n_kv_slots] next write position per slot
-    // Ragged multi-slot feed scratch (mtp_feed_rows_multislot): per-row slot
-    // and position tables, gather indices into the caller's hidden buffer,
-    // the gathered rows, and final_norm of EVERY fed row.
-    // Aliases: the int tables carve d_feed_tokens (4 x feed_rows_cap ints),
-    // d_b_gather is d_b_h_norm (rows normed in place), d_b_h_final is
-    // d_b_norm (free once the MLP consumed the post-norm). Never freed alone.
+    // Ragged multi-slot feed scratch: per-row slot/position tables, gather indices into the
+    // caller's hidden buffer, gathered rows, final_norm of every fed row.
+    // Aliases: int tables carve d_feed_tokens (4x feed_rows_cap ints); d_b_gather is
+    // d_b_h_norm; d_b_h_final is d_b_norm (freed once MLP consumes post-norm). Never freed alone.
     int*  d_row_slots     = nullptr;  // [feed_rows_cap]
     int*  d_row_pos       = nullptr;  // [feed_rows_cap]
     int*  d_row_src       = nullptr;  // [feed_rows_cap]
@@ -183,26 +157,22 @@ struct MtpDraftWorkspace {
     int num_kv_heads = 0;
     int head_dim     = 0;
 
-    // RoPE config (Phase 2.2.Attn+RoPE). When rope_dim > 0, mrope-aware
-    // Q/K rotation is applied BEFORE the attention scan. Both Q (extracted)
-    // and K (this step's projection) get rotated; cached K's stay rotated
-    // from their own insertion-time position.
+    // RoPE config (Phase 2.2.Attn+RoPE): when rope_dim>0, mrope-aware Q/K rotation applies
+    // before the attention scan. Both Q (extracted) and K (this step) rotate; cached K's
+    // stay rotated from their own insertion-time position.
     float rope_theta      = 0.0f;
     int   rope_dim        = 0;     // 0 = disable RoPE
     bool  rope_neox       = true;  // (currently mtp_mrope_kernel hardcodes neox)
-    // mrope section half-counts (Qwen3-VL multimodal). Sum must equal
-    // rope_dim/2. For Qwen3.6: {11, 11, 10}. For text-only tokens all 3
-    // positions are equal so mrope reduces to standard partial-rope; sec*
-    // fields stay relevant for future multimodal token handling.
+    // mrope section half-counts (Qwen3-VL). Sum must equal rope_dim/2. Qwen3.6: {11,11,10}.
+    // Text-only tokens: all 3 positions equal, mrope reduces to partial-rope; sec* fields
+    // stay for future multimodal handling.
     int   mrope_sec0      = 0;
     int   mrope_sec1      = 0;
     int   mrope_sec2      = 0;
-    // RoPE scaling — must mirror the main forward's rope path or the drafter
-    // rotates Q/K differently from the verifier at extended positions, silently
-    // degrading acceptance with position (issue #897). rope_freq_scale is the
-    // linear scaling (main uses inv_scaling = 1/freq_scale); yarn_ext_factor > 0
-    // engages YaRN blending with yarn_corr_dim_0/1 (from rope_yarn_corr_dims())
-    // and yarn_attn_factor (mscale). Defaults = no scaling (Qwen3.6 base).
+    // RoPE scaling must mirror the main forward's rope path or the drafter rotates Q/K
+    // differently from the verifier at extended positions, silently degrading acceptance
+    // with position (#897). rope_freq_scale: linear scale (main uses inv_scaling=1/freq_scale).
+    // yarn_ext_factor>0 engages YaRN blending via yarn_corr_dim_0/1 + yarn_attn_factor (mscale).
     float rope_freq_scale = 1.0f;
     float yarn_ext_factor  = 0.0f;
     float yarn_attn_factor = 1.0f;
@@ -211,12 +181,10 @@ struct MtpDraftWorkspace {
     float rms_norm_eps    = 1e-6f;
     float arch_norm_offset = 0.0f;  // for q_norm/k_norm (Qwen3.5/3.6 gamma=1+W)
 
-    // ---- Batched prefill-feed scratch (dense attn+KV heads only) ----
-    // The per-pair feed loop reads the whole head's weights once per token —
-    // on Qwen3.8-27B that priced prefill at ~800 µs/token (pp512 7426 → 1252
-    // tok/s, -83%). mtp_feed_batch() feeds up to feed_rows_cap (token, hidden)
-    // pairs in one M=rows pass instead. feed_rows_cap == 0 → unsupported head
-    // (MoE MLP, or no attention/KV cache) and the caller keeps the loop.
+    // Batched prefill-feed scratch (dense attn+KV heads only). The per-pair loop reading the
+    // whole head's weights once per token was prohibitively slow; mtp_feed_batch feeds up to
+    // feed_rows_cap (token,hidden) pairs in one M=rows pass. feed_rows_cap==0: unsupported
+    // head (MoE MLP, or no attention/KV cache), caller keeps the loop.
     int      feed_rows_cap = 0;
     int32_t* d_feed_tokens = nullptr;  // [feed_rows_cap]
     void* d_b_emb      = nullptr;  // [rows, H] emb rows, normed in place
@@ -234,12 +202,9 @@ struct MtpDraftWorkspace {
     void* d_b_up       = nullptr;  // [rows, d_ff]
     void* d_b_act      = nullptr;  // [rows, d_ff]
 
-    // ---- Post-norm feed scratch (diagnostics.mtp_prenorm_h) ----
-    // [prenorm_rows_cap, H] FP16: the fed hidden rows after the target's
-    // final norm. Sized once at enable time (engine_spec_mtp.cpp) to the
-    // widest feed a prefill chunk can produce. It used to be a file-static
-    // cudaMalloc staircase that re-grew with every longer feed while serving:
-    // the last pinned call in the I2 gate's phase A.
+    // Post-norm feed scratch (diagnostics.mtp_prenorm_h): [prenorm_rows_cap,H] FP16, the fed
+    // hidden rows after the target's final norm. Sized once at enable time (engine_spec_mtp.cpp)
+    // to the widest feed a prefill chunk can produce.
     void* d_prenorm_rows = nullptr;
     int prenorm_rows_cap = 0;
 };
@@ -248,49 +213,17 @@ struct MtpDraftWorkspace {
 // scratch above: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
 constexpr int kMtpFeedRows = 256;
 
-// One MTP draft step. Returns the draft token id via host out_token_id.
-//
-// Inputs:
-//   - prev_token_id   : last accepted token (host int, used to gather embedding)
-//   - d_h_prev        : main-model final hidden state [hidden_dim] FP16 on GPU
-//   - mtp             : loaded MTP head (.loaded must be true)
-//   - main_tok_emb    : main model's token embedding [vocab, hidden] FP16
-//   - main_lm_head    : main model's lm_head [vocab, hidden] FP16
-//   - workspace       : pre-allocated scratch tensors
-//   - hidden_dim      : 2048 for Qwen3.6
-//   - vocab_size      : 248320 for Qwen3.6
-//   - stream
-//
-// Output:
-//   - *out_token_id   : drafted next token id (D2H copy of argmax). Pass
-//                       nullptr to skip the lm_head GEMV + argmax + stream
-//                       sync entirely — a cache-feed-only step (prefill /
-//                       verify catch-up positions whose prediction is never
-//                       consumed). The lm_head read (~1 GiB FP16 on Qwen3.6's
-//                       248k vocab) dominates per-step cost, so feed-only
-//                       steps are ~an order of magnitude cheaper.
-//   - out_topk_ids    : optional [top_w] host buffer; when non-null and
-//                       top_w>0, receives the top-W candidate ids in
-//                       descending-logit order (out_topk_ids[0] == *out_token_id).
-//                       Used by the Stage 0 tree-ceiling measurement.
-//   - lm_head_nvfp4   : optional NVFP4 decode-cache view of main_lm_head
-//                       (GraphExecutor::lm_head_nvfp4_view). When set, the
-//                       chain logits GEMV reads ~4x less HBM than the FP16
-//                       weight — the dominant per-draft cost on large-vocab
-//                       models. Draft-only: verification stays lossless
-//                       regardless of the draft head's precision.
-//   - d_prev_token    : device-chain input — read the previous token id from
-//                       this device int instead of prev_token_id (which is
-//                       then ignored, pass -1). No H2D upload, no host
-//                       bounds check (validate the chain once after D2H).
-//   - d_out_token     : device-chain output — write the argmax to this device
-//                       int; NO D2H copy, NO stream sync (out_token_id is
-//                       ignored). With top_w > 0 the fast top-W kernel fills
-//                       ws.d_topk (device-only, still no sync) and rank 0
-//                       lands in d_out_token — the multi-candidate branch
-//                       seed. The caller drains the whole chain with a
-//                       single D2H + sync.
-//
+// One MTP draft step; returns the draft token id via out_token_id.
+// d_h_prev: main-model final hidden [hidden_dim] FP16 GPU. mtp.loaded must be true.
+// out_token_id=nullptr: skip lm_head GEMV+argmax+sync (feed-only step, ~10x cheaper;
+// used for prefill/verify catch-up positions whose prediction is unused).
+// out_topk_ids (optional, top_w>0): top-W candidate ids descending-logit order,
+// out_topk_ids[0]==*out_token_id (Stage 0 tree-ceiling measurement).
+// lm_head_nvfp4 (optional): NVFP4 decode-cache view of main_lm_head, ~4x less HBM read;
+// draft-only precision; verification stays lossless.
+// d_prev_token/d_out_token: device-chain I/O, no H2D/D2H/sync per step; with top_w>0 the
+// fast top-W kernel fills ws.d_topk and rank 0 lands in d_out_token. Caller drains the
+// whole chain with one D2H+sync at the end.
 // Returns false on any precondition violation (mtp not loaded, null buffers).
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     const MtpHead& mtp,
@@ -305,28 +238,20 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     const int32_t* d_prev_token = nullptr,
                     int32_t* d_out_token = nullptr);
 
-// Batched prefill feed: append n_rows (token, hidden) pairs to the MTP KV
-// cache in one M=n_rows pass — embedding/norm/fc/attention/MLP all batched,
-// causal attention per query row over [0, mtp_pos + row + 1). Feed-only: no
-// logits, no argmax, no sync. Advances ws.mtp_pos by n_rows on success.
-// Requires ws.feed_rows_cap >= n_rows (dense-MLP head with attention + KV
-// cache — mtp_workspace_allocate sizes the batch scratch only for those).
-// h_tokens is a HOST pointer (uploaded to ws.d_feed_tokens internally);
-// d_hidden_rows is [n_rows, hidden_dim] FP16 on device.
+// Batched prefill feed: append n_rows (token,hidden) pairs to the MTP KV cache in one
+// M=n_rows pass (embedding/norm/fc/attention/MLP batched, causal attention per query row
+// over [0,mtp_pos+row+1)). Feed-only: no logits/argmax/sync. Advances ws.mtp_pos by n_rows.
+// Requires ws.feed_rows_cap>=n_rows (dense-MLP head w/ attention+KV cache).
+// h_tokens: host ptr (uploaded internally); d_hidden_rows: [n_rows,hidden_dim] FP16 device.
 bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
                     const MtpHead& mtp, const Tensor& main_tok_emb,
                     MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream);
-// Ragged multi-slot feed (batched verify): row r is the pair (h_tokens[r],
-// d_hidden_all[h_src_rows[r]]) appended to KV slot h_slots[r] at position
-// h_pos[r], attending [0, h_pos[r] + 1) of that slot. Rows of one slot must
-// come in ascending positions (the append lands before the scan reads it, so
-// a later row of the same slot sees the earlier one). Writes final_norm of
-// every row to ws.d_b_h_final [n_rows, H]. Does not touch mtp_pos/slot_pos:
-// the caller advances them. Host arrays; same head requirements as
-// mtp_feed_batch, n_rows <= ws.feed_rows_cap.
-// post_norm (optional): the target's final norm applied to the gathered
-// hidden rows before the feed (diagnostics.mtp_prenorm_h, the upstream
-// convention of feeding post-norm hidden states).
+// Ragged multi-slot feed (batched verify): row r = (h_tokens[r], d_hidden_all[h_src_rows[r]])
+// appended to KV slot h_slots[r] at h_pos[r], attending [0,h_pos[r]+1) of that slot.
+// Rows of one slot must be in ascending position order (append precedes the scan that reads
+// it). Writes final_norm of every row to ws.d_b_h_final[n_rows,H]; caller advances
+// mtp_pos/slot_pos. post_norm (optional): apply target's final norm before feed
+// (diagnostics.mtp_prenorm_h, upstream convention).
 bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
                              int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
                              const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
@@ -338,40 +263,30 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot);
 // dst[r] = src[d_idx[r]], rows of `cols` FP16 (device index array).
 void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols, int n_rows, cudaStream_t stream);
 
-// Top-W over a device logits vector into ws.d_topk (descending-logit order),
-// no D2H, no sync. `fast` is the two-pass serving kernel (pass 1: per-block
-// top-W over a vocab slice into ws.d_topk_part_*, pass 2: single-block
-// merge); `reference` is the probe's single-CTA kernel behind a launcher so
-// the GPU test can compare the two on the same input. Both break exact-value
-// ties by lowest index within a pass, but the fast kernel's pass structure
-// can order EQUAL-valued entries differently across slice boundaries — the
-// test must use distinct values. logits are FP32 when fp32_logits (the NVFP4
-// lm_head cache path), FP16 otherwise.
+// Top-W over device logits into ws.d_topk (descending-logit order), no D2H/sync.
+// `fast`: two-pass serving kernel (pass1 per-block top-W, pass2 single-block merge);
+// `reference`: probe's single-CTA oracle for the GPU test to compare against.
+// Both break exact-value ties by lowest index within a pass; fast kernel's pass structure
+// can order EQUAL values differently across slice boundaries (test needs distinct values).
+// logits FP32 when fp32_logits (NVFP4 lm_head cache path), FP16 otherwise.
 bool mtp_topw_fast(const void* d_logits, bool fp32_logits, int vocab_size, int top_w, MtpDraftWorkspace& ws,
                    cudaStream_t stream);
 bool mtp_topw_reference(const void* d_logits, bool fp32_logits, int vocab_size, int top_w,
                         MtpDraftWorkspace& ws, cudaStream_t stream);
 
-// Apply the YaRN-aware mrope rotation to a single MTP step's Q [n_heads, head_dim]
-// and K [n_kv_heads, head_dim] (FP16) in place at position `pos`. Mirrors the main
-// forward's rope_forward math so the draft head and the verifier rotate Q/K
-// identically on rope-scaled models (issue #897): inv_scaling = 1/rope_freq_scale,
-// ext_factor > 0 engages YaRN blending via corr_dim_0/1 + attn_factor (mscale).
-// Exposed for the rope-parity unit test. Pass null d_q or d_k to skip that side.
-// n_rows > 1: Q/K hold n_rows consecutive steps ([n_rows, heads, head_dim]);
-// row r rotates at position pos + r (batched prefill feed).
-// d_row_pos (optional, device [n_rows]): per-row positions instead of pos + r.
+// Applies YaRN-aware mrope rotation to one MTP step's Q[n_heads,head_dim]/K[n_kv_heads,
+// head_dim] FP16 in place at `pos`; mirrors main forward's rope_forward math so draft
+// and verifier rotate identically on rope-scaled models (#897).
+// n_rows>1: Q/K hold n_rows consecutive steps; row r rotates at pos+r (or d_row_pos[r]
+// if given). Pass null d_q or d_k to skip that side.
 void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
                      float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
                      float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
                      cudaStream_t stream, int n_rows = 1, const int* d_row_pos = nullptr);
 
-// Allocate the workspace from the VRAM allocator. Caller is responsible for
-// keeping ws alive (typically owned by the Engine for the lifetime of a session).
-// The MoE-related buffers (post_norm, expert outputs, shared expert scratch,
-// routing pool) are sized from `n_experts`, `top_k`, `expert_d_ff`,
-// `shared_d_ff`. Pass 0 for any of those to disable the MoE block at runtime
-// (back-compat — Phase 2.1 callers can keep using the 2-arg form below).
+// Allocates the workspace from the VRAM allocator; caller keeps ws alive (typically
+// Engine, session lifetime). MoE buffers sized from n_experts/top_k/expert_d_ff/
+// shared_d_ff; pass 0 for any to disable the MoE block (back-compat 2-arg form).
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts = 0, int top_k = 0,
                             int expert_d_ff = 0, int shared_d_ff = 0,

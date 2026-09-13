@@ -1,17 +1,8 @@
-// =============================================================================
-// mmq_q4k_imma_tile.cu — Phase 2B INT8 IMMA tile kernel + Phase 2C dispatcher
-// =============================================================================
-//
-// Architecture (Phase 2B.3): BLOCK_M=64 BLOCK_N=32 BLOCK_K=32; 4 warps/CTA in
-// 2×2 spatial with WRM·WRN=2·2 per warp (16 MMAs/CTA/K-block); 2-stage cp.async.
-//
-// Math identity (per design memo §3.2):
-//   out_ref[m, n] = Σ_k x_fp16[m, k] · w_fp16[n, k]
-//   x_fp16 = x_scale·X_s8;   w_fp16 = α·(W_s8 + 8) − dmin·m;   β = 8·α − dmin·m
-//   ⇒ out[m, n] = Σ_sub x_scale[m, sub] · ( α[n, sub] · Σ X_s8·W_s8
-//                                         + β[n, sub] · x_rowsum[m, sub] )
-//
-// The IMMA's role is the inner Σ X_s8·W_s8 over each 32-K sub-block.
+// Phase 2B INT8 IMMA tile GEMM + Phase 2C dispatcher.
+// BLOCK_M=64 BLOCK_N=32 BLOCK_K=32; 4 warps/CTA in 2x2 spatial, WRM.WRN=2x2/warp
+// (16 MMAs/CTA/K-block); 2-stage cp.async.
+// out[m,n] = sum_sub x_scale[m,sub]*(alpha[n,sub]*sum(X_s8*W_s8) + beta[n,sub]*x_rowsum[m,sub]);
+// IMMA computes the inner sum(X_s8*W_s8) per 32-K sub-block (design memo Section 3.2).
 
 #include "compute/mmq_q4k_imma_tile.h"
 #include "compute/mmq_q4k_imma_layout.h"
@@ -30,11 +21,8 @@ namespace imp {
 
 namespace {
 
-// Phase 2B.3 large-tile layout:
-//   BLOCK_M = 64, BLOCK_N = 32, BLOCK_K = 32. 4 warps per CTA in 2×2 spatial
-//   arrangement, each warp doing WRM·WRN = 2·2 = 4 MMAs per K-block.
-//   Each warp owns a 32×16 output sub-tile (= 4 × m16n8 fragments).
-//   Total: 16 MMAs per CTA per K-block (4× Phase 2B.2).
+// BLOCK_M=64, BLOCK_N=32, BLOCK_K=32; 4 warps/CTA, 2x2 spatial, each warp WRM.WRN=2x2=4
+// MMAs/K-block; each warp owns a 32x16 output sub-tile (4x m16n8 fragments); 16 MMAs/CTA/K-block.
 constexpr int kBlockM = 64;
 constexpr int kBlockN = 32;
 constexpr int kBlockK = 32;
@@ -62,10 +50,8 @@ __device__ __forceinline__ void cp_async_wait_group() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
-// Per-CTA async load of one K-block. All 128 threads cooperate:
-//   each thread issues one A-load (16 bytes) and one B-load (8 bytes).
-//   A: 64×32 = 2048 bytes = 128 × 16  via ca_16
-//   B: 32×32 = 1024 bytes = 128 × 8   via ca_8
+// Per-CTA async load of one K-block: 128 threads, each issues one A-load (16B) and B-load (8B).
+// A: 64x32=2048B = 128x16B via ca_16. B: 32x32=1024B = 128x8B via ca_8.
 __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
                                                    const int8_t* W_s8, int8_t (*sA)[kBlockK],
                                                    int8_t (*sB)[kBlockK], int base_m, int base_n,
@@ -119,10 +105,8 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
 
     const int base_m = m_block * kBlockM;
     const int base_n = n_block * kBlockN;
-    // Each warp owns a 32 × 16 region of output:
-    //   M rows: [warp_m * 32, warp_m * 32 + 32)
-    //   N cols: [warp_n * 16, warp_n * 16 + 16)
-    // Internally divided into 2 × 2 m16n8 sub-tiles (wrm, wrn).
+    // Each warp owns a 32x16 output region: M rows [warp_m*32, +32), N cols [warp_n*16, +16),
+    // divided into 2x2 m16n8 sub-tiles (wrm, wrn).
     const int warp_origin_m = warp_m * 32;
     const int warp_origin_n = warp_n * 16;
 
@@ -245,10 +229,8 @@ void mmq_q4k_imma_tile(const int8_t* X_s8, const __half* x_scale, const float* x
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// =============================================================================
-// Activation quantization: FP16 [M, K] → int8 + per-sub-block FP16 scale
-// + FP32 int-rowsum. One CUDA block per (m, sub); 32 threads per block.
-// =============================================================================
+// Activation quantization: FP16[M,K] -> int8 + per-sub-block FP16 scale + FP32 int-rowsum.
+// One CUDA block per (m, sub); 32 threads per block.
 
 namespace {
 
@@ -304,11 +286,8 @@ void quantize_fp16_to_int8_subblock(const __half* X_fp16, int M, int K, int8_t* 
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// =============================================================================
 // High-level entry: full Q4_K_M dense GEMM via INT8 IMMA.
-// Caches reordered weight (symmetric-s8 + α/β) per W pointer; reuses activation
-// scratch per max (M, K) shape seen.
-// =============================================================================
+// Caches reordered weight per W pointer; reuses activation scratch per max (M,K) shape seen.
 
 namespace {
 
@@ -336,12 +315,9 @@ std::mutex g_imma_mtx;
 std::unordered_map<const void*, WeightCache> g_w_cache;
 ActScratch g_act_scratch;
 
-// The weight cache is keyed by SOURCE POINTER and its planes are cudaMalloc'd,
-// so without a teardown a second model in the process kept paying for the
-// first one's planes and a recycled allocation with the same (N, K) would have
-// been served the previous model's weights — the mmq_q8_imma.cu hazard, same
-// fix. The activation scratch is arena-owned and generation-checked, so only
-// its guard is re-armed.
+// Weight cache keyed by SOURCE POINTER, planes cudaMalloc'd: without teardown a second model
+// keeps paying for the first one's planes, and a recycled allocation could get old weights
+// (mmq_q8_imma.cu hazard, same fix). Activation scratch is arena-owned; only its guard is re-armed.
 void mmq_q4k_imma_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     for (auto& [_, c] : g_w_cache) {
@@ -377,16 +353,10 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
     return true;
 }
 
-// T2 (A7 step 8), same AUDIT B13 argument as mmq_q8_imma.cu: these three are
-// kernel parameters inside instantiated graphs, and the cudaFree they used to
-// do on a grow made a replayed graph read freed memory. A bump arena never
-// frees, so the old slice stays valid.
-//
-// Deliberately NOT charged in exec_t2_demand. This whole file is behind
-// `gemm.q4k_imma_prefill`, which is OFF by default (config.h) — charging its
-// worst case on every model would reserve tens of MiB for a path nobody takes.
-// It draws on the arena's alignment slack instead and degrades honestly: a
-// short arena returns false and the caller falls back to the dequant path.
+// T2 (A7 step 8), same AUDIT B13 argument as mmq_q8_imma.cu: these are graph kernel params;
+// bump arena never frees so a grow never invalidates a replayed graph's captured slice.
+// Not charged in exec_t2_demand: gated by gemm.q4k_imma_prefill (off by default, config.h);
+// draws on arena alignment slack instead, and a short arena falls back to the dequant path.
 bool ensure_act_scratch(int M, int K) {
     const uint64_t gen = engine_arena().generation();
     if (g_act_scratch.X_s8 != nullptr && g_act_scratch.gen == gen && g_act_scratch.max_M >= M &&

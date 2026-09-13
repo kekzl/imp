@@ -16,17 +16,13 @@ constexpr uint32_t kMaxCodepoint = 0x10FFFF;
 // A repetition bound larger than this is a grammar bomb, not an intent: {0,100000}
 // would materialise 100k synthetic rules before decoding a single token.
 constexpr int kMaxRepeat = 1024;
-// Nesting depth of `( ... )` groups. Same reasoning as kMaxRepeat, one level
-// up: the parser is recursive descent over a request-supplied string, so
-// `root ::= ((((...` costs one stack frame per byte (#1609). No real grammar
-// nests anywhere near this.
+// Max `( ... )` nesting: parser is recursive descent over a request-supplied
+// string, so `root ::= ((((...` costs one stack frame per byte (#1609).
 constexpr int kMaxGroupDepth = 64;
 
-// Digits to a repetition bound without std::stoi's throw. An empty string is 0
-// (`{,4}` means "up to 4"); anything that cannot be under kMaxRepeat is false,
-// which the caller turns into the same refusal an in-range but too-large bound
-// gets. Five digits is already past kMaxRepeat, so the accumulator cannot run
-// away.
+// Digit-to-int without std::stoi's throw. Empty string is 0 (`{,4}` = "up to 4").
+// False on overflow takes the same refusal path as an in-range but too-large bound.
+// Max 5 digits (already > kMaxRepeat) keeps the accumulator from overflowing.
 inline bool bound_from_digits(const std::string& s, int& out) {
     if (s.size() > 5)
         return false;
@@ -134,7 +130,6 @@ struct Parser {
         return true;
     }
 
-    // One character of a literal or class: an escape, or a UTF-8 codepoint.
     bool read_char(uint32_t& cp) {
         if (eof())
             return fail("unterminated literal");
@@ -267,12 +262,8 @@ struct Parser {
         pos++;
         if (a.empty() && b.empty())
             return fail("empty { } repetition");
-        // The bound check below is the gate, and std::stoi used to throw
-        // std::out_of_range before it ever ran. Measured on the server, same
-        // request: 500 {"message":"stoi","type":"server_error"} before, 400
-        // "repetition bound over 1024 (at offset 31)" after. httplib's
-        // exception handler is what kept that a 500 rather than an abort; the
-        // fuzz harness has none and died. Found by fuzz_gbnf, 2026-09-10.
+        // Must not throw: bound_from_digits stays non-throwing because the fuzz
+        // harness has no exception handler on this parse path.
         if (!bound_from_digits(a, lo) || (has_comma && !b.empty() && !bound_from_digits(b, hi)))
             return fail("repetition bound over " + std::to_string(kMaxRepeat));
         if (!has_comma)
@@ -286,12 +277,10 @@ struct Parser {
         return true;
     }
 
-    // Postfix operators bind to the element just parsed — the WHOLE element:
-    // `"abc"*` repeats the string, not its last character. A string literal
-    // expands to one item per character, so `start` marks where it began and
-    // everything from there is folded into a synthetic rule first.
-    // Applied immediately (no whitespace skip) so `a *` is a rule ref followed
-    // by a syntax error rather than a silent repetition.
+    // Postfix binds to the WHOLE preceding element (`"abc"*` repeats the string, not one char); `start` marks
+    // where it began, folded into a synthetic rule.
+    // No whitespace skip before matching, so `a *` is a rule ref then a syntax error, not a silent
+    // repetition.
     bool apply_postfix(std::vector<GbnfItem>& items, size_t start) {
         while (!eof()) {
             char c = peek();

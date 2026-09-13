@@ -1,17 +1,8 @@
-// Block-diagonal Walsh-Hadamard transform (WHT) for FP16 activations.
-//
-// The normalized WHT distributes outliers across elements, reducing the
-// dynamic range per micro-block and improving FP4 quantization accuracy.
-// This is the runtime component of the MR-GPTQ / QuTLASS approach:
-//   X_rotated[i] = (1/sqrt(N)) * H_N @ X[i]   for each block of N elements
-//
-// The butterfly decomposition gives O(N log N) ops per block vs O(N^2) for dense matmul.
-// For N=128: 7 stages × 128 ops = 896 FMA vs 16384 for dense — 18x fewer ops.
-//
-// Implementation strategy:
-//   - Each warp of 32 threads processes one block of up to 32 elements.
-//   - For block_size > 32, multiple warps cooperate via shared memory.
-//   - Intra-warp butterfly stages use __shfl_xor_sync (zero latency).
+// Block-diagonal Walsh-Hadamard transform (WHT) for FP16 activations: spreads outliers across
+// a block, reducing per-block dynamic range for FP4 quant (MR-GPTQ/QuTLASS):
+// X_rotated[i] = (1/sqrt(N)) * H_N @ X[i]. Butterfly is O(N log N) vs O(N^2) for dense matmul.
+// block_size<=32: one warp per block via __shfl_xor_sync; block_size>32: warps cooperate via
+// shared memory.
 
 #include "compute/hadamard.h"
 #include "core/logging.h"
@@ -21,12 +12,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Walsh-Hadamard butterfly: swap-and-add/sub for one stage.
-// partner = threadIdx ^ stride (XOR pattern).
-// a[tid] = a[tid] + a[partner]   if tid < partner
-// a[tid] = a[partner] - a[tid]   if tid > partner
-// ---------------------------------------------------------------------------
+// Walsh-Hadamard butterfly: swap-and-add/sub for one stage, partner = threadIdx ^ stride.
+// a[tid] = a[tid] + a[partner] if tid < partner; a[tid] = a[partner] - a[tid] if tid > partner.
 
 // Warp-level butterfly using shuffle.
 __device__ __forceinline__ float warp_butterfly(float val, int stage) {
@@ -37,16 +24,13 @@ __device__ __forceinline__ float warp_butterfly(float val, int stage) {
     return (lane & stride) ? (partner - val) : (val + partner);
 }
 
-// ---------------------------------------------------------------------------
-// Kernel for block_size <= 32 (single warp, no shared memory)
-// Each warp handles one block. Threads beyond block_size are masked.
-// ---------------------------------------------------------------------------
+// Kernel for block_size <= 32: one warp per block (single warp, no shared memory).
+// Threads beyond block_size are masked.
 template <int BLOCK_SIZE>
 __global__ void hadamard_warp_kernel(const half* __restrict__ input, half* __restrict__ output, int M,
                                      int K) {
     static_assert(BLOCK_SIZE <= 32, "Use shared memory kernel for block_size > 32");
 
-    // Each warp processes one block of BLOCK_SIZE elements.
     // Grid: one warp per block. Total blocks = M * (K / BLOCK_SIZE).
     int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
     int tid_in_warp = threadIdx.x & 31;
@@ -79,15 +63,12 @@ __global__ void hadamard_warp_kernel(const half* __restrict__ input, half* __res
     output[base + tid_in_warp] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
 // Kernel for block_size 64: 2 warps cooperate via shared memory.
 // Each CTA (2 warps = 64 threads) handles one block of 64 elements.
 // Stages 0-4: warp shuffle. Stage 5: shared memory cross-warp.
-// ---------------------------------------------------------------------------
 __global__ void hadamard_64_kernel(const half* __restrict__ input, half* __restrict__ output, int M, int K) {
     constexpr int BLOCK_SIZE = 64;
 
-    // Each CTA = 64 threads = 2 warps. One CTA per block of 64 elements.
     int block_id = blockIdx.x;
     int tid = threadIdx.x;  // 0..63
 
@@ -101,7 +82,6 @@ __global__ void hadamard_64_kernel(const half* __restrict__ input, half* __restr
 
     float val = __half2float(input[base + tid]);
 
-// Stages 0-4: intra-warp butterfly via shuffle
 #pragma unroll
     for (int s = 0; s < 5; s++) {
         val = warp_butterfly(val, s);
@@ -122,10 +102,8 @@ __global__ void hadamard_64_kernel(const half* __restrict__ input, half* __restr
     output[base + tid] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
 // Kernel for block_size 128: 4 warps cooperate via shared memory.
 // Each CTA = 128 threads. Stages 0-4: warp shuffle. Stages 5-6: shared memory.
-// ---------------------------------------------------------------------------
 __global__ void hadamard_128_kernel(const half* __restrict__ input, half* __restrict__ output, int M, int K) {
     constexpr int BLOCK_SIZE = 128;
 
@@ -142,7 +120,6 @@ __global__ void hadamard_128_kernel(const half* __restrict__ input, half* __rest
 
     float val = __half2float(input[base + tid]);
 
-// Stages 0-4: intra-warp butterfly via shuffle
 #pragma unroll
     for (int s = 0; s < 5; s++) {
         val = warp_butterfly(val, s);
@@ -169,15 +146,10 @@ __global__ void hadamard_128_kernel(const half* __restrict__ input, half* __rest
         val = (tid & 64) ? (pval - val) : (val + pval);
     }
 
-    // Normalize: 1/sqrt(128)
     val *= 0.0883883476f;  // 1/sqrt(128)
 
     output[base + tid] = __float2half(val);
 }
-
-// ---------------------------------------------------------------------------
-// Host dispatch
-// ---------------------------------------------------------------------------
 
 void hadamard_transform_fp16(const half* input, half* output, int M, int K, int block_size,
                              cudaStream_t stream) {
@@ -207,13 +179,11 @@ void hadamard_transform_fp16(const half* input, half* output, int M, int K, int 
             break;
         }
         case 64: {
-            // One CTA (64 threads) per block.
             hadamard_64_kernel<<<total_blocks, 64, 0, stream>>>(input, output, M, K);
             IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         case 128: {
-            // One CTA (128 threads) per block.
             hadamard_128_kernel<<<total_blocks, 128, 0, stream>>>(input, output, M, K);
             IMP_CUDA_CHECK_LAUNCH();
             break;

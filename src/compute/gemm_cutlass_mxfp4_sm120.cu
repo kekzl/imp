@@ -1,22 +1,10 @@
-// CUTLASS sm_120 block-scaled MXFP4×MXFP4 GEMM for prefill acceleration.
-//
-// LEGACY / MAINTENANCE MODE (2026-05-24): MXFP4 is supported but is not
-// the dev priority. Production hero models use NVFP4 + SafeTensors
-// (Qwen3.6-35B-A3B-NVFP4, Qwen3-8B-NVFP4-cortecs, Gemma-4-26B-A4B-it-NVFP4,
-// etc.). Ship cleanup fixes here and don't chase residual quality bugs on
-// community MXFP4 GGUFs without an external reference engine to compare
-// against. Memory note: `feedback_gguf_mxfp4_legacy_2026_05_24`.
-//
-// Parallel to the NVFP4 CUTLASS path (gemm_cutlass_sm120.cu) but uses
-// mx_float4_t<float_e2m1_t> with UE8M0 scale factors (SFVecSize=32).
-//
-// MXFP4 uses the same E2M1 data encoding as NVFP4 — the packed nibble
-// layout is identical. Only the scale factor format differs:
-//   NVFP4: UE4M3 per 16 elements (finer granularity, 3 mantissa bits)
-//   MXFP4: UE8M0 per 32 elements (wider dynamic range, pure exponent)
-//
-// The hardware tensor core instruction for MXFP4 groups 32 elements per
-// scale factor vs 16 for NVFP4, potentially allowing different scheduling.
+// LEGACY/MAINTENANCE MODE: MXFP4 supported but not the dev priority; production hero
+// models use NVFP4+SafeTensors (Qwen3.6-35B-A3B-NVFP4, Qwen3-8B-NVFP4-cortecs,
+// Gemma-4-26B-A4B-it-NVFP4). Ship cleanup fixes; don't chase MXFP4-GGUF quality bugs
+// without an external reference engine (memory: feedback_gguf_mxfp4_legacy_2026_05_24).
+// Same E2M1 packed-nibble data encoding as NVFP4 (gemm_cutlass_sm120.cu); only the
+// scale format differs: NVFP4 UE4M3/16 elements (finer, 3 mantissa bits), MXFP4
+// UE8M0/32 elements (wider range, pure exponent).
 
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "quant/nvfp4_quant.h"
@@ -42,10 +30,8 @@
 
 using namespace cute;
 
-// ---------------------------------------------------------------------------
-// CUTLASS GEMM type configuration: MXFP4 × MXFP4 → FP16
-// Uses mx_float4_t with UE8M0 scales (SFVecSize=32).
-// ---------------------------------------------------------------------------
+// CUTLASS GEMM type config: MXFP4 x MXFP4 -> FP16, using mx_float4_t with UE8M0 scales
+// (SFVecSize=32).
 
 using MxElementA = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
 using MxLayoutATag = cutlass::layout::RowMajor;
@@ -129,10 +115,8 @@ size_t cutlass_mxfp4_sf_size(int rows, int K) {
     return static_cast<size_t>(n_row_tiles) * n_k_tiles * kMxAtomSize;
 }
 
-// ---------------------------------------------------------------------------
-// Convert UE4M3 micro-scales (NVFP4, per 16 elements) to UE8M0 (MXFP4, per 32).
-// Merges 2 consecutive UE4M3 values into 1 UE8M0 by taking the max exponent.
-// ---------------------------------------------------------------------------
+// Converts UE4M3 micro-scales (NVFP4, per 16 elements) to UE8M0 (MXFP4, per 32): merges
+// 2 consecutive UE4M3 values into 1 UE8M0 by taking the max exponent.
 
 // UE8M0: pure exponent, value = 2^(bits - 127).  bits=0 → 2^-127, bits=254 → 2^127.
 __device__ __forceinline__ uint8_t float_to_ue8m0(float val) {
@@ -235,11 +219,9 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Wei
                   (long long)K, sf_bytes / (1024.0 * 1024.0), linear_sf_bytes / (1024.0 * 1024.0));
 }
 
-// ---------------------------------------------------------------------------
-// Unpack native MXFP4 GGUF blocks into CUTLASS format.
-// GGUF block: [16 bytes E2M1 data | 1 byte UE8M0 scale] × N_blocks
-// Output: separate contiguous data array + SfAtom scale array.
-// ---------------------------------------------------------------------------
+// Unpacks native MXFP4 GGUF blocks into CUTLASS format. GGUF block: [16 bytes E2M1
+// data | 1 byte UE8M0 scale] x N_blocks. Output: separate contiguous data array +
+// SfAtom scale array.
 
 // Build SfAtom + linear scale layouts from pre-split scale bytes.
 // Input: linear_scales at gpu_buf + data_bytes (already [N, K/32] row-major)

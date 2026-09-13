@@ -8,14 +8,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Packed FP8 E4M3 conversion helpers (sm_120+, Blackwell)
-//
-// cvt.e4m3x2 converts 2 elements per instruction instead of 1, halving
-// instruction count in the FP8 KV cache quantize/dequantize hot paths.
-//
-// Uses packed cvt instructions (2 elements/instruction) on SM120+.
-// ---------------------------------------------------------------------------
+// Packed FP8 E4M3 conversion (sm_120+, Blackwell). cvt.e4m3x2 converts 2 elements/
+// instruction (vs 1), halving instruction count in FP8 KV cache quant/dequant hot paths.
 
 // Convert 2 packed FP16 (f16x2, 32-bit) → 2 packed FP8 E4M3 (e4m3x2, 16-bit).
 // Applies round-to-nearest-even with saturation-to-finite (no inf/nan output).
@@ -45,32 +39,18 @@ __device__ __forceinline__ void cvt_e4m3x4_to_f32x4(uint32_t packed_fp8, float& 
     f3 = __half2float(h2_hi->y);
 }
 
-// ---------------------------------------------------------------------------
-// Packed FP4 E2M1 conversion helpers
-//
-// NOTE: The FP16→FP4 packed conversion (cvt.rn.satfinite.e2m1x2.f16x2) is in
-// PTX ISA 9.2 but ptxas rejects it on CUDA 13.2. Production paths use the
-// FP32 variant (cvt.rn.satfinite.e2m1x2.f32 — works fine, see e.g.
-// src/quant/nvfp4_quant.cu:148). The FP16x2 variant was never wired up
-// — re-evaluate on the next toolkit bump if a hot FP16→FP4 path appears.
-// ---------------------------------------------------------------------------
+// Packed FP4 E2M1 conversion. NOTE: FP16->FP4 packed conversion
+// (cvt.rn.satfinite.e2m1x2.f16x2) is in PTX ISA 9.2 but ptxas rejects it on CUDA 13.2.
+// Production paths use the FP32 variant (cvt.rn.satfinite.e2m1x2.f32, see
+// src/quant/nvfp4_quant.cu:148); FP16x2 variant unwired, re-evaluate on next toolkit bump.
 
-// ---------------------------------------------------------------------------
-// Blackwell add.f32x2 PTX (sm_120a)
-//
-// 2-lane FP32 add at PTX level. NOTE: ptxas on consumer Blackwell (sm_120)
-// decomposes this into 2× scalar FADD at SASS — the vectorized hardware path
-// is not exposed on consumer Blackwell. The change is structural / forward-
-// compat, not a perf delta. Bit-cast via uint64_t is the only register form
-// ptxas accepts for this PTX op (verified empirically against CUDA 13.2.1
-// nvcc/ptxas; the natural {%0,%1},{%2,%3},{%4,%5} form with =f/f constraints
-// is rejected as "Arguments mismatch for instruction 'add'").
-//
-// Also note: this folds 4 floats as (a0+b0) + (a1+b1) instead of left-fold
-// ((a0+a1)+b0)+b1 — FP add is non-associative, so callers may see a ≤1-ULP
-// FP32 difference on rounding-boundary inputs (sub-ULP at FP16 after a
-// downstream half cast).
-// ---------------------------------------------------------------------------
+// Blackwell add.f32x2 PTX (sm_120a): 2-lane FP32 add. ptxas on consumer Blackwell
+// decomposes this to 2x scalar FADD at SASS (vectorized HW path not exposed on sm_120);
+// change is structural/forward-compat, not a perf delta.
+// Bit-cast via uint64_t is the only register form ptxas accepts (verified against CUDA
+// 13.2.1); natural {%0,%1},{%2,%3} form is rejected.
+// Folds 4 floats as (a0+b0)+(a1+b1), not left-fold: FP add non-associative, so callers
+// may see <=1-ULP FP32 difference on rounding-boundary inputs (sub-ULP after FP16 cast).
 __device__ __forceinline__ float2 add_f32x2(float2 a, float2 b) {
     uint64_t ar, br, sr;
     memcpy(&ar, &a, sizeof(float2));

@@ -51,10 +51,9 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
                      bool normalize_weights = true, const void* score_bias = nullptr,
                      bool skip_sorting = false);
 
-// gpt-oss router bias (issue #547): true linear bias on the gate LOGITS, added
-// BEFORE softmax/top-k (affects selection AND weights). Distinct from the
-// DeepSeek-style `score_bias` above, which biases SELECTION only.
-// logits_f32: [n, ne] FP32 (mutated). bias: [ne] FP16 on device.
+// gpt-oss router bias (#547): linear bias on gate LOGITS added BEFORE softmax/top-k
+// (affects selection AND weights). Distinct from DeepSeek-style score_bias (selection only).
+// logits_f32[n,ne] FP32 mutated in place; bias[ne] FP16 device.
 void moe_add_logit_bias(float* logits_f32, const void* bias_fp16, int n, int ne,
                         cudaStream_t stream = nullptr);
 
@@ -72,28 +71,24 @@ void moe_gather(const Tensor& input, const MoeRoutingResult& routing, Tensor& ga
 void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, Tensor& output,
                  cudaStream_t stream = nullptr);
 
-// Fused token-centric scatter + FP32->FP16 conversion + residual add.
-// Replaces: moe_scatter + fp32_to_fp16_kernel + elementwise_add for prefill.
-// Uses token_to_expanded inverse map to avoid atomicAdd contention.
-// expert_output: [expanded, d_model] FP16. residual: [n_tokens, d_model] FP16 (or nullptr).
-// output: [n_tokens, d_model] FP16.
+// Fused token-centric scatter + FP32->FP16 + residual add (prefill); replaces
+// moe_scatter + fp32_to_fp16_kernel + elementwise_add via token_to_expanded inverse map
+// (avoids atomicAdd contention).
+// expert_output[expanded,d_model] FP16; residual[n_tokens,d_model] FP16 or null;
+// output[n_tokens,d_model] FP16.
 void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_to_expanded,
                                 const float* expert_weights, const void* residual, void* output, int n_tokens,
                                 int d_model, int top_k, cudaStream_t stream = nullptr);
 
-// Fused weighted sum + FP16 output + optional residual add.
-// Combines expert weighted sum + residual add in one kernel. Only this fused
-// variant is used by run_moe_ffn; the older non-residual `moe_weighted_sum`
-// was removed 2026-04-20 (was declared but never called).
+// Fused weighted sum + FP16 output + optional residual add, used by run_moe_ffn.
 // expert_outputs: [top_k, d_model] FP16. expert_weights: [top_k] FP32 on device.
 // residual: [d_model] FP16 (or nullptr to skip). output: [d_model] FP16.
 void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights, const void* residual,
                                void* output, int d_model, int top_k, cudaStream_t stream = nullptr);
 
-// Fused gate GEMV + softmax/sigmoid + top-k selection in a single kernel.
-// For n=1 decode: replaces gemv_gate_fp32 + moe_topk_gating(skip_sorting=true).
-// W_gate: [n_experts, d_model] FP16. x: [d_model] FP16.
-// Writes to buffers.expert_indices and buffers.expert_weights directly.
+// Fused gate GEMV + softmax/sigmoid + top-k (decode M=1); replaces gemv_gate_fp32 +
+// moe_topk_gating(skip_sorting=true). W_gate[n_experts,d_model] FP16, x[d_model] FP16.
+// Writes directly to buffers.expert_indices / expert_weights.
 void moe_gate_topk_fused(const void* W_gate, const void* x, int n_experts, int d_model, int top_k,
                          MoeRoutingBuffers& buffers, MoeRoutingResult& result, cudaStream_t stream = nullptr,
                          bool use_sigmoid = false, bool normalize_weights = true,

@@ -7,24 +7,14 @@
 
 namespace imp {
 
-// Hand-rolled persistent NVFP4 grouped GEMM for SM120 (RTX 5090).
-// Drop-in alternative to gemm_grouped_cutlass_3x_nvfp4 with M-aware
-// tile selection (16/32/64/128). Reads native row-major UE4M3 scales
-// directly from cache_moe_native_nvfp4's nvfp4_moe_ms_native buffer.
-//
-//   A_i  : [M_i, K]      packed NVFP4, K-contiguous, K/2 bytes per row
-//   SFA_i: [M_i, K/16]   UE4M3 native row-major (1 byte per scale)
-//   B_i  : [N,   K]      packed NVFP4 (per-expert weight)
-//   SFB_i: [N,   K/16]   UE4M3 native row-major
-//   D_i  : [M_i, N]      FP16 output, RowMajor
-//   alpha_i: per-expert tensor_scale (applied as GEMM alpha)
-//
-// IMPORTANT: dev_alpha is a DEVICE pointer to [n_experts] float values.
-// Caller is responsible for keeping this buffer live until the stream
-// has consumed the kernel.
-//
-// K and N must be identical across all experts. M_i varies.
-// Returns false if SM120 unavailable or any precondition fails.
+// Hand-rolled persistent NVFP4 grouped GEMM for SM120. Drop-in alternative to
+// gemm_grouped_cutlass_3x_nvfp4 with M-aware tile selection (16/32/64/128). Reads native
+// row-major UE4M3 scales directly from cache_moe_native_nvfp4's nvfp4_moe_ms_native buffer.
+//   A_i [M_i,K] packed NVFP4, K/2 bytes/row; SFA_i [M_i,K/16] UE4M3 native row-major
+//   B_i [N,K] packed NVFP4; SFB_i [N,K/16] UE4M3 native row-major
+//   D_i [M_i,N] FP16 RowMajor; alpha_i per-expert tensor_scale as GEMM alpha
+// dev_alpha is a DEVICE pointer to [n_experts] floats; caller keeps it live until the stream
+// consumes the kernel. K and N must be identical across experts; M_i varies.
 bool gemm_grouped_nvfp4_smallM(
     int n_experts,
     const int* host_M,                // [n_experts] M_i per expert

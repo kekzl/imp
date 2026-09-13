@@ -101,11 +101,8 @@ __device__ __forceinline__ void mma_sync_mxf4nvf4_m16n8k64(
 }
 
 #ifdef SMALLM_SOFTWARE_REF
-// ---------------------------------------------------------------------------
-// smallM kernel v1 SOFTWARE REFERENCE (debug-only; previous correctness path).
-// Retained as a ground-truth reference for cross-checking the production HW
-// MMA kernel. Compiled only when SMALLM_SOFTWARE_REF is defined.
-// ---------------------------------------------------------------------------
+// smallM kernel v1 SOFTWARE REFERENCE (debug-only): ground-truth for cross-checking the
+// production HW MMA kernel. Compiled only when SMALLM_SOFTWARE_REF is defined.
 __device__ __forceinline__ float e2m1_nibble_to_fp32(uint8_t nib) {
     static constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
     float mag = kMag[nib & 0x7];
@@ -188,35 +185,18 @@ __global__ void smallM_kernel_v1_software_ref(
 }
 #endif  // SMALLM_SOFTWARE_REF
 
-// ---------------------------------------------------------------------------
-// smallM kernel (smallM_kernel_v1): TMA loads + N_STAGES-deep producer/consumer
-// pipeline, warp-specialised. There is no v2 in this file; the unrelated
-// src/quant/nvfp4_gemm_smallm_v2.cu is the dense small-M kernel
-// (AUDIT_arch_2026 A2-7 corrected this block).
-//
-// Grid:  (n_experts, N / TILE_N).  Each CTA owns one expert x one n-tile.
-// Block: 256 threads (8 warps): warps 0-3 produce, warps 4-7 consume.
-//
-// Pipeline (N_STAGES in [2,4]):
-//   * Stage SMEM holds A, B, SFA, SFB sub-buffers per stage plus a full and
-//     an empty mbarrier per stage.
-//   * Producer warps 0-3: thread 0 arrives with expect_tx and issues the two
-//     TMA loads (A and B) for the stage; the other producer threads cp.async
-//     the SFA/SFB scale rows (their gmem stride is K/16 bytes, too small for
-//     TMA on low-K shapes) and arrive on the same barrier.
-//   * Consumer warps 4-7: each owns N_ITERS_PER_CONSUMER of the n-iters,
-//     waits on the stage's full barrier, runs MMAs over that stage's SMEM
-//     slice accumulating into registers, then releases the stage through
-//     the empty barrier so the producers can refill it.
-//
-// SMEM budget @ TILE=128, 3 stages:
-//   A:  3 × 8 KiB  = 24 KiB
-//   B:  3 × 8 KiB  = 24 KiB
-//   SFA: 3 × 1 KiB =  3 KiB
-//   SFB: 3 × 1 KiB =  3 KiB
-//   mbar: 3 × 16 B = ~64 B
-//   total ≈ 54 KiB (well under 99 KiB cap on sm_120).
-// ---------------------------------------------------------------------------
+// smallM_kernel_v1: TMA loads + N_STAGES-deep producer/consumer pipeline, warp-specialised.
+// No v2 in this file; src/quant/nvfp4_gemm_smallm_v2.cu is the unrelated dense small-M kernel
+// (AUDIT_arch_2026 A2-7).
+// Grid: (n_experts, N/TILE_N), one CTA per (expert, n-tile). Block: 256 threads (8 warps):
+// warps 0-3 produce, 4-7 consume. Pipeline (N_STAGES in [2,4]): stage SMEM holds A,B,SFA,SFB
+// sub-buffers plus a full/empty mbarrier per stage. Producer warps 0-3: thread 0 arrives with
+// expect_tx and issues the two TMA loads (A,B); other producer threads cp.async the SFA/SFB
+// rows (gmem stride K/16 bytes, too small for TMA on low-K shapes) and arrive on the same
+// barrier. Consumer warps 4-7: each owns N_ITERS_PER_CONSUMER n-iters, waits on the stage's
+// full barrier, runs MMAs, releases via the empty barrier.
+// SMEM @ TILE=128, 3 stages: A 3x8=24 KiB, B 3x8=24 KiB, SFA/SFB 3x1=3 KiB each, mbar ~64B;
+// total ~54 KiB (under the 99 KiB sm_120 cap).
 
 template <int TILE_M, int TILE_N, int TILE_K, int N_STAGES>
 __global__ void smallM_kernel_v1(
@@ -262,12 +242,9 @@ __global__ void smallM_kernel_v1(
     const int n_base     = n_tile * TILE_N;
     const int M_eff      = min(M_e, TILE_M);
 
-    // SMEM layout (aligned to 128 B for TMA):
-    //   A[N_STAGES][TILE_M][A_BYTES_ROW]
-    //   B[N_STAGES][TILE_N][B_BYTES_ROW]
-    //   SFA[N_STAGES][TILE_M][SFA_BYTES_ROW]
-    //   SFB[N_STAGES][TILE_N][SFB_BYTES_ROW]
-    //   mbar[N_STAGES]   (8B each, padded to 16B)
+    // SMEM layout (aligned to 128B for TMA): A[N_STAGES][TILE_M][A_BYTES_ROW],
+    // B[N_STAGES][TILE_N][B_BYTES_ROW], SFA[N_STAGES][TILE_M][SFA_BYTES_ROW],
+    // SFB[N_STAGES][TILE_N][SFB_BYTES_ROW], mbar[N_STAGES] (8B each, padded to 16B).
     extern __shared__ __align__(128) uint8_t smem_raw[];
     uint8_t* smem_A   = smem_raw;
     uint8_t* smem_B   = smem_A   + N_STAGES * A_TILE_BYTES;
@@ -302,12 +279,10 @@ __global__ void smallM_kernel_v1(
     constexpr int N_ITERS_PER_CONSUMER = N_SUBTILES / N_CONSUMER_WARPS;  // 4
     static_assert(N_ITERS_PER_CONSUMER * N_CONSUMER_WARPS == N_SUBTILES, "");
 
-    // Two mbarrier arrays per stage: bar_full (data ready) + bar_empty (free).
-    //   bar_full[s]: arrival_count = PRODUCER_THREADS, expected_tx = TMA_BYTES.
-    //     • W0L0 contributes 1 arrival via mbarrier.arrive.expect_tx (also issues TMA).
-    //     • The other 127 producer threads each cp.async + wait + plain arrive.
-    //   bar_empty[s]: arrival_count = CONSUMER_THREADS.
-    //     • Each consumer thread arrives once after MMA on stage S finishes.
+    // Two mbarrier arrays per stage: bar_full (data ready, arrival_count=PRODUCER_THREADS,
+    // expected_tx=TMA_BYTES; W0L0 arrives via mbarrier.arrive.expect_tx + issues TMA, the other
+    // 127 producer threads cp.async+wait+plain arrive) and bar_empty (free,
+    // arrival_count=CONSUMER_THREADS, each consumer arrives once after its MMA on stage S finishes).
     uint64_t* bar_full  = smem_mbar;                 // [N_STAGES]
     uint64_t* bar_empty = smem_mbar + N_STAGES;      // [N_STAGES]
 
@@ -359,12 +334,9 @@ __global__ void smallM_kernel_v1(
                 cp_async_bulk_tensor_2d(stage_A(stage), desc_A, k_packed, 0,      bar);
                 cp_async_bulk_tensor_2d(stage_B(stage), desc_B, k_packed, n_base, bar);
             } else {
-                // Other producer threads: cp.async load SF + arrive.
-                // cp.async work distribution: tid in [1, PRODUCER_THREADS).
-                // SFA tile rows × SFA_BYTES_ROW. Ops per tile:
-                //   TILE_K=128 → SFA: 128 rows × 8B = 128 ops total.
-                //   TILE_K=256 → SFA: 128 rows × 16B = 256 ops total.
-                // (PRODUCER_THREADS - 1) = 127 threads cover these ops.
+                // Other producer threads cp.async load SF + arrive; work split over tid in
+                // [1,PRODUCER_THREADS). SFA tile rows x SFA_BYTES_ROW: TILE_K=128 -> 128 rows x 8B = 128 ops;
+                // TILE_K=256 -> 128 rows x 16B = 256 ops, covered by (PRODUCER_THREADS-1)=127 threads.
                 {
                     constexpr int N_OPS_PER_ROW = SFA_BYTES_ROW / 8;
                     constexpr int N_OPS         = SFA_TILE_BYTES / 8;
@@ -654,10 +626,8 @@ std::vector<WorkItem> build_work_queue(int n_experts, const int* M_per, int N) {
 
 }  // namespace detail
 
-// ---------------------------------------------------------------------------
-// CUtensorMap building via runtime entry-point lookup (so we don't add a
-// libcuda.so.1 hard dep). Mirrors the trick in tma_block_scale_bench.cu.
-// ---------------------------------------------------------------------------
+// CUtensorMap building via runtime entry-point lookup, avoiding a hard libcuda.so.1 dep.
+// Mirrors the trick in tma_block_scale_bench.cu.
 using PFN_cuTensorMapEncodeTiled_t = CUresult (*)(
     CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*, const cuuint64_t*,
     const cuuint64_t*, const cuuint32_t*, const cuuint32_t*,
@@ -679,10 +649,8 @@ static PFN_cuTensorMapEncodeTiled_t resolve_tensor_map_encode() {
     return pfn;
 }
 
-// Build a 2-D CUtensorMap over uint8 data with row-major layout.
-//   gmem_rows × gmem_cols; row stride = gmem_cols bytes (contiguous).
-//   Tile box = box_rows × box_cols.
-// Returns true on success.
+// Builds a 2-D CUtensorMap over uint8 data, row-major: gmem_rows x gmem_cols, row stride =
+// gmem_cols bytes (contiguous). Tile box = box_rows x box_cols. Returns true on success.
 static bool build_tma_2d_u8(CUtensorMap* desc, void* gmem,
                              int gmem_rows, int gmem_cols,
                              int box_rows,  int box_cols) {
@@ -741,10 +709,9 @@ bool gemm_grouped_nvfp4_smallM(
     if (n_experts <= 0 || N <= 0 || K <= 0) return false;
     if ((K % 128) != 0 || (N % 128) != 0) return false;
 
-    // TMA constraint: innermost stride (= row bytes) must be ≥ 16 and
-    // multiple of 16. A and B both have row = K/2 bytes — for K ≥ 32, ≥ 16.
-    // With K%128==0 we always have K/2 ≥ 64, divisible by 16. OK.
-    // (SFA/SFB stay on cp.async path so their tiny row doesn't matter.)
+    // TMA constraint: innermost stride (row bytes) must be >= 16 and a multiple of 16. A and B
+    // rows are K/2 bytes; K%128==0 guarantees K/2>=64, divisible by 16. (SFA/SFB stay on cp.async,
+    // their tiny row doesn't matter.)
 
     // Phase A constraint: only support max_M ≤ 128 (single M-tile per expert).
     int max_M = 0;
@@ -776,13 +743,9 @@ bool gemm_grouped_nvfp4_smallM(
     const bool use_tilek_256 = (K % 256) == 0;
     const int TILE_K_rt   = use_tilek_256 ? 256 : 128;
 
-    // Build per-expert CUtensorMap descriptors on host.
-    // 2 descriptors per active expert: [A, B]. Inactive experts get a dummy
-    // descriptor pointing at a 1×16 dummy buffer — they won't be loaded
-    // because the kernel early-exits on M_e ≤ 0.
-    // Box geometry:
-    //   A: gmem (M_e, K/2) bytes, box (TILE_M, TILE_K/2)
-    //   B: gmem (N,   K/2) bytes, box (TILE_N, TILE_K/2)
+    // Builds per-expert CUtensorMap descriptors on host: 2 per active expert [A,B]. Inactive
+    // experts get a dummy descriptor (1x16 buffer) since the kernel early-exits on M_e<=0.
+    // Box geometry: A gmem (M_e,K/2) box (TILE_M,TILE_K/2); B gmem (N,K/2) box (TILE_N,TILE_K/2).
     std::vector<CUtensorMap> h_descs(2 * n_experts);
     if (!s_dummy_ready) {
         cudaMalloc(&s_dummy, 256);
@@ -843,11 +806,9 @@ bool gemm_grouped_nvfp4_smallM(
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
 
-    // SMEM budget per (TILE_M, TILE_K, N_STAGES):
-    //   Per stage: A = TILE_M * TILE_K/2, B = TILE_N * TILE_K/2
-    //              SFA = TILE_M * TILE_K/16, SFB = TILE_N * TILE_K/16
-    // Examples: TILE_M=128, TK=128, NS=3 → ~54 KiB. TILE_M=64, TK=128, NS=3 → ~50 KiB.
-    // All exceed 48 KiB default static cap → opt-in via cudaFuncSetAttribute.
+    // SMEM budget per (TILE_M,TILE_K,N_STAGES): per stage A=TILE_M*TILE_K/2, B=TILE_N*TILE_K/2,
+    // SFA=TILE_M*TILE_K/16, SFB=TILE_N*TILE_K/16. Exceeds the 48 KiB default static cap (opt-in
+    // via cudaFuncSetAttribute needed) for all practical tile choices.
     auto smem_bytes_for = [](int TM, int TK, int NS) {
         const int A   = TM * (TK / 2);
         const int B   = TILE_N * (TK / 2);

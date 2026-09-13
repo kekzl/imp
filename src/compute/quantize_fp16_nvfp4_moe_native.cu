@@ -1,16 +1,9 @@
-// =============================================================================
-// quantize_fp16_nvfp4_moe_native.cu
-//
-// Per-expert FP16 -> NVFP4 quantization with native row-major UE4M3 scale
-// layout.  Produces the layout consumed by gemm_grouped_nvfp4_smallM (the
-// smallM prefill GEMM for MoE activations).
-//
-// Algorithm matches quantize_fp16_to_nvfp4 (nvfp4_quant.cu) exactly so that
-// bit-exact equivalence holds for a single-expert problem:
-//   - Two-level scaling: tensor_scale (per expert) + micro_scale (per 16 elems)
-//   - FP8 UE4M3 micro-scales, HW E2M1 FP4 conversion (cvt.rn.satfinite.e2m1x2)
-//   - Output layout: [M_e, K/2] packed FP4 + [M_e, K/16] linear UE4M3 scales
-// =============================================================================
+// Per-expert FP16->NVFP4 quantization, native row-major UE4M3 scale layout; feeds
+// gemm_grouped_nvfp4_smallM (MoE activation smallM prefill GEMM).
+// Matches quantize_fp16_to_nvfp4 (nvfp4_quant.cu) exactly for bit-exact single-expert
+// equivalence: two-level scaling (tensor_scale/expert + micro_scale/16 elems), FP8 UE4M3
+// micro-scales, HW E2M1 (cvt.rn.satfinite.e2m1x2). Output: [M_e,K/2] packed FP4 +
+// [M_e,K/16] linear UE4M3 scales.
 
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "quant/fp8_utils.cuh"
@@ -30,10 +23,8 @@ namespace imp {
 static constexpr int kNativeMicroBlockSize = 16;  // elements per micro-block
 static constexpr float kNativeFP4E2M1Max = 6.0f;  // max representable in E2M1
 
-// ---------------------------------------------------------------------------
-// HW FP4 pair conversion (identical to pack_fp4_pair_hw in gemm_cutlass_sm120.cu
-// and nvfp4_pack_pair_hw in nvfp4_quant.cu).  Low nibble = v0, high nibble = v1.
-// ---------------------------------------------------------------------------
+// HW FP4 pair conversion, identical to pack_fp4_pair_hw (gemm_cutlass_sm120.cu) and
+// nvfp4_pack_pair_hw (nvfp4_quant.cu). Low nibble=v0, high nibble=v1.
 __device__ __forceinline__ uint8_t native_pack_fp4_pair(float v0, float v1) {
 #if __CUDA_ARCH__ >= 1200
     uint32_t out;
@@ -58,17 +49,10 @@ __device__ __forceinline__ uint8_t native_pack_fp4_pair(float v0, float v1) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Kernel 1: per-expert absmax reduction.
-//
-// Grid:   blockIdx.x = expert index
-// Block:  256 threads
-// Each CTA reduces all rows [offsets[e], offsets[e+1]) over all K columns and
-// writes a single float via atomicMax to d_absmax[e].
-//
-// Uses uint32 atomicMax on IEEE754 bit pattern of non-negative floats —
-// identical trick to absmax_kernel in nvfp4_quant.cu.
-// ---------------------------------------------------------------------------
+// Kernel 1: per-expert absmax reduction. Grid: blockIdx.x=expert; block: 256 threads.
+// Each CTA reduces rows [offsets[e],offsets[e+1]) over all K columns, atomicMax into
+// d_absmax[e] using uint32 atomicMax on IEEE754 bits of non-negative floats
+// (same trick as absmax_kernel in nvfp4_quant.cu).
 __global__ void nvfp4_moe_native_absmax_kernel(
     const __half* __restrict__ src,      // [expanded, K]
     const int* __restrict__ offsets,     // [ne+1]
@@ -108,24 +92,12 @@ __global__ void nvfp4_moe_native_absmax_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Kernel 2: per-expert FP16 -> NVFP4 quantize (native row-major output).
-//
-// One thread per micro-block of 16 elements.
-// Grid:   blockIdx.x = expert, blockIdx.y = slice-of-work
-// Block:  256 threads
-//
-// Scale convention (matches quantize_micro_block_nvfp4 in nvfp4_quant.cu):
-//   tensor_scale  = absmax / 6.0  (if absmax==0 → 1.0 to avoid /0)
-//   micro_scale_f = local_absmax / (tensor_scale * 6.0)
-//   micro_scale_f = clamp(micro_scale_f, 1/512, 448)  → FP8 UE4M3 byte
-//   actual_scale  = fp8_e4m3_to_float(ue4m3_byte)     (0 → 1/512 fallback)
-//   fp4_val       = input_val / (tensor_scale * actual_scale)
-//
-// Output layout (native, row-major dense):
-//   packed_e[m * (K/2)  + kb * 8 + i/2]  = packed nibble byte
-//   sf_e   [m * (K/16) + kb]             = UE4M3 byte
-// ---------------------------------------------------------------------------
+// Kernel 2: per-expert FP16->NVFP4 quantize (native row-major output). One thread per
+// 16-elem micro-block. Grid: blockIdx.x=expert, blockIdx.y=slice; block: 256 threads.
+// Scale (matches quantize_micro_block_nvfp4, nvfp4_quant.cu): tensor_scale=absmax/6
+// (1.0 if absmax==0); micro_scale_f=clamp(local_absmax/(tensor_scale*6),1/512,448)->UE4M3;
+// fp4_val=input_val/(tensor_scale*actual_scale).
+// Output: packed_e[m*(K/2)+kb*8+i/2]=nibble byte; sf_e[m*(K/16)+kb]=UE4M3 byte.
 __global__ void nvfp4_moe_native_quant_kernel(
     const __half* __restrict__ src,          // [expanded, K]
     void* const* __restrict__ d_packed,      // [ne] per-expert packed FP4
@@ -319,10 +291,8 @@ void quantize_fp16_to_nvfp4_moe_native_with_scales(
         d_expert_offsets, expanded, K, n_experts, stream);
 }
 
-// ---------------------------------------------------------------------------
-// compute_moe_alpha_device: element-wise product of two device float arrays.
-// One thread per expert; single block (n_experts typically ≤ 256).
-// ---------------------------------------------------------------------------
+// Element-wise product of two device float arrays. One thread per expert,
+// single block (n_experts <= ~256).
 __global__ void moe_alpha_mul_kernel(
     const float* __restrict__ d_act,
     const float* __restrict__ d_weight,
@@ -349,10 +319,8 @@ void compute_moe_alpha_device(
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// compute_M_per_from_offsets_device: per-expert token count from offset scan.
-// One thread per expert; single block (n_experts typically ≤ 256).
-// ---------------------------------------------------------------------------
+// Per-expert token count from offset scan. One thread per expert, single
+// block (n_experts <= ~256).
 __global__ void moe_compute_M_per_kernel(
     const int32_t* __restrict__ d_offsets,
     int32_t* __restrict__ d_M_per_out,
@@ -377,12 +345,9 @@ void compute_M_per_from_offsets_device(
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// compact_alpha_active: order-preserving stream compaction of d_alpha
-// to only the entries where d_M_per[e] > 0. Single block, block-level
-// inclusive prefix sum (Hillis–Steele) in shared memory.
-// n_experts is bounded by 256 (typical 64-128); 8 scan steps total.
-// ---------------------------------------------------------------------------
+// Order-preserving stream compaction of d_alpha to entries where d_M_per[e] > 0.
+// Single block, Hillis-Steele inclusive prefix sum in shared memory.
+// n_experts <= 256 (typical 64-128); 8 scan steps total.
 __global__ void compact_alpha_active_kernel(
     const float*   __restrict__ d_alpha,
     const int32_t* __restrict__ d_M_per,
@@ -440,16 +405,11 @@ void compact_alpha_active(
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// compute_sfa_offsets_device: exclusive prefix sum of cutlass_nvfp4_sf_size
-// (per-expert SfAtom-padded SFA byte size). Single block, Hillis–Steele scan
-// over int64 in shared memory. Phase 3a of MoE-prefill-graphs lever.
-// ---------------------------------------------------------------------------
-//
-// Padding constants must stay in lockstep with kAtomRows/kAtomKElems/kAtomSize
-// in src/compute/gemm_cutlass_sm120.cu (CUTLASS SfAtom = 128 rows × 64 K-elems
-// × 512 bytes). Kept here as constexpr to avoid a host-only include from a
-// device translation unit.
+// Exclusive prefix sum of cutlass_nvfp4_sf_size (per-expert SfAtom-padded SFA byte size).
+// Single block, Hillis-Steele scan over int64 in shared memory.
+// Padding constants must stay in lockstep with kAtomRows/kAtomKElems/kAtomSize in
+// src/compute/gemm_cutlass_sm120.cu (CUTLASS SfAtom = 128 rows x 64 K-elems x 512 bytes).
+// Kept as constexpr here to avoid a host-only include from a device translation unit.
 namespace {
 constexpr int kSfAtomRows   = 128;
 constexpr int kSfAtomKElems = 64;
@@ -514,10 +474,7 @@ void compute_sfa_offsets_device(
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// build_sfa_bases_device: trivial pointer-arithmetic kernel that writes
-// d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e].  One thread per expert.
-// ---------------------------------------------------------------------------
+// Writes d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e]. One thread per expert.
 __global__ void build_sfa_bases_kernel(
     uint8_t**      __restrict__ d_sfa_bases_out,
     uint8_t*       __restrict__ base_sf,
@@ -544,16 +501,10 @@ void build_sfa_bases_device(
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// bzero_sfa_active: bounded-prefix wipe of the SfAtom staging buffer using
-// the device-resident exclusive-prefix-sum's terminal slot as the byte count.
-// Replaces cudaMemsetAsync(dst, 0, max_bytes) — for sparse routing the actual
-// total is often <50% of the worst-case bound (QW5 in P5 §2.1).
-//
-// Strategy: vectorized 16-byte stores via uint4. Grid sized to cover max_bytes
-// at saturation; each thread checks its byte-offset against d_total before
-// writing. Out-of-range threads early-exit (no work).
-// ---------------------------------------------------------------------------
+// Bounded-prefix wipe of the SfAtom staging buffer, using the device-resident exclusive
+// prefix sum's terminal slot as the byte count (replaces cudaMemsetAsync(dst,0,max_bytes);
+// sparse routing often uses <50% of the worst-case bound).
+// Vectorized 16-byte stores via uint4; grid covers max_bytes, out-of-range threads early-exit.
 __global__ void bzero_sfa_active_kernel(
     uint8_t*       __restrict__ dst,
     const int64_t* __restrict__ d_sfa_offsets,

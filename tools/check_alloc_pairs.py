@@ -7,7 +7,7 @@ WHY THIS EXISTS
 `cudaFreeAsync` on a pointer from plain `cudaMalloc` (and the reverse) is not valid
 CUDA. It is also invisible: the driver does not have to complain, the pointer is the
 right width, and the program keeps running. `AUDIT.md` B10 recorded exactly one such
-pair in July at `mtp_forward.cu:606/615`; by August the lines had moved to 610/619 and
+pair in July at `mtp_forward.cu:546/615`; by August the lines had moved to 610/619 and
 the defect had not. A defect that survives its own bug report by moving two lines is a
 defect that needs a gate, not another report.
 

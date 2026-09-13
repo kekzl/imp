@@ -12,51 +12,21 @@ namespace imp {
 namespace chunkpar {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Kernel 2 — sequential inter-chunk state pass + outputs, on tensor cores.
-// Grid (n_heads, kColSplit): blockIdx.y owns COLS = HD/kColSplit state columns;
-// u_eff, y and the state update are column-local, so the split only re-stages
-// the (read-only) W / Qeff / K_d rows per CTA. 256 threads = 8 warps: the CTA is latency-bound
-// (11 us per chunk against ~4 us of MMA + staging at 4 warps, 1 CTA/SM by
-// shared memory), so the row GEMMs split their 4 x 4 warp tiles over 8 warps
+// Kernel 2, sequential inter-chunk state pass + outputs, on tensor cores. Grid
+// (n_heads,kColSplit): blockIdx.y owns COLS=HD/kColSplit state columns (column-local
+// u_eff, y, state update; only W/Qeff/K_d rows are re-staged per CTA). 256 threads
+// (8 warps): the CTA is latency-bound, so row GEMMs split 4x4 warp tiles over 8 warps
 // and the state update runs one m-tile per warp.
-//
-// Per chunk, three GEMMs as mma.sync m16n8k8 tf32 with FP32 accumulate:
-//   u_eff [L x COLS]  = U_A - W    [L x SS] @ H [SS x COLS]
-//   y     [L x COLS]  = (Y_A + Qeff [L x SS] @ H) * scale
+// Per chunk, three GEMMs as mma.sync m16n8k8 tf32, FP32 accumulate:
+//   u_eff [L x COLS] = U_A - W [L x SS] @ H [SS x COLS]
+//   y     [L x COLS] = (Y_A + Qeff [L x SS] @ H) * scale
 //   H'    [SS x COLS] = D0L * H + K_d^T [SS x L] @ u_eff [L x COLS]
-// H lives in shared memory (FP32): the B operand of the first two GEMMs and
-// the C-init / D of the third. The carried state itself is never rounded —
-// D0L*H enters the accumulator in FP32 — only the per-chunk increments see
-// the operand rounding. The two GEMMs that feed the state (u_eff, H update)
-// run as 3xFP16 m16n8k16 (a = a_hi + a_lo in fp16, 22 significant bits like
-// 3xTF32, at the FP16/FP32-accumulate rate = 2x TF32 on GeForce Blackwell
-// and k = 16 per instruction): after #1851 ncu read the tensor pipe 67%
-// active with math_pipe_throttle the top stall, i.e. the TF32 rate was the
-// limit; 3xFP16 reads K2 -15% on both hybrids (27B 328 -> 279 ms, 35B 102 ->
-// 87 per pp4096) with the unit-test state diff at 1.3e-6 (3xTF32: 9.5e-7).
-// Plain tf32 on u_eff is out (state diff 8.5e-5..1.1e-4); the y GEMM is an
-// output term and runs plain fp16 (the tf32 precision class). The k16
-// fragment pattern (rows 2tg / 2tg+1, A as float2 at column 2tg) collided on
-// the padded strides (SA = 132 cannot serve both the row-GEMM float2 rows
-// and the K_d^T rows 2tg; SH = 40 puts rows 0/4 on one bank group): ncu read
-// bank conflicts 28% of the shared wavefronts, mio_throttle 1.3. The staged
-// block is a swz128 tile and the [k][n] tiles use stride COLS + 4 now:
-// conflicts 13%, K2 another -5% (27B 280 -> 266 ms, 35B 87 -> 83), 41% tensor
-// pipe active, the rest wait / scoreboard stalls at 8 warps and 1 CTA/SM. The scalar float4 form of this
-// kernel ran 242 us per 512-token strip at 6.6 TFLOPS; the three GEMMs are
-// 1.6 GFLOP per strip and head-set.
-// The staged [row][k] block is a swz128 tile (both fragment patterns land on
-// distinct bank groups), the [k][n] tiles use stride COLS + 4.
-// ---------------------------------------------------------------------------
-// C[16 x NTILE*8] = s_a[m0.., 0..SS) @ H[0..SS, 0..NTILE*8) for one warp's
-// 16-row strip, mma C layout. (A free function: nvcc 13.3 segfaults on a
-// generic lambda carrying the X3 tag inside the kernel.)
-// C[16 x NTILE*8] = s_a[m0.., 0..SS) @ H[0..SS, 0..NTILE*8) for one warp's
-// 16-row strip, mma C layout, k16 fp16 fragments: X3 = 3xFP16 (state-feeding
-// terms), else plain fp16 (output-only terms). s_a is a swz128 [64 x 128]
-// tile, s_h a [k][n] tile of stride SH. (A free function: nvcc 13.3
-// segfaults on a generic lambda carrying the X3 tag inside the kernel.)
+// H lives in shared memory FP32; D0L*H enters the accumulator in FP32, only per-chunk
+// increments see operand rounding. u_eff and the H update (state-feeding) run 3xFP16
+// m16n8k16 (a = a_hi+a_lo, 22 significant bits like 3xTF32, 2x TF32 rate on GeForce
+// Blackwell); plain tf32 on u_eff corrupts the state (diff 8.5e-5..1.1e-4). y is an
+// output term and runs plain fp16. Staged tiles use a swz128 layout; [k][n] tiles use
+// stride COLS+4 to avoid bank conflicts between the row-GEMM float2 rows and the K_d^T rows.
 template <int SS, int SH, int NTILE, bool X3>
 __device__ __forceinline__ void gemm_rows_x_h(const float* __restrict__ s_a, const float* __restrict__ s_h,
                                               int m0, int g, int tg, float (&acc)[NTILE][4]) {
@@ -137,14 +107,10 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     }
     __syncthreads();
 
-    // Staging is software-pipelined: the next [kChunk x SS] factor block is
-    // loaded into registers (8 float4 per thread) BEFORE the current GEMM
-    // phase and committed to s_a after the barrier that closes it, so the
-    // L2 round trips of the staging overlap the MMA work instead of sitting
-    // on the critical path (ncu on the un-pipelined form: long_scoreboard
-    // 4.25 stalls per issue, the top item). Rows >= L are staged as zeros
-    // (the state update needs finite K_d rows there; the row GEMMs discard
-    // them).
+    // Staging is software-pipelined: the next [kChunk x SS] factor block loads into registers
+    // (8 float4/thread) before the current GEMM phase, committed to s_a after the closing
+    // barrier, so L2 round trips overlap MMA instead of sitting on the critical path. Rows
+    // >= L stage as zero (the state update needs finite K_d rows there; row GEMMs discard them).
     constexpr int F4_PER_ROW = SS / 4;
     constexpr int F4T = kChunk * F4_PER_ROW / NT;  // float4 per thread per block
     static_assert(kChunk * F4_PER_ROW % NT == 0, "staging split");

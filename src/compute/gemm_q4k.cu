@@ -1,14 +1,9 @@
-// Fused Q4_K/Q5_K × Q8_1 dp4a GEMM kernels for MoE expert prefill AND dense prefill.
-// Weight-stationary, Q8_1 activations in shared memory, dp4a integer accumulation.
-// Eliminates the FP16 dequant intermediate that caused 8.3× bandwidth overhead.
-//
-// Based on the proven gemm_q6k_moe_fused architecture: each CTA loads a tile of
-// Q8_1 activations into shared memory, then each warp computes one output column
-// across the M_TILE tokens using dp4a dot products with the quantized weights.
-//
-// Q4_K difference from Q6_K: unsigned nibbles (0-15) with per-sub-block min offset.
-// The min correction uses dp4a(ones, q8, 0) to compute sum(q8) inline — no need
-// for the Q8_1 sum field (block_q8_1::s).
+// Fused Q4_K/Q5_K x Q8_1 dp4a GEMM for MoE and dense prefill: weight-stationary, Q8_1
+// activations in shared memory, dp4a integer accumulation, eliminating the FP16 dequant
+// intermediate. Based on the gemm_q6k_moe_fused architecture: each CTA loads a tile of Q8_1
+// activations into shared memory, each warp computes one output column across M_TILE tokens.
+// Q4_K differs from Q6_K: unsigned nibbles (0-15) with a per-sub-block min offset; the min
+// correction uses dp4a(ones,q8,0) to sum(q8) inline, no need for block_q8_1::s.
 
 #include "compute/gemm_q4k.h"
 #include "compute/gemm.h"
@@ -56,16 +51,11 @@ __device__ __forceinline__ void get_scale_min_q4k(const uint8_t* sc, int j,
     }
 }
 
-// Each Q4_K super-block (256 elements) = 8 Q8_1 blocks.
-// Each Q8_1 block covers 32 elements = one sub-block of Q4_K.
-// Sub-blocks 0,2,4,6 are low nibbles of qs chunks. 1,3,5,7 are high nibbles.
-//
-// For Q8_1 block index g (0..7) within a Q4_K super-block:
-//   chunk = g / 2  (which 64-element group, 0..3)
-//   is_high = g & 1 (low vs high nibbles)
-//   qs starts at chunk * 32 bytes
-//   If is_high: use (qs[i] >> 4) & 0xF. Else: use qs[i] & 0xF.
-//   For Q5_K: additionally, qh bit at position (2*chunk + is_high) gives the 5th bit.
+// Each Q4_K super-block (256 elements) = 8 Q8_1 blocks; each Q8_1 block covers 32 elements
+// (one Q4_K sub-block). Sub-blocks 0,2,4,6 are low nibbles of qs chunks, 1,3,5,7 high nibbles.
+// For Q8_1 block index g (0..7): chunk=g/2, is_high=g&1, qs starts at chunk*32 bytes; use
+// (qs[i]>>4)&0xF if is_high else qs[i]&0xF. Q5_K additionally: qh bit at (2*chunk+is_high)
+// gives the 5th bit.
 
 template <QKType BT>
 __global__ void __launch_bounds__(CTA_THREADS, 1)
@@ -232,11 +222,8 @@ gemm_qk_dp4a_moe_fused_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dense (non-MoE) dp4a kernel: no expert offsets, grid over (N, 1).
-// sm_120 caps shared memory at 99 KiB (101,376 B), so TILE_M is smaller
-// than the MoE kernel to fit the Q8_1 tile within that budget.
-// ---------------------------------------------------------------------------
+// Dense (non-MoE) dp4a kernel: no expert offsets, grid over (N,1). sm_120 caps shared memory
+// at 99 KiB (101376 B), so TILE_M is smaller than the MoE kernel to fit the Q8_1 tile in budget.
 
 static constexpr int DENSE_TILE_M = 16;
 

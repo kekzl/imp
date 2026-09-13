@@ -15,17 +15,11 @@
 
 namespace imp {
 
-// Constrain generation to a context-free grammar written in GBNF
-// (docs/roadmap.md gap 8).
-//
-// This is the decode-time wrapper around GbnfMatcher, with the same apply_mask
-// contract as JsonConstrainer / SchemaConstrainer / RegexConstrainer. What the
-// grammar adds over the regex wrapper is a STACK — the language is context-free,
-// so the live state is a set of parse continuations, not a set of NFA states —
-// and UTF-8 assembly, since a BPE token can end mid-character.
-//
-// The grammar is implicitly anchored: the whole output must be a derivation of
-// `root`, and EOS is allowed only once that derivation is complete.
+// Constrains generation to a context-free grammar (GBNF, docs/roadmap.md gap 8). Decode-time
+// wrapper around GbnfMatcher, same apply_mask contract as JsonConstrainer/SchemaConstrainer/
+// RegexConstrainer. State is a parse-continuation stack (context-free, not NFA states); UTF-8
+// assembly handles BPE tokens split mid-character. Anchored: EOS allowed only once the
+// derivation of `root` completes.
 
 class GrammarConstrainer {
 public:
