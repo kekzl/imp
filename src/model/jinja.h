@@ -157,10 +157,8 @@ public:
     // Parse a Jinja2 template string. Returns true on success.
     bool parse(const std::string& source);
 
-    // Render the parsed template with the given context.
-    // Returns the rendered string, or empty string on error. A render that
-    // exceeds the evaluation budget (macro call depth, loop iterations) is an
-    // error, not a crash: error() names the budget.
+    // Renders the parsed template; returns "" on error. A render exceeding the evaluation
+    // budget (macro depth, loop iterations) is an error, not a crash: error() names the budget.
     std::string render(const Context& ctx) const;
 
     // Last error message (set on parse/render failure)

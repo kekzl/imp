@@ -95,10 +95,9 @@ Qwen3VLVisionRef qwen3vl_map_vision_tensor(const std::string& name) {
         return ref;
     }
 
-    // DeepStack mergers must be tested BEFORE the main merger: the main one is
-    // `merger.*` and these are `deepstack_merger_list.<i>.*`, so there is no
-    // prefix overlap — but keeping the order explicit documents that they are
-    // distinct, not variants of one another.
+    // DeepStack mergers must be tested BEFORE the main merger: the main one is "merger.*" and
+    // these are "deepstack_merger_list.<i>.*" (no prefix overlap), but keeping the order
+    // explicit documents they are distinct, not variants of one another.
     if (starts_with(name, "deepstack_merger_list.")) {
         size_t pos = 22;  // strlen("deepstack_merger_list.")
         const int idx = take_index(name, pos);

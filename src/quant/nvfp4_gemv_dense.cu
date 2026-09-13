@@ -1,7 +1,6 @@
-// Dense single-input NVFP4 GEMV kernels + host launchers.
-// Split out of nvfp4_gemm.cu (kernel .cu size gate). All kernels and launchers
-// MOVED VERBATIM — hot-path numeric code, must stay bit-identical. Shared device
-// helpers + tuning constants live in nvfp4_gemm_internal.cuh.
+// Dense single-input NVFP4 GEMV kernels + host launchers, split out of nvfp4_gemm.cu
+// (kernel .cu size gate). MOVED VERBATIM: hot-path numeric code, must stay bit-identical.
+// Shared device helpers + tuning constants live in nvfp4_gemm_internal.cuh.
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -63,11 +62,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_fp32_kernel(
         y[row] = total;
 }
 
-// ---------------------------------------------------------------------------
-// Multi-row GEMV: NR rows per block, 256 threads (8 warps).
-// Each warp handles one row, multiple warps process multiple rows in parallel.
+// Multi-row GEMV: NR rows per block, 256 threads (8 warps), each warp handles one row.
 // Amortizes block launch overhead and improves occupancy for small K.
-// ---------------------------------------------------------------------------
 template <int NR>
 __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -154,11 +150,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_residual_kernel(
         y[row] = __float2half(total + __half2float(residual[row]));
 }
 
-// ---------------------------------------------------------------------------
-// Fused SwiGLU + GEMV + residual:
-//   y[row] = A_nvfp4[row,:] @ swiglu(gate, up) + residual[row]
-// Eliminates the separate SwiGLU kernel launch.
-// ---------------------------------------------------------------------------
+// Fused SwiGLU+GEMV+residual: y[row] = A_nvfp4[row,:] @ swiglu(gate,up) + residual[row].
+// Eliminates a separate SwiGLU kernel launch.
 
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_swiglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,

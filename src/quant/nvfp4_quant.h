@@ -7,13 +7,9 @@
 
 namespace imp {
 
-// NVFP4 (FP4 E2M1) quantization with two-level scaling:
-//   Level 1: FP8 E4M3 micro-scale per 16 values (micro-block)
-//   Level 2: FP32 tensor-scale (global)
-//
-// Packed format: 2 FP4 values per byte (low nibble = even index, high = odd)
-// Micro-scales: [N, K/16] as uint8_t (FP8 E4M3)
-// Tensor-scale: single FP32
+// NVFP4 (FP4 E2M1) quantization with two-level scaling: Level 1 FP8 E4M3 micro-scale per 16
+// values, Level 2 FP32 tensor-scale (global). Packed: 2 FP4/byte (low=even, high=odd).
+// Micro-scales [N,K/16] uint8_t (FP8 E4M3); tensor-scale single FP32.
 
 struct NvFP4QuantResult {
     void* packed_data = nullptr;   // [N, K/2] packed nibbles on device
@@ -21,10 +17,9 @@ struct NvFP4QuantResult {
     float tensor_scale = 1.0f;     // global tensor scale
     int64_t N = 0;
     int64_t K = 0;
-    // True when packed_data/micro_scales were allocated by this result (the
-    // quantize_* paths) and must be cudaFree'd on teardown. False when they
-    // BORROW resident model weight storage (the data-borrow decode cache) —
-    // cudaFree on a borrowed pointer fails with "invalid argument".
+    // True when packed_data/micro_scales were allocated by this result (quantize_* paths) and
+    // must be cudaFree'd on teardown. False when they BORROW resident model weight storage (the
+    // data-borrow decode cache): cudaFree on a borrowed pointer fails with "invalid argument".
     bool owned = true;
 };
 
@@ -32,20 +27,14 @@ struct NvFP4QuantResult {
 // input: [N, K] FP16 on device. K must be multiple of 16.
 void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream = nullptr);
 
-// Same, with a CALLER-SUPPLIED tensor scale instead of one calibrated from this
-// tensor alone — an offline-export need the load-time path does not have.
-//
-// Fused layers must SHARE a scale: an engine that merges q/k/v into one linear
-// keeps a single tensor scale for the merged weight (vLLM keeps the max), so
-// three independently calibrated scales leave two of the three matrices
-// dequantized against the wrong one. Sharing is also the better quantization
-// here, not just the compatible one — measured 30.40 to 29.47 perplexity on
-// Qwen3-0.6B (tools/imp-quantize/checkpoint_out.h).
-//
-// A scale of 0 or a non-finite one is rejected: it would divide every value in
-// the tensor by it.
-// Graph-safe: quantize [M, K] FP16 into CALLER-OWNED packed/scale buffers
-// with a fixed tensor scale (no allocation, no host sync).
+// Same, with a CALLER-SUPPLIED tensor scale instead of one calibrated from this tensor
+// alone (an offline-export need the load-time path lacks). Fused layers must SHARE a scale:
+// an engine merging q/k/v into one linear keeps a single tensor scale for the merged weight
+// (vLLM keeps the max); three independently calibrated scales would dequantize two of three
+// matrices against the wrong one, and sharing measured better quality too (30.40->29.47 PPL
+// on Qwen3-0.6B). A scale of 0 or non-finite is rejected (would divide every value by it).
+// Graph-safe: quantizes [M,K] FP16 into CALLER-OWNED packed/scale buffers with a fixed
+// tensor scale (no allocation, no host sync).
 void quantize_fp16_to_nvfp4_into(const void* d_input_fp16, int M, int K, uint8_t* d_packed,
                                  uint8_t* d_micro_scales, float tensor_scale,
                                  cudaStream_t stream = nullptr);
@@ -71,11 +60,9 @@ void dequantize_nvfp4_to_fp16(const NvFP4QuantResult& quant, void* output_fp16,
 // Free NVFP4 result device memory.
 void free_nvfp4_result(NvFP4QuantResult& result);
 
-// ---------------------------------------------------------------------------
-// NVFP4 MoE: per-expert quantization with independent tensor scales.
-// Packed expert weights [n_experts, eff, K] are quantized expert-by-expert
-// into contiguous NVFP4 buffers with one tensor_scale per expert.
-// ---------------------------------------------------------------------------
+// NVFP4 MoE: per-expert quantization with independent tensor scales. Packed expert weights
+// [n_experts,eff,K] are quantized expert-by-expert into contiguous NVFP4 buffers with one
+// tensor_scale per expert.
 
 struct NvFP4MoEQuantResult {
     void* packed_data = nullptr;     // [n_experts, eff, K/2] contiguous FP4
@@ -106,41 +93,23 @@ void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* outpu
 // Free NvFP4MoEQuantResult device memory.
 void free_nvfp4_moe_result(NvFP4MoEQuantResult& result);
 
-// ---------------------------------------------------------------------------
 // Defensive promotion of weight_scale_2 into the GEMM-internal tensor_scale.
-//
-// Modelopt:        val = fp4 * micro_scale * weight_scale_2  (multiply)
-// llm-compressor:  val = fp4 * micro_scale / weight_scale_2  (divide → store 1/x)
-//
-// A weight_scale_2 of 0, NaN, or ±Inf would produce non-finite GEMM output and
-// contaminate the entire layer's hidden state. This helper folds in defensive
-// zeroing for both formats:
-//   - non-finite h_scale         → 0.0f
-//   - llm-compressor h_scale=0   → 0.0f (1/0 would be Inf)
-//   - llm-compressor 1/h_scale non-finite → 0.0f
-//   - Modelopt h_scale=0         → 0.0f (intentionally null layer)
-//
-// `*was_zeroed` is set true when defensive zeroing fired (used for diagnostic
-// counters at end of load).
-//
-// Pure host function — testable without CUDA. Defined in nvfp4_quant.cu.
+//   Modelopt:       val = fp4 * micro_scale * weight_scale_2   (multiply)
+//   llm-compressor: val = fp4 * micro_scale / weight_scale_2   (divide, stores 1/x)
+// A weight_scale_2 of 0/NaN/Inf would produce non-finite GEMM output and contaminate the
+// layer; zeroed defensively: non-finite h_scale->0; llm-compressor h_scale=0 or 1/h_scale
+// non-finite->0; Modelopt h_scale=0->0 (intentionally null layer). was_zeroed reports which.
 float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed);
 
-// Valid wire dtype for NVFP4 weight_scale per compressed-tensors spec.
-// Spec mandates float8_e4m3fn. NVFP4/MXFP4 cross-misroutes and corrupt
-// checkpoints would arrive here with U8/I8 (UE8M0) or other dtypes — those
-// must be rejected at promote time so the slow dequant→cuBLAS fallback runs
-// instead of silently producing wrong output through the FP8 decoder.
+// Valid wire dtype for NVFP4 weight_scale per compressed-tensors spec (float8_e4m3fn
+// mandated). NVFP4/MXFP4 cross-misroutes or corrupt checkpoints could arrive as U8/I8
+// (UE8M0) or other dtypes; rejected at promote time so the slow dequant->cuBLAS fallback
+// runs instead of the FP8 decoder silently producing wrong output.
 bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err);
 
-// Verify that weight_scale's inner dimension matches weight_packed's inner
-// dimension at the spec's group_size=16. weight_packed is stored as [N, K/2]
-// (packed halves) and weight_scale must be [N, K/16] = [N, weight_packed_K/8].
-//
-// Mismatch on outer dim or inner-dim ratio rejects promotion.
-//   packed_inner_dim is `weight.shape[1]` from the SafeTensors loader (= K/2).
-//   scale_inner_dim is `weight_scale.shape[1]`.
-//   packed_outer_dim/scale_outer_dim are shape[0] of each.
+// Verifies weight_scale's inner dim matches weight_packed's at the spec's group_size=16:
+// weight_packed is [N,K/2] (packed halves), weight_scale must be [N,K/16] =
+// [N, weight_packed_K/8]. Mismatch on outer dim or inner-dim ratio rejects promotion.
 bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer_dim, int64_t packed_inner_dim,
                                         int64_t scale_outer_dim, int64_t scale_inner_dim,
                                         std::string* err);

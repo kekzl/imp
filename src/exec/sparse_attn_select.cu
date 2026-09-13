@@ -1,10 +1,8 @@
-// Sparse decode attention: Quest-class top-k page selection.
-// Three kernels: per-block key min/max maintenance, block scoring against the
-// current queries, and top-k selection into a compacted block table the
-// unmodified paged decode kernels consume. Everything runs device-side from
-// device inputs (block tables, context lens), so the whole path is
-// CUDA-graph-safe while the context grows during replay.
-// Design + gates: docs/plans/2026-08-28-sparse-decode-attention.md.
+// Sparse decode attention: Quest-class top-k page selection. Three kernels: per-block
+// key min/max maintenance, block scoring against the current queries, top-k selection
+// into a compacted block table the unmodified paged decode kernels consume. All
+// device-side from device inputs, so the whole path is CUDA-graph-safe while context
+// grows during replay. Design: docs/plans/2026-08-28-sparse-decode-attention.md.
 
 #include "exec/sparse_attn_select.h"
 #include "exec/executor_kernels_internal.cuh"
@@ -33,10 +31,10 @@ struct KeyReaderPlain {
     }
 };
 
-// NVFP4: two elements per byte (low nibble = even), UE4M3 group scale per 16
-// contiguous elements in a parallel array. head_dim is a multiple of 16 on
-// this path, and heads are contiguous within a row, so the flat group index
-// over the row is exactly e/16 - no head_dim needed here.
+// NVFP4 key reader: two elements per byte (low nibble = even), UE4M3 group scale per 16
+// contiguous elements in a parallel array. head_dim is a multiple of 16 on this path and
+// heads are contiguous within a row, so the flat group index over the row is exactly
+// e/16, no head_dim needed.
 struct KeyReaderNvfp4 {
     const uint8_t* __restrict__ blk;
     const uint8_t* __restrict__ sc;
@@ -54,30 +52,22 @@ struct KeyReaderNvfp4 {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Metadata maintenance. Owner-CTA scheme, race-free without atomics: CTA i is
-// active iff token i's physical block differs from token i-1's; the owner
-// covers every same-block token after it in this launch (same-block tokens
-// are adjacent in all call shapes: prefill contiguous positions, ragged
-// row-range per sequence, spec verify chunk contiguous, multi-seq decode one
-// token per sequence with exclusive blocks). slot 0 initializes, otherwise
-// merge with the stored metadata - block reuse is covered because a fresh
-// block's first write is always slot 0.
-// Metadata layout per (layer, block): row_elems half2 per (kv_head, dim)
-// element, element index e = kv_head * head_dim + d. The pair carries
-// (min, max), or (mean, std) under attention.sparse_score_meanstd - same
-// layout, same pass, the score kernel reads it the same way.
-// ---------------------------------------------------------------------------
-// All-layers batched variant for decode: one launch covers every KV layer
-// (grid.y). The per-layer form cost 36 launches x ~2.4-5.9 us per decode
-// step; batching is legal because decode selection force-includes the recent
-// blocks, so metadata may lag the current step's write by one step without
-// affecting which blocks the bound can exclude.
-// Ragged token->block-table-row mapping: with seq_offsets ([n_seq+1], the
-// ragged prefill's device twin of h_seq_offsets), token i belongs to the seq
-// whose offset range contains i, and THAT is the block-table row. Without it
-// (nullptr) the plain kv_resolve_slot semantics apply (decode: token == seq;
-// single-seq: flat table).
+// Metadata maintenance: owner-CTA scheme, race-free without atomics. CTA i is active iff
+// token i's physical block differs from token i-1's; the owner covers every same-block
+// token after it (same-block tokens are adjacent in every call shape: prefill
+// contiguous, ragged row-range per sequence, spec verify chunk contiguous, multi-seq
+// decode one token per sequence with exclusive blocks). Slot 0 initializes, otherwise
+// merges with stored metadata; block reuse is covered because a fresh block's first
+// write is always slot 0.
+// Metadata layout per (layer, block): row_elems half2 per (kv_head, dim) element, index
+// e = kv_head * head_dim + d. The pair carries (min, max), or (mean, std) under
+// attention.sparse_score_meanstd; same layout, same pass, same read by the score kernel.
+// Batched decode variant: one launch covers every KV layer (grid.y), legal because
+// decode selection force-includes recent blocks, so metadata may lag by one step without
+// affecting the bound.
+// Ragged token->block-table-row mapping: with seq_offsets ([n_seq+1], the device twin of
+// h_seq_offsets), token i belongs to the seq whose offset range contains i, and that is
+// the block-table row; nullptr falls back to plain kv_resolve_slot semantics.
 __device__ __forceinline__ int sparse_resolve_block(const int* block_tables, const int* positions,
                                                     const int* seq_offsets, int token_idx, int block_size,
                                                     int max_blocks_per_seq, int n_sequences, int& slot) {
@@ -122,12 +112,11 @@ __device__ __forceinline__ int sparse_owner_block(const int* block_tables, const
     return block_id;
 }
 
-// Mean/std twin (attention.sparse_score_meanstd). Same storage, same owner
-// scheme: the pair holds (mean, std) over the block's written slots instead of
-// (min, max). `slot` IS the count already merged (slots fill in order), so no
-// separate counter is needed. One Welford pass per element rather than
-// sum/sumsq: E[x^2]-E[x]^2 cancels away most of the mantissa once |mean| is a
-// few multiples of the spread, which is the normal case for keys.
+// Mean/std twin (attention.sparse_score_meanstd): same storage, same owner scheme, but
+// the pair holds (mean, std) over the block's written slots instead of (min, max). slot
+// IS the count already merged (slots fill in order), no separate counter needed. One
+// Welford pass per element rather than sum/sumsq: E[x^2]-E[x]^2 cancels most of the
+// mantissa once |mean| is a few multiples of the spread.
 template <typename Reader>
 __device__ __forceinline__ void sparse_merge_block_meanstd(Reader rd, __half2* __restrict__ mm, int slot,
                                                            int span, int row_elems) {
@@ -239,20 +228,15 @@ __global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
                                  span, row_elems);
 }
 
-// ---------------------------------------------------------------------------
-// Block scoring. One warp per block, grid-stride over blocks (grid shape is
-// context-independent - capture-safe while ctx grows during replay).
-// score(b) = max over q heads h of sum_d (q_h[d]*center[d] + |q_h[d]|*off[d])
-// over h's kv head metadata. Both policies share that form and differ only in
-// what the metadata pass stored:
-//   corner bound (Quest): (min, max), and max(q*min, q*max) is identically
-//     q*(min+max)/2 + |q|*(max-min)/2 - an upper bound on any softmax logit
-//     the block can produce, but one whose width is set by the single most
-//     extreme token per dimension.
-//   mean/std: the page's own centre and spread (arXiv 2605.27740). Not a
-//     bound, an estimate - top-k only ranks blocks, so admissibility buys
-//     nothing and the outlier sensitivity costs recall.
-// ---------------------------------------------------------------------------
+// Block scoring: one warp per block, grid-stride over blocks (context-independent grid
+// shape, capture-safe while ctx grows during replay).
+//   score(b) = max over q heads h of sum_d (q_h[d]*center[d] + |q_h[d]|*off[d])
+// Corner bound (Quest): (min, max); max(q*min, q*max) == q*(min+max)/2 + |q|*(max-min)/2,
+// an upper bound on any softmax logit the block can produce, but bounded by the single
+// most extreme token per dimension.
+// Mean/std (arXiv 2605.27740): the page's own centre and spread, not a bound but an
+// estimate; top-k only ranks blocks, so admissibility buys nothing and outlier
+// sensitivity costs recall.
 struct ScoreCornerBound {
     __device__ __forceinline__ static float term(float q, float lo, float hi, float) {
         return fmaxf(q * lo, q * hi);
@@ -307,12 +291,10 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
         }
         const __half2* mm = minmax_base + (int64_t)block_id * row_elems;
         float best = -FLT_MAX;
-        // 16-byte metadata loads (4 (min,max) pairs per lane per step) with a
-        // one-ahead prefetch across kv heads: the scalar form issued 8-byte
-        // dependent loads and was latency-bound at 151 us/launch (measured
-        // 2026-08-28, 32k ctx). head_dim is a multiple of 16 (kNVFP4Group),
-        // so head_dim*4B is 16B-aligned and lane*4 stays in-bounds per
-        // 128-dim sweep.
+        // 16-byte metadata loads (4 (min,max) pairs per lane per step) with a one-ahead prefetch
+        // across kv heads: a scalar 8-byte dependent-load form is latency-bound. head_dim is a
+        // multiple of 16 (kNVFP4Group), so head_dim*4B is 16B-aligned and lane*4 stays in-bounds
+        // per 128-dim sweep.
         const int d_first = lane * 4;
         const bool lane_live = d_first < head_dim;
         float4 raw_next{};
@@ -365,17 +347,12 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Top-k selection + compacted table build. One CTA per sequence.
-//
-// The selection key is 64-bit: (monotone score bits << 32) | ~block_index -
-// unique per block, so the radix threshold is exact, ties resolve to the
-// LOWER block index, and the result is deterministic. 8 x 8-bit MSB radix
-// passes narrow the k-th largest key among the middle blocks; sink and
-// recent blocks are forced. A bitmap + ballot compaction emits the selected
-// physical block ids in ascending block order, which preserves the dense
-// kernel's softmax accumulation order.
-// ---------------------------------------------------------------------------
+// Top-k selection + compacted table build, one CTA per sequence. Selection key is
+// 64-bit: (monotone score bits << 32) | ~block_index, unique per block, so the radix
+// threshold is exact, ties resolve to the LOWER block index, result is deterministic.
+// 8x 8-bit MSB radix passes narrow the k-th largest key among middle blocks; sink and
+// recent blocks are forced. Bitmap + ballot compaction emits selected physical block ids
+// in ascending order, preserving the dense kernel's softmax accumulation order.
 constexpr int kSelectThreads = 256;
 
 __device__ __forceinline__ uint32_t score_key(float s) {
@@ -410,11 +387,10 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
     const int k = budget_blocks - sink_blocks - recent_blocks;
     const float* sc = scores + (int64_t)seq * scores_stride;
 
-    // Dynamic smem: hist[256] | bitmap words | word ranks | cached score keys.
-    // The radix passes iterate the middle keys 8 times; reading the float
-    // scores from global every pass made the single-CTA kernel latency-bound
-    // (20.9 us/launch measured 2026-08-28) - one global read into smem, then
-    // every pass runs over smem.
+    // Dynamic smem: hist[256] | bitmap words | word ranks | cached score keys. The radix
+    // passes iterate the middle keys 8 times; reading float scores from global every pass
+    // makes the single-CTA kernel latency-bound, so read once into smem and run every pass
+    // over smem.
     extern __shared__ uint32_t sel_smem[];
     uint32_t* hist = sel_smem;  // 256
     const int n_words = (max_blocks_per_seq + 31) / 32;
@@ -434,11 +410,10 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
     for (int b = mid_lo + threadIdx.x; b < mid_hi; b += blockDim.x)
         keys[b] = score_key(sc[b]);
 
-    // 4 MSB-first radix passes over the 32-bit score keys (multiplicity kept;
-    // ties resolve by ascending block index in the bitmap phase below). The
-    // per-pass threshold bin comes from a parallel suffix scan of the
-    // histogram - the earlier serial thread-0 scan over 8 passes made this
-    // single-CTA kernel latency-bound (~20 us at 32k ctx, 2026-08-28).
+    // 4 MSB-first radix passes over the 32-bit score keys (multiplicity kept; ties resolve
+    // by ascending block index in the bitmap phase below). The per-pass threshold bin comes
+    // from a parallel suffix scan of the histogram: a serial thread-0 scan over 8 passes
+    // makes this single-CTA kernel latency-bound.
     for (int level = 3; level >= 0; level--) {
         for (int i = threadIdx.x; i < 256; i += blockDim.x)
             hist[i] = 0;
@@ -610,10 +585,9 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
                           int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
                           cudaStream_t stream) {
-    // Fixed grid.x: work distribution adapts device-side via grid-stride, so a
-    // captured graph stays correct while the context grows during replay.
-    // 256 CTAs: 32 left the kernel latency-bound (151 us at 32k ctx, 19% of
-    // the SMs; 128 measured 25 us); the grid-stride loop makes the extra CTAs
+    // Fixed grid.x: work distribution adapts device-side via grid-stride, so a captured
+    // graph stays correct while the context grows during replay. 256 CTAs: fewer leaves the
+    // kernel latency-bound at low SM occupancy; the grid-stride loop makes the extra CTAs
     // free at short ctx.
     dim3 score_grid(256, n_seq);
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);

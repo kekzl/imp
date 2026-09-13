@@ -26,13 +26,11 @@ constexpr int kNumScalars = 11;
 
 }  // namespace
 
-// ── layout ──────────────────────────────────────────────────────────────
-//
-// device slot:  [sample scratch][11 ints][stop ids][penalty ring]
-// host slot:    [ring buffer][step counter][burst done][decode scratch]
-//
-// Each sub-buffer is kSubAlign-aligned, so the strides below are what one slot
-// costs and slot i starts at i * stride.
+// Layout:
+//   device slot: [sample scratch][11 ints][stop ids][penalty ring]
+//   host slot:   [ring buffer][step counter][burst done][decode scratch]
+// Each sub-buffer is kSubAlign-aligned; the strides below are what one slot costs and
+// slot i starts at i * stride.
 
 static size_t device_stride_for(const GraphSlotCaps& caps) {
     size_t off = 0;

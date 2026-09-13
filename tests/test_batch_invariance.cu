@@ -8,7 +8,7 @@
 //   quantizes the ACTIVATION rows to NVFP4 first (W4A4). Any weight the M=1
 //   branch declines therefore takes the W4A4 kernel even solo, which a 2 %
 //   error planted in that kernel proved on the checkpoint measured here
-//   (src/exec/executor_gemm_dispatch.cu:183-237 and :356-415).
+//   (src/exec/executor_gemm_dispatch.cu:173-227 and :356-415).
 //   Every quality number imp had for that step came from either
 //   `ForwardPassTest.DecodeLogitsInvariantToBatchComposition` — a 2-layer FP16
 //   synthetic model that never runs an NVFP4 kernel — or the server-level

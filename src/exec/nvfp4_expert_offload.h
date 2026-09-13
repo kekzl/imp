@@ -9,42 +9,20 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Host-resident NVFP4 MoE experts: the slot layout and the predicates that
-// decide whether the path applies.
-//
-// The GGUF host-offload path (#1370) works because one expert is one
-// contiguous byte range, so the LRU cache's fixed-stride slot pool IS the
-// array the fused decode kernels want: feed them slot indices with
-// `stride = slot_size` and they need no change.
-//
-// An NVFP4 expert is TWO ranges — packed FP4 weights and FP8 E4M3
-// micro-scales — which is why the same trick does not fall out for free. It
-// still works, because the kernels address the two with separate bases and
-// separate strides:
-//
-//     W  = packed_data  + idx * expert_stride_packed
-//     MS = micro_scales + idx * expert_stride_ms
-//
-// Concatenating both halves into one slot and passing
-//
-//     packed_data          = pool
-//     micro_scales         = pool + packed_off()
-//     expert_stride_packed = expert_stride_ms = slot_bytes()
-//
-// resolves both to the same slot. No kernel changes.
-//
-// `tensor_scales` is the one piece that does NOT fall out: the kernels read
-// it as `tensor_scales[idx]`, i.e. with the same index as the weight, so a
-// per-EXPERT array cannot be handed to a slot-indexed kernel. It needs a
-// per-slot device mirror, written whenever a slot's occupant changes.
-// ---------------------------------------------------------------------------
+// Host-resident NVFP4 MoE experts: the LRU slot pool works for GGUF (#1370) because one
+// expert is one contiguous byte range. NVFP4 is TWO ranges (packed FP4 + FP8 E4M3
+// micro-scales); the kernels address them with separate bases/strides:
+//   W  = packed_data  + idx * expert_stride_packed
+//   MS = micro_scales + idx * expert_stride_ms
+// Concatenating both into one slot (packed_data=pool, micro_scales=pool+packed_off(),
+// both strides=slot_bytes()) resolves both to the same slot with no kernel changes.
+// tensor_scales does NOT fall out this way: kernels read tensor_scales[idx] per-expert,
+// so it needs a per-slot device mirror, rewritten whenever a slot's occupant changes.
 
-// The kernels load packed weights through `uint2` (nvfp4_gemm_internal.cuh,
-// gemv_nvfp4_row), so both the slot base and the packed stride must be
-// 8-byte aligned. Micro-scales are read byte-wise and need no alignment of
-// their own — but they sit behind the packed block, so the padding is what
-// keeps the NEXT slot's packed block aligned. 16 covers both with room.
+// Packed weights load through uint2 (nvfp4_gemm_internal.cuh, gemv_nvfp4_row): slot base
+// and packed stride must be 8-byte aligned. Micro-scales need no alignment of their own
+// but sit behind the packed block, so padding keeps the NEXT slot's packed block aligned.
+// 16 covers both with room.
 inline constexpr size_t kNvFP4SlotAlign = 16;
 
 inline constexpr size_t nvfp4_align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
@@ -74,17 +52,10 @@ inline NvFP4SlotLayout nvfp4_slot_layout(int64_t N, int64_t K) {
     return l;
 }
 
-// Can this projection's experts be served from the slot pool?
-//
-// This is the single definition of the condition. The dispatch calls it to
-// decide whether to stage, the load-time gate calls it to decide whether the
-// placement is servable at all, and the staging loop below relies on exactly
-// these facts holding — a weight that is NVFP4-promoted (so Phase 0 ran and
-// found its scales), host-resident (so it is the cache's business), carrying
-// micro-scales, and shaped like every other expert in the projection.
-//
-// Keeping one definition is the point: #1384 and #1403 were both a predicate
-// standing in front of the check that was supposed to catch the problem.
+// Single definition of whether a projection's experts can be served from the slot pool:
+// NVFP4-promoted, host-resident, carrying micro-scales, shaped like every other expert in
+// the projection. #1384 and #1403 were both a predicate standing in front of the check
+// meant to catch the problem.
 inline bool nvfp4_host_experts_servable(const std::vector<Tensor>& experts) {
     if (experts.empty() || !experts[0].data)
         return false;
@@ -102,10 +73,9 @@ inline bool nvfp4_host_experts_servable(const std::vector<Tensor>& experts) {
     return true;
 }
 
-// One projection's experts staged contiguously on the device, in the layout
-// the NVFP4 GEMMs already expect: `packed + e * packed_stride` and
-// `ms + e * ms_stride`. Empty `packed` means this projection was not staged
-// (a non-gated model has no gate) and the caller falls back per expert.
+// One projection's experts staged contiguously on device in the layout the NVFP4 GEMMs
+// expect: packed + e*packed_stride, ms + e*ms_stride. Empty packed = not staged (e.g. no
+// gate on a non-gated model); caller falls back per expert.
 struct StagedProj {
     const char* packed = nullptr;
     const char* ms = nullptr;
@@ -120,16 +90,10 @@ struct StagedProj {
     bool covers(int expert) const { return valid() && expert >= 0 && expert < n_experts; }
 };
 
-// An nvfp4_scratch_ key naming one per-expert MoE weight.
-// Key form: "L{layer}.expert_w_{gate,up,down}.{expert}". Dense weights
-// ("L5.wq", "out_proj") deliberately do not parse — they have no host path,
-// so promoting a host-resident one would label bytes NVFP4 that nothing can
-// serve from where they sit.
-//
-// One definition because three places ask the same question: Phase 0 (may I
-// promote this host-resident weight?) and both scale-upload paths (does this
-// scale belong to a weight that stayed on host, and must therefore stay there
-// too?). Parsing it twice is how the two halves drift apart.
+// nvfp4_scratch_ key naming one per-expert MoE weight: "L{layer}.expert_w_{gate,up,down}.
+// {expert}". Dense weights ("L5.wq", "out_proj") deliberately do not parse: no host path,
+// so promoting one would label bytes NVFP4 that nothing can serve. One parser because
+// Phase 0 and both scale-upload paths ask the same question; parsing twice lets them drift.
 struct NvFP4ExpertKey {
     enum class Kind { Gate, Up, Down };
     bool valid = false;

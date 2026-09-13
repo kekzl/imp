@@ -1,7 +1,5 @@
-// Pre-dequant Phase 3 (FP8): mode-2 FP16-cache release with FP8 migration.
-// Split out of pre_dequant_phase3_nvfp4_decode.cu to keep each .cu under the
-// kernel file-size threshold. See pre_dequant_internal.h / quant_pipeline.h
-// for shared declarations.
+// Pre-dequant Phase 3 (FP8): mode-2 FP16-cache release with FP8 migration. Split out to
+// keep each .cu under the kernel file-size threshold.
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -20,11 +18,10 @@
 
 namespace imp {
 
-// Mode 2 ("only") FP16-cache release with FP8 migration. Migrate every
-// FP16 entry not already FP8-cached into a contiguous FP8 buffer
-// (calibrate + per-tensor scale), then free the FP16 cache except entries
-// that have no NVFP4/FP8 alternative (GDN ssm_in/ssm_out on hybrids).
-// Also frees the fused KV / gate-up prefill caches.
+// Mode 2 ("only") FP16-cache release with FP8 migration: migrate every FP16 entry not
+// already FP8-cached into a contiguous FP8 buffer (calibrate + per-tensor scale), then
+// free the FP16 cache except entries with no NVFP4/FP8 alternative (GDN ssm_in/ssm_out
+// on hybrids). Also frees the fused KV/gate-up prefill caches.
 void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_budget,
                                                             cudaStream_t stream,
                                                             Nvfp4DecodeContext& dctx) {
@@ -113,15 +110,11 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
         }
     }
 
-    // Free remaining FP16 cache — but KEEP entries that have no NVFP4
-    // or FP8 alternative (e.g. GDN `ssm_in`/`ssm_out` on hybrid models
-    // like Qwen 3.5/3.6). Without this, run_gdn falls back to on-the-fly
-    // dequant which produces ~5% per-element drift at L0 and cascades
-    // to sign-flips at the shared MLP → garbage output.
-    //
-    // Also KEEP entries for native NVFP4 weights (CUTLASS_NVFP4 source):
-    // the FP16 cache is the only correct prefill path — FP8 quantization
-    // error compounds across 36 layers and shifts argmax at 152K vocab.
+    // Free remaining FP16 cache but KEEP entries with no NVFP4/FP8 alternative (e.g. GDN
+    // ssm_in/ssm_out on hybrids): without this, run_gdn falls back to on-the-fly dequant,
+    // which drifts at L0 and cascades to sign-flips at the shared MLP, garbage output.
+    // Also KEEP entries for native NVFP4 weights: the FP16 cache is the only correct prefill
+    // path there, since FP8 error compounds across layers and shifts argmax at large vocab.
     size_t freed = 0;
     size_t kept_bytes = 0;
     int kept_count = 0;
@@ -134,11 +127,10 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
             continue;
         }
         const bool has_nvfp4 = (wcache_->nvfp4.find(ptr) != wcache_->nvfp4.end());
-        // A native-FP8 entry is NOT an alternative to the FP16 copy: it serves
-        // the M=1 GEMV only, and on sm_120 there is no FP8 prefill GEMM behind
-        // it. Freeing FP16 on its account leaves prefill with a dangling
-        // pointer — `cublasLtMatmul status 14, dtA=2 dtB=2` plus an illegal
-        // access at the next cudaFree, and only under decode mode 2.
+        // A native-FP8 entry is NOT an alternative to the FP16 copy: it serves only the M=1
+        // GEMV, and sm_120 has no FP8 prefill GEMM behind it. Freeing FP16 on its account leaves
+        // prefill with a dangling pointer (cublasLtMatmul status 14) and an illegal access at the
+        // next cudaFree, only under decode mode 2.
         const auto fp8_it = wcache_->fp8.find(ptr);
         const bool has_fp8 = (fp8_it != wcache_->fp8.end()) && !fp8_it->second.native_source;
         if (has_nvfp4 || has_fp8) {

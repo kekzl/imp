@@ -1,14 +1,7 @@
-// Pre-dequant Phase 2: FP8 cache.
-// Converts weights to FP8 device tensors for the fp8_prefill path,
-// gated by attention.fp8_prefill / runtime FP8 state.
-//
-// Mixed precision: attention weights (WQ/WK/WV/WO) are cached in FP16
-// instead of FP8 to avoid precision loss that compounds across layers
-// and shifts argmax at large vocab sizes (NVFP4 degeneration root cause).
-// FFN/SSM weights tolerate 8-bit and go to FP8 for +53% prefill speed.
-//
-// Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
-// refactor roadmap. See pre_dequant_internal.h for shared helpers.
+// Phase 2: converts weights to FP8 device tensors for the fp8_prefill path. Mixed
+// precision: attention weights (WQ/WK/WV/WO) stay FP16 to avoid precision loss that
+// compounds across layers and shifts argmax at large vocab (NVFP4 degeneration root
+// cause); FFN/SSM weights tolerate 8-bit and go to FP8 for prefill speed.
 
 #include "exec/executor.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
@@ -37,12 +30,10 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
     size_t fp8_budget = std::min(remaining_budget, budget.fp8_cache_bytes);
     size_t phase2_fp16_bytes = 0;
     if (wcache_->use_fp8) {
-        // --- FP16 weight cache for native NVFP4 ---
-        // FP8 quantization error (~0.5%/layer) compounds over 36 layers and
-        // shifts argmax in 152K vocab. vLLM avoids this by dequanting NVFP4→FP16
-        // fully at load and using FP16 cuBLAS for everything. We do the same:
-        // dequantize all NVFP4 dense weights to FP16 for prefill, keep original
-        // NVFP4 data for decode GEMV (which is single-token and doesn't compound).
+        // FP16 weight cache for native NVFP4: FP8 quantization error (~0.5%/layer) compounds
+        // over many layers and shifts argmax in a large vocab. Dequantize all NVFP4 dense
+        // weights to FP16 for prefill; keep original NVFP4 data for decode GEMV (single-token,
+        // doesn't compound).
         int fp16_all_count = 0;
         size_t fp16_all_bytes = 0;
         {
@@ -248,41 +239,24 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
     deduct_budget(remaining_budget, wcache_->fp8_bytes + phase2_fp16_bytes);
 }
 
-// Phase 2b: FP8 E4M3 decode sidecar for the GDN/Mamba in/out projections
-// (gemm.fp8_ssm_proj). On native-NVFP4 hybrids the producer recipe leaves
-// ssm_in/ssm_out BF16 → they decode as FP16 GEMVs, the single largest
-// decode slice (34.6% on Qwen3.6-35B, 2026-07-10 nsys). NVFP4 on these
-// wide GDN shapes REGRESSES (see config.h note); FP8 halves the bytes with
-// byte-aligned loads instead. The sidecar only serves the M=1 decode GEMV —
-// prefill and verify chunks keep the full-precision source, and the
-// recurrent-scan state stays FP16, so the quality exposure is one 8-bit
-// weight read per token, not error accumulation in the state.
-//
-// GGUF hybrids (e.g. Qwen3.6-35B-A3B UD-Q4_K_M): the recurrent projections
-// are excluded from the NVFP4 decode cache (quality lock, phase 3) and are
-// in no other cache, so their handles were Undefined-tier → decode paid a
-// full dequant→cuBLAS round-trip per token. UD quants keep exactly these
-// tensors at Q8_0, so an FP8 copy costs the same bytes but runs the tuned
-// rowscale GEMV instead. Quantized sources are dequanted into the shared
-// scratch first; only ≥8-bit sources (Q8_0) qualify — for 4/5/6-bit
-// sources FP8 would *increase* the decode bytes, and stacking FP8 rounding
-// on a coarser lattice is exactly the recurrent-scan quality risk the
-// phase-3 exclusion exists for.
+// Phase 2b: FP8 E4M3 decode sidecar for GDN/Mamba in/out projections (gemm.fp8_ssm_proj).
+// On native-NVFP4 hybrids these stay BF16 (decode as FP16 GEMVs, the largest decode
+// slice); NVFP4 regresses on these wide GDN shapes, so FP8 halves the bytes instead.
+// Serves only the M=1 decode GEMV; prefill/verify keep full precision and the recurrent
+// scan state stays FP16, so the exposure is one 8-bit weight read per token.
+// GGUF hybrids: recurrent projections are excluded from the NVFP4 decode cache (phase 3
+// quality lock) and land nowhere else; UD quants keep them at Q8_0, so an FP8 copy costs
+// the same bytes but runs the tuned rowscale GEMV. Only >=8-bit sources qualify: on 4/5/6
+// bit sources FP8 would increase decode bytes and stack rounding on a coarser lattice.
 void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
     const bool ssm_on = dispatch_policy().gemm.fp8_ssm_proj;
-    // gemm.fp8_attn_proj (#984): same decode-only per-row-scale sidecar for
-    // the FULL-PRECISION attention projections. "auto" = full q/k/v/o on
-    // gpt-oss only — its BF16 dense projections get no NVFP4 decode cache
-    // (nvfp4_beneficial is GGUF-only) and decode as 2 B/elem FP16 GEMVs,
-    // 33.5% of the decode window (docs/archive/roofline_gptoss_2026_07_13.md);
-    // measured +12.1% decode. Teacher-forced PPL is UNAFFECTED by
-    // construction (nsys-verified: zero FP8 GEMV kernels in a --perplexity
-    // run — the apparent +2.6% in a naive PPL A/B was cuBLAS algo re-selection
-    // from the ~600 MiB VRAM shift, not the sidecar). "qo" restricts the
-    // sidecar to the q/o projections (~76% of the eligible bytes) as a
-    // conservative middle mode for future arches; "on" forces full q/k/v/o
-    // for any full-precision attention weights.
+    // gemm.fp8_attn_proj (#984): decode-only per-row-scale sidecar for full-precision
+    // attention projections. "auto" = q/k/v/o on gpt-oss only (its BF16 dense projections get
+    // no NVFP4 decode cache and decode as FP16 GEMVs). Teacher-forced PPL is unaffected by
+    // construction (no FP8 GEMV kernels run during --perplexity). "qo" restricts the sidecar
+    // to q/o as a conservative middle mode; "on" forces full q/k/v/o for any full-precision
+    // attention weights.
     const std::string& ap = dispatch_policy().gemm.fp8_attn_proj;
     const bool attn_full = ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
     const bool attn_qo = attn_full || ap == "qo";
@@ -302,13 +276,11 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     size_t total_bytes = 0;
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
-        // At decode the fused GDN input pack ([ssm_in | gate | alpha | beta]
-        // row-concat) replaces the ssm_in dispatch entirely (run_gdn n==1
-        // fused_input path), so the sidecar must target the pack where it
-        // exists; ssm_in then only serves prefill and stays full-precision.
-        // Without a pack (quantized GGUF sources never build one) decode runs
-        // the 4-call path — ssm_in AND gdn_gate GEMVs every token, so both
-        // are sidecar targets there.
+        // At decode the fused GDN input pack ([ssm_in | gate | alpha | beta] row-concat) replaces
+        // the ssm_in dispatch entirely (run_gdn n==1 fused_input path); the sidecar must target
+        // the pack where it exists, and ssm_in then only serves prefill. Without a pack
+        // (quantized GGUF sources never build one), decode runs ssm_in AND gdn_gate GEMVs
+        // separately, so both are sidecar targets there.
         const Tensor* in_side = (ssm_on && L.gdn_input_packed.data) ? &L.gdn_input_packed
                                 : ssm_on                            ? &L.ssm_in
                                                                     : nullptr;
@@ -323,10 +295,9 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
              {in_side, gate_side, ssm_out_side, q_side, k_side, v_side, o_side}) {
             if (!w || !w->data || !w->on_device)
                 continue;
-            // F16 (native residents; BF16 checkpoints are converted at
-            // upload) quantizes straight from the resident weight — the
-            // calibration kernel reads __half. Q8_0 (GGUF) dequants into the
-            // shared scratch first; see the byte/quality rationale above.
+            // F16 (native residents; BF16 converted at upload) quantizes straight from the resident
+            // weight, the calibration kernel reads __half. Q8_0 (GGUF) dequants into the shared
+            // scratch first.
             const bool f16_src = w->qtype == QType::F16;
             const bool q8_src = w->qtype == QType::Q8_0 && qscratch_->dequant != nullptr;
             if (!f16_src && !q8_src)
@@ -356,10 +327,9 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
         return;
     }
 
-    // Per-ROW scales: one scale per output channel. A single per-tensor scale
-    // measurably hurts PPL here (+4% on Qwen3.6-35B) because the fused GDN
-    // input pack concatenates row blocks with very different magnitudes
-    // (conv | gate | alpha | beta) — one amax wastes e4m3 range on most rows.
+    // Per-ROW scales, one per output channel: a single per-tensor scale measurably hurts PPL
+    // because the fused GDN input pack concatenates row blocks with very different
+    // magnitudes (conv | gate | alpha | beta); one amax wastes e4m3 range on most rows.
     size_t total_rows = 0;
     for (const auto& e : entries)
         total_rows += static_cast<size_t>(e.rows);

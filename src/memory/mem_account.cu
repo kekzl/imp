@@ -46,19 +46,13 @@ MemAccount::Pool& MemAccount::pool_locked(const char* name) {
 }
 
 void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
-    // Deliberately NOT gated on enabled_. The per-pool ledger is what makes
-    // unattributed_bytes() mean "what imp cannot account for"; gated, it is
-    // empty on every start that did not pass --mem-report and the residual
-    // reads as the whole device. That is not hypothetical — charging a plan
-    // from it collapsed Qwen3.6-35B-A3B-NVFP4's KV pool from 4096 tokens to
-    // 512, and only the sweep that happened to have --mem-report on looked
-    // sound (AUDIT B80).
-    //
-    // The cost is a lock and a small map lookup per ACQUISITION, and
-    // acquisitions are an init-time event: I2 measures zero of them while
-    // serving. The 35B's weight upload is the worst case at ~31k notes, once.
-    // What stays gated is the expensive half — checkpoint history, the report
-    // table and the sampler thread.
+    // Deliberately NOT gated on enabled_: the per-pool ledger is what makes
+    // unattributed_bytes() mean "what imp cannot account for"; gated, it would be empty on
+    // every start without --mem-report and the residual would read as the whole device
+    // (this once collapsed a KV pool from 4096 tokens to 512, AUDIT B80). Cost is a lock +
+    // small map lookup per ACQUISITION, an init-time event (I2 measures zero while serving).
+    // What stays gated is the expensive half: checkpoint history, the report table, the
+    // sampler thread.
     if (delta_bytes == 0)
         return;
     std::lock_guard<std::mutex> lock(mu_);
@@ -93,10 +87,9 @@ void MemAccount::sample_once() {
 
 size_t MemAccount::unattributed_bytes() const {
     size_t free_b = 0, total_b = 0;
-    // The planner view hides what the lazy pools have charged but not
-    // committed; that is address space, not device memory in use. Read the
-    // raw view in one call: the planner view plus the ledger added back
-    // afterwards raced the prewarm's slot commits (4185 measured vs 3416).
+    // The planner view hides what the lazy pools have charged but not committed (address
+    // space, not device memory in use). Read the raw view in one call: the planner view plus
+    // the ledger added back afterwards would race the prewarm's slot commits.
     if (!vram_budget_mem_get_info_ex(&free_b, &total_b, /*exclude_pending=*/false))
         return 0;
     const size_t used = total_b > free_b ? total_b - free_b : 0;
@@ -189,10 +182,9 @@ void MemAccount::report(const char* phase_label) {
     emit("device: total=%.0f MiB  used=%.0f MiB  free=%.0f MiB  peak_used=%.0f MiB",
          total_b / kMiB, used / kMiB, free_b / kMiB, peak / kMiB);
 
-    // What --vram-budget is actually a cap on. device-used above also carries
-    // the CUDA context and any neighbour process, so it is the wrong number to
-    // gate on; own_peak is this process's allocations since init and nothing
-    // else. The peak-VRAM gate reads this line.
+    // What --vram-budget is actually a cap on: device-used also carries the CUDA context and
+    // any neighbour process, so it is the wrong number to gate on. own_peak is this
+    // process's allocations since init and nothing else; the peak-VRAM gate reads this line.
     {
         const MemBudgetStat b = memory_budget_stat();
         const size_t ctx = vram_used_at_install_bytes();
@@ -220,10 +212,9 @@ void MemAccount::report(const char* phase_label) {
             cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usd);
             emit("mempool(async): reserved=%.0f MiB  used=%.0f MiB  trimmable=%.0f MiB",
                  rsv / kMiB, usd / kMiB, (double(rsv) - double(usd)) / kMiB);
-            // I2 / criterion 3. Armed at the Serving transition, so anything
-            // above the value it was armed at was allocated while serving —
-            // and unlike steady_state_allocations() this sees allocations that
-            // never touched Backend.
+            // I2 / criterion 3. Armed at the Serving transition, so anything above the value it was
+            // armed at was allocated while serving; unlike steady_state_allocations(), this sees
+            // allocations that never touched Backend.
             unsigned long long usd_hi = 0, rsv_hi = 0;
             cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &usd_hi);
             cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &rsv_hi);
@@ -231,10 +222,9 @@ void MemAccount::report(const char* phase_label) {
                  "(delta vs now: used %+.0f MiB)",
                  usd_hi / kMiB, rsv_hi / kMiB, (double(usd_hi) - double(usd)) / kMiB);
         }
-        // Graph-owned memory: stream-ordered allocations captured INSIDE a
-        // graph land here, not in the default pool. A5.2 predicts this should
-        // reach zero once step 5 removes per-request cudaMallocAsync from the
-        // captured regions — at which point the cudaDeviceGraphMemTrim calls
+        // Graph-owned memory: stream-ordered allocations captured INSIDE a graph land here, not
+        // the default pool. A5.2 predicts this reaches zero once step 5 removes per-request
+        // cudaMallocAsync from captured regions, at which point the cudaDeviceGraphMemTrim calls
         // in cuda_graph.cu become provably dead.
         {
             int gdev = 0;
@@ -282,12 +272,10 @@ void MemAccount::report(const char* phase_label) {
         }
         emit("%-26s %12.1f %12.1f", "TRACKED TOTAL", cur_sum / kMiB, peak_sum / kMiB);
 
-        // Named charges. These are real device memory that the per-pool notes
-        // structurally cannot see — not imp allocations at all in two of the
-        // three cases — so folding them into "untracked" made the residual
-        // look like unexplained loss. Criterion 6 asks for >=95% accounted
-        // "remainder explicitly attributed (context, driver, library
-        // internals)"; this is that attribution.
+        // Named charges: real device memory the per-pool notes structurally cannot see (not imp
+        // allocations at all, in two of three cases), so folding them into "untracked" made the
+        // residual look like unexplained loss. Criterion 6 asks for >=95% accounted "remainder
+        // explicitly attributed (context, driver, library internals)"; this is that attribution.
         int64_t named = 0;
         if (named_context_) {
             emit("%-26s %12.1f    CUDA context + driver", "  named: context",
@@ -305,17 +293,13 @@ void MemAccount::report(const char* phase_label) {
             named += static_cast<int64_t>(named_arena_);
         }
 
-        // The headline number of the whole attribution campaign, so it has to
-        // say what it is labelled. It did not: the percentage printed on the
-        // RESIDUAL line was 100*(1 - residual/used) — the ACCOUNTED share — so
-        // an over-count rendered as "RESIDUAL (unattributed) -38246.8 MiB,
-        // 230.3% of device used". Both halves now belong to their own line.
-        //
-        // `cur_sum` can exceed `used` legitimately: pools report their own live
-        // bytes, and a pool that suballocates from an arena is counted by both.
-        // When that happens the residual goes negative, which is a real signal
-        // (double-counting) and not a rounding artifact — so it is named rather
-        // than clamped to zero.
+        // The headline number of the attribution campaign has to say what it is labelled: it
+        // didn't, since the percentage on the RESIDUAL line was 100*(1 - residual/used) (the
+        // ACCOUNTED share), so an over-count rendered as a negative "unattributed" percentage
+        // over 100%. Both halves now belong to their own line.
+        // cur_sum can legitimately exceed used: pools report their own live bytes, and a pool
+        // that suballocates from an arena is counted by both. The residual then goes negative,
+        // a real double-counting signal, so it is named rather than clamped to zero.
         const double accounted = double(cur_sum) + double(named);
         const double residual = double(used) - accounted;
         const double used_d = double(used);

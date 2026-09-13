@@ -14,18 +14,11 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Constructor: allocate one contiguous GPU buffer for all layers, all blocks,
-// K+V slots.
-//
-// Memory layout (byte offsets):
-//   Per layer: K blocks contiguous, then V blocks contiguous.
-//
+// Allocates one contiguous GPU buffer for all layers, all blocks, K+V slots.
+// Per layer: K blocks contiguous, then V blocks contiguous.
 //   K offset(layer, block_id) = (layer * 2 * max_blocks + block_id) * block_bytes_
 //   V offset(layer, block_id) = (layer * 2 * max_blocks + max_blocks + block_id) * block_bytes_
-//
 //   Total = n_layers * max_blocks * 2 * block_bytes_
-// ---------------------------------------------------------------------------
 
 KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks, int block_size,
                  VRAMAllocator* alloc, int ceiling_blocks)
@@ -130,10 +123,10 @@ KVCache::KVCache(AccountingOnly, int n_layers, int n_kv_heads, int head_dim, QTy
                        ? (static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2)
                        : (static_cast<size_t>(block_size) * n_kv_heads * head_dim * dtype_size(dtype))),
       accounting_only_(true) {
-    // Geometry, including the checks: scale_block_bytes_ is arithmetic on the
-    // shape and the manager reads it, and the NVFP4 head_dim rule is a
-    // constraint on the shape rather than on the allocation. Leaving either out
-    // would make this cache disagree with a real one about what it is.
+    // Geometry, including the checks: scale_block_bytes_ is arithmetic on the shape and the
+    // manager reads it, and the NVFP4 head_dim rule is a constraint on the shape rather than
+    // the allocation. Leaving either out would make this cache disagree with a real one
+    // about what it is.
     const bool needs_scales = (dtype == QType::INT8 || dtype == QType::INT4 ||
                                dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
     if (needs_scales) {
@@ -174,12 +167,10 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
       alloc_(alloc),
       layer_is_swa_(layer_is_swa),
       swa_max_blocks_(swa_max_blocks) {
-    // Before the layout: it strides by layer_capacity_(l), which is
-    // max_blocks_ for a full-attention layer, and the stride has to be the
-    // ceiling or growth would move every layer's data. If the reservation is
-    // then declined, the stride has to go back to the affordable size and the
-    // whole layout with it, or the offsets would describe a pool that was
-    // never allocated: layout_layers_ runs again below.
+    // Before the layout: strides by layer_capacity_(l) = max_blocks_ for a full-attention
+    // layer, and the stride must be the ceiling or growth would move every layer's data. If
+    // the reservation is then declined, the stride reverts to the affordable size and
+    // layout_layers_ runs again, or the offsets would describe a pool never allocated.
     const int usable = plan_growth_(max_blocks, ceiling_blocks);
     size_t total = layout_layers_(n_kv_heads_per_layer, head_dim_per_layer);
 
@@ -325,11 +316,10 @@ size_t KVCache::layout_layers_(const std::vector<int>& n_kv_heads_per_layer,
 
 size_t KVCache::layout_layer_scales_(const std::vector<int>& n_kv_heads_per_layer,
                                      const std::vector<int>& head_dim_per_layer) {
-    // Each layer's scale-block-bytes derived from its own (nkv * hd / kNVFP4Group)
-    // so that layers with different head_dim (Gemma 4 SWA vs full-attention
-    // layers) get correctly-sized scale storage. MXFP4_KV uses the identical
-    // layout, same per-16-element group; only the scale byte semantics differ
-    // (UE8M0 vs E4M3), which is transparent here.
+    // Each layer's scale-block-bytes derives from its own (nkv * hd / kNVFP4Group) so layers
+    // with different head_dim (Gemma-4 SWA vs full-attention) get correctly-sized scale
+    // storage. MXFP4_KV uses the identical layout, same per-16-element group; only the scale
+    // byte semantics differ (UE8M0 vs E4M3), transparent here.
     layer_scale_block_bytes_.assign(n_layers_, 0);
     layer_k_scale_offset_.assign(n_layers_, 0);
     layer_v_scale_offset_.assign(n_layers_, 0);
@@ -460,11 +450,10 @@ KVCache::~KVCache() {
 // Growable pool
 // ---------------------------------------------------------------------------
 
-// Decide the layout stride. Returns how many blocks are usable to begin with.
-//
-// Growth is refused rather than faked when the device has no virtual memory
-// management: a pool that reports a ceiling it can never reach would make
-// admission wait for memory that is not coming.
+// Decide the layout stride; returns how many blocks are usable to begin with. Growth is
+// refused rather than faked when the device has no virtual memory management: a pool
+// reporting a ceiling it can never reach would make admission wait for memory that is
+// not coming.
 int KVCache::plan_growth_(int max_blocks, int ceiling_blocks) {
     if (ceiling_blocks <= max_blocks || vmm_backend() == nullptr)
         return max_blocks;
@@ -473,10 +462,9 @@ int KVCache::plan_growth_(int max_blocks, int ceiling_blocks) {
     return max_blocks;
 }
 
-// Reserve address space for the ceiling. False means "not growable", and the
-// caller falls back to the fixed allocation it would have made anyway — a
-// reservation failure must not turn into a load failure, because the fixed
-// path can still serve.
+// Reserve address space for the ceiling. False means "not growable"; the caller falls
+// back to the fixed allocation it would have made anyway. A reservation failure must not
+// turn into a load failure, since the fixed path can still serve.
 bool KVCache::reserve_pool_(size_t total_bytes, int fixed_blocks) {
     if (!growable_)
         return false;
@@ -501,12 +489,10 @@ bool KVCache::reserve_pool_(size_t total_bytes, int fixed_blocks) {
     return true;
 }
 
-// Commit the memory that blocks [0, blocks) occupy, in every layer's region.
-// Returns the number of blocks actually backed, which is what the caller must
-// believe: a growth that got halfway is half a pool, not a failure.
-//
-// One call per layer region, because the pool is laid out per layer and what
-// grows is every layer at once, not the end of one buffer.
+// Commit the memory that blocks [0, blocks) occupy, in every layer's region. Returns the
+// number of blocks actually backed, which the caller must believe: a growth that got
+// halfway is half a pool, not a failure. One call per layer region, because the pool is
+// laid out per layer and growth affects every layer at once.
 int KVCache::commit_blocks_(int blocks) {
     if (!region_ || blocks <= 0)
         return 0;
@@ -518,12 +504,9 @@ int KVCache::commit_blocks_(int blocks) {
         const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
         if (bb == 0)
             continue;  // a non-attention layer in a hybrid holds no KV
-        // A sliding-window layer's region is smaller than `blocks` implies, so
-        // this commits past it into the next layer's range. Deliberate: that
-        // range belongs to the same reservation and is wanted anyway, the tail
-        // is clamped to the reservation, and capping it per layer was measured
-        // to change nothing (64.00 vs 34.00 MiB committed either way, the
-        // difference coming from the layout rather than from the cap).
+        // A sliding-window layer's region is smaller than `blocks` implies, so this commits past
+        // it into the next layer's range: deliberate, since that range belongs to the same
+        // reservation and is wanted anyway; the tail is clamped to the reservation.
         const size_t want = static_cast<size_t>(blocks) * bb;
         const size_t k_off = static_cast<const char*>(k_ptr(l, 0)) - base;
         const size_t v_off = static_cast<const char*>(v_ptr(l, 0)) - base;
@@ -540,32 +523,21 @@ int KVCache::commit_blocks_(int blocks) {
     const size_t added = region_.committed() - before;
     if (added > 0)
         MemAccount::instance().note("kv_cache", static_cast<std::ptrdiff_t>(added));
-    // Fresh blocks start clean, exactly as the fixed pool's one big memset
-    // guarantees. Driver-committed pages carry no such promise, and a block
-    // handed out with stale bytes in its unused tail is the kind of difference
-    // that shows up as rare, unreproducible output rather than as an error.
-    // Only the new range: rezeroing the old one would erase live KV.
-    //
-    // The invariant this keeps is "a block is clean the first time it is handed
-    // out", and it is tracked by committed_blocks_. A future shrink has to
-    // lower that counter when it decommits, or a range that is decommitted and
-    // recommitted would come back with whatever the driver hands over and skip
-    // the memset below. Reuse of an already-committed block does NOT re-zero,
-    // which is the fixed pool's behaviour too: attention reads only the slots
-    // the sequence wrote.
+    // Fresh blocks start clean, as the fixed pool's one big memset guarantees; driver-
+    // committed pages carry no such promise, so a block handed out with stale bytes in its
+    // unused tail shows up as rare, unreproducible output rather than an error. Only the new
+    // range is zeroed; the invariant is "a block is clean the first time it is handed out",
+    // tracked by committed_blocks_. Reuse of an already-committed block does NOT re-zero
+    // (matches the fixed pool: attention reads only the slots the sequence wrote).
     for (int l = 0; l < n_layers_ && blocks > first_new; l++) {
         const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
         if (bb == 0)
             continue;
-        // Clamp to THIS layer's region. The commit loop above deliberately
-        // over-commits past a sliding-window layer (same reservation, wanted
-        // anyway, and the tail is clamped there); this loop had the same
-        // arithmetic and no clamp, so on a pool with windowed layers it wrote
-        // past the end of the reservation - `cudaMemset ... an illegal memory
-        // access`, which is sticky and took the whole test binary down with it.
-        //
-        // Two bugs, not one: for a windowed layer that is NOT last, the same
-        // overrun lands inside the next layer's live KV and zeroes it.
+        // Clamp to THIS layer's region: the commit loop above deliberately over-commits past a
+        // sliding-window layer (same reservation, wanted anyway), but this loop had the same
+        // arithmetic with no clamp, so on a pool with windowed layers it wrote past the end of
+        // the reservation (illegal memory access, sticky, took the whole test binary down). For
+        // a windowed layer that is NOT last, the same overrun also zeroes the next layer's live KV.
         const size_t cap = layer_block_bytes_.empty() ? static_cast<size_t>(max_blocks_)
                                                       : layer_capacity_(l);
         const size_t hi = std::min(static_cast<size_t>(blocks), cap);
@@ -575,20 +547,11 @@ int KVCache::commit_blocks_(int blocks) {
         IMP_CUDA_CHECK_LOG(cudaMemset(k_ptr(l, first_new), 0, bytes));
         IMP_CUDA_CHECK_LOG(cudaMemset(v_ptr(l, first_new), 0, bytes));
     }
-    // The memsets above run on the LEGACY DEFAULT STREAM, and the engine
-    // decodes on a cudaStreamNonBlocking stream - which by construction has no
-    // ordering relationship with stream 0. Publishing the capacity without
-    // waiting let a memset retire AFTER the first KV write into the same
-    // blocks, zeroing live KV (#1652). On a 36-layer model that is 72
-    // unordered memsets over exactly the blocks the next decode step is about
-    // to fill, and it breaks the invariant this zeroing exists to keep in the
-    // worse direction: not "stale bytes" but "your bytes, erased".
-    //
-    // Synchronising stream 0 rather than the device: the only work being waited
-    // on is these memsets, and cudaDeviceSynchronize would additionally stall
-    // on whatever the engine has in flight, for no benefit. Growth is rare (it
-    // fires when the pool is under pressure, not per step), so this costs a
-    // sync on a path that already commits driver pages.
+    // The memsets above run on the LEGACY DEFAULT STREAM; the engine decodes on a
+    // cudaStreamNonBlocking stream with no ordering relationship to stream 0. Publishing
+    // capacity without waiting let a memset retire AFTER the first KV write into the same
+    // blocks, erasing live KV (#1652). Synchronize stream 0 (not the device): the only work
+    // waited on is these memsets, and growth is rare, so the sync costs nothing extra.
     if (blocks > first_new)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
     committed_blocks_ = blocks;
@@ -648,14 +611,11 @@ int KVCache::try_grow_to(int wanted) {
     int target = std::min(wanted, max_blocks_);
     if (target <= have)
         return have;
-    // The ceiling was sized from post-weight VRAM at init, before the library
-    // reserve and the forward scratch were claimed (Qwen3.8-27B-NVFP4: a
-    // 6726-block ceiling, 3783 MiB, against 1384 MiB actually spare above the
-    // allocator headroom after warmup). A VMM commit does not fail when the
-    // card is full, it spills into host memory at a fraction of the bandwidth
-    // (#1103), so growth is capped at what is free above the headroom NOW.
-    // This reading only ever refuses blocks; the planned commit stays the
-    // floor and nothing is sized from it.
+    // The ceiling was sized from post-weight VRAM at init, before the library reserve and
+    // forward scratch were claimed. A VMM commit does not fail when the card is full, it
+    // spills into host memory at a fraction of the bandwidth (#1103), so growth is capped at
+    // what is free above the headroom NOW; the planned commit stays the floor and nothing is
+    // sized from it.
     size_t free_now = 0, total_now = 0;
     const size_t per_block = bytes_per_block();
     if (per_block > 0 && vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
@@ -732,10 +692,8 @@ BlockRef KVCache::acquire_block_ref() { return blocks_.acquire(); }
 
 BlockRef KVCache::share_block(int block_id) { return blocks_.share_by_id(block_id); }
 
-// ---------------------------------------------------------------------------
-// SWA block group (kv_cache.swa_sizing): separate id space, no sharing —
-// SWA blocks are never prefix-cached or pinned, so ref counts stay 0/1.
-// ---------------------------------------------------------------------------
+// SWA block group (kv_cache.swa_sizing): separate id space, no sharing. SWA blocks are
+// never prefix-cached or pinned, so ref counts stay 0/1.
 
 int KVCache::allocate_swa_block() {
     BlockRef ref = swa_blocks_.acquire();
@@ -970,10 +928,9 @@ void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ── batched_copy_device ──────────────────────────────────────────────
-// One CTA per desc; uint4 fast path when src/dst/bytes are 16-byte aligned
-// (block and scale regions are — pool offsets are multiples of the block
-// byte sizes), byte loop otherwise.
+// One CTA per desc; uint4 fast path when src/dst/bytes are 16-byte aligned (block and
+// scale regions are, since pool offsets are multiples of the block byte sizes), byte
+// loop otherwise.
 
 static __global__ void kv_batched_copy_kernel(const KVCache::CopyDesc* descs, int n) {
     const int d = blockIdx.x;

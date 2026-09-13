@@ -106,10 +106,9 @@ KindCapabilities effective_capabilities(TensorKind k, QType source_qtype) {
         return cap;
     }
 
-    // NVFP4 overlay only benefits Q5_K / Q6_K / Q8_0 / Q8_K (>= 5.5 bits/elem
-    // source). Sub-5-bit GGUF formats (Q4_K, Q4_0, Q5_0, Q5_1, Q3_K, Q2_K) are
-    // representation changes at similar bit-width — no compression win, possible
-    // quality risk. Mirror the runtime `nvfp4_beneficial(qtype)` policy.
+    // NVFP4 overlay only benefits Q5_K/Q6_K/Q8_0/Q8_K (>=5.5 bits/elem source). Sub-5-bit GGUF
+    // formats (Q4_K, Q4_0, Q5_0, Q5_1, Q3_K, Q2_K) are same-bit-width representation changes:
+    // no compression win, possible quality risk. Mirrors nvfp4_beneficial(qtype).
     const bool nvfp4_overlay_ok =
         (source_qtype == QType::Q8_0 || source_qtype == QType::Q8_K ||
          source_qtype == QType::Q6_K || source_qtype == QType::Q5_K ||

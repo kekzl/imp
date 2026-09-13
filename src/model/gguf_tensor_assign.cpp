@@ -1,9 +1,5 @@
-// ============================================================================
-// GGUF tensor → model weight assignment. Maps each GGUF tensor name to the
-// correct Model/Layer slot. Split out of gguf_loader.cpp to bound recompile
-// blast radius (see tools/check_filesize.py). Top-level load orchestration
-// stays in gguf_loader.cpp.
-// ============================================================================
+// GGUF tensor -> model weight slot assignment. Split out of gguf_loader.cpp to bound
+// recompile blast radius (tools/check_filesize.py).
 
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
@@ -202,17 +198,9 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
             // Mark fused by leaving expert_up_packed null — executor detects this.
             assign_quant(layer.expert_gate_packed, tensor);
         }
-        // FFN. The suffix test matters here for the same reason it does on the
-        // `attn_*` arms above and the `_exps` arms below: without it a
-        // `blk.N.ffn_up.bias` would be assign_quant'd straight into `w_up` and
-        // CLOBBER the weight, since assign_quant is a plain assignment. imp
-        // carries no dense FFN bias (only the per-expert ones), so the right
-        // answer is to leave it unassigned and let it be reported, not to
-        // overwrite a weight with a bias vector.
-        //
-        // Latent: no local GGUF ships one. gpt-oss, the family that does have
-        // FFN biases, spells them `ffn_{gate,up,down}_exps.bias` and hits the
-        // guarded arms below.
+        // Suffix test matters like the attn_* / _exps arms: without it blk.N.ffn_up.bias would
+        // assign_quant into w_up and clobber the weight (plain assignment). imp carries no dense
+        // FFN bias; left unassigned and reported. Latent: gpt-oss spells it ffn_{gate,up,down}_exps.bias.
         else if (field == "ffn_gate") {
             if (suffix == "bias")
                 return false;
@@ -252,10 +240,9 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
             else
                 assign_quant(layer.expert_up_packed, tensor);
         } else if (field == "ffn_down_exps") {
-            // Distinguish .weight (the per-expert FFN down weights) from .scale
-            // (per-expert output multiplier, shape [n_expert]) and gpt-oss's
-            // per-expert .bias. Same 4-part-name bug as ffn_gate_inp.scale: a
-            // non-weight tensor would otherwise overwrite expert_down_packed.
+            // Distinguish .weight (per-expert FFN down) from .scale (per-expert output multiplier,
+            // [n_expert]) and gpt-oss's per-expert .bias. Same 4-part-name bug as ffn_gate_inp.scale:
+            // a non-weight tensor would overwrite expert_down_packed.
             if (suffix == "scale")
                 layer.expert_down_scale = tensor;
             else if (suffix == "bias")
@@ -280,12 +267,9 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
         else if (field == "ssm_out")
             assign_quant(layer.ssm_out, tensor);
         else if (field == "ssm_dt") {
-            // Some converters (Qwen3.5-27B-mxfp4) emit A_log under the name
-            // "ssm_dt.weight" — a 1D vector of shape [n_heads]. Differentiate
-            // bias vs weight: bias → ssm_dt_b (per-head dt bias),
-            // weight → ssm_a (per-head A_log). Without this branch the weight
-            // silently overwrites the bias and ssm_a stays null, causing the
-            // GDN scan kernel to NULL-deref A_log[h] on first launch.
+            // Some converters (Qwen3.5-27B-mxfp4) emit A_log as "ssm_dt.weight", a [n_heads] vector.
+            // Differentiate: bias -> ssm_dt_b (per-head dt bias), weight -> ssm_a (per-head A_log).
+            // Without this the weight overwrites the bias and ssm_a stays null (GDN scan NULL-deref).
             if (suffix == "bias")
                 layer.ssm_dt_b = tensor;
             else if (suffix == "weight")

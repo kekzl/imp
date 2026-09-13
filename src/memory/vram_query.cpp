@@ -30,10 +30,10 @@ size_t vram_reserved_uncommitted_bytes() {
 
 void vram_budget_install(size_t budget_mb) {
     size_t budget = budget_mb << 20;
-    // Snapshot the baseline even when uncapped. It is what separates "this
-    // process's allocations" from the CUDA context and any neighbour already
-    // on the card, and both --mem-report and the peak-VRAM gate need that
-    // split to say anything useful about a budget being respected.
+    // Snapshot the baseline even when uncapped: it separates "this process's allocations"
+    // from the CUDA context and any neighbour already on the card, and both --mem-report and
+    // the peak-VRAM gate need that split to say anything useful about a budget being
+    // respected.
     size_t free_b = 0, total_b = 0;
     const bool have_info = cudaMemGetInfo(&free_b, &total_b) == cudaSuccess;
     if (have_info) {
@@ -136,10 +136,9 @@ bool vram_budget_mem_get_info_ex(size_t* free_bytes, size_t* total_bytes, bool e
             *total_bytes = 0;
         return false;
     }
-    // Track own-usage high water here rather than in a sampler thread: this
-    // function is called at every sizing site, which is exactly the phase in
-    // which the peak forms. Once serving starts imp allocates nothing (I2), so
-    // the peak cannot move behind our back.
+    // Track own-usage high water here rather than in a sampler thread: this function is
+    // called at every sizing site, exactly the phase in which the peak forms. Once serving
+    // starts imp allocates nothing (I2), so the peak cannot move behind our back.
     const size_t baseline = g_free_at_install.load(std::memory_order_relaxed);
     if (baseline > 0) {
         const size_t own = (baseline > free_b) ? (baseline - free_b) : 0;
@@ -154,10 +153,10 @@ bool vram_budget_mem_get_info_ex(size_t* free_bytes, size_t* total_bytes, bool e
         free_b = std::min(free_b, budget_left);
         total_b = budget;
     }
-    // What the lazy pools were charged for and have not committed is not free
-    // for anyone who sizes from this reading: measured without this, the KV
-    // plan took the arena's deferred 1946 MiB (3561 -> 9556 blocks) and the
-    // vision tower would have committed into a pool that had already spent it.
+    // What the lazy pools were charged for and have not committed is not free for anyone who
+    // sizes from this reading: without excluding it, the KV plan took the arena's deferred
+    // charge as free and a later commit (e.g. the vision tower) would spill into a pool that
+    // had already spent it.
     if (exclude_pending) {
         const size_t pending = vram_reserved_uncommitted_bytes();
         free_b = free_b > pending ? free_b - pending : 0;

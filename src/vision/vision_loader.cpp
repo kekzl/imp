@@ -27,19 +27,15 @@
 namespace imp {
 
 // The GGUF reader, value parser and tensor-info parser are the shared ones from
-// model/gguf_loader_internal.h. This file carried a hand-copied fork of all
-// three from before the bounds checks were added and never picked them up
-// (AUDIT_arch_2026 F1-2).
+// model/gguf_loader_internal.h. This file carried a hand-copied fork of all three from
+// before the bounds checks were added and never picked them up (AUDIT_arch_2026 F1-2).
 
 namespace {
 
 
-// One sink for both passes over a mmproj. `dry` runs the whole load with every
-// allocation replaced by an addition, which is how the arena reservation is
-// computed: the counting pass and the real pass are the SAME code, so the number
-// cannot drift from what the upload takes. The alternative — a second parser that
-// walks header, KVs and tensor descriptors on its own — is ~100 duplicated lines
-// whose drift is precisely what the Qwen3-VL side needed a test to catch.
+// One sink for both passes over a mmproj: `dry` runs the whole load with every allocation
+// replaced by an addition, computing the arena reservation - counting pass and real pass
+// are the SAME code, so the number cannot drift from what the upload takes.
 struct VisionUpload {
     bool dry = false;
     size_t bytes = 0;
@@ -96,11 +92,10 @@ bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, 
     return true;
 }
 
-// Upload a 2D weight transposed: `src` is row-major [rows, cols]; the device
-// result is row-major [cols, rows]. Gemma-3's mm.input_projection.weight is
-// stored with ne0=out (the transpose of vision_gemm's [N=out, K=in] contract,
-// where the LLaVA-style projectors store ne0=in). Transposing at load lets the
-// same vision_gemm projection path consume it unchanged.
+// Uploads a 2D weight transposed: src is row-major [rows,cols], device result is row-major
+// [cols,rows]. Gemma-3's mm.input_projection.weight stores ne0=out (the transpose of
+// vision_gemm's [N=out,K=in] contract; LLaVA-style projectors store ne0=in). Transposing at
+// load lets the same vision_gemm path consume it unchanged.
 bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t rows, int64_t cols,
                                    void** d_out, VisionUpload& up) {
     int64_t n = rows * cols;
@@ -300,10 +295,9 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
         cfg.image_size, cfg.patch_size, cfg.hidden_size, cfg.num_heads, cfg.num_layers, cfg.num_patches,
         cfg.num_image_tokens);
 
-    // Detect projector type. gemma4v is a structurally different encoder
-    // (RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX RoPE, sandwich
-    // post-norms, GeGLU FFN, scale-1 attention) — configure it here; the encoder
-    // branches on cfg.is_gemma4v. See docs/internals/vision_gemma4v_spec.md.
+    // gemma4v is a structurally different encoder (RMSNorm blocks, per-head q/k/v norm, 2D
+    // axial NEOX RoPE, sandwich post-norms, GeGLU FFN, scale-1 attention); configured here, the
+    // encoder branches on cfg.is_gemma4v. See docs/internals/vision_gemma4v_spec.md.
     {
         std::string projector;
         auto it = metadata.find("clip.projector_type");
@@ -351,10 +345,9 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     // "247 / 316" says something is wrong, "attn_qkv" says what.
     std::vector<std::string> unrecognized;
     for (const auto& info : tensor_infos) {
-        // A window that escapes the mapped file, a negative dim or an
-        // overflowing dim product: refused before a pointer is formed. The GGUF
-        // loader skips such a tensor; a tower with a missing weight cannot
-        // serve, so this loader refuses the file.
+        // A window escaping the mapped file, a negative dim, or an overflowing dim product is
+        // refused before a pointer is formed. The GGUF loader skips such a tensor; a tower with a
+        // missing weight cannot serve, so this loader refuses the whole file.
         if (!gguf_tensor_in_bounds(info)) {
             IMP_LOG_ERROR("Vision: tensor '%s' out of bounds (offset=%llu, limit=%zu) - refusing %s",
                           info.name.c_str(), static_cast<unsigned long long>(info.offset), info.data_limit,
@@ -374,12 +367,10 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
         for (uint32_t d = 0; d < info.n_dims; d++)
             shape[d] = info.dims[info.n_dims - 1 - d];
 
-        // Multimodal projector (mm.input_projection.weight): vision_gemm wants
-        // B=[N=out, K=in] (contiguous along in=hidden). Orientation differs by
-        // export: Gemma-3 stores [ne0=out, ne1=in] (transpose needed), while the
-        // LLaVA-style convention stores [ne0=in, ne1=out] (already correct).
-        // Pick by which dim equals the SigLIP hidden size, then record [out, in]
-        // so mm_proj_w drives lm_d_model.
+        // mm.input_projection.weight: vision_gemm wants B=[N=out,K=in] (contiguous along in).
+        // Orientation differs by export: Gemma-3 stores [ne0=out,ne1=in] (needs transpose), LLaVA
+        // convention stores [ne0=in,ne1=out] (already correct). Picked by which dim equals the
+        // SigLIP hidden size, recorded as [out,in] so mm_proj_w drives lm_d_model.
         if (info.name == "mm.input_projection.weight" && info.n_dims == 2) {
             int64_t ne0 = info.dims[0];
             int64_t ne1 = info.dims[1];

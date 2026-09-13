@@ -45,11 +45,10 @@ public:
     // CPU-only preprocess (decode/resize/normalize) — safe to call off the
     // batch worker (e.g. an HTTP handler thread). Fills `out` with FP16 pixels.
     [[nodiscard]] bool preprocess(std::span<const uint8_t> data, ImageData& out) const;
-    // Encode a preprocessed image into the caller's `out` device buffer (sized
-    // embeddings_bytes()). Encodes into the STABLE scratch d_embeddings_ first
-    // (the encoder CUDA graph is keyed on the output pointer, so a per-request
-    // output would force a full recapture every image) then copies to `out`.
-    // Serialized: the caller MUST be the sole GPU driver (the batch worker).
+    // Encodes into the caller's `out` buffer via the STABLE scratch d_embeddings_ first, then
+    // copies out (the encoder's CUDA graph is keyed on the output pointer, so a per-request
+    // output would force a full recapture every image). Serialized: caller MUST be the sole GPU
+    // driver (batch worker).
     [[nodiscard]] bool encode_to(const ImageData& img, half* out, cudaStream_t stream);
     size_t embeddings_bytes() const noexcept {
         return static_cast<size_t>(num_image_tokens()) * static_cast<size_t>(lm_d_) * sizeof(half);

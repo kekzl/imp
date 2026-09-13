@@ -1,22 +1,11 @@
-// Teacher-forced perplexity over a token sequence.
-//
-// Two entry points:
-//  - perplexity_nll(tokens, n): assumes a SINGLE-CHUNK prefill of
-//    `tokens[0..n-1]` just ran, so the persistent-workspace `hidden_` holds
-//    the final-layer hidden state for ALL n positions (forward_logits leaves
-//    it intact — it only slices the last token for the production LM head).
-//  - perplexity_nll_partial(...): per-chunk accumulation for CHUNKED prefill
-//    (hidden_ only retains the most recent chunk). Driven by the engine's
-//    step_prefill_one via begin/end_perplexity_capture — that flow backs
-//    imp_perplexity, whose default config resolves to chunked prefill.
-// Both apply the (tier-aware) LM head to every position in batches of
-// <= max_logit_tokens_ (logits_ is batch-sized) and accumulate the negative
-// log-likelihood of each actual next token.
-//
-// PPL = exp( (1/(n-1)) * sum_{i=0}^{n-2} -log softmax(logits_i)[tokens_{i+1}] ).
-//
-// Bench/eval only — does NOT touch the production forward_logits path. Reuses
-// gemm_via_handle_ (tier-aware: NVFP4 / FP8 / FP16 / GGUF all handled).
+// Teacher-forced perplexity. perplexity_nll(tokens,n): assumes a
+// SINGLE-CHUNK prefill just ran, hidden_ holds all n positions'
+// final-layer state. perplexity_nll_partial: per-chunk accumulation for
+// CHUNKED prefill (hidden_ retains only the most recent chunk), driven by
+// begin/end_perplexity_capture (imp_perplexity's default). Both apply the
+// tier-aware LM head in batches of <= max_logit_tokens_.
+// PPL = exp((1/(n-1)) * sum_{i=0}^{n-2} -log softmax(logits_i)[tokens_{i+1}]).
+// Bench/eval only, does not touch production forward_logits; reuses gemm_via_handle_.
 
 #include "exec/executor.h"
 #include "exec/executor_gemv_helpers.h"
@@ -39,11 +28,10 @@
 
 namespace imp {
 
-// One block per row. Online max + logsumexp over the vocab, then write
-// -logprob(target) to the per-position slot. Skips the final corpus position
-// (no next token to predict). Per-position writes (host sums in fixed index
-// order) instead of a global atomicAdd keep the NLL bit-reproducible —
-// cross-block atomic accumulation order varies run-to-run.
+// One block per row: online max + logsumexp over the vocab, writes
+// -logprob(target) to the per-position slot (skips the final corpus
+// position). Per-position writes in fixed index order keep the NLL
+// bit-reproducible; cross-block atomicAdd order varies run-to-run.
 __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz, V]
                                        const int32_t* __restrict__ tokens, int chunk_start, int n,
                                        int V, double* __restrict__ nll_per_pos,
@@ -113,10 +101,9 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
     }
 }
 
-// Shared eval-side LM-head driver (perplexity + spec-decode greedy verify):
-// applies the tier-aware LM head to hidden_[0..n_rows) in batches of
-// max_logit_tokens_, then hands each batch's logits_ view (softcap already
-// applied — production parity) to `consume`.
+// Shared eval-side LM-head driver (perplexity + spec-decode greedy
+// verify): applies the tier-aware LM head to hidden_[0..n_rows) in batches
+// of max_logit_tokens_, handing each batch's logits_ view (softcap applied) to `consume`.
 void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
                                             const std::function<void(const Tensor&, int, int)>& consume) {
     if (!initialized_ || n_rows <= 0) {
@@ -139,11 +126,11 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
     const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
     const bool lm_has_fp8 = (wcache_.fp8.count(model_->output_proj().data) != 0);
     const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
-    // Raw-GGUF-quant LM head (tied-embedding Gemma Q4_K etc.): mirror the
-    // production use_dp4a_lm arm. Routing these through gemm_via_handle_ at
-    // M=1 hits the GGUF GEMV handlers with an FP16 (un-quantized) input and
-    // produced an illegal memory access on gemma-3-12b — which poisoned the
-    // context and surfaced as the absurd PPL=1.0000 (zeroed NLL buffer).
+    // Raw-GGUF-quant LM head (tied-embedding Gemma Q4_K etc.): mirrors the
+    // production use_dp4a_lm arm. Routing through gemm_via_handle_ at M=1 hits
+    // the GGUF GEMV handlers with an unquantized FP16 input, causing an
+    // illegal memory access on gemma-3-12b that poisoned context and surfaced as PPL=1.0000 (zeroed NLL
+    // buffer).
     const auto out_qtype = model_->out_proj_.qtype;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
                              is_dp4a_qtype(out_qtype) && !dispatch_policy().gemm.no_dp4a_lm &&
@@ -170,11 +157,10 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
         bool lm_cutlass_done = false;
         if (allow_cutlass && lm_is_nvfp4 && lm_head_cutlass_ready_ &&
             qscratch_.cutlass_act_data != nullptr && qscratch_.cutlass_act_sf != nullptr) {
-            // Same NVFP4-activation tensor-core path as batched decode — lets the
-            // perplexity harness measure its quality (the per-row GEMV below keeps
-            // FP16 activations, so toggling gemm.nvfp4_lm_head_cutlass gives the
-            // PPL trade directly). NVFP4 act quant is per-row, so the M dimension
-            // (csz) affects only speed, not the measured quality.
+            // Same NVFP4-activation tensor-core path as batched decode, letting the
+            // perplexity harness measure its quality directly (the per-row GEMV below
+            // keeps FP16 activations; toggling gemm.nvfp4_lm_head_cutlass gives the
+            // PPL trade). NVFP4 act quant is per-row, so M (csz) affects only speed.
             Tensor noc = view_tokens(norm_out_, csz);
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
             quantize_fp16_to_nvfp4_cutlass(noc.data, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
@@ -187,22 +173,19 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
             // logits already written
         } else if (lm_is_nvfp4) {
             // Batched-M GEMV: one weight pass per MR=4 rows instead of a full
-            // vocab×d_model weight read per row. On a 65-row verify chunk
-            // (Qwen3-Coder-30B) the per-row loop spent 7.2 ms re-reading the
-            // LM head 65×; batched it's ~1.9 ms. Row math is unchanged (FP16
-            // activations, same kernel family as production batched decode).
+            // vocab*d_model weight read per row, cutting the dominant cost of a
+            // multi-row verify chunk. Row math unchanged (FP16 activations, same
+            // kernel family as production batched decode).
             Tensor noc = view_tokens(norm_out_, csz);
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
             gemv_nvfp4_kpar_batched_fp32(nvfp4_lm_r, static_cast<const half*>(noc.data),
                                          static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model,
                                          csz, stream);
         } else if (use_dp4a_lm) {
-            // Fused RMSNorm→Q8_1 quantize per row, then ONE batched dp4a GEMV
-            // whose weight pass is shared across the rows (#847 lever 2). The
-            // per-row loop re-read the full LM head once per chunk row
-            // (0.44 ms/row on Qwen3-8B Q8_0 — the dominant GGUF verify term
-            // after #856). Falls back to per-row when the multi-row scratch
-            // is unavailable (q8_1_rows == 1) or the batch is a single row.
+            // Fused RMSNorm->Q8_1 quantize per row, then ONE batched dp4a GEMV sharing
+            // the weight pass across rows (#847 lever 2), replacing a per-row loop
+            // that re-read the full LM head every row. Falls back to per-row when the
+            // multi-row scratch is unavailable or the batch is a single row.
             auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
             const int stride = qscratch_.q8_1_max_blocks;
             if (csz > 1 && qscratch_.q8_1_rows >= 2) {
@@ -260,10 +243,10 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
         return;
     }
     const int V = model_->config().vocab_size;
-    // Lazy-build the CUTLASS LM head: engine init only builds it when serving
-    // (max_batch_size > 1), but the harness must measure the batched-decode
-    // quality trade even from a batch=1 CLI run. No-op when the flag is off
-    // or the LM head is not in the NVFP4 decode cache.
+    // Lazy-builds the CUTLASS LM head: engine init only builds it when serving
+    // (max_batch_size>1), but the harness must measure the batched-decode
+    // quality trade from a batch=1 CLI run too. No-op if the flag is off or the LM head isn't in the NVFP4
+    // decode cache.
     build_lm_head_cutlass_(stream);
     for_each_lm_head_batch_(chunk_len, stream, /*allow_cutlass=*/true,
                             [&](const Tensor& lg, int row0, int csz) {
@@ -274,11 +257,10 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
                             });
 }
 
-// Two-phase row-wise argmax. A single block per row reads ~600 KB of fp32
-// logits sequentially (~145 µs/row at vocab 151k); phase 1 splits each row
-// across kArgmaxSplits blocks, phase 2 reduces the partials. Tie-break =
-// smallest index, matching the production greedy argmax in sampling.cu —
-// spec-decode verify must agree with what plain greedy decode would sample.
+// Two-phase row-wise argmax: phase 1 splits each row across kArgmaxSplits
+// blocks, phase 2 reduces partials (a single block reading a full vocab
+// row sequentially is slow). Tie-break = smallest index, matching
+// production greedy argmax: spec-decode verify must agree with plain greedy.
 constexpr int kArgmaxSplits = 16;
 
 __global__ void rowwise_argmax_partial_kernel(const float* __restrict__ logits, int V,
@@ -354,11 +336,11 @@ __global__ void verify_hist_count_kernel(const int32_t* __restrict__ hist, int n
     counts[idx] = c;
 }
 
-// Apply repetition/frequency/presence penalties to a batch of chunk rows.
-// Row `row0 + blockIdx.y` predicts the token after chunk position row0+y;
-// its penalty set = shared history + d_draft[0..row-1] (the draft tokens the
-// eager path would have emitted before this prediction). Formulas identical
-// to apply_penalties_kernel in sampling.cu.
+// Applies repetition/frequency/presence penalties to a batch of chunk
+// rows: row row0+blockIdx.y predicts the token after chunk position
+// row0+y; its penalty set = shared history + d_draft[0..row-1] (what the
+// eager path would have emitted before this prediction). Same formulas as apply_penalties_kernel in
+// sampling.cu.
 __global__ void verify_penalties_kernel(float* __restrict__ logits, int row0, int V,
                                         const int32_t* __restrict__ counts,
                                         const int32_t* __restrict__ draft, float rep_pen,
@@ -383,11 +365,10 @@ __global__ void verify_penalties_kernel(float* __restrict__ logits, int row0, in
     *lg = logit;
 }
 
-// Grow-once caches for the speculative verify path. Both are sized from values
-// fixed at init (max_logit_tokens_, vocab_size), so calling this from
-// prewarm_verify_scratch() removes the last two per-serving allocations the
-// --wrap interposer still saw (A7 step 5.4). The lazy calls below remain, so a
-// path that reaches them without a prewarm still works.
+// Grow-once caches for the speculative verify path, sized from init-time
+// constants (max_logit_tokens_, vocab_size). Calling from
+// prewarm_verify_scratch() removes the last per-serving allocations the
+// --wrap interposer saw; the lazy calls remain for paths without a prewarm.
 bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     const size_t scratch_needed =
@@ -466,13 +447,11 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                 freq_pen, pres_pen);
             IMP_CUDA_CHECK_LAUNCH();
         }
-        // Banned special tokens (chat-template delimiters): every OTHER path
-        // masks them before its argmax (forward(), sample_from_logits - see
-        // the comment there), and this argmax EMITS tokens (accepted rows +
-        // the bonus). Without the mask the verify chunk was the one path that
-        // could pick e.g. <|im_start|> mid-think, ending the request with
-        // empty content (deterministic on some prompts, degen_suite [stream]).
-        // Per-row penalties (batched verify): each row's own request history.
+        // Bans special tokens (chat-template delimiters) before this argmax, same
+        // as every other path (forward(), sample_from_logits): without it, the
+        // verify chunk was the one path that could emit e.g. <|im_start|> mid-
+        // think, ending the request with empty content. Per-row penalties (batched verify): each row's own
+        // request history.
         if (h_row_hist != nullptr && h_row_hist_n != nullptr && h_row_pens != nullptr) {
             for (int r = 0; r < csz; ++r) {
                 const int row = row0 + r;

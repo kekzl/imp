@@ -9,41 +9,21 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// MMVQ (Q8_1-input GEMV) scratch — file-scope, sized once at workspace init
-// via prewarm_mmvq_scratch(). The hot-path mmvq_scratch_get_or_grow() reads
-// the cached size.
-//
-// A7 step 4: both slabs prefer the engine-persistent arena, so neither path
-// calls the driver when the arena can serve it. That matters for the grow
-// branch, which this comment used to describe as "capture-unsafe": a
-// cudaMalloc inside a captured region fails the capture outright, whereas an
-// arena take is a pointer bump and is safe anywhere.
-//
-// The demand is max_tokens x ceil(K/32) x 36 x 2, and max_tokens is the
-// EXECUTOR's, not something the engine can bound when it opens the arena
-// (896 on a bench run, 4096 on a server default — 108 MiB at K=12288). So a
-// shortfall falls back to a direct allocation with a WARN rather than
-// failing: the tier is not planner-sized yet (A4), and a guessed reservation
-// that is too small must not be what breaks a model. When the planner sizes
-// T2 from measured high-water marks, the fallback goes.
-//
-// A superseded slab taken from the arena stays stranded there — bounded,
-// one-time, and visible in the arena's high-water mark.
-//
-// R5 Slice 8.6: hoisted out of executor_kernels.cu now that the legacy
-// `gemm_dispatch_impl` switch is retired. Single-TU ownership keeps the
-// global state private to this unit and the public header declares only
-// the two entry points.
-// ---------------------------------------------------------------------------
+// MMVQ (Q8_1-input GEMV) scratch, file-scope, sized once at workspace init via
+// prewarm_mmvq_scratch(); the hot path reads the cached size. Both slabs prefer the
+// engine-persistent arena: an arena take is a pointer bump and safe under CUDA graph
+// capture, whereas cudaMalloc inside a captured region fails outright.
+// Demand = max_tokens x ceil(K/32) x 36 x 2; max_tokens is the executor's and not
+// boundable when the engine opens the arena, so a shortfall falls back to a direct
+// allocation with a WARN rather than failing the model.
+// A superseded slab taken from the arena stays stranded there: bounded, one-time,
+// visible in the arena's high-water mark.
 namespace {
 void* g_mmvq_scratch = nullptr;
 size_t g_mmvq_scratch_size = 0;
-// The arena generation the cached pointer belongs to. A close (engine
-// teardown) or reset invalidates every span it handed out; without this the
-// static would survive into the next engine still pointing at the old region.
-// The pre-arena code had the same hazard against a cudaFree'd pointer — this
-// closes it rather than reproducing it.
+// Arena generation the cached pointer belongs to: an engine teardown or reset
+// invalidates every span it handed out. Without this the static would survive into the
+// next engine still pointing at the old (freed) region.
 uint64_t g_mmvq_scratch_gen = 0;
 // Sentinel generation for a slab we allocated ourselves (arena shortfall).
 constexpr uint64_t kFallbackGen = ~0ull;

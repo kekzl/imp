@@ -1,28 +1,18 @@
-// Decode path for MoE layers whose NVFP4 experts live on host.
-//
-// The GGUF host-offload path (#1370) works by handing the fused decode kernels
-// the LRU cache's per-layer slot pool instead of the model's expert array: the
-// kernels read `base + idx * stride`, and the pool is exactly that shape, so
-// `idx` becomes a slot index and no kernel changes.
-//
-// NVFP4 experts did not have that path at all. A host-resident placement was
-// loaded and served WRONG - Phase 0 skipped promoting scales onto host weights,
-// the generic GEMM then recognised the scale-less packed weight and returned
-// without multiplying, and the model answered from whichever experts happened
-// to be resident, at exit code 0 (#1403 refused the placement rather than
-// serve it). This file is the path that refusal was standing in for.
-//
-// What is different from the GGUF case, and why it is only different by this
-// much: an NVFP4 expert is TWO byte ranges (packed FP4 weights + FP8 E4M3
-// micro-scales) rather than one. Both are addressed by the same slot index,
-// because the kernels take separate bases and separate strides for them - so a
-// slot holding `packed || micro_scales` resolves both at once. The layout
-// arithmetic is in nvfp4_expert_offload.h.
-//
-// The one piece that genuinely does not fall out is the per-tensor scale: the
-// kernels read `tensor_scales[idx]` with the SAME index as the weight, so the
-// checkpoint's per-EXPERT array cannot be handed to a slot-indexed kernel. The
-// cache keeps a per-SLOT mirror, written whenever a slot's occupant changes.
+// Decode path for MoE layers whose NVFP4 experts live on host. The GGUF
+// host-offload path (#1370) hands fused decode kernels the LRU cache's
+// per-layer slot pool instead of the model's expert array (base+idx*stride,
+// idx = slot index); NVFP4 experts had no such path, so a host-resident
+// placement served WRONG (Phase 0 skipped promoting scales, the generic
+// GEMM saw a scale-less weight and returned without multiplying, answering
+// from whichever experts happened to be resident, exit code 0 - #1403
+// refused the placement rather than serve it; this file replaces that refusal).
+// An NVFP4 expert is TWO byte ranges (packed FP4 + FP8 E4M3 micro-scales),
+// both addressed by the same slot index via separate bases/strides
+// (layout: nvfp4_expert_offload.h). The one piece that does not fall out
+// is the per-tensor scale: kernels read tensor_scales[idx] by the SAME
+// index as the weight, so the checkpoint's per-expert array cannot be
+// handed to a slot-indexed kernel; the cache keeps a per-slot mirror,
+// updated whenever a slot's occupant changes.
 
 #include "exec/executor.h"
 #include "exec/executor_forward_moe_internal.h"
@@ -44,21 +34,13 @@
 
 namespace imp {
 
-// Refuse a placement nothing can serve - the gate #1403 installed, moved to
-// where the answer is actually known.
-//
-// At weight-upload time it was not: whether a host-resident NVFP4 layer can be
-// served depends on the expert cache, which is sized later (init_weights runs
-// before init_kv_cache). The old gate resolved that by refusing every
-// host-resident NVFP4 placement outright, which was correct while no path
-// existed. Now that one does, re-deriving the cache's sizing at placement time
-// would mean a second copy of that arithmetic - and a copy that drifts is
-// exactly the failure #1384 and #1403 both were.
-//
-// So the check runs here instead, after pre-dequant, against the real tensors
-// and the real cache. It uses the SAME predicates the dispatch uses, so a
-// placement that passes here is one run_moe_decode_fast will route to the slot
-// path rather than quietly fall through to a GEMM that cannot multiply it.
+// Refuses a placement nothing can serve (the #1403 gate), moved to where
+// the answer is known: at weight-upload time whether a host-resident NVFP4
+// layer can be served depends on the expert cache, sized later
+// (init_weights runs before init_kv_cache), so the old gate refused every
+// such placement outright. This check runs after pre-dequant, against the
+// real tensors and cache, using the SAME predicates the dispatch uses, so
+// a placement that passes here is one run_moe_decode_fast will actually route to the slot path.
 void GraphExecutor::verify_host_expert_placement() const {
     const auto& cfg = model_->config();
     if (!cfg.is_nvfp4_prequant)
@@ -108,19 +90,13 @@ void GraphExecutor::verify_host_expert_placement() const {
     }
 }
 
-// Stage one host-resident NVFP4 layer's experts into the device buffer.
-//
-// The per-expert route issues two H2D per expert per projection, ~768 KiB and
-// ~96 KiB - sizes that do not reach PCIe bandwidth. nsys measured 90 759 such
-// transfers moving 38 GB for one profiling run, with the host inside those
-// calls far longer than the GPU spent transferring. A whole projection at once
-// is the same bytes as ONE transfer of ~110 MiB.
-//
-// That collapse is only possible because the sources are already contiguous:
-// `moe.pin_host_experts` lays a projection's experts into one pinned slab back
-// to back, and a plain mmap usually does the same. Contiguity is CHECKED here
-// rather than assumed - a checkpoint that interleaves its tensors would
-// otherwise have its experts silently read from the wrong addresses.
+// Stages one host-resident NVFP4 layer's experts into the device buffer:
+// a whole projection in one transfer instead of two H2D per expert per
+// projection (many small transfers below PCIe bandwidth). Only possible
+// because sources are contiguous (moe.pin_host_experts lays a projection's
+// experts back to back in one pinned slab, and a plain mmap usually does
+// too); contiguity is CHECKED here, not assumed, or an interleaved
+// checkpoint would silently read experts from the wrong addresses.
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                        StagedProj out[kExpertProjCount]) {
     for (int i = 0; i < kExpertProjCount; ++i)
@@ -192,11 +168,9 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         out[p].n_experts = ne;
         any = true;
 
-        // CUTLASS device-args view: the grouped GEMM reads SfAtom-ordered
-        // scale factors and per-expert pointer arrays, neither of which the
-        // staged bytes carry. Building them here is what lets a host-resident
-        // layer take the same prefill path as a resident one instead of the
-        // per-expert dequant fallback.
+        // CUTLASS device-args view: the grouped GEMM reads SfAtom-ordered scale
+        // factors and per-expert pointer arrays, neither of which staged bytes
+        // carry. Building them here lets a host-resident layer take the same prefill path as a resident one.
         if (!moe_.layer_stage_sf || moe_.layer_stage_sf_proj_bytes == 0)
             continue;
         const int64_t N = experts[0].shape[0];
@@ -234,14 +208,11 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
     return any;
 }
 
-// Stage a host-resident layer for prefill and report whether the staged copy
-// can carry the CUTLASS path.
-//
-// Staged once per MoE call and carried on ctx, so a fallback to the legacy
-// path does not transfer the same bytes again. The weights then live in the
-// staging buffer rather than the registry, which is why the CUTLASS entry
-// predicate (`covers_ids`) cannot see them: those handles exist only for
-// device-resident experts.
+// Stages a host-resident layer for prefill and reports whether it can
+// carry the CUTLASS path. Staged once per MoE call, carried on ctx, so a
+// legacy fallback doesn't re-transfer the same bytes. The staged weights
+// live in the staging buffer, not the registry, which is why the CUTLASS
+// entry predicate (covers_ids) cannot see them.
 bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf)
         ctx.staged_done = stage_nvfp4_layer_(layer, stream, ctx.staged);
@@ -252,12 +223,10 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
            (ctx.non_gated_experts || ready(ExpertProj::Gate));
 }
 
-// Present a staged layer to the CUTLASS grouped prefill as if it were
-// device-resident. The staging pass already wrote the per-expert pointer and
-// alpha arrays; this only slices them per projection.
-//
-// Opt-in (moe.staged_cutlass_prefill): the prefill win is large and the decode
-// effect that comes with it is real but unexplained - see dispatch_policy.h.
+// Presents a staged layer to the CUTLASS grouped prefill as if
+// device-resident: the staging pass already wrote per-expert pointer and
+// alpha arrays, this just slices them per projection. Opt-in
+// (moe.staged_cutlass_prefill): the decode effect that comes with the prefill win is real but unexplained.
 bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
@@ -368,13 +337,9 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     if (!stage(ly.expert_w_gate, ExpertProj::Gate) || !stage(ly.expert_w_up, ExpertProj::Up) ||
         !stage(ly.expert_w_down, ExpertProj::Down)) {
         // Unreachable by construction: the dispatch predicate checked every
-        // precondition, and staging can only fail on an out-of-range expert
-        // id. Falling through would hand a HOST pointer to a kernel, so say so
-        // instead.
-        // IMP_CHECK, not IMP_LOG_FATAL. The comment above says continuing hands a
-        // HOST pointer to a device kernel, and IMP_LOG_FATAL only LOGS
-        // (logging.h:58) - so it said so and then did it. Abort rather than
-        // throw: this is state corruption, not a request that can be failed.
+        // precondition, and staging can only fail on an out-of-range expert id.
+        // IMP_CHECK (abort), not IMP_LOG_FATAL (logs only): falling through would
+        // hand a HOST pointer to a kernel, which is state corruption, not a failable request.
         IMP_CHECK(false,
                   "MoE NVFP4 host decode: experts could not be staged into the LRU pool (layer %d, "
                   "top_k %d, slots/layer %d). The dispatch predicate and this path have diverged.",

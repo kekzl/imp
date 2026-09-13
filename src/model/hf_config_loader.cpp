@@ -85,10 +85,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     // Architecture detection: prefer "architectures" array, fall back to "model_type"
     const JValue* archs = jobj_find(root, "architectures");
     if (archs && archs->type == JType::ARRAY && !archs->arr.empty()) {
-        // Encoder-only (BERT/RoBERTa/embedding) models have no causal LM head and
-        // need pooling — the GGUF loader already rejects them at load; the
-        // SafeTensors/HF path must too, or a `NomicBertModel` falls through to
-        // the generic decoder and hits a CUDA IMA on the first request (#818).
+        // Encoder-only (BERT/RoBERTa/embedding) models have no causal LM head; the SafeTensors/HF
+        // path must reject them like the GGUF loader does, or NomicBertModel falls through to the
+        // generic decoder and hits a CUDA IMA on first request (#818).
         if (is_encoder_only_arch(archs->arr[0].str_val)) {
             throw std::runtime_error("encoder-only architecture '" + archs->arr[0].str_val +
                                      "' is not supported (imp runs causal decoder LMs; "
@@ -163,10 +162,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     // root for all subsequent reads so we don't have to duplicate every lookup.
     const JValue* text_cfg = jobj_find(root, "text_config");
     const JValue& eff = (text_cfg && text_cfg->type == JType::OBJECT) ? *text_cfg : root;
-    // A nested text_config is exactly the marker that this checkpoint is a
-    // multimodal wrapper, so weight_map knows to strip `model.language_model.`
-    // and drop the vision tower. Derived from the file rather than from an arch
-    // allowlist — the text tower itself is an ordinary model.
+    // A nested text_config marks this checkpoint as a multimodal wrapper: weight_map strips
+    // model.language_model. and drops the vision tower. Derived from the file, not an arch
+    // allowlist; the text tower itself is an ordinary model.
     if (text_cfg && text_cfg->type == JType::OBJECT)
         cfg.multimodal_wrapper = true;
 
@@ -200,11 +198,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         jobj_get_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
     }
 
-    // RoPE. Newer HF configs (Qwen3.5/3.6, Qwen3-Next) move `rope_theta` and
-    // `partial_rotary_factor` under a nested `rope_parameters` object. Read the
-    // top-level keys first (older convention) then fall back to the nested
-    // `rope_parameters.*` to override. Without this, Qwen3.6 silently runs with
-    // theta=10000 instead of 10000000 (1000× wrong base) and full-dim RoPE.
+    // Newer HF configs (Qwen3.5/3.6, Qwen3-Next) nest rope_theta/partial_rotary_factor under
+    // rope_parameters. Read top-level first, then override with rope_parameters.*. Otherwise
+    // Qwen3.6 silently runs theta=10000 (1000x too small) with full-dim RoPE.
     jobj_get_float(eff, "rope_theta", cfg.rope_theta);
     float partial_factor = 0.0f;
     jobj_get_float(eff, "partial_rotary_factor", partial_factor);
@@ -272,11 +268,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         float factor = 1.0f;
         jobj_get_float(*rope_scaling, "factor", factor);
 
-        // imp convention (matches the GGUF loader / rope_forward): rope_freq_scale
-        // stores the FACTOR (>1, e.g. 32); the kernel applies 1/factor itself.
-        // Storing 1/factor here double-inverted YaRN for gpt-oss (#547):
-        // interpolated dims rotated factor^2=1024x too fast and the mscale
-        // compensation flipped to 0.653 instead of 1.347.
+        // imp convention (matches the GGUF loader / rope_forward): rope_freq_scale stores the
+        // FACTOR (>1), the kernel applies 1/factor itself. Storing 1/factor here double-inverted
+        // YaRN for gpt-oss (#547): dims rotated factor^2=1024x too fast, mscale flipped 0.653 vs 1.347.
         if (rope_type == "linear") {
             cfg.rope_freq_scale = factor;
         } else if (rope_type == "yarn") {
@@ -306,12 +300,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                 }
             }
         } else if (rope_type == "llama3") {
-            // Llama-3.x per-frequency RoPE scaling. Reuses LongRoPE infrastructure:
-            // we precompute one factor per rope-pair so the kernel sees
-            //   freqs[i] = base_freq[i] / factor[i]
-            // matching the HF reference algorithm. Since this scaling is
-            // independent of sequence length, both short and long arrays carry
-            // identical values.
+            // Llama-3.x per-frequency RoPE scaling reuses LongRoPE infra: one factor per rope-pair so
+            // freqs[i] = base_freq[i]/factor[i], matching the HF algorithm. Independent of sequence
+            // length, so short and long arrays carry identical values.
             float low_freq_factor = 1.0f, high_freq_factor = 4.0f;
             int orig_max_pos = 0;
             jobj_get_float(*rope_scaling, "low_freq_factor", low_freq_factor);
@@ -371,16 +362,10 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         else if (rope_type == "dynamic") {
             cfg.rope_freq_scale = 1.0f / factor;
         }
-        // The chain had no final arm, so an unhandled spelling left
-        // `rope_freq_scale` at 1.0 and the model loaded reporting its full
-        // declared context while rotating unscaled: coherent near the native
-        // window, degrading past it, at exit code 0. Older Phi-3 exports spell
-        // LongRoPE `su` / `su_scaled` (the handled `longrope` is the rename),
-        // and `dynamic_ntk` / `ntk` appear in the wild too.
-        //
-        // "default" and "none" mean no scaling, which is what falling through
-        // already does, so they are silent on purpose: Qwen3-VL-4B declares
-        // `"rope_type": "default"` and warning on it would cry wolf.
+        // An unhandled rope_type spelling left rope_freq_scale at 1.0 while reporting full context
+        // and rotating unscaled. Handles legacy spellings su/su_scaled (longrope rename),
+        // dynamic_ntk/ntk. "default"/"none" mean no scaling and fall through silently on purpose
+        // (Qwen3-VL-4B declares "default").
         else if (!rope_type.empty() && rope_type != "default" && rope_type != "none") {
             cfg.rope_scaling_unhandled = true;
             IMP_LOG_WARN(
@@ -439,29 +424,19 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         cfg.expert_d_ff = cfg.d_ff;
     }
 
-    // Qwen3.5/3.6 GDN: linear-attention layer config. The HF config exposes
-    // these as `linear_*` fields; we map them onto the existing ssm_*
-    // ModelConfig slots that the GDN forward path reads (executor_ssm_gdn.cu).
-    // Without this plumbing, ssm_inner_size stays 0 → conv_channels=0 →
-    // ssm_proj_buf_ allocates 0 bytes → IMA on the first GDN GEMM.
-    //
-    //   linear_value_head_dim × linear_num_value_heads → ssm_inner_size
-    //   linear_key_head_dim                            → ssm_state_size
-    //   linear_num_key_heads                           → ssm_group_count
-    //   linear_num_value_heads                         → ssm_dt_rank (n_heads)
-    //   linear_conv_kernel_dim                         → ssm_conv_kernel
+    // Qwen3.5/3.6 GDN: HF exposes linear_* fields, mapped onto ssm_* slots read by
+    // executor_ssm_gdn.cu. Missing this leaves ssm_inner_size=0, conv_channels=0,
+    // ssm_proj_buf_ allocates 0 bytes: IMA on first GDN GEMM.
+    //   linear_value_head_dim x linear_num_value_heads -> ssm_inner_size
+    //   linear_key_head_dim                            -> ssm_state_size
+    //   linear_num_key_heads                           -> ssm_group_count
+    //   linear_num_value_heads                         -> ssm_dt_rank (n_heads)
+    //   linear_conv_kernel_dim                         -> ssm_conv_kernel
     if (cfg.arch == ModelArch::QWEN36_MOE || cfg.arch == ModelArch::QWEN35_MOE ||
         cfg.arch == ModelArch::QWEN35) {
-        // HF SafeTensors stores GDN heads in grouped order (heads 0..n_v_per_k-1
-        // belong to group 0, etc). The scan kernel's default `g = h % n_groups`
-        // formula assumes the GGUF tiled layout (heads 0..n_groups-1 are replica
-        // 0). Set the flag so executor_ssm_gdn passes grouped_layout=1 to the
-        // kernel for HF-loaded checkpoints.
-        //
-        // Cross-converted checkpoints (HF → GGUF → HF, or weights re-packed by
-        // a third-party tool) can ship in the opposite layout. Override via
-        // gdn.layout_override="tiled"; default
-        // for SafeTensors stays grouped.
+        // HF SafeTensors stores GDN heads in grouped order (heads 0..n_v_per_k-1 = group 0); the
+        // scan kernel's default g=h%n_groups assumes the GGUF tiled layout. Set grouped_layout=1
+        // for HF loads. Cross-converted checkpoints may ship tiled; override gdn.layout_override="tiled".
         cfg.gdn_grouped_head_layout = true;
         {
             const std::string& v = process_diag_gdn_layout_override();
@@ -497,10 +472,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         if (lin_conv > 0)
             cfg.ssm_conv_kernel = lin_conv;
 
-        // layer_types[] decides per-layer GDN-vs-attention. The GGUF Qwen3.6
-        // loader infers this from tensor presence; on the HF side we surface
-        // it explicitly so executor_workspace + ssm-state sizing can pick the
-        // right layer count.
+        // layer_types[] decides per-layer GDN-vs-attention. The GGUF Qwen3.6 loader infers this
+        // from tensor presence; the HF side surfaces it explicitly so executor_workspace/ssm-state
+        // sizing picks the right layer count.
         const JValue* lt = jobj_find(eff, "layer_types");
         if (lt && lt->type == JType::ARRAY) {
             cfg.n_kv_heads_per_layer.clear();
@@ -527,18 +501,15 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             cfg.expert_shared_d_ff = qwen_shared_d_ff;
     }
 
-    // Nemotron-H MoE: hybrid Mamba2 + MoE-Expert + Attention. Read the
-    // mamba/MoE-specific fields and parse `hybrid_override_pattern` to fill
-    // `n_kv_heads_per_layer` so executor_workspace can size buffers per layer.
-    // Without this plumbing, ssm_inner_size stays 0 → SSM kernels read past
-    // their allocated state → IMA on the first prefill (the symptom we see).
-    //
-    //   mamba_head_dim × mamba_num_heads → ssm_inner_size
-    //   ssm_state_size                    → ssm_state_size
-    //   n_groups                          → ssm_group_count
-    //   mamba_num_heads                   → ssm_dt_rank (n_heads)
-    //   conv_kernel                       → ssm_conv_kernel
-    //   hybrid_override_pattern (M/E/*)   → n_kv_heads_per_layer (0 / 0 / n_kv)
+    // Nemotron-H MoE: hybrid Mamba2+MoE+Attention. Parses hybrid_override_pattern to fill
+    // n_kv_heads_per_layer so executor_workspace sizes buffers per layer. Missing this leaves
+    // ssm_inner_size=0: SSM kernels read past allocated state, IMA on first prefill.
+    //   mamba_head_dim x mamba_num_heads -> ssm_inner_size
+    //   ssm_state_size                   -> ssm_state_size
+    //   n_groups                         -> ssm_group_count
+    //   mamba_num_heads                  -> ssm_dt_rank (n_heads)
+    //   conv_kernel                      -> ssm_conv_kernel
+    //   hybrid_override_pattern (M/E/*)  -> n_kv_heads_per_layer (0/0/n_kv)
     if (cfg.arch == ModelArch::NEMOTRON_H_MOE) {
         int mamba_head_dim = 0, mamba_num_heads = 0, n_groups_v = 0;
         int ssm_state = 0, conv_k = 0;
@@ -582,10 +553,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         if (ntp && ntp->type == JType::NUMBER)
             cfg.expert_weights_norm = (ntp->num_val != 0.0);
 
-        // hybrid_override_pattern is a 52-char string with one char per layer:
-        //   M = Mamba2 (no attention)
-        //   E = MoE expert FFN (no attention)
-        //   * = Attention layer
+        // hybrid_override_pattern: one char per layer. M=Mamba2 (no attention), E=MoE expert FFN
+        // (no attention), *=Attention layer.
         std::string pat;
         if (jobj_get_string(eff, "hybrid_override_pattern", pat) && !pat.empty()) {
             cfg.n_kv_heads_per_layer.clear();
@@ -616,10 +585,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                      cfg.expert_shared_d_ff, cfg.expert_weights_scale, (int) cfg.expert_weights_norm);
     }
 
-    // gpt-oss: alternating attention — layer_types[] marks "sliding_attention"
-    // (window 128) on even layers, "full_attention" on odd. Uniform head_dim
-    // (64); the per-head sink logits + per-expert biases are tensor-level
-    // (weight_map.cpp). Router = topk-then-softmax (resolved in the MoE path).
+    // gpt-oss: layer_types[] marks "sliding_attention" (window 128) on even layers,
+    // "full_attention" on odd. Uniform head_dim=64; per-head sink logits + per-expert biases
+    // are tensor-level (weight_map.cpp). Router: topk-then-softmax.
     if (cfg.arch == ModelArch::GPT_OSS) {
         const JValue* lt = jobj_find(eff, "layer_types");
         if (lt && lt->type == JType::ARRAY) {
@@ -632,10 +600,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             cfg.sliding_window = 128;
     }
 
-    // Gemma 4: per-layer geometry. layer_types[] tells SWA vs global, and
-    // head_dim / global_head_dim + num_key_value_heads / num_global_key_value_heads
-    // define the dual geometry. Build the per-layer vectors so
-    // executor_attention.cu picks up the right shapes/theta per layer.
+    // Gemma-4: layer_types[] gives SWA vs global; head_dim/global_head_dim and
+    // num_key_value_heads/num_global_key_value_heads define the dual geometry. Builds
+    // per-layer vectors so executor_attention.cu picks the right shape/theta per layer.
     if (cfg.arch == ModelArch::GEMMA4) {
         int global_head_dim = 0;
         int num_global_kv = 0;
@@ -673,13 +640,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                 cfg.n_kv_heads_per_layer.push_back(
                     is_swa ? cfg.n_kv_heads : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
             }
-            // Scalar head_dim = max(per-layer head_dim) so KV-cache buffers and
-            // attention workspace are sized for the *largest* head_dim, not the
-            // SWA-only value. The GGUF loader does the same (gguf_loader.cpp).
-            // Without this, full-attention layers (head_dim=512) write past
-            // their allocated stride into adjacent layer slots → corrupted KV
-            // cache → garbage attention output. Symptom: L0 attention output
-            // diverges from GGUF reference even though Q/K/V projections agree.
+            // Scalar head_dim = max per-layer head_dim, so KV-cache/attention workspace sizes for the
+            // largest head_dim, not the SWA-only value (matches the GGUF loader). Otherwise
+            // full-attention layers (head_dim=512) write past their stride into adjacent layer slots.
             int max_hd = 0;
             for (int v : cfg.head_dim_per_layer)
                 max_hd = std::max(max_hd, v);
@@ -736,13 +699,10 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             // non-RoPE dims plus qk_rope_head_dim RoPE dims.
             cfg.head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim;
             cfg.rope_dim = cfg.qk_rope_head_dim;
-            // YaRN mscale from rope_scaling. HF DeepSeek-V2 uses the two mscale
-            // fields DIFFERENTLY and they must NOT be conflated:
-            //   - the softmax attention scale gets yarn_get_mscale(factor, mscale_all_dim)^2
-            //   - the RoPE cos/sin get the RATIO
-            //       yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)
-            // For DeepSeek-V2-Lite both are 0.707, so the rope ratio is exactly
-            // 1.0 (no cos/sin scaling); V3 may differ. Load both separately.
+            // YaRN mscale from rope_scaling. HF DeepSeek-V2 uses two mscale fields differently, must
+            // not conflate: softmax scale gets yarn_get_mscale(factor,mscale_all_dim)^2; rope cos/sin
+            // gets the ratio yarn_get_mscale(factor,mscale)/yarn_get_mscale(factor,mscale_all_dim).
+            // For V2-Lite both are 0.707 so the rope ratio is exactly 1.0; V3 may differ.
             const JValue* rs = jobj_find(eff, "rope_scaling");
             if (rs && rs->type == JType::OBJECT) {
                 float mscale = 1.0f, mscale_all_dim = 1.0f;
@@ -760,27 +720,12 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                          cfg.kv_lora_rank, cfg.q_lora_rank,
                          cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.v_head_dim,
                          cfg.head_dim, cfg.mla_mscale);
-            // MLA + YaRN rope mscale correction.
-            //
-            // imp's rope_yarn kernel scales cos/sin by:
-            //   mscale_final = yarn_attn_factor * (1 + 0.1 * log(rope_freq_scale))
-            //
-            // HF DeepseekV2YarnRotaryEmbedding scales cos/sin by the RATIO of the
-            // two configured mscales (modeling_deepseek.py):
-            //   _mscale = yarn_get_mscale(factor, mscale)
-            //             / yarn_get_mscale(factor, mscale_all_dim)
-            // where yarn_get_mscale(f, m) = 0.1*m*ln(f) + 1.
-            //
-            // For V2-Lite (factor=40, mscale == mscale_all_dim == 0.707) this
-            // ratio is EXACTLY 1.0 — HF does not scale the rotary at all. The
-            // earlier code used yarn_get_mscale(factor, mscale_all_dim)=1.261 as
-            // the target, inflating the rope cos/sin by 1.261x; the error
-            // compounds with position and cost ~+24% PPL at 512 tokens. Set
-            // yarn_attn_factor so mscale_final == the HF ratio.
-            //
-            // (The softmax attention scale separately receives
-            // yarn_get_mscale(factor, mscale_all_dim)^2 via
-            // mla_attention_scale_multiplier — that is unchanged.)
+            // imp's rope_yarn kernel scales cos/sin by yarn_attn_factor*(1+0.1*log(rope_freq_scale)).
+            // HF DeepseekV2YarnRotaryEmbedding instead scales by the mscale RATIO
+            //   yarn_get_mscale(factor,mscale)/yarn_get_mscale(factor,mscale_all_dim),
+            //   where yarn_get_mscale(f,m)=0.1*m*ln(f)+1. Set yarn_attn_factor to match this ratio.
+            // Softmax scale is separate and unchanged: yarn_get_mscale(factor,mscale_all_dim)^2 via
+            // mla_attention_scale_multiplier.
             if (cfg.yarn_ext_factor > 0.0f && cfg.rope_freq_scale > 1.0f) {
                 const float log_scale = std::log(cfg.rope_freq_scale);
                 const float ms_num = 0.1f * cfg.mla_mscale_num * log_scale + 1.0f;
@@ -795,18 +740,16 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         }
     }
 
-    // Multimodal vision-tower detection. Imp's SafeTensors loader skips
-    // vision tensors today; the user only gets the LLM head. Surface this
-    // explicitly when `vision_config` is present so chat-with-images use
-    // cases don't silently degrade to text-only.
+    // Multimodal vision-tower detection. imp's SafeTensors loader skips vision tensors today;
+    // surface this when vision_config is present so chat-with-images doesn't silently degrade
+    // to text-only.
     const JValue* vc = jobj_find(root, "vision_config");
     if (vc && vc->type == JType::OBJECT) {
         std::string vision_type;
         jobj_get_string(*vc, "model_type", vision_type);
-        // Which vision_config model_types use the Qwen3-VL tower layout. Shared
-        // with the SafeTensors loader's keep-the-vision-tensors gate, which must
-        // make exactly this decision one step earlier — see
-        // vision_tower_supported().
+        // Which vision_config model_types use the Qwen3-VL tower layout. Shared with the
+        // SafeTensors loader's keep-the-vision-tensors gate (vision_tower_supported()), which must
+        // make this decision one step earlier.
         const bool qwen3vl_tower = vision_tower_supported(vision_type);
         bool parsed = false;
         if (qwen3vl_tower && out_vision_tower) {
@@ -838,15 +781,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         }
     }
 
-    // Audio modality. The vision path above says out loud that it degrades to
-    // text-only; audio said nothing at all, so an omni checkpoint loaded, ran,
-    // and never mentioned the modality it had lost (roadmap Open 8).
-    //
-    // The test is OBJECT, not presence: Gemma-4-26B-A4B ships
-    // `"audio_config": null` alongside a real `vision_config` and carries no
-    // audio tensor, so keying off the key would warn on every Gemma-4. Both
-    // checkpoints also set `audio_token_id` (258881) whether or not there is
-    // an encoder, so that field is not a signal either.
+    // Audio modality: unlike vision, an omni checkpoint with a lost audio path said nothing
+    // (roadmap Open 8). Test OBJECT not presence: Gemma-4-26B ships audio_config:null with no
+    // audio tensor; audio_token_id is set regardless of an encoder, so it is not a signal either.
     const JValue* ac = jobj_find(root, "audio_config");
     if (ac && ac->type == JType::OBJECT) {
         cfg.has_audio_config = true;
@@ -963,11 +900,9 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
         IMP_LOG_WARN("chat_template array found but no usable entry in %s", path.c_str());
     }
 
-    // Case 3: standalone chat_template.jinja file alongside tokenizer_config.json.
-    // Newer HuggingFace exports (e.g. Gemma-4 llm-compressor NVFP4) ship the
-    // template as a separate file with no chat_template field in
-    // tokenizer_config.json. Read it raw — the Jinja2 engine consumes the
-    // string, so no parsing required here.
+    // Case 3: standalone chat_template.jinja beside tokenizer_config.json (e.g. Gemma-4
+    // llm-compressor NVFP4 exports with no chat_template field in tokenizer_config.json).
+    // Read raw; the Jinja2 engine consumes the string, no parsing needed here.
     std::string jinja_path = model_dir + "/chat_template.jinja";
     if (std::ifstream in(jinja_path); in.good()) {
         std::stringstream buf;
@@ -1019,10 +954,8 @@ std::vector<HFConfigLoader::AddedToken> HFConfigLoader::load_added_tokens(const 
 
 namespace {
 
-// Token entry in special_tokens_map.json comes in two shapes:
-//   "<unk>"                                    (plain string)
-//   {"content": "<s>", "lstrip": false, ...}   (object with metadata)
-// Extract the content string from either; returns empty if neither matches.
+// special_tokens_map.json token entries come as a plain string or a {"content":...} object.
+// Extracts the content string from either; returns empty if neither shape matches.
 std::string extract_token_content(const JValue& v) {
     if (v.type == JType::STRING)
         return v.str_val;
@@ -1183,17 +1116,9 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         // and a top-level value (if any) is the less specific statement.
         jobj_get_int(*quant, "group_size", cfg.group_size);
 
-        // MIXED_PRECISION carries no top-level algorithm: `quantized_layers` maps
-        // each tensor to its own. Accepting it as an NVFP4 checkpoint is only
-        // right if NVFP4 is actually in there — the flag this function sets
-        // (`is_nvfp4_prequant`) drives the MoE expert cache and the VRAM budget,
-        // and claiming it for an all-FP8 export would misplan both.
-        //
-        // The per-tensor algorithms are counted, not stored: the storage tier is
-        // decided from each tensor's real dtype at load, so a table saying "FP8"
-        // about a tensor that arrives as F8_E4M3 adds nothing. What the counts
-        // buy is a log line that names any algorithm this build did not expect,
-        // instead of it passing silently as "some NVFP4 model".
+        // MIXED_PRECISION carries no top-level algorithm; quantized_layers maps each tensor to its
+        // own. is_nvfp4_prequant is set only if NVFP4 is actually present (drives the MoE expert
+        // cache + VRAM budget). Per-tensor algorithms are counted only, to log any unexpected one.
         if (mixed) {
             const JValue* layers = jobj_find(*quant, "quantized_layers");
             if (!layers || layers->type != JType::OBJECT) {
@@ -1262,14 +1187,9 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
     }
 
     if (has_compressor && imp::llm_compressor::parse_recipe_yaml(model_dir, cfg)) {
-        // The recipe gives the scheme; the ignore list has to come from
-        // config.json when that carries one. The recipe writes the RUN's
-        // patterns, config.json the module names they expanded to, and the two
-        // do not match the same modules: `re:.*router` full-matches
-        // `...router`, never the `...router.proj` Gemma-4 carries. 4 patterns
-        // against 222 names on Gemma-4-26B-A4B-it-NVFP4, and the 30 routers
-        // that fell through arrived as unclassified Linear slots, which the
-        // inventory refuses (#1962).
+        // The scheme comes from the recipe; the ignore list must come from config.json when
+        // present. recipe.yaml records RUN patterns (re:.*router), config.json the expanded module
+        // names (...router.proj); the two do not match the same modules (#1962).
         std::vector<std::string> expanded;
         if (imp::llm_compressor::read_config_ignore_list(model_dir, expanded)) {
             IMP_LOG_INFO("NVFP4 ignore list: %zu expanded names from config.json replace %zu recipe pattern(s)",
@@ -1279,22 +1199,18 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         return true;
     }
 
-    // No recipe.yaml, or one this build cannot use: the checkpoint's own
-    // declaration is `quantization_config` in config.json, which is what
-    // HuggingFace and vLLM read. A compressed-tensors export published without
-    // the recipe used to fall through to "not quantized" here, and its scales
-    // are the RECIPROCAL of Modelopt's — so the weights loaded, generated, and
-    // were wrong by amax²/36.
+    // No usable recipe.yaml: fall back to config.json's quantization_config (what HF/vLLM
+    // read). A compressed-tensors export without a recipe used to read as "not quantized"; its
+    // scales are the RECIPROCAL of Modelopt's, so weights load and run wrong by amax^2/36.
     return imp::llm_compressor::parse_compressed_tensors_config(model_dir, cfg);
 }
 
 // ---- load_mxfp4_config ----
 
 bool HFConfigLoader::load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg) {
-    // MXFP4 is declared at config.json:quantization_config (top-level, not
-    // a separate file like NVFP4 modelopt). GPT-OSS / TorchAO MXFP4 exports
-    // use `quant_method == "mxfp4"` (case-insensitive) plus a `block_size`
-    // field that's typically 32 (E8M0 scale per 32 elements).
+    // MXFP4 is declared at config.json:quantization_config (top-level, unlike NVFP4's separate
+    // file). GPT-OSS/TorchAO exports use quant_method=="mxfp4" (case-insensitive) plus
+    // block_size (typically 32, E8M0 scale per 32 elements).
     std::string path = model_dir + "/config.json";
     JValue root;
     if (!parse_json_file(path, root))
@@ -1330,11 +1246,9 @@ bool HFConfigLoader::load_mxfp4_config(const std::string& model_dir, MxFP4Config
 // ---- load_awq_config ----
 
 bool HFConfigLoader::load_awq_config(const std::string& model_dir, AWQConfig& cfg) {
-    // AWQ ships its config in one of two places:
-    //   1) `config.json:quantization_config` (HuggingFace-standard location)
-    //   2) a separate `quant_config.json` (older AutoAWQ exports)
-    // The fields we care about are `quant_method == "awq"`, `bits`,
-    // `group_size`, `zero_point`, `version` ("gemm"/"gemv"/"marlin").
+    // AWQ config lives in one of two places: config.json:quantization_config (HF-standard) or
+    // a separate quant_config.json (older AutoAWQ). Fields: quant_method=="awq", bits,
+    // group_size, zero_point, version (gemm/gemv/marlin).
     auto try_parse = [&](const std::string& path, bool nested_under_qc) -> bool {
         JValue root;
         if (!parse_json_file(path, root))

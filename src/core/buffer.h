@@ -20,11 +20,8 @@ public:
     // Factory methods
     static Buffer device(size_t nbytes);
     static Buffer host(size_t nbytes);
-    // There was a pinned() factory here with zero callers, and with it a
-    // `pinned_` flag that reset() branched on. Pinned host memory has an owner
-    // of its own now (memory/host_pinned.h, T5b); this class is the
-    // device-or-pageable one. Removed rather than migrated — a second owner
-    // wrapped around the first would have removed no free.
+    // Device-or-pageable buffer only; pinned host memory has its own owner
+    // (memory/host_pinned.h, T5b), not a second wrapper around this one.
 
     // Accessors
     void* ptr() const { return data_; }

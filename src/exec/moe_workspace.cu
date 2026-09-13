@@ -4,10 +4,9 @@
 
 namespace imp {
 
-// The batched-MoE pointer/scale arrays are T2 arena tenants since A7 step 4b.2:
-// engine-lifetime, sized from n_experts, charged by exec_t2_demand as
-// `moe_arrays`. The arena is closed by ~Engine after every executor teardown, so
-// the frees that used to live here are gone — only the pointer nulling remains.
+// Batched-MoE pointer/scale arrays are T2 arena tenants (A7 step 4b.2): engine-lifetime,
+// sized from n_experts, charged as moe_arrays. Arena is closed by ~Engine after teardown;
+// only pointer nulling remains here.
 
 void MoEWorkspace::free(VRAMAllocator* alloc) {
     auto vfree = [alloc](void*& p) {

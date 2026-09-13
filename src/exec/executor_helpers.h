@@ -55,15 +55,12 @@ static inline int get_kv_layer(const std::vector<int>& kv_layer_map, int layer) 
     return kv_layer_map.empty() ? layer : kv_layer_map[layer];
 }
 
-// Set L2 streaming hint for weight data: deprioritize in L2 eviction so weights
-// don't pollute cache for KV data or activations reused across layers.
-//
-// The window size is clamped to the device's accessPolicyMaxWindowSize
-// (on RTX 5090 / Blackwell consumer: 128 MiB; B200: 512 MiB). Without clamping,
-// GDN models whose (w_gate,w_up,w_down) address span exceeds 128 MiB — e.g.
-// Qwen3.5-9B Q8_0 spans ~200 MiB — cause cudaStreamSetAttribute to return
-// cudaErrorInvalidValue, which poisons the stream's error state and garbles
-// every subsequent kernel.
+// L2 streaming hint for weight data (deprioritize eviction so weights
+// don't pollute L2 for KV/activations). Window size is clamped to the
+// device's accessPolicyMaxWindowSize (128 MiB on RTX 5090, 512 MiB on
+// B200): without clamping, a GDN model whose gate/up/down span exceeds it
+// makes cudaStreamSetAttribute return cudaErrorInvalidValue, poisoning the
+// stream and garbling every later kernel.
 static inline void set_l2_streaming(cudaStream_t stream, const void* ptr, size_t bytes) {
     if (!ptr || bytes == 0 || !stream)
         return;

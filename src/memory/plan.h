@@ -1,31 +1,20 @@
 #pragma once
 
-// The planner (docs/internals/MEMORY.md §A4).
-//
-// compute_vram_budget() calls itself "pure computation — just arithmetic". It
-// is pure in the functional sense and impure in the useful one: its dominant
-// input is a live cudaMemGetInfo reading taken after the weight upload and
-// before the weight caches are built. So the KV pool is sized from a number
-// that is ~3.9 GiB too optimistic (§A1.5) and the cache phases re-derive their
-// own budgets from live free VRAM again (#1100). The engine used to work around
-// the ordering with a physical balloon allocation whose only job was to hide
-// bytes from the planner; that is gone (AUDIT B62 — the guarantee is a planned
-// floor now), but the live re-derivation it papered over is still here.
-//
-// plan_memory() has three properties that code does not:
-//
-//   1. It never queries the device. Its only capacity input is budget_bytes,
-//      so the same config yields a byte-identical plan on every boot. That
-//      ends the "free VRAM before the upload swings by 1.6 GB between
-//      identical invocations -> different auto-batch -> different KV clamp"
-//      trap recorded against #1103.
-//   2. It is a pure function of a plain struct, so it runs in the CPU-only CI
-//      lane with no GPU and no Model.
-//   3. It fails at load time with an itemised report and the largest levers,
-//      never mid-generation.
-//
-// This header is deliberately free of CUDA, Model and EngineConfig. The
-// adapter that fills PlanInput from those lives in runtime/.
+// The planner (MEMORY.md A4). compute_vram_budget() is pure in the functional sense and
+// impure in the useful one: its dominant input is a live cudaMemGetInfo reading taken
+// after weight upload and before the weight caches are built, ~3.9 GiB too optimistic
+// (A1.5), and the cache phases still re-derive their own budgets from live free VRAM
+// (#1100). The physical-balloon workaround for the ordering is gone (AUDIT B62, the
+// guarantee is a planned floor now), but the live re-derivation it papered over remains.
+// plan_memory() has three properties code alone does not:
+//   1. Never queries the device: its only capacity input is budget_bytes, so the same
+//      config yields a byte-identical plan every boot (ends the free-VRAM-swings-between-
+//      identical-boots trap, #1103).
+//   2. Pure function of a plain struct: runs in the CPU-only CI lane, no GPU, no Model.
+//   3. Fails at load time with an itemised report and the largest levers, never
+//      mid-generation.
+// Deliberately free of CUDA, Model and EngineConfig; the adapter filling PlanInput from
+// those lives in runtime/.
 
 #include "memory/backend.h"
 
@@ -78,35 +67,21 @@ struct ConcurrencyLimits {
     int min_kv_tokens = 0;
 };
 
-// The fixed charge that is not imp's memory and cannot be planned away.
-// A1.5 measured ~3.9 GiB claimed by CUDA/cuBLAS/CUTLASS on the first forward
-// pass, invariant to batch and context. Carrying it as an explicit, named
-// input is the difference between a plan and a guess.
+// The fixed charge that is not imp's memory and cannot be planned away: ~3.9 GiB claimed
+// by CUDA/cuBLAS/CUTLASS on the first forward pass, invariant to batch and context
+// (A1.5). Carrying it as an explicit, named input is the difference between a plan and a
+// guess.
 struct LibraryReserve {
     size_t bytes = 0;
     const char* source = "unset";
 };
 
-// Measured 2026-07-28 on the target (RTX 5090 / sm_120a, CUDA 13.3, WSL2 WDDM
-// driver): with runtime.warmup=false the engine settles at 14 046 MiB and a
-// single 32-token request takes it to 18 234 MiB. Flat at 3848-3886 MiB across
-// batch 1/8/16 and context 1024/4096, so it scales with nothing the plan
-// controls. Refuted as explanations: imp's own lazy module loading
-// (CUDA_MODULE_LOADING=EAGER moves 124 MiB), and the default cudaMallocAsync
-// pool (reserved/used unchanged across the request).
-//
-// The 2026-07-28 measurement above was taken on a Q8_0 config, where MOST of it
-// was not a library claim at all: mmq_q8_imma's per-weight s8 planes, allocated
-// on the first prefill and charged to nothing (#1899, MEMORY.md A1.5). Those are
-// planned separately now (VRAMBudget::imma_plane_bytes), and what is left of the
-// first-forward claim measures 763 MiB on Qwen3-8B-Q8_0, 1366 on Qwen3-14B-Q6_K
-// and 3260 on Qwen3.8-27B-NVFP4. The constant stays where it is because it is
-// also the cold-start floor for models with no recorded measurement, and
-// over-reserving there costs ~640 MiB of KV (the 10 % reserve floor absorbs the
-// rest) while under-reserving costs a spilled card.
-//
-// Re-measure after a driver or CUDA bump; imp.conf `vram.library_reserve_mb`
-// overrides it per host.
+// The first-forward library claim varies by config (mmq_q8_imma's per-weight s8 planes
+// used to be miscounted here; they are planned separately now, VRAMBudget::
+// imma_plane_bytes). kMeasuredLibraryReserveBytes stays as the cold-start floor for
+// models with no recorded measurement: over-reserving costs KV (absorbed partly by the
+// 10% reserve floor), under-reserving spills the card. Re-measure after a driver or CUDA
+// bump; imp.conf vram.library_reserve_mb overrides it per host.
 constexpr size_t kMeasuredLibraryReserveBytes = 3900ull * 1024 * 1024;
 
 struct PlanInput {
@@ -145,11 +120,10 @@ struct PlanLine {
 
 struct MemoryPlan {
     size_t model_resident = 0;      // weights + the MANDATORY weight caches
-    // The rest of the weight-cache demand. Granted from the residual after the
-    // model-resident charges, and only above the one-sequence KV floor: it is
-    // the tier the engine itself trades away when VRAM is short (it caches what
-    // fits and leaves the rest as native blocks), so committing it whole made
-    // the plan reject configurations that serve fine (AUDIT B69).
+    // The rest of the weight-cache demand, granted from the residual after model-resident
+    // charges, only above the one-sequence KV floor: it is the tier the engine itself trades
+    // away when VRAM is short, so committing it whole made the plan reject configurations
+    // that serve fine (AUDIT B69).
     size_t optional_caches = 0;
     size_t engine_persistent = 0;
     size_t forward_scratch = 0;
@@ -188,10 +162,9 @@ struct PlanResult {
 // Pure. Never touches the device. Deterministic for a given input.
 PlanResult plan_memory(const PlanInput& in);
 
-// The largest max_batch_size in [1, in.limits.max_batch_size] the plan
-// accepts, shrinking the batch-shaped part of features.ssm_state_bytes by
-// `ssm_bytes_per_slot` per dropped slot (any fixed remainder, e.g. reserved
-// verify slots, stays). 0 when not even one slot fits. Pure.
+// The largest max_batch_size in [1, in.limits.max_batch_size] the plan accepts,
+// shrinking the batch-shaped part of features.ssm_state_bytes by ssm_bytes_per_slot per
+// dropped slot (any fixed remainder stays). 0 when not even one slot fits. Pure.
 int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot);
 
 }  // namespace imp

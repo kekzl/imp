@@ -21,22 +21,10 @@ namespace imp {
 Model::Model() = default;
 
 Model::~Model() {
-    // Free all GPU-side weight buffers (allocated via cudaMallocAsync).
-    //
-    // #834: these MUST be freed with cudaFreeAsync, not cudaFree. On this
-    // stack (CUDA 13.3 / WSL2) cudaFree on a stream-ordered allocation
-    // returns cudaSuccess but does NOT return the block to the async mempool
-    // — the pool's used counter keeps counting it, cudaMemPoolTrimTo can
-    // reclaim nothing, and every model unload leaks weights-sized VRAM
-    // (~8.3 GiB per Qwen3-8B-Q8_0 cycle; the reload test's cycle-2 audit
-    // showed pool used=16600 MiB > reserved=8320 MiB). cudaFreeAsync on the
-    // legacy stream + a sync retires the frees so the trim in
-    // imp_model_free/imp_context_free actually hands the memory back.
-    //
-    // At program exit the CUDA runtime may tear down the default mempool
-    // before this destructor runs, making the frees return an error.
-    // Silently ignore — the driver reclaims all device memory on context
-    // destroy.
+    // #834: free with cudaFreeAsync, not cudaFree - on this stack (CUDA 13.3/WSL2) cudaFree on
+    // a stream-ordered alloc returns success without returning the block to the pool, leaking
+    // weights-sized VRAM per unload. At exit the runtime may tear down the pool before this
+    // destructor runs; ignore errors then, the driver reclaims all device memory on context destroy.
     const bool had_gpu_weights = !gpu_allocations_.empty();
     int free_fail = 0;
     cudaError_t first_err = cudaSuccess;
@@ -58,13 +46,9 @@ Model::~Model() {
         (void)cudaGetLastError();  // clear sticky error (e.g. process-exit teardown)
     }
     gpu_allocations_.clear();
-    // Return the freed weights to the driver. The default cudaMallocAsync pool
-    // runs with an unbounded release threshold (engine init), so cudaFreeAsync
-    // above only parks weights-sized memory in the pool — the next plain
-    // cudaMalloc (e.g. a subsequent model's token-embedding upload) can't see
-    // it and OOMs. Previously this trim only ran at the C-API teardown boundary
-    // (imp_model_free), so direct-C++ model teardown (tests, embedders) leaked
-    // the reservation. Trim here so ANY model destruction returns it.
+    // Returns freed weights to the driver: the default cudaMallocAsync pool has an unbounded
+    // release threshold, so cudaFreeAsync only parks memory - the next plain cudaMalloc can't
+    // see it and OOMs. Trim here so ANY model destruction returns it, not just C-API teardown.
     if (had_gpu_weights)
         trim_device_mempool();
 
@@ -102,10 +86,9 @@ size_t Model::release_weight_pages() {
     auto drop = [&advised](void* p, size_t n) {
         if (!p || n == 0)
             return;
-        // Page-aligned by construction (mmap returns aligned addresses), and
-        // MADV_DONTNEED on a PROT_READ MAP_PRIVATE file mapping discards the
-        // resident pages only: a later read refaults from the page cache, so
-        // every pointer into the mapping stays valid and correct.
+        // Page-aligned by construction (mmap). MADV_DONTNEED on a PROT_READ MAP_PRIVATE mapping
+        // discards resident pages only: a later read refaults from the page cache, so every
+        // pointer into the mapping stays valid and correct.
         if (madvise(p, n, MADV_DONTNEED) == 0)
             advised += n;
     };
@@ -128,11 +111,9 @@ void Model::release_gpu_allocation(void* ptr) {
         // record is no longer capturable (the tensor re-uploads cold at resume).
         if (upload_log_)
             upload_log_->evict_ptr(ptr);
-        // Every caller releases a source weight tensor it is about to cudaFree
-        // (Phase-3 MoE expert-source drop, Phase-4b redundant-source drop). Once
-        // a source is freed the model can no longer rebuild caches for a SECOND
-        // engine on this handle — mark it so Engine::init rejects that cleanly
-        // instead of reading freed memory and poisoning the CUDA context (#830).
+        // Every caller releases a source weight tensor about to cudaFree (Phase-3 MoE
+        // expert-source drop, Phase-4b redundant-source drop). Marks so Engine::init rejects a
+        // second engine on this handle instead of reading freed memory and poisoning CUDA (#830).
         sources_consumed_ = true;
     }
 }
@@ -143,11 +124,8 @@ bool Model::is_base_gpu_allocation(void* ptr) const {
     return std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr) != gpu_allocations_.end();
 }
 
-// ---------------------------------------------------------------------------
-// Architecture registry — single source of truth for all per-arch metadata.
-// Replaces scattered switch statements in model.cpp, chat_template.cpp,
-// presets.cpp, and imp_api.cpp (RF-003).
-// ---------------------------------------------------------------------------
+// Architecture registry: single source of truth for per-arch metadata, replacing scattered
+// switch statements in model.cpp/chat_template.cpp/presets.cpp/imp_api.cpp (RF-003).
 struct ArchEntry {
     ModelArch arch;
     const char* name;
@@ -204,13 +182,10 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
     {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
-    // ewnorm=true: gpt-oss routes softmax-after-topk — selection on biased
-    // logits + renormalized top-k softmax is exactly imp's norm_weights path
-    // once the router bias is added to the logits (compute_moe_routing).
-    // embed_scale=2^-4: residual-stream rescale — gpt-oss's massive BF16
-    // activations overflow the FP16 hidden state (±inf by L23). All other
-    // h-contributors (Wo, o_bias, expert down + bias) are scaled to match
-    // at load; RMSNorm scale-invariance makes the model output exact.
+    // ewnorm=true: gpt-oss routes softmax-after-topk - selection on biased logits +
+    // renormalized top-k softmax equals imp's norm_weights path once router bias is added to
+    // logits. embed_scale=2^-4: residual rescale for gpt-oss's BF16 activations overflowing
+    // FP16 hidden (inf by L23); all h-contributors scaled to match, RMSNorm keeps output exact.
     {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0.0625f, 3 /*GPT_OSS_GLU*/, -1, false, true, 1.0f, 1.0f,
      0},
     {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
@@ -232,31 +207,10 @@ static const ArchEntry& lookup_arch(ModelArch arch) {
 
 const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
 
-// Arch families empirically verified safe to honor a model author's
-// kv_cache_quant_algo=FP8 hint BY DEFAULT (kv_cache.dtype=auto, no explicit
-// --kv-fp8). Measured 2026-06-13 on a 3.9k-token context, FP8 vs FP16 KV, same
-// corpus, RTX 5090:
-//   QWEN3     (Qwen3-14B-NVFP4, dense):  PPL 13.95 -> 14.10  (+1.07%), coherent
-//   QWEN3_MOE (Qwen3-30B-A3B-NVFP4):     PPL ~16.20 -> ~15.99 (neutral), coherent
-//   LLAMA     (Phi-4-reasoning-plus-NVFP4, llama arch): PPL 7.135 -> 7.153
-//             (+0.25%), measured 2026-06-23 on a 3.8k-token context. Vanilla
-//             Llama checkpoints do not declare the FP8 hint, so honoring it for
-//             the LLAMA arch only affects Phi-4-style models whose checkpoint
-//             opts in via kv_cache_quant_algo=FP8.
-//   NEMOTRON_H_MOE (Nemotron-3-Nano-30B): FP8-KV mean PPL 4.2774 vs FP16 4.2774
-//             = ~0.00% over a 26.5k-token corpus (5 runs each), measured 2026-06-29.
-//             The earlier 2026-06-23 single A/B read +0.47%..+1.83%, but that was
-//             run-to-run noise: this MoE+Mamba2 hybrid is nondeterministic even in
-//             deterministic mode (cross-context GDN), and the ~0.9% spread per dtype
-//             swamps the dtype effect — the multi-run means coincide. Only 6/52
-//             layers carry a KV cache (the rest are SSM), so the FP8 surface is small.
-// Measured 2026-06-23 but NOT added (same gate):
-//   GEMMA4 (Gemma-4-26B-A4B-NVFP4): baseline PPL on this corpus is broken (~243),
-//     can't gate. QWEN36MOE (Qwen3.6-35B-A3B): quality fine (-0.97%) but the
-//     checkpoint does not declare the hint, so allowlisting is moot.
-// Other families stay FP16 until measured; force FP8 explicitly with --kv-fp8.
-// This list IS the long-context quality gate — keep it conservative, extend only
-// with evidence.
+// Arch families verified safe to honor the checkpoint's kv_cache_quant_algo=FP8 hint by
+// default (kv_cache.dtype=auto): QWEN3, QWEN3_MOE, LLAMA (Phi-4-style hint-declaring
+// checkpoints only), NEMOTRON_H_MOE (small KV surface, mostly SSM layers). This list IS
+// the long-context quality gate: keep conservative, extend only with fresh evidence.
 bool kv_fp8_hint_default_safe(ModelArch arch) {
     switch (arch) {
         case ModelArch::QWEN3:
@@ -269,28 +223,10 @@ bool kv_fp8_hint_default_safe(ModelArch arch) {
     }
 }
 
-// Arch families verified safe for default FP8 KV WITHOUT a checkpoint hint.
-// GGUF exports never declare kv_cache_quant_algo, so the hint gate alone left
-// every GGUF model on FP16 KV — measured −39%..−41% decode at 16k context
-// (Qwen3-8B Q8_0: 150→211 tok/s with FP8 KV, 2026-07-12). Evidence bar is
-// stricter than the hint list (the author did not opt in): teacher-forced PPL
-// over a ~13.5k-token corpus at max_seq_len 16384, FP8 vs FP16 KV, fresh
-// process per run, measured 2026-07-12:
-//   QWEN3     Qwen3-8B Q8_0    11.0906 → 11.0962 (+0.05%, bit-stable ×3 runs)
-//             Qwen3-14B Q6_K    9.4706 →  9.4797 (+0.10%, bit-stable ×2)
-//   QWEN3_MOE Qwen3-30B Q4_K_M  mean 11.506 → 11.489 (−0.15%, 3 runs/arm —
-//             inside the ±0.17% MoE run-to-run spread; neutral)
-// Measured but NOT added (same session):
-//   QWEN36_MOE: GGUF 35B UD-Q4KM is neutral (−0.15%, 3 runs/arm), but the
-//     no-hint list is arch-wide and would also flip Qwen3.6-35B-NVFP4, where
-//     FP8 KV costs a REAL +1.47% PPL (13.746→13.948 mean, arms non-overlapping
-//     across 2 runs each — NVFP4 attention weights compound with FP8 KV).
-//     Hybrids also have a small KV surface (most layers are GDN), so the
-//     long-context decode upside is small; not worth the NVFP4 quality cost.
-//   LLAMA: Llama-3.2-3B Q8_0 reads +0.87%, but its baseline PPL on the gate
-//     corpus is broken-high (252 — same class as the GEMMA4 ~243 exclusion),
-//     so the measurement doesn't clear the evidence bar. Phi-4-style LLAMA
-//     checkpoints that DO declare the hint still upgrade via the hint list.
+// Arch families verified safe for default FP8 KV even with no checkpoint hint (GGUF never
+// declares the hint; FP16 KV at 16k context costs ~-40% decode). Stricter bar than the
+// hint list (author didn't opt in): QWEN3, QWEN3_MOE only. QWEN36_MOE and LLAMA measured
+// but excluded: NVFP4 compounds with FP8 KV / baseline PPL is broken-high.
 bool kv_fp8_no_hint_default_safe(ModelArch arch) {
     switch (arch) {
         case ModelArch::QWEN3:
@@ -301,39 +237,11 @@ bool kv_fp8_no_hint_default_safe(ModelArch arch) {
     }
 }
 
-// Arch families measured safe for DEFAULT NVFP4 KV.
-//
-// Why this gate is not the FP8 one with a different constant: the FP8 lists
-// above trade quality for long-context DECODE SPEED, and their exclusion note
-// for QWEN36_MOE turns on exactly that — "hybrids also have a small KV surface
-// (most layers are GDN), so the long-context decode upside is small". For
-// CAPACITY the same fact points the other way. A GDN hybrid keeps a KV cache
-// for its attention layers only, so that cache is small AND it is the thing
-// that bounds max_seq_len; shrinking it buys context that cannot be bought any
-// other way on a 32 GB card.
-//
-// Measured 2026-08-24, teacher-forced PPL over ppl_corpus_45k.txt (13810
-// counted tokens), fresh process per run, arms ALTERNATED (a fixed arm order
-// overstates the delta on this host):
-//
-//   QWEN35  Qwen3.8-27B-NVFP4    FP16 4.6124 / 4.6124 / 4.6124  (bit-stable)
-//                                NVFP4 4.6259 / 4.6259 / 4.6287   +0.29..+0.35%
-//           Qwen3.5-4B mxfp4 GGUF FP16 9.3869 / 9.3862
-//                                NVFP4 9.4038 / 9.3999            +0.15..+0.18%
-//
-// And what it buys, same card, same model, nothing else changed:
-//   max_model_len 48 512 -> 131 072 tokens; KV pool 3032 -> 2304 MiB.
-//   TTFT 852 ms @5225 tok, 7.7 s @41 680, 34.4 s @123 822 — output coherent.
-//   degen_suite.py against a server on NVFP4 KV: 50 checks, 0 FAIL.
-//
-// The cost is real and larger than the FP8 lists' ~neutral bar, so this is a
-// deliberate different trade, not the same bar met: half a percent of
-// perplexity for 2.7x the context. `kv_cache.dtype=fp16` opts out.
-//
-// NOT added, and the reason is the one already recorded for FP8 above:
-// QWEN36_MOE / QWEN35_MOE stay off. FP8 KV costs those +1.47% PPL because
-// NVFP4 attention weights compound with a quantised KV, and NVFP4 KV is the
-// more aggressive quantiser of the two; unmeasured there, so not defaulted.
+// Arch families measured safe for default NVFP4 KV: a capacity gate (shrinks the KV cache
+// that bounds max_seq_len), not a speed one - distinct bar from the FP8 lists above.
+// QWEN35 only: ~+0.3% PPL cost buys ~2.7x max_model_len on a GDN hybrid's small
+// attention-only KV surface. kv_cache.dtype=fp16 opts out; QWEN36_MOE/QWEN35_MOE stay off
+// (FP8 KV already costs them +1.47% PPL there; NVFP4 KV unmeasured for them).
 bool kv_nvfp4_default_safe(ModelArch arch) {
     switch (arch) {
         case ModelArch::QWEN35:
@@ -447,14 +355,10 @@ ModelArch parse_model_arch(const std::string& s) {
     if (it != registry.end())
         return it->second;
 
-    // Unrecognised architecture → GENERIC, which loads and produces
-    // plausible-looking output rather than an error (#1206). That fallback is
-    // deliberate — the registry above maps 30 strings onto known archs and a
-    // Llama-shaped checkpoint usually works through it — but it used to be
-    // completely silent, so a genuinely unsupported model looked supported.
-    // is_encoder_only_arch() guards the one family where the failure was loud
-    // (BERT encoders: IMA on the first request, #818); everything else just
-    // ran. Say which string was not recognised, once, at parse time.
+    // Unrecognised architecture falls back to GENERIC (plausible output, not an error, #1206):
+    // the registry maps known strings and a Llama-shaped checkpoint usually works through it.
+    // is_encoder_only_arch() guards the one family where silent failure was loud (BERT: IMA,
+    // #818); everything else just runs. Logs the unrecognised string once, at parse time.
     if (!s.empty())
         IMP_LOG_WARN(
             "Unrecognised architecture '%s' — loading as GENERIC (Llama-shaped decoder). "
@@ -464,13 +368,9 @@ ModelArch parse_model_arch(const std::string& s) {
 }
 
 bool is_encoder_only_arch(const std::string& s) {
-    // Matches BOTH naming conventions: llama.cpp GGUF arch ids (lowercase,
-    // e.g. "nomic-bert", "jina-bert-v2", "roberta") AND HuggingFace config.json
-    // `architectures` class names (CamelCase, e.g. "NomicBertModel",
-    // "BertModel", "XLMRobertaModel", "MPNetModel"). The GGUF path fed lowercase
-    // ids; the SafeTensors/HF path feeds CamelCase, so a case-sensitive
-    // find("bert") missed "NomicBertModel" and let it fall through to the
-    // generic decoder → CUDA IMA on the first request (#818). Lowercase first.
+    // Matches both llama.cpp GGUF arch ids (lowercase, e.g. nomic-bert) and HF architectures
+    // CamelCase class names (e.g. NomicBertModel). Case-sensitive find("bert") missed
+    // "NomicBertModel", falling through to the generic decoder -> CUDA IMA (#818). Lowercase first.
     std::string l;
     l.reserve(s.size());
     for (char c : s)
@@ -492,11 +392,9 @@ void apply_arch_defaults(ModelConfig& cfg) {
     // Gemma-3/4 computes embed_scale from d_model
     if (cfg.arch == ModelArch::GEMMA3 || cfg.arch == ModelArch::GEMMA4)
         cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
-    // Gemma norm weights store (1 + learned) directly: the GGUF converter bakes
-    // the +1 into every *norm.weight (see gguf_loader.cpp "already baked"), so the
-    // runtime must use the weight as-is (offset 0), same as Gemma-4 and Qwen3.5.
-    // Verified on gemma-3-12b-it-Q4_K_M: attn_norm min≈0.99 (== learned≈0 + 1), not
-    // centered at 0. Applying a +1 offset here double-counts → garbage output.
+    // Gemma norm weights store (1+learned) directly (GGUF converter bakes +1 into every
+    // *norm.weight); the runtime must use the weight as-is (offset 0), same as Gemma-4/Qwen3.5.
+    // Applying a +1 offset here double-counts, producing garbage output.
     if (e.ffn_activation >= 0)
         cfg.ffn_activation = static_cast<FFNActivation>(e.ffn_activation);
     if (e.norm_placement >= 0)
@@ -506,14 +404,9 @@ void apply_arch_defaults(ModelConfig& cfg) {
     if (e.expert_weights_norm)
         cfg.expert_weights_norm = true;
 
-    // Nemotron-H family attention is NoPE: the Mamba layers carry position,
-    // the attention layers are trained WITHOUT rotary embeddings. The HF
-    // config still ships rope_theta=10000 / partial_rotary_factor=1.0 (class
-    // defaults), and applying RoPE scrambles positional binding — the model
-    // reads prompts as a bag of words ("17 + 25" → "25 + 17"/"15 + 7";
-    // "ALPHA BRAVO CHARLIE" → hallucinated different prompt). Verified by
-    // disabling rotation (rope_theta=1e12 config patch): prompt reading
-    // becomes exact.
+    // Nemotron-H attention is NoPE: the Mamba layers carry position, attention layers are
+    // trained WITHOUT rotary embeddings. HF config still ships rope_theta/partial_rotary_factor
+    // class defaults; applying RoPE scrambles positional binding into a bag-of-words reading.
     if (cfg.arch == ModelArch::NEMOTRON_H_MOE)
         cfg.rope_attn_disabled = true;
 }

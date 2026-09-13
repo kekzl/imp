@@ -1,10 +1,8 @@
-// M=1 GDN input projections in one launch: in_proj and gate (NVFP4 rows) plus
-// alpha and beta (FP16 rows, the loader dequantizes them) share one grid.
-// Replaces four launches per GDN layer at batch=1 on native-NVFP4 hybrids (the
-// F16 gdn_input_packed path only covers F16/BF16 checkpoints). Per-row math and
-// reduction order are those of the kernel each segment replaces (multirow
-// warp_k_loop, K-par gemv_nvfp4_row + reduce_kpar, gemv_fp16_kernel), so every
-// output is bit-identical to the four-launch path.
+// M=1 GDN input projections in one launch: in_proj+gate (NVFP4) plus alpha+beta (FP16, the
+// loader dequantizes them) share one grid, replacing four launches per GDN layer at batch=1
+// on native-NVFP4 hybrids (the F16 gdn_input_packed path only covers F16/BF16 checkpoints).
+// Per-row math and reduction order match the kernel each segment replaces, so every output
+// is bit-identical to the four-launch path.
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -73,10 +71,10 @@ __device__ __forceinline__ float warp_dot_fp16(const half* __restrict__ row, con
 constexpr int kGdnInputNR = 8;  // warp-per-row rows per block (in_proj, alpha, beta)
 constexpr int kGdnGateRowsPerBlock = kMRThreads / kKparThreads;  // 2: K-par rows per block
 
-// Block ranges: [0, in_blocks) in_proj rows warp-per-row (the multirow kernel's
-// order), then gate rows at kKparThreads per row with reduce_kpar's order (the
-// gate takes gemv_nvfp4_kpar_kernel in the executor, not the multirow form, so
-// this keeps it bit-identical too), then alpha/beta rows warp-per-row.
+// Block ranges: [0,in_blocks) in_proj rows warp-per-row (multirow kernel's order), then
+// gate rows at kKparThreads/row with reduce_kpar's order (gate takes gemv_nvfp4_kpar_kernel
+// in the executor, not multirow, so this stays bit-identical too), then alpha/beta rows
+// warp-per-row.
 __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInputArgs a) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;

@@ -27,10 +27,10 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
 
     q_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
                                align256(static_cast<size_t>(max_tokens) * nh * hd * es));
-    // K and V are contiguous (no alignment gap) to enable strided batched GEMM.
-    // v_.data == k_.data + kv_raw exactly, so output_stride = kv_raw / es.
-    // MLA: mla_assemble_kv materialises K/V for all n_heads (not just n_kv_heads=1),
-    // so size the workspace to n_heads * head_dim to avoid overflow.
+    // K and V are contiguous (no alignment gap) for strided batched GEMM: v_.data == k_.data
+    // + kv_raw exactly, so output_stride = kv_raw / es.
+    // MLA: mla_assemble_kv materializes K/V for all n_heads (not just n_kv_heads=1); size the
+    // workspace to n_heads * head_dim to avoid overflow.
     {
         int kv_cols = cfg.is_mla() ? (nh * hd) : (nkv * hd);
         size_t kv_raw = static_cast<size_t>(max_tokens) * kv_cols * es;
@@ -136,20 +136,14 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
 }
 
 bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
-    // The grow branch below routes through vram_alloc/vram_free (the owner's
-    // allocator), which is not stream-ordered, so nothing here needs `stream`.
-    // The parameter stays: eight call sites pass it and a stream-ordered
-    // variant is the shape this would take if the branch ever goes live.
+    // Grow branch routes through vram_alloc/vram_free (not stream-ordered), so nothing here
+    // needs `stream`. Parameter stays: eight call sites pass it, matching the stream-ordered
+    // variant this branch would take if it ever goes live.
     (void)stream;
-    // Resize targets the PREFILL shared arena. While the decode workspace is
-    // active (slot 1), shared_workspace_ aliases the fixed-size decode buffer
-    // — growing through that alias frees the decode buffer and
-    // leaves decode_shared_workspace_ dangling; the next use_workspace(1)
-    // re-installs the freed pointer and decode kernels write into freed
-    // memory (#948: server wedged with an illegal memory access whenever a
-    // chunked prefill followed a batch=1 decode, which leaves slot 1 active).
-    // Restore the prefill workspace first, exactly like the decode path does
-    // before its own resize (step_decode_forward).
+    // Resize targets the prefill shared arena. While the decode workspace is active (slot 1),
+    // shared_workspace_ aliases the fixed-size decode buffer; growing through that alias
+    // frees the decode buffer and leaves decode_shared_workspace_ dangling (#948). Restore
+    // the prefill workspace first, like the decode path does before its own resize.
     if (active_workspace_ == 1)
         use_workspace(0);
     if (new_max_tokens == shared_workspace_max_tokens_ || new_max_tokens <= 0)
@@ -168,19 +162,12 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         return true;
 
     if (new_shared > shared_workspace_size_) {
-        // Only reallocate when growing — reuse existing buffer if large enough.
-        //
-        // Through the SAME allocator that owns the buffer. allocate_shared_workspace()
-        // takes it from vram_alloc() (cudaMalloc, or VRAMAllocator when one is
-        // installed) and free_workspace() returns it with vram_free(); this branch
-        // used to cudaFreeAsync that pointer and replace it with a cudaMallocAsync
-        // one, which is the same invalid pair AUDIT B10 recorded in mtp_forward.cu,
-        // plus a buffer whose owner could then no longer account for it. AUDIT's
-        // step-4b/step-5 resolution shows the branch is unreachable today
-        // (new_shared > shared_workspace_size_ cannot hold: allocate_shared_workspace
-        // sizes at max_tokens_, this clamps to it, and every phase term is monotone
-        // in T). Fixed rather than deleted precisely because that reachability
-        // argument is a property of the surrounding code, not of this branch.
+        // Only reallocate when growing, through the SAME allocator that owns the buffer
+        // (allocate_shared_workspace/free_workspace via vram_alloc/vram_free). Mixing
+        // cudaFreeAsync with cudaMallocAsync here would repeat AUDIT B10's invalid pair.
+        // The branch is unreachable today (allocate_shared_workspace sizes at max_tokens_, this
+        // clamps to it, every phase term monotone in T); fixed rather than deleted because that
+        // argument depends on surrounding code, not this branch.
         if (shared_workspace_) {
             vram_free(vram_alloc_, shared_workspace_);
             shared_workspace_ = nullptr;

@@ -1,22 +1,8 @@
 #pragma once
 
-// GDN configuration, one of the nine sections split out of
-// core/dispatch_policy.h on 2026-08-21.
-//
-// WHY. dispatch_policy.h aggregates all nine and is included by 23 translation
-// units, of which 21 touch two sections or fewer. Adding one field to it costs
-// 137.1 s of incremental rebuild, against 9.1 s for a small .cpp and 14.6 s for
-// the largest .cu the file-size gate polices. A TU that needs only this section
-// can include only this header and stop rebuilding when the others change.
-//
-// This is F-10 one level down, and dispatch_policy.h's own preamble records the
-// original: config.h was included by 22 files, 85 TUs transitively, and changed
-// 130 times in six months - "the highest build cost in the repo". Lifting nine
-// sections into an aggregate fixed that, and gave the aggregate the same
-// property for the same reason.
-//
-// Pure move: the contents below are byte-identical to their previous form, and
-// dispatch_policy.h includes every one of these, so no existing include breaks.
+// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// isolates a TU that touches only this section from the other eight's churn.
+// Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
 #include <cstdint>
 #include <string>
@@ -30,64 +16,32 @@ struct GDN {
     float norm_eps_override = 0.0f;  // 0 = use model default
     bool ref_kernel = false;
     bool vhead_reorder = false;
-    // GDN chunkwise SSD scan refactor — Phase 1b.1 structural prototype.
-    // When true,
-    // the executor dispatches GDN scan through
-    // `gdn_scan_chunkwise_{f32,fp32out}` (chunk-cached K/Q in shared
-    // memory) instead of the per-token-loop `gdn_scan_fused_{f32,fp32out}`.
-    // Bit-near-equivalent output (FP16 1e-3 / FP32 1e-5 tolerances per
-    // Phase 1a); microbench shows +16.7 % on the GDN scan kernel alone
-    // at n_tok=4096 (1.567 → 1.343 µs/tok on RTX 5090). Phase 4
-    // cold-median A/B on Qwen3.6-35B-A3B Q4_K_M showed the end-to-end
-    // wall delta is within the cuBLAS variance band (±0.5 % across
-    // pp512 / pp2048 / tg128), so flipping the default on is wall-neutral
-    // for the hero MoE model and unlocks the kernel-level win for
-    // workloads where the GDN scan is a larger share of wall (longer
-    // contexts, pure-GDN models like Qwen3.5-4B-GDN / Qwen3.5-9B-GDN
-    // when bench data becomes available). Opt out via
-    // `--set gdn.chunkwise_scan=false` if a model regresses.
-    // After the Phase 2 ladder (2a / 2b / 2c, all shipped) was
-    // exhaustively benched, Phase 1b.1 remains the fastest chunkwise
-    // path on sm_120 — the WY-rep + TC-MMA variants all stay behind it.
+    // GDN chunkwise SSD scan: dispatches gdn_scan_chunkwise_{f32,fp32out}
+    // (chunk-cached K/Q in shared memory) instead of the per-token-loop fused
+    // scan. Bit-near-equivalent (FP16 1e-3 / FP32 1e-5 tol). Default on;
+    // opt out via gdn.chunkwise_scan=false if a model regresses.
     bool chunkwise_scan = true;
-    // Chunk-PARALLEL prefill scan: the WY per-chunk factors are computed with
-    // grid (chunks x heads) — full-device parallel — and only a cheap matmul
-    // chain per head stays sequential. Every earlier scan route (fused,
-    // chunkwise, WY/TC) launches 32 CTAs on 170 SMs and was 42% of the
-    // Qwen3.6-35B pp512 wall (658 us/layer). Applies to single-sequence
-    // prefill (n >= 128) on HD=SS=128 with either state dtype; every other
-    // shape/route keeps the dispatch below. Falls back silently when the
-    // workspace was not allocated.
+    // Chunk-parallel prefill scan: WY per-chunk factors computed on grid
+    // (chunks x heads), full-device parallel; only a cheap per-head matmul
+    // chain stays sequential. Applies to single-sequence prefill (n>=128),
+    // HD=SS=128, either state dtype. Falls back silently if the workspace was not allocated.
     bool chunkpar_scan = true;
     // Chunks (64 tokens each) per chunk-parallel strip: kernel 1 launches
-    // strip x n_heads CTAs at one CTA per SM, so the strip sets the wave
-    // quantisation (48 heads x 8 = 384 CTAs = 2.26 waves on 170 SMs). 0 =
-    // auto (the strip in [4, 16] with the fullest last wave, larger on ties);
-    // 1..16 pins it. The workspace is sized for 16.
+    // strip*n_heads CTAs at one CTA/SM, so strip sets the wave quantization.
+    // 0 = auto (strip in [4,16], fullest last wave); 1..16 pins it.
     int chunkpar_strip = 0;
-    // Store the GDN recurrent state as BF16 instead of FP32 (halves the
-    // state traffic that dominates batched decode; arithmetic stays FP32 in
-    // registers). Default ON since the #1776/#1777 pair: +12.5% aggregate at
-    // 32 streams on Qwen3.8-27B-NVFP4 for +0.21% PPL, and the freed state
-    // bytes go to the KV pool now that the plan no longer starves it.
-    // HD=SS=128 models only; forces the fused scan route (the chunkwise/ref
-    // kernels are FP32-state only) — the executor drops chunkwise when the
-    // pool is BF16, the init resolver refuses the ref_kernel combo and keeps
-    // FP32 on unsupported shapes. FP16 state stays refuted (subnormal
-    // truncation). Opt out via gdn.state_bf16=false.
+    // GDN recurrent state as BF16 instead of FP32 (halves state traffic;
+    // arithmetic stays FP32 in registers). HD=SS=128 only; forces the fused
+    // scan (chunkwise/ref kernels are FP32-state only). FP16 state is refuted
+    // (subnormal truncation). Default on; opt out via gdn.state_bf16=false.
     bool state_bf16 = true;
-    // Batched decode (2 <= M <= 32): the alpha and beta projections run as one
-    // split-K FP16 tensor-core launch (compute/gemm_f16_narrow_smallm.cu)
-    // instead of two cuBLAS GEMMs (nvjet + splitKreduce each, 4 launches per
-    // GDN layer). FP16-resident alpha/beta weights only; other tiers keep the
-    // two-call path. false = the two cuBLAS calls.
+    // Batched decode (2<=M<=32): alpha/beta projections run as one split-K
+    // FP16 tensor-core launch instead of two cuBLAS GEMMs. FP16-resident
+    // alpha/beta weights only; other tiers keep the two-call path.
     bool alpha_beta_smallm = true;
-    // Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj, gate,
-    // alpha and beta in one GEMV launch (quant/nvfp4_gemv_gdn_input.cu), the
-    // out-projection adds the residual in its epilogue (no residual save,
-    // add or copy-back), and gated attention runs q|k|v as one launch. 6
-    // launches per GDN layer and 2 per attention layer fewer. false = the
-    // per-projection launches.
+    // Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj/gate/alpha/
+    // beta fused into one GEMV, out-proj adds the residual in its epilogue,
+    // gated attention runs q|k|v as one launch. false = per-projection launches.
     bool m1_fused = true;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;

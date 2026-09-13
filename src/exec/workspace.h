@@ -12,31 +12,20 @@ class Model;
 class VRAMAllocator;
 struct MoEWorkspace;
 
-// The shared/persistent/decode scratch arena, extracted from GraphExecutor (D2,
-// component 3). Owns the forward-pass scratch arena (shared + persistent
-// workspace, the per-phase sizes, and the decode/prefill workspace swap state);
-// the cross-cutting auxiliary-buffer hub (qscratch/moe/attn) stays on
-// GraphExecutor.
-//
-// The arena BUFFERS (shared/persistent/decode pointers + sizes + swap state)
-// are owned here. The PER-PHASE activation tensors (q_/k_/v_/gate_out_/ssm_*/…)
-// are carved by the four GraphExecutor::configure_*_workspace methods — pure
-// activation-tensor slicing, so they live on GraphExecutor (they read the buffer
-// via ws_.shared()). Only the six PERSISTENT tensors that the retained methods
-// here genuinely touch (hidden_/residual_/norm_out_/logits_/fp32_accum_buf_/
-// fp32_hidden_, carved by allocate_persistent_workspace and swapped by the
-// decode/prefill workspace swap in allocate_decode_workspace/use_workspace) are
-// still written here through pointers set in init(), mirroring how QuantPipeline
-// writes the caller-owned caches. The sizing logic is unchanged, so the move is
-// behaviour-neutral.
-//
-// See the Workspace-component design memo (archived: docs/archive/README.md).
+// Shared/persistent/decode scratch arena, extracted from GraphExecutor (D2, component
+// 3): owns the forward-pass scratch arena (buffers + sizes + decode/prefill swap state).
+// The cross-cutting auxiliary-buffer hub (qscratch/moe/attn) stays on GraphExecutor.
+// PER-PHASE activation tensors are still carved by GraphExecutor's
+// configure_*_workspace methods (pure slicing, they read the buffer via ws_.shared());
+// only the six PERSISTENT tensors (hidden_/residual_/norm_out_/logits_/
+// fp32_accum_buf_/fp32_hidden_) are written here, mirroring how QuantPipeline writes the
+// caller-owned caches. Sizing logic is unchanged; the move is behaviour-neutral.
 class Workspace {
 public:
     // Build context, set once from GraphExecutor::init (mirrors QuantPipeline's
-    // pointer-context). The pointer args are to LIVE GraphExecutor members so
-    // the moved methods read/write them exactly as before (e.g. has_gdn_ is
-    // still false at the first compute_shared_sizes() and true afterward).
+    // pointer-context). Pointer args point to LIVE GraphExecutor members so the moved
+    // methods read/write them exactly as before (e.g. has_gdn_ is false at the first
+    // compute_shared_sizes() call and true afterward).
     void init(const Model& model, VRAMAllocator* alloc, QType compute_dtype, int* max_tokens,
               MoEWorkspace& moe,
               // model-feature flags (read for phase sizing)
@@ -86,17 +75,14 @@ public:
     void use_workspace(int slot);
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
     void compute_shared_sizes(int max_tokens);
-    // include_attn_scores: charge the cuBLAS S-matrix term (capped 256 MiB,
-    // non-MoE only). Pass false when FA2 serves all prefill — the allocator
-    // skips the buffer there (#932), so the estimate must not hold phantom
-    // headroom for it (#943). GraphExecutor::workspace_estimate() derives
-    // the flag from fa2_serves_all_prefill().
+    // include_attn_scores: charge the cuBLAS S-matrix term (capped 256 MiB, non-MoE only).
+    // Pass false when FA2 serves all prefill: the allocator skips the buffer there (#932),
+    // so the estimate must not hold phantom headroom for it (#943).
     size_t workspace_estimate(bool include_attn_scores) const;
 
-    // Free the owned shared + persistent workspace buffers (called from
-    // GraphExecutor::free_buffers). Mirrors the original free path exactly:
-    // the decode-swap buffers are intentionally NOT freed here (matching the
-    // pre-extraction behaviour).
+    // Frees the owned shared + persistent workspace buffers (called from
+    // GraphExecutor::free_buffers). Mirrors the original free path: decode-swap buffers are
+    // intentionally NOT freed here (matching pre-extraction behaviour).
     void free_buffers();
 
 private:
@@ -114,10 +100,10 @@ private:
     const int* max_expert_eff_ = nullptr;
     const int* max_logit_tokens_ = nullptr;
 
-    // Persistent activation tensors (owned by GraphExecutor; carved by
-    // allocate_persistent_workspace and swapped by allocate_decode_workspace /
-    // use_workspace, which stay here). The 16 per-phase activation tensors moved
-    // out with the configure_*_workspace carvers (back on GraphExecutor).
+    // Persistent activation tensors owned by GraphExecutor, carved by
+    // allocate_persistent_workspace and swapped by allocate_decode_workspace/use_workspace,
+    // which stay here. The 16 per-phase activation tensors moved out with the
+    // configure_*_workspace carvers (back on GraphExecutor).
     Tensor* hidden_ = nullptr;
     Tensor* residual_ = nullptr;
     Tensor* norm_out_ = nullptr;

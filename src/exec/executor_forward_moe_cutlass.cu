@@ -1,8 +1,5 @@
-// ---------------------------------------------------------------------------
-// CUTLASS 3.x NVFP4 MoE prefill path.
-// Extracted from executor_forward_moe.cu — contains
-// GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_().
-// ---------------------------------------------------------------------------
+// CUTLASS 3.x NVFP4 MoE prefill path, extracted from
+// executor_forward_moe.cu: GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_().
 
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
@@ -30,27 +27,14 @@
 
 namespace imp {
 
-// The path-selection ORDER + arch/config gates below are mirrored as a pure host
-// function `select_moe_prefill_path` in moe_prefill_decision.h.
-//
-// That mirror used to be TEST-ONLY: test_routing_decision.cpp was its sole
-// caller, so a reorder here left the test green and its stated purpose unmet —
-// audit finding F-3. The attention half of F-3 got its runtime check
-// (verify_against_routing_model, attention_dispatch.cu); this half did not, and
-// the comment at executor_forward_moe.cu asked for the two predicates to be kept
-// in sync by hand. Nothing enforced that.
-//
-// This function now CONSULTS the mirror. Each tier records what it actually did
-// — not what its preconditions promised, since device-args and smallM can both
-// fail *inside* and fall through — and once a tier wins, the model is replayed
-// against those observations and must name the same winner.
-//
-// KNOWN LIMIT, same as the attention side and stated rather than implied: a tier
-// reordered ahead of the winner that WOULD have accepted stays invisible,
-// because the chain short-circuits and never asks it.
-//
-// One-shot so a divergence cannot flood a serving log; the first occurrence is
-// the one that matters and it names both answers.
+// Path-selection order + gates mirror select_moe_prefill_path
+// (moe_prefill_decision.h). That mirror used to be test-only (F-3): a
+// reorder here left the test green without enforcing sync. This function
+// now CONSULTS the mirror: each tier records what it actually did, and
+// once a tier wins, the model is replayed against those observations and
+// must name the same winner. KNOWN LIMIT: a tier reordered ahead of the
+// winner that would have accepted stays invisible (chain short-circuits).
+// One-shot logging so a divergence cannot flood the serving log.
 static void verify_against_moe_routing_model(ModelArch arch, const DispatchPolicy& rcfg,
                                              const MoePrefillWorkspace& obs, MoePrefillPath chosen) {
     const MoePrefillPath modeled = select_moe_prefill_path(arch, rcfg, obs);
@@ -92,21 +76,11 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         }
         return true;
     };
-    // Predicate: CUTLASS 3.x NVFP4 grouped path.
-    // Measured on Qwen3-Coder-30B-A3B-FP4:
-    //   Prefill n=120: ~2750 tok/s (vs legacy ~77)   — 35x win
-    //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
-    // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
-    // The moe.no_cutlass3x config flag (was IMP_NO_CUTLASS3X_MOE env) forces
-    // legacy for debugging.
-    //
-    // Observations for the routing-model replay, filled in as the chain is
-    // walked. A tier the chain never reaches keeps its `false` — see the KNOWN
-    // LIMIT above. Same short-circuit order as the six early returns this
-    // conjunction replaces, so the cheap checks still gate the expensive ones.
-    // Host-resident NVFP4 experts: stage the layer and report whether the
-    // staged copy can carry this path (see the definition; it is why
-    // `covers_ids` cannot see these weights).
+    // CUTLASS 3.x NVFP4 grouped path predicate. moe.no_cutlass3x forces legacy
+    // for debugging. Observations for the routing-model replay are filled in
+    // as the chain is walked; a tier the chain never reaches keeps its false
+    // (see verify_against_moe_routing_model's KNOWN LIMIT). Host-resident
+    // NVFP4 experts: staging the layer here is why `covers_ids` cannot see these weights.
     const bool staged_covers = stage_layer_for_prefill_(layer, stream, ctx);
 
     MoePrefillWorkspace obs{};
@@ -121,30 +95,16 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         return false;
     }
 
-// =========================================================================
-// CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM path (NVFP4 × NVFP4 → FP16).
-// On by default; the moe.no_cutlass3x config flag (was IMP_CUTLASS3X_MOE env)
-// forces legacy. Zero dequant overhead vs the nvfp4→FP16 batch path;
-// per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
-// =========================================================================
-//
-// Phase 3c-full Step 2b: fully device-args dispatch placed BEFORE
-// the D2H+sync. When workspace buffers exist (the production
-// case for NVFP4-prequant models), runs gate / up / activation /
-// down end-to-end via device-resident kernels and skips the
-// legacy code path below. No host iteration over M_per /
-// h_offsets, no D2H+sync — prerequisite for graph capture of
-// the MoE prefill path. Falls back to the legacy path on any
-// dispatch failure or unpopulated workspace.
-//
+// CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM (NVFP4xNVFP4->FP16), on by
+// default (moe.no_cutlass3x forces legacy). Zero dequant overhead vs the
+// NVFP4->FP16 batch path; per-group alpha via fusion_args.alpha_ptr_array.
+// Fully device-args dispatch runs gate/up/activation/down end-to-end via
+// device-resident kernels before any D2H+sync, a prerequisite for graph
+// capture of MoE prefill. Falls back to legacy on dispatch failure or an unpopulated workspace.
 bool device_args_done = false;
 {
-    // Default ON since 2026-05-14: 4-model A/B showed +11–39%
-    // pp512 vs the legacy host-args + smallM dispatch on
-    // Qwen3-Coder / Qwen3.6 / Qwen3-30B-Modelopt / Gemma-4
-    // NVFP4 (decode unchanged). Set moe.nvfp4_device_args=false
-    // to force the legacy
-    // path for A/B or workarounds.
+    // moe.nvfp4_device_args: default on; set false to force the legacy
+    // host-args + smallM dispatch for A/B or workarounds.
     const bool da_enabled = dispatch_policy().moe.nvfp4_device_args;
     // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2
     // only and has no per-expert bias hooks — the legacy host-args path below
@@ -171,12 +131,10 @@ bool device_args_done = false;
             static_cast<const int32_t*>(routing.expert_offsets.data),
             moe_.d_M_per, ne, stream);
 
-        // gathered_base intentionally not bound. The gate/up input quant
-        // path reads ctx.no via sorted_token_ids directly (skip-the-read
-        // half of the gather+quant fusion; full skip-gather is gated on a
-        // legacy-fallback lazy-gather addition, see plan doc). The down
-        // projection input comes from fused_act_quantize_device which
-        // reads gate/up outputs directly.
+        // gathered_base intentionally not bound: gate/up input quantize reads
+        // ctx.no via sorted_token_ids directly (skip-the-read half of the
+        // gather+quant fusion). Down projection input comes from
+        // fused_act_quantize_device, which reads gate/up outputs directly.
         char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
         char* expert_up_base   = static_cast<char*>(moe_.expert_up.data);
         char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
@@ -189,12 +147,10 @@ bool device_args_done = false;
             imp::build_sfa_bases_device(
                 reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
                 moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, stream);
-            // Zero the *active* prefix of the SFA staging buffer.
-            // Padded rows of the SfAtom layout must be 0 for clean
-            // CUTLASS reads; QW5 (phase-5 review §2.1, archived in #604)
-            // replaces the full cudaMemsetAsync with a bounded
-            // device kernel that reads d_sfa_offsets[ne] as the
-            // byte count, capping at cutlass3x_sf_size.
+            // Zeroes only the ACTIVE prefix of the SFA staging buffer: padded rows of
+            // the SfAtom layout must be 0 for clean CUTLASS reads. QW5 (#604) replaces
+            // the full cudaMemsetAsync with a bounded device kernel that reads
+            // d_sfa_offsets[ne] as the byte count, capped at cutlass3x_sf_size.
             imp::bzero_sfa_active(
                 moe_.cutlass3x_sf,
                 moe_.d_sfa_offsets,
@@ -206,17 +162,10 @@ bool device_args_done = false;
         // below uses quantize_fp16_to_nvfp4_cutlass_moe_gather inline.
         // The down-projection input is handled by fused_act_quantize_device.)
 
-        // Fused activation + quantize for the down-projection input.
-        // Replaces apply_expert_activation(gate, up -> swiglu_buf) +
-        // quantize_device(swiglu_buf, eff). Reads gate/up directly,
-        // computes SwiGLU/GeGLU/ReLU² in registers, writes only the
-        // packed FP4 + SFA. M1 from the phase-5 review §2.2 (archived in #604).
-        //
-        // For non_gated experts (RELU_SQR): gate is nullptr, kernel
-        // reads `up` only. `expert_up_base` is left bit-identical
-        // (the fused kernel does NOT modify the input), whereas the
-        // legacy path called relu_sqr_inplace which clobbered `up`
-        // — callers downstream of this fast path do not re-read up.
+        // Fused activation+quantize for the down-projection input: reads gate/up
+        // directly, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed
+        // FP4+SFA (M1, #604). Non-gated (RELU_SQR): gate is nullptr, reads `up`
+        // only; unlike the legacy relu_sqr_inplace, this does NOT clobber `up`.
         auto fused_act_quantize_device = [&](const char* gate_base,
                                               const char* up_base, int K_in,
                                               FFNActivation act_type) {
@@ -228,11 +177,10 @@ bool device_args_done = false;
                 expanded, K_in, ne, act_type, stream);
         };
 
-        // Per-layer pre-cached arrays (Phase 3c-full Step 3).
-        // When ready, all three projections feed dispatch_device with
-        // device-resident ptr arrays — no per-call host iteration,
-        // no H2D. Falls back to the per-call upload via the workspace
-        // caches from Step 1 when the pre-cache isn't built.
+        // Per-layer pre-cached arrays (Phase 3c-full Step 3): when ready, all
+        // three projections feed dispatch_device with device-resident ptr arrays,
+        // no per-call host iteration or H2D. Falls back to per-call upload via the
+        // Step 1 workspace caches when the pre-cache isn't built.
         const bool da_cache_ready =
             layer < static_cast<int>(moe_.per_layer_da_cache.size()) &&
             moe_.per_layer_da_cache[layer].ready;
@@ -253,12 +201,10 @@ bool device_args_done = false;
                 const void** d_SFB = pre_d_SFB;
                 float*       d_a   = pre_d_alpha;
                 if (!d_B || !d_SFB || !d_a) {
-                    // Pre-cache miss — fall back to per-call H2D
-                    // into the workspace caches from Step 1.
-                    // NOT graph-capturable: the memcpy sources are stack
-                    // vectors, so a recorded node would read a dead stack
-                    // address on every replay (#860 — nondeterministic
-                    // garbage B pointers, misaligned-address graph launches).
+                    // Pre-cache miss falls back to per-call H2D into the Step 1 workspace
+                    // caches. NOT graph-capturable: the memcpy sources are stack vectors, so a
+                    // recorded node would read a dead stack address on every replay (#860,
+                    // nondeterministic garbage pointers / misaligned-address graph launches).
                     moe_host_args_capture_guard(stream);
                     std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
                     std::vector<float> h_alpha(ne);
@@ -301,13 +247,9 @@ bool device_args_done = false;
                     ne, N_out, K_in, dargs, stream);
             };
 
-        // Gate / Up share input quantization (K_in = d).
-        // Fused gather + quantize — reads ctx.no in token order via
-        // sorted_token_ids and writes packed FP4 + SFA in expert-sorted
-        // layout in one kernel pass. Saves the gathered_base HBM read
-        // (the moe_gather write still happens upstream; conditional
-        // skip-gather is a follow-up that needs a will-device-args
-        // pre-check + lazy-gather in the legacy fallback).
+        // Gate/Up share input quantization (K_in=d): fused gather+quantize reads
+        // ctx.no in token order via sorted_token_ids and writes packed FP4+SFA in
+        // expert-sorted layout in one kernel pass, saving the gathered_base HBM read.
         prep_sfa(d);
         imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
             ctx.no.data,
@@ -361,9 +303,8 @@ bool device_args_done = false;
 
 if (!device_args_done) {
 // Lazy moe_gather: caller skipped the upstream gather when this path was
-// predicted to fire. The fast path didn't, so the legacy fallback needs the
-// gathered FP16 intermediate. Idempotent (moe_gather_done guard) — never
-// double-gathers.
+// predicted to fire; the fast path didn't, so the legacy fallback needs
+// the gathered FP16 intermediate. Idempotent (moe_gather_done guard).
 if (!ctx.moe_gather_done) {
     int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
     Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
@@ -401,13 +342,10 @@ char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
 char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
 char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
-// ---------------------------------------------------------------------
-// Optional smallM kernel branch — opt-in via moe.nvfp4_smallM.
-// Activates when max(M_per) <= moe.nvfp4_smallM_threshold (default 64)
-// AND all three NVFP4 native MoE pointers are populated for this layer
-// (the native [n_experts, N, K/16] layout is what smallM consumes).
-// Falls through to CUTLASS 3.x on any failure / unavailability.
-// ---------------------------------------------------------------------
+// Optional smallM kernel branch (opt-in moe.nvfp4_smallM): activates when
+// max(M_per) <= moe.nvfp4_smallM_threshold (default 64) AND all three
+// native NVFP4 MoE pointers are populated ([n_experts,N,K/16] layout).
+// Falls through to CUTLASS 3.x on any failure/unavailability.
 bool smallM_done = false;
 {
     const auto& moe_cfg = dispatch_policy().moe;
@@ -499,14 +437,11 @@ bool smallM_done = false;
                 // No D2H sync — d_act_tscales stays on device.
             }
 
-            // Build per-expert weight pointer arrays from the native
-            // NvFP4MoEQuantResult cache. alpha = act_ts * weight_ts,
-            // computed entirely on device via compute_moe_alpha_device.
-            //
-            // run_proj signature: takes d_act_ts (device float*) instead of
-            // the old host vector. Weight scales are H2D'd once per
-            // projection (~ne*4 bytes = 256–512 bytes) as a device buffer,
-            // then multiplied on device with no round-trip.
+            // Builds per-expert weight pointer arrays from the native
+            // NvFP4MoEQuantResult cache; alpha = act_ts*weight_ts, computed entirely
+            // on device (compute_moe_alpha_device). run_proj takes d_act_ts (device
+            // float*), not a host vector; weight scales H2D once per projection (~ne*4 bytes), multiplied on
+            // device.
             auto run_proj = [&](const NvFP4MoEQuantResult* W,
                                 const std::vector<void*>& act_packed,
                                 const std::vector<void*>& act_sf,
@@ -533,12 +468,10 @@ bool smallM_done = false;
                 std::vector<int> active_M_local;
                 std::vector<const void*> hA, hSFA, hB, hSFB;
                 std::vector<void*> hD;
-                // Note: no hAlpha — alpha stays on device.
-                // We build a device-indexed view of d_alpha for active
-                // experts. Since gemm_grouped_nvfp4_smallM accepts a
-                // contiguous [n_experts] device array and uses blockIdx.x
-                // as the expert index, we need d_alpha indexed by the
-                // active-expert position. Build a compact device buffer.
+                // alpha stays on device (no hAlpha): builds a device-indexed view of
+                // d_alpha for active experts, since gemm_grouped_nvfp4_smallM accepts a
+                // contiguous [n_experts] device array indexed by blockIdx.x, and needs it
+                // indexed by active-expert position instead.
                 std::vector<float> h_alpha_compact;
                 active_M_local.reserve(ne);
                 hA.reserve(ne);
@@ -547,10 +480,8 @@ bool smallM_done = false;
                 hSFB.reserve(ne);
                 hD.reserve(ne);
                 h_alpha_compact.reserve(ne);
-                // We need to read d_alpha to compact it for active experts
-                // only when M_per[e]==0 experts are skipped. Read d_alpha
-                // back if any expert is inactive; otherwise pass d_alpha as-is.
-                // Optimization: if all experts are active, pass d_alpha directly.
+                // Compacting alpha for active experts is only needed when some M_per[e]==0
+                // experts are skipped; reads d_alpha back only then, otherwise passes d_alpha directly.
                 bool all_active = true;
                 for (int e = 0; e < ne; ++e)
                     if (M_per[e] == 0) { all_active = false; break; }
@@ -582,10 +513,9 @@ bool smallM_done = false;
                 float* d_alpha_active = d_alpha;
                 float* d_alpha_compact_dev = nullptr;
                 if (!all_active) {
-                    // Need to compact alpha for active experts.
-                    // Cheapest: D2H the small d_alpha buffer (ne floats),
-                    // compact, H2D compact array. Still eliminates the
-                    // D2H of activation scales (the expensive one).
+                    // Compacting alpha: D2H the small d_alpha buffer (ne floats), compact,
+                    // H2D the compact array. Cheapest option; still eliminates the larger D2H of activation
+                    // scales.
                     std::vector<float> h_alpha_full(ne);
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
                         h_alpha_full.data(), d_alpha,
@@ -720,11 +650,10 @@ if (!smallM_done) {
 
 if (!smallM_done) {
 
-// Active-expert SFA offset table (computed per K_in; different for d vs eff).
-// Shared across same-K_in projections: gate and up both use K_in=d,
-// so a single quantize of `gathered_base` + pointer array is reused
-// for both grouped GEMMs. Down reuses the staging buffer with fresh
-// quantize for K_in=eff (stream-ordered overwrite).
+// Active-expert SFA offset table, computed per K_in (differs for d vs
+// eff). Gate and up share K_in=d, so one quantize of gathered_base +
+// pointer array is reused for both grouped GEMMs; down reuses the staging
+// buffer with a fresh quantize for K_in=eff.
 auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_offsets,
                          std::vector<uint8_t*>& h_sfa_bases) -> bool {
     sfa_offsets.assign(ne + 1, 0);
@@ -761,10 +690,9 @@ auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_
     return true;
 };
 
-// Legacy host-args dispatch. Only entered when the default-on
-// device-args full path (line ~1310) failed its precondition
-// check (workspace buffers not populated). Kept as the safety-
-// net fallback path.
+// Legacy host-args dispatch, entered only when the default-on device-args
+// full path failed its precondition check (workspace buffers not
+// populated). Kept as the safety-net fallback path.
 auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in,
                         int N_out, const std::vector<size_t>& sfa_offsets) {
     char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
@@ -832,10 +760,10 @@ apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                         moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
                         compute_dtype_, cfg.ffn_activation, stream);
 
-// Down has a different activation (post-SwiGLU, K_in=eff) → re-quantize.
-// (A fused silu(gate)*up+quantize kernel was tried but regressed short-prompt
-//  decode ~11% due to low SM occupancy at small expanded — existing swiglu
-//  kernel has better per-element parallelism, so keep it separate.)
+// Down has a different activation (post-SwiGLU, K_in=eff): re-quantize.
+// A fused silu(gate)*up+quantize kernel regressed short-prompt decode
+// (~11%, low SM occupancy at small expanded); the separate swiglu kernel
+// has better per-element parallelism, kept separate.
 char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
 if (quantize_once(down_act, eff, sfa_offs, sfa_bases)) {
     grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs);

@@ -1,23 +1,16 @@
 #pragma once
 
-// L3 of the memory architecture (docs/internals/MEMORY.md §A3.4): the typed
-// views that make I3 — "stable addresses for graph-captured memory" — a
-// property of the type system instead of a comment the next refactor ignores.
-//
-// CUDA Graphs bake device pointers into the captured graph. Prefill and decode
-// are both graphified, so any buffer touched inside a captured region must live
-// somewhere whose address is guaranteed stable for the graph's lifetime. The
-// mechanism is deliberately small:
-//
-//   DeviceSpan<T>  — a view of device memory. Says nothing about stability.
-//   StableSpan<T>  — a view whose address is guaranteed stable for the lifetime
-//                    of the region it came from.
-//
-// StableSpan widens to DeviceSpan implicitly. There is NO conversion the other
-// way, no StableSpan(T*) constructor, and no as_stable() escape hatch: the only
-// way to obtain one is from a tier allocator that can actually make the promise
-// (passkey idiom below). A graph-capturable kernel wrapper takes StableSpan, so
-// handing it a relocatable buffer does not compile.
+// L3 of the memory architecture (MEMORY.md A3.4): typed views that make I3 ("stable
+// addresses for graph-captured memory") a property of the type system, not a comment the
+// next refactor ignores. CUDA Graphs bake device pointers into the captured graph, so any
+// buffer touched inside a captured region must live somewhere with a guaranteed-stable
+// address.
+//   DeviceSpan<T>  - a view of device memory, says nothing about stability.
+//   StableSpan<T>  - a view whose address is guaranteed stable for the region's lifetime.
+// StableSpan widens to DeviceSpan implicitly; there is no conversion the other way, no
+// StableSpan(T*) constructor, no as_stable() escape hatch. The only way to obtain one is
+// from a tier allocator that can make the promise (passkey idiom). A graph-capturable
+// kernel wrapper takes StableSpan, so handing it a relocatable buffer does not compile.
 
 #include <cstddef>
 #include <cstdint>

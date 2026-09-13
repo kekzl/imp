@@ -1,21 +1,12 @@
 #pragma once
 
-// ActivationCalibrator — per-input-channel activation magnitudes, collected
-// from a live forward pass.
-//
-// Hooked into GraphExecutor::gemm_via_handle_, the single dispatch point every
-// registered weight GEMM goes through. That placement is the point: it sees
-// the activation each weight actually consumes, whatever tier or kernel the
-// weight ends up on, so no call site has to be taught about calibration.
-//
-// Keyed by (layer, TensorKind), which is what an offline quantizer can map
-// back onto checkpoint tensor names. Kinds that share an input (q/k/v off one
-// norm; gate/up off another) simply record the same numbers — the consumer
-// merges them.
-//
-// Off unless [calibration] enabled is set; the hook is a null-pointer test on
-// the hot path. Collection is FP16-activations only, which is every dense
-// prefill path.
+// Per-input-channel activation magnitudes collected from a live forward.
+// Hooked into GraphExecutor::gemm_via_handle_, the single dispatch point
+// every registered weight GEMM goes through, so no call site needs
+// calibration awareness. Keyed by (layer, TensorKind); kinds sharing an
+// input (q/k/v, gate/up) record the same numbers, merged by the consumer.
+// Off unless [calibration] enabled; hook is a null-pointer test on the hot
+// path. FP16-activations only (every dense prefill path).
 
 #include "core/tensor.h"
 #include "core/tensor_kind.h"
@@ -30,10 +21,9 @@ namespace imp {
 
 class ActivationCalibrator {
 public:
-    // `alloc` may be null in tests; then the collector allocates nothing and
+    // `alloc` may be null in tests: the collector then allocates nothing and
     // stays empty rather than reaching for cudaMalloc behind the allocator's
-    // back (docs/internals/MEMORY.md A3 — every device allocation routes
-    // through src/memory/).
+    // back (every device allocation routes through src/memory/, MEMORY.md A3).
     explicit ActivationCalibrator(VRAMAllocator* alloc) : alloc_(alloc) {}
     ~ActivationCalibrator();
 

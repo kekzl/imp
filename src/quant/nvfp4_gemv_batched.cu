@@ -1,17 +1,10 @@
-// nvfp4_gemv_batched.cu -- NVFP4 GEMV/GEMM kernels that serve MANY activation
-// rows: the speculative verify chunk (M = 1..4) and the batched LM head.
-//
-// Split out of nvfp4_gemv_dense.cu on 2026-08-21 rather than allowlisted past
-// the kernel size gate. The boundary is a real one and not a line count: every
-// kernel in the sibling file computes ONE activation row against many weight
-// rows, every kernel here computes MANY activation rows against the same weight
-// read. That is also the boundary the numerical-parity work runs along -
-// gemv_nvfp4_multirow_mb_kernel exists so this side reduces K exactly the way
-// the one-row side does.
-//
-// Compile-time isolation is the point: these are templated over MR, so every
-// touch re-ptxases four instantiations, and they were dragging the single-row
-// decode kernels through that on every edit.
+// NVFP4 GEMV/GEMM kernels serving MANY activation rows (spec-verify M=1..4, batched LM
+// head). Split from nvfp4_gemv_dense.cu (2026-08-21): every kernel there computes ONE
+// activation row against many weight rows, every kernel here computes MANY rows against the
+// same weight read - also the boundary numerical-parity work runs along
+// (gemv_nvfp4_multirow_mb_kernel reduces K exactly like the one-row side). Templated over
+// MR, so compile-time isolation stops every touch from re-ptxasing four instantiations and
+// dragging the single-row decode kernels through it.
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -23,16 +16,11 @@
 namespace imp {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Batched-M K-parallel GEMV (FP32 out): y[m, n] = A_nvfp4[n,:] @ x[m,:] for the
-// MR activation rows m in this launch. One block per output (vocab) row n; the
-// weight row is loaded ONCE and reused across all MR activation rows (x[m]
-// streams from L2). This removes the per-sequence weight re-read of the batched
-// decode LM head — a single M=1 GEMV per sequence re-read the whole ~389 MiB
-// LM-head matrix from HBM (it does not fit in L2), making it the #2 decode GPU
-// consumer at batch>1. x is [n_act, K] row-major, y is [n_act, N_out] row-major;
-// the caller offsets x/y to this launch's first row.
-// ---------------------------------------------------------------------------
+// Batched-M K-parallel GEMV (FP32 out): y[m,n]=A_nvfp4[n,:]@x[m,:] for the MR activation
+// rows in this launch. One block per output row n; the weight row loads ONCE and is reused
+// across all MR rows (x[m] streams from L2). Removes the per-sequence weight re-read of the
+// batched decode LM head (a single M=1 GEMV per sequence re-read the whole ~389 MiB
+// LM-head matrix from HBM, the #2 decode GPU consumer at batch>1).
 template <int MR>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -100,38 +88,17 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Multi-row x multi-activation GEMV: the batched twin of
-// gemv_nvfp4_multirow_kernel above, and it exists for NUMERICAL PARITY rather
-// than for speed.
-//
-// The speculative verify chunk and the M=1 decode step compute the same
-// projections, and until 2026-08-21 they did not agree on the answer. Both
-// inner loops are instruction-for-instruction identical - same
-// cvt.rn.f16x2.e2m1x2 dequant, same 16 fma pairs, same scale - and they differ
-// in ONE thing: how wide the K reduction is. Decode takes
-// gemv_nvfp4_multirow_kernel<8>, where each WARP owns an output row and strides
-// `mi = lane; mi += 32`, giving 32 partial sums. The verify chunk took
-// gemv_nvfp4_kpar_mb_fp16_kernel, where the whole 128-thread BLOCK owns an
-// output row and strides `mi = tid; mi += 128`, giving 128. At n_mb = 320 that
-// is 32 partial sums against 128 of the same products in a different grouping:
-// identical mathematics, different float rounding.
-//
-// Small, and it reached the stop decision. On Qwen3.8-27B-NVFP4 at
-// speculative.mtp_k=1 the bonus token off the last chunk row came out as
-// <|im_end|> where single-token decode kept writing, truncating 2 of 6 answers
-// after ~40 tokens (docs/LIMITATIONS.md).
-//
-// This keeps the 32-lane warp partition, so each activation row reproduces the
-// decode kernel bit for bit by construction, while still reading each weight
-// micro-block once for all MR rows - the batching win the verify overlay exists
-// for is not given up to get the parity.
-//
-// Only the shapes where decode actually takes the multirow branch need this:
-// use_multirow() is true for 10240x5120 and 12288x5120 (q/k/v) and false for
-// 5120x5120 and 5120x17408 (o/down), where decode takes the 128-wide kpar
-// kernel and the existing batched kernel already agrees with it.
-// ---------------------------------------------------------------------------
+// Batched twin of gemv_nvfp4_multirow_kernel, existing for NUMERICAL PARITY not speed: the
+// spec-verify chunk and M=1 decode compute the same projections with instruction-identical
+// inner loops that differ in ONE thing, K-reduction width. Decode's multirow kernel gives
+// each WARP an output row (32 partial sums, mi=lane;+=32); the verify chunk's kpar kernel
+// gave the whole 128-thread BLOCK an output row (128 partial sums). Same math, different
+// float rounding - reached the stop decision on Qwen3.8-27B-NVFP4 mtp_k=1, truncating 2/6
+// answers after ~40 tokens (docs/LIMITATIONS.md). This kernel keeps the 32-lane warp
+// partition so each row reproduces decode bit-for-bit, while still reading each weight
+// micro-block once for all MR rows. Only fires for shapes where decode takes the multirow
+// branch (use_multirow(): true for 10240x5120/12288x5120 q/k/v, false for
+// 5120x5120/5120x17408 o/down, where the existing batched kernel already agrees).
 template <int NR, int MR, bool kAcc = false>
 __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -154,10 +121,9 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
     for (int m = 0; m < MR; ++m)
         acc[m] = 0.0f;
 
-    // Same stride, same order, same helper as warp_k_loop + dot_micro_block in
-    // gemv_nvfp4_multirow_kernel. Do not "optimise" the accumulation here
-    // without re-running tools/analysis/mtp_truncation_check.sh: the parity IS
-    // the feature.
+    // Same stride/order/helper as warp_k_loop+dot_micro_block in gemv_nvfp4_multirow_kernel.
+    // Do not "optimise" the accumulation without re-running tools/analysis/mtp_truncation_check.sh:
+    // the parity IS the feature.
     for (int mi = lane; mi < n_mb; mi += 32) {
         const int byte_off = mi * 8;
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
@@ -179,10 +145,10 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
     }
 }
 
-// FP16-output twin of gemv_nvfp4_kpar_mb_fp32_kernel for spec-verify chunk
-// GEMMs (#998): one block per weight row n, the row decoded once and reused
-// across the MR activation rows of this launch. kAcc adds into the existing
-// output (cuBLAS beta=1 semantics) for the o/down residual-add GEMMs (#1055).
+// FP16-output twin of gemv_nvfp4_kpar_mb_fp32_kernel for spec-verify chunk GEMMs (#998):
+// one block per weight row n, decoded once and reused across the MR rows of this launch.
+// kAcc adds into the existing output (cuBLAS beta=1 semantics) for the o/down residual-add
+// GEMMs (#1055).
 template <int MR, bool kAcc = false>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -254,15 +220,12 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 
 }  // namespace
 
-// PDL registration + MaxL1 carveout for the batched-M kernels that production
-// reaches: gemv_nvfp4_kpar_mb_fp32_kernel<1..4> behind
-// gemv_nvfp4_kpar_batched_fp32 (the batched decode LM head,
-// executor_forward.cu). The kernel waits before its first global read and
-// triggers after its last, which is the registration contract (core/pdl.h);
-// until AUDIT_arch_2026 A2-2 it was instrumented and never registered, so
-// pdl::launch fell through to <<<>>> and its graph edge stayed a default edge.
-// gemv_nvfp4_multirow_mb_kernel and gemv_nvfp4_kpar_mb_fp16_kernel (behind
-// gemm_nvfp4_batched / _acc) run only as test oracles and stay unregistered.
+// PDL registration + MaxL1 carveout for the batched-M kernels production reaches:
+// gemv_nvfp4_kpar_mb_fp32_kernel<1..4> behind gemv_nvfp4_kpar_batched_fp32 (batched decode
+// LM head). Kernel waits before its first global read, triggers after its last (core/pdl.h
+// contract); until AUDIT_arch_2026 A2-2 it was instrumented but never registered, so
+// pdl::launch fell through to <<<>>> with a default graph edge. multirow_mb and
+// kpar_mb_fp16 kernels (test oracles only) stay unregistered.
 void nvfp4_gemv_batched_pdl_register() {
 #define NVFP4_MB_REGISTER(kern)                                                    \
     do {                                                                           \
@@ -277,20 +240,19 @@ void nvfp4_gemv_batched_pdl_register() {
 #undef NVFP4_MB_REGISTER
 }
 
-// Batched-M FP32 GEMV for the LM head at batch>1: y[n_act, N_out] = x[n_act,K] @ A^T.
-// Reads the weight matrix ONCE per launch (vs once per activation row in the old
-// per-row M=1 loop). n_act is processed in power-of-two MR chunks so each launch
-// reuses the weight across MR rows; typical decode batches (<=16) need one launch.
+// Batched-M FP32 GEMV for the LM head at batch>1: y[n_act,N_out]=x[n_act,K]@A^T. Reads the
+// weight matrix ONCE per launch (vs once per row in the old per-row M=1 loop); n_act is
+// processed in power-of-two MR chunks so each launch reuses the weight across MR rows,
+// typical decode batches (<=16) need one launch.
 void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, float* y, int N_out, int K,
                                   int n_act, cudaStream_t stream) {
     const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
     const auto* ms = reinterpret_cast<const uint8_t*>(A.micro_scales);
     const float ts = A.tensor_scale;
-    // MR is capped at 4: each accumulator row costs registers, and beyond MR=4
-    // the kernel spills (measured: 91 us/row at MR=4 vs 118 us/row at MR=16). For
-    // M>4 the weight is re-read per MR=4 tile, but the tiled cost still beats the
-    // larger-MR spill (M=16: 4x MR=4 = 1.45 ms < 1x MR=16 = 1.89 ms) and the old
-    // per-row loop (16x M=1 = 4.2 ms).
+    // MR is capped at 4: each accumulator row costs registers, beyond MR=4 the kernel spills
+    // (measured 91 us/row at MR=4 vs 118 us/row at MR=16). For M>4 the weight re-reads per
+    // MR=4 tile, but tiled still beats a larger-MR spill (M=16: 4x MR=4=1.45ms < 1x MR=16=1.89ms)
+    // and the old per-row loop (16x M=1=4.2ms).
     int done = 0;
     while (done < n_act) {
         const int rem = n_act - done;
@@ -324,11 +286,10 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K, int n_act,
                         cudaStream_t stream) {
     const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
-    // Numerical parity with the M=1 decode path, when decode would take the
-    // 32-lane multirow branch for this shape. See the comment on
-    // gemv_nvfp4_multirow_mb_kernel: the 128-wide kpar reduction below is a
-    // different float grouping of the same products, and on a speculative arm
-    // that difference reaches the stop decision.
+    // Numerical parity with the M=1 decode path, when decode would take the 32-lane multirow
+    // branch for this shape (see gemv_nvfp4_multirow_mb_kernel): the 128-wide kpar reduction
+    // below is a different float grouping of the same products, and on a speculative arm that
+    // difference reaches the stop decision.
     if (nvfp4_verify_row_parity()) {
         constexpr int NR = 8;
         const int n_mb_p = K / kMicroBlockSize;
@@ -399,11 +360,10 @@ void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N
 void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K, int n_act,
                             cudaStream_t stream) {
     const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
-    // Numerical parity with the M=1 decode path, when decode would take the
-    // 32-lane multirow branch for this shape. See the comment on
-    // gemv_nvfp4_multirow_mb_kernel: the 128-wide kpar reduction below is a
-    // different float grouping of the same products, and on a speculative arm
-    // that difference reaches the stop decision.
+    // Numerical parity with the M=1 decode path, when decode would take the 32-lane multirow
+    // branch for this shape (see gemv_nvfp4_multirow_mb_kernel): the 128-wide kpar reduction
+    // below is a different float grouping of the same products, and on a speculative arm that
+    // difference reaches the stop decision.
     if (nvfp4_verify_row_parity()) {
         constexpr int NR = 8;
         const int n_mb_p = K / kMicroBlockSize;

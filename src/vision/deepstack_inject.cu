@@ -6,10 +6,9 @@ namespace imp {
 
 namespace {
 
-// One block per image token. The scan for the k-th placeholder mirrors the
-// embedding-replacement kernel deliberately: both have to agree on which
-// position is the k-th image token, and reading the same way is the cheapest
-// way to keep them from drifting apart.
+// One block per image token. The k-th-placeholder scan deliberately mirrors the
+// embedding-replacement kernel: both must agree on which position is the k-th image token,
+// and reading the same way is the cheapest way to keep them from drifting apart.
 __global__ void add_vision_embeddings_kernel(half* __restrict__ hidden, const int32_t* __restrict__ token_ids,
                                              const half* __restrict__ embeddings, int vision_token_id,
                                              int n_tokens, int d_model, int n_vision_tokens, int emb_offset) {

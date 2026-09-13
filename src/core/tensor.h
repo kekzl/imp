@@ -24,29 +24,21 @@ struct Tensor {
     bool on_device = false;
     TensorKind kind = TensorKind::UNKNOWN;
 
-    // Sidecar metadata for block-quantised tensors:
-    //   scales       — borrowed device pointer to per-block scales
-    //                  (FP8 E4M3 micro-scales for NVFP4 [N, K/16],
-    //                  FP16 per-group scales for split Q4_0, etc.)
-    //   tensor_scale — per-tensor scalar (FP32, by value) for two-level
-    //                  schemes like NVFP4. Default 1.0 = no-op
-    //                  (multiplicative identity). For llm-compressor
-    //                  NVFP4 the loader pre-applies the 1/x reciprocal
-    //                  so the runtime can always multiply.
+    // Sidecar metadata for block-quantized tensors. scales: borrowed per-block
+    // scale pointer (FP8 E4M3 micro-scales for NVFP4 [N,K/16], FP16 per-group
+    // for split Q4_0). tensor_scale: per-tensor FP32 scalar for two-level
+    // schemes (NVFP4); default 1.0 = no-op. llm-compressor NVFP4 pre-applies the 1/x reciprocal.
     void* scales = nullptr;
     float tensor_scale = 1.0f;
 
-    // GGUF MXFP4 has two on-disk block layouts:
-    //   - imp legacy (GGML type 31): [data (16 bytes) | scale (1 byte)] per block
-    //   - llama.cpp standard (GGML type 39): [scale (1 byte) | data (16 bytes)] per block
-    // When loaded from a type-39 GGUF this flag is true; the weight_upload MXFP4
-    // path swaps the byte offsets so the GPU-side split-layout is identical.
+    // GGUF MXFP4 has two on-disk block layouts: imp legacy (GGML type 31)
+    // [data(16B)|scale(1B)], llama.cpp standard (type 39) [scale(1B)|data(16B)].
+    // mxfp4_layout_v2=true for type-39; weight_upload swaps byte offsets so the GPU split layout matches.
     bool mxfp4_layout_v2 = false;
 
-    // Phase 5 PR #1 Commit 5.1.4.b: original GGUF source bytes have been
-    // freed by Phase-4b. `data` is left as a stale hash-key pointer; any
-    // dispatch site that dereferences `data` raw must skip when this is
-    // true and route via overlay tier instead.
+    // dropped_source=true: original GGUF source bytes were freed (Phase-4b);
+    // `data` is a stale hash-key pointer. Any dispatch site dereferencing
+    // `data` raw must skip and route via the overlay tier instead.
     bool dropped_source = false;
 
     Tensor() = default;

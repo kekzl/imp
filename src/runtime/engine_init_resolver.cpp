@@ -76,7 +76,7 @@ void Engine::init_apply_debug_raw_overrides_() {
     // MoE: no expert LRU cache (state-carrying)
     runtime_config_.moe.no_expert_cache = true;
     // GDN: reference unfused scan (no register-state reordering); config key
-    // `gdn.ref_kernel`, read at executor_ssm_gdn.cu:526.
+    // `gdn.ref_kernel`, read at executor_ssm_gdn.cu:491.
     runtime_config_.gdn.ref_kernel = true;
     // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
     // IMP_NO_MMVQ: those trigger incompatible kernel paths that IMA on some

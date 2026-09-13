@@ -1,9 +1,8 @@
-// executor_gemm_smallm.cu — the small-M NVFP4 dispatch family of
-// GraphExecutor, moved VERBATIM out of executor_gemm_dispatch.cu on
-// 2026-08-27 (that TU sat at the 600-LOC kernel hard threshold; this family
-// — producer-side activation quantize, its rmsnorm/swiglu wrappers and the
-// sibling-pair dispatch — is one coherent unit, and splitting it isolates
-// smallm edits from re-ptxas-ing the whole dispatch chain).
+// Small-M NVFP4 dispatch family, moved VERBATIM out of
+// executor_gemm_dispatch.cu (that TU sat at the 600-LOC kernel hard
+// threshold): producer-side activation quantize, its rmsnorm/swiglu
+// wrappers, and the sibling-pair dispatch, split to isolate smallm edits from re-ptxas-ing the whole dispatch
+// chain.
 
 #include "exec/executor.h"
 #include "exec/gemm_context.h"
@@ -25,12 +24,10 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out)
     if (h.source_data == nullptr)
         return false;
     if (dequant_gpu_supported(h.source_qtype)) {
-        // GGUF source (#1897): decode rows read the NVFP4 decode overlay,
-        // exactly the entry the M=1 decode GEMV reads. A GGUF weight with 2+
-        // rows used to take the prefill route and dequantize the whole
-        // Q*_K source per step (Qwen3-8B-Q8_0: 52 ms flat from two
-        // sequences up, 8 streams slower than 1). Prompt rows never come
-        // here: the 4-bit overlay would replace the full-precision prefill.
+        // GGUF source (#1897): decode rows read the NVFP4 decode overlay, the same
+        // entry the M=1 decode GEMV reads. A GGUF weight with 2+ rows used to take
+        // the prefill route and dequantize the whole Q*_K source per step. Prompt
+        // rows never take this: the 4-bit overlay would replace full-precision prefill.
         if (!cur_decode_rows_)
             return false;
         const StorageTier decode = (h.decode_tier != StorageTier::Undefined) ? h.decode_tier : h.primary_tier;
@@ -172,12 +169,10 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
 
 bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count,
                                                const Tensor& input, const GemmContext& ctx) {
-    // Mirror of the single-tensor smallm v2 eligibility in gemm_via_handle_
-    // (see the block there for the rationale of each condition) applied to
-    // EVERY weight, plus: same K, v2 only, the single-stripe policy on the
-    // combined tile count, fresh outputs only. Every decline is a plain
-    // `false` — the caller issues the single dispatches it would have issued
-    // anyway.
+    // Mirror of the single-tensor smallm v2 eligibility in gemm_via_handle_,
+    // applied to EVERY weight, plus: same K, v2 only, the single-stripe policy
+    // on the combined tile count, fresh outputs only. Every decline is a plain
+    // false; the caller issues the single dispatches it would have anyway.
     if (!dispatch_policy().gemm.nvfp4_smallm || dispatch_policy().gemm.nvfp4_smallm_impl != 2 ||
         !dispatch_policy().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m || overlap_prefill_active_ ||
         ctx.beta != 0.0f || count < 2 || count > kSmallMV2MaxSiblings)

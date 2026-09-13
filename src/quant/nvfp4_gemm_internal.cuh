@@ -1,10 +1,9 @@
 #ifndef IMP_QUANT_NVFP4_GEMM_INTERNAL_CUH
 #define IMP_QUANT_NVFP4_GEMM_INTERNAL_CUH
 
-// Internal shared device helpers + tuning constants for the NVFP4 GEMV kernels.
-// Split out of nvfp4_gemm.cu so the per-family kernel TUs (dense / fused / moe)
-// stay under the kernel .cu size gate. MOVED VERBATIM — do not rewrite, reorder,
-// or change any numeric behavior; the kernels are hot-path numeric code and must
+// Internal shared device helpers + tuning constants for the NVFP4 GEMV kernels, split out
+// of nvfp4_gemm.cu so the per-family kernel TUs stay under the kernel .cu size gate.
+// MOVED VERBATIM: do not rewrite, reorder, or change numeric behavior, hot-path code must
 // stay bit-identical.
 
 #include "quant/fp8_utils.cuh"
@@ -18,12 +17,10 @@ namespace imp {
 static constexpr int kMicroBlockSize = 16;
 static constexpr int kKparWarps = 4;
 static constexpr int kKparThreads = kKparWarps * 32;  // 128
-// The K-par decode GEMVs carry __launch_bounds__(kKparThreads) with NO
-// min-blocks term. The former (kKparThreads, 12) filled the 1536-thread SM
-// exactly and forced ptxas to 40 registers; without it the kernels allocate 42
-// (10 CTAs per SM instead of 12) and decode reads +1.9 % on Qwen3-8B-Q8_0,
-// +0.7 % on Qwen3-14B-NVFP4, +1.1 % at 32 streams on Qwen3.8-27B, 3/3 pairs
-// each (AUDIT_arch_2026 dispatch #11). (kKparThreads, 16) is infeasible on
+// K-par decode GEMVs use __launch_bounds__(kKparThreads) with NO min-blocks term.
+// (kKparThreads,12) forces ptxas to 40 registers (fills the 1536-thread SM exactly);
+// without it registers rise to 42 (10 CTAs/SM instead of 12), costing decode +0.7..+1.9%
+// across measured models (AUDIT_arch_2026 dispatch #11). (kKparThreads,16) is infeasible on
 // this SM and compiles to the same SASS; do not write it back.
 
 // Multi-row kernel: 8 warps, NR rows per block for small-K models.
@@ -35,12 +32,10 @@ static constexpr int kMRThreads = kMRWarps * 32;  // 256
 // because more blocks (M instead of M/NR) give higher warp occupancy.
 static constexpr int kMinBlocksPerSM = 6;
 
-// Cached SM count for dispatch decisions.
-// speculative.verify_row_parity. Kernel TUs do not include runtime/config.h;
-// process_diag is the seam. NOT cached in a function-local static like
-// nvfp4_n_sms(): this is read once per GEMM launch on the host, so the read
-// costs nothing, and caching it would make the knob impossible to toggle in a
-// test - which is how the first version of this was written.
+// Cached SM count for dispatch decisions; process_diag is the seam since kernel TUs don't
+// include runtime/config.h. NOT cached in a function-local static like nvfp4_n_sms(): read
+// once per GEMM launch on the host costs nothing, and caching would make the knob
+// impossible to toggle in a test.
 static bool nvfp4_verify_row_parity() { return imp::process_diag_verify_row_parity(); }
 
 static int nvfp4_n_sms() {
@@ -62,26 +57,18 @@ static bool use_multirow(int n_mb, int mr_blocks) {
 // fp8_e4m3_to_float_fast moved to quant/fp8_utils.cuh (shared with MXFP4 +
 // CUTLASS block-scale kernels). Single correct implementation, denorm-safe.
 
-// Process one micro-block (8 packed bytes = 16 FP4 values).
-// Returns unscaled dot product: sum(dequant(nibble) * activation).
-//
-// HW FP4 decode via `cvt.rn.f16x2.e2m1x2` — single PTX instruction converts
-// one byte (2 packed E2M1 nibbles) to a packed f16x2. Replaces the prior
-// 8-op-per-byte prmt+shift+OR cascade. Verified supported on sm_120f /
-// CUDA 13.2 by tools/analysis/ptx_cvt_survey.sh.
-//
-// Layout: low nibble (bits 0-3) decodes to f16x2.x (lower half),
-//         high nibble (bits 4-7) decodes to f16x2.y (upper half).
+// Processes one micro-block (8 packed bytes = 16 FP4 values), returns the unscaled dot
+// product sum(dequant(nibble)*activation). HW FP4 decode via cvt.rn.f16x2.e2m1x2 (one PTX
+// instruction converts a byte's 2 packed E2M1 nibbles to packed f16x2), replacing an
+// 8-op prmt+shift+OR cascade. Verified on sm_120f/CUDA 13.2 (tools/analysis/ptx_cvt_survey.sh).
+// Low nibble (bits 0-3) -> f16x2.x; high nibble (bits 4-7) -> f16x2.y.
 __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb, const half* __restrict__ x,
                                                  int elem_base) {
-    // x slice for one micro-block: 16 halfs = 32 B, loaded as two 16-B
-    // vectors. The previous per-pair half2 loads issued 8 narrow 4-B
-    // requests at a 32-B lane stride — each request touched 32 distinct
-    // sectors and the 8 unrolled iterations re-touched the same sectors,
-    // an 8x L1TEX sector-access amplification on x that saturated the
-    // L1TEX data path (~90%) while DRAM idled at ~70% (#667 lever-3
-    // profile: x re-reads were ~77% of all GEMV L1TEX sector accesses).
-    // elem_base is a multiple of 16 halfs, so both loads are 16-B aligned.
+    // x slice for one micro-block: 16 halfs = 32B, loaded as two 16-B vectors. Per-pair half2
+    // loads instead issued 8 narrow 4-B requests at a 32-B lane stride, touching 32 distinct
+    // sectors per iteration (8x L1TEX sector-access amplification, saturating L1TEX ~90% while
+    // DRAM idled ~70%, #667 lever-3). elem_base is a multiple of 16 halfs, so both loads are
+    // 16-B aligned.
     const uint4 xv0 = *reinterpret_cast<const uint4*>(x + elem_base);
     const uint4 xv1 = *reinterpret_cast<const uint4*>(x + elem_base + 8);
     half2 xh[8];
@@ -163,11 +150,10 @@ template <typename DotFn>
 __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_packed,
                                              const uint8_t* __restrict__ row_ms, float tensor_scale, int n_mb,
                                              int lane, DotFn dot_fn) {
-    // (A two-micro-blocks-per-lane variant — 16-B weight vector + 2-B scale
-    // pair for deeper memory-level parallelism — measured exactly neutral
-    // here: the kernels already sit at the practical GDDR7 ceiling once the
-    // x sector amplification is gone. Keep the simple form; it also keeps
-    // the accumulation order bit-identical to the pre-vectorization kernel.)
+    // A two-micro-blocks-per-lane variant (16-B weight vector + 2-B scale pair, deeper MLP)
+    // measured exactly neutral: the kernels already sit at the practical GDDR7 ceiling once x
+    // sector amplification is gone. Keep the simple form; it also keeps accumulation order
+    // bit-identical to the pre-vectorization kernel.
     float acc = 0.0f;
     for (int mi = lane; mi < n_mb; mi += 32) {
         int byte_off = mi * 8;

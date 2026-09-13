@@ -13,11 +13,10 @@ namespace {
 
 constexpr int kThreads = 256;
 
-// One thread per input channel, striding down the rows. Consecutive threads
-// read consecutive columns of the same row, so the loads coalesce.
-// Both moments in one pass: sum|x| feeds the AWQ scale candidates, sum x^2 the
-// error weight the search minimises (calibration_stats.h). Splitting them into
-// two launches would read the activation twice for no reason.
+// One thread per input channel, striding down rows: consecutive threads
+// read consecutive columns of the same row (coalesced). Both moments in
+// one pass (sum|x| for AWQ scale candidates, sum x^2 for the error weight)
+// to avoid reading the activation twice.
 __global__ void accum_abs_cols_kernel(const half* __restrict__ x, int64_t rows, int64_t K, int64_t row_stride,
                                       double* __restrict__ sum, double* __restrict__ sumsq) {
     int64_t j = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -60,10 +59,9 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
     if (it == entries_.end()) {
         Entry e;
         e.K = K;
-        // Allocating here is why calibration forces CUDA graphs off — an
-        // allocation inside a capture is an error, not a slow path.
-        // One buffer of 2K: [0, K) is sum|x|, [K, 2K) is sum x^2. Two
-        // allocations per entry would double the bookkeeping for nothing.
+        // Allocating here is why calibration forces CUDA graphs off (alloc inside
+        // capture is an error). One buffer of 2K: [0,K) sum|x|, [K,2K) sum x^2,
+        // avoiding two allocations per entry.
         e.d_sum = static_cast<double*>(
             alloc_->allocate(static_cast<size_t>(2 * K) * sizeof(double), "activation_calibration"));
         if (!e.d_sum) {

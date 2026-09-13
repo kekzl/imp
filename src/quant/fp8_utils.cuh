@@ -7,29 +7,15 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// FP8 E4M3 software conversion device helpers.
-//
-// Shared by fp8_quant.cu, nvfp4_quant.cu, and any other CUDA code that needs
-// scalar float <-> FP8 E4M3 conversion on the device.
-//
-// FP8 E4M3 layout (8 bits): 1 sign | 4 exponent | 3 mantissa, bias = 7
-//   Normal value   : (-1)^s * 2^(e-7) * (1 + m/8)    e in [1,14]
-//   Subnormal value: (-1)^s * 2^(-6)  * (m/8)         e == 0, m != 0
-//   Zero           : s=0|1, e=0, m=0
-//   Max normal     : +/- 448.0  (e=14, m=7)
-//   Min subnormal  : +/- 2^(-9) = 1/512
-//
-// Uses round-to-nearest-even for float->FP8 and saturates to max normal
-// (not NaN) on overflow.
-// ---------------------------------------------------------------------------
+// FP8 E4M3 software conversion device helpers, shared by fp8_quant.cu, nvfp4_quant.cu, and
+// any CUDA code needing scalar float<->FP8 E4M3 on device.
+//   Normal: (-1)^s*2^(e-7)*(1+m/8), e in [1,14]. Subnormal: (-1)^s*2^-6*(m/8), e=0,m!=0.
+//   Zero: e=0,m=0. Max normal: +-448.0 (e=14,m=7). Min subnormal: +-2^-9 = 1/512.
+// Round-to-nearest-even float->FP8, saturates to max normal (not NaN) on overflow.
 
 static constexpr float kFP8E4M3MaxVal = 448.0f;
 
-// ---------------------------------------------------------------------------
-// FP32 -> FP8 E4M3 software conversion with saturation (no Inf in E4M3).
-// Round-to-nearest-even.
-// ---------------------------------------------------------------------------
+// FP32->FP8 E4M3 software conversion with saturation (no Inf in E4M3), round-to-nearest-even.
 __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
     const uint32_t sign = (val < 0.0f) ? 1u : 0u;
     float abs_val = fabsf(val);
@@ -73,12 +59,10 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
         }
         result = (uint8_t)((sign << 7) | m3);
     } else if (e4 > 15) {
-        // True overflow (input > E4M3-fn max range): saturate to max normal
-        // 448 = (1 + 6/8) * 2^8, bits 0x7E.
-        // (Earlier code returned (14<<3)|7 = 0x77, decode 240 — a 0.536× squash
-        // for any value ≥ 256. This was the precision cliff that broke
-        // compressed-tensors NVFP4 prequant: outlier-block scales near 447
-        // got read back as 240, halving GEMM output on affected rows.)
+        // True overflow (input > E4M3-fn max range) saturates to max normal 448 = (1+6/8)*2^8,
+        // bits 0x7E. Earlier code returned (14<<3)|7 = 0x77 (decode 240), a 0.536x squash for any
+        // value >= 256: broke compressed-tensors NVFP4 prequant, outlier-block scales near 447 read
+        // back as 240, halving GEMM output on affected rows.
         result = (uint8_t)((sign << 7) | (15 << 3) | 6);
     } else {
         // Normal range, including e4=15 (which is valid for m=0..6, encoding
@@ -107,17 +91,11 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// FP8 E4M3 -> FP32 software conversion (fast, branchless bit repack).
-//
-// Normal (exp>0):  value = (1 + man/8) * 2^(exp - 7)  [bias = 7]
-// Denorm (exp=0):  value = man * 2^-9
-// Sign bit (bit 7) applied to output sign bit.
-//
-// Previously two copies existed: a slow exp2f-based version here and a fast
-// bit-repack version in nvfp4_gemm.cu. The bit-repack version produced wrong
-// denorm values until the NVFP4 prequant debug (50× inflation) forced a fix;
-// now both are consolidated into this single correct fast implementation.
+// FP8 E4M3->FP32 (fast, branchless bit repack). Normal (exp>0): (1+man/8)*2^(exp-7)
+// (bias=7). Denorm (exp=0): man*2^-9. Sign bit (bit 7) applies to output sign.
+// Consolidates two prior copies (a slow exp2f version here, a fast bit-repack one in
+// nvfp4_gemm.cu) that disagreed on denorm values until the NVFP4 prequant debug (50x
+// inflation) forced a fix; now this is the single correct fast implementation.
 __device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits) {
     uint32_t sign = (bits >> 7) & 1;
     uint32_t exp = (bits >> 3) & 0x0F;

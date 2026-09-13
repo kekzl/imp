@@ -41,11 +41,9 @@ bool validate_header_size(uint64_t file_size, uint64_t declared_header_size, std
             *err = "file truncated below the 8-byte header_size prefix";
         return false;
     }
-    // Overflow-safe form: declared_header_size > (file_size - 8) cannot
-    // overflow because file_size - 8 is a valid subtraction (file_size >= 8).
-    // The naive 8 + declared_header_size > file_size would wrap to a small
-    // value when declared_header_size approaches UINT64_MAX, bypassing the
-    // check.
+    // Overflow-safe: declared_header_size > (file_size - 8) cannot overflow since file_size-8 is
+    // a valid subtraction (file_size >= 8). The naive 8+declared_header_size > file_size wraps to
+    // a small value near UINT64_MAX, bypassing the check.
     if (declared_header_size > file_size - 8) {
         if (err)
             *err = "declared header_size exceeds file size (file may be truncated or corrupt)";
@@ -67,9 +65,8 @@ bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end, uint64_
         return false;
     }
     // Overflow-safe: tensor_data_offset + offset_end > file_size becomes
-    // offset_end > file_size - tensor_data_offset. file_size >= tensor_data_offset
-    // is guaranteed by the upstream validate_header_size check
-    // (tensor_data_offset = 8 + header_size, header_size <= file_size - 8).
+    // offset_end > file_size - tensor_data_offset; file_size >= tensor_data_offset is guaranteed
+    // by validate_header_size upstream (tensor_data_offset = 8 + header_size <= file_size).
     if (tensor_data_offset > file_size) {
         if (err)
             *err = "tensor_data_offset > file_size (header_size validation invariant violated)";
@@ -90,20 +87,11 @@ bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end, uint64_
 
 }  // namespace safetensors_internal
 
-// ---- SafeTensors wire dtype: one table for the width AND the QType ----
-//
-// #1604: the width a tensor is validated with and the width its consumer reads
-// it with have to be the same number. They were two private tables, and for
-// I16 they disagreed - 2 bytes on disk against 4 for the QType::INT32 it was
-// mapped to - so a tensor that passed every check was then read 2x past its
-// own window.
-//
-// A dtype whose on-disk width has no equal-width engine type is refused, not
-// re-typed. A "closest proxy" of a different width converts nothing: it
-// reinterprets the bytes at the wrong stride, so element i is read from byte
-// i*4 of a 2-byte-per-element array. Such a tensor was never servable, only
-// silently mapped, and src/model/CLAUDE.md is explicit that a checkpoint this
-// build cannot serve is refused at load rather than served wrong.
+// #1604: the width a tensor is validated with and the width its consumer reads it with must
+// be the same number (I16 disagreed: 2 bytes on disk vs 4 for the QType::INT32 it mapped to,
+// so a passing tensor was read 2x past its window). A dtype with no equal-width engine type
+// is refused, not re-typed: a "closest proxy" of a different width reads element i from the
+// wrong byte stride.
 struct SafeTensorsDtype {
     std::string_view name;
     size_t wire_bytes;  // bytes per element on disk
@@ -127,11 +115,9 @@ static constexpr SafeTensorsDtype kSafeTensorsDtypes[] = {
     {"BOOL", 1, QType::INT8, true, nullptr},
     {"I32", 4, QType::INT32, true, nullptr},
     {"U32", 4, QType::INT32, true, nullptr},
-    // Not servable: the engine has no 8-byte type and no 16-bit integer type,
-    // so no equal-width mapping exists. These used to be F64/I64 -> INT32
-    // (8 -> 4, wrong stride, garbage values) and I16/U16 -> INT32 or the F32
-    // default (2 -> 4, a 100% over-read running off the end of the mapping for
-    // the last tensor in a shard).
+    // Not servable: no 8-byte or 16-bit integer engine type exists for an equal-width mapping.
+    // These used to map F64/I64->INT32 (8->4, wrong stride) and I16/U16->INT32 or F32 default
+    // (2->4, a 100% over-read past the last tensor in a shard).
     {"F64", 8, QType::F32, false, nullptr},
     {"I64", 8, QType::INT32, false, nullptr},
     {"U64", 8, QType::INT32, false, nullptr},
@@ -218,10 +204,9 @@ static int extract_layer_index(const std::string& name) {
     if (name.compare(0, plen, prefix) != 0)
         return -1;
 
-    // `idx * 10 + digit` on an unchecked digit run is signed overflow, i.e.
-    // undefined, and the result sizes `model->layers_` through
-    // `infer_n_layers` when config.json is absent. Stop at the limit instead:
-    // a name past it is not a layer this build can serve either way.
+    // `idx*10 + digit` on an unchecked digit run is signed overflow (UB), and the result sizes
+    // model->layers_ via infer_n_layers when config.json is absent. Stop at the limit: a name
+    // past it isn't a layer this build can serve either way.
     int idx = 0;
     size_t i = plen;
     while (i < name.size() && name[i] >= '0' && name[i] <= '9') {
@@ -327,13 +312,9 @@ struct ShardInfo {
     size_t mmap_size = 0;
 };
 
-// mtp_out (optional): when non-null, `mtp.*` / `model.mtp.*` tensors — which
-// translate_name otherwise SKIPs — are collected there under their raw
-// `mtp.*` name (the `model.` prefix stripped). Dense Qwen3.6 checkpoints
-// embed the MTP head in the main shard instead of a sidecar.
-//
-// keep_vision: pass through to translate_name — see its header comment. Not
-// defaulted, because a caller that forgets it silently loses the tower.
+// mtp_out (optional): when non-null, mtp.*/model.mtp.* tensors (which translate_name would
+// otherwise SKIP) are collected under their raw mtp.* name. keep_vision: passed through to
+// translate_name; not defaulted, since a caller that forgets it silently loses the tower.
 static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map,
                        ShardInfo& shard, bool llm_compressor_format, bool keep_vision,
                        imp::llm_compressor::TranslationCounters& counters,
@@ -470,12 +451,9 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         int ndim = static_cast<int>(shape_val->arr.size());
         int64_t shape[kMaxDims] = {};
 
-        // #1605: every dim arrives as a JSON double narrowed to int64, so the
-        // sign and the running product have to be checked BEFORE any
-        // multiplication - a wrapped product yields a small expected_nbytes
-        // that then passes the offset check. gguf_tensor_byte_size()
-        // (src/model/gguf_parse.cpp) has had exactly this guard since it was
-        // written; this is the same computation without it.
+        // #1605: every dim arrives as a JSON double narrowed to int64, so sign and the running
+        // product must be checked BEFORE multiplication, or a wrapped product yields a small
+        // expected_nbytes that passes the offset check (same guard gguf_tensor_byte_size() has).
         uint64_t nelem = 1;
         bool bad_shape = false;
         for (int d = 0; d < ndim; d++) {
@@ -500,25 +478,10 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         }
 
         if (ndim > kMaxDims) {
-            // Was: drop with a WARN. That loses a weight and only says so in a
-            // log line — Qwen3-VL's patch embed is [1024, 3, 2, 16, 16] and
-            // vanished exactly that way.
-            //
-            // Flatten the trailing dims into dim 1 instead: [d0, d1..dn] ->
-            // [d0, d1*..*dn]. The element order is untouched (row-major), so
-            // this is a pure reinterpretation, and it is the only shape imp's
-            // GEMM path could consume in any case. It is also the RIGHT shape
-            // for the tensors that actually arrive this way: a patch-embed
-            // convolution whose kernel equals its stride is a linear projection
-            // of flattened patches, i.e. exactly a [out_ch, in_ch*kt*kh*kw]
-            // matrix.
-            //
-            // A genuine sliding-window convolution would lose its window
-            // structure here — but it was being DROPPED before, so nothing can
-            // regress, and the INFO line makes the reinterpretation visible
-            // rather than silent.
-            // Dims are non-negative here, but shape[0] == 0 makes the total
-            // product 0 while the tail alone can still overflow, so the tail
+            // Flatten trailing dims into dim 1 ([d0,d1..dn]->[d0,d1*..*dn]) instead of dropping the
+            // tensor with a WARN (Qwen3-VL's [1024,3,2,16,16] patch embed used to vanish that way).
+            // Row-major order is untouched; a same-stride kernel conv is exactly this flattened matrix.
+            // shape[0]==0 zeroes the total product while the tail alone can still overflow, so the tail
             // gets its own saturating guard.
             uint64_t tail = 1;
             bool tail_overflow = false;
@@ -557,16 +520,10 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         uint64_t offset_start = static_cast<uint64_t>(offsets_val->arr[0].as_int());
         uint64_t offset_end = static_cast<uint64_t>(offsets_val->arr[1].as_int());
 
-        // Per-tensor offset/size validation (F4): reject swap, OOB end, and
-        // shape-vs-byte-count mismatch. expected_nbytes = nelem * wire_bytes.
-        //
-        // #1603: there is no lenient branch any more. The old one ran for every
-        // unknown dtype and never looked at offset_start at all - the only
-        // checker of offset_start is validate_tensor_offsets - so the raw
-        // pointer below was `mmap_base + tensor_data_offset + <unbounded>`. Its
-        // one check also added two file-controlled uint64s, which wraps for
-        // offset_end >= 2^64 - tensor_data_offset; validate_header_size at the
-        // top of this file rejects exactly that pattern and says why.
+        // Per-tensor offset/size validation (F4): reject swap, OOB end, shape-vs-byte-count
+        // mismatch (expected_nbytes = nelem*wire_bytes). #1603: no lenient branch any more; the old
+        // one never checked offset_start and its own check summed two file-controlled uint64s,
+        // wrapping for offset_end >= 2^64 - tensor_data_offset (validate_header_size now rejects that).
         if (nelem != 0 && dt->wire_bytes > UINT64_MAX / nelem) {
             n_dropped_bad_shape++;
             warn_drop(tensor_name.c_str(), "shape times dtype width overflows");
@@ -607,16 +564,11 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     return true;
 }
 
-// A shard name out of `model.safetensors.index.json` is file content, not an
-// operator-supplied path, and it is about to be concatenated onto the model
-// directory and handed to open()/mmap(). A name with a separator in it escapes
-// that directory: "../../../../etc/hostname" resolves, and so does an absolute
-// path, because `model_dir + "/" + "/etc/shadow"` is just "//etc/shadow".
-//
-// Every real checkpoint names a plain file next to the index, so the rule is
-// the strict one: a bare filename, nothing else. The GGUF split path is not
-// exposed to this because it derives shard names from the operator's own path
-// (gguf_loader.cpp:196) rather than from the file.
+// A shard name from model.safetensors.index.json is file content, not an operator path, and
+// gets concatenated onto the model directory and opened/mmap'd: a separator escapes the
+// directory ("../../../etc/hostname", or an absolute path via "dir"+"/"+"/etc/shadow").
+// Rule: a bare filename, nothing else. GGUF split shards derive names from the operator's
+// own path instead, so this does not apply there.
 bool safetensors_shard_name_is_safe(const std::string& name) {
     if (name.empty())
         return false;
@@ -629,13 +581,10 @@ bool safetensors_shard_name_is_safe(const std::string& name) {
 
 // ---- Sharded SafeTensors loading ----
 
-// mtp_out: same contract as load_shard's — non-null means an embedded MTP head
-// is wanted, so `mtp.*` tensors are collected instead of discarded, and a shard
-// made only of them is NOT dropped. Passing nullptr here (which this function
-// used to do implicitly, having no parameter at all) loses the draft head on
-// every sharded llm-compressor checkpoint, silently: translate_name SKIPs the
-// names, so they never reach the main map either, and the fallback that
-// harvests them from there finds nothing.
+// mtp_out: same contract as load_shard's - non-null means an embedded MTP head is wanted,
+// so mtp.* tensors are collected and a shard made only of them is NOT dropped. Passing
+// nullptr (the old implicit behavior) silently loses the draft head on every sharded
+// llm-compressor checkpoint: translate_name SKIPs the names, so they never reach the map.
 static bool load_sharded(const std::string& model_dir, std::unordered_map<std::string, Tensor>& tensor_map,
                          std::vector<ShardInfo>& shards, bool keep_vision,
                          std::unordered_map<std::string, Tensor>* mtp_out) {
@@ -678,12 +627,10 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
         }
     }
 
-    // Drop shards where every tensor would be skipped by translate_name.
-    // Saves the mmap + header parse + page cache pressure for an unused file.
-    //
-    // `keep_vision` has to reach this loop, not just translate_name: a vision
-    // tower usually ships as its own shard (`model_visual.safetensors`), so the
-    // drop decides the tower's fate before any tensor is looked at.
+    // Drops shards where translate_name would skip every tensor, saving mmap + header parse +
+    // page cache pressure for an unused file. keep_vision must reach this loop, not just
+    // translate_name: a vision tower usually ships as its own shard, so the drop decides its
+    // fate before any tensor is looked at.
     std::set<std::string> shard_files;
     const bool keep_mtp = mtp_out != nullptr;
     for (auto& [fname, tensors] : shard_tensors) {
@@ -772,15 +719,10 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
 
 // ---- Main SafeTensors loader ----
 
-// Name-only MTP presence check. Three checkpoint layouts carry a head, and a
-// reader that knows only one of them reports "no head" on the other two:
-//   1. sidecar   model_mtp.safetensors
-//   2. sharded   model.safetensors.index.json names it in weight_map
-//   3. single    model.safetensors names it in the header
-// All three answer via name_is_mtp_head_key(), the same tensor dispatch_mtp()
-// keys its shapes on, so a "yes" here means enabling would actually load. Only
-// names are read (the index text, or the 8-byte-prefixed header), never a
-// weight, so this costs nothing on a load that does not want the head.
+// Name-only MTP presence check across all three layouts a head can carry (sidecar
+// model_mtp.safetensors, sharded index.json entry, single-file header), via the same
+// name_is_mtp_head_key() dispatch_mtp() keys its shapes on, so "yes" here means enabling
+// would actually load. Only names are read, never a weight, so this costs nothing otherwise.
 bool probe_mtp_head(const std::string& model_dir) {
     namespace fs = std::filesystem;
     if (model_dir.empty())
@@ -833,14 +775,9 @@ bool probe_mtp_head(const std::string& model_dir) {
     return header_has_head(model_dir + "/model.safetensors");
 }
 
-// Reconstruct the checkpoint's declared partition from the tensor map and log
-// it. Returns true (with `why`) when the load must be refused; the rules and
-// their scope live in nvfp4_module_policy.h.
-//
-// Driven off the tensor map rather than off imp's slots because the ignore list
-// is written in the checkpoint's own namespace: a slot cannot say which module
-// it came from, and reconstructing that per architecture is the guess this is
-// meant to remove.
+// Reconstructs the checkpoint's declared partition from the tensor map and logs it; rules
+// live in nvfp4_module_policy.h. Driven off the tensor map rather than imp's slots because
+// the ignore list is written in the checkpoint's own namespace, which a slot cannot name.
 static bool nvfp4_inventory_refuses(const std::unordered_map<std::string, Tensor>& tensor_map,
                                     const ModelConfig& cfg, std::string* why) {
     namespace pol = imp::nvfp4_policy;
@@ -898,11 +835,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                                  probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     imp::llm_compressor::TranslationCounters tcounters{};
 
-    // Whether to keep `model.visual.*` instead of dropping it. Decided here,
-    // from config.json alone, because load_config() runs only after the shards
-    // are mapped and a shard dropped by then cannot be recovered. A checkpoint
-    // with no vision_config — every text-only one — answers false and loads
-    // byte-for-byte as before.
+    // Whether to keep model.visual.*. Decided here from config.json alone, since load_config()
+    // runs only after shards are mapped and a dropped shard cannot be recovered later. A
+    // checkpoint with no vision_config answers false and loads byte-for-byte as before.
     const bool keep_vision = imp::HFConfigLoader::probe_vision_tower(model_dir);
 
     // Try loading tensors. embedded_mtp_map collects `mtp.*` tensors that
@@ -953,24 +888,18 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
 
     IMP_LOG_INFO("Parsed %zu tensors from SafeTensors", tensor_map.size());
 
-    // Detect + LOAD MTP head sidecar (DeepSeek-V3-family models, e.g. Qwen3.6).
-    // Phase 1.B: actual tensor load into Model::mtp_. The main load path
-    // continues to skip the `mtp.` prefix; this sidecar load builds a separate
-    // host tensor_map keyed by raw `mtp.*` names and dispatches to MtpHead fields.
-    // Mmap is retained via Model::split_mmaps_ so Tensor pointers stay valid.
-    //
-    // Gated on load_mtp_head: the head is ~1.57 GiB BF16 (Qwen3.6) of dead VRAM
-    // unless the caller actually enables MTP spec-decode. Default-off skips it
-    // entirely so the model behaves as if no sidecar existed.
+    // Detects + loads the MTP head sidecar (DeepSeek-V3-family, e.g. Qwen3.6): a separate host
+    // tensor_map keyed by raw mtp.* names, dispatched to MtpHead fields; mmap retained via
+    // Model::split_mmaps_ so Tensor pointers stay valid. Gated on load_mtp_head: the head is
+    // ~1.57 GiB BF16 (Qwen3.6) of dead VRAM unless MTP spec-decode is actually enabled.
     std::optional<imp::MtpHead> mtp_local;
     std::unordered_map<std::string, Tensor> mtp_tensor_map;
     ShardInfo mtp_shard{};
 
-    // Dispatch a raw mtp.* tensor map to MtpHead fields. Two MLP variants:
-    //   MoE (Qwen3.6-35B): router + packed experts + gated shared expert.
-    //   Dense (Qwen3.6-27B embedded head): plain SwiGLU gate/up/down —
-    //     mapped onto the shared_expert fields (router/experts stay empty;
-    //     mtp_forward runs it as "residual + shared path", no sigmoid gate).
+    // Dispatches a raw mtp.* tensor map to MtpHead fields. Two MLP variants: MoE (Qwen3.6-35B):
+    // router + packed experts + gated shared expert. Dense (Qwen3.6-27B embedded head): plain
+    // SwiGLU gate/up/down mapped onto the shared_expert fields (router/experts stay empty,
+    // forward runs it as residual + shared path, no sigmoid gate).
     auto dispatch_mtp = [](std::unordered_map<std::string, Tensor>& tm, const std::string& src,
                            size_t bytes) -> imp::MtpHead {
         imp::MtpHead head;
@@ -984,11 +913,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             dst = it->second;
             return true;
         };
-        // Nemotron-3.5 layout: a miniature Nemotron rather than a miniature
-        // Qwen — attention in layers.0, MoE in layers.1, `mixer` where Qwen
-        // says `self_attn`/`mlp`, and per-expert 2-D weights instead of one
-        // packed 3-D stack. Detected on a name only this layout has, so the
-        // Qwen path below is reached byte-for-byte as before.
+        // Nemotron-3.5 layout: a miniature Nemotron, not Qwen - attention in layers.0, MoE in
+        // layers.1, mixer where Qwen says self_attn/mlp, per-expert 2-D weights instead of one
+        // packed 3-D stack. Detected on a name only this layout has, so the Qwen path below stays
+        // byte-for-byte unaffected.
         if (tm.count(kMtpHeadKeyEhProj)) {
             bool nok = true;
             nok &= take("mtp.layers.0.enorm.weight", head.pre_fc_norm_embedding);
@@ -1111,11 +1039,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                 IMP_LOG_WARN("MTP head file %s present but failed to load", mtp_path.c_str());
             }
         } else {
-            // Embedded variant. llm-compressor checkpoints had their mtp.*
-            // tensors diverted into embedded_mtp_map during load_shard
-            // (translate_name SKIPs them); Model-Optimizer checkpoints keep
-            // them in the main tensor_map (weight_map skips them later) —
-            // harvest from there.
+            // Embedded variant: llm-compressor checkpoints divert their mtp.* tensors into
+            // embedded_mtp_map during load_shard (translate_name SKIPs them); Model-Optimizer
+            // checkpoints keep them in the main tensor_map (weight_map skips them later) - harvest
+            // from there instead.
             if (embedded_mtp_map.empty()) {
                 for (const auto& kv : tensor_map) {
                     if (!name_is_mtp_tensor(kv.first))
@@ -1132,10 +1059,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             }
         }
     } else if (probe_mtp_head(model_dir)) {
-        // The caller asked for no head and this checkpoint has one. Say so
-        // once, with the trade: speculative.mtp_k=auto declines the head
-        // outside a single-stream run, and an option nobody is told about is
-        // not a choice the operator gets to make. Costs a name scan, no bytes.
+        // The caller asked for no head and this checkpoint has one: say so once, since
+        // speculative.mtp_k=auto declines the head outside a single-stream run, and an option
+        // nobody is told about isn't a choice the operator gets to make. Costs a name scan, no bytes.
         IMP_LOG_INFO(
             "MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it "
             "only on a single-stream run (max_batch_size=1) with runtime.deterministic off; "
@@ -1185,15 +1111,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // 4. Apply arch-specific defaults
     apply_arch_defaults(cfg);
 
-    // SafeTensors store Q/K in HuggingFace-native layout, which uses NeoX-style
-    // (rotate-half) RoPE: pairs (i, i+rope_dim/2). The arch table defaults
-    // LLAMA/MISTRAL/MIXTRAL/LLAMA4 to interleaved RoPE (rope_neox=0) because the
-    // GGUF converter pre-permutes Q/K so interleaved reproduces NeoX. That
-    // permutation is NOT applied to SafeTensors weights, so the interleaved
-    // default scrambles positional encoding (e.g. Phi-3/Phi-4 -> coherent but
-    // prompt-blind output with preserved magnitudes). Force NeoX for the
-    // SafeTensors path so HF-native Q/K rotate correctly. Arches that already
-    // keep the default (rope_neox=true: QWEN3/GEMMA/...) are unaffected.
+    // SafeTensors stores Q/K in HF-native NeoX-style (rotate-half) RoPE: pairs (i, i+rope_dim/2).
+    // The arch table defaults LLAMA/MISTRAL/MIXTRAL/LLAMA4 to interleaved because GGUF
+    // pre-permutes Q/K so interleaved reproduces NeoX; that permutation is NOT applied to
+    // SafeTensors weights, so the interleaved default scrambles positions (coherent but
+    // prompt-blind output). Force NeoX on the SafeTensors path; rope_neox=true arches unaffected.
     if (cfg.arch == ModelArch::LLAMA || cfg.arch == ModelArch::MISTRAL || cfg.arch == ModelArch::MIXTRAL ||
         cfg.arch == ModelArch::LLAMA4) {
         cfg.rope_neox = true;
@@ -1212,11 +1134,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                      cfg.expert_d_ff);
     }
 
-    // 5. Allocate layers and expert vectors
-    //
-    // Every number below came out of the file (config.json, or inferred from
-    // tensor names when it is absent), so it is checked before it sizes
-    // anything: `num_hidden_layers` alone reaches 18.9 TiB at INT_MAX.
+    // Every number below came out of the file (config.json, or inferred from tensor names when
+    // absent), so it is checked before it sizes anything: num_hidden_layers alone reaches
+    // 18.9 TiB at INT_MAX.
     {
         std::string dim_err;
         if (!validate_declared_dimensions(cfg, &dim_err)) {
@@ -1253,16 +1173,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                      gptq_cfg.desc_act ? "true" : "false");
     }
 
-    // 6c. NVFP4 config detection. Scale tensors were already routed into
-    // model->nvfp4_scratch_ by weight_map.cpp during the layer-pattern pass;
-    // executor_pre_dequant.cu's Phase 0 promote() resolves each scratch key
-    // back to the main weight tensor and writes the device pointer onto its
-    // .scales / .tensor_scale sidecars. No load-side linking needed here.
-    // MXFP4 detection. gpt-oss MXFP4 experts ARE decoded natively: they are
-    // transcoded MXFP4→NVFP4 at init (pre_dequant_phase3_nvfp4_decode.cu) and
-    // run through the CUTLASS NVFP4 grouped GEMM. Other MXFP4 SafeTensors
-    // architectures have no decode path yet — only those still need the GGUF
-    // conversion warning.
+    // NVFP4: scale tensors were already routed into model->nvfp4_scratch_ by weight_map.cpp;
+    // executor_pre_dequant.cu Phase 0 promote() resolves them back onto the weight's sidecars,
+    // no load-side linking needed here. MXFP4: gpt-oss experts decode natively (transcoded
+    // MXFP4->NVFP4 at init, run through CUTLASS NVFP4 grouped GEMM); other MXFP4 SafeTensors
+    // archs have no decode path yet and still need the GGUF conversion warning.
     HFConfigLoader::MxFP4Config mxfp4_cfg;
     if (HFConfigLoader::load_mxfp4_config(model_dir, mxfp4_cfg)) {
         cfg.is_mxfp4_prequant = true;
@@ -1322,11 +1237,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // 7. Tie output projection if not found.
-    // Cross-check the author's `tie_word_embeddings` flag (parsed by
-    // HFConfigLoader::load_config) against the actual lm_head.weight
-    // presence. Mismatch is a real surprise — most models tie, so silent
-    // tying when the author said `tie=false` would mask a missing lm_head.
+    // Cross-checks the author's tie_word_embeddings flag against actual lm_head.weight
+    // presence. Mismatch is a real surprise: most models tie, so silently tying when the
+    // author declared tie=false would mask a genuinely missing lm_head.
     const bool out_proj_missing = (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr);
     if (cfg.tie_word_embeddings == 0 && out_proj_missing) {
         IMP_LOG_WARN(
@@ -1375,12 +1288,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                 IMP_LOG_INFO("Loaded tokenizer from %s", tok_json_path.c_str());
             }
         } else if (has_spm) {
-            // SentencePiece-only checkpoint (older Llama 1/2, Mistral, …).
-            // Native protobuf parser populates vocab + scores + token types;
-            // the SPM-style encoder in tokenizer.cpp:encode_spm() handles the
-            // rest. BPE-from-spm checkpoints get loaded with the same vocab
-            // table — the score-based encoder produces equivalent output for
-            // most practical text.
+            // SentencePiece-only checkpoint (older Llama 1/2, Mistral, ...): native protobuf parser
+            // populates vocab+scores+token types, encode_spm() handles the rest. BPE-from-spm
+            // checkpoints share the same vocab table; the score-based encoder produces equivalent
+            // output for most practical text.
             SentencePieceModel spm = load_sentencepiece_model_file(tok_spm_path);
             if (!spm.empty()) {
                 auto tok = std::make_unique<Tokenizer>();
@@ -1409,13 +1320,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // 9b. tokenizer_config.json — tokenizer-side flags (add_bos_token,
-    // add_prefix_space). Mirrors gguf_loader.cpp's read of
-    // tokenizer.ggml.add_bos_token / add_space_prefix. Without this the
-    // SafeTensors path used Tokenizer's hardcoded default `add_bos_=true`
-    // — wrong for any model that ships add_bos_token=false in its config
-    // (e.g. Qwen3-Coder-30B-A3B-FP4 which auto-prepends <|endoftext|>
-    // unwantedly otherwise).
+    // tokenizer_config.json tokenizer-side flags (add_bos_token, add_prefix_space), mirroring
+    // gguf_loader.cpp's tokenizer.ggml.add_bos_token/add_space_prefix. Without this the
+    // SafeTensors path used the hardcoded add_bos_=true default, wrong for any model shipping
+    // add_bos_token=false (e.g. Qwen3-Coder-30B-A3B-FP4 auto-prepending <|endoftext|>).
     if (!model_dir.empty() && model->tokenizer_) {
         HFConfigLoader::TokenizerFlags tflags;
         if (HFConfigLoader::load_tokenizer_flags(model_dir, tflags)) {
@@ -1432,11 +1340,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             if (tflags.use_default_system_prompt >= 0) {
                 model->tokenizer_->set_use_default_system_prompt(tflags.use_default_system_prompt != 0);
             }
-            // Resolve BOS/EOS token IDs from the token content strings.
-            // This handles models like DeepSeek whose BOS token string
-            // ("<｜begin▁of▁sentence｜>") is not in the hardcoded detection
-            // list in tokenizer.cpp — they land in added_tokens and are
-            // already in the vocabulary; we just need to wire up the ID.
+            // Resolves BOS/EOS token IDs from the token content strings. Handles models (e.g.
+            // DeepSeek) whose BOS string is not in tokenizer.cpp's hardcoded detection list: they land
+            // in added_tokens and are already in the vocabulary, only the ID needs wiring.
             if (!tflags.bos_token.empty()) {
                 int32_t bid = model->tokenizer_->find_token(tflags.bos_token);
                 if (bid >= 0) {
@@ -1467,10 +1373,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         cfg.vocab_size = static_cast<int>(model->tok_emb_.shape[0]);
     }
 
-    // 10. generation_config.json — sampling/EOS defaults shipped by the model
-    // author. Loaded into model->generation_config_ for engine + CLI consumers.
-    // EOS IDs additionally pushed onto the tokenizer's eos list so the engine's
-    // existing stop-condition path picks them up without further plumbing.
+    // generation_config.json: sampling/EOS defaults shipped by the model author, loaded into
+    // model->generation_config_ for engine + CLI consumers. EOS IDs are additionally pushed
+    // onto the tokenizer's eos list so the existing stop-condition path picks them up.
     if (!model_dir.empty()) {
         HFConfigLoader::load_generation_config(model_dir, model->generation_config_);
         if (model->tokenizer_) {
@@ -1480,11 +1385,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // 11. Cross-check special_tokens_map.json against the loaded tokenizer's
-    // special-flag column. The model author's list is authoritative; if a
-    // string from `additional_special_tokens` exists in vocab but isn't
-    // marked CONTROL (token_type=3), patch it. Caught by the engine's
-    // banned-token scan in engine.cpp.
+    // Cross-checks special_tokens_map.json against the loaded tokenizer's special-flag column.
+    // The model author's list is authoritative: a string in additional_special_tokens that
+    // exists in vocab but isn't marked CONTROL (token_type=3) gets patched, caught by the
+    // engine's banned-token scan.
     if (!model_dir.empty() && model->tokenizer_) {
         HFConfigLoader::SpecialTokensMap stm;
         if (HFConfigLoader::load_special_tokens_map(model_dir, stm)) {
@@ -1509,11 +1413,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // 12. Validate config-promised biases against actual tensor presence.
-    // Some HF configs declare attention_bias/mlp_bias but the SafeTensors
-    // export omits the bias tensors. Without this check the loader silently
-    // leaves bias slots null and inference proceeds with undefined behaviour
-    // depending on which kernels short-circuit on null biases.
+    // Validates config-promised biases against actual tensor presence: some HF configs declare
+    // attention_bias/mlp_bias but the export omits the tensors. Without this the loader
+    // silently leaves bias slots null and inference runs with undefined behavior depending on
+    // which kernels short-circuit on null biases.
     if (cfg.attention_bias == 1) {
         int missing_q = 0, missing_k = 0, missing_v = 0;
         for (const auto& layer : model->layers_) {
@@ -1541,12 +1444,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             "Inference may be incoherent.");
     }
 
-    // gpt-oss post-load pass (#547): de-interleave the fused gate_up expert
-    // bias (g0,u0,g1,u1,... along the column dim) into separate gate/up bias
-    // tensors so the standard per-projection bias plumbing applies. The
-    // packed MXFP4 expert weights stay host-mmap'd; the MXFP4→NVFP4
-    // conversion happens at executor pre-dequant (needs the executor's
-    // wcache). Host copies live in host_owned_buffers_ (freed in ~Model).
+    // gpt-oss post-load pass (#547): de-interleaves the fused gate_up expert bias (g0,u0,g1,
+    // u1,...) into separate gate/up bias tensors for standard per-projection bias plumbing.
+    // Packed MXFP4 expert weights stay host-mmap'd; MXFP4->NVFP4 conversion happens at
+    // executor pre-dequant. Host copies live in host_owned_buffers_ (freed in ~Model).
     if (cfg.arch == ModelArch::GPT_OSS) {
         for (auto& layer : model->layers_) {
             const Tensor& fused = layer.expert_gate_up_bias_fused;
@@ -1579,16 +1480,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
         IMP_LOG_INFO("gpt-oss: expert gate_up biases de-interleaved for %zu layers", model->layers_.size());
 
-        // Residual-stream 2^-4 rescale (#547): gpt-oss's massive BF16
-        // activations overflow the FP16 hidden state (hidden L2 jumps ~12x at
-        // L6 and reaches ±inf by L23 → NaN logits + garbage decode). Scaling
-        // every contributor to h by 2^-4 is exact for the model output: FP16
-        // scaling is an exponent shift (lossless), RMSNorm is scale-invariant,
-        // and lm_head reads only normed values. Contributors:
-        //   - embeddings: cfg.embed_scale = 2^-4 (arch registry)
-        //   - Wo + o_bias + expert down bias: scaled here (host BF16)
-        //   - expert down weights: tensor_scales inside the MXFP4→NVFP4
-        //     converter (pre_dequant_phase3_nvfp4_decode.cu)
+        // Residual-stream 2^-4 rescale (#547): gpt-oss's BF16 activations overflow FP16 hidden
+        // (inf by L23, NaN logits). FP16 scaling is a lossless exponent shift; RMSNorm is
+        // scale-invariant and lm_head reads only normed values, so scaling every h-contributor is
+        // exact. Contributors: embeddings (cfg.embed_scale), Wo+o_bias+expert down bias (scaled
+        // here), expert down weights (tensor_scales in pre_dequant_phase3_nvfp4_decode.cu).
         auto scale_bf16_pow2 = [&](Tensor& t, int neg_exp) -> bool {
             if (!t.data || t.on_device)
                 return true;

@@ -99,13 +99,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     int scale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 16) (bytes)
     int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
 
-// BitDecoding Phase 3c residual write — copies one (K, V) FP16 row pair per
-// token into the per-(seq, layer) residual ring slot. Replaces a pair of
-// `cudaMemcpyAsync` we used to launch per layer; the device-to-device copy
-// engine path serialized small transfers and dominated decode tg/s
-// (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
-//
-// Multi-seq form: pass n_tokens > 1 with the device pointer arrays.
+// BitDecoding Phase 3c residual write: copies one (K,V) FP16 row pair per
+// token into the per-(seq,layer) residual ring slot, replacing a pair of
+// per-layer cudaMemcpyAsync calls (the D2D copy engine serialized small
+// transfers and dominated decode tg/s, -3x on Qwen3-4B Q8 NVFP4-KV @4K).
+// Multi-seq form: n_tokens>1 with device pointer arrays.
 __global__ void residual_kv_write_multi_kernel(
     const half* __restrict__ k_in,                  // [n_tokens, slot_elems]
     const half* __restrict__ v_in,                  // [n_tokens, slot_elems]
@@ -113,10 +111,10 @@ __global__ void residual_kv_write_multi_kernel(
     half* const* __restrict__ residual_v_dst_ptrs,  // [n_tokens] device array of dst pointers
     int slot_elems);
 
-// Graph-capture-safe variant. Resolves the destination ring slot at kernel
-// execution time by reading the device-resident `widx` (one int per seq slot)
-// pointer + the persistent slot index. Caller passes the per-(seq_slot, layer)
-// K/V base pointer (NOT the ring slot — that's computed inside the kernel).
+// Graph-capture-safe variant: resolves the destination ring slot at kernel
+// execution time from the device-resident `widx` + the persistent slot
+// index. Caller passes the per-(seq_slot,layer) K/V base pointer, not the ring slot (computed inside the
+// kernel).
 __global__ void residual_kv_write_indirect_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
@@ -126,13 +124,11 @@ __global__ void residual_kv_write_indirect_kernel(
     int seq_slot,                                     // index into d_residual_widx_ptr
     int slot_elems);
 
-// Graph-capture-safe MULTI-seq variant of the above. The per-batch-index
-// destination is computed on the device from the layer base, the residual
-// per-seq stride and the ring index, so nothing about it is frozen at capture
-// time (#1708). The old form took a device ARRAY of destination pointers that
-// the host built and `cudaMallocAsync`'d per call, per layer - inside the
-// captured region, freed again right after, so a replay wrote to memory the
-// allocator had handed to someone else.
+// Graph-capture-safe MULTI-seq variant (#1708): the per-batch-index
+// destination is computed on device from the layer base, per-seq stride
+// and ring index, so nothing is frozen at capture time. Replaces a form
+// that built a host device-pointer array with cudaMallocAsync/Free per
+// call inside the captured region, where a replay wrote through freed memory.
 __global__ void residual_kv_write_multi_indirect_kernel(
     const half* __restrict__ k_in,                // [n_tokens, slot_elems]
     const half* __restrict__ v_in,                // [n_tokens, slot_elems]
@@ -152,10 +148,9 @@ __global__ void advance_residual_state_kernel(
     int slot,
     int residual_n_tokens);
 
-// Same, for every sequence in a multi-seq decode step (#1708). The single-slot
-// form above is reached only when `state.kv_seq_id >= 0`, which only the N==1
-// path sets - so a multi-seq step advanced the ring on the HOST, and a graph
-// replay never ran that.
+// Same, for every sequence in a multi-seq decode step (#1708). The
+// single-slot form above is reached only when state.kv_seq_id>=0 (N==1
+// only), so a multi-seq step advanced the ring on the HOST, which a graph replay never ran.
 __global__ void advance_residual_state_multi_kernel(int* __restrict__ d_widx, int* __restrict__ d_fc,
                                                     const int* __restrict__ d_seq_slots, int n_seqs,
                                                     int residual_n_tokens);
@@ -181,13 +176,10 @@ __global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restri
 __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restrict__ in,
                                                            half* __restrict__ out, int64_t n);
 
-// ---------------------------------------------------------------------------
-// GDN/Qwen3.5/3.6 attention output-gate split (interleaved layout):
-// Source row layout: [Q_h0(hd) | Gate_h0(hd) | Q_h1(hd) | Gate_h1(hd) | ...]
-// Splits per head into two contiguous [n, nh*hd] buffers in one launch,
-// replacing the nh × 2 cudaMemcpy2DAsync loop in executor_attention.cu
-// (~656 D2D copies per decode step on Qwen3.5 GDN — Finding 2).
-// Element type is templated; instantiated for half (FP16) and __nv_bfloat16.
+// GDN/Qwen3.5/3.6 attention output-gate split (interleaved layout
+// [Q_h0(hd)|Gate_h0(hd)|...]): splits per head into two contiguous
+// [n,nh*hd] buffers in one launch, replacing an nh*2 cudaMemcpy2DAsync
+// loop. Instantiated for half and __nv_bfloat16.
 template <typename T>
 __global__ __launch_bounds__(256) void attn_gate_split_interleaved_kernel(
     const T* __restrict__ src, T* __restrict__ q_dst, T* __restrict__ gate_dst, int n_tokens, int nh,
@@ -217,18 +209,16 @@ void dispatch_dp4a_gemv(QType qtype, const void* W, const block_q8_1* q8_1, cons
 
 void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream);
 
-// Device-to-device copy as a kernel launch (stream-async, ~10 us host cost)
-// instead of cudaMemcpyAsync's WDDM DMA submission (~165 us blocked host
-// time per call on this WSL2 host). Use for per-layer copies on the decode
-// hot path; falls back to cudaMemcpyAsync for unaligned buffers.
+// D2D copy as a kernel launch (stream-async, ~10 us host cost) instead of
+// cudaMemcpyAsync's WDDM DMA submission (~165 us blocked host time/call on
+// this WSL2 host). Use for per-layer copies on the decode hot path; falls back to cudaMemcpyAsync for
+// unaligned buffers.
 void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream);
 
-// Pipelined batched-decode chain advance (see decode_pipeline_advance.cu):
-// token_ids[i] = slot i's sampled token, positions[i]++, context_lens[i]++,
-// per-row history append (penalty rows), plus n_patches block-table scatter
-// writes (offsets are flat indices into the pool block-table region; patch/
-// pos arrays must be device-readable — the engine passes mapped pinned
-// memory). One tiny single-block launch.
+// Pipelined batched-decode chain advance: token_ids[i]=slot i's sampled
+// token, positions[i]++, context_lens[i]++, per-row penalty history
+// append, plus n_patches block-table scatter writes. Patch/pos arrays must be device-readable (mapped pinned
+// memory).
 void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
                              int32_t* d_token_ids, int* d_positions, int* d_context_lens,
                              int* d_block_tables, int n_patches, const int* d_patch_offsets,

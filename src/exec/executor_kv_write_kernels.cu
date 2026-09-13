@@ -6,17 +6,11 @@
 
 namespace imp {
 
-// Shared parameter contract for the paged KV-write kernels below. Each token's
-// K (and V) slice is copied into the correct slot of the right block.
-//
-// k_in / v_in:      [n_tokens, n_kv_heads * head_dim] contiguous
-// positions:        [n_tokens] position of each token in the sequence
-// block_tables:     [n_sequences, max_blocks_per_seq] or [max_blocks] block IDs
-// *_cache_base:     base pointer of the KV pool for this layer (block 0)
-// block_stride:     elements per block = kKVBlockSize * n_kv_heads * head_dim
-// row_elems:        n_kv_heads * head_dim (elements per token)
-// max_blocks_per_seq: stride for 2D block table (0 = legacy flat)
-// n_sequences:      number of sequences in the batch
+// Shared parameter contract for the paged KV-write kernels: k_in/v_in
+// [n_tokens, n_kv_heads*head_dim]; positions[n_tokens]; block_tables
+// [n_sequences,max_blocks_per_seq] or flat [max_blocks]; block_stride =
+// kKVBlockSize*n_kv_heads*head_dim; row_elems = n_kv_heads*head_dim;
+// max_blocks_per_seq=0 means legacy flat table.
 
 // Fused K+V write to paged KV cache in a single launch.
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
@@ -35,11 +29,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 
@@ -66,14 +59,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// FP16 -> INT8 quantization + write to paged KV cache with per-head scales.
-// Each warp processes one KV head independently: compute absmax via warp shuffle,
-// then quantize and write int8 data + half scale.
-//
-// blockIdx.x = token_idx, blockIdx.y = 0 (K) or 1 (V).
-// blockDim.x = 256 (8 warps). Each warp loops over heads.
-// ---------------------------------------------------------------------------
+// FP16->INT8 quantization + paged KV write with per-head scales: each warp
+// processes one KV head independently (absmax via warp shuffle, then
+// quantize + write int8 + half scale). blockIdx.x=token, blockIdx.y=K(0)/V(1); 256 threads (8 warps), each
+// looping over heads.
 __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     const half* __restrict__ k_in,  // [n_tokens, n_kv_heads * head_dim]
     const half* __restrict__ v_in, const int* __restrict__ positions, const int* __restrict__ block_tables,
@@ -91,11 +80,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 
@@ -161,12 +149,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// INT4 KV cache write: FP16 → 4-bit symmetric quantization with per-head scales.
-// Two INT4 values packed into one byte (low nibble = even index, high nibble = odd).
-// Range: [-8, 7] symmetric. Scale = absmax / 7.0.
-// blockIdx.x = token, blockIdx.y = 0 (K) or 1 (V).
-// ---------------------------------------------------------------------------
+// INT4 KV cache write: FP16 -> 4-bit symmetric quantization with per-head
+// scales, two values packed per byte (low nibble even index, high nibble
+// odd). Range [-8,7], scale = absmax/7.0. blockIdx.x=token, blockIdx.y=K(0)/V(1).
 __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables,
@@ -183,11 +168,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 
@@ -248,13 +232,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// NVFP4 KV cache write kernel
-// Per (token, head, group of 16 elems along head_dim):
-//   1. absmax over 16 elems
-//   2. scale = absmax / 6.0  (FP4 E2M1 max = 6.0); store as UE4M3 byte
-//   3. quant each elem to E2M1 nibble (nearest-magnitude + sign), pack 2/byte
-// ---------------------------------------------------------------------------
+// NVFP4 KV cache write, per (token,head,16-element group along head_dim):
+// absmax over the 16 elems, scale = absmax/6.0 (FP4 E2M1 max), stored as a
+// UE4M3 byte, then each elem quantized to an E2M1 nibble (nearest-magnitude+sign), 2 packed per byte.
 __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, uint8_t* __restrict__ k_cache_base,
@@ -272,11 +252,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 
@@ -329,16 +308,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// MXFP4-KV write kernel: same layout as NVFP4 but stores UE8M0 scale bytes.
-//
-// The only difference from write_kv_cache_nvfp4_kernel is the scale encoding:
-//   NVFP4:    `__nv_fp8_e4m3 ue4m3(sc); scale_dst[...] = reinterpret_cast<uint8_t>(&ue4m3);`
-//   MXFP4_KV: `scale_dst[...] = tq_float_to_ue8m0(sc);`   (pure-exponent 8-bit)
-//
-// All other fields (block_stride, scale_block_stride, FP4 packing, group size)
-// are identical. The tq_float_to_ue8m0 alias is defined at line 1084.
-// ---------------------------------------------------------------------------
+// MXFP4-KV write: same layout as NVFP4, differs only in scale encoding
+// (NVFP4: UE4M3 via __nv_fp8_e4m3; MXFP4_KV: pure-exponent UE8M0 via
+// tq_float_to_ue8m0). Block_stride, scale_block_stride, FP4 packing and group size are identical.
 __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, uint8_t* __restrict__ k_cache_base,
@@ -355,11 +327,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 
@@ -392,13 +363,12 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
             amax = fmaxf(amax, fabsf(v));
         }
         float sc_exact = amax / 6.0f;
-        // Round-trip-consistent scale: quantize to UE8M0 first, then use the
-        // ACTUAL decoded scale for nibble quantization. The NVFP4 write kernel
-        // gets away with using sc_exact directly because E4M3's mantissa keeps
-        // the rounding error ~1.5%, but UE8M0 is power-of-2 only (up to 2x
-        // rounding error per group) — a mismatch between encoder/decoder
-        // scales compounds catastrophically over 32 layers (degenerate output
-        // observed in Phase 2 NIAH re-run, 0% retrieval even at 4K context).
+        // Round-trip-consistent scale: quantizes to UE8M0 first, then uses the
+        // ACTUAL decoded scale for nibble quantization. NVFP4's E4M3 mantissa
+        // keeps rounding error ~1.5% so it can use sc_exact directly, but UE8M0 is
+        // power-of-2 only (up to 2x rounding error/group); an encoder/decoder
+        // scale mismatch compounds catastrophically over 32 layers (observed as 0% NIAH retrieval at 4K
+        // context).
         uint8_t sc_byte = tq_float_to_ue8m0(sc_exact);
         float sc_actual = tq_ue8m0_to_float(sc_byte);
         float inv_sc = (sc_actual > 1e-30f) ? (1.0f / sc_actual) : 0.0f;
@@ -418,20 +388,12 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// BitDecoding Phase 3c: FP16 residual ring write.
-//
-// blockIdx.x = token_idx (0..n_tokens-1); blockIdx.y selects K (0) or V (1).
-// blockDim.x threads stripe across slot_elems = n_kv_heads * head_dim. The
-// per-token destination pointer (already resolved on the host to the right
-// (seq_slot, layer, K|V, ring_slot) location) is read from the per-token
-// pointer array.
-//
-// Replaces a pair of `cudaMemcpyAsync(dst, src, slot_elems*sizeof(half),
-// cudaMemcpyDeviceToDevice, stream)` calls per layer, which were observed
-// to serialize on the copy engine and dominate decode tg/s when residual
-// was enabled (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
-// ---------------------------------------------------------------------------
+// BitDecoding Phase 3c FP16 residual ring write. blockIdx.x=token_idx,
+// blockIdx.y selects K(0)/V(1); threads stripe across slot_elems =
+// n_kv_heads*head_dim. Per-token destination (host-resolved to
+// (seq_slot,layer,K|V,ring_slot)) comes from a per-token pointer array.
+// Replaces per-layer cudaMemcpyAsync pairs that serialized on the copy engine (-3x decode regression at 4K
+// ctx).
 __global__ void residual_kv_write_multi_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
@@ -451,9 +413,8 @@ __global__ void residual_kv_write_multi_kernel(
 }
 
 // Graph-safe single-seq variant: reads write_idx from a device pointer at
-// kernel execution time, so the captured kernel sees the current ring state
-// across graph replays. blockIdx.x ∈ {0, 1} selects K or V; threads stripe
-// across slot_elems.
+// execution time, so the captured kernel sees the current ring state
+// across replays. blockIdx.x in {0,1} selects K or V; threads stripe across slot_elems.
 __global__ void residual_kv_write_indirect_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
@@ -529,13 +490,11 @@ __global__ void advance_residual_state_kernel(
     }
 }
 
-// Linear-mode RoPE cos/sin for one pair, shared by the two decode KV-write RoPE
-// kernels below (write_kv_cache_rope_fused / rope_q_only). These fuse RoPE only
-// when the model is linear-scaled (the can_fuse_rope_kv gate requires
-// yarn_ext_factor <= 0), so this needs no YaRN blend and stays bit-exact with
-// the previous inline copies — kept separate from the general rope_yarn() helper
-// (rope_yarn.cuh), whose interpolate-then-scale grouping would shift the decode
-// KV cache by an ULP for no functional gain.
+// Linear-mode RoPE cos/sin, shared by the two decode KV-write RoPE
+// kernels. Fuses RoPE only when linear-scaled (can_fuse_rope_kv requires
+// yarn_ext_factor<=0), needing no YaRN blend; kept separate from the
+// general rope_yarn() helper, whose interpolate-then-scale grouping would shift the decode KV cache by an
+// ULP.
 static __device__ __forceinline__ void rope_linear_cos_sin(int pos, int pair_idx, float theta,
                                                            float inv_scaling, int rope_pairs,
                                                            const float* __restrict__ longrope_inv_freqs,
@@ -572,11 +531,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 
@@ -654,11 +612,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
+    // Defense-in-depth (F-A12): a negative block_id (freed StreamingLLM -1
+    // sentinel, or a future block-table bug) would index the KV pool OOB;
+    // block_id is uniform per block, so this skips the write without
+    // divergence. Never fires today (host-side admission guarantees a real block).
     if (block_id < 0)
         return;
 

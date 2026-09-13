@@ -1,33 +1,22 @@
-// The growable backend: CUDA virtual memory management (A3.1, A7 step 7).
-//
-// Reserve address space for what the pool could ever need, commit physical
-// pages into it as demand arrives, and release them when it goes away. The
-// point is not fragmentation, it is that a pool built this way cannot be
-// mis-sized, because it is no longer sized.
-//
-// Two properties make it usable here, both re-measured on this box against
-// CUDA 13.3 with tools/analysis/vmm_wsl2_probe.cu before this file was written:
-//
-//   The base address is invariant across a grow/shrink cycle, so a CUDA graph
-//   captured against a pointer into the region still reads correct data after
-//   1.5 GiB was committed underneath it, with no re-instantiation. Graphs are
-//   worth 2-3x of decode here, so a backend that invalidated them would be
-//   unusable whatever else it offered.
-//
-//   cuMemRelease actually returns memory to the driver: after decommitting
-//   everything, free VRAM is back at the post-reserve baseline to within 2 MiB.
-//   That is the part cudaFree does NOT do on WSL2/WDDM, where a process keeps
-//   its peak commitment for its lifetime. It is why shrinking is worth having
-//   at all on this platform, and it is the only mechanism that lets two imp
-//   processes share one card without one of them being restarted.
-//
-// Measured cost on the same run: 1.18 ms per 256 MiB commit, 2.58 ms per
-// decommit. A KV pool grows at most once every few hundred decode steps, so the
-// stall is budgeted against a growth event, not against a step.
-//
-// cuMemUnmap alone frees nothing — the allocation handle still holds the
-// memory. Both calls are needed, in that order, which is why every mapping is
-// tracked with its handle rather than just its address range.
+// The growable backend: CUDA virtual memory management (A3.1, A7 step 7). Reserve
+// address space for what the pool could ever need, commit physical pages as demand
+// arrives, release them when it goes away: the point is not fragmentation, it's that a
+// pool built this way cannot be mis-sized, because it is no longer sized.
+// Two properties make it usable here (re-measured on this box against CUDA 13.3 with
+// tools/analysis/vmm_wsl2_probe.cu):
+//   Base address is invariant across a grow/shrink cycle, so a CUDA graph captured
+//   against a pointer into the region still reads correct data after a commit
+//   underneath it, with no re-instantiation. Graphs are worth 2-3x decode here, so an
+//   invalidating backend would be unusable.
+//   cuMemRelease actually returns memory to the driver (unlike cudaFree on WSL2/WDDM,
+//   where a process keeps its peak commitment for its lifetime); it's why shrinking is
+//   worth having, and the only mechanism letting two imp processes share one card
+//   without restarting one.
+// Commit/decommit cost roughly a millisecond per 256 MiB; a KV pool grows at most once
+// every few hundred decode steps, so the stall is budgeted against a growth event, not a
+// step.
+// cuMemUnmap alone frees nothing (the allocation handle still holds the memory); both
+// calls are needed, in that order, which is why every mapping is tracked with its handle.
 
 #include "memory/backend.h"
 #include "memory/vram_query.h"
@@ -45,16 +34,11 @@
 namespace imp {
 namespace {
 
-// The driver API is loaded by hand rather than linked.
-//
-// Linking it would put a hard DT_NEEDED on libcuda.so.1 into the imp library,
-// and every CPU-only test binary would then fail to START in a container
-// without a GPU — which is exactly what CI runs. The symbols were absent from
-// the binary before this file existed only because nothing referenced them and
-// --as-needed dropped the entry.
-//
-// A missing library is therefore the same answer as a device without virtual
-// memory management: no growable backend, everything else unchanged.
+// The driver API is loaded by hand rather than linked: linking it would put a hard
+// DT_NEEDED on libcuda.so.1 into the imp library, and every CPU-only test binary would
+// then fail to START in a GPU-less container, exactly what CI runs. A missing library is
+// therefore the same answer as a device without VMM: no growable backend, everything
+// else unchanged.
 struct DriverApi {
     CUresult (*MemAddressReserve)(CUdeviceptr*, size_t, size_t, CUdeviceptr, unsigned long long) = nullptr;
     CUresult (*MemAddressFree)(CUdeviceptr, size_t) = nullptr;
@@ -283,10 +267,9 @@ private:
         return p;
     }
 
-    // Map every granule in [begin, end) that is not mapped yet, coalescing
-    // each run of missing granules into ONE driver allocation. The measured
-    // cost is per call and not per byte (1.18 ms for 256 MiB), so a run that
-    // needs 128 granules must not become 128 calls.
+    // Map every granule in [begin, end) not mapped yet, coalescing each run of missing
+    // granules into ONE driver allocation: the cost is per call, not per byte, so a run
+    // needing many granules must not become many calls.
     MemError map_range_(Reservation& r, size_t begin, size_t end) {
         const CUmemAllocationProp prop = prop_();
         CUmemAccessDesc access = {};
@@ -338,14 +321,10 @@ private:
         return MemError::Ok;
     }
 
-    // Give back every chunk that lies entirely inside [begin, end). A chunk
-    // that straddles the boundary is left mapped: splitting a driver
-    // allocation is not possible, and unmapping it would take memory the
-    // caller did not offer with it.
-    //
-    // Both calls are required and in this order: cuMemUnmap removes the
-    // mapping, cuMemRelease is what returns the memory to the driver.
-    // Unmapping alone measures as freeing nothing.
+    // Give back every chunk that lies entirely inside [begin, end). A chunk that straddles
+    // the boundary is left mapped: splitting a driver allocation is not possible, and
+    // unmapping it would take memory the caller did not offer. Both cuMemUnmap and
+    // cuMemRelease are required, in that order; unmapping alone frees nothing.
     void unmap_range_(Reservation& r, size_t begin, size_t end) {
         for (auto it = r.chunks.lower_bound(begin); it != r.chunks.end();) {
             const size_t c_end = it->first + it->second.size;

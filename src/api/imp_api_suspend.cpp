@@ -1,7 +1,6 @@
-// Suspend-to-RAM C API (weight snapshot + GPU release). Split out of
-// imp_api.cpp as its own logical unit — see include/imp/imp.h for the
-// documented suspend/resume flow and src/memory/weight_snapshot.h for the
-// snapshot machinery.
+// Suspend-to-RAM C API (weight snapshot + GPU release), split out of
+// imp_api.cpp. See include/imp/imp.h for the suspend/resume flow and
+// src/memory/weight_snapshot.h for the snapshot machinery.
 
 #include "api/imp_internal.h"
 #include "core/cuda_static_reset.h"
@@ -75,10 +74,9 @@ ImpError imp_gpu_release(int device_reset) {
         }
         imp::trim_device_mempool();
         if (device_reset) {
-            // Free + re-arm every lazily-created module-static CUDA resource
-            // (cuBLAS handles, workspaces, scratch) while the context is still
-            // valid — their `if (!ptr)` guards would otherwise hand out dangling
-            // handles to the next engine after the reset.
+            // Free and re-arm every lazily-created module-static CUDA resource while
+            // the context is still valid; their `if (!ptr)` guards would otherwise hand
+            // dangling handles to the next engine after the reset.
             imp::reset_static_cuda_state();
             cudaError_t r = cudaDeviceReset();
             if (r != cudaSuccess) {

@@ -30,12 +30,10 @@ size_t WeightRegistry::free_owned_storage(VRAMAllocator* alloc) {
     for (auto& h : handles_) {
         if (h.owned_bytes == 0)
             continue;
-        // Free the primary-tier payload pointer. Tiers with auxiliary buffers
-        // (NVFP4 scales, CUTLASS sf, MXFP4 scales) are freed by their native
-        // free_nvfp4_result / free_cutlass_nvfp4_weight / etc. helpers in
-        // executor_workspace_buffers.cu — this registry helper is currently
-        // only used by FP16 overlay tensors (fused_kv, fused_gate_up) which
-        // have a single contiguous storage pointer.
+        // Frees the primary-tier payload pointer. Tiers with auxiliary buffers (NVFP4 scales,
+        // CUTLASS sf, MXFP4 scales) are freed by their native free_nvfp4_result /
+        // free_cutlass_nvfp4_weight helpers instead; this registry helper currently serves only
+        // FP16 overlay tensors (fused_kv, fused_gate_up) with a single contiguous pointer.
         switch (h.primary_tier) {
             case StorageTier::FP16:
                 if (h.payload.fp16.data) {

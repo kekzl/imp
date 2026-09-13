@@ -1,13 +1,10 @@
 #pragma once
 
-// The Qwen3-VL vision encoder forward.
-//
-// Unlike the fixed-resolution encoder next door, this one has no `image_size`:
-// the token count comes from the image. Buffers are therefore sized once to a
-// configured maximum and the forward runs over whatever prefix an image needs,
-// which is also why attention is chunked over query rows — a full
-// [heads, tokens, tokens] score matrix is the one buffer that grows
-// quadratically and would dominate everything else.
+// Qwen3-VL vision encoder forward: unlike the fixed-resolution encoder, this has no
+// image_size, token count comes from the image. Buffers sized once to a configured maximum;
+// forward runs over whatever prefix an image needs, and attention is chunked over query
+// rows since a full [heads,tokens,tokens] score matrix is the one buffer that grows
+// quadratically.
 
 #include "vision/qwen3vl_vision_grid.h"
 #include "vision/vision_model.h"
@@ -31,11 +28,10 @@ public:
     [[nodiscard]] bool init(const VisionModel& model, int max_tokens);
     void free_buffers();
 
-    // Device bytes init() will take from the T2 arena, answerable before the
-    // arena opens (it reads config, not weights). init() records what it actually
-    // took in taken_bytes(); the two are asserted equal in the encoder tests, so a
-    // buffer added to init() without updating this shows up as a test failure
-    // rather than as an arena exhaustion on some other model.
+    // Device bytes init() takes from the T2 arena, answerable before the arena opens (reads
+    // config, not weights). init() records what it actually took in taken_bytes(); the two are
+    // asserted equal in the encoder tests, so a buffer added to init() without updating this
+    // shows as a test failure rather than arena exhaustion elsewhere.
     static size_t demand_bytes(const VisionConfig& c, int max_tokens);
     size_t taken_bytes() const { return taken_bytes_; }
 
@@ -43,11 +39,9 @@ public:
     // Merged image tokens produced for a `tokens`-patch image.
     int merged_tokens(int tokens) const;
 
-    // d_patches: [grid.tokens, features] FP16 device, in the patchifier's
-    //   merge-block token order.
-    // d_out: [merged_tokens, out_hidden_size] FP16 device, caller-allocated.
-    // d_deepstack_out: one buffer per config.deepstack_indexes, same shape as
-    //   d_out. Empty is allowed and simply skips the taps.
+    // d_patches: [grid.tokens,features] FP16 device, patchifier's merge-block token order.
+    // d_out: [merged_tokens,out_hidden_size] FP16 device, caller-allocated. d_deepstack_out:
+    // one buffer per config.deepstack_indexes, same shape as d_out; empty skips the taps.
     bool encode(const half* d_patches, const QwenVisionGrid& grid, half* d_out,
                 const std::vector<half*>& d_deepstack_out, cudaStream_t stream);
 

@@ -1,17 +1,10 @@
 #pragma once
 
-// The (t, h, w) position each token gets when a prompt contains images.
-//
-// Text tokens advance all three axes together, so a text-only prompt comes out
-// identical to `0, 1, 2, ...` on every axis — which is what makes M-RoPE a no-op
-// there. An image instead lays its tokens out on a grid: every token of the
-// image shares one temporal position, and its height and width positions are its
-// row and column within the image. The whole image then advances the running
-// position by only `max(rows, cols)`, not by its token count, which is why a
-// picture costs far fewer positions than tokens.
-//
-// Getting this wrong does not crash: the model reads the image as if its tokens
-// were laid out somewhere else, and describes a different picture.
+// (t,h,w) position per token when a prompt has images. Text tokens advance all 3 axes
+// together (reduces to 0,1,2,... for text-only). An image shares one temporal position
+// across its tokens; height/width = row/column. The image advances position by
+// max(rows,cols), not its token count. Wrong values don't crash: the model describes
+// a different picture than the one given.
 
 #include <cstdint>
 #include <expected>
@@ -29,13 +22,10 @@ struct MRopeImageGrid {
     int tokens() const { return rows * cols; }
 };
 
-// `is_image[i]` marks token i as belonging to an image. Image runs must be
-// contiguous and their lengths must match `grids` in order — a mismatch means
-// the placeholder expansion and the preprocessor disagree, and is refused here
-// rather than silently mis-positioning the rest of the prompt.
-//
-// `start_pos` is the position the first token takes (0 for a fresh prompt, the
-// continuation point when appending).
+// is_image[i] marks token i as image; image runs must be contiguous and match `grids` in
+// order, or the placeholder expansion and preprocessor disagree - refused here rather
+// than silently mis-positioning the rest. start_pos is the first token's position
+// (0 fresh, or the continuation point).
 struct MRopePositions {
     // [3, n_tokens], axis-major, ready for MRopeParams.
     std::vector<int32_t> pos;

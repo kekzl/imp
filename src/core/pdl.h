@@ -25,27 +25,13 @@ void enable_kernel(KernelFunc func) {
     enable(reinterpret_cast<const void*>(func));
 }
 
-// ---------------------------------------------------------------------------
-// PDL-aware kernel launch.  Uses cudaLaunchKernelEx with the
-// ProgrammaticStreamSerialization attribute when PDL is enabled for the
-// kernel.  Falls back to standard <<<>>> launch when PDL is not
-// enabled/available.
-//
-// Device half (2026-08-31, core/pdl_device.cuh): a registered kernel calls
-// pdl_wait() before its first global access and pdl_trigger() after its last
-// input read, so a programmatic edge really lets the consumer's blocks land
-// on the SMs during the producer's tail. Registration is the promise that
-// the kernel waits (cuda_graph.cu converts an edge only when the CONSUMER is
-// registered); a kernel without pdl_wait() must never be registered. The
-// launch sites register themselves (pdl::enable_kernel right before
-// pdl::launch) so every template instantiation that runs is covered.
-// Before the device half, this attribute was inert (#1655 measured
-// runtime.no_pdl true vs false inside noise); runtime.no_pdl=true remains
-// the control arm and turns both halves off.
-//
-// Usage:
-//   pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
-// ---------------------------------------------------------------------------
+// PDL-aware kernel launch via cudaLaunchKernelEx with
+// ProgrammaticStreamSerialization; falls back to plain <<<>>> when PDL is
+// off/unavailable. Registration is the promise that a kernel calls
+// pdl_wait() before its first global access and pdl_trigger() after its
+// last input read (cuda_graph.cu only converts an edge when the CONSUMER is
+// registered); a kernel without pdl_wait() must never be registered.
+// Usage: pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
 template <typename KernelFunc, typename... Args>
 void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem, cudaStream_t stream, Args... args) {
     const void* func_ptr = reinterpret_cast<const void*>(func);

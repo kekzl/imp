@@ -1,18 +1,9 @@
-// LoRA runtime delta — issue #522.
-//
-// y += scale * (x · A^T) · B^T   with A [r,K], B [N,r], x [n,K], y [n,N].
-//
-// Two regimes:
-//  - n == 1 (decode): two purpose-built GEMV kernels. cuBLAS is NOT safe
-//    here — decode runs under CUDA-graph capture and cublasLt fails with
-//    status 14 inside capture (same class as the IQ4 finding, #556). The
-//    skinny shapes (r <= 64) make custom kernels trivially sufficient.
-//  - n > 1 (prefill): two cuBLAS gemm() calls (prefill is never captured).
-//
-// The rank intermediate lives in a small persistent scratch sized at
-// set_lora() time (max_tokens × max_rank); adapters are swapped by pointer,
-// the engine invalidates decode graphs on swap so captures never hold stale
-// adapter pointers.
+// LoRA runtime delta (#522): y += scale*(x.A^T).B^T, A[r,K], B[N,r],
+// x[n,K], y[n,N]. n==1 (decode): two purpose-built GEMV kernels (cuBLAS is
+// NOT safe under CUDA-graph capture, status 14, same class as #556); skinny
+// shapes (r<=64) make custom kernels sufficient. n>1 (prefill): two cuBLAS
+// gemm() calls (prefill is never captured). Rank intermediate lives in a
+// persistent scratch sized at set_lora() time; the engine invalidates decode graphs on adapter swap.
 
 #include "exec/executor.h"
 #include "compute/gemm.h"

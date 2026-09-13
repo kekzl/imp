@@ -1,11 +1,6 @@
-// =============================================================================
-// gemm_kernel_q4k_hmma.cu -- Q4_K HMMA GEMM dispatch (Phase 0 scaffold)
-// =============================================================================
-//
-// Config-gated dispatch for the Q4_K x FP16 HMMA GEMM kernel. Called from
-// gemm_via_handle_ in executor_gemm_dispatch.cu at the prefill (M>1) path,
-// gated on `gemm.q4k_hmma_enabled` (default false). A direct call, not a
-// GemmKernelRegistry entry.
+// Q4_K HMMA GEMM dispatch (Phase 0 scaffold), config-gated on gemm.q4k_hmma_enabled
+// (default false). Called from gemm_via_handle_ at the prefill (M>1) path; a direct call,
+// not a GemmKernelRegistry entry.
 
 #include "compute/mmq_q4k_hmma.h"
 #include "core/logging.h"

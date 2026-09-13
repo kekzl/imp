@@ -1,16 +1,10 @@
 #pragma once
 
-// Per-launch expert imbalance, as arithmetic with no CUDA in it (#1548).
-//
-// What decides grouped-GEMM cost is max(M_e) at ONE launch: the kernel pads
-// every expert to a single M tile, so one hot expert sets the tile for all of
-// them and everything below it is padding. imp computed that number on the host
-// at three sites, used it to pick the tile, and dropped it; the only surviving
-// record was a whole-process activation histogram, which averages exactly the
-// skew that matters away.
-//
-// Split out here so the arithmetic is testable without a GPU or an executor.
-// The accumulation lives in GraphExecutor; this is the part that can be wrong.
+// Per-launch expert imbalance, pure arithmetic, no CUDA (#1548). Grouped-GEMM cost is
+// max(M_e) at one launch: the kernel pads every expert to a single M tile, so one hot
+// expert sets the tile and everything below it is padding. A whole-process activation
+// histogram averages this skew away; split out here so the arithmetic is testable
+// without a GPU or an executor.
 
 #include <cstdint>
 
@@ -36,11 +30,9 @@ inline MoeLaunchRows moe_launch_rows(const int32_t* offsets, int ne) {
     return r;
 }
 
-// The device kernel that actually records this at runtime. Declared here so a
-// test can run it against moe_launch_rows() above: the reference is the rule,
-// the kernel is what ships, and nothing else makes them agree.
-//
-// `acc` is [n_layers * 4]: [peak_max, sum_max, sum_rows, launches] per layer.
+// Device kernel that records this at runtime, declared here so a test can run it against
+// moe_launch_rows() above: the reference is the rule, the kernel is what ships.
+// acc is [n_layers*4]: [peak_max, sum_max, sum_rows, launches] per layer.
 #ifdef __CUDACC__
 __global__ void moe_imbalance_kernel(const int32_t* __restrict__ offsets, unsigned int* __restrict__ acc,
                                      int ne, int layer);

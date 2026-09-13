@@ -28,12 +28,11 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
                      budget_bytes / (1024.0 * 1024.0), entry_bytes / (1024.0 * 1024.0));
         return;
     }
-    // Allocate the buffers EAGERLY: engine init sizes the weight caches, KV
-    // clamp and workspace pools to fill the card (and the async mempool
-    // retains the slack), so at serving time free VRAM is ~0 by design —
-    // lazy allocation would never get a byte on tight models. Claiming the
-    // budget here makes the downstream sizing account for it; a failed
-    // malloc just caps the slot count.
+    // Allocate the buffers EAGERLY: engine init sizes weight caches, KV clamp and workspace
+    // pools to fill the card (the async mempool retains the slack), so at serving time free
+    // VRAM is ~0 by design; lazy allocation would never get a byte on tight models. Claiming
+    // the budget here makes downstream sizing account for it; a failed malloc just caps the
+    // slot count.
     pool_ = std::make_shared<BufferPool>();
     for (int i = 0; i < want; ++i) {
         void* p = nullptr;
@@ -44,10 +43,9 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     }
     capacity_ = allocated_bufs_;
     if (capacity_ == 0) {
-        // Was a silent `return`. The caller reads enabled() == false and turns
-        // hybrid prefix caching off with a message about the BUDGET, which is
-        // the one thing that was not the problem: the budget bought `want`
-        // slots and the device refused every one of them.
+        // Was a silent `return`. The caller reads enabled() == false and turns hybrid prefix
+        // caching off with a message about the BUDGET, which was not the problem: the budget
+        // bought `want` slots and the device refused every one of them.
         size_t free_bytes = 0, total_device = 0;
         if (cudaMemGetInfo(&free_bytes, &total_device) != cudaSuccess)
             free_bytes = 0;
@@ -197,10 +195,9 @@ void* RecurrentSnapshotStore::acquire_buffer_(cudaStream_t stream) {
             return p;
         }
     }
-    // All buffers were pre-allocated at init. None free: evict LRU-head
-    // entries until a buffer comes back. An entry whose buffer is still held
-    // by a request releases it later — keep evicting map entries until one
-    // deleter actually recycles.
+    // All buffers were pre-allocated at init, none free: evict LRU-head entries until a
+    // buffer comes back. An entry whose buffer is still held by a request releases it later;
+    // keep evicting map entries until one deleter actually recycles.
     while (!lru_.empty()) {
         evict_device_lru_(stream);
         std::lock_guard<std::mutex> lk(pool_->mu);
@@ -232,14 +229,11 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
     return true;
 }
 
-// Every device slab is held by an in-flight restore. That is the steady state
-// of concurrent multi-turn sessions (3 slabs on Qwen3.8-27B, 8 sessions each
-// holding its restore until its generation finishes), and dropping the save
-// here cost every session its next-turn prefix: measured 2026-09-07, 8 sessions
-// x 3 turns x 3.8k tokens, turn 2 restored the turn-0 boundary (3776 tokens) or
-// nothing, never the 7584-token turn-1 boundary. The host tier had 25 free
-// slots the whole time. Save straight into it: the same one-slab D2H an
-// eviction issues, and find() already serves host entries.
+// Every device slab can be held by an in-flight restore (the steady state of concurrent
+// multi-turn sessions); dropping the save in that case cost every session its next-turn
+// prefix, since the host tier had free slots the whole time. Save straight into the host
+// tier instead: the same one-slab D2H an eviction issues, and find() already serves host
+// entries.
 bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void* src, cudaStream_t stream) {
     void* hbuf = host_capacity_ > 0 ? acquire_host_buffer_() : nullptr;
     if (!hbuf) {

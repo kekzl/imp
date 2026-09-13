@@ -13,20 +13,15 @@ namespace imp {
 struct VisionModel;  // vision/vision_model.h — only a pointer is needed here
 
 struct HFConfigLoader {
-    // Load config.json from model directory, populate ModelConfig.
-    // Returns true if config.json was found and parsed successfully.
-    // Only overwrites cfg fields that are present in the JSON.
-    // `out_vision_tower` is optional: when non-null AND the checkpoint carries a
-    // vision tower this loader understands, it receives a VisionModel with only
-    // its `config` filled — the weights are weight_map's half. Left null for
-    // every text-only path, so nothing else changes.
+    // Loads config.json, populates ModelConfig; only overwrites fields present in the JSON.
+    // out_vision_tower, when non-null and the checkpoint carries a supported vision tower,
+    // receives a VisionModel with only its config filled; weights are weight_map's half.
     static bool load_config(const std::string& model_dir, ModelConfig& cfg,
                             std::unique_ptr<VisionModel>* out_vision_tower = nullptr);
 
-    // Sampling and stop-condition defaults shipped by the model author in
-    // generation_config.json. Sentinel values (<0 for floats, -1 for ints,
-    // empty vector for eos) mean "not present in JSON" — caller falls back
-    // to arch-family defaults or the hard-coded ImpGenerateParams baseline.
+    // Sampling/stop-condition defaults from generation_config.json. Sentinels mean "not
+    // present": <0 for floats, -1 for ints, empty vector for eos. Caller falls back to arch
+    // defaults or the hardcoded ImpGenerateParams baseline.
     struct GenerationConfig {
         float temperature = -1.0f;
         float top_p = -1.0f;
@@ -52,11 +47,9 @@ struct HFConfigLoader {
     };
     static std::vector<AddedToken> load_added_tokens(const std::string& model_dir);
 
-    // Authoritative special-token declarations from special_tokens_map.json.
-    // The model author lists every string that should be treated as a control
-    // token; tokenizer.json's `special: true` flag is normally a faithful copy
-    // but conversions can drop the flag. Cross-checking lets the loader patch
-    // the gap before the engine builds its banned-token list.
+    // Authoritative special-token declarations from special_tokens_map.json. tokenizer.json's
+    // special:true flag is normally a faithful copy but conversions can drop it; cross-checking
+    // patches the gap before the engine builds its banned-token list.
     struct SpecialTokensMap {
         std::vector<std::string> additional_special_tokens;
         std::string bos_token;  // empty if not specified
@@ -66,28 +59,19 @@ struct HFConfigLoader {
     };
     static bool load_special_tokens_map(const std::string& model_dir, SpecialTokensMap& out);
 
-    // Tokenizer-side flags from tokenizer_config.json. The corresponding
-    // GGUF metadata is `tokenizer.ggml.add_bos_token` and
-    // `tokenizer.ggml.add_space_prefix` — `gguf_loader.cpp` already wires
-    // those. SafeTensors loader needs an equivalent path.
-    //
-    // Sentinel: -1 = field not present, 0 = false, 1 = true. Caller falls
-    // back to its own default (matching GGUF: gpt2-style tokenizers default
-    // add_bos=false, everything else true).
+    // Tokenizer-side flags from tokenizer_config.json; GGUF equivalent is
+    // tokenizer.ggml.add_bos_token / add_space_prefix. Sentinel -1=absent, 0=false, 1=true.
+    // Caller default matches GGUF: gpt2-style tokenizers default add_bos=false, else true.
     struct TokenizerFlags {
         int add_bos_token = -1;
         int add_eos_token = -1;
         int add_prefix_space = -1;
-        // When the model author sets `use_default_system_prompt: false`, the
-        // chat-template apply path must NOT auto-fill the template's hardcoded
-        // default system message (e.g. Mistral-Small-3.2's 600-token default
-        // injected by chat_template.jinja line 158 when no system message is
-        // supplied).
+        // use_default_system_prompt:false means the chat-template apply path must NOT auto-fill
+        // the template's hardcoded default system message (Mistral-Small-3.2's 600-token default).
         int use_default_system_prompt = -1;
-        // BOS/EOS token strings from tokenizer_config.json (may be plain string
-        // or AddedToken object). Empty if not present. Used to resolve the BOS/EOS
-        // token ID for models whose BOS string is not in the hardcoded detection
-        // list (e.g. DeepSeek's "<｜begin▁of▁sentence｜>").
+        // BOS/EOS token strings from tokenizer_config.json (plain string or AddedToken object).
+        // Empty if absent; resolves the BOS/EOS id for models whose BOS string isn't in the
+        // hardcoded detection list.
         std::string bos_token;
         std::string eos_token;
     };
@@ -114,12 +98,9 @@ struct HFConfigLoader {
         std::string kv_cache_quant_algo;           // "FP8" or empty (modelopt only)
         std::vector<std::string> exclude_modules;  // e.g. ["lm_head"]
         NvFP4Format format = NvFP4Format::MODELOPT;
-        // Modelopt `quant_algo: MIXED_PRECISION`: instead of one global algorithm
-        // there is a per-tensor `quantized_layers` table. Nemotron-3.5 uses it to
-        // put the Mamba in/out projections on FP8 and the MoE experts on NVFP4.
-        // Only the counts are kept: nothing downstream consumes a per-tensor
-        // algorithm, because the storage tier is decided from each tensor's
-        // actual dtype at load. They exist so the log can state what was seen.
+        // Modelopt quant_algo:MIXED_PRECISION: a per-tensor quantized_layers table instead of one
+        // global algorithm (Nemotron-3.5: Mamba in/out on FP8, MoE experts on NVFP4). Only counts
+        // are kept; storage tier is decided from each tensor's actual dtype at load.
         bool mixed_precision = false;
         int n_nvfp4_tensors = 0;
         int n_fp8_tensors = 0;
@@ -127,21 +108,14 @@ struct HFConfigLoader {
     };
     static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
 
-    // True if config.json declares a `vision_config` whose model_type this build
-    // can actually build a tower from (vision_tower_supported()).
-    //
-    // Exists because the SafeTensors loader has to decide whether to keep the
-    // `model.visual.*` tensors BEFORE load_config() runs — the shards are mapped
-    // first, and a dropped shard cannot be recovered later. Deliberately answers
-    // only "is there a tower worth keeping weights for": the geometry is still
-    // validated by load_config(), and a checkpoint that passes here but fails
-    // there just carries the tensors unused.
+    // True if config.json declares a vision_config this build can build a tower from. Must
+    // run before load_config(): shards are mapped first and a dropped shard cannot be
+    // recovered. Only answers "worth keeping tensors for"; geometry is validated by load_config().
     static bool probe_vision_tower(const std::string& model_dir);
 
-    // MXFP4 quantization config (e.g. GPT-OSS). Sourced from `config.json`
-    // top-level `quantization_config` block (`quant_method == "mxfp4"`).
-    // Only the metadata is parsed; the SafeTensors decode path is not yet
-    // implemented (use the GGUF wire format for actual MXFP4 inference).
+    // MXFP4 quantization config (e.g. GPT-OSS): config.json quantization_config,
+    // quant_method=="mxfp4". Only metadata is parsed; the SafeTensors decode path is not
+    // implemented (use GGUF for MXFP4 inference).
     struct MxFP4Config {
         int block_size = 32;  // E8M0 scale per 32 elements is the standard
     };

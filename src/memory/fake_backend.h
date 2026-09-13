@@ -1,22 +1,14 @@
 #pragma once
 
-// FakeBackend — the substitution seam that makes the memory subsystem testable
-// without a GPU (docs/internals/MEMORY.md §A6).
-//
-// imp's CI has no GPU runner; the lane that actually runs is `ctest -L unit`.
-// Every allocator, the planner, and all the refcount logic therefore have to be
-// exercisable on host memory. FakeBackend hands out ordinary heap memory behind
-// the same Backend interface and adds what a test needs and a real device
-// cannot give:
-//
-//   - a bounded capacity, so exhaustion paths are testable without a 32 GiB card
-//   - a full journal of every acquire/release/commit, for conservation replay
-//   - poison-on-release (0xDE), so use-after-free is a deterministic memcmp
-//     failure rather than a GPU fault
-//   - injectable failure (fail the n-th acquisition), to drive the rollback
-//     paths that are hand-written per call site today
-//   - growth simulation, asserting base addresses never move — the host-side
-//     proof of I3 that the VMM backend will have to satisfy on device
+// FakeBackend: the substitution seam that makes the memory subsystem testable without a
+// GPU (MEMORY.md A6). imp's CI has no GPU runner (only `ctest -L unit` runs), so every
+// allocator, the planner, and refcount logic must be exercisable on host memory.
+// FakeBackend hands out heap memory behind the Backend interface, plus what a test needs
+// and a real device cannot give: bounded capacity (exhaustion testable without a 32 GiB
+// card), a full acquire/release/commit journal (conservation replay), poison-on-release
+// (0xDE, use-after-free becomes a deterministic memcmp), injectable failure (drive
+// rollback paths), and growth simulation asserting base addresses never move (the
+// host-side proof of I3).
 
 #include "memory/backend.h"
 
@@ -43,10 +35,9 @@ public:
     ~FakeBackend() override;
 
     MemError do_commit(Region& region, size_t new_committed) override;
-    // A range commit is modelled as a prefix extension: committed becomes
-    // max(committed, offset + bytes). Interior gaps are not modelled, which is
-    // exact for a slab that commits its slots in order and conservative
-    // (over-counts) otherwise.
+    // A range commit is modelled as a prefix extension: committed becomes max(committed,
+    // offset + bytes). Interior gaps are not modelled, exact for a slab that commits its
+    // slots in order and conservative (over-counts) otherwise.
     MemError do_commit_range(Region& region, size_t offset, size_t bytes) override;
     // 4 KiB rather than the VMM backend's 2 MiB, so a test can see stride
     // padding without allocating megabytes per slot.
@@ -69,11 +60,10 @@ public:
     // Number of regions still live.
     size_t live_regions() const;
 
-    // True if every byte of [base, base+bytes) is the release poison. Lets a
-    // test prove a buffer was actually returned rather than merely forgotten.
-    // Valid for the most recent kQuarantineDepth released regions (they are
-    // poisoned and held, not freed, precisely so this is not a use-after-free)
-    // and for the decommitted tail of a growable region.
+    // True if every byte of [base, base+bytes) is the release poison: lets a test prove a
+    // buffer was actually returned rather than merely forgotten. Valid for the most recent
+    // kQuarantineDepth released regions (poisoned and held, not freed, precisely so this
+    // isn't a use-after-free) and for the decommitted tail of a growable region.
     static bool is_poisoned(const void* base, size_t bytes);
 
     static constexpr unsigned char kPoison = 0xDE;

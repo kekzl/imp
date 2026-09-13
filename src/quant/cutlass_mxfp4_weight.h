@@ -1,11 +1,9 @@
 #pragma once
 
-// CutlassMxFP4Weight describes a quantised weight's layout: packed E2M1
-// nibbles plus the two scale representations the prefill and decode paths
-// read. That is a quant concern, so it lives here rather than in
-// compute/gemm_cutlass_mxfp4_sm120.h — where it forced src/quant to include
-// src/compute, one of the two backward edges in an otherwise forward
-// compute -> quant relationship.
+// Describes a quantised weight's layout: packed E2M1 nibbles plus the two scale
+// representations prefill and decode read. Lives here rather than in
+// compute/gemm_cutlass_mxfp4_sm120.h to avoid forcing src/quant to include src/compute (one
+// of the two backward edges in an otherwise forward compute->quant relationship).
 
 #include <cuda_runtime.h>
 #include <cstdint>

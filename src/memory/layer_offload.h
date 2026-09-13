@@ -6,14 +6,9 @@
 
 namespace imp {
 
-// Manages double-buffered GPU staging for layer weight offloading.
-// Keeps N layers on GPU (highest priority: attention > SSM > MoE routing),
-// offloads the rest to host memory. Async prefetch hides H2D transfer latency.
-//
-// Usage:
-//   offload_mgr->ensure_layer(i, compute_stream);     // wait if needed
-//   offload_mgr->prefetch_layer(i + 1);                // start async H2D
-//   // run layer i...
+// Manages double-buffered GPU staging for layer weight offloading. Keeps N layers on GPU
+// (priority: attention > SSM > MoE routing), offloads the rest to host memory. Async
+// prefetch hides H2D transfer latency.
 class LayerOffloadManager {
 public:
     LayerOffloadManager() = default;
@@ -24,10 +19,9 @@ public:
     LayerOffloadManager(const LayerOffloadManager&) = delete;
     LayerOffloadManager& operator=(const LayerOffloadManager&) = delete;
 
-    // Initialize offloading for the given model.
-    // gpu_layers: number of layers to keep on GPU (0 = all offloaded,
-    //             -1 = all on GPU i.e. disabled).
-    // Priority: attention layers first, then SSM, then MoE-only.
+    // Initialize offloading for the given model. gpu_layers: number of layers to keep on GPU
+    // (0 = all offloaded, -1 = all on GPU, disabled). Priority: attention layers first, then
+    // SSM, then MoE-only.
     [[nodiscard]] bool init(Model* model, int gpu_layers);
 
     // Ensure layer's weights are accessible on GPU. If the layer is resident

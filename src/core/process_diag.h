@@ -1,21 +1,11 @@
 #pragma once
 
-// Process-wide diagnostic / runtime-mode flags, snapshotted from
-// RuntimeConfig once at startup by process_diag_install()
-// (runtime/process_diag_install.h, called from the tool mains and Engine::init).
-//
-// These exist because a handful of leaf utilities — graph_diag inline
-// helpers, executor_debug inline helpers, the CUDA-graph capture-mode
-// selector, PDL gate, vision-encoder graph gate — are called from
-// hundreds of sites that don't otherwise carry a RuntimeConfig and
-// can't reasonably take one as a parameter. Snapshotting at startup
-// trades the former per-call RuntimeConfig::current() accessor for a
-// narrow set of typed POD reads with no global mutable state during
-// inference.
-//
-// Set via process_diag_install(); read via the typed accessors below.
-// Default values match the RuntimeConfig defaults so library users
-// that never call install() still get sane behaviour.
+// Process-wide diagnostic/runtime-mode flags, snapshotted from RuntimeConfig
+// once at startup by process_diag_install() (called from tool mains and
+// Engine::init). Exists because leaf utilities (graph_diag, executor_debug,
+// CUDA-graph capture-mode selector, PDL gate, vision-encoder graph gate) are
+// called from hundreds of sites that can't carry a RuntimeConfig. Defaults
+// match RuntimeConfig so library users that skip install() still get sane behavior.
 
 #include <string>
 
@@ -116,18 +106,14 @@ bool process_diag_no_vision_graph();
 const std::string& process_diag_graph_capture_mode();
 bool process_diag_prefill_graph_enabled();
 
-// GEMM
 // Mirrored at engine init from cfg.runtime.deterministic_gemm; some arch
 // resolvers (Gemma-4, FP8 KV) promote this flag during init_resolve_*.
-// process_diag_set_deterministic_gemm() lets engine_init_resolver update
-// the cache in place (replaces the former RuntimeConfig::install dual-write).
+// process_diag_set_deterministic_gemm() lets the resolver update the cache in place.
 bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
-// FP16-accumulate cuBLAS prefill GEMMs (gemm.cublas_fp16_acc) — read by the
+// FP16-accumulate cuBLAS prefill GEMMs (gemm.cublas_fp16_acc), read by the
 // free-function gemm() in compute/gemm.cu, which carries no RuntimeConfig.
-// "auto" (default) is resolved per-arch by init_resolve_quant_flags_ via the
-// setter (ON except Gemma-3/4 and gpt-oss); install() maps auto → off so
-// engine-less tools keep 32F accumulate.
+// "auto" resolved per-arch by init_resolve_quant_flags_; install() maps auto -> off for engine-less tools.
 bool process_diag_cublas_fp16_acc();
 void process_diag_set_cublas_fp16_acc(bool v);
 

@@ -18,9 +18,8 @@
 #include <cuda_fp16.h>
 
 // Column-wise partial sum of the hidden-state buffer: out[d] = sum_t h[t][d].
-// Embedding requests (#1005) mean-pool every token's hidden state; this runs
-// once per prefill chunk so chunked inputs pool correctly (the old
-// /v1/embeddings path could only pool single-pass prefills).
+// Embedding requests (#1005) mean-pool every token's hidden state; runs
+// once per prefill chunk so chunked inputs pool correctly.
 __global__ void hidden_pool_sum_kernel(const __half* __restrict__ hidden, int n_tokens, int d_model,
                                        float* __restrict__ out) {
     int d = blockIdx.x * blockDim.x + threadIdx.x;
@@ -146,10 +145,9 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
                           state.dry_penalty_last_n, stream);
     }
 
-    // Ban special tokens (e.g. <|im_start|>, <|im_end|>) from generation.
-    // These are chat template delimiters that should never appear in model output.
-    // Without this, the model can emit <|im_start|> mid-generation, which starts
-    // a phantom new turn and causes output degeneration (Qwen3, Llama3, etc.).
+    // Ban special tokens (e.g. <|im_start|>, <|im_end|>) from generation: chat
+    // template delimiters that must never appear in model output, else the
+    // model can start a phantom new turn and degenerate (Qwen3, Llama3, etc.).
     if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
         // Small list (typically 2-5 tokens) — copy to device and set to -inf.
         // Use a small stack-allocated device buffer via cudaMemcpyAsync.
@@ -228,9 +226,8 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
 }
 
 // The per-row / row-batched sampling family (sample_from_logits,
-// sample_single_from_logits{,_async}, apply_row_filters_, the pending-row
-// flushes and the token collectors) lives in executor_sampling.cu since
-// 2026-08-27 — see the header comment there.
+// sample_single_from_logits{,_async}, apply_row_filters_, token collectors)
+// lives in executor_sampling.cu; see the header comment there.
 
 
 // ---------------------------------------------------------------------------
@@ -301,12 +298,10 @@ void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d
         return;
     }
 
-    // Delegate the heavy lifting (embedding → layers → final norm → LM head →
-    // softcap) to the canonical forward_logits path. Caller must pre-set
+    // Delegates to the canonical forward_logits path (embedding -> layers ->
+    // final norm -> LM head -> softcap). Caller must pre-set
     // state.token_ids = d_token_id so embedding_lookup reads the freshly
-    // sampled token from device memory (CudaGraphConditionalRunner::setup
-    // does this). Unifying here eliminates the parallel reimplementation
-    // that previously diverged on Gemma-4 (samples <eos> at step 0).
+    // sampled token from device memory (CudaGraphConditionalRunner::setup).
     Tensor logits;
     forward_logits(state, logits, stream);
 

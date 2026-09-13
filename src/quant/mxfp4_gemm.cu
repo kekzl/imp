@@ -6,13 +6,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// MXFP4 K-parallel GEMV kernels (optimized)
-//
-// Same prmt register LUT as NVFP4 GEMV. Key difference: 32 elements per
-// scale group (2 micro-blocks × 16 nibbles each share 1 UE8M0 scale).
-// uint4 loads for full 16-byte group in one 128-bit transaction.
-// ---------------------------------------------------------------------------
+// MXFP4 K-parallel GEMV: same prmt register LUT as NVFP4 GEMV. Key difference: 32 elements
+// per scale group (2 micro-blocks x 16 nibbles share 1 UE8M0 scale). uint4 loads move a
+// full 16-byte group in one 128-bit transaction.
 
 static constexpr int kMxGroupSize = 32;
 static constexpr int kMxGroupBytes = 16;  // 32 nibbles = 16 bytes

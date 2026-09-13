@@ -1,9 +1,6 @@
-// The C API's image surface.
-//
-// Split out of imp_api.cpp because that file sits exactly on the 800-code-LOC
-// hard threshold and this is the part with room to grow: a tower that takes
-// several images needs more entry points than one that takes a single fixed
-// one, and each is a thin guard over Engine.
+// C API's image surface, split out of imp_api.cpp: that file sits at the
+// 800-code-LOC hard threshold, and multi-image entry points need more room
+// than a single fixed image would; each is a thin guard over Engine.
 
 #include "api/imp_internal.h"
 #include "runtime/engine.h"
@@ -15,10 +12,9 @@
 
 namespace {
 
-// Every entry point here answers the same two questions first, and the second
-// one is the interesting one: `has_vision()` covers BOTH towers (Qwen3-VL ships
-// its own in the checkpoint, Gemma-3/4 need mmproj_path), so a message naming
-// only mmproj would be wrong for half the models that reach it.
+// has_vision() covers BOTH towers (Qwen3-VL ships its own, Gemma-3/4 need
+// mmproj_path); naming only mmproj in an error would be wrong for half the
+// models that reach this check.
 ImpError check_vision_ready(ImpContext ctx, const char* fn) {
     if (!ctx)
         return IMP_ERROR_INVALID_ARG;

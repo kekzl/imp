@@ -5,23 +5,12 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// GPTQ 4-bit dequantization kernel
-//
-// GPTQ packs 8 x 4-bit values per INT32 in qweight and qzeros.
-// Layout:
-//   qweight[K/8, N]  — K/8 rows, N columns (column = output neuron)
-//   qzeros[num_groups/8, N] — packed zero points per group
-//   scales[num_groups, N]   — FP16 per-group scales
-//   g_idx[K] (optional)     — maps input dim k to its group index (desc_act)
-//
-// For each output element [row, col] in the [N, K] result:
-//   group = g_idx ? g_idx[col] : col / group_size
-//   qval  = extract 4 bits from qweight[col/8, row] at position (col%8)*4
-//   zero  = extract 4 bits from qzeros[group/8, row] at position (group%8)*4
-//   scale = scales[group, row]
-//   weight = scale * (qval - zero)
-// ---------------------------------------------------------------------------
+// GPTQ 4-bit dequant: qweight/qzeros pack 8x4-bit values per INT32.
+//   qweight[K/8,N], qzeros[num_groups/8,N] (packed zero points), scales[num_groups,N] FP16.
+//   g_idx[K] (optional) maps input dim k to its group (desc_act).
+// Per output [row,col]: group = g_idx?g_idx[col]:col/group_size;
+//   qval = qweight[col/8,row] bits (col%8)*4; zero = qzeros[group/8,row] bits (group%8)*4;
+//   weight = scales[group,row] * (qval - zero).
 
 __global__ void dequant_gptq4_kernel(half* __restrict__ out,               // [N, K]
                                      const int32_t* __restrict__ qweight,  // [K/8, N]

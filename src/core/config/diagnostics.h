@@ -1,22 +1,8 @@
 #pragma once
 
-// Diagnostics configuration, one of the nine sections split out of
-// core/dispatch_policy.h on 2026-08-21.
-//
-// WHY. dispatch_policy.h aggregates all nine and is included by 23 translation
-// units, of which 21 touch two sections or fewer. Adding one field to it costs
-// 137.1 s of incremental rebuild, against 9.1 s for a small .cpp and 14.6 s for
-// the largest .cu the file-size gate polices. A TU that needs only this section
-// can include only this header and stop rebuilding when the others change.
-//
-// This is F-10 one level down, and dispatch_policy.h's own preamble records the
-// original: config.h was included by 22 files, 85 TUs transitively, and changed
-// 130 times in six months - "the highest build cost in the repo". Lifting nine
-// sections into an aggregate fixed that, and gave the aggregate the same
-// property for the same reason.
-//
-// Pure move: the contents below are byte-identical to their previous form, and
-// dispatch_policy.h includes every one of these, so no existing include breaks.
+// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// isolates a TU that touches only this section from the other eight's churn.
+// Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
 #include <cstdint>
 #include <string>
@@ -25,66 +11,43 @@
 namespace imp::cfg {
 
 struct Diagnostics {
-    // Process log level: "debug" | "info" | "warn" | "error" | "fatal".
-    // Applied by process_diag_install(), which runs from both tool mains
-    // AND Engine::init, so a C-API consumer reaches it too.
-    // Until 2026-08-03 there was no way to set this at all: log_set_level()
-    // was the only writer of g_log_level and nothing called it, so the level
-    // was pinned at INFO and all 76 IMP_LOG_DEBUG sites were unreachable —
-    // a debug facility that could not be switched on.
+    // Process log level: debug|info|warn|error|fatal. Applied by
+    // process_diag_install(), called from both tool mains and Engine::init, so
+    // C-API consumers reach it too.
     std::string log_level = "info";
     bool debug_forward = false;
     bool debug_template = false;
     std::string dump_hidden_dir;
     std::string dump_logits_dir;   // path or empty
-    // Directory for the FINAL LM logits of each forward pass, one .npy per
-    // pass ([rows, vocab] FP32). Empty = off. Distinct from dump_logits_dir,
-    // which dumps MoE GATE logits at one layer: this is what the sampler sees,
-    // and it is what a reference-parity harness compares against HF. Written
-    // after the soft-cap so it is the final value, not an intermediate.
+    // Directory for the final LM logits per forward pass ([rows,vocab] FP32
+    // .npy). Distinct from dump_logits_dir (MoE gate logits at one layer): this
+    // is what the sampler sees, written post soft-cap. Empty = off.
     std::string dump_final_logits_dir;
-    // Directory for the Gated-DeltaNet recurrent state. Writes
-    // gdn_state.npy ([n_gdn_layers, heads*head_dim*state_size] FP32, the LAST
-    // forward pass wins) plus gdn_state_stats.jsonl, one line per pass with
-    // per-pass min/max/RMS and a non-finite count. The .jsonl is the drift
-    // record over a long prefill: the state is FP32 by contract
-    // (mamba_ssm_dtype), and silent divergence over tens of thousands of
-    // tokens is the failure mode that dtype exists to prevent. Empty = off.
+    // Directory for the GDN recurrent state: gdn_state.npy ([n_gdn_layers,
+    // heads*head_dim*state_size] FP32, last pass wins) + gdn_state_stats.jsonl
+    // (per-pass min/max/RMS/non-finite count). State is FP32 by contract (mamba_ssm_dtype). Empty = off.
     std::string dump_gdn_state_dir;
     std::string dump_routing_dir;  // path or empty
     // Path for the per-layer MoE expert-activation histogram (JSON), written at
-    // executor teardown. Empty = off. Unlike dump_routing_dir, which logs one
-    // token's top-k as a DEBUG line, this counts EVERY routing decision of the
-    // run — the dataset the resident/host expert-split question needs.
+    // executor teardown. Counts every routing decision of the run (unlike
+    // dump_routing_dir's one-token DEBUG line). Empty = off.
     std::string moe_expert_hist;
-    // Path for a per-token MoE expert TRACE (JSON), written at executor
-    // teardown. Empty = off. The histogram above is an aggregate and cannot see
-    // temporal locality, which is the whole question for a cache: an LRU pays
-    // only if an expert selected now is selected again soon. Decode only (n==1),
-    // so each record is one (token, layer).
+    // Path for a per-token MoE expert trace (JSON), written at executor
+    // teardown. Unlike the histogram, preserves temporal locality (needed to
+    // judge an LRU expert cache). Decode only (n==1): one record per (token, layer).
     std::string moe_expert_trace;
     bool dump_tokens = false;
-    // Teacher-forced perplexity: restrict the NLL sum to logit rows
-    // i in [ppl_first, ppl_last] (row i predicts token i+1); ppl_last=-1
-    // means "through the end" (n-2). Matches llama-perplexity's window
-    // (`first = n_ctx/2`, rows [first, n_ctx-2]) when llama.cpp runs the
-    // same corpus with `-c C --chunks 1` (llama-perplexity refuses
-    // single-chunk-over-everything: it wants >= 2*n_ctx total tokens):
-    // set ppl_first = C/2, ppl_last = C-2 (+ token-offset if the streams
-    // are BOS-shifted). The cross-engine PPL-parity bar (GOAL release
-    // bar 1) is measured this way.
+    // Teacher-forced PPL: sum NLL over rows [ppl_first, ppl_last] (row i
+    // predicts token i+1); ppl_last=-1 means through n-2. Matches
+    // llama-perplexity's window (first=n_ctx/2, [first, n_ctx-2]) for cross-engine PPL parity (GOAL bar 1).
     int ppl_first = 0;
     int ppl_last = -1;
     int exit_layer = -1;
     bool profile = false;
     bool graph_diag = false;
-    // Trace knobs that used to be raw getenv() reads in the hot path
-    // (#1207). CLAUDE.md's rule is that IMP_DETERMINISTIC and IMP_FMHA_FA2
-    // are the only seeded env vars; IMP_SPEC_TRACE / IMP_JUMP_TRACE /
-    // IMP_PPL_DUMP had crept back in. The env names still work — they are
-    // debug aids people have in their shell history — but they are seeded
-    // into these keys at load, so `--set` and imp.conf reach them too and
-    // `imp-cli --help`/imp.conf.example can document them.
+    // Was a raw getenv() read in the hot path (#1207). IMP_SPEC_TRACE /
+    // IMP_JUMP_TRACE / IMP_PPL_DUMP still work as env names but are seeded into
+    // these keys at load, so --set and imp.conf reach them too.
     bool spec_trace = false;  // per-step speculative draft/verify trace
     bool jump_trace = false;  // conditional-graph jump trace
     std::string ppl_dump;     // path: dump per-token NLL from --perplexity
@@ -92,33 +55,18 @@ struct Diagnostics {
     // Force NVFP4 dispatch through dequant->FP16 GEMV (M=1 bisection
     // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).
     bool nvfp4_force_dequant = false;
-    // Skip building the NVFP4 decode cache entirely (bisection/eval
-    // tool): decode runs on the source-precision paths (dp4a GEMV for
-    // GGUF quants, FP16 GEMV otherwise) — the pre-cache decode
-    // semantics. Distinct from nvfp4_force_dequant, which dequantizes
-    // the already-NVFP4-quantized cache and so keeps NVFP4 values.
+    // Skip building the NVFP4 decode cache (bisection/eval): decode runs the
+    // pre-cache source-precision paths (dp4a GEMV for GGUF, FP16 GEMV
+    // otherwise). Distinct from nvfp4_force_dequant (dequantizes the NVFP4 cache itself).
     bool no_nvfp4_decode_cache = false;
-    // Do not let the NVFP4 dequant-workspace cap disable prefill-graph
-    // capture (`executor_workspace_buffers.cu`, kCap = 512 MiB). Probe
-    // tool: the cap is compared against the largest dequant target,
-    // which for every model with a big vocabulary is the LM head
-    // (vocab x d_model x 2 B — 593 MiB on Qwen3-Coder-30B, 1187 MiB on
-    // Qwen3-8B), so prefill capture is off for every model above ~1B.
-    // Whether the M>1 NVFP4 dequant fallback can actually be reached
-    // under prefill capture is the open question; with this set, the
-    // existing fail-loud in gemm_nvfp4 answers it — capture succeeds if
-    // the path never fires, and fails cleanly if it does.
+    // Probe: don't let the NVFP4 dequant-workspace cap (kCap=512 MiB,
+    // executor_workspace_buffers.cu) disable prefill-graph capture. With this
+    // set, gemm_nvfp4's fail-loud path answers whether the M>1 dequant fallback is reached under capture.
     bool prefill_graph_ignore_dequant_cap = false;
-    // #847 graph-captured-verify feasibility probe: stream-capture every
-    // spec verify chunk forward, instantiate + launch the graph (falls
-    // back to the eager forward on any failure). Logs per-attempt
-    // outcomes — a capturability census, not a perf path.
-    // Capture-fidelity check (diagnostics). When on, every replay of a cached
-    // verify-chunk graph is compared against an eager forward of the same state:
-    // half A eager, restore the recurrent slab from the pre-chunk copy, half B
-    // the cached graph, then diff the row-0 logits. Costs a full extra forward
-    // plus two vocab-sized D2H per verify step, so it is a gate/diagnostic mode,
-    // never a serving one. Off it is one bool test per verify step.
+    // #847 feasibility probe: stream-captures every verify chunk forward, falls
+    // back to eager on failure; logs a capturability census, not a perf path.
+    // Fidelity check: replays a cached verify graph vs an eager forward and
+    // diffs row-0 logits (costs a full extra forward + 2 D2H per step). Diagnostic only.
     bool spec_capture_fidelity = false;
     bool spec_capture_probe = false;
     // Log shape + per-candidate algoId/tileId + chosen algo for every
@@ -130,33 +78,18 @@ struct Diagnostics {
     // sample / distribute / outside), aggregated every 256 steps. The GPU gap
     // profile locates idle; this says which HOST phase produces it.
     bool step_timing = false;
-    // imp-server worker-loop phase attribution (admission / engine step /
-    // delivery staging), aggregated every 256 loops. The companion of
-    // step_timing one layer up: that one says which engine phase is slow,
-    // this one says whether the worker around it is. Was the ad-hoc
-    // IMP_WORKER_TIMING env read until AUDIT_arch_2026 J-10; the env is
-    // seeded into this key at load like the other diagnostics knobs.
+    // imp-server worker-loop phase attribution (admission/engine step/
+    // delivery), aggregated every 256 loops; companion to step_timing
+    // (engine-phase vs worker-around-it). Env IMP_WORKER_TIMING seeded into this key at load.
     bool worker_timing = false;
-    // Stage 0 tree-ceiling probe: ask the MTP head for its top-4 candidates on
-    // every chain step and tally, per depth, whether the true next token was
-    // within top-w. imp-cli prints the table at the end of a run.
-    //
-    // Off by default because it is not free, and it was not free in the serving
-    // path either: measured on Qwen3.8-27B, the top-4 kernel is a single
-    // <<<1,256>>> block scanning a 248 320-entry vocabulary once per width,
-    // 713 us per drafted token — twice the cost of the lm_head GEMV that
-    // produced the logits, and 12 % of all GPU time in an MTP run. Asking for
-    // it also forces a per-draft cudaStreamSynchronize, which is the very
-    // thing the device-side chain exists to avoid. Nothing in serving reads
-    // the result.
+    // Stage 0 tree-ceiling probe: for every chain step, ask the MTP head for
+    // top-4 candidates and tally whether the true next token was in top-w per
+    // depth. Off by default: costs a full vocab-scan kernel plus a per-draft
+    // sync (the very thing the device-side chain avoids). Nothing in serving reads the result.
     bool mtp_tree_probe = false;
-    // MTP: pass main model's post-RMSNorm hidden to draft head (vLLM
-    // variant). Default ON since 2026-08-27: on Qwen3.8-27B-NVFP4 (mtp_k=1,
-    // ngram=false, 1024-token thinking chats) it lifted serving accept from
-    // 70.2/72.2% to 74.1/78.4% and won 4/4 alternating pairs (+2-3% tok/s).
-    // The head was trained against post-norm hiddens (the upstream
-    // convention); imp's executor hidden_ is the pre-norm residual, so the
-    // feed normalizes every fed pair. false restores the pre-norm feed.
+    // MTP: feed the draft head the main model's post-RMSNorm hidden (vLLM
+    // variant), matching how the head was trained; imp's executor hidden_ is
+    // pre-norm, so this normalizes the fed pair. Default on; false restores the pre-norm feed.
     bool mtp_prenorm_h = true;
     // Audit NVFP4 weight scales at load time.
     bool audit_nvfp4_scales = false;
@@ -166,11 +99,9 @@ struct Diagnostics {
     bool vram_audit = false;
     // Optional append-only file the VRAM audit table is mirrored into.
     std::string vram_audit_dump;
-    // A finished bisect, kept as a diagnostic (AUDIT_arch_2026 A2-9): the LM
-    // head runs dequant -> FP16 -> cuBLAS instead of the fused Q8_1 GEMV, with
-    // a per-forward cudaMallocAsync of the whole FP16 output projection. Tells
-    // a wrong top logit apart from a wrong hidden state; never on in serving.
-    // Was `generation.lm_dequant_fp16`.
+    // Finished bisect kept as a diagnostic (AUDIT_arch_2026 A2-9): LM head runs
+    // dequant->FP16->cuBLAS instead of the fused Q8_1 GEMV, isolating a wrong
+    // top logit from a wrong hidden state. Never on in serving.
     bool lm_dequant_fp16 = false;
     // [RETIRED] tq_skip_qjl removed in Phase 5 (TurboQuant retired 2026-05-17).
 };

@@ -50,11 +50,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Quant type dispatch helpers
-// ---------------------------------------------------------------------------
-// Shared helpers: executor_helpers.h (get_kv_layer, vram_alloc, etc.)
-// Layer methods: executor_attention.cu, executor_ffn.cu, executor_ssm_gdn.cu
+// Quant type dispatch helpers. Shared helpers: executor_helpers.h
+// (get_kv_layer, vram_alloc, etc.). Layer methods: executor_attention.cu,
+// executor_ffn.cu, executor_ssm_gdn.cu.
 
 
 // Gemma 4: per-layer output scale. Multiplies all elements of `data` by the
@@ -183,11 +181,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         return;
     }
     if (n > max_tokens_) {
-        // Throwing here lets the BatchingEngine's try/catch cancel the
-        // request with HTTP 500 instead of silently returning an
-        // uninitialized logits tensor that the caller then reshapes
-        // (→ `terminate: reshape: numel mismatch` on the worker thread,
-        // which used to kill the entire imp-server container).
+        // Throwing here lets BatchingEngine's try/catch cancel the request with
+        // HTTP 500 instead of returning an uninitialized logits tensor that later
+        // reshapes to a numel mismatch and terminates the worker thread (used to kill the whole imp-server
+        // container).
         char msg[128];
         snprintf(msg, sizeof(msg), "GraphExecutor::forward_logits: n_tokens (%d) exceeds max_tokens (%d)", n,
                  max_tokens_);
@@ -211,10 +208,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     cur_decode_rows_ = n > 1 && (!state.is_prefill || state.spec_verify_chunk);
     cur_per_row_lm_ = state.per_row_lm_head;
 
-    // Clear any stale CUDA error state before starting the forward pass. A
-    // class that cannot be cleared (device fault) throws instead of warning:
-    // the previous step's tokens are already stale and every launch below
-    // would fail the same way (AUDIT_arch_2026 D-1).
+    // Clears any stale CUDA error before the forward pass. A class that
+    // cannot be cleared (device fault) throws instead of warning: the
+    // previous step's tokens are already stale and every launch below would fail the same way
+    // (AUDIT_arch_2026 D-1).
     {
         cudaError_t e_ = cuda_clear_or_throw("forward");
         if (e_ != cudaSuccess)
@@ -443,16 +440,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 debug_tensor_rows(rbuf, view_tokens(h, n), stream);
             }
 
-            // Binary dump of the full hidden state, for diffing two builds or two
-            // quantizations of the same model layer by layer.
-            //   diagnostics.dump_hidden_dir = "<path>"  -> layers 0/5/15/29
-            //   diagnostics.dump_hidden_dir = "all"     -> every layer
-            //
-            // This used to sit inside the Gemma-4 `layer_out_scale` branch AND
-            // behind debug_forward_enabled(), so on any model without that scale
-            // — every Qwen3, every GDN hybrid — it produced no files at all and
-            // reported nothing. It is a diagnostic, so it keys off its own switch
-            // and nothing else; the default is empty and costs a string check.
+            // Binary dump of the full hidden state for diffing builds/quantizations
+            // layer by layer. dump_hidden_dir="<path>" -> layers 0/5/15/29; "all" ->
+            // every layer. Keys off its own diagnostics switch only, independent of
+            // arch-specific branches, so every model (not just Gemma-4) gets dumps.
             {
                 const std::string& dh = dispatch_policy().diagnostics.dump_hidden_dir;
                 if (!dh.empty() && (dh == "all" || i == 0 || i == 5 || i == 15 || i == 29)) {
@@ -483,10 +474,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 scale_fp16_by_fp16ptr_kernel<<<blocks, threads, 0, stream>>>(
                     static_cast<half*>(h.data), static_cast<const half*>(ly.layer_out_scale.data), total);
                 IMP_CUDA_CHECK_LAUNCH();
-                // Also scale the FP32 residual accumulator so next layer's
-                // attention sees the correctly-scaled residual stream.
-                // Without this the FP32 accum grows unbounded (layer_out_scale
-                // ~0.1-0.2 compensates residual growth per llama's gemma4-iswa).
+                // Also scales the FP32 residual accumulator so the next layer's attention
+                // sees the correctly-scaled residual stream; without this the FP32 accum
+                // grows unbounded (layer_out_scale compensates residual growth, per llama's gemma4-iswa).
                 if (fp32_accum_buf_ && model_->profile().is_gemma4) {
                     int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
                     scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
@@ -528,12 +518,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
         }
 
-        // Gemma-4 FP32 residual sync: run_moe_ffn now updates fp32_hidden_ itself
-        // via the rmsnorm_fp32_accum_to_fp16_kernel path when post_ffn_norm is
-        // present and fp32_accum_buf_ is active. The forced FP16→FP32 sync here
-        // would clobber the FP32 precision and cause ~1-2% drift per layer.
-        // Only sync when the MoE path did NOT go through the FP32 accum kernel
-        // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
+        // Gemma-4 FP32 residual sync: run_moe_ffn already updates fp32_hidden_ via
+        // rmsnorm_fp32_accum_to_fp16_kernel when post_ffn_norm + fp32_accum_buf_
+        // are active. A forced FP16->FP32 sync here would clobber that precision
+        // and drift ~1-2%/layer; only sync when the MoE path did NOT go through the FP32 accum kernel.
         if (fp32_accum_buf_ && model_->profile().is_gemma4 &&
             dispatch_policy().moe.force_fp16_sync) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
@@ -554,23 +542,14 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             dump_tensor_npy("C_fp32_shadow", view_tokens(fp32_hidden_, n), stream, i, decode_step);
         }
 
-        // DeepStack: add the vision taps into the hidden state after each of
-        // the first `n_deepstack` layers, at image-token positions only. The
-        // taps came from vision blocks 5/11/17 but land here at layers 0/1/2 —
-        // a different index space, and the reason this is keyed on `i` rather
-        // than on any vision-side number.
-        // `is_prefill` is part of the condition, not an optimisation: image
-        // tokens only ever exist in the prompt, and a decode graph captured
-        // with this branch taken would bake the add into every replay.
-        //
-        // Speculative decoding depends on this too (#1207). The spec gate in
-        // engine_spec_ngram.cpp rejects constrained decode, SSM state and
-        // non-NVFP4 MoE explicitly, but says nothing about vision — because it
-        // does not have to: the verify chunk forwards with is_prefill=false, so
-        // it never re-injects, and the image is already in the KV cache from the
-        // prompt. Extending this branch to decode would silently break
-        // speculation (verify and target would inject differently) — so if that
-        // ever becomes necessary, add a vision reject to the spec gate first.
+        // DeepStack: adds vision taps into the hidden state after the first
+        // n_deepstack layers, at image-token positions only. Taps came from vision
+        // blocks 5/11/17 but land at layers 0/1/2 here (a different index space).
+        // is_prefill gates it (not an optimization): image tokens only exist in
+        // the prompt, and a captured decode graph would otherwise bake the add
+        // into every replay. Speculative decoding relies on this too (#1207): the
+        // verify chunk forwards with is_prefill=false, so it never re-injects; if
+        // this branch is ever extended to decode, add a vision reject to the spec gate first.
         if (state.is_prefill && i < state.n_deepstack && state.deepstack_embeddings[i] &&
             state.n_vision_tokens > 0 && state.vision_token_id >= 0 && h.qtype == QType::F16) {
             launch_add_vision_embeddings(static_cast<half*>(h.data), state.token_ids,
@@ -592,13 +571,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     cur_layer_ = -1;  // past the layers: the LM head is not a calibration target
 
     // Sparse decode attention: batched key min/max update, all KV layers in
-    // one launch, for EVERY forward that wrote KV - decode steps, spec verify
-    // chunks and prefill chunks alike. The per-layer inline form this
-    // replaces cost the multi-stream serving prefill ~12% wall (2026-08-29);
-    // selection only runs at decode time, so end-of-chunk updates keep the
-    // metadata complete before the first decode step. Inside the captured
-    // graph like everything above; the one-decode-step lag is covered by the
-    // selection's forced recent blocks.
+    // one launch, for every forward that wrote KV (decode, spec verify,
+    // prefill chunks alike) - the per-layer inline form this replaced cost
+    // serving prefill wall. Selection runs at decode time only, so
+    // end-of-chunk updates keep metadata complete before the first decode step.
     if (state.kv_cache != nullptr && state.kv_cache->key_minmax_enabled() &&
         state.block_tables != nullptr && state.n_tokens > 0) {
         KVCache* kvc = state.kv_cache;
@@ -624,11 +600,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                             qscratch_.sparse_score_meanstd, stream);
     }
 
-    // BitDecoding Phase 3: advance the residual ring state once per decode
-    // step. Has to happen INSIDE the captured graph (otherwise replays would
-    // reuse the captured-time write_idx). Must come AFTER the layer loop —
-    // each layer reads the same write_idx for its KV write/attention so the
-    // bump applies starting next step. Decode-only (n==1 or n==n_sequences).
+    // BitDecoding Phase 3: advances the residual ring state once per decode
+    // step, inside the captured graph (else replays reuse the captured-time
+    // write_idx). Must run AFTER the layer loop: each layer reads the same
+    // write_idx for its KV write/attention. Decode-only (n==1 or n==n_sequences).
     if (!state.is_prefill && state.kv_manager != nullptr &&
         state.kv_manager->residual_enabled() && state.kv_seq_id >= 0) {
         int slot = state.kv_manager->residual_slot_of(state.kv_seq_id);
@@ -642,10 +617,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         }
     } else if (!state.is_prefill && state.kv_manager != nullptr && state.kv_manager->residual_enabled() &&
                state.d_residual_seq_slots != nullptr && state.n_sequences > 1) {
-        // Multi-seq: `kv_seq_id` is only set on the N==1 path, so the branch
-        // above never fired here and the ring was advanced on the host instead
-        // - which a graph replay does not run (#1708). Slots come from the
-        // engine's per-step upload, so this is correct across replays.
+        // Multi-seq: kv_seq_id is only set on the N==1 path, so the branch above
+        // never fires here; the ring was advanced host-side instead, which a graph
+        // replay does not run (#1708). Slots come from the engine's per-step upload, correct across replays.
         advance_residual_state_multi_kernel<<<1, state.n_sequences, 0, stream>>>(
             state.kv_manager->d_residual_widx_ptr(), state.kv_manager->d_residual_fc_ptr(),
             state.d_residual_seq_slots, state.n_sequences, state.kv_manager->residual_n_tokens());
@@ -669,14 +643,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    // ---- Step 3+4: Final RMSNorm + LM head projection ----
-    // Only project the tokens that actually need sampling:
-    //   Prefill: last token only (all others just populate KV cache)
-    //   Decode:  all tokens (one per sequence)
-    //
-    // For raw Q6_K/Q8_0 output projection with single token (n=1 or prefill last):
-    // use fused RMSNorm→Q8_1 + dp4a GEMV with FP32 output. Saves ~2.45x VRAM
-    // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
+    // Final RMSNorm + LM head: only project tokens that need sampling
+    // (prefill: last token only; decode: all tokens, one per sequence). Raw
+    // Q6_K/Q8_0 output projection at n=1 uses fused RMSNorm->Q8_1 + dp4a GEMV
+    // with FP32 output (reads quantized weights directly, saves bandwidth vs cuBLAS FP16).
     const auto out_qtype = model_->out_proj_.qtype;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
                              !dispatch_policy().gemm.no_dp4a_lm;
@@ -697,14 +667,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     const bool lm_has_fp8 = (wcache_.fp8.count(model_->output_proj().data) != 0);
     const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
 
-    // L2 streaming hint for the LM head projection (QW3 from the phase-5 review §2.1, archived in #604):
-    // output_proj is huge (vocab_size × d_model — ~780 MiB for Qwen3-8B Q8_0) and
-    // touched exactly once per forward, so it pollutes L2 if cached normally. The
-    // streaming policy marks the read as evict-on-touch so the cache stays available
-    // for KV-cache and other reuse-heavy data the next decode step will need.
-    // num_bytes is clamped to cudaDevAttrMaxAccessPolicyWindowSize (128 MiB on 5090)
-    // inside set_l2_streaming; the first 128 MiB of the weight matters most because
-    // mid-decode the vocab logits row exits L2 before it can be re-read anyway.
+    // L2 streaming hint for the LM head projection (QW3, #604): output_proj is
+    // huge and touched once per forward, so it pollutes L2 normally; marking
+    // it evict-on-touch keeps L2 available for KV-cache reuse. num_bytes is
+    // clamped to cudaDevAttrMaxAccessPolicyWindowSize (128 MiB on 5090): the
+    // first 128 MiB matters most since mid-decode the vocab row exits L2 before reread anyway.
     {
         const Tensor& w = model_->output_proj();
         if (w.data && w.nbytes() > 0 && !w.dropped_source)
@@ -712,11 +679,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     }
 
     // Ragged cross-sequence prefill: every sequence needs ITS last row through
-    // the LM head, not just row n-1. Forward-compact the K last rows into rows
-    // [0, K) of hidden_ (safe in increasing order: dst row s < src row
-    // h_seq_offsets[s+1]-1 whenever they differ, and no later source row can
-    // equal an earlier destination), then run the batched decode-style LM head
-    // below with n = K. Logits row s belongs to sequence s.
+    // the LM head, not just row n-1. Forward-compacts the K last rows into
+    // [0,K) of hidden_ (safe: dst row s < any later distinct source row), then
+    // runs the batched decode-style LM head with n=K. Logits row s belongs to sequence s.
     const bool ragged_lm = state.ragged_prefill() && !state.all_logits;
     if (ragged_lm) {
         const size_t row_bytes = static_cast<size_t>(cfg.d_model) * dtype_size(hidden_.qtype);
@@ -785,12 +750,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 debug_tensor_rows("after_final_rmsnorm_row", no_last, stream);
                 debug_tensor_rows("h_last_row", h_last, stream);
             }
-            // Bisect, kept as `diagnostics.lm_dequant_fp16` (AUDIT_arch_2026
-            // A2-9): bypass the fused rmsnorm_quantize_q8_1 + dp4a GEMV, dequant
-            // output_proj to an FP16 temp buffer (a per-forward cudaMallocAsync
-            // of the whole projection) and run cuBLAS FP16 into FP32 logits. A
-            // llama-matching top logit here means the dp4a path is wrong; the
-            // same wrong logit means the hidden state or output_norm is.
+            // Bisect kept as diagnostics.lm_dequant_fp16 (AUDIT_arch_2026 A2-9):
+            // bypasses the fused rmsnorm_quantize_q8_1+dp4a GEMV, dequants output_proj
+            // to FP16, runs cuBLAS FP16 into FP32 logits. A llama-matching top logit
+            // here isolates the dp4a path as wrong; the same wrong logit implicates the hidden state or
+            // output_norm instead.
             if (dispatch_policy().diagnostics.lm_dequant_fp16) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
@@ -880,11 +844,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n > 1 && lm_is_nvfp4) {
-            // Batched-M NVFP4 GEMV LM head for batched decode. The old code looped
-            // a single M=1 GEMV per sequence, re-reading the whole ~389 MiB LM-head
-            // matrix from HBM once per row (it does not fit in L2) — the #2 decode
-            // GPU consumer at batch>1. gemv_nvfp4_kpar_batched_fp32 reads the weight
-            // ONCE and reuses it across all rows.
+            // Batched-M NVFP4 GEMV LM head for batched decode: reads the ~389 MiB
+            // LM-head matrix from HBM ONCE and reuses it across all rows, replacing a
+            // per-sequence M=1 GEMV loop that re-read it once per row (the #2 decode GPU consumer at
+            // batch>1).
             NvFP4QuantResult nvfp4_lm_r;
             if (lm_nvfp4_secondary) {
                 nvfp4_lm_r = lm_nvfp4_it->second;
@@ -900,12 +863,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             Tensor no_final = view_tokens(norm_out_, n);
             bool lm_done = false;
             bool normed = false;
-            // Small-M path first (n <= 32, gemm.nvfp4_lm_head_smallm): the
-            // smallm v2 kernel at one stripe (a vocab-sized N tiles the card
-            // many times over) streams the weight once at the sibling-launch
-            // bandwidth and writes FP32 logits straight from its accumulators;
-            // the final norm fuses the activation quantize into the small-M
-            // scratch. Declines fall through to the CUTLASS / GEMV chain.
+            // Small-M path first (n<=32, gemm.nvfp4_lm_head_smallm): the smallm v2
+            // kernel streams the LM-head weight once at one stripe and writes FP32
+            // logits straight from its accumulators; the final norm fuses the
+            // activation quantize. Declines fall through to the CUTLASS/GEMV chain.
             if (dispatch_policy().gemm.nvfp4_lm_head_smallm && n <= 32 && (cfg.d_model % 256) == 0 &&
                 (cfg.vocab_size % 64) == 0) {
                 const int K = cfg.d_model;
@@ -937,10 +898,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
             if (!normed)
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-            // Tensor-core path: one CUTLASS NVFP4 GEMM (M=n) reads the LM-head
-            // weight ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (the
-            // samplers read float logits). Falls back to the GEMV if disabled or
-            // the kernel declines the shape.
+            // Tensor-core path: one CUTLASS NVFP4 GEMM (M=n) reads the LM-head weight
+            // ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (samplers read
+            // float logits). Falls back to the GEMV if disabled or the kernel declines the shape.
             if (!lm_done && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
                 qscratch_.cutlass_act_sf != nullptr) {
                 quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data,
@@ -1018,24 +978,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    // ---- Final-logit dump (reference parity) ----
-    //
-    // What the sampler sees, after the soft-cap, as FP32 .npy. One file per
-    // forward pass, named by pass index and row count so a prefill (1 row when
-    // all_logits is off) and the decode steps that follow it stay separable.
-    //
-    // This is the only way to compare imp's logits against an independent
-    // implementation: /v1/chat/completions can report top_logprobs, which
-    // settles token ORDER but not the values, and the per-layer hidden dump
-    // above stops before the final norm and the LM head — the exact span where
-    // #1273 hid for four months.
-    //
-    // Skipped while the stream is being captured into a CUDA graph: the sync
-    // and the device-to-host copy below are both illegal there and fail the
-    // capture ("end_capture failed: operation failed due to a previous error
-    // during capture"), which turns a diagnostic into a broken decode path.
-    // The prefill pass — the one a parity harness wants — is not captured, so
-    // it still lands.
+    // Final-logit dump (reference parity): what the sampler sees, post
+    // soft-cap, as FP32 .npy, one file per forward pass. The only way to
+    // compare imp's logits value-for-value against an independent
+    // implementation (top_logprobs settles order, not values; the hidden dump
+    // stops before the final norm and LM head). Skipped under CUDA graph
+    // capture (the sync + D2H copy are illegal there); the uncaptured prefill pass still lands.
     if (!dispatch_policy().diagnostics.dump_final_logits_dir.empty()) {
         cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
         if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
@@ -1059,12 +1007,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         cudaStreamSynchronize(stream);
         cudaMemcpy(host.data(), logits_out.data, host.size() * sizeof(float), cudaMemcpyDeviceToHost);
         char fname[512];
-        // The INPUT token count goes in the name, not just the output row
-        // count: with all_logits off a prefill emits one row, and so does every
-        // engine warm-up pass, so `rows` alone cannot tell them apart. Reading
-        // the first dump as "the prefill" is wrong — the warm-up passes come
-        // first and carry dummy input (measured: pearson 0.36 against the HF
-        // reference for those, 0.986 for the real one).
+        // The INPUT token count goes in the filename, not just the output row
+        // count: with all_logits off, a prefill and every engine warm-up pass both
+        // emit one row, so `rows` alone can't tell them apart; warm-up passes carry dummy input and come
+        // first.
         snprintf(fname, sizeof(fname), "%s/imp_logits_pass%03d_in%d_n%d.npy", dir.c_str(), dump_pass, n,
                  rows);
         write_npy_fp32(fname, host.data(), rows, vocab);
@@ -1074,19 +1020,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     }
 final_logits_dump_done:
 
-    // ---- Gated-DeltaNet recurrent-state dump (long-context drift) ----
-    //
-    // The state is FP32 by the checkpoint's own contract (mamba_ssm_dtype), and
-    // the reason that matters is drift: a downcast does not fail, it diverges
-    // quietly over tens of thousands of tokens. Logits at the end of a long
-    // prefill cannot distinguish "the state stayed sane" from "the state rotted
-    // and the last chunk happened to look fine", so this records the state
-    // itself.
-    //
-    // gdn_state.npy holds the LAST pass (overwritten each time), and every pass
-    // appends one line to gdn_state_stats.jsonl — so a 46k-token prefill leaves
-    // a per-chunk record of RMS and non-finite counts, which IS the drift curve.
-    // Skipped under graph capture for the same reason the logit dump is.
+    // Gated-DeltaNet recurrent-state dump: state is FP32 by the checkpoint's
+    // own contract (mamba_ssm_dtype) because a downcast diverges quietly over
+    // tens of thousands of tokens, which final logits alone can't distinguish
+    // from a healthy state. gdn_state.npy holds the LAST pass;
+    // gdn_state_stats.jsonl appends one line (RMS, non-finite count) per pass,
+    // the drift curve. Skipped under graph capture, same reason as the logit dump.
     if (!dispatch_policy().diagnostics.dump_gdn_state_dir.empty() && state.ssm_state != nullptr &&
         state.ssm_seq_id >= 0) {
         cudaStreamCaptureStatus gcap = cudaStreamCaptureStatusNone;

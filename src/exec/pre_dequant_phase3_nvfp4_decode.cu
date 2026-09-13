@@ -1,17 +1,8 @@
-// Pre-dequant Phase 3: NVFP4 decode-cache quantization.
-// Multi-step quantization of decode-side weights to NVFP4, including
-// candidate collection, two-pass mode-1/2 quantize, FP8 migration of
-// failed candidates, CUTLASS conversion, MXFP4-source conversion, and
-// MoE expert caching.
-//
-// Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
-// refactor roadmap. This file keeps the entry point + the NVFP4 quantize
-// helpers (collect / mode-1 / mode-2 / second-pass / LM-head / projections);
-// the FP8 migration, CUTLASS/MXFP4 conversion, and MoE expert caching live in
-// pre_dequant_phase3_fp8.cu, pre_dequant_phase3_cutlass.cu, and
-// pre_dequant_phase3_moe.cu respectively.
-//
-// See pre_dequant_internal.h for shared helpers.
+// Pre-dequant Phase 3: NVFP4 decode-cache quantization. Multi-step quantization of
+// decode-side weights: candidate collection, two-pass mode-1/2 quantize, FP8 migration
+// of failed candidates, CUTLASS conversion, MXFP4-source conversion, MoE expert caching.
+// This file keeps the entry point + NVFP4 quantize helpers; FP8/CUTLASS/MXFP4/MoE live
+// in the sibling pre_dequant_phase3_*.cu files.
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -65,13 +56,11 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
                      dctx.exclude_ptrs.size());
     }
 
-    // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4 —
-    // unconditionally. These feed the recurrent scan which accumulates
-    // quantization error in state H across tokens; 4-bit degrades quality on
-    // 9B+ models. (The former gemm.nvfp4_ssm_proj opt-in that kept them IN
-    // the cache was removed 2026-07-11: bit-rotted, and superseded by the
-    // GGUF branch of gemm.fp8_ssm_proj — see config.h.) Native-NVFP4 SSM
-    // weights are handled identically by the phase0b register gate.
+    // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4 unconditionally. They
+    // feed the recurrent scan, which accumulates quantization error in state H across
+    // tokens; 4-bit degrades quality on 9B+ models. Superseded by the GGUF branch of
+    // gemm.fp8_ssm_proj (config.h). Native-NVFP4 SSM weights are handled identically by the
+    // phase0b register gate.
     {
         int n_ssm_excluded = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -109,36 +98,28 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant))
             return;
         // gemma-3: the NVFP4 decode cache MUST be built from an FP16 companion
-        // (executor_pre_dequant.cu sets fp16_companion on every NVFP4-tier
-        // entry). A from-scratch build corrupts gemma-3 decode — first step
-        // emits token 0 / <pad>, then an illegal access. That companion
-        // guarantee is best-effort: when the FP16 cache hits its VRAM budget
-        // (tight KV budget on a 32 GB card) a weight's companion is absent, so
-        // it silently drops to from-scratch and re-triggers the exact bug the
-        // flag exists to prevent (measured: 35 of 49 cached tensors went
-        // from-scratch, decode emitted <pad> then IMA). Skip those weights —
-        // they stay on the coherent dequant-at-decode path (a bandwidth loss
-        // on the uncached fraction, never garbage; no_nvfp4_decode_cache is
-        // fully coherent, proving that fallback sound).
+        // (fp16_companion set on every NVFP4-tier entry); a from-scratch build corrupts gemma-3
+        // decode (token 0/<pad>, then illegal access). That guarantee is best-effort: when the
+        // FP16 cache hits its VRAM budget, a weight's companion may be absent and silently drop
+        // to from-scratch, re-triggering the bug. Skip those weights instead: they stay on the
+        // coherent dequant-at-decode path (bandwidth loss, never garbage).
         if (from_scratch && model_->profile().is_gemma3)
             return;
         dctx.entries.push_back({w.data, w, qtype, from_scratch});
     };
 
-    // LM head first: largest single weight (vocab × d_model), biggest bandwidth
-    // win. Same gates as the native-precision paths (executor_pre_dequant plan /
-    // nvfp4_decode_cache_fp16_lm_head_): gemm.nvfp4_lm_head opts out entirely,
-    // GDN/SSM hybrids keep the source-precision head unless nvfp4_lm_head_gdn.
-    // This call used to be unconditional, which silently voided both opt-outs
-    // on every quantized-source (GGUF) checkpoint (PPL-parity audit 2026-07-12).
+    // LM head first: largest single weight (vocab x d_model), biggest bandwidth win. Same
+    // gates as the native-precision paths: gemm.nvfp4_lm_head opts out entirely; GDN/SSM
+    // hybrids keep the source-precision head unless nvfp4_lm_head_gdn. Must stay
+    // conditional: an unconditional call here silently voids both opt-outs on every
+    // quantized-source (GGUF) checkpoint.
     {
         const auto& prof = model_->profile();
         const bool gdn_head_ok = !(prof.is_gdn || prof.is_ssm) ||
                                  dispatch_policy().gemm.nvfp4_lm_head_gdn;
-        // This collector only serves QUANTIZED (GGUF) heads — a native
-        // BF16/F16 head routes through nvfp4_decode_cache_fp16_lm_head_
-        // instead, so gate (and log) only for quantized sources to avoid a
-        // misleading "skipped" line on SafeTensors models.
+        // This collector only serves QUANTIZED (GGUF) heads; a native BF16/F16 head routes
+        // through nvfp4_decode_cache_fp16_lm_head_ instead. Gate (and log) only for quantized
+        // sources to avoid a misleading "skipped" line on SafeTensors models.
         const QType head_qtype = model_->out_proj_.qtype;
         const bool quantized_head = head_qtype != QType::F16 && head_qtype != QType::BF16;
         // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
@@ -187,10 +168,9 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     if (wcache_->nvfp4.count(lm.data))
         return;
 
-    // GDN/SSM-hybrid models: the LM head is quality-load-bearing for the
-    // recurrent state; NVFP4 there degrades coherence (memory
-    // lm_head_only_nvfp4_qwen3_6_refuted). Detect via any GDN/SSM layer.
-    // Opt-in override (gemm.nvfp4_lm_head_gdn) to re-measure the tradeoff.
+    // GDN/SSM-hybrid models: the LM head is quality-load-bearing for the recurrent state;
+    // NVFP4 there degrades coherence. Detect via any GDN/SSM layer. Opt-in override
+    // (gemm.nvfp4_lm_head_gdn) to re-measure the tradeoff.
     if (!dispatch_policy().gemm.nvfp4_lm_head_gdn) {
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
@@ -226,31 +206,25 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
         (1024.0 * 1024.0);
     IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
                  rows, cols, nvfp4_mib);
-    // The checkpoint may have listed lm_head as one of the modules it left at
-    // source precision. imp re-quantizes it anyway (owner-accepted: +2.2% PPL
-    // for +8-16% decode, gemm.h), which is a deliberate override of the
-    // author's declaration and therefore has to be said out loud rather than
-    // inferred from a missing line.
+    // The checkpoint may have listed lm_head as a module to leave at source precision; imp
+    // re-quantizes it anyway (owner-accepted tradeoff, gemm.h). Deliberate override of the
+    // author's declaration, so it must be said out loud here rather than inferred from a
+    // missing line.
     if (nvfp4_policy::module_is_ignored("lm_head", cfg.nvfp4_exclude_modules))
         IMP_LOG_INFO("lm_head is in quantization_config.ignore; gemm.nvfp4_lm_head=auto "
                      "re-quantizes it at load, set gemm.nvfp4_lm_head=false to serve it at "
                      "checkpoint precision");
 }
 
-// Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a
-// native-NVFP4 hybrid model into NVFP4 decode-cache entries. Mirrors
-// nvfp4_decode_cache_fp16_lm_head_ exactly (same quantize call, same wcache
-// insertion, same guards: weight on device, qtype F16/BF16, ndim 2, cols%16==0,
-// not already cached) — phase 4 then auto-routes M=1 decode through gemv_nvfp4
-// because the weight lands in wcache_->nvfp4 (decode_tier → NVFP4). Prefill is
-// untouched: the unfused originals stay BF16 and the prefill tier still uses the
-// full-precision GEMM path. Opt-in via gemm.nvfp4_attn_proj → the recipe-excluded
-// BF16 attention q/k/v/o (stateless within a step, low quality risk).
-//
-// The analogous lever for the BF16 GDN/Mamba in_proj/out_proj was built and
-// measured to REGRESS decode (−9% Nemotron, −20% Qwen3.6) — the tuned FP16 GEMV
-// (70-81% HBM) beats the NVFP4 GEMV for the wide GDN-output shapes — so it was
-// removed; keeping those projections FP16 is correct for speed, not just quality.
+// Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a native-NVFP4
+// hybrid into NVFP4 decode-cache entries, mirroring nvfp4_decode_cache_fp16_lm_head_
+// exactly (same guards: on device, F16/BF16, ndim 2, cols%16==0, not already cached).
+// Phase 4 then auto-routes M=1 decode through gemv_nvfp4 (decode_tier -> NVFP4); prefill
+// stays on the full-precision GEMM path. Opt-in via gemm.nvfp4_attn_proj (recipe-excluded
+// BF16 attention q/k/v/o, stateless within a step, low quality risk).
+// The analogous lever for BF16 GDN/Mamba in_proj/out_proj was removed: it regresses
+// decode there (the tuned FP16 GEMV beats NVFP4 GEMV for wide GDN-output shapes), so
+// keeping those projections FP16 is correct for speed, not just quality.
 void QuantPipeline::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
     const bool do_attn = dispatch_policy().gemm.nvfp4_attn_proj;
@@ -322,16 +296,12 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     size_t& remaining_budget, cudaStream_t stream) {
     if (wcache_->nvfp4_decode_mode <= 0)
         return;
-    // diagnostics.no_nvfp4_decode_cache skips the steps that BUILD decode-cache
-    // entries. It must not skip the CUTLASS/MXFP4 conversions further down:
-    // those only re-lay-out weights phase 0 already registered, they populate
-    // wcache_->cutlass_nvfp4, and infer_tier_from_wcache (pre_dequant_internal.h)
-    // reads that map to set prefill_tier. Returning here took the whole
-    // 5935-tensor CUTLASS *prefill* cache with it, so a decode-only knob moved
-    // the dense FFN prefill from W4A4 (gemm_kernel_cutlass_nvfp4.cu quantizes
-    // the activation) to W4A16 (the gemm_nvfp4 safety net in
-    // executor_gemm_dispatch.cu) and changed a teacher-forced perplexity by
-    // -1.25 %.
+    // diagnostics.no_nvfp4_decode_cache skips steps that BUILD decode-cache entries. It must
+    // NOT skip the CUTLASS/MXFP4 conversions further down: those only re-lay-out weights
+    // phase 0 already registered, populating wcache_->cutlass_nvfp4, which
+    // infer_tier_from_wcache reads to set prefill_tier. Returning early here took the whole
+    // CUTLASS prefill cache with it, silently moving dense FFN prefill from W4A4 to the
+    // gemm_nvfp4 W4A16 safety net.
     const bool skip_decode_cache = dispatch_policy().diagnostics.no_nvfp4_decode_cache;
     if (skip_decode_cache) {
         IMP_LOG_INFO(
@@ -343,14 +313,12 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     Nvfp4DecodeContext dctx;
     dctx.mode_str = (wcache_->nvfp4_decode_mode == 1) ? "additive" : "only";
 
-    // Compute the shared mode-2 safety reserve once. Mode 1 keeps the upfront
-    // 10% headroom (see vram_budget.cpp:47), so its budget arithmetic already
-    // protects against shared/system-memory fallback; the in-loop safety is a
-    // backstop only. Mode 2 omits the upfront 10% to fit larger weight caches
-    // and previously paid for it with a 10% in-loop safety (3.2 GiB on a 32 GiB
-    // 5090) that starved the dense NVFP4 cache. Replace with the same formula
-    // the MoE expert path already uses: a KV-headroom estimate at 16 K tokens
-    // plus a 256 MiB workspace cushion, clamped to [256 MiB, 1 GiB].
+    // Compute the shared mode-2 safety reserve once. Mode 1 keeps the upfront 10% headroom
+    // (vram_budget.cpp:47), so its arithmetic already protects against shared/system-memory
+    // fallback; the in-loop safety here is a backstop only. Mode 2 omits the upfront 10% to
+    // fit larger weight caches, so it uses the same formula the MoE expert path already
+    // uses: a KV-headroom estimate at 16K tokens plus a 256 MiB workspace cushion, clamped
+    // to [256 MiB, 1 GiB].
     if (wcache_->nvfp4_decode_mode == 2) {
         int n_attn_layers = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -395,17 +363,17 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         }
     }
 
-    // Native-NVFP4 models store the LM head in FP16/BF16 — quantize it to an
-    // NVFP4 decode-cache entry so decode uses the fast GEMV instead of a cuBLAS
-    // FP16 GEMV over vocab×d_model (~0.78 ms/token, ~19% of decode on Qwen3-8B).
-    // Run after dense quantize so the entry is committed before CUTLASS convert.
+    // Native-NVFP4 models store the LM head in FP16/BF16: quantize it to an NVFP4
+    // decode-cache entry so decode uses the fast GEMV instead of a cuBLAS FP16 GEMV over
+    // vocab x d_model. Run after dense quantize so the entry is committed before CUTLASS
+    // convert.
     if (!skip_decode_cache)
         nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
 
-    // Native-NVFP4 hybrids store some attention projections BF16 (recipe
-    // exclusion). Opt-in (gemm.nvfp4_attn_proj) quantizes the q/k/v/o into the
-    // same NVFP4 decode cache. Run after the LM head, before CUTLASS convert so
-    // these entries get the same block-scaled treatment.
+    // Native-NVFP4 hybrids store some attention projections BF16 (recipe exclusion). Opt-in
+    // (gemm.nvfp4_attn_proj) quantizes q/k/v/o into the same NVFP4 decode cache. Run after
+    // the LM head, before CUTLASS convert, so these entries get the same block-scaled
+    // treatment.
     if (!skip_decode_cache)
         nvfp4_decode_cache_fp16_projections_(cfg, stream);
 
@@ -425,10 +393,10 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_cache_moe_experts_(cfg, budget, remaining_budget, stream, dctx);
 }
 
-// Mode 2 ("only") incremental NVFP4 quantize. Process FP16-cached entries
-// first (each conversion nets VRAM since NVFP4 ≈ 28% of FP16), then the
-// from-scratch entries until VRAM is exhausted. Frees each source FP16
-// entry immediately after the corresponding NVFP4 result is committed.
+// Mode 2 ("only") incremental NVFP4 quantize: process FP16-cached entries first (each
+// conversion nets VRAM since NVFP4 is roughly 28% of FP16), then from-scratch entries
+// until VRAM is exhausted. Frees each source FP16 entry immediately after its NVFP4
+// result is committed.
 void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx) {
     using NvFP4Entry = Nvfp4DecodeContext::Entry;
     auto& nvfp4_entries = dctx.entries;
@@ -544,10 +512,9 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         dctx.mode_str);
 }
 
-// Mode 1 ("additive") batch NVFP4 quantize. Pick entries fitting the
-// remaining VRAM budget, quantize them via a single batched
-// quantize_fp16_to_nvfp4_async pass, then commit tensor_scales after one
-// stream sync.
+// Mode 1 ("additive") batch NVFP4 quantize: pick entries fitting the remaining VRAM
+// budget, quantize via a single batched quantize_fp16_to_nvfp4_async pass, then commit
+// tensor_scales after one stream sync.
 void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
                                                  Nvfp4DecodeContext& dctx) {
     using NvFP4Entry = Nvfp4DecodeContext::Entry;

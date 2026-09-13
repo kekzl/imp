@@ -7,24 +7,18 @@
 
 namespace imp {
 
-// NVFP4 GEMV: y = A_nvfp4 @ x
-// A is stored in NVFP4 format (packed_data + micro_scales + tensor_scale)
-// x: [K] or [K,1] FP16 on device
-// y: [M] or [M,1] FP16 on device
+// NVFP4 GEMV: y = A_nvfp4 @ x. A is packed_data+micro_scales+tensor_scale; x [K] or [K,1]
+// FP16; y [M] or [M,1] FP16.
 void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStream_t stream = nullptr);
 
-// NVFP4 GEMM via cuBLASLt (for M > 1, e.g., prefill).
-// Falls back to dequant + standard GEMM if cuBLASLt NVFP4 is unavailable.
-// beta: output accumulation factor (default 0 = overwrite). beta=1 enables
-// residual-fused GEMM: y = dequant(A) @ B + y.
+// NVFP4 GEMM via cuBLASLt (M>1, e.g. prefill); falls back to dequant+standard GEMM if
+// cuBLASLt NVFP4 is unavailable. beta: output accumulation factor (default 0=overwrite);
+// beta=1 enables residual-fused GEMM: y = dequant(A)@B + y.
 void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream = nullptr,
                 float beta = 0.0f);
 
-// ---------------------------------------------------------------------------
-// K-parallel NVFP4 GEMV host launchers for decode (M=1) dispatch.
-// These take raw NvFP4QuantResult + FP16 pointers — no Tensor overhead.
-// Architecture: 128 threads (4 warps), 1 row/block, M blocks.
-// ---------------------------------------------------------------------------
+// K-parallel NVFP4 GEMV host launchers for decode (M=1): raw NvFP4QuantResult+FP16
+// pointers, no Tensor overhead. 128 threads (4 warps), 1 row/block, M blocks.
 
 // Basic GEMV: y[M] = A_nvfp4[M,K] @ x[K]
 void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y, int M, int K, cudaStream_t stream);
@@ -38,15 +32,10 @@ void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y, in
 void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, float* y, int N_out, int K,
                                   int n_act, cudaStream_t stream);
 
-// Batched-M FP16 GEMM for small-M chunk forwards (spec-verify, #998):
-// y[n_act, N_out] = x[n_act, K] @ A^T, reading each NVFP4 weight row once per
-// MR<=4 activation tile instead of dequantizing the source (the M>1 prefill
-// fallback costs a full FP16 materialization of the weight per call — 52% of
-// the decode window on Qwen3-14B Q6_K verify chunks). Same tiling as the
-// FP32 LM-head variant above.
-// Small-M W4A16 GEMM (plain NVFP4 layout, Marlin recipe: dequant-to-FP16 in
-// smem + FP16 tensor-core MMA). M <= 32, K % 128 == 0. Built for the batched
-// decode projections; see nvfp4_gemm_smallm.cu for the measured history.
+// Batched-M FP16 GEMM for small-M chunk forwards (spec-verify, #998): reads each NVFP4
+// weight row once per MR<=4 activation tile instead of dequantizing the source (the M>1
+// prefill fallback fully materializes the weight per call). Marlin recipe: dequant-to-FP16
+// in smem + FP16 tensor-core MMA. M<=32, K%128==0.
 size_t gemm_nvfp4_smallm_workspace_bytes(int N_out);
 bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M, int N_out, int K,
                        void* d_workspace, cudaStream_t stream, bool accumulate = false);
@@ -54,31 +43,29 @@ bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M,
 bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                           int N_out, int K, void* d_workspace, cudaStream_t stream,
                           bool accumulate = false);
-// v2: native block-scaled mxf4nvf4 MMA on both plain-NVFP4 sides, fed by a
-// producer/consumer cp.async pipeline (no dequant, no FP16 staging). M <= 32,
-// K % 256 == 0, N % 64 == 0; see nvfp4_gemm_smallm_v2.cu for the design and
-// gemm.h for the v1 postmortem that motivates it.
+// v2: native block-scaled mxf4nvf4 MMA on both plain-NVFP4 sides, fed by a producer/
+// consumer cp.async pipeline (no dequant, no FP16 staging). M<=32, K%256==0, N%64==0; see
+// nvfp4_gemm_smallm_v2.cu for design, gemm.h for the v1 postmortem motivating it.
 int gemm_nvfp4_smallm_v2_stripes(int N_out, int K);
 size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K);
 bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                              int N_out, int K, void* d_workspace, cudaStream_t stream,
                              bool accumulate = false);
-// FP32-output twin for the batched LM head (the samplers read float logits):
-// single-stripe shapes only (a vocab-sized N tiles the card many times over),
-// fresh output, no workspace; false otherwise. Same accumulators as the FP16
-// kernel, written before the FP16 rounding.
+// FP32-output twin for the batched LM head (samplers read float logits): single-stripe
+// shapes only (a vocab-sized N tiles the card many times over), fresh output, no
+// workspace; false otherwise. Same accumulators as the FP16 kernel, written before the
+// FP16 rounding.
 bool gemm_nvfp4_smallm_v2_a4_f32(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, float* y, int M,
                                  int N_out, int K, cudaStream_t stream);
 // Tuning hook (tests only): explicit stage depth {2,3,4,6} and stripe count.
 bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                                    int N_out, int K, void* d_workspace, cudaStream_t stream,
                                    bool accumulate, int stages, int stripes);
-// Sibling variant: two or three weights with the same K sharing one quantized
-// activation (FFN gate|up, GDN in|z, attention q|k|v) in ONE launch. The
-// single-stripe policy is applied to the COMBINED n-tile count (>= 80 tiles),
-// fresh outputs (no accumulate); returns false otherwise and the caller falls
-// back to the single calls. Bit-identical per tensor to the single-tensor
-// kernel at stripes=1 (same CTA body, same tile order).
+// Sibling variant: two or three weights with the same K sharing one quantized activation
+// (FFN gate|up, GDN in|z, attention q|k|v) in ONE launch. Single-stripe policy applies to
+// the COMBINED n-tile count (>=80 tiles), fresh outputs; returns false otherwise (caller
+// falls back to single calls). Bit-identical per tensor to the single-tensor kernel at
+// stripes=1.
 constexpr int kSmallMV2MaxSiblings = 3;
 struct SmallMV2Sibling {
     const NvFP4QuantResult* w;
@@ -106,10 +93,9 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
 void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu, const half* x, half* yg,
                               half* yu, int rows, int K, cudaStream_t stream);
 
-// M=1 GDN input projections in one launch: in_proj + gate (NVFP4) and alpha +
-// beta (FP16 [ab_rows, K] each) on one x. Returns false (nothing launched)
-// when K % 16 != 0, K > 8192 or a weight's K differs; the caller keeps its
-// four-call path. Registered for PDL by nvfp4_gemv_pdl_register().
+// M=1 GDN input projections in one launch: in_proj+gate (NVFP4) and alpha+beta (FP16
+// [ab_rows,K]) on one x. Returns false when K%16!=0, K>8192, or a weight's K differs; the
+// caller keeps its four-call path. Registered for PDL by nvfp4_gemv_pdl_register().
 bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantResult& w_gate, const half* w_alpha,
                                 const half* w_beta, int ab_rows, const half* x, half* y_in, half* y_gate,
                                 half* y_alpha, half* y_beta, int K, cudaStream_t stream);
@@ -129,10 +115,8 @@ void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A, const half* gate, con
 void gemv_nvfp4_geglu_residual(const NvFP4QuantResult& A, const half* gate, const half* up, half* y,
                                const half* residual, int M, int K, cudaStream_t stream);
 
-// ---------------------------------------------------------------------------
-// MoE NVFP4 GEMV: per-expert decode projections.
-// FP16 input (no Q8_1 pre-quantization needed).
-// ---------------------------------------------------------------------------
+// MoE NVFP4 GEMV: per-expert decode projections. FP16 input (no Q8_1 pre-quantization
+// needed).
 
 // MoE decode GEMV: y[expert_slot, rows] = W[expert_id, :, :] @ x[expert_slot, :]
 // x_stride: 0 = shared input across experts, K = per-expert input.
@@ -150,22 +134,16 @@ void nvfp4_gemv_pdl_register();
 // nvfp4_gemv_pdl_register().
 void nvfp4_gemv_batched_pdl_register();
 
-// Set the pre-allocated dequant scratch buffer for the gemm_nvfp4 fallback
-// path (M>1 dequant→FP16→cuBLAS). When set and large enough, gemm_nvfp4
-// reuses this buffer instead of attempting a cudaMalloc — which would fail
-// inside CUDA stream capture. Pass nullptr/0 to clear (e.g., on engine
-// destroy).
-//
-// The fallback path only fires for M>1, so the buffer is sized for the
-// FP16 dequant of the LARGEST NVFP4 weight matrix in the model (N×K×2
-// bytes). The caller is responsible for the buffer's lifetime — this
-// function only stores the pointer and size for later use by ensure_dequant_buffer().
+// Sets the pre-allocated dequant scratch buffer for gemm_nvfp4's M>1 fallback
+// (dequant->FP16->cuBLAS): when set and large enough, reused instead of a cudaMalloc, which
+// would fail inside CUDA stream capture. nullptr/0 clears it (e.g. engine destroy). Sized
+// for the FP16 dequant of the LARGEST NVFP4 weight in the model (N*K*2 bytes); caller owns
+// the buffer's lifetime, this only stores pointer+size.
 void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes);
 
-// Test probe: returns the current size of the lazy cudaMalloc'd dequant
-// buffer (the legacy non-graph-safe path). When a workspace is set via
-// set_nvfp4_dequant_workspace(), subsequent gemm_nvfp4 calls should not
-// grow this buffer. Exposed for tests to assert workspace-vs-lazy choice.
+// Test probe: current size of the lazy cudaMalloc'd dequant buffer (the legacy
+// non-graph-safe path). After set_nvfp4_dequant_workspace() is set, subsequent gemm_nvfp4
+// calls should not grow this. Exposed for tests to assert workspace-vs-lazy choice.
 size_t nvfp4_lazy_dequant_buf_size_for_testing();
 
 }  // namespace imp

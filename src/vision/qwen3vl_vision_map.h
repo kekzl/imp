@@ -1,15 +1,10 @@
 #pragma once
 
-// Qwen3-VL vision-tower tensor names -> slots.
-//
-// Split out as a pure function because this is where a vision tower silently
-// goes wrong: a misrouted name does not crash, it produces a plausible-looking
-// encoder that returns unrelated embeddings. Keeping it free of Tensor and file
-// I/O means it can be tested exhaustively against the real name list without a
-// checkpoint or a GPU.
-//
-// Names come from `model.visual.*` in the checkpoint (the `model.visual.`
-// prefix is NOT included — callers strip it, as weight_map already does).
+// Qwen3-VL vision-tower tensor names -> slots. A pure function because this is where a
+// vision tower silently goes wrong: a misrouted name doesn't crash, it produces a
+// plausible-looking encoder returning unrelated embeddings. Free of Tensor and file I/O so
+// it can be tested exhaustively against the real name list without a checkpoint or GPU.
+// Names come from model.visual.* (prefix stripped by callers, as weight_map already does).
 
 #include <string>
 

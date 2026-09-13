@@ -1,7 +1,7 @@
 // The public C enums and their internal counterparts are two hand-maintained
 // copies of one numbering. Nothing bound them (#1206).
 //
-// src/model/model.cpp:148 re-declares every IMP_ARCH_* value as a kApi*
+// src/model/model.cpp:127 re-declares every IMP_ARCH_* value as a kApi*
 // constant with the comment "IMP_ARCH_* values from include/imp/types.h (avoid
 // header dependency)" — a deliberate choice to keep the public C header out of
 // the model layer, and a correct one. But grepping tests/ for kApi or IMP_ARCH_

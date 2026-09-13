@@ -1,11 +1,8 @@
 #pragma once
 
-// Loader helpers that keep tensor + qtype + sidecar-scales in lockstep so
-// no loader can silently forget to populate one of them. Used by the GGUF,
-// SafeTensors, and llm-compressor loaders.
-//
-// Once Stage G lands, the *_qtype mirror fields on TransformerLayer go
-// away entirely; the helpers will collapse to single-Tensor assigns then.
+// Loader helpers keeping tensor + qtype + sidecar-scales in lockstep, used by GGUF,
+// SafeTensors, and llm-compressor loaders. Once Stage G lands the *_qtype mirror fields on
+// TransformerLayer go away; helpers collapse to single-Tensor assigns.
 
 #include "core/tensor.h"
 #include "core/qtype.h"

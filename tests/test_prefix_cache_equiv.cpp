@@ -390,7 +390,7 @@ TEST(PrefixEquivTest, MaxReuseBlocksCapsSharing) {
 // new sequence and only THEN fail to allocate a fresh block, at which point
 // rollback_partial_allocation() returns everything. Those moved-in blocks left
 // cached_blocks_map_ but their entries are still in the prefix-hash table, so
-// the rollback has to drop them (kv_cache_manager.cpp:549/562 →
+// the rollback has to drop them (kv_cache_manager.cpp:542/562 →
 // drop_stale_hash_if_last). If it does not, the next request for the same
 // prefix could "hit" a block that is back in the free pool — the
 // double-ownership bug the trim path's own comment names.

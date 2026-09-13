@@ -38,26 +38,18 @@ namespace imp {
 // GraphExecutor lifetime
 // ---------------------------------------------------------------------------
 
-// Write the MoE expert-activation histogram (diagnostics.moe_expert_hist) and
-// release it. Called from the destructor, so it captures the whole process:
-// a decode run's skew is the sum over every token it produced.
-//
-// The total is logged whether or not it is zero. A histogram that recorded
-// nothing is the failure mode that matters here — the model had no MoE layers,
-// or the key was set after init — and it must not look like a flat
-// distribution in the JSON.
-//
-// Reading dispatch_policy() and freeing through vram_alloc_ from a destructor is
-// safe by declaration order, not by luck: Engine declares dispatch_policy_
-// (engine.h:319) and vram_alloc_ (engine.h:311) before executor_ (engine.h:340),
-// so the executor is destroyed first and both are still alive. Reordering those
-// members would turn this into a use-after-free.
+// Writes the MoE expert-activation histogram and releases it, called from
+// the destructor so it captures the whole process. Total is logged even
+// when zero (a histogram that recorded nothing must not look like a flat
+// distribution). Reading dispatch_policy() and freeing via vram_alloc_ from
+// a destructor is safe by declaration order: Engine declares
+// dispatch_policy_ and vram_alloc_ before executor_ (engine.h), so the
+// executor is destroyed first and both are still alive; reordering those members would use-after-free.
 void GraphExecutor::dump_moe_expert_hist_() {
-    // Read the imbalance counters (#1548) before releasing them, and release
+    // Reads the imbalance counters (#1548) before releasing them, and releases
     // them BEFORE the early return below: they are allocated whenever a MoE
     // model runs a prefill, while the histogram needs a diagnostics key, so
-    // hanging their release off the histogram's presence would leak them in
-    // the normal case.
+    // tying their release to the histogram's presence would leak them normally.
     const auto imb = moe_imbalance();
     vram_free(vram_alloc_, moe_.imb_acc);
     moe_.imb_acc = nullptr;
@@ -88,10 +80,9 @@ void GraphExecutor::dump_moe_expert_hist_() {
                 fprintf(f, "]%s\n", l + 1 < moe_.hist_layers ? "," : "");
             }
             fprintf(f, "  ],\n");
-            // Per-launch imbalance (#1548). The counts above are a whole-process
-            // aggregate, which averages away the skew that decides cost: what
-            // sets the grouped GEMM's M tile is max(M_e) at ONE launch, and a
-            // sum over the run cannot be read back into it.
+            // Per-launch imbalance (#1548): the counts above are a whole-process
+            // aggregate, which averages away the skew that decides cost. What sets the
+            // grouped GEMM's M tile is max(M_e) at ONE launch; a run-sum cannot be read back into that.
             fprintf(f, "  \"per_layer_imbalance\": [\n");
             for (size_t l = 0; l < imb.size(); l++) {
                 const double ratio = imb[l].mean_rows > 0.0 ? imb[l].mean_max / imb[l].mean_rows : 0.0;
@@ -207,10 +198,10 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // in configure_ssm_workspace().
     ssm_z_cols_ = exec_ssm_z_cols(model);
 
-    // Compute max expert FFN hidden dim from actual packed tensor shapes.
-    // cfg.expert_d_ff may not match the actual tensor dimensions (e.g. Nemotron-H).
-    // Gemma 4: ffn_gate_up_exps is fused (shape[1] = 2*expert_d_ff), but it gets
-    // split at weight_upload time. Trust cfg.expert_d_ff over the pre-split shape.
+    // Computes max expert FFN hidden dim from actual packed tensor shapes:
+    // cfg.expert_d_ff may not match the tensors (e.g. Nemotron-H). Gemma 4's
+    // ffn_gate_up_exps is fused (shape[1]=2*expert_d_ff) but splits at
+    // weight_upload time; trust cfg.expert_d_ff over the pre-split shape.
     max_expert_eff_ = cfg.expert_d_ff;
     if (has_moe_ && cfg.arch != ModelArch::GEMMA4) {
         for (int li = 0; li < cfg.n_layers; li++) {
@@ -241,14 +232,11 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // max cached context the latent cache must hold.
     mla_absorb_max_seq_ = (effective_seq_len > 0) ? effective_seq_len : 4096;
 
-    // Cap max_tokens for hybrid MoE+SSM/GDN models to bound workspace VRAM.
-    // SSM state + cuBLAS S-matrix + workspace can exhaust 32 GB VRAM at the
-    // model's full max_seq_len. Chunked-prefill on hybrid archs IS supported
-    // now (uniform attention shapes across layers), but the cap still keeps
-    // single-chunk prefills cheap; the engine clamps effective_chunk to this
-    // value and falls into the chunked path for longer prompts. 2048 covers
-    // most real prompts in one shot at ~190 MiB shared workspace
-    // (attn_scores n_heads × N² is the dominant term).
+    // Caps max_tokens for hybrid MoE+SSM/GDN models to bound workspace VRAM:
+    // SSM state + cuBLAS S-matrix + workspace can exhaust 32 GB at
+    // max_seq_len. Chunked-prefill on hybrids is supported (uniform attention
+    // shapes across layers), but the cap keeps single-chunk prefills cheap;
+    // longer prompts fall into the chunked path via effective_chunk. Default 2048.
     if (has_ssm_ && (has_moe_ || has_gdn_)) {
         int capped = has_moe_ ? 2048 : 2048;
         if (max_tokens_ > capped) {
@@ -258,44 +246,29 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
         }
     }
 
-    // Logits buffer only needs to hold tokens that require LM head projection:
-    // - Prefill: 1 (last token only)
-    // - Decode:  n_sequences (one per batch slot)
-    // - Eval/verify (spec-decode greedy verify, --perplexity): chunk rows are
-    //   processed through this buffer in batches of max_logit_tokens_. Floor 8:
-    //   at batch=1 the buffer was [1, vocab], which serialized the verify LM
-    //   head into one full-weight GEMV per row (a 65-row verify chunk re-read
-    //   the LM head 65x — 7.2 of 30 ms/cycle on Qwen3-Coder-30B). With >=4
-    //   rows the batched-M GEMV reuses each weight read across MR=4 rows;
-    //   8 halves the outer-loop iterations for ~5 MB of logits (+split-K
-    //   scratch scales with this too, ~1 MB/row).
+    // Logits buffer holds only tokens needing an LM head projection: prefill 1
+    // (last token), decode n_sequences, eval/verify processed in batches of
+    // max_logit_tokens_. Floor 8: at batch=1 the buffer was [1,vocab],
+    // serializing the verify LM head into one full-weight GEMV per row; >=4
+    // rows lets the batched-M GEMV reuse each weight read across MR=4 rows.
     max_logit_tokens_ = std::max({max_batch_size, 8, 1});
 
-    // Wire the scratch-arena component with the live context it sizes against
-    // (pointers to GraphExecutor members so e.g. has_gdn_ is read live — still
-    // false here, set true below — and the activation/phase tensors the moved
-    // methods carve stay GraphExecutor-owned).
+    // Wires the scratch-arena component with the live context it sizes
+    // against (pointers to GraphExecutor members, e.g. has_gdn_ read live:
+    // still false here, set true below); activation/phase tensors stay GraphExecutor-owned.
     ws_.init(model, vram_alloc_, compute_dtype_, &max_tokens_, moe_, &has_moe_, &has_ssm_, &has_gdn_,
              &has_dense_ffn_, &max_expert_eff_, &max_logit_tokens_, &hidden_, &residual_, &norm_out_,
              &logits_, &fp32_accum_buf_, &fp32_hidden_);
 
-    // Compute shared workspace sizes (no allocation — deferred to allocate_workspaces()).
-    // Detect GDN layers (Gated DeltaNet, e.g., Qwen3.5) BEFORE the shared sizes
-    // are computed. GDN carries its input projection in FP32 for precision, so
-    // compute_shared_sizes() charges 4 bytes/elem for it — but only if it knows
-    // the model is GDN. Reading has_gdn_ while it is still false reserved HALF
-    // the bytes the pointer carve then handed out, and configure_ssm_workspace()
-    // ran later, when the flag WAS set, so the two disagreed by exactly 2x.
-    //
-    // On a GDN+MoE model the MoE phase dominates the shared arena and hid this;
-    // on a GDN+dense model (Qwen3.5-4B) the SSM phase is the maximum, and the
-    // overrun corrupted every token past the halfway point — NaN from the first
-    // recurrent layer whose block exceeded it, silently and prefill-only (#1282).
-    //
-    // Deliberately placed AFTER the max_tokens cap above, which reads has_gdn_
-    // while it is still false. That is the AS-BUILT behaviour the T2 reservation
-    // replicates on purpose (AUDIT B18) — moving this any earlier would change
-    // the cap and under-reserve the arena by 2x instead.
+    // Computes shared workspace sizes before allocation; GDN detection must
+    // run BEFORE these sizes are computed, since compute_shared_sizes() charges
+    // 4 bytes/elem for GDN's FP32 input projection only if has_gdn_ is already
+    // true. Reading it while still false under-reserved by 2x and corrupted
+    // every token past the halfway point on a GDN+dense model (NaN from the
+    // first recurrent layer that exceeded it, prefill-only, #1282); a GDN+MoE
+    // model hid this because the MoE phase dominates the arena. Deliberately
+    // placed AFTER the max_tokens cap above (which reads has_gdn_ while still
+    // false) - that is the AS-BUILT behavior the T2 reservation replicates on purpose (AUDIT B18).
     {
         int gdn_idx = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -325,16 +298,9 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     }
 
 
-    // Programmatic Dependent Launch registration. Registration is the
-    // promise that the kernel calls pdl_wait() before its first global
-    // access (core/pdl_device.cuh): a registered kernel may be scheduled
-    // while its producer still runs. Only instrumented kernels are registered
-    // here; the other launch sites register themselves next to their
-    // pdl::launch. The former blanket list (fp32 add, fused KV writes,
-    // fp16<->fp32 converts, fp32 norms, plain rope, activation/dp4a families) is gone:
-    // those kernels do not wait yet, and registering them raced
-    // (DegenerationTest.GreedyDeterminism failed on the first instrumented
-    // build, 2026-08-31).
+    // Registration promises the kernel calls pdl_wait() before its first global access
+    // (core/pdl_device.cuh); a registered kernel may run while its producer still executes.
+    // Only instrumented kernels register here; others register next to their pdl::launch.
     if (use_pdl_ && pdl::is_available()) {
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
         nvfp4_gemv_pdl_register();
@@ -346,10 +312,8 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
         use_pdl_ = false;
     }
 
-    // SMEM carveout: maximize L1 for bandwidth-bound GEMV kernels (independent of PDL).
-    // The dp4a family lost its carveout when its PDL registration was withdrawn
-    // (#1833); it is a launch attribute, not a wait promise, so it returns here
-    // (AUDIT_arch_2026 A1-3 / A2-1, dispatch #11).
+    // SMEM carveout maximizes L1 for bandwidth-bound GEMV kernels, independent of PDL.
+    // Launch attribute, not a wait promise, so it applies here regardless of registration (#1833).
     mxfp4_gemv_set_l1_carveout();
     gemv_dp4a_set_l1_carveout();
 
@@ -428,11 +392,8 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
         IMP_LOG_ERROR("Shared workspace allocation failed — cannot run inference");
         return false;
     }
-    // Always allocate batch dequant buffer — GPU-resident layers need it even
-    // when some other layers are host-resident. Without it, ALL layers fall to
-    // the serial path (major perf regression; was a correctness regression
-    // before the host gate_up split fix since serial path had undefined
-    // behavior for Gemma-4 host experts).
+    // Always allocate: GPU-resident layers need it even if other layers are host-resident.
+    // Without it, all layers fall to the serial path (major perf regression).
     allocate_auxiliary_buffers(/*skip_batch_dequant=*/false);
     if (mla_scratch_unservable_) {
         // The only auxiliary buffer whose absence is not a slower path. Refusing
@@ -496,10 +457,8 @@ size_t Workspace::workspace_estimate(bool include_attn_scores) const {
     auxiliary += static_cast<size_t>(*max_logit_tokens_) * nh_est * 32 * (2 + hd_est) *
                  sizeof(float);  // split-K
 
-    // S-matrix for the cuBLAS attention fallback. Skipped for MoE-heavy
-    // models (VRAM is tight; the FMHA family doesn't need it) and whenever
-    // the caller knows the allocator won't build one — FA2-served configs
-    // skip the buffer entirely (#932), so charging it here would hold up to
+    // Skip for MoE-heavy models (VRAM tight, FMHA family doesn't need it) and when the
+    // allocator won't build one; FA2-served configs skip it entirely (#932), avoiding up to
     // 256 MiB of phantom headroom (#943).
     bool is_moe = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
     if (include_attn_scores && !is_moe) {

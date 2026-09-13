@@ -81,10 +81,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
               cfg.head_dim_per_layer[layer] > 0)
                  ? cfg.head_dim_per_layer[layer]
                  : (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh));
-    // Gemma 4: derive per-layer n_heads and n_kv_heads from actual tensor shapes.
-    // Layer 0 (SWA) wq=[4096,2816] wk=[2048,2816] → 16 Q × hd=256, 8 KV × hd=256
-    // Layer 5 (Global) wq=[8192,2816] wk=[1024,2816] → 16 Q × hd=512, 2 KV × hd=512
-    // Authoritative source = the loaded tensor shapes; per-layer config can lag.
+    // Gemma 4: derive per-layer n_heads/n_kv_heads from actual tensor shapes
+    // (layer 0 SWA: 16Q/8KV hd=256; layer 5 global: 16Q/2KV hd=512).
+    // Authoritative source is the loaded tensor shapes; per-layer config can lag.
     if (prof.is_gemma4 && hd > 0 && ly.wq.data != nullptr) {
         int wq_out = static_cast<int>(ly.wq.shape[0]);
         if (wq_out > 0 && (wq_out % hd) == 0) {
@@ -158,15 +157,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         debug_tensor_stats("L0_step0_h_input", h, stream);
     }
 
-    // 1. Save residual for later add-back.
-    //    Optimization: for decode (n=1) with dp4a, fuse residual into GEMV.
-    //    For prefill (n>1) with FP16 cache, use cuBLAS beta=1 to fuse residual
-    //    into the wo projection GEMM — no separate residual save/add/copy needed.
-    //    For FP32 accumulator path: residual is kept in fp32_hidden_, skip FP16 copy.
-    // True sandwich norm: post_attn_norm applied inside run_attention AND separate
-    // ffn_norm for run_ffn (Gemma-3 pattern). When ffn_norm is absent (Qwen3.5),
-    // post_attn_norm serves as FFN input norm in run_ffn — NOT a sandwich norm.
-    // Without this check, post_attn_norm is applied TWICE (here + run_ffn fallback).
+    // Residual save: decode (n=1, dp4a) fuses residual into the GEMV; prefill
+    // (n>1, FP16 cache) fuses via cuBLAS beta=1 into wo; FP32-accumulator path
+    // keeps the residual in fp32_hidden_, skipping the FP16 copy.
+    // True sandwich norm (Gemma-3): post_attn_norm inside run_attention AND a
+    // separate ffn_norm in run_ffn. When ffn_norm is absent (Qwen3.5),
+    // post_attn_norm serves as the FFN input norm instead, not a sandwich norm;
+    // without this check it would apply twice.
     const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr && ly.ffn_norm.data != nullptr);
     // FP32 residual accumulator (Gemma-3 dense + Gemma-4 MoE post-norm architecture).
     // Kernel semantics: fp32_h += rmsnorm(po) * w. llama's build_norm(attn) + residual
@@ -194,11 +191,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                       !will_fuse_o_beta1 && n > 1 && qscratch_.dequant != nullptr &&
                                       dequant_gpu_supported(ly.wo.qtype));
-    // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier
-    // (gemm.nvfp4_residual_beta1): h += o_proj(ao) via the smallm accumulate
-    // path — replaces GEMM-to-scratch + elementwise_add_store and skips the
-    // residual save below. Small ragged prefill chunks (n <= 32) take it
-    // too, which is correct (same accumulate) and still one launch fewer.
+    // Batched-decode residual accumulation on CUTLASS_NVFP4 (gemm.nvfp4_residual_beta1):
+    // h += o_proj(ao) via the smallm accumulate path, replacing GEMM-to-scratch
+    // + elementwise_add_store and skipping the residual save. Ragged prefill
+    // chunks n<=32 take it too (same accumulate, one launch fewer).
     bool will_fuse_o_beta1_nvfp4 =
         (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
          !will_fuse_o_dequant_beta1 && n > 1 && n <= 32 && h.qtype == QType::F16 &&
@@ -219,18 +215,16 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
-    // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
-    //    For decode (n=1) with matching quant types: fused RMSNorm→Q8_1→QKV GEMV.
-    //    This skips the intermediate norm_out FP16 buffer entirely.
-    //    Otherwise falls back to separate RMSNorm + 3 dp4a/cuBLAS dispatches.
+    // QKV projections [n,d]@W^T -> [n,proj_dim]. Decode (n=1) with matching
+    // quant types: fused RMSNorm->Q8_1->QKV GEMV, skipping the intermediate
+    // norm_out FP16 buffer. Otherwise separate RMSNorm + 3 dp4a/cuBLAS dispatches.
     {
 #include "exec/executor_attention_qkv.cu"
     }
 
-    // Gemma 4: K=V sharing for global attention layers (wv == null).
-    // These layers have no V projection — V is aliased from K. Copy K→V here
-    // so all downstream code (QK-norm, V-norm, KV-write, attention) sees a
-    // valid V tensor.
+    // Gemma 4: K=V sharing for global attention layers (wv==null): no V
+    // projection exists, V is aliased from K. Copy K->V here so downstream
+    // code (QK-norm, V-norm, KV-write, attention) sees a valid V tensor.
     if (prof.is_gemma4 && ly.wv.data == nullptr && kk.data != nullptr && vv.data != nullptr) {
         size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.qtype);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(vv.data, kk.data, kv_bytes, cudaMemcpyDeviceToDevice, stream));
@@ -292,8 +286,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     // SWA-aware KV sizing (kv_cache.swa_sizing): windowed layers read/write
     // the small SWA block group through the parallel table (-1 holes outside
-    // the trailing window — the kernels' window mask never reaches them).
-    // nullptr table = feature off → every layer shares state.block_tables.
+    // the trailing window). nullptr table = feature off, every layer shares state.block_tables.
     const int* layer_block_tables =
         (state.block_tables_swa != nullptr && layer_sliding_window > 0) ? state.block_tables_swa
                                                                         : state.block_tables;
@@ -305,11 +298,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                            : longrope_long_freqs_;
     }
     // Gemma 4: per-layer rope_freqs (pre-computed effective frequencies for
-    // global layers, see gguf_loader.cpp:1221). llama.cpp's gemma4-iswa.cpp:55-59
-    // passes these as freq_factors to ggml_rope_ext on full_attention layers
-    // (n_rot=hd, with most pairs effectively zeroed by 1e30 divisors). This
-    // matches the proportional-rope schema (ccss000000000000) the converter
-    // emits via partial_rotary_factor=0.25.
+    // global layers, gguf_loader.cpp:1160), matching llama.cpp's
+    // gemma4-iswa.cpp passing them as freq_factors to ggml_rope_ext on
+    // full_attention layers (n_rot=hd, proportional-rope schema ccss000000000000).
     if (prof.attn_variant == AttnVariant::GEMMA4_SWA) {
         bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
         if (!layer_is_swa && ly.rope_freqs.data && ly.rope_freqs.on_device) {
@@ -317,34 +308,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         }
     }
 
-    // Attention output gate (fused Q + gate projection). Two layouts exist:
-    //   (a) Per-head interleaved: [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
-    //   (b) Feature-dim concat:   [Q_all(nh*hd) | Gate_all(nh*hd)]
-    // (a) is the DEFAULT and is correct for every checkpoint tested, Qwen 3.5 and
-    // Qwen 3.6 alike. This comment used to claim (b) was "the Qwen 3.6 /
-    // Qwen3-Next layout" and that auto-detection was pending an E2E test, which
-    // sent the #1273 investigation down a dead end. Two independent checks, both
-    // in 2026-08:
-    //   - Reference: HF `modular_qwen3_next.py` splits with
-    //     `torch.chunk(q_proj(x).view(*shape, -1, head_dim * 2), 2, dim=-1)` —
-    //     grouping 2*head_dim per head and cutting inside it IS per-head
-    //     interleaved, Q first. Same as (a).
-    //   - Checkpoints: per-row NVFP4 block-scale means alternate with period
-    //     head_dim on gated models (Qwen3.6-27B ratio 1.34, 35B 1.08-1.22) and
-    //     not at all on a dense control (1.001) — the periodicity only exists
-    //     where a gate exists, i.e. Q and gate interleave per head on disk.
-    // `attention.gate_concat` stays as an escape hatch for a future checkpoint
-    // that really ships (b). It is not a knob to reach for when a hybrid looks
-    // wrong: on all three staged hybrids, flipping it is what breaks them.
+    // Attention output gate (fused Q+gate): per-head interleaved
+    // [Q_h0(hd),Gate_h0(hd),...] is the DEFAULT and correct for every checkpoint
+    // tested (Qwen3.5, Qwen3.6): matches HF's per-head chunk split, and NVFP4
+    // block-scale periodicity on disk confirms it. `attention.gate_concat` is
+    // an escape hatch for a feature-dim-concat checkpoint that has not shipped
+    // yet; flipping it breaks every staged hybrid today.
     Tensor attn_gate_buf;
     if (has_attn_output_gate) {
-        // The gate does not own storage — it borrows the SSM z buffer, which is
-        // carved only by configure_ssm_workspace(), which in turn runs only from
-        // run_ssm()/run_gdn(). Every gated checkpoint today is also recurrent AND
-        // puts a recurrent layer before its first attention layer, so the buffer
-        // is always live by the time we get here. Neither is guaranteed by
-        // construction, and getting it wrong writes the gate through a null or
-        // stale pointer — silently, and only in prefill.
+        // The gate borrows the SSM z buffer (carved only by
+        // configure_ssm_workspace(), which runs only from run_ssm()/run_gdn()).
+        // Every gated checkpoint today is recurrent with a recurrent layer before
+        // its first attention layer, so the buffer is live here, but this is not
+        // guaranteed by construction: getting it wrong writes through a null/stale pointer silently, prefill
+        // only.
         if (ssm_z_buf_.data == nullptr) {
             throw std::runtime_error(
                 "attention output gate has no buffer: it borrows the SSM z buffer, which this "
@@ -372,11 +349,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                  static_cast<size_t>(q_actual_dim) * es_q, n,
                                                  cudaMemcpyDeviceToDevice, stream));
         } else {
-            // Per-head interleaved: Qwen 3.5 layout.
-            // Q[t, h*hd:(h+1)*hd] = src[t, h*2*hd : h*2*hd+hd]
-            // Gate[t, h*hd:(h+1)*hd] = src[t, h*2*hd+hd : (h+1)*2*hd]
-            // Replaced nh × 2 cudaMemcpy2DAsync loop with one fused kernel
-            // (~656 D2D copies/decode-step → 1 launch on Qwen3.5 GDN W2).
+            // Per-head interleaved (Qwen 3.5 layout): Q[t,h*hd:(h+1)*hd] =
+            // src[t,h*2*hd:h*2*hd+hd], Gate = src[t,h*2*hd+hd:(h+1)*2*hd]. One fused
+            // kernel replaces an nh x 2 cudaMemcpy2DAsync loop.
             attn_gate_split_interleaved(q_target.data, qv.data, attn_gate_buf.data, n, nh, hd, q_out_dim,
                                         static_cast<int>(es_q), stream);
         }
@@ -388,27 +363,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool rope_k_deferred = false;  // true when K-RoPE will be fused into KV write
     {
         bool has_qk_norm = (ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr);
-        // Determine if we can fuse K-RoPE into KV cache write.
-        // YaRN models (#547, gpt-oss): the fused kernels
-        // (rope_q_only_fp16_kernel / write_kv_cache_rope_fused_kernel) only
-        // know theta + 1/scale — no ramp blending, no attn_factor. Prefill
-        // K would be YaRN-correct but every decode-written K plain-RoPE →
-        // degeneration from token 2. Keep YaRN on the separate full path.
-        // MLA uses asymmetric K/V head dims (hd=192, vhd=128): the fused rope-KV
-        // write kernel doesn't support different K vs V dimensions, so disable it.
-        // `rope_q_only_fp16_kernel` and the deferred K-RoPE in the KV write take
-        // a single position array and know nothing about axes. With M-RoPE
-        // active they would rotate every dimension by the text position —
-        // silently, and only wrongly for image tokens. Keep them off.
+        // Fused K-RoPE-into-KV-write is declined for: YaRN (#547, gpt-oss) - the
+        // fused kernels know only theta+1/scale, no ramp/attn_factor, so decode-
+        // written K would go plain-RoPE and degenerate from token 2; MLA - fused
+        // kernel doesn't support asymmetric K/V head dims (hd=192, vhd=128);
+        // M-RoPE active - the fused kernels take one position array per axis-blind rotation, which would
+        // silently misrotate image tokens.
         const bool mrope_active = state.mrope.positions != nullptr || state.mrope.pos_delta != nullptr;
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
                                  state.kv_cache->qtype() == QType::F16 &&
                                  prof.attn_variant != AttnVariant::NOPE && cfg.yarn_ext_factor <= 0.0f &&
                                  !cfg.is_mla() && !mrope_active);
-        // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
-        // full head_dim. Global layers' freq_factors (loaded into
-        // longrope_freqs above) zero out most pairs to realize the
-        // partial-rotary schedule from the GGUF (ccss000000000000).
+        // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the full
+        // head_dim; global layers' freq_factors (loaded as longrope_freqs) zero
+        // out most pairs to realize the GGUF's partial-rotary schedule (ccss000000000000).
         int fused_rope_dim = cfg.rope_dim;
         if (prof.is_gemma4) {
             fused_rope_dim = hd;
@@ -416,11 +384,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = dispatch_policy().attention.no_qknorm_fused;
-        // Fused QK-norm + RoPE covers the batched-decode rows too (n <= 64,
-        // one CTA per head x token): the separate path below ran q-norm,
-        // k-norm and rope as three launches per layer at 32 streams. The
-        // fused kernel applies the norm weight over the full head, so the
-        // sub-head norm layouts (norm dim < head_dim) stay on the separate path.
+        // Fused QK-norm+RoPE covers batched-decode rows too (n<=64, one CTA per
+        // head x token), replacing three separate launches per layer at 32
+        // streams. Applies the norm weight over the full head; sub-head norm
+        // layouts (norm dim < head_dim) stay on the separate path.
         const bool full_head_norm = ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr &&
                                     ly.attn_q_norm.shape[0] == hd && ly.attn_k_norm.shape[0] == hd;
         if (has_qk_norm && n <= 64 && (n == 1 || full_head_norm) && qv.qtype == QType::F16 &&
@@ -446,16 +413,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             IMP_CUDA_CHECK_LAUNCH();
             rope_k_deferred = true;
         } else {
-            // Separate path: QK-norm (if present) + RoPE on both Q and K.
-            //
-            // Some architectures (Qwen3.5-27B-mxfp4) ship `attn_q_norm` /
-            // `attn_k_norm` with a smaller dim than `head_dim` — the weight
-            // is meant to be applied per (norm_dim)-sized chunk along the
-            // head, so a 512-dim head with a 256-dim norm splits into two
-            // 256-dim sub-heads sharing the same scale. Detect that by
-            // looking at the norm weight's element count and reshape the
-            // Q/K view accordingly. When norm_dim == hd (the common case)
-            // this is a no-op.
+            // Some archs (Qwen3.5-27B-mxfp4) ship attn_q_norm/attn_k_norm with a
+            // smaller dim than head_dim: the weight applies per norm_dim-sized chunk,
+            // so a 512-dim head with a 256-dim norm splits into two 256-dim sub-heads
+            // sharing the scale. Detected from the norm weight's element count; no-op when norm_dim==hd.
             auto split_norm_dim = [hd](const Tensor& w) -> int {
                 int wd = (w.data != nullptr) ? static_cast<int>(w.shape[0]) : hd;
                 return (wd > 0 && wd < hd && hd % wd == 0) ? wd : hd;
@@ -504,26 +465,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         debug_tensor_stats("L0_step2_after_rope_k", kk, stream);
     }
 
-    // 7. Attention scale.
-    //   Standard archs: 1/sqrt(head_dim).
-    //   Gemma 4: 1.0 (confirmed by llama.cpp print_info: f_attn_scale = 1.0.
-    //                 Q-norm and K-norm absorb the per-element scaling).
-    //   MLA (DeepSeek-V2/V3): multiply by YaRN mscale_adj^2 where
-    //     mscale_adj = 0.1 * mscale_all_dim * ln(yarn_factor) + 1.0.
-    //   For V2-Lite (mscale_all_dim=0.707, factor=40): adj≈1.261, adj^2≈1.590.
+    // Attention scale: standard archs 1/sqrt(head_dim); Gemma 4 = 1.0 (Q/K-norm
+    // absorb the per-element scaling, per llama.cpp f_attn_scale); MLA
+    // multiplies by YaRN mscale_adj^2, mscale_adj = 0.1*mscale_all_dim*ln(yarn_factor)+1.0.
     float scale = (prof.is_gemma4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
     if (cfg.is_mla()) scale *= mla_attention_scale_multiplier(cfg);
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the
-    // FP16 paged decode kernels understand them — prefill routing below
-    // forces the cuBLAS path whenever sinks are present.
+    // FP16 paged decode kernel understand them; prefill forces cuBLAS when sinks are present.
     const void* attn_sinks = (prof.is_gpt_oss) ? ly.attn_sinks.data : nullptr;
 
-    // MLA absorbed-decode (Phase 3, opt-in). Populate the per-layer latent cache
-    // with this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH
-    // prefill and decode (so the cache is warm before the first decode step).
-    // Single-sequence only; the absorbed decode below reads this cache.
+    // MLA absorbed-decode (opt-in): populates the per-layer latent cache with
+    // this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH prefill
+    // and decode, so the cache is warm before the first decode step. Single-sequence only.
     const bool mla_absorb_active =
         dispatch_policy().attention.mla_absorb && cfg.is_mla() && mla_absorb_cache_ != nullptr &&
         state.n_sequences == 1;
@@ -535,25 +490,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
     }
 
-    // Decode attention for `n` one-token rows: the historical inline block,
-    // now a lambda so the ragged prefill path can hand its riders (the mixed
-    // prefill+decode step) to it as ONE batched launch per layer. `state` and
-    // `layer_block_tables` are the sub-batch's own: block tables, context
-    // lengths and positions start at its first sequence, qv/kk/vv/ao at its
-    // first row.
+    // Decode attention for `n` one-token rows: historical inline block, now a
+    // lambda so ragged prefill can hand its riders (mixed prefill+decode step)
+    // to it as ONE batched launch per layer. `state`/`layer_block_tables` are
+    // the sub-batch's own (block tables, context lens, positions start at its first sequence).
     auto decode_attend = [&](const InferenceState& state, int n, int row_begin, Tensor qv, Tensor kk,
                              Tensor vv, Tensor ao, const int* layer_block_tables) {
 #include "exec/executor_attention_decode.cu"
     };
 
     if (state.is_prefill && !state.chunk_decode_attn) {
-        // Prefill attention for ONE sequence's rows. The body is the
-        // historical inline dispatch block, now parameterized on per-sequence
-        // geometry so the ragged cross-sequence path can loop it: `n` rows
-        // starting at `row_begin` in the shared workspaces, query offset
-        // `q_offset`, and (ragged only) flat per-seq block table + positions
-        // for the KV write. Non-ragged callers pass bt_flat = nullptr, which
-        // keeps write_kv_cache on its historical default path.
+        // Prefill attention for ONE sequence's rows: historical inline dispatch,
+        // parameterized on per-sequence geometry so the ragged cross-sequence path
+        // can loop it. Non-ragged callers pass bt_flat=nullptr, keeping
+        // write_kv_cache on its historical default path.
         auto prefill_attend_seq = [&](int n, int q_offset, int row_begin, Tensor qv, Tensor kk,
                                       Tensor vv, Tensor ao, const int* layer_block_tables,
                                       const int* bt_flat, const int* bt_swa_flat,
@@ -584,10 +534,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                    rows_view(ao, static_cast<int64_t>(nh) * hd, rb, ns), bt_s, bt_s,
                                    /*bt_swa_flat=*/nullptr, state.positions + rb);
             }
-            // Riders: the trailing one-row members decode as one paged
-            // batch. Their sub-state starts at sequence n_pf / row rb; the
-            // ragged geometry is cleared so the decode block sees a plain
-            // n_riders-sequence decode step.
+            // Riders: trailing one-row members decode as one paged batch. Their
+            // sub-state starts at sequence n_pf/row rb; ragged geometry is cleared so
+            // the decode block sees a plain n_riders-sequence decode step.
             if (state.n_riders > 0) {
                 const int rb = state.h_seq_offsets[n_pf];
                 const int nr = state.h_seq_offsets[state.n_sequences] - rb;
@@ -623,27 +572,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         debug_tensor_stats("L0_step3_h_before_oproj", h, stream);
     }
 
-    // MLA: V head dim (vhd) is narrower than the QK head dim (hd). The o_proj
-    // expects an [n, nh * vhd] input. The two attention paths leave ao in
-    // different layouts:
-    //   - Decode (paged kernel): writes the result COMPACTLY as [n, nh*vhd]
-    //     directly into attn_out_ (the kernel knows v_head_dim). Only a shape
-    //     fixup is needed.
-    //   - Prefill (cuBLAS/FA2/FMHA): these kernels accumulate V at hd because
-    //     the materialized V was zero-padded to hd, so ao is [n, nh, hd] with
-    //     the real values in the first vhd dims of each head and zeros in the
-    //     tail. A per-head compaction [n, nh, hd] -> [n, nh, vhd] is required;
-    //     a naive shape narrow would reinterpret an hd-strided buffer as
-    //     vhd-compact (wrong — it would take the first nh*vhd contiguous
-    //     elements, mixing head boundaries).
+    // MLA: V head dim (vhd) is narrower than QK head dim (hd); o_proj expects
+    // [n, nh*vhd]. Decode (paged kernel) writes ao COMPACTLY already (shape
+    // fixup only). Prefill (cuBLAS/FA2/FMHA) leaves ao as [n,nh,hd] (V
+    // zero-padded to hd): needs a per-head [n,nh,hd]->[n,nh,vhd] compaction; a
+    // naive narrow would mix head boundaries.
     if (cfg.is_mla() && cfg.v_head_dim > 0 && cfg.v_head_dim != hd) {
         const int vhd = cfg.v_head_dim;
         const int64_t mla_ao_cols = static_cast<int64_t>(nh) * vhd;
         if (state.is_prefill) {
-            // Compact hd-strided -> vhd-compact via a scratch buffer (src/dst
-            // must not alias). Prefill is not CUDA-graph-captured, so the
-            // stream-ordered alloc is amortised in the pool (same pattern as the
-            // chunked-prefill gather above).
+            // Compacts hd-strided -> vhd-compact via a scratch buffer (src/dst must
+            // not alias). Prefill isn't CUDA-graph-captured, so the stream-ordered
+            // alloc is amortised in the pool.
             void* compact_buf = nullptr;
             const size_t bytes = static_cast<size_t>(n) * mla_ao_cols * sizeof(half);
             IMP_CUDA_CHECK_LOG(cudaMallocAsync(&compact_buf, bytes, stream));
@@ -668,12 +608,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         sigmoid_mul(ao, attn_gate_buf, ao, stream);
     }
 
-    // 8+9. O projection + residual connection.
-    //    For decode (n=1) with dp4a: fuse residual add into GEMV, write directly
-    //    to hidden buffer. When will_fuse_o_residual is set, we skipped the
-    //    initial h→r memcpy and use h.data itself as the residual source.
-    //    This is safe because h.data is only READ (never written) between the
-    //    start of run_attention and this point.
+    // O projection + residual: decode (n=1, dp4a) fuses the residual add into
+    // the GEMV, writing straight to hidden. When will_fuse_o_residual is set,
+    // the initial h->r memcpy is skipped and h.data itself is the residual
+    // source (safe: h.data is only read, never written, in this span).
     if (will_fuse_o_nvfp4) {
         // NVFP4 Wo + residual: attn_out (FP16) @ wo_nvfp4^T + residual → hidden
         // Source: secondary cache (Q8_0/Q6_K/Q5_K) is already a populated struct;
@@ -815,11 +753,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         add_bias(hv, ly.o_bias, stream);
     }
 
-    // LoRA delta on o_proj: h already holds residual + Wo·ao from whichever
+    // LoRA delta on o_proj: h already holds residual + Wo.ao from whichever
     // arm ran (all fused arms require !has_post_attn_norm), so accumulating
-    // s·(ao·A^T)·B^T into h afterwards is exactly PEFT's wrapped-Linear
-    // semantics. Sandwich-norm archs (post_attn_norm) would need the delta
-    // INSIDE the norm — declined in v1 with a log.
+    // s.(ao.A^T).B^T afterwards matches PEFT's wrapped-Linear semantics.
+    // Sandwich-norm archs would need the delta INSIDE the norm; declined in v1 (logged).
     if (lora_) {
         if (const LoraWeights* w = lora_->get(layer, LoraProj::O)) {
             if (!has_post_attn_norm) {

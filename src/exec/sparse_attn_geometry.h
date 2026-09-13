@@ -1,13 +1,9 @@
 #pragma once
 
-// Sparse decode attention: token -> block geometry, as a pure function.
-//
-// It lives outside the .cu because the arithmetic is where the defect was
-// (#1819): every conversion used the compile-time kKVBlockSize (16) while a
-// model with n_kv_heads <= 4 runs a 32-token block, so `sparse_topk_tokens=N`
-// bought 2N tokens of budget, `sparse_min_ctx` engaged at twice its stated
-// length, and sink/recent covered twice their configured windows. Host-only
-// and dependency-free, so a CPU test can pin it at both block sizes.
+// Sparse decode attention token->block geometry, as a pure function: lives outside the
+// .cu because the arithmetic was the defect (#1819) - every conversion used the
+// compile-time kKVBlockSize (16) while n_kv_heads<=4 models run a 32-token block, so
+// budgets silently doubled. Host-only, dependency-free, testable at both block sizes.
 
 #include <algorithm>
 

@@ -6,19 +6,11 @@
 
 namespace imp {
 
-// Native SentencePiece (.model protobuf) parser.
-//
-// The on-disk format is a serialized `sentencepiece.ModelProto` protobuf
-// message. imp's tokenizer already implements SentencePiece-style scoring
-// (`encode_spm`, see tokenizer.cpp) for vocabularies loaded from GGUF; this
-// loader extracts the same vocabulary + scores from the protobuf so the
-// SafeTensors path can fall back to a `tokenizer.model` file when no
-// `tokenizer.json` is present (older Llama 1/2, some Mistral variants).
-//
-// Scope: parses Unigram-style ModelProto. BPE-from-spm checkpoints are
-// detected (model_type=2) but their vocabulary still loads; the encoder
-// will run score-based merging on it which matches Unigram behaviour for
-// most practical text.
+// Native SentencePiece (.model protobuf) parser: extracts vocab+scores from the
+// sentencepiece.ModelProto so the SafeTensors path can fall back to tokenizer.model when
+// no tokenizer.json is present (older Llama 1/2, some Mistral). Scope: Unigram-style.
+// BPE-from-spm (model_type=2) is detected but its vocabulary still loads; the encoder runs
+// score-based merging, matching Unigram behavior for most practical text.
 
 struct SentencePieceModel {
     enum class ModelType : int32_t { UNIGRAM = 1, BPE = 2, WORD = 3, CHAR = 4, UNKNOWN = 0 };
@@ -40,12 +32,9 @@ struct SentencePieceModel {
     bool empty() const { return pieces.empty(); }
 };
 
-// Parse a SentencePiece .model protobuf blob. `data` is the full file
-// contents; `size` is its length. Returns true on a structurally valid
-// parse with at least one piece. Sets `*err` on failure (when non-null).
-//
-// The parser is wire-format-tolerant: unknown fields and unexpected wire
-// types are skipped without aborting the parse.
+// Parses a SentencePiece .model protobuf blob (data+size); true on a structurally valid
+// parse with at least one piece, `*err` set on failure. Wire-format-tolerant: unknown
+// fields/wire types are skipped without aborting.
 bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel* out, std::string* err);
 
 // Convenience wrapper that opens `path`, mmaps it, and calls

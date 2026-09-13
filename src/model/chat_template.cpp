@@ -48,10 +48,8 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
     // Gemma-4 uses <|turn> instead of <start_of_turn>
     if (jinja2_str.find("<|turn>") != std::string::npos)
         return ChatTemplateFamily::GEMMA;
-    // Mistral V3-Tekken (Mistral-Small-3.x, Mistral-Nemo, Mixtral-8x22B):
-    // adds [TOOL_CALLS] / [AVAILABLE_TOOLS] / [TOOL_RESULTS] markers on top of
-    // the V1/V2 [INST] core. Check BEFORE the LLAMA2 [INST] fallback so newer
-    // Mistrals don't get misclassified as the older family.
+    // Mistral V3-Tekken adds [TOOL_CALLS]/[AVAILABLE_TOOLS]/[TOOL_RESULTS] on the V1/V2 [INST]
+    // core. Check before the LLAMA2 [INST] fallback so newer Mistrals are not misclassified.
     if (jinja2_str.find("[TOOL_CALLS]") != std::string::npos ||
         jinja2_str.find("[AVAILABLE_TOOLS]") != std::string::npos)
         return ChatTemplateFamily::MISTRAL_V3;
@@ -136,13 +134,9 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     return ChatTemplateFamily::RAW;
 }
 
-// imp's minimal Jinja2 engine has no {% generation %}/{% endgeneration %} block
-// tags — a HuggingFace chat-template extension that marks the assistant-response
-// span for training-time loss masking (render-neutral). Phi-4-reasoning places
-// them inside the assistant branch; the unknown opening tag derails block nesting
-// so the trailing {% if add_generation_prompt %} is dropped → the assistant
-// generation prompt is never appended → the model emits role markers as text.
-// Strip the (render-neutral) tags before parsing.
+// imp's Jinja2 engine has no {% generation %}/{% endgeneration %} tags (HF loss-masking ext).
+// Phi-4-reasoning places them inside the assistant branch; the unknown tag derails nesting so
+// add_generation_prompt is dropped and the model emits role markers as text. Strip first.
 static std::string strip_generation_tags(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -182,26 +176,15 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             use_jinja_ = true;
             build_control_token_map(tokenizer);
             IMP_LOG_INFO("Chat template: using Jinja2 engine");
-            // Think evidence (drives the server-side thinking DEFAULT):
-            //  a) the template exposes the `enable_thinking` switch
-            //     (Qwen3 hybrid, Qwen3.6, Nemotron), or
-            //  b) a fresh-conversation render emits "<think>" (Phi-4
-            //     reasoning system prompt, DeepSeek-R1 generation prefix).
-            // A raw substring match is NOT enough: Qwen3-*-Instruct-2507
-            // mentions <think> only in branches that re-render PAST
-            // assistant turns — for a fresh turn nothing thinks, and
-            // defaulting it to thinking traps the whole answer in
-            // reasoning_content.
+            // Think evidence: template exposes enable_thinking (Qwen3 hybrid/3.6/Nemotron), or a fresh
+            // render emits "<think>" (Phi-4, DeepSeek-R1). Raw substring match is not enough:
+            // Qwen3-*-Instruct-2507 mentions <think> only when re-rendering past turns, never fresh ones.
             mentions_thinking_ = jinja_str.find("enable_thinking") != std::string::npos;
             if (!mentions_thinking_ && jinja_str.find("<think>") != std::string::npos)
                 mentions_thinking_ = probe_render_mentions_think(tokenizer);
-            // Qwen-Coder / Qwen3.6 XML tool-call dialect: the template teaches
-            // <function=NAME><parameter=KEY> bodies inside <tool_call> (raw-text
-            // values, not JSON). Constrained tool enforcement must use the XML
-            // grammar on these templates — the JSON body FSM masks raw newlines
-            // and mangles multi-line arguments. The source-substring hit is only
-            // a prefilter; the probe render proves the RENDERED prompt actually
-            // teaches the dialect (see probe_render_teaches_xml_tools).
+            // Qwen-Coder/Qwen3.6 XML tool-call dialect: <function=NAME><parameter=KEY> raw-text bodies.
+            // Constrained enforcement must use the XML grammar; the JSON body FSM mangles multi-line args.
+            // Source substring is only a prefilter; probe_render_teaches_xml_tools confirms the render.
             tool_xml_dialect_ = jinja_str.find("<parameter=") != std::string::npos &&
                                 jinja_str.find("<function=") != std::string::npos &&
                                 probe_render_teaches_xml_tools(tokenizer);
@@ -249,10 +232,8 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
         }
         case ChatTemplateFamily::LLAMA2:
         case ChatTemplateFamily::MISTRAL_V3: {
-            // Both share the [INST]/[/INST] core. V3 adds tool-call markers
-            // ([TOOL_CALLS], [AVAILABLE_TOOLS], [TOOL_RESULTS]) which are
-            // emitted via the Jinja2 path when present in chat_template.jinja
-            // — the hardcoded apply method only handles the message-frame.
+            // V1/V2/V3 share [INST]/[/INST]. V3's tool-call markers render via the Jinja2 path when
+            // present in chat_template.jinja; the hardcoded apply method only handles the message frame.
             inst_start_id_ = tokenizer.find_token("[INST]");
             inst_end_id_ = tokenizer.find_token("[/INST]");
             if (inst_start_id_ < 0 || inst_end_id_ < 0) {
@@ -299,10 +280,9 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             stop_token_ids_.push_back(end_of_turn_id_);
             stop_token_ids_.push_back(static_cast<int32_t>(tokenizer.eos_id()));
 
-            // Vision tokens (optional — Gemma-3 and Gemma-4 multimodal).
-            // Resolved from vocabulary; stays -1 if not found (disables vision).
-            // Gemma-3: <start_of_image>/<image_soft_token>/<end_of_image>.
-            // Gemma-4: <|image>/<|image|>/<image|> (begin / repeated soft / end).
+            // Vision tokens (Gemma-3/Gemma-4 multimodal), resolved from vocabulary; -1 disables vision.
+            // Gemma-3: <start_of_image>/<image_soft_token>/<end_of_image>. Gemma-4:
+            // <|image>/<|image|>/<image|>.
             boi_id_ = tokenizer.find_token("<start_of_image>");
             if (boi_id_ < 0)
                 boi_id_ = tokenizer.find_token("<|image>");
@@ -368,11 +348,8 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
-            // The final-channel answer ends with <|return|>; tool calls end
-            // with <|call|>. <|end|> is deliberately NOT a stop token — it
-            // separates the analysis message from the final message inside
-            // one assistant turn (stopping there would truncate after the
-            // reasoning block).
+            // Final-channel answer ends with <|return|>; tool calls end with <|call|>. <|end|> is NOT a
+            // stop token: it separates the analysis message from the final message in one assistant turn.
             stop_token_ids_.push_back(hm_return_id_);
             if (hm_call_id_ >= 0)
                 stop_token_ids_.push_back(hm_call_id_);
@@ -413,11 +390,9 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
     return true;
 }
 
-// Honor `tokenizer_config.json::use_default_system_prompt: false`. When the
-// model author opts out and the caller didn't provide an explicit system
-// message, prepend an empty one so the Jinja template's "if no system →
-// inject default_system_message" branch doesn't fire (Mistral-Small-3.2
-// otherwise auto-injects ~600 tokens of boilerplate).
+// Honor tokenizer_config.json use_default_system_prompt:false. When set and the caller gave
+// no system message, prepend an empty one so the template's default-injection branch never
+// fires (Mistral-Small-3.2 otherwise auto-injects ~600 tokens of boilerplate).
 static std::vector<ChatMessage> maybe_suppress_default_system(const Tokenizer& tok,
                                                               const std::vector<ChatMessage>& messages) {
     if (tok.use_default_system_prompt())
@@ -586,10 +561,8 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
     };
 
     std::function<jinja::Value()> parse_value;
-    // #1607: this parser recurses once per nesting level over a string that
-    // came from a request body. The HTTP boundary caps the body at 100 levels,
-    // which is what actually bounds this today - the cap here is so a second
-    // caller, from a source that has no such boundary, cannot reintroduce it.
+    // #1607: recurses once per nesting level over a request-body string. The HTTP boundary caps
+    // the body at 100 levels; this cap guards a second caller that has no such boundary.
     int depth = 0;
     constexpr int kMaxDepth = 128;
 
@@ -744,11 +717,9 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
         std::string num_str = json_str.substr(start, pos - start);
         if (num_str.empty())
             return jinja::Value();
-        // A JSON number between INT64_MAX and UINT64_MAX survives the request
-        // roundtrip as an integer (9223372036854775808 dumps unchanged; only
-        // past ~1e19 does nlohmann turn it into 1e+26), and std::stoll throws
-        // out_of_range on it. This file has no other catch, so that reached the
-        // request path as a 500. Fall back to the double the value already is.
+        // A JSON number in (INT64_MAX, UINT64_MAX] survives the roundtrip as an integer and
+        // std::stoll throws out_of_range; this file has no other catch, so it reached the request
+        // path as a 500. Fall back to the double the value already is.
         try {
             if (!is_float)
                 return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
@@ -796,30 +767,17 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
-    // Only stamp `enable_thinking` when the caller is explicitly suppressing
-    // thinking. Different model families pick OPPOSITE defaults when the
-    // variable is undefined: Qwen3 / Qwen3.6 inject an open `<think>\n` and
-    // expect the model to write reasoning; Gemma-4's it template injects a
-    // pre-closed `<|channel>thought\n<channel|>` block (model writes the
-    // answer directly). Forcing `enable_thinking=true` on every render
-    // overrode Gemma-4's template default and put NVFP4 quants into a
-    // verbose-think loop with no exit ("* Wait, I should...", "* Let's try
-    // a simpler one:", repeating). Leaving the variable undefined for the
-    // default case lets each template author's default win.
-    // force_thinking stamps enable_thinking=true so a template that defaults the
-    // variable to a pre-CLOSED block (Qwen3.5-4B) opens the block for an explicit
-    // caller request — without it, `enable_thinking:true` was silently a no-op on
-    // such templates. suppress wins if both are set.
+    // Stamp enable_thinking only when the caller has an opinion: Qwen3 defaults undefined to an
+    // open <think>, Gemma-4 to a pre-closed thought block. force_thinking opens a template's
+    // default-closed block (e.g. Qwen3.5-4B); suppress wins if both are set.
     if (suppress_thinking) {
         ctx["enable_thinking"] = jinja::Value(false);
     } else if (force_thinking) {
         ctx["enable_thinking"] = jinja::Value(true);
     }
-    // Stamped only when the caller has an opinion, for the same reason
-    // enable_thinking is: templates pick their own default for the undefined
-    // case and it is not ours to override. Qwen3.8 defaults to 'xhigh' and
-    // injects a different system preamble per value; leaving the variable unset
-    // is what made the wire field inert.
+    // Stamped only when the caller has an opinion, same reasoning as enable_thinking: template
+    // authors pick their own default for the undefined case. Qwen3.8 defaults to 'xhigh' and
+    // varies its system preamble by value.
     if (!reasoning_effort.empty())
         ctx["reasoning_effort"] = jinja::Value(reasoning_effort);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
@@ -878,13 +836,10 @@ bool ChatTemplate::probe_render_mentions_think(const Tokenizer& tok) const {
     return rendered.find("<think>") != std::string::npos;
 }
 
-// Render a dummy tools conversation and report whether the RENDERED prompt
-// teaches the Qwen-Coder XML calling convention inside the ChatML
-// <tool_call> envelope. A raw source-substring match is not evidence: a
-// template may mention the markers in a comment, an example, or an untaken
-// branch while actually prompting JSON bodies — and Seed-OSS-style templates
-// pair the XML body with a non-<tool_call> envelope the enforcement's gate
-// and forced literals would then contradict.
+// Renders a dummy tools conversation and checks whether the RENDERED prompt teaches the
+// Qwen-Coder XML convention inside <tool_call>. Source substring alone is not evidence: a
+// template may mention markers unused, or pair an XML body with a non-<tool_call> envelope
+// (Seed-OSS).
 bool ChatTemplate::probe_render_teaches_xml_tools(const Tokenizer& tok) const {
     if (!jinja_tpl_)
         return false;
@@ -948,11 +903,9 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     ctx["tools"] = jinja::Value(std::move(tools_arr));
     ctx["tool_choice"] = jinja::Value(tool_choice);
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
-    // See apply_jinja for the defaults rationale; same logic for the
-    // tools-aware path. When tools are present, default to enable_thinking=true:
-    // models like Gemma-4 emit tool_calls via a thought-channel-driven decision
-    // (template auto-closes the channel with empty content when thinking is off,
-    // which trains the model to skip tool selection and answer in plain text).
+    // Same defaults rationale as apply_jinja, tools-aware path. Default enable_thinking=true
+    // when tools are present: Gemma-4 emits tool_calls via a thought-channel decision, and the
+    // template auto-closes the channel with empty content when thinking is off.
     if (suppress_thinking) {
         ctx["enable_thinking"] = jinja::Value(false);
     } else if (force_thinking || family_ == ChatTemplateFamily::GEMMA) {

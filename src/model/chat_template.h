@@ -55,21 +55,10 @@ public:
     [[nodiscard]] bool init(ChatTemplateFamily family, const Tokenizer& tokenizer,
                             const std::string& jinja_str = "");
 
-    // Build token ID vector: special tokens as raw IDs, text segments encoded.
-    // suppress_thinking: inject /no_think + stamp enable_thinking=false so the
-    //   template renders its answer-directly branch.
-    // force_thinking: stamp enable_thinking=true so a template that defaults the
-    //   variable to a *closed* block (e.g. Qwen3.5-4B: `<think>\n\n</think>\n\n`)
-    //   instead opens the block for an explicit caller request. suppress wins if
-    //   both are set. Default (neither) leaves the variable undefined so each
-    //   template author's own default applies (Qwen3 open vs Gemma-4 closed).
-    // reasoning_effort: stamped into the Jinja context verbatim when non-empty,
-    //   left undefined otherwise so the template's own default applies. imp does
-    //   not police the value: which strings are legal is the template author's
-    //   business (Qwen3.8 takes xhigh/medium/low and raise_exception's the rest;
-    //   the OpenAI convention is low/medium/high). A template that rejects a
-    //   value logs through jinja's raise_exception and renders without its
-    //   preamble — it does NOT silently fall back to the default.
+    // suppress_thinking: injects /no_think + enable_thinking=false (answer-directly branch).
+    // force_thinking: stamps enable_thinking=true to open a template's default-closed block
+    //   (Qwen3.5-4B); suppress wins if both set. Default: leave undefined, template's own applies.
+    // reasoning_effort: stamped verbatim when non-empty; legal values are template-defined.
     std::vector<int32_t> apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
                                bool suppress_thinking = false, bool force_thinking = false,
                                const std::string& reasoning_effort = "") const;
@@ -92,38 +81,23 @@ public:
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
-    // True when the raw Jinja template references reasoning ("<think>" or
-    // "enable_thinking"). Used to decide the server-side thinking DEFAULT:
-    // vocab-level <think> tokens alone are NOT evidence of a think-trained
-    // model (Qwen3-*-Instruct-2507 ships the Qwen3 vocab incl. <think>
-    // specials but is not think-trained and its template never opens a
-    // think block — defaulting it to thinking traps the whole answer in
-    // reasoning_content).
+    // True when the raw Jinja template references reasoning (<think> or enable_thinking). Vocab
+    // -level <think> tokens alone are not evidence: Qwen3-*-Instruct-2507 ships think specials
+    // but its template never opens a think block.
     bool mentions_thinking() const { return mentions_thinking_; }
     // True when a raw Jinja template is driving rendering (mentions_thinking
     // is only meaningful evidence in that case).
     bool has_jinja() const { return use_jinja_; }
-    // True when the Jinja template teaches the Qwen-Coder / Qwen3.6 XML
-    // tool-call body (<function=NAME><parameter=KEY> with raw-text values)
-    // instead of the ChatML JSON body — selects the XML grammar for
-    // constrained tool enforcement.
+    // True when the Jinja template teaches the Qwen-Coder/Qwen3.6 XML tool-call body
+    // (<function=NAME><parameter=KEY>, raw-text values) instead of the ChatML JSON body.
     bool tool_xml_dialect() const { return tool_xml_dialect_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
     bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
 
-    // The rendered prompt, before tokenisation - what apply_jinja() feeds to
-    // tokenize_rendered().
-    //
-    // Public so a golden can compare imp's render against an HF reference
-    // byte-for-byte WITHOUT a real vocabulary, which is what lets those goldens
-    // run in the CPU lane with no model and no skips (#1572). It is the
-    // production path, not a parallel one: apply_jinja() calls this. The
-    // pre-existing Harmony golden drove jinja::Template directly and rebuilt
-    // this context by hand, so the context builder - where the thinking flags,
-    // bos/eos stamping and message shaping live - was outside every golden.
-    //
-    // Empty when no Jinja template is driving (hardcoded families, RAW).
+    // Rendered prompt before tokenisation, fed to tokenize_rendered(). Public so a golden can
+    // byte-compare against an HF reference with no vocabulary and no model (#1572).
+    // Production path (apply_jinja calls it). Empty when no Jinja template drives (RAW families).
     std::string render_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                              bool add_generation_prompt = true, bool suppress_thinking = false,
                              bool force_thinking = false,

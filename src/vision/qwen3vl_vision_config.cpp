@@ -28,21 +28,13 @@ std::optional<int> get_int(const JValue& v, const char* key) {
 }  // namespace
 
 bool vision_tower_supported(const std::string& vision_model_type) {
-    // Qwen3.6 (`qwen3_5_moe`) ships the same tower under a different name: 333
-    // `model.visual.*` tensors whose names are a strict subset of Qwen3-VL's
-    // patterns, the same nine geometry fields, and an empty
-    // `deepstack_visual_indexes` (which the loader already handles).
-    //
-    // Qwen3.8 (`qwen3_5`, the dense sibling) is the same tower again, checked
-    // field by field against Qwen3.6-35B: depth 27, hidden 1152, heads 16,
-    // intermediate 4304, patch 16, merge 2, temporal 2, pos-grid 2304, empty
-    // deepstack, and the same `image_token_id` 248056. Only `out_hidden_size`
-    // differs (5120 vs 2048), which is the LM's hidden size, not a tower
-    // property. Its checkpoint carries the same 333 `model.visual.*` tensors.
-    //
-    // An allowlist rather than a shape fingerprint on purpose — anything
-    // unrecognised must keep hitting the loud text-only path rather than being
-    // parsed on a resemblance.
+    // Qwen3.6 (qwen3_5_moe) ships the same tower under a different name (333 model.visual.*
+    // tensors, a strict subset of Qwen3-VL's names, same 9 geometry fields, empty
+    // deepstack_visual_indexes). Qwen3.8 (qwen3_5, dense sibling) is the same tower again
+    // (checked field-by-field vs Qwen3.6-35B); only out_hidden_size differs (LM hidden size,
+    // not a tower property). Allowlist rather than a shape fingerprint on purpose: anything
+    // unrecognised must keep hitting the loud text-only path rather than being parsed on
+    // resemblance.
     return vision_model_type == "qwen3_vl" || vision_model_type == "qwen3_5_moe" ||
            vision_model_type == "qwen3_5";
 }

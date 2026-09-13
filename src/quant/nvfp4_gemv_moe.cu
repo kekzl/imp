@@ -1,7 +1,6 @@
-// MoE NVFP4 GEMV kernels (per-expert decode / gate+up / swiglu) + launchers.
-// Split out of nvfp4_gemm.cu (kernel .cu size gate). All kernels and launchers
-// MOVED VERBATIM — hot-path numeric code, must stay bit-identical. Shared device
-// helpers + tuning constants live in nvfp4_gemm_internal.cuh.
+// MoE NVFP4 GEMV kernels (per-expert decode/gate+up/swiglu) + launchers, split out of
+// nvfp4_gemm.cu (kernel .cu size gate). MOVED VERBATIM: hot-path numeric code, must stay
+// bit-identical. Shared device helpers + tuning constants live in nvfp4_gemm_internal.cuh.
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -14,11 +13,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// MoE NVFP4 GEMV: per-expert decode projections.
-// Grid: top_k * rows blocks, 128 threads.  Each block computes one row of
-// one expert's output.  FP16 input (no Q8_1 pre-quantization).
-// ---------------------------------------------------------------------------
+// MoE NVFP4 GEMV: per-expert decode projections. Grid: top_k*rows blocks, 128 threads;
+// each block computes one row of one expert's output. FP16 input (no Q8_1
+// pre-quantization).
 __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_decode_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
     const float* __restrict__ tensor_scales, const int32_t* __restrict__ expert_indices,
@@ -47,10 +44,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_decode_kernel
         y[(size_t)expert_slot * rows + row] = __float2half(total);
 }
 
-// ---------------------------------------------------------------------------
-// Fused gate+up MoE NVFP4 GEMV.
-// Grid: dim3(top_k * rows, 2).  blockIdx.y=0 → gate, blockIdx.y=1 → up.
-// ---------------------------------------------------------------------------
+// Fused gate+up MoE NVFP4 GEMV. Grid: dim3(top_k*rows,2), blockIdx.y=0->gate, y=1->up.
 __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_gate_up_fused_kernel(
     const uint8_t* __restrict__ gate_packed, const uint8_t* __restrict__ gate_ms,
     const float* __restrict__ gate_ts, const uint8_t* __restrict__ up_packed,
@@ -87,16 +81,13 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_gate_up_fused
         out[(size_t)expert_slot * rows + row] = __float2half(total);
 }
 
-// ---------------------------------------------------------------------------
-// Multi-row MoE NVFP4 kernels: 8 warps (256 threads), NR rows per block.
-// Truly fused gate+up: one block computes both gate and up dot products.
-// Dramatically reduces block count for small K (e.g., d_model=2048).
-// ---------------------------------------------------------------------------
+// Multi-row MoE NVFP4 kernels: 8 warps (256 threads), NR rows/block, truly fused gate+up
+// (one block computes both dot products), dramatically reducing block count for small K
+// (e.g. d_model=2048).
 
-// Multi-row MoE gate+up with blockIdx.y split (gate=0, up=1).
-// One warp per row; threads-per-block = NR * 32 set by the launcher.
-// Note: no __launch_bounds__ — per sm120 perf testing the override costs
-// -4.5 % to -20 % on GEMV/attention paths (see sm120-cuda-expert skill).
+// Multi-row MoE gate+up, blockIdx.y split (gate=0, up=1). One warp per row; threads-per-block
+// = NR*32 set by the launcher. No __launch_bounds__: per sm120 testing the override costs
+// -4.5% to -20% on GEMV/attention paths (sm120-cuda-expert skill).
 template <int NR>
 __global__ void gemv_nvfp4_moe_gate_up_mr_kernel(
     const uint8_t* __restrict__ gate_packed, const uint8_t* __restrict__ gate_ms,
@@ -178,21 +169,19 @@ __global__ void gemv_nvfp4_moe_decode_mr_kernel(
 // reduction (n_mb <= 512, i.e., K <= 8192).
 static bool use_moe_multirow(int K) { return (K / kMicroBlockSize) <= 512; }
 
-// Tile-tuning knob: read NR from RuntimeConfig, clamp to {4, 8, 16, 32}.
-// Default stays 8: the 2026-09-06 sweep settled 16 and 32 as losses (-0.96 %,
-// -5.15 % tg128) and left 4 unresolved — it led 8 of 9 paired runs but by less
-// than this host's noise floor once the card is busy. Numbers and method in
-// `src/core/config/moe.h`.
+// Tile-tuning knob: NR from RuntimeConfig, clamped to {4,8,16,32}. Default 8: the
+// 2026-09-06 sweep found 16/32 losses (-0.96%, -5.15% tg128); 4 unresolved (led 8/9 paired
+// runs, but by less than this host's noise floor once busy). See src/core/config/moe.h.
 static int resolve_mr_nr() {
     int v = imp::process_diag_moe_mr_nr();
     if (v == 4 || v == 8 || v == 16 || v == 32) return v;
     return 8;
 }
 
-// Dispatch a single-output MR-decode launch for the requested NR (one warp
-// per row → threads-per-block = NR * 32). The thread-count match keeps the
-// `row = local_block * NR + warp_id; if (warp_id >= NR) return;` guard from
-// firing → no idle warps.
+// Dispatches a single-output MR-decode launch for the requested NR (one warp/row,
+// threads-per-block = NR*32). The thread-count match keeps the
+// `row = local_block*NR + warp_id; if (warp_id>=NR) return;` guard from firing, so no idle
+// warps.
 template <int NR>
 static void launch_mr_decode(const NvFP4MoEQuantResult& w, const int32_t* expert_indices, const half* x,
                              half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream) {

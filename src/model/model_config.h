@@ -46,26 +46,19 @@ struct ModelConfig {
     // every SSM sizing/upload/assign site. 0 on non-SSM models.
     int ssm_conv_channels() const { return ssm_inner_size + 2 * ssm_group_count * ssm_state_size; }
     // Asymmetric-head GDN (n_v_heads > n_k_heads) head storage layout.
-    // false (default): heads in tiled order (h % n_groups gives group_id).
-    //                  GGUF Qwen3.5/3.6 converters use this layout.
-    // true:            heads in grouped order (h / n_v_per_k gives group_id).
-    //                  HF SafeTensors Qwen3.5/3.6 use this. Set by the
-    //                  SafeTensors loader; GGUF loader leaves it false.
+    //   false (default): tiled order, h % n_groups gives group_id (GGUF Qwen3.5/3.6).
+    //   true: grouped order, h / n_v_per_k gives group_id (HF SafeTensors Qwen3.5/3.6).
     bool gdn_grouped_head_layout = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
-    // M-RoPE (Qwen-VL family): the rotary pairs are split across three position
-    // axes — text/time, image height, image width. Half-counts, summing to
-    // rope_dim/2 (Qwen3-VL: [24, 20, 20] for rope_dim 128). All zero means the
-    // model has no M-RoPE and every rotary pair follows the single text
-    // position, which is also what a text-only prompt reduces to on a model
-    // that does have it.
+    // M-RoPE (Qwen-VL): rotary pairs split across 3 position axes (text/time, image height,
+    // width). Half-counts sum to rope_dim/2 (Qwen3-VL: [24,20,20] for rope_dim 128). All zero
+    // = no M-RoPE, every pair follows the single text position (also what text-only reduces to).
     int mrope_section[3] = {0, 0, 0};
-    // Qwen3-VL interleaves the three axes across the frequency spectrum
-    // (T,H,W,T,H,W,... then T for the tail) instead of taking three contiguous
-    // blocks, "preserving frequency continuity" per upstream. The two layouts
-    // rotate different dimensions by different angles, so this is not cosmetic.
+    // Qwen3-VL interleaves the 3 axes across the frequency spectrum (T,H,W,T,H,W,... then T
+    // tail) instead of 3 contiguous blocks. The two layouts rotate different dims by different
+    // angles; not cosmetic.
     bool mrope_interleaved = false;
     bool has_mrope() const { return mrope_section[1] > 0 || mrope_section[2] > 0; }
 
@@ -79,13 +72,10 @@ struct ModelConfig {
     // Stores rope_scaling.mscale_all_dim if present, else rope_scaling.mscale.
     // For DeepSeek-V2-Lite both are 0.707; the distinction matters for V3.
     float mla_mscale = 1.0f;
-    // Raw rope_scaling.mscale (the numerator of the RoPE cos/sin scale).
-    // HF DeepseekV2YarnRotaryEmbedding scales cos/sin by the RATIO
-    //   yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim),
-    // which for V2-Lite (mscale == mscale_all_dim == 0.707) is exactly 1.0 —
-    // NOT yarn_get_mscale(factor, mscale_all_dim). Kept separate from
-    // mla_mscale (= mscale_all_dim, used by the softmax scale) so the rope
-    // factor below can form the ratio instead of double-applying the mscale.
+    // Raw rope_scaling.mscale, the numerator of the RoPE cos/sin scale. HF DeepseekV2 scales
+    // cos/sin by the RATIO yarn_get_mscale(factor,mscale)/yarn_get_mscale(factor,mscale_all_dim),
+    // which is 1.0 for V2-Lite (both 0.707). Kept separate from mla_mscale (mscale_all_dim) so
+    // this ratio isn't double-applied.
     float mla_mscale_num = 1.0f;
     bool is_mla() const { return kv_lora_rank > 0; }
     int first_k_dense_replace = 0;  // layers [0, k) use dense FFN even in a MoE model
@@ -123,29 +113,20 @@ struct ModelConfig {
     int mxfp4_hadamard_attn = 0;  // block size for attention weights (0=disabled)
     int mxfp4_hadamard_ffn = 0;   // block size for FFN weights (0=disabled)
 
-    // NVFP4 pre-quantized model (from Model Optimizer SafeTensors)
-    // The checkpoint is a multimodal wrapper: its config nests the text
-    // hyperparameters under `text_config` and its tensors live under
-    // `model.language_model.*` with a separate vision tower. Set by the config
-    // loader, consumed by weight_map to strip the wrapper prefixes. A flag
-    // rather than an arch list because the TEXT model of such a checkpoint is
-    // an ordinary one (Qwen3-VL's is plain Qwen3) — widening the arch list
-    // would change behaviour for every text-only model of that family.
+    // Checkpoint is a multimodal wrapper: config nests text hyperparameters under text_config,
+    // tensors live under model.language_model.* plus a separate vision tower. Flag rather than
+    // an arch list, since the TEXT model of such a checkpoint is an ordinary one (Qwen3-VL's
+    // is plain Qwen3).
     bool multimodal_wrapper = false;
 
-    // The checkpoint declares an audio encoder. imp has no audio path at all:
-    // no encoder, no input type, no tokenizer route for the audio token, so
-    // this is a whole missing modality rather than a degraded one. Read from
-    // `audio_config` being a JSON OBJECT, not from the key merely existing:
-    // Gemma-4-26B writes `"audio_config": null` and carries no audio tensor,
-    // while Gemma-4-12B writes the object (`model_type` `gemma4_unified_audio`)
-    // and ships `model.embed_audio.embedding_projection.weight`.
+    // Checkpoint declares an audio encoder; imp has no audio path at all (no encoder, input
+    // type, or tokenizer route). Read from audio_config being a JSON OBJECT, not key presence:
+    // Gemma-4-26B writes audio_config:null with no audio tensor, Gemma-4-12B writes the object.
     bool has_audio_config = false;
 
-    // The checkpoint declared a `rope_scaling.type` this loader does not
-    // implement, so no scaling was applied and the model rotates unscaled while
-    // still reporting its declared context window. Not set for `default` and
-    // `none`, which mean exactly that.
+    // Checkpoint declared a rope_scaling.type this loader doesn't implement: no scaling
+    // applied, model rotates unscaled while reporting its declared context. Not set for
+    // "default"/"none", which mean exactly that.
     bool rope_scaling_unhandled = false;
 
     bool is_nvfp4_prequant = false;
@@ -154,18 +135,14 @@ struct ModelConfig {
     // Reconstruction: val = fp4 * weight_scale_fp8 / weight_global_scale
     // (Modelopt: val = fp4 * weight_scale_fp8 * weight_scale_2)
     bool is_llm_compressor_nvfp4 = false;
-    // `quantization_config.ignore`: the modules the author left at source
-    // precision. Together with `targets: ["Linear"]` this is a COMPLETE
-    // partition of the checkpoint's Linears, which is what lets the loader tell
-    // "the author kept this in BF16" from "imp lost this module's weight_scale"
-    // (src/model/nvfp4_module_policy.h). Parsed since the first
-    // compressed-tensors support, read by nobody until #1960.
+    // quantization_config.ignore: modules the author kept at source precision. With
+    // targets:["Linear"] this is a COMPLETE partition of the checkpoint's Linears, letting the
+    // loader tell "author kept this in BF16" from "imp lost this module's weight_scale" (#1960).
     std::vector<std::string> nvfp4_exclude_modules;
 
-    // MXFP4 pre-quantized model (e.g. GPT-OSS exports). Only the metadata
-    // is recognised on the SafeTensors path today — the actual decode path
-    // is GGUF-only (QType::MXFP4 wire format). Use these flags to surface
-    // the format and warn the user instead of falling through to FP16 silently.
+    // MXFP4 pre-quantized model (e.g. GPT-OSS). Only metadata is recognised on the SafeTensors
+    // path; the decode path is GGUF-only (QType::MXFP4). Surfaces the format so it warns
+    // instead of silently falling through to FP16.
     bool is_mxfp4_prequant = false;
     int mxfp4_block_size = 32;  // E8M0 scale per 32 elements is standard
 
@@ -175,12 +152,9 @@ struct ModelConfig {
     bool is_awq_prequant = false;
     int awq_group_size = 128;
 
-    // Author-declared KV-cache quantization hint, sourced from Modelopt's
-    // hf_quant_config.json `kv_cache_quant_algo` field (e.g. "FP8"). Empty
-    // means the model author did not declare one. Surfaced to the engine as
-    // an informational signal — engine does NOT auto-flip the KV cache dtype
-    // because FP8 KV is known to break several model families even with
-    // model-author opt-in (see kv_dtype_tradeoffs memory).
+    // Author-declared KV-cache quant hint from Modelopt's hf_quant_config.json
+    // kv_cache_quant_algo. Informational only: the engine does not auto-flip KV dtype from it,
+    // since FP8 KV breaks some model families even with author opt-in.
     std::string kv_cache_quant_hint;
 
     // tri-state config flags (-1 = unset, 0 = false, 1 = true).
@@ -189,18 +163,14 @@ struct ModelConfig {
     int attention_bias = -1;
     int mlp_bias = -1;
 
-    // True when load_config() couldn't identify the architecture from
-    // config.json and fell back to ModelArch::GENERIC. Downstream loaders
-    // can use this to decide whether to invoke tensor-name heuristics, and
-    // higher layers can surface an explicit warning to the user.
+    // True when load_config() couldn't identify the architecture and fell back to
+    // ModelArch::GENERIC. Downstream loaders can gate tensor-name heuristics on it; higher
+    // layers can warn the user explicitly.
     bool arch_inferred_fallback = false;
 
-    // Model-specific runtime knobs that used to live on the global
-    // RuntimeConfig singleton (Phase 5 Track A moved them here). The only
-    // writer is engine_init_resolver, when the arch is GEMMA4; there is no
-    // config surface. Six bring-up bisect flags (fp32_gemm_out, no_graphs,
-    // fp32_expert_down, no_decode_fast, no_post_ffw_1, ggml_prefill) sat here
-    // with no writer since #319 and were deleted with their branches
+    // Model-specific runtime knobs formerly on the global RuntimeConfig singleton (Phase 5
+    // Track A). Only writer is engine_init_resolver for GEMMA4; no config surface. Six
+    // bring-up bisect flags with no writer since #319 were deleted with their branches
     // (AUDIT_arch_2026 G-7).
     struct Overrides {
         struct Gemma4 {
@@ -209,14 +179,10 @@ struct ModelConfig {
     } overrides;
 };
 
-// YaRN mscale attention-scale multiplier for MLA models (Task 2.5).
-//
-// DeepSeek-V2/V3 uses a YaRN-adjusted softmax scale:
-//   mscale_adj = 0.1 * mscale_all_dim * ln(factor) + 1.0   (factor = rope_freq_scale)
-//   attention_scale = (1 / sqrt(head_dim)) * mscale_adj^2
-//
-// This helper returns mscale_adj^2 when the config is an MLA model with
-// YaRN factor > 1, and 1.0f otherwise (leaving non-MLA models unaffected).
+// YaRN mscale attention-scale multiplier for MLA (DeepSeek-V2/V3):
+//   mscale_adj = 0.1*mscale_all_dim*ln(factor)+1.0  (factor = rope_freq_scale)
+//   attention_scale = (1/sqrt(head_dim)) * mscale_adj^2
+// Returns mscale_adj^2 when YaRN factor>1 on an MLA model, else 1.0.
 inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
     if (!cfg.is_mla() || cfg.rope_freq_scale <= 1.0f)
         return 1.0f;
@@ -228,18 +194,12 @@ inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
 // Used by nvfp4_moe_*_ptr borrowed pointers below.
 struct NvFP4MoEQuantResult;
 
-// Pre-quantized NVFP4 weights (from Model Optimizer / llm-compressor via
-// SafeTensors). Lives only on the Model::nvfp4_scratch_ load-time map —
-// once executor_pre_dequant.cu Phase 0 promotes the scale pointers onto
-// the corresponding main weight tensor's .scales / .tensor_scale fields,
-// the entry is dropped.
-//
-//   weight_scale     [N, K/group_size]  FP8 E4M3 micro-scales
-//   weight_scale_2   [1] or scalar      FP32 tensor-scale
-//   input_scale      [1]                FP32 activation scale (optional)
-//
-// `valid()` only requires weight_scale; weight_scale_2 is permitted to be
-// missing for some Modelopt variants.
+// Pre-quantized NVFP4 weights (Model Optimizer / llm-compressor SafeTensors), live only on
+// Model::nvfp4_scratch_ until Phase 0 promotes them onto the weight's .scales/.tensor_scale.
+//   weight_scale   [N, K/group_size] FP8 E4M3 micro-scales
+//   weight_scale_2 [1] FP32 tensor-scale (may be missing for some Modelopt variants)
+//   input_scale    [1] FP32 activation scale (optional)
+// valid() requires only weight_scale.
 struct NvFP4PreQuantWeight {
     Tensor weight_scale;
     Tensor weight_scale_2;
@@ -249,10 +209,9 @@ struct NvFP4PreQuantWeight {
 
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
-    // MLA (Multi-head Latent Attention) projections (DeepSeek-V2/V3).
-    // kv_a_proj: kv_a_proj_with_mqa — packed latent(512)+rope(64) down-projection.
-    // kv_a_layernorm: RMSNorm weight on the 512-dim latent (never quantized).
-    // kv_b_proj: up-projection, output 16*(128+128)=4096.
+    // MLA projections (DeepSeek-V2/V3): kv_a_proj_with_mqa packs latent(512)+rope(64)
+    // down-proj; kv_a_layernorm is RMSNorm on the 512-dim latent (never quantized); kv_b_proj
+    // up-projects to 16*(128+128)=4096.
     Tensor kv_a_proj, kv_a_layernorm, kv_b_proj;
     Tensor q_bias, k_bias, v_bias;  // Attention biases (Qwen2)
     Tensor o_bias;                  // Output-projection bias (gpt-oss)
@@ -280,12 +239,10 @@ struct TransformerLayer {
     Tensor layer_out_scale;     // per-layer output scalar (optional)
     Tensor rope_freqs;          // per-layer RoPE frequency factors (full-attn layers only)
     bool kv_equals_k = false;   // Gemma 4: V=K (wv absent for this layer)
-    // Provenance for the fused-projection scale split (src/exec/
-    // nvfp4_merged_scale_guard.h). Set ONLY by weight_map.cpp when it splits one
-    // checkpoint tensor (`qkv_proj` / `gate_up_proj`) into these slots. The
-    // loader's scale fix-up requires it: on a separate-tensor checkpoint the arm
-    // is indistinguishable from an unrelated promotion failure, and firing then
-    // points a sibling's micro-scales into the base's plane.
+    // Provenance for the fused-projection scale split (src/exec/nvfp4_merged_scale_guard.h).
+    // Set only by weight_map.cpp when splitting a fused qkv_proj/gate_up_proj tensor. Required
+    // by the loader's scale fix-up: on a separate-tensor checkpoint this arm is
+    // indistinguishable from a promotion failure, and firing then misroutes a sibling's scales.
     bool qkv_split_from_fused = false;
     bool gate_up_split_from_fused = false;
     Tensor w_gate, w_up, w_down, ffn_norm;
@@ -299,17 +256,13 @@ struct TransformerLayer {
     // Shared expert (always-active, e.g. Nemotron/DeepSeek)
     Tensor w_up_shared, w_down_shared, w_gate_shared;
 
-    // Qwen3-Next / Qwen3.6 shared-expert input gate: a [d_model] FP32 projection
-    // that, after sigmoid, produces a per-token scalar used to gate the shared
-    // expert output before it is added to the MoE output. Stored in the GGUF as
-    // `blk.{i}.ffn_gate_inp_shexp.weight`. Absent for Qwen2-MoE / Qwen3 MoE.
+    // Qwen3-Next/Qwen3.6 shared-expert input gate: [d_model] FP32 projection whose sigmoid
+    // produces a per-token scalar gating the shared expert output before adding to the MoE
+    // output. GGUF: blk.{i}.ffn_gate_inp_shexp.weight. Absent for Qwen2-MoE/Qwen3 MoE.
     Tensor shared_expert_gate_inp;
 
-    // (Per-group scales now ride along on each tensor's .scales field —
-    //  see core/tensor.h. The legacy *_scales mirror fields were removed
-    //  in Stage F.)
-    //
-    // (qtype mirrors removed in Stage G — read tensor.qtype directly.)
+    // Per-group scales ride on each tensor's .scales field (core/tensor.h); legacy *_scales
+    // mirror fields were removed in Stage F, qtype mirrors removed in Stage G.
 
     // WeightRegistry indices (populated by pre_dequant_weights, Phase 2+).
     // kInvalidTensorID means the corresponding Tensor is absent on this layer
@@ -378,26 +331,20 @@ struct TransformerLayer {
     Tensor gdn_alpha;  // [d_model, n_gdn_heads] delta rule decay
     Tensor gdn_beta;   // [d_model, n_gdn_heads] delta rule learning rate
 
-    // Decode-only fused weight: gdn_alpha and gdn_beta interleaved along N
-    // as [d_model, 2*n_gdn_heads]. Fires the M=1 path with a single GEMV
-    // launch instead of two. Built at load-time when both alpha and beta are
-    // FP16/BF16 + same shape; left null on GGUF/MXFP4 paths so the dispatcher
-    // falls back to the two-call path. Superseded by `gdn_input_packed` below
-    // when the full 4-way fusion fires.
+    // Decode-only fused weight: gdn_alpha/gdn_beta interleaved along N as
+    // [d_model, 2*n_gdn_heads], firing the M=1 path as one GEMV instead of two. Built at load
+    // time when both are FP16/BF16 + same shape; null on GGUF/MXFP4 (falls back to two-call
+    // path). Superseded by gdn_input_packed when the full 4-way fusion fires.
     Tensor gdn_alpha_beta_packed;
 
-    // Full GDN input projection fusion: stacks ssm_in + gdn_gate + gdn_alpha +
-    // gdn_beta along the N (output) dim into one [total_out, d_model] weight,
-    // where total_out = conv_channels + inner + 2*n_heads. A single GEMV
-    // produces all four outputs contiguously, then run_gdn slices at:
-    //   [0,                          conv_channels)        → xBC (conv1d input)
-    //   [conv_channels,              conv_channels+inner)  → z / gate_out
-    //   [conv_channels+inner,        ...+n_heads)          → alpha
-    //   [conv_channels+inner+n_heads,total_out)            → beta
-    //
-    // When set, ssm_in / gdn_gate / gdn_alpha / gdn_beta have their device
-    // memory released (their .data goes nullptr, .on_device=false). Null =
-    // fall back to the four separate gemm_dispatch calls.
+    // Full GDN input fusion: stacks ssm_in+gdn_gate+gdn_alpha+gdn_beta along N into one
+    // [total_out, d_model] weight (total_out = conv_channels+inner+2*n_heads). One GEMV
+    // produces all four outputs; run_gdn slices:
+    //   [0, conv_channels)                         -> xBC (conv1d input)
+    //   [conv_channels, conv_channels+inner)       -> z / gate_out
+    //   [conv_channels+inner, ...+n_heads)         -> alpha
+    //   [conv_channels+inner+n_heads, total_out)   -> beta
+    // When set, ssm_in/gdn_gate/gdn_alpha/gdn_beta device memory is released (.data=nullptr).
     Tensor gdn_input_packed;
     int gdn_packed_conv_channels = 0;
     int gdn_packed_inner = 0;

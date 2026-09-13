@@ -17,14 +17,10 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// The NVFP4 GEMV kernels themselves live in the per-family TUs (kept under the
-// kernel .cu size gate): nvfp4_gemv_dense.cu, nvfp4_gemv_fused.cu and
-// nvfp4_gemv_moe.cu. This TU keeps the tensor-based GEMV wrapper, the
-// dequant-to-FP16 GEMM fallback, and the PDL registration. Forward-declare the
-// kernel symbols that nvfp4_gemv_pdl_register() needs to take the address of;
-// the definitions stay byte-identical in their respective TUs.
-// ---------------------------------------------------------------------------
+// NVFP4 GEMV kernels live in per-family TUs (nvfp4_gemv_dense.cu, _fused.cu, _moe.cu, kept
+// under the kernel .cu size gate). This TU keeps the tensor-based GEMV wrapper, the
+// dequant-to-FP16 GEMM fallback, and PDL registration; forward-declares kernel symbols for
+// nvfp4_gemv_pdl_register() (definitions stay byte-identical in their own TUs).
 __global__ void gemv_nvfp4_kpar_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
                                        float tensor_scale, const half* x, half* y, int M, int K);
 __global__ void gemv_nvfp4_kpar_fp32_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
@@ -100,15 +96,8 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStrea
     gemv_nvfp4_kpar(A, reinterpret_cast<const half*>(x.data), reinterpret_cast<half*>(y.data), M, K, stream);
 }
 
-// ---------------------------------------------------------------------------
-// GEMM for NVFP4 weights:  C = input @ A^T
-//
-//   A (NvFP4QuantResult): weight matrix [N, K] in NVFP4 packed format
-//   input (Tensor):       activation     [M, K] in FP16
-//   C (Tensor):           output         [M, N] in FP16
-//
-// Strategy: dequantize A to FP16, then call cuBLAS gemm.
-// ---------------------------------------------------------------------------
+// GEMM for NVFP4 weights: C = input @ A^T. A [N,K] NVFP4 packed, input [M,K] FP16,
+// C [M,N] FP16. Strategy: dequantize A to FP16, then call cuBLAS gemm.
 
 static void* s_nvfp4_dequant_buf = nullptr;
 static size_t s_nvfp4_dequant_buf_size = 0;
@@ -217,15 +206,12 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
         return;
     }
 
-    // Small-M chunks (spec-verify: M = drafts+1, short/boundary prefills): the
-    // dequant fallback below rewrites the whole FP16 weight EVERY call — on
-    // Qwen3.6-27B MTP-only verify that was 49% of all GPU time (nsys, ~52
-    // dequants x ~600 us per verify). The batched-M GEMV reads the NVFP4
-    // weight once per MR=4 tile instead: at M<=16 that is <=4 passes at 0.25x
-    // FP16 bytes vs the fallback's ~2.25x (dequant read+write + GEMM read).
-    // beta!=0, non-F16 output, and the nvfp4-force-dequant bisect flag keep
-    // the fallback. FP32 accumulate + convert — same numerics class as the
-    // M=1 decode GEMV.
+    // Small-M chunks (spec-verify: M=drafts+1, boundary prefills): the dequant fallback
+    // rewrites the whole FP16 weight EVERY call. The batched-M GEMV instead reads the NVFP4
+    // weight once per MR=4 tile: at M<=16 that's <=4 passes at 0.25x FP16 bytes vs the
+    // fallback's ~2.25x (dequant read+write + GEMM read). beta!=0, non-F16 output, and the
+    // nvfp4-force-dequant bisect flag keep the fallback. FP32 accumulate + convert, same
+    // numerics class as the M=1 decode GEMV.
     constexpr int64_t kSmallMBatchedGemv = 16;
     if (M <= kSmallMBatchedGemv && beta == 0.0f && B.qtype == QType::F16 &&
         C.qtype == QType::F16 && !process_diag_nvfp4_force_dequant()) {
@@ -266,13 +252,11 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
     void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes, stream);
     if (!dequant_buf) {
-        // A silent return here corrupts whatever runs next: the output tensor
-        // keeps garbage, and under stream capture the recorded graph simply
-        // LACKS this GEMM — the #855 census "hybrid crash" was this exact
-        // hole (Nemotron: pre-alloc skipped for a >cap weight, fallback
-        // refused mid-capture, graph launched with an uninitialized
-        // activation buffer -> misaligned address). Throw instead; the
-        // verify capturer fails the capture cleanly and falls back eager.
+        // A silent return here corrupts whatever runs next: the output tensor keeps garbage, and
+        // under stream capture the recorded graph simply LACKS this GEMM (#855 "hybrid crash":
+        // pre-alloc skipped for an over-cap weight, fallback refused mid-capture, graph launched
+        // with an uninitialized activation buffer, misaligned address). Throw instead so the verify
+        // capturer fails the capture cleanly and falls back eager.
         throw std::runtime_error("gemm_nvfp4: no dequant workspace for M>1 fallback (capture-active "
                                  "or allocation failure) — cannot run this GEMM");
     }
@@ -285,10 +269,8 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     gemm(B, A_fp16, C, 1.0f, beta, stream);
 }
 
-// ---------------------------------------------------------------------------
-// PDL registration for all NVFP4 GEMV kernels.
-// Called from GraphExecutor::init() when PDL is enabled.
-// ---------------------------------------------------------------------------
+// PDL registration for all NVFP4 GEMV kernels, called from GraphExecutor::init() when PDL
+// is enabled.
 void nvfp4_gemv_pdl_register() {
     constexpr int NR = 8;
 

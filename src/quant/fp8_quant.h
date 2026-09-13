@@ -6,10 +6,8 @@
 
 namespace imp {
 
-// Quantize FP16 weights to FP8 E4M3 with per-tensor scale.
-// input: [N, K] FP16 on device
-// output: [N, K] FP8_E4M3 on device (caller pre-allocates)
-// scale_out: scalar FP32 (written to device pointer)
+// Quantizes FP16 weights to FP8 E4M3 with a per-tensor scale. input [N,K] FP16, output
+// [N,K] FP8_E4M3 (caller pre-allocates), scale_out scalar FP32 (written to device pointer).
 void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_scale_out,
                                cudaStream_t stream = nullptr, float* d_block_maxes = nullptr,
                                float* d_absmax = nullptr, int max_grid = 0);
@@ -38,20 +36,15 @@ void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, 
 void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16, int n_elements, float scale,
                                  cudaStream_t stream = nullptr);
 
-// Per-expert FP8 scale calibration for MoE.
-// Computes scale = absmax / 448.0 for each expert's gathered activations.
-// input_fp16: [total_tokens, K] FP16 on device
-// offsets:    device array [n_experts+1], expert e has tokens [offsets[e], offsets[e+1])
-// d_scales_out: device array [n_experts] receives per-expert scales
+// Per-expert FP8 scale calibration for MoE: scale=absmax/448 per expert's gathered
+// activations. input_fp16 [total_tokens,K]; offsets [n_experts+1] gives expert e's token
+// range [offsets[e],offsets[e+1]); d_scales_out [n_experts].
 void calibrate_fp8_scales_per_expert(const void* input_fp16, int K, const int32_t* d_offsets, int n_experts,
                                      float* d_scales_out, cudaStream_t stream = nullptr);
 
-// Per-expert FP8 quantization for MoE.
-// Quantizes each expert's activation slice with its own scale.
-// input_fp16: [total_tokens, K] FP16 on device
-// output_fp8: [total_tokens, K] FP8_E4M3 on device (caller pre-allocates)
-// d_offsets:  device array [n_experts+1]
-// d_scales:   device array [n_experts] per-expert scales
+// Per-expert FP8 quantization for MoE: quantizes each expert's activation slice with its
+// own scale. input_fp16/output_fp8 [total_tokens,K]; d_offsets [n_experts+1];
+// d_scales [n_experts].
 void quantize_fp16_to_fp8_e4m3_per_expert(const void* input_fp16, void* output_fp8, int K,
                                           const int32_t* d_offsets, int n_experts, const float* d_scales,
                                           cudaStream_t stream = nullptr);

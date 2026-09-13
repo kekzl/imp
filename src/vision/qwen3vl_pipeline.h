@@ -1,16 +1,9 @@
 #pragma once
 
-// Image bytes to LM-ready embeddings, for Qwen3-VL.
-//
-// Separate from `VisionPipeline` (the GGUF mmproj path) because the two differ
-// in the thing that shapes everything else: that one has a fixed
-// `num_image_tokens` from config, this one has none. The token count comes from
-// the image, so buffers are sized to a patch budget and each image uses a
-// prefix of them.
-//
-// The tower's weights live in the Model — they came from the same checkpoint —
-// so this holds a reference, not ownership, and uploads them to the device on
-// first init.
+// Image bytes to LM-ready embeddings, Qwen3-VL. Separate from VisionPipeline (GGUF mmproj
+// path) because that has a fixed num_image_tokens from config while this has none (token
+// count comes from the image, buffers sized to a patch budget). Tower weights live in the
+// Model (same checkpoint); this holds a reference, not ownership, uploading on first init.
 
 #include "vision/image_processor.h"  // QwenPatches
 #include "vision/qwen3vl_encoder.h"
@@ -46,25 +39,22 @@ public:
     Qwen3VLPipeline(const Qwen3VLPipeline&) = delete;
     Qwen3VLPipeline& operator=(const Qwen3VLPipeline&) = delete;
 
-    // `tower` must be a loaded Qwen3-VL vision tower; it is uploaded to the
-    // device here if it is still host-resident. `max_patches` bounds the image
-    // size this pipeline will accept — it sizes every workspace, so it is also
-    // what an oversized image is rejected against.
-    // lazy: validate and remember the tower, defer its upload and the arena
-    // takes to the first encode (vram.lazy_commit). is_ready() is true from
-    // init on either way; a deferred build that fails turns it false.
+    // `tower` must be a loaded Qwen3-VL vision tower, uploaded here if still host-resident.
+    // max_patches bounds accepted image size, sizing every workspace and rejecting oversized
+    // images. lazy: validates+remembers the tower, defers upload and arena takes to first
+    // encode (vram.lazy_commit); is_ready() is true from init either way, false only if a
+    // deferred build later fails.
     [[nodiscard]] bool init(VisionModel& tower, int max_patches, bool lazy = false);
 
-    // Device bytes init() will take from the T2 arena — tower excluded, that is
-    // qwen3vl_vision_tower_device_bytes(). Answerable before the arena opens: it
-    // reads config and tensor shapes, not weights. taken_bytes() reports what was
-    // actually taken, and the two are asserted equal in the pipeline tests.
+    // Device bytes init() takes from the T2 arena, tower excluded (that's
+    // qwen3vl_vision_tower_device_bytes()). Answerable before the arena opens (reads
+    // config/shapes, not weights); taken_bytes() reports what was actually taken, asserted
+    // equal in the pipeline tests.
     static size_t demand_bytes(const VisionModel& tower, int max_patches);
 
-    // The patch budget the engine will actually use, from the configured value
-    // (0 = default). Engine::init sizes the arena with this and the vision warmup
-    // initialises with it; going through one function is what keeps the
-    // reservation and the allocation from drifting apart.
+    // The patch budget the engine will actually use, from the configured value (0=default).
+    // Engine::init sizes the arena with this and vision warmup initialises with it; routing
+    // through one function keeps reservation and allocation from drifting apart.
     static int patch_budget(const VisionModel& tower, int configured);
     // Includes the encoder's slices: demand_bytes() covers both, so the pair the
     // drift test compares has to cover both as well.
@@ -77,10 +67,9 @@ public:
 
     bool encode_file(const std::string& path, Qwen3VLImage& out, cudaStream_t stream);
 
-    // --- Per-request path (the server) --------------------------------
-    // CPU only — decode, resize, patchify. Safe to call off the batch worker
-    // (an HTTP handler thread), and it is what tells the caller how many image
-    // tokens the prompt has to reserve, BEFORE any GPU work happens.
+    // Per-request path (the server): CPU only, decode+resize+patchify. Safe off the batch
+    // worker (an HTTP handler thread); tells the caller how many image tokens the prompt must
+    // reserve, BEFORE any GPU work happens.
     bool preprocess(std::span<const uint8_t> data, QwenPatches& out) const;
     // Image tokens a patchified image becomes.
     int merged_tokens_of(const QwenPatches& p) const;
@@ -91,10 +80,10 @@ public:
     int embedding_dim() const;
     int deepstack_taps() const;
 
-    // Encode into the CALLER's buffers. Runs through the pipeline's own stable
-    // scratch first and copies out, because the encoder's workspaces are sized
-    // once and shared — a per-request output would mean re-sizing per image.
-    // Serialized: the caller must be the sole GPU driver (the batch worker).
+    // Encodes into the CALLER's buffers via the pipeline's own stable scratch first, then
+    // copies out: the encoder's workspaces are sized once and shared, a per-request output
+    // would force re-sizing per image. Serialized: caller must be the sole GPU driver (the
+    // batch worker).
     bool encode_patches_to(const QwenPatches& patches, half* d_out, const std::vector<half*>& d_deepstack,
                            Qwen3VLImage& shape_out, cudaStream_t stream);
 

@@ -44,14 +44,10 @@ namespace imp {
 class LoraAdapter;
 struct LoraWeights;
 
-// Pipelined batched-decode chain advance (decode_pipeline_advance.cu): feed
-// step N's sampled slot tokens as step N+1's input ids, bump positions and
-// context lens, append each token to the per-row device output history
-// (penalty rows sample step N+1 against a history including the token the
-// host has not read yet), scatter freshly appended block-table entries.
-// Patch/pos arrays must be device-readable — the engine passes mapped
-// pinned memory. Declared here (host-safe) instead of executor_kernels.h
-// so host-only TUs (engine_scheduler.cpp) can launch it.
+// Pipelined batched-decode chain advance (decode_pipeline_advance.cu): see
+// decode_pipeline_advance.cu for the mechanism. Patch/pos arrays must be
+// device-readable (mapped pinned memory). Declared here (host-safe) so
+// host-only TUs (engine_scheduler.cpp) can launch it.
 void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
                              int32_t* d_token_ids, int* d_positions, int* d_context_lens,
                              int* d_block_tables, int n_patches, const int* d_patch_offsets,
@@ -61,11 +57,9 @@ void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot
 // Nvfp4DecodeContext moved to exec/quant_pipeline.h (build-only; consumed by
 // the QuantPipeline phase-3 helpers).
 
-// Imperative executor for the transformer forward pass.
-//
-// The Graph class provides a DAG representation for visualization and debugging,
-// but this executor hardcodes the standard transformer forward pass for
-// efficiency. No graph walking is done at runtime.
+// Imperative executor for the transformer forward pass. The Graph class is
+// a DAG for visualization/debugging only; this executor hardcodes the
+// standard forward pass for efficiency. No graph walking at runtime.
 struct GemmContext;  // defined in gemm_context.h
 struct VRAMBudget;   // defined in runtime/vram_budget.h; only pre_dequant_weights() names it
 class GraphExecutor {
@@ -97,11 +91,10 @@ public:
     // experts_on_host: if true, skip MoE batch dequant buffer allocation.
     [[nodiscard]] bool allocate_workspaces(bool experts_on_host = false);
 
-    // Estimated GPU memory needed by allocate_workspaces().
-    // Used by Engine to compute the expert upload reserve. The S-matrix term
-    // is included only when the allocator would actually build one (#943) —
-    // on FA2-served configs it is skipped there, so charging it here would
-    // hold up to 256 MiB of phantom headroom out of the cache/KV planners.
+    // Estimated GPU memory needed by allocate_workspaces(), used by Engine for
+    // the expert upload reserve. The S-matrix term is included only when the
+    // allocator would actually build one (#943): FA2-served configs skip it, so
+    // charging it here would hold phantom headroom out of the cache/KV planners.
     size_t workspace_estimate() const {
         return ws_.workspace_estimate(/*include_attn_scores=*/!fa2_serves_all_prefill());
     }
@@ -114,60 +107,37 @@ public:
     void forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream = nullptr);
 
     // Teacher-forced perplexity over tokens[0..n-1]. Call AFTER a SINGLE-CHUNK
-    // prefill of the same tokens (uses the persistent-workspace hidden_, which
-    // holds all-position final hidden after forward_logits). Applies the
-    // tier-aware LM head to every position in chunks and returns exp(mean NLL
-    // of next tokens). Bench/eval only. For chunked prefill use the
-    // Engine::begin/end_perplexity_capture flow, which accumulates via
-    // perplexity_nll_partial after every chunk's forward.
+    // prefill of the same tokens (uses the persistent hidden_). Bench/eval
+    // only. For chunked prefill use Engine::begin/end_perplexity_capture,
+    // which accumulates via perplexity_nll_partial after every chunk.
     double perplexity_nll(std::span<const int32_t> tokens, cudaStream_t stream = nullptr);
 
-    // Per-chunk NLL accumulation (chunked-prefill-aware imp_perplexity).
-    // Applies the tier-aware LM head to hidden_[0..chunk_len-1] — the chunk
-    // that prefill just forwarded, absolute corpus positions chunk_start..
-    // chunk_start+chunk_len-1 — and writes -log p(next token) into
-    // d_nll[global_pos]. d_tokens / d_nll are device buffers of length
-    // n_total owned by the caller (Engine ppl capture). Enqueues on `stream`
-    // only; the caller reduces after a sync. Overwrites the logits_
-    // workspace — call only after all reads of the chunk's logits are done.
-    // Optional d_match[global_pos] ∈ {0,1}: greedy argmax == actual next
-    // token (production tie-break) — teacher-forced greedy-agreement probe.
+    // Per-chunk NLL accumulation: applies the tier-aware LM head to
+    // hidden_[0..chunk_len-1] (absolute corpus positions chunk_start..+len-1),
+    // writes -log p(next token) into d_nll[global_pos]. Enqueues on `stream`
+    // only; caller reduces after a sync. Overwrites logits_: call only after
+    // all reads of the chunk's logits are done. Optional d_match: greedy argmax == actual next token.
     void perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
                                 int chunk_len, double* d_nll, cudaStream_t stream,
                                 int32_t* d_match = nullptr);
 
     // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
-    // d_out[d_model] (fp32, overwritten). Runs after a chunk's forward while
-    // hidden_ still holds that chunk; the engine accumulates chunk sums
-    // host-side so chunked prefills pool the full input.
+    // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
+    // holds it; engine accumulates chunk sums host-side for full-input pooling.
     void pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream);
 
-    // Greedy verify for n-gram speculative decoding: applies the tier-aware
-    // LM head to hidden_[0..n_rows-1] (the verify chunk that forward_logits
-    // just ran) and writes argmax token ids to d_out[0..n_rows-1]. Same
-    // logits as production greedy sampling (incl. final softcap). Overwrites
-    // the logits_ workspace. Enqueues on `stream` only.
-    //
-    // Optional penalties (exact production parity with apply_penalties):
-    // d_hist[0..n_hist) is the request's output-token history (ends with the
-    // chunk's first token t0); d_draft points at the chunk tokens AFTER t0,
-    // so row j additionally penalizes d_draft[0..j-1] — the same set the
-    // eager path would have accumulated by that step. repeat_last_n != 0 is
-    // the caller's responsibility to gate (window semantics not replicated).
-    // d_topm/topm (optional): additionally write each row's top-M logit ids
-    // (best first, post-penalty — same distribution the argmax decides on)
-    // to d_topm[row * topm + rank]. Harvested by the Token-Recycling
-    // adjacency drafter (speculative.token_recycling).
-    // allow_cutlass: the batched-decode LM head (W4A4 tensor-core tile) instead
-    // of the per-row FP16-activation GEMV; the batched verify's rows are
-    // batched-decode rows, whose plain step takes exactly that head.
-    // d_banned_alt / n_banned_alt / h_row_alt: a second ban list applied to
-    // the rows whose h_row_alt[row] != 0 (host array, n_rows entries) in place
-    // of d_banned - the per-request think stop mask of a batched chunk.
-    // h_row_hist / h_row_hist_n / h_row_pens (host arrays, n_rows entries,
-    // pens as [rep, freq, pres] per row): per-row penalty histories on device
-    // (the batched chunk's rows belong to different requests), applied with
-    // apply_penalties before the ban and the argmax. Exclusive with d_hist.
+    // Greedy verify for n-gram speculative decoding: applies the tier-aware LM
+    // head to hidden_[0..n_rows-1] (same logits as production greedy, incl.
+    // softcap), writes argmax to d_out. Overwrites logits_.
+    // Optional penalties: d_hist ends with the chunk's t0; d_draft holds chunk
+    // tokens after t0, so row j also penalizes d_draft[0..j-1] (production parity).
+    // d_topm/topm: writes each row's top-M post-penalty logit ids, harvested by
+    // the Token-Recycling adjacency drafter.
+    // allow_cutlass: batched-decode W4A4 LM head instead of the per-row GEMV.
+    // d_banned_alt/h_row_alt: per-request think-stop mask for rows where
+    // h_row_alt[row]!=0, in place of d_banned.
+    // h_row_hist/h_row_pens: per-row penalty histories for a batched chunk's
+    // mixed-request rows, applied before the ban and argmax. Exclusive with d_hist.
     void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                            const int32_t* d_hist = nullptr, int n_hist = 0,
                            const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
@@ -179,51 +149,42 @@ public:
                            const int32_t* const* h_row_hist = nullptr, const int* h_row_hist_n = nullptr,
                            const float* h_row_pens = nullptr);
 
-    // LM head + argmax over EXTERNAL, already-normed rows ([n_rows, d_model]
-    // FP16, e.g. the MTP head's final_norm output): the batched-decode W4A4
-    // tensor-core LM head, no output norm applied. d_out[0..n_rows). False
-    // when that LM head is not built (max_batch_size == 1) or on a GEMM
-    // failure; nothing is written then.
+    // LM head + argmax over EXTERNAL, already-normed rows ([n_rows,d_model]
+    // FP16, e.g. MTP head output): the batched-decode W4A4 LM head, no output
+    // norm applied. False (nothing written) when that head isn't built
+    // (max_batch_size==1) or on a GEMM failure.
     bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream);
 
-    // Materialize the LM-head projection of hidden_[0..n_rows) into d_out
-    // ([n_rows, vocab_size] fp32) — same batched re-projection as
-    // greedy_argmax_all, but copying the rows out instead of reducing them.
-    // The constrained-pipeline jump-ahead (#844) consumes them across later
-    // ticks, one masked sample per row. Call while the workspace that ran
-    // the chunk forward is still active. Enqueues on `stream` only.
+    // Materializes the LM-head projection of hidden_[0..n_rows) into
+    // d_out[n_rows,vocab_size] fp32 (same re-projection as greedy_argmax_all,
+    // but copying rows instead of reducing). Consumed by the constrained-
+    // pipeline jump-ahead (#844). Call while the chunk-forward workspace is still active.
     void project_logits_all(int n_rows, float* d_out, cudaStream_t stream);
 
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
     std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
                                             cudaStream_t stream = nullptr);
 
-    // Single-token sampling: returns one int32_t directly (avoids vector alloc).
-    // Use for single-sequence decode where only one token is sampled.
-    // Enqueue-only per-row sampling into scratch slot `slot_idx` (no readback,
-    // no sync); returns false for sync-only modes (mirostat, logit_bias, CUB
-    // top_k regime) WITHOUT touching the row. Gather all rows afterwards via
-    // collect_sampled_tokens (one pinned D2H + one stream sync).
+    // Single-token sampling, avoids a vector alloc; use for single-sequence
+    // decode. Enqueue-only per-row sampling into scratch slot slot_idx (no
+    // readback/sync); returns false for sync-only modes (mirostat, logit_bias,
+    // CUB top_k) without touching the row. Gather via collect_sampled_tokens.
     bool sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx,
                                          cudaStream_t stream = nullptr);
     const int32_t* collect_sampled_tokens(int n_slots, cudaStream_t stream = nullptr);
-    // One-launch append of this step's sampled tokens (strided sample slots,
-    // ACTIVE parity half) into per-request device penalty histories. Row i of
-    // `args` maps sample slot i -> hist[slots[i]*cap + offs[i]]; offs[i] < 0
-    // skips the row. Enqueue AFTER the row samplers, BEFORE the parity flip.
+    // One-launch append of this step's sampled tokens (strided slots, ACTIVE
+    // parity half) into per-request device penalty histories: row i maps
+    // slot i -> hist[slots[i]*cap+offs[i]]; offs[i]<0 skips. Enqueue after the
+    // row samplers, before the parity flip.
     bool append_sampled_history(const PenaltyAppendArgs& args, int32_t* d_hist,
                                 cudaStream_t stream = nullptr);
 
-    // Parity-buffered sampling for the pipelined batched decode (one step in
-    // flight): the slot region, pinned gather buffer, and top-k row-args
-    // staging are allocated x2, and set_sample_parity selects which half the
-    // async enqueue/flush/gather use. This lets step N+1's sampler chains be
-    // enqueued (writing slot set p^1) while step N's tokens (slot set p) are
-    // still in flight to the host. gather_sampled_tokens_async replaces
-    // collect_sampled_tokens' stream sync with an event recorded after the
-    // strided D2H; wait_gathered_tokens syncs that event only — the engine
-    // thread never waits on work enqueued after the gather.
-    // All non-pipelined callers run at parity 0 (identical to the old layout).
+    // Parity-buffered sampling for pipelined batched decode: slot region,
+    // pinned gather buffer, and top-k staging are allocated x2; parity selects
+    // the active half so step N+1's sampler chains enqueue into p^1 while step
+    // N's tokens (p) are still in flight to host. gather_sampled_tokens_async
+    // replaces the stream sync with an event; wait_gathered_tokens waits only
+    // that event. Non-pipelined callers run at parity 0.
     void set_sample_parity(int parity) { sample_parity_ = parity & 1; }
     bool gather_sampled_tokens_async(int n_slots, cudaStream_t stream = nullptr);
     const int32_t* wait_gathered_tokens(int parity);
@@ -237,18 +198,16 @@ public:
     int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
                                       cudaStream_t stream = nullptr);
 
-    // Async decode: runs forward pass reading token from device memory (d_token_id),
-    // then samples and writes result back to d_token_id. No host-device sync.
-    // h_mapped: mapped pinned memory for host-side token readback (polled async).
-    // Returns immediately. Host reads *h_mapped to get the token.
+    // Async decode: forward reads the token from device memory (d_token_id),
+    // samples, writes back to d_token_id. No host-device sync; returns
+    // immediately. h_mapped is pinned memory for host polling of the token.
     void forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
                               cudaStream_t stream = nullptr);
 
     // Constrained async sampling (pipelined constrained decode): applies
-    // device-side banned-token masking + the active json/schema constraint
-    // mask, then samples on device. Writes the token to d_result (which must
-    // be SAMPLE_SCRATCH_BYTES — multi-block sampler scratch follows the token)
-    // and async-copies it to h_pinned. No host-device sync — order via an event.
+    // device-side banned-token + active json/schema mask, samples on device.
+    // Writes to d_result (must be SAMPLE_SCRATCH_BYTES) and async-copies to
+    // h_pinned. No host-device sync; order via an event.
     void masked_sample_async(const InferenceState& state, const Tensor& logits, int32_t* d_result,
                              int32_t* h_pinned, cudaStream_t stream);
 
@@ -261,19 +220,16 @@ public:
     // budget: VRAM budget with per-phase caps computed by Engine::plan_vram_budget().
     void pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget);
 
-    // Allocate the gemm_nvfp4 dequant workspace based on max NVFP4 weight size.
-    // Must be called AFTER pre_dequant_weights() so wcache_.nvfp4 is populated.
-    // Skips allocation if no NVFP4 weights exist or if the largest weight
-    // exceeds a sanity cap (currently 512 MiB) — in those cases the gemm_nvfp4
-    // fallback continues to use lazy cudaMalloc on non-captured streams.
+    // Allocates the gemm_nvfp4 dequant workspace sized to the max NVFP4 weight.
+    // Must run AFTER pre_dequant_weights(). Skips if no NVFP4 weights exist or
+    // the largest exceeds the 512 MiB sanity cap; the fallback then lazy-cudaMallocs on non-captured streams.
     bool allocate_nvfp4_dequant_workspace();
 
-    // Build a CUTLASS NVFP4 weight for the LM head so batched decode (n>1) can
-    // do a single tensor-core GEMM (weight read once) instead of the per-row /
-    // batched-M GEMV (weight read ceil(M/4)x). Only the SfAtom scale buffer is
-    // allocated (~vocab*d_model/16 bytes); the FP4 data is borrowed from the
-    // NVFP4 decode cache. No-op unless serving (max_logit_tokens_ > 1) and the
-    // LM head is NVFP4. Must run AFTER pre_dequant_weights().
+    // Builds a CUTLASS NVFP4 LM-head weight for batched decode (n>1): one
+    // tensor-core GEMM (weight read once) instead of per-row/batched-M GEMV
+    // (read ceil(M/4)x). Only the SfAtom scale buffer is allocated; FP4 data
+    // borrows the NVFP4 decode cache. No-op unless serving and LM head is NVFP4. Must run AFTER
+    // pre_dequant_weights().
     void build_lm_head_cutlass_(cudaStream_t stream);
 
     // Split-K workspace for gemm_nvfp4_smallm (batched-decode small-M GEMMs).
@@ -284,60 +240,53 @@ public:
     size_t smallm_xq_bytes_ = 0;
     bool smallm_arena_ = false;  // both scratches are T2 arena slabs: never cudaFree them
     // What smallm_xq_ currently holds (source pointer + shape of the last
-    // activation quantize). Lets a dispatch with a matching act-quant hint
-    // skip the re-quantize when two GEMMs share one normed input (gate/up,
-    // q/k/v, GDN in/z). The triple self-invalidates on every fresh quantize.
+    // activation quantize). Lets a dispatch with a matching hint skip
+    // re-quantizing when two GEMMs share one normed input (gate/up, q/k/v, GDN
+    // in/z). Self-invalidates on every fresh quantize.
     const void* smallm_xq_src_ = nullptr;
     int smallm_xq_src_m_ = 0;
     int smallm_xq_src_k_ = 0;
     // True when the scratch was filled by a PRODUCER fusion (fused
-    // rmsnorm/swiglu + quantize) rather than by the dispatch's own quantize.
-    // The small-M block accepts a matching tag without an act-quant hint in
-    // that case — the producer updated the tag on the very write that
-    // produced the FP16 buffer, so the pointer cannot hold newer content.
-    // Never read by the CUTLASS prefill consumer (its scratch is separate).
+    // rmsnorm/swiglu + quantize), not the dispatch's own quantize: the
+    // small-M block then accepts a matching tag without an act-quant hint,
+    // since the producer updated the tag on the same write. Never read by the CUTLASS prefill consumer.
     bool smallm_xq_from_producer_ = false;
 
     // Grow the small-M xq scratch (no-op while capturing; resize
     // invalidates the shared-activation tag).
     void ensure_smallm_xq_(size_t xq_need, cudaStream_t stream);
     // Producer-fusion gate + scratch handout: returns the xq packed/scales
-    // pointers when `consumer_id`'s weight will take the small-M NVFP4 route
-    // for [M, K] F16 activations and the scratch is (or can be made) large
-    // enough. Returns nullptr otherwise — caller runs the unfused kernels.
-    // Never allocates while `stream` is capturing.
+    // pointers when consumer_id's weight will take the small-M NVFP4 route for
+    // [M,K] F16 activations and the scratch fits; nullptr otherwise (caller
+    // runs unfused kernels). Never allocates while `stream` is capturing.
     uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                  uint8_t** scales_out);
     // Tag the scratch as holding quantize(out[0..M,0..K)) written by a fused
     // producer kernel.
     void smallm_producer_tag_(const void* out_data, int M, int K);
     // The plain-NVFP4 weight the small-M GEMM reads for `h`: the native
-    // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode
-    // overlay of a dequantable GGUF source (wcache_.nvfp4, the bytes the M=1
-    // GEMV reads). False when the handle has neither; prompt rows on a GGUF
-    // source keep the full-precision dequant route. Single gate for the
-    // dispatch block, the sibling-pair dispatch and the producer fusion.
+    // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode overlay
+    // of a dequantable GGUF source. False when neither exists; prompt rows on
+    // a GGUF source keep the full-precision dequant route. Single gate shared
+    // by the dispatch block, sibling-pair dispatch and producer fusion.
     bool smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const;
     // Grow the small-M GEMM workspace to `need` bytes; a no-op while
     // `stream` is capturing (twin of ensure_smallm_xq_).
     void ensure_smallm_ws_(size_t need, cudaStream_t stream);
-    // Fused rmsnorm+quantize when the consumer takes the small-M route;
-    // falls back to plain rmsnorm() internally. `consumer_id` is the FIRST
-    // GEMM reading `no` (q / gate / GDN in) — all further readers skip via
-    // the act-quant hint as before.
+    // Fused rmsnorm+quantize when the consumer takes the small-M route; falls
+    // back to plain rmsnorm() internally. `consumer_id` is the FIRST GEMM
+    // reading `no` (q/gate/GDN in); further readers skip via the act-quant hint.
     void rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no, TensorID consumer_id,
                              int n, float eps, cudaStream_t stream, float weight_offset);
     // Fused swiglu+quantize when the down projection takes the small-M
     // route; falls back to plain swiglu() internally.
     void swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
                             int n, cudaStream_t stream);
-    // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV.
-    // Fills `out` from the secondary decode cache (wcache_.nvfp4) or the
-    // native-NVFP4 registry tier — the same sources the decode-path LM head
-    // dispatch uses. Returns false when the LM head is not NVFP4-served
-    // (cache disabled, FP8 LM head, or quantized source without a cache
-    // entry); callers then keep the FP16 GEMV. The returned pointers borrow
-    // executor-owned storage — do not free.
+    // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV:
+    // fills `out` from the secondary decode cache or the native-NVFP4 registry
+    // tier (same sources the decode-path LM head uses). False when the LM head
+    // isn't NVFP4-served; callers then keep the FP16 GEMV. Returned pointers borrow executor storage, do not
+    // free.
     bool lm_head_nvfp4_view(NvFP4QuantResult& out) const;
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
@@ -353,16 +302,11 @@ public:
         kv_calibrated_.assign(n_kv, false);
     }
 
-    // Drop both the calibrated_ flag and the per-layer scale so the next
-    // prefill recalibrates from a clean slate. Call this after warmup —
-    // synthetic BOS tokens produce unrepresentative K/V absmax statistics
-    // (Llama: too-small absmax, scale locked too tight, real data
-    // overflowed FP8_MAX → degenerate output; Gemma-4: too-large absmax
-    // from extreme output_norm outliers, scale locked too wide, real
-    // data quantized to too-coarse FP8 grid → "Federer" garbage).
-    // Resetting the scale value (not just the flag) avoids both failure
-    // modes. High-water-mark within a single generation still applies
-    // via the std::max in executor_kv_write.cu.
+    // Drops calibrated_ AND the per-layer scale value (not just the flag) after
+    // warmup: synthetic BOS tokens give unrepresentative K/V absmax (too-tight
+    // scale overflows to FP8_MAX on real data, or too-wide scale under-uses
+    // the FP8 grid). High-water-mark within one generation still applies via
+    // std::max in executor_kv_write.cu.
     void reset_kv_calibration() {
         std::fill(kv_scales_.begin(), kv_scales_.end(), 1.0f);
         std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
@@ -383,34 +327,28 @@ public:
     bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1) {
         return ws_.allocate_decode_workspace(stream, max_batch);
     }
-    // 0=prefill, 1=decode. Also swaps the collision-prone quant-scratch
-    // family (fp8 activation + q8_1) onto the per-slot copies when the
-    // decode set exists — required for prefill/decode overlap, a no-op
-    // otherwise (see allocate_decode_qscratch).
+    // 0=prefill, 1=decode. Also swaps the collision-prone quant-scratch family
+    // (fp8 activation + q8_1) onto per-slot copies when the decode set exists
+    // (required for prefill/decode overlap); no-op otherwise.
     void use_workspace(int slot);
     bool has_decode_workspace() const { return ws_.has_decode_workspace(); }
     int decode_max_batch() const { return ws_.decode_max_batch(); }
     int active_workspace() const { return ws_.active(); }
     int max_tokens() const { return max_tokens_; }
 
-    // Prefill/decode overlap support (docs/plans/2026-08-27-prefill-decode-overlap.md).
-    // allocate_decode_qscratch: per-slot copies of the quant scratches both
-    // paths would otherwise share (fp8_act family + q8_1/d8), sized for
-    // max_batch rows. set_overlap_prefill_active: the engine marks the
-    // prefill forward it enqueues concurrently with an in-flight decode;
-    // the smallm/producer-xq dispatch paths decline for that forward (their
-    // scratch + tags are decode-owned under overlap).
+    // Prefill/decode overlap support. allocate_decode_qscratch: per-slot
+    // copies of quant scratches both paths would otherwise share (fp8_act +
+    // q8_1/d8), sized for max_batch rows. set_overlap_prefill_active: marks a
+    // prefill forward enqueued concurrently with an in-flight decode; the
+    // smallm/producer-xq dispatch paths decline for it (scratch+tags are decode-owned under overlap).
     bool allocate_decode_qscratch(int max_batch);
     void set_overlap_prefill_active(bool v) { overlap_prefill_active_ = v; }
 
-    // Take the small-M NVFP4 workspace and activation scratch for the largest
-    // eligible weight (native source or GGUF decode overlay) from the T2
-    // arena (charged as ExecT2Demand::smallm_scratch) before the first
-    // captured decode step. A capture cannot allocate, and on a GGUF source
-    // no eager forward reaches the small-M block first (prompt rows keep the
-    // dequant route), so without this every captured batched-decode graph
-    // baked in the dequant fallback (#1897). Falls back to the lazy
-    // cudaMalloc growth when the arena cannot serve it.
+    // Takes the small-M NVFP4 workspace + activation scratch for the largest
+    // eligible weight from the T2 arena before the first captured decode step:
+    // a capture cannot allocate, and on a GGUF source no eager forward reaches
+    // the small-M block first, so without this every captured batched-decode
+    // graph baked in the dequant fallback (#1897). Falls back to lazy cudaMalloc growth otherwise.
     void allocate_smallm_scratch(cudaStream_t stream);
     // The prefill sample must not land in the decode batch's parity slots
     // while both run concurrently: the engine points the prefill-side
@@ -420,9 +358,8 @@ public:
     bool model_has_moe() const { return has_moe_; }
 
     // Batched-decode residual accumulation eligibility (gemm.nvfp4_residual_beta1):
-    // the o / down / GDN-out projection may run beta=1 straight into the
-    // hidden buffer when it will take the smallm accumulate path. Shared by
-    // the three call sites so the gates cannot drift apart.
+    // the o/down/GDN-out projection may run beta=1 into hidden when it will
+    // take the smallm accumulate path. Shared by three call sites so the gates cannot drift apart.
     bool residual_beta1_nvfp4_ok_(TensorID id, int n, const Tensor& h) const {
         if (!dispatch_policy().gemm.nvfp4_residual_beta1 || id == kInvalidTensorID)
             return false;
@@ -440,44 +377,39 @@ public:
         return attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
     }
 
-    // Attention shapes are uniform when the per-layer shape arrays are absent
-    // or carry a single distinct nonzero value (GDN/Mamba2 hybrids fill zeros
-    // for non-attention layers). Uniform models can be served by the O(n)
-    // FA2/FMHA chunked-prefill family; only truly heterogeneous shapes
-    // (Gemma-4 dual head_dim 256/512) require the rectangular cuBLAS path.
+    // Attention shapes are uniform when per-layer shape arrays are absent or
+    // carry one distinct nonzero value (GDN/Mamba2 hybrids zero non-attention
+    // layers). Uniform models are servable by the O(n) FA2/FMHA family; only
+    // truly heterogeneous shapes (Gemma-4 dual head_dim 256/512) need the rectangular cuBLAS path.
     bool attn_shapes_uniform() const;
 
-    // True when FP16-QK FA2 serves ALL prefill for this model (uniform
-    // shapes, no learned sinks, head_dim covered: 128 always, 256 behind
-    // attention.fa2_hd256, fa2_fp16qk != "never"). Shared by the S-matrix
-    // allocator skip and workspace_estimate() so the two cannot drift (#943).
+    // True when FP16-QK FA2 serves ALL prefill for this model (uniform shapes,
+    // no learned sinks, hd=128 always / 256 behind fa2_hd256, fa2_fp16qk !=
+    // "never"). Shared by the S-matrix allocator skip and workspace_estimate() so the two cannot drift
+    // (#943).
     bool fa2_serves_all_prefill() const;
 
-    // Largest prefill chunk starting at `offset` that the chunked-attention
-    // dispatch can serve without overflowing the cuBLAS S-matrix (constraint:
-    // n × (offset + n) ≤ s_cap² and n ≤ s_cap), floored to a kv_bs multiple.
-    // Chunks served by the O(n) FA2/FMHA paths need no S-matrix and return
-    // `desired` unchanged. Returns 0 when even a kv_bs-sized chunk cannot be
-    // served (caller must reject the request instead of letting the kernel
-    // capacity guard abort).
+    // Largest prefill chunk at `offset` the chunked-attention dispatch can
+    // serve without overflowing the cuBLAS S-matrix: n*(offset+n) <= s_cap^2
+    // and n <= s_cap, floored to a kv_bs multiple. O(n) FA2/FMHA-served chunks
+    // need no S-matrix and return `desired` unchanged. 0 = even a kv_bs chunk
+    // cannot be served; caller must reject the request.
     int max_safe_prefill_chunk(int offset, int desired, int kv_bs) const;
 
-    // Graph-captured verify chunk (#847). The chunked continuation forward is
-    // replayable (InferenceState::ctx_capacity mode) only when the FP16-QK FA2
-    // kernel serves EVERY attention layer with device-read lengths: uniform
-    // hd=128 shapes, no learned sinks, no MLA, no LongRoPE (host branch on
-    // max_context_len selects the freq table), fa2_fp16qk not disabled.
+    // Graph-captured verify chunk (#847): the chunked continuation forward is
+    // replayable only when FP16-QK FA2 serves EVERY attention layer with
+    // device-read lengths: uniform hd=128, no learned sinks, no MLA, no
+    // LongRoPE, fa2_fp16qk not disabled.
     bool chunk_capture_supported() const;
     // Persistent K/V scratch for the replayable chunked continuation
-    // ([ctx_capacity, nkv, hd] FP16 each) — replaces the per-layer
+    // ([ctx_capacity,nkv,hd] FP16 each), replacing the per-layer
     // cudaMallocAsync whose size would bake the growing ctx_len into the
-    // graph. Idempotent; returns false on allocation failure.
+    // graph. Idempotent; false on allocation failure.
     [[nodiscard]] bool ensure_chunk_capture_scratch(int ctx_capacity);
 
-    // Grow-once scratch for the speculative verify path (argmax partials, and
-    // the per-vocab penalty counts). Sized from init-time constants, so the
-    // engine pre-warms it rather than letting the first verify step allocate
-    // while serving (A7 step 5.4).
+    // Grow-once scratch for the speculative verify path (argmax partials,
+    // per-vocab penalty counts), sized from init-time constants so the engine
+    // pre-warms it instead of letting the first verify step allocate while serving.
     [[nodiscard]] bool ensure_verify_scratch(bool with_penalties);
     void prewarm_verify_scratch();
     // Bumped whenever the shared forward workspace is reallocated. A captured
@@ -505,10 +437,9 @@ public:
     // For single sequence: pass vocab_size. For batched logprobs: pass vocab_size * n_sequences.
     void ensure_logits_pinned(int total_floats);
 
-    // Configure StreamingLLM smart KV cache: keeps the first `n_sinks` tokens
-    // and the last `window` tokens of every attended sequence, dropping the
-    // rest. Set n_sinks=0 to disable. Currently honoured only by the FP16 GQA
-    // decode kernel; quantized variants ignore this and fall back to plain
+    // Configure StreamingLLM smart KV cache: keeps the first n_sinks tokens
+    // and the last `window` tokens, drops the rest; n_sinks=0 disables.
+    // Honoured only by the FP16 GQA decode kernel; quantized variants ignore this and fall back to plain
     // sliding-window attention.
     void set_streaming_kv(int n_sinks, int window) {
         streaming_n_sinks_ = (n_sinks > 0) ? n_sinks : 0;
@@ -516,32 +447,30 @@ public:
     }
     int streaming_window() const { return streaming_window_; }
 
-    // LoRA runtime delta (issue #522): activation-path low-rank deltas, no
-    // weight patching — works with every quant tier. nullptr = base model.
-    // The caller (Engine) must invalidate decode graphs around swaps: the
-    // captured graph holds the adapter's kernel launches/pointers.
+    // LoRA runtime delta (#522): activation-path low-rank deltas, no weight
+    // patching, works with every quant tier. nullptr = base model. Caller
+    // (Engine) must invalidate decode graphs around swaps: the captured graph
+    // holds the adapter's kernel launches/pointers.
     void set_lora(const LoraAdapter* adapter);
     const LoraAdapter* lora() const { return lora_; }
 
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
-    // The executor reads its dispatch decisions from a DispatchPolicy owned by
-    // the Engine (the nine former RuntimeConfig sections, core/dispatch_policy.h;
-    // the RuntimeConfig::current() singleton is gone). Engine wires this via
-    // set_dispatch_policy() during init; the contract is "set before first
-    // access". Tests that build a bare GraphExecutor without an owning Engine
-    // must wire a DispatchPolicy themselves.
+    // Executor reads dispatch decisions from a DispatchPolicy owned by Engine
+    // (the nine former RuntimeConfig sections; RuntimeConfig::current() is
+    // gone). Engine wires this via set_dispatch_policy() during init; contract
+    // is "set before first access". A bare GraphExecutor in tests must wire one itself.
     void set_dispatch_policy(const DispatchPolicy& p) noexcept { dispatch_policy_ = &p; }
     // The KV cache's real block size, resolved by the engine before init().
     // Workspace sizing that converts a token count into a block count needs
     // this and not kKVBlockSize - the two differ on n_kv_heads <= 4 models.
     void set_kv_block_size(int n) noexcept { kv_block_size_ = n > 0 ? n : kKVBlockSize; }
 
-    // Activation calibration ([calibration] enabled): collect per-input-channel
-    // activation magnitudes off gemm_via_handle_ for an offline quantizer.
-    // Engine turns this on before the first forward and turns CUDA graphs off
-    // with it — the collector allocates lazily, which a capture forbids.
+    // Activation calibration ([calibration] enabled): collects per-input-
+    // channel activation magnitudes off gemm_via_handle_ for an offline
+    // quantizer. Engine turns this on before the first forward and turns CUDA
+    // graphs off with it, since the collector allocates lazily (a capture forbids that).
     void enable_calibration() {
         if (!calib_)
             calib_ = std::make_unique<ActivationCalibrator>(vram_alloc_);
@@ -556,10 +485,10 @@ public:
     }
 
 private:
-    // The init-time weight-quantization pipeline (the 23 pre_dequant_*/
+    // The init-time weight-quantization pipeline (23 pre_dequant_*/
     // nvfp4_decode_* methods + the build-only StoragePlan) was extracted to
-    // QuantPipeline (exec/quant_pipeline.h). GraphExecutor owns one
-    // (quant_pipeline_, below) and delegates pre_dequant_weights() to it.
+    // QuantPipeline (exec/quant_pipeline.h); GraphExecutor owns one and
+    // delegates pre_dequant_weights() to it.
 
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;
@@ -574,14 +503,12 @@ private:
     int max_tokens_ = 0;
 
     // Shared eval-side LM-head driver: applies the tier-aware LM head to
-    // hidden_[0..n_rows) in batches of max_logit_tokens_ and calls
-    // consume(logits_view, row0, csz) after each batch's logits (softcap
-    // already applied) land in logits_. Used by perplexity_nll_partial and
-    // greedy_argmax_all. allow_cutlass routes NVFP4 LM heads through the
-    // CUTLASS NVFP4-activation GEMM when built — true only for the
-    // perplexity harness (which measures that path's quality trade);
-    // spec-decode verify passes false so batch=1 outputs stay bit-identical
-    // to the FP16-activation GEMV regardless of gemm.nvfp4_lm_head_cutlass.
+    // hidden_[0..n_rows) in batches of max_logit_tokens_, calling
+    // consume(logits_view, row0, csz) per batch (softcap already applied).
+    // Used by perplexity_nll_partial and greedy_argmax_all. allow_cutlass
+    // routes NVFP4 LM heads through the CUTLASS NVFP4-activation GEMM (true
+    // only for the perplexity harness); spec-decode verify passes false so
+    // batch=1 output stays bit-identical to the FP16-activation GEMV.
     void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
                                  const std::function<void(const Tensor&, int, int)>& consume);
 
@@ -609,10 +536,10 @@ private:
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)
-    // set by forward_logits: the forward's rows are generated tokens (batched
-    // decode, one row per sequence, or a spec-verify chunk), not prompt rows.
-    // Gates the GGUF NVFP4 decode overlay for 2..32-row GEMMs (#1897); M
-    // alone cannot tell a decode step from a short prefill.
+    // Set by forward_logits: the forward's rows are generated tokens (batched
+    // decode or a spec-verify chunk), not prompt rows. Gates the GGUF NVFP4
+    // decode overlay for 2..32-row GEMMs (#1897): M alone cannot tell a decode
+    // step from a short prefill.
     bool cur_decode_rows_ = false;
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
@@ -620,10 +547,9 @@ private:
     // attribute set so the GPU can overlap tail of one kernel with head of next.
     bool use_pdl_ = false;
 
-    // --- Scratch arena (shared/persistent/decode workspace) ---
     // Owns the workspace buffers + sizes + the decode/prefill swap state; the
     // moved methods write the activation/phase tensors below through pointers
-    // set in ws_.init() (called from GraphExecutor::init). See exec/workspace.h.
+    // set in ws_.init() (see exec/workspace.h).
     Workspace ws_;
 
     // Persistent activation tensors (views into the persistent workspace)
@@ -632,18 +558,16 @@ private:
     Tensor norm_out_;  // [max_tokens, d_model] FP16
     Tensor logits_;    // [max_logit_tokens, vocab_size]
 
-    // FP32 residual accumulator for post-norm architectures (Gemma-3).
-    // Prevents FP16 overflow in the residual stream over many layers.
-    // The FP32 tensor is the "true" hidden state; the FP16 hidden_ is only
-    // used as input to RMSNorm (which is scale-invariant, so clamping is safe).
-    // nullptr for pre-norm models (LLaMA, Qwen, etc.).
+    // FP32 residual accumulator for post-norm architectures (Gemma-3):
+    // prevents FP16 overflow in the residual stream over many layers. FP32 is
+    // the "true" hidden state; FP16 hidden_ is only RMSNorm input (scale-
+    // invariant, so clamping is safe). nullptr for pre-norm models.
     void* fp32_accum_buf_ = nullptr;
     Tensor fp32_hidden_;  // [max_tokens, d_model] FP32 — true hidden state
 
-    // The shared/persistent workspace buffers + per-phase sizes live in ws_.
-    // The phase TENSORS below are views carved by GraphExecutor's
-    // configure_*_workspace methods (which slice ws_.shared()); the hot path
-    // reads them as members.
+    // Shared/persistent workspace buffers + per-phase sizes live in ws_. The
+    // phase tensors below are views carved by GraphExecutor's
+    // configure_*_workspace methods (slicing ws_.shared()); the hot path reads them as members.
 
     // Attention phase tensors (views into the shared workspace, set by configure_attn_workspace)
     Tensor q_;         // [max_tokens, n_heads * head_dim]
@@ -666,9 +590,9 @@ private:
     int chunk_capture_ctx_ = 0;
 
     // Persistent K/V gather scratch for the EAGER chunked path. Spec-verify
-    // re-enters that path per layer per verify step — per-call
-    // cudaMallocAsync/FreeAsync was ~140 alloc pairs per verify on hybrids
-    // (#847). Grow-only; reused across layers (stream-ordered use).
+    // re-enters that path per layer per verify step; per-call
+    // cudaMallocAsync/FreeAsync cost ~140 alloc pairs per verify on hybrids
+    // (#847). Grow-only, reused across layers (stream-ordered use).
     half* chunk_eager_k_ = nullptr;
     half* chunk_eager_v_ = nullptr;
     size_t chunk_eager_bytes_ = 0;
@@ -694,9 +618,8 @@ private:
                                  // built; sized only for has_gdn_ models.
 
     // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): five
-    // per-(chunk, head) strip arrays + the FP32 inter-strip state. Engine
-    // lifetime, allocated in allocate_workspace_buffers when the model has
-    // GDN layers; nullptr degrades the route to the fused scan.
+    // per-(chunk,head) strip arrays + FP32 inter-strip state. Engine lifetime,
+    // allocated when the model has GDN layers; nullptr degrades to the fused scan.
     void* gdn_chunkpar_ws_ = nullptr;
     size_t gdn_chunkpar_ws_bytes_ = 0;
 
@@ -726,20 +649,20 @@ private:
     void* nvfp4_dequant_ws_buf_ = nullptr;
     size_t nvfp4_dequant_ws_size_ = 0;
 
-    // MLA (DeepSeek) persistent QKV scratch — pre-allocated once (sized for
-    // max_tokens) so the materialized two-step KV projection never calls
-    // cudaMallocAsync inside the CUDA-graph-captured decode region (capture
-    // rejects stream-ordered alloc/free → silent eager fallback + degeneration).
+    // MLA persistent QKV scratch, pre-allocated once (sized for max_tokens) so
+    // the materialized two-step KV projection never calls cudaMallocAsync
+    // inside the CUDA-graph-captured decode region (capture rejects
+    // stream-ordered alloc/free -> silent eager fallback + degeneration).
     void* mla_kv_a_buf_ = nullptr;    // [max_tokens, kv_lora_rank + qk_rope_head_dim]
     void* mla_latent_buf_ = nullptr;  // [max_tokens, kv_lora_rank]
     void* mla_k_rope_buf_ = nullptr;  // [max_tokens, qk_rope_head_dim]
     void* mla_kv_b_buf_ = nullptr;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
 
-    // MLA absorbed-decode latent KV cache (Phase 3, opt-in attention.mla_absorb).
-    // Per-layer slice = [max_seq, kv_lora_rank + qk_rope_head_dim] FP16; cols
-    // [0:kv_lora_rank] = RMSNorm'd latent, [kv_lora_rank:] = post-RoPE decoupled
-    // key. Allocated only when mla_absorb is set, the model is_mla(), and every
-    // layer's kv_b_proj is FP16. Single-sequence only.
+    // MLA absorbed-decode latent KV cache (opt-in attention.mla_absorb).
+    // Per-layer slice [max_seq, kv_lora_rank+qk_rope_head_dim] FP16: cols
+    // [0:kv_lora_rank] = RMSNorm'd latent, rest = post-RoPE decoupled key.
+    // Allocated only when mla_absorb is set, model is_mla(), every layer's kv_b_proj is FP16. Single-sequence
+    // only.
     void* mla_absorb_cache_ = nullptr;        // [n_layers, max_seq, kv_lora+rope]
     float* mla_absorb_scores_ = nullptr;      // [n_heads, max_seq] decode scratch
     size_t mla_absorb_layer_stride_ = 0;      // halfs per layer = max_seq*(kv_lora+rope)
@@ -750,19 +673,18 @@ private:
     bool mla_scratch_unservable_ = false;
 
     // Set when allocate_nvfp4_dequant_workspace() could NOT pre-allocate the
-    // M>1 dequant scratch (largest NVFP4 weight exceeds the cap, or alloc
-    // failed). The fallback then lazy-cudaMallocs, which is illegal inside
-    // CUDA graph capture (cublasLt status 14 → cascading capture failure).
-    // The scheduler reads this to skip prefill-graph capture (run eager).
+    // M>1 dequant scratch (weight exceeds the cap, or alloc failed). The
+    // fallback then lazy-cudaMallocs, illegal inside CUDA graph capture; the
+    // scheduler reads this to skip prefill-graph capture.
     bool nvfp4_dequant_uncapturable_ = false;
 
 public:
     bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
 
     // True when MoE prefill will run the legacy host-args fallback (no CUTLASS
-    // NVFP4 grouped workspace — e.g. any GGUF Q*_K MoE model). That path reads
-    // routing on the host (D2H + sync) and throws under an active capture, so
-    // the scheduler must not attempt prefill-graph capture at all (#874).
+    // NVFP4 grouped workspace, e.g. GGUF Q*_K MoE). That path reads routing on
+    // the host (D2H+sync) and throws under active capture, so the scheduler
+    // must not attempt prefill-graph capture at all (#874).
     bool moe_prefill_uncapturable() const;
 
 private:
@@ -806,21 +728,18 @@ private:
     void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
     const int32_t* banned_cache_(const InferenceState& state, cudaStream_t stream);
     void flush_pending_topk_rows_(cudaStream_t stream);
-    // Row-batched top-k/top-p staging: sample_single_from_logits_async STASHES
+    // Row-batched top-k/top-p staging: sample_single_from_logits_async stashes
     // eligible rows here instead of launching; collect_sampled_tokens uploads
-    // the args (one pinned H2D) and fires ONE partial + ONE finalize launch
-    // for the whole batch. Greedy rows launch immediately (2 cheap kernels).
+    // args (one pinned H2D) and fires ONE partial + ONE finalize launch for
+    // the whole batch. Greedy rows launch immediately.
     PinnedBuffer h_row_args_;            // pinned, 2 x sample_slots_ entries (parity halves, T5b)
     TopkRowArgs* d_row_args_ = nullptr;  // device mirror (same layout)
     int n_pending_topk_rows_ = 0;
     int pending_topk_max_k_ = 0;
     int pending_topk_vocab_ = 0;
-    // Greedy + penalty row staging, same stash/flush contract as top-k above
-    // (2026-08-27: 31 rows/step used to fire 62 serialized argmax pairs plus
-    // 31 vocab-sweep penalty launches eager between graph replays — 6.6% of
-    // serving wall was gaps in that chain). Flush order in the collectors is
-    // penalties -> greedy -> top-k, which preserves each row's own
-    // penalties-before-sampler order on the single stream.
+    // Greedy + penalty row staging, same stash/flush contract as top-k above.
+    // Flush order in the collectors is penalties -> greedy -> top-k, preserving
+    // each row's own penalties-before-sampler order on the single stream.
     void flush_pending_greedy_rows_(cudaStream_t stream);
     void flush_pending_penalty_rows_(cudaStream_t stream);
     PinnedBuffer h_greedy_args_;              // pinned, 2 x sample_slots_ (parity halves)
@@ -899,15 +818,12 @@ private:
     // Replaces RuntimeConfig::current() inside GraphExecutor::* methods.
     const DispatchPolicy* dispatch_policy_ = nullptr;
 
-    // --- Allocation and configuration methods ---
     // The shared/persistent/decode scratch arena (allocate_*_workspace,
     // compute_shared_sizes, workspace_estimate, resize_workspace,
     // allocate_decode_workspace, use_workspace) moved into Workspace
-    // (exec/workspace.h); GraphExecutor owns ws_ and delegates.
-    //
-    // The four per-phase carvers stay here: they write GraphExecutor's
-    // activation-tensor members (q_/k_/v_/.../gdn_fused_proj_buf_) by slicing
-    // the shared buffer (read via ws_.shared()), so they belong on GraphExecutor.
+    // (exec/workspace.h); GraphExecutor owns ws_ and delegates. The four
+    // per-phase carvers stay here: they write GraphExecutor's activation-tensor
+    // members by slicing the shared buffer, so they belong on GraphExecutor.
     void configure_attn_workspace(int max_tokens);
     void configure_ffn_workspace(int max_tokens);
     void configure_moe_workspace(int max_tokens);
@@ -927,29 +843,25 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
-    // Sibling-pair small-M dispatch: both weights consume the SAME input and
-    // both route to the smallm v2 kernel — run them as one launch
-    // (gemm_nvfp4_smallm_v2_pair_a4). Returns false (and does nothing) when
-    // either weight would not take that route; the caller then issues the
-    // two gemm_via_handle_ calls it would have issued anyway.
+    // Sibling-pair small-M dispatch: two weights consuming the SAME input,
+    // both routing to the smallm v2 kernel, run as one launch
+    // (gemm_nvfp4_smallm_v2_pair_a4). False (and no-op) when either weight
+    // would not take that route; caller then issues the two separate calls it would have anyway.
     bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                    Tensor& out_a, Tensor& out_b, const GemmContext& ctx);
-    // Batched-decode GDN alpha + beta projections in one narrow FP16 launch
-    // (gdn.alpha_beta_smallm, executor_gdn_alpha_beta.cu). Returns false and
-    // launches nothing when a weight is not FP16-resident or a shape does not
-    // fit; the caller then issues its two gemm_via_handle_ calls.
+    // Batched-decode GDN alpha+beta projections in one narrow FP16 launch
+    // (gdn.alpha_beta_smallm). False and no-op when a weight is not
+    // FP16-resident or a shape doesn't fit; caller then issues its two calls.
     bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
                                     Tensor& beta_out, cudaStream_t stream);
     // The NVFP4 view gemm_via_handle_ would hand the M=1 decode GEMV for this
     // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
     // its source bytes). false = that dispatch would not take the GEMV.
     bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
-    // M=1 GDN launch fusion (gdn.m1_fused, executor_gdn_alpha_beta.cu):
-    // in_proj + gate + alpha + beta in one GEMV launch; the out-projection
-    // adds the residual in its epilogue. Each returns false and launches
-    // nothing when a weight or shape does not fit; the caller keeps its path.
-    // alpha/beta go to ssm_dt_buf_ in the 4-call layout (alpha at 0, beta at
-    // the 256-byte-aligned offset) that the scan reads.
+    // M=1 GDN launch fusion (gdn.m1_fused): in_proj+gate+alpha+beta in one
+    // GEMV; out-proj adds the residual in its epilogue. False and no-op when a
+    // weight/shape doesn't fit. alpha/beta land in ssm_dt_buf_ (alpha at 0,
+    // beta at the 256-byte-aligned offset) for the scan to read.
     bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
                                  int n_heads, cudaStream_t stream);
     bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
@@ -964,11 +876,9 @@ private:
     bool try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input,
                                     const GemmContext& ctx);
     // True when an M>1 dispatch of `id` is guaranteed to take the CUTLASS
-    // NVFP4 prefill block in gemm_via_handle_ (which quantizes the input
-    // into the shared activation scratch). Gate for the act-quant-hint
-    // dedupe at the QKV / gate-up call sites — must be CONSERVATIVE: a
-    // false negative just re-quantizes; a false positive would skip with a
-    // stale scratch.
+    // NVFP4 prefill block (which quantizes input into shared activation
+    // scratch). Gates the act-quant-hint dedupe at QKV/gate-up call sites;
+    // must be CONSERVATIVE: false negative just re-quantizes, false positive skips with stale scratch.
     bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
@@ -989,53 +899,45 @@ private:
     // / smallM / legacy host-args sub-variants). Predicate is checked
     // internally; returns true if the path ran.
     bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
-    // Cheap precondition mirror for try_run_moe_cutlass3x_nvfp4_prefill_'s
-    // device-args fast path. Read upstream of moe_gather to skip the gather
-    // when the path is guaranteed to fire (and thereby own this MoE layer
-    // exclusively — it reads ctx.no via sorted_token_ids and doesn't need
-    // the gathered intermediate). If the device-args path's run-time gate
-    // turns out false anyway, the legacy fallback gathers lazily — so a
-    // mismatch here costs at most one wasted gather, never wrong output.
+    // Cheap precondition mirror for the device-args fast path, read upstream
+    // of moe_gather to skip the gather when the path is guaranteed to fire (it
+    // reads ctx.no via sorted_token_ids and doesn't need the gathered
+    // intermediate). A mismatch costs at most one wasted gather, never wrong output.
     bool moe_cutlass3x_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
-    // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
-    // after routed experts have written into h. Reads `no` (post-norm) and
-    // adds its result back into `h` via elementwise_add. No-op when
-    // ly.w_up_shared is null or the runtime opt-out is set.
+    // Optional shared expert (parallel dense FFN), called from run_moe_ffn
+    // after routed experts wrote into h. Reads `no` (post-norm), adds its
+    // result into `h` via elementwise_add. No-op when ly.w_up_shared is null
+    // or the runtime opt-out is set.
     void run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
                                float eps, const Tensor& no, Tensor& h);
-    // MoE decode fast-path (n=1, device-resident packed experts):
-    // dispatches all top_k experts in a single kernel per projection. NVFP4
-    // and dp4a/FP16 sub-paths handled internally. Sets `residual_fused`=true
-    // when the weighted sum fused the residual add (no shared expert path
-    // active). Caller invokes only when decode_fast eligibility predicate
-    // returned true.
+    // MoE decode fast-path (n=1, device-resident packed experts): dispatches
+    // all top_k experts in a single kernel per projection (NVFP4 and dp4a/FP16
+    // sub-paths handled internally). Sets residual_fused=true when the
+    // weighted sum fused the residual add (no shared expert active).
     void run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff,
                              int top_k, const MoeRoutingResult& routing,
                              const Tensor& no, Tensor& h, const Tensor& r,
                              bool moe_use_fp32_residual, bool moe_fused_norm_q8,
                              bool will_skip_residual_copy, bool& residual_fused);
-    // Decode step for a layer whose NVFP4 experts live on host: stages the
-    // routed experts into the LRU cache's slot pool and runs the ordinary
-    // fused NVFP4 GEMVs against it. Only called when the dispatch predicate in
-    // run_moe_decode_fast says every precondition holds — see
-    // nvfp4_expert_offload.h. Defined in executor_forward_moe_nvfp4_host.cu.
+    // Decode step for a layer whose NVFP4 experts live on host: stages routed
+    // experts into the LRU cache's slot pool, runs ordinary fused NVFP4 GEMVs
+    // against it. Called only when run_moe_decode_fast's dispatch predicate
+    // (nvfp4_expert_offload.h) confirms every precondition holds.
     void run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff, int top_k,
                                    const MoeRoutingResult& routing, const Tensor& no, Tensor& h,
                                    const Tensor& r, bool moe_use_fp32_residual,
                                    bool will_skip_residual_copy, bool& residual_fused,
                                    bool non_gated_experts);
 
-    // Stage every expert of one host-resident NVFP4 layer into
-    // moe_.layer_stage_buf, so the prefill reads them from device memory
-    // instead of issuing two H2D per expert. Fills `out` with one view per
-    // projection and returns true when at least one was staged.
-    // Defined in executor_forward_moe_nvfp4_host.cu.
+    // Stages every expert of one host-resident NVFP4 layer into
+    // moe_.layer_stage_buf, so prefill reads them from device memory instead
+    // of two H2D per expert. Fills `out` with one view per projection; true when at least one was staged.
     bool stage_nvfp4_layer_(int layer, cudaStream_t stream, StagedProj out[kExpertProjCount]);
 
-    // Build a CUTLASS device-args view over a layer staged by the call above,
-    // so a host-resident layer dispatches like a device-resident one. Returns
-    // false when the layer was not staged, a projection could not build its
-    // SfAtom view, or the opt-in is off. Defined alongside the stager.
+    // Builds a CUTLASS device-args view over a layer staged by
+    // stage_nvfp4_layer_, so a host-resident layer dispatches like a
+    // device-resident one. False when the layer was not staged, a projection
+    // could not build its SfAtom view, or the opt-in is off.
     bool build_staged_device_args_(const MoeFfnContext& ctx, bool non_gated,
                                    MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const;
 
@@ -1045,28 +947,25 @@ private:
 
 public:
     // Throws when a MoE layer's NVFP4 experts are host-resident and nothing
-    // can serve them from there. Call after pre_dequant_weights(): it needs
-    // Phase 0's promotion and the initialised expert cache, which is why it
-    // cannot live at weight-upload time. See the definition for the history.
+    // can serve them from there. Call after pre_dequant_weights(): needs
+    // Phase 0's promotion and the initialised expert cache.
     void verify_host_expert_placement() const;
 
 private:
-    // Compute MoE routing: gate logits (FP32 router fast-path for Gemma-4
-    // already done by caller — signaled via `fp32_gate_logits_ready`) + topk
+    // Computes MoE routing: gate logits (FP32 router fast-path for Gemma-4
+    // already done by caller, signaled via fp32_gate_logits_ready) + topk
     // gating + per-expert weight scaling (Nemotron, Gemma-4). Caller passes
-    // pre-normalized `router_in` if !fp32_gate_logits_ready.
+    // pre-normalized router_in if !fp32_gate_logits_ready.
     void compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                              int top_k, const Tensor& router_in,
                              bool fp32_gate_logits_ready, bool will_decode_fast,
                              const void* router_bias_ptr, bool use_sigmoid,
                              bool norm_weights, MoeRoutingResult& routing);
 public:
-    // Per-layer expert imbalance, readable while serving (#1548). peak is the
-    // worst max(M_e) seen on that layer, mean_max the average of the per-launch
-    // maxima, mean_rows the average rows per expert per launch. The ratio
-    // mean_max / mean_rows is what says whether a layer is padding-bound: the
-    // grouped GEMM pads every expert to one M tile, so a single hot expert sets
-    // it for all of them. Empty until a MoE layer has run.
+    // Per-layer expert imbalance, readable while serving (#1548). peak = worst
+    // max(M_e) on that layer; mean_max = average per-launch maxima; mean_rows
+    // = average rows per expert per launch. mean_max/mean_rows says whether a
+    // layer is padding-bound (grouped GEMM pads every expert to one M tile).
     struct MoeImbalance {
         uint32_t peak_max = 0;
         double mean_max = 0.0;
@@ -1080,11 +979,10 @@ private:
     // Destructor-time, so it covers the whole process rather than one request.
     void dump_moe_expert_hist_();
     void dump_moe_expert_trace_();
-    // Fused Q6_K prefill MoE path: reads Q6_K weights directly (no FP16
-    // dequant scratch), TC variant uses gather-free sorted_token_ids
-    // indirection, scalar variant materializes the gathered buffer.
-    // Fills moe_.expert_{gate,up,swiglu,down} for downstream scatter.
-    // Returns true when path was taken (caller skips general path branches).
+    // Fused Q6_K prefill MoE path: reads Q6_K weights directly, no FP16
+    // dequant scratch. TC variant uses gather-free sorted_token_ids
+    // indirection; scalar variant materializes the gathered buffer. Fills
+    // moe_.expert_{gate,up,swiglu,down}; true when the path was taken.
     bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
@@ -1093,12 +991,10 @@ private:
     bool try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
-    // Gemma-4 ggml MMVQ per-token prefill: processes tokens individually via
-    // FP16 batch dequant + cublasGemmGroupedBatchedEx prefill: dequants all
-    // experts to FP16 in one shot, runs a single grouped GEMM per projection.
-    // One D2H sync per layer for offsets (unavoidable for grouped GEMM API).
-    // Falls through to scatter (caller's responsibility); returns true when
-    // path was taken.
+    // Gemma-4 ggml MMVQ per-token prefill: FP16 batch dequant + a single
+    // cublasGemmGroupedBatchedEx per projection (dequants all experts in one
+    // shot). One D2H sync per layer for offsets (unavoidable for the grouped
+    // GEMM API). Falls through to scatter; true when the path was taken.
     bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff, int ne,
                                         int expanded, bool non_gated_experts, QType up_qtype,
                                         const MoeRoutingResult& routing);
@@ -1118,12 +1014,10 @@ private:
     bool layer_has_moe(int layer) const;
     bool layer_has_dense_ffn(int layer) const;
 
-    // Write computed K/V into KV cache blocks
-    // Default call (row_begin=0, n_rows=-1, null overrides) is the historical
-    // behavior. The ragged-prefill per-seq loop passes a row range into the
-    // shared k_/v_ workspaces plus FLAT per-seq block tables and a positions
-    // pointer for that range; overrides force single-sequence kernel indexing
-    // (max_blocks_per_seq=0) and skip the residual write-through.
+    // Writes computed K/V into KV cache blocks. Default call (row_begin=0,
+    // n_rows=-1, null overrides) is the historical single-sequence path. The
+    // ragged-prefill per-seq loop passes a row range plus FLAT per-seq block
+    // tables and a positions pointer, forcing single-sequence kernel indexing.
     void write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream, int row_begin = 0,
                         int n_rows = -1, const int* bt_flat = nullptr, const int* bt_swa_flat = nullptr,
                         const int* positions_override = nullptr);

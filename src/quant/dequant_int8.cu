@@ -7,20 +7,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// INT8 -> FP16 dequantization kernel with per-element scales.
-//
-// The caller is responsible for pre-expanding (broadcasting) scales so that
-// scales[i] is the correct scale factor for element i.  This keeps the kernel
-// flexible: it works for per-tensor, per-channel, and per-group quantization
-// as long as the scales buffer has been prepared accordingly.
-//
-//   output[i] = (float)input[i] * __half2float(scales[i])
-//
-// For bandwidth efficiency each thread processes 4 consecutive elements using
-// a 32-bit load for the INT8 data and two 32-bit loads for two packed half2
-// values, then writes two half2 values.
-// ---------------------------------------------------------------------------
+// INT8->FP16 dequant with per-element scales: caller pre-expands (broadcasts) scales so
+// scales[i] is element i's factor, working for per-tensor/channel/group quantization alike.
+// output[i] = (float)input[i] * half2float(scales[i]).
 
 static constexpr int kBlockSize = 256;
 static constexpr int kElemsPerThread = 4;

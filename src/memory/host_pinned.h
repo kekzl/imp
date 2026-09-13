@@ -1,56 +1,37 @@
 #pragma once
 
-// T5's engine-persistent half: pinned host memory with an owner
-// (docs/internals/MEMORY.md §A2, and the correction to it recorded there).
-//
-// `Backend` covers DEVICE memory only, which left every pinned host buffer in
-// the engine allocating through the driver directly — 26 acquisition sites in
-// 11 files at the time this was written, the largest single class remaining on
-// the I1 allowlist and the only one with no tier to move to.
-//
-// Why it is not simply "T5" as A2 first described it. That row reads "transient
-// host-staging, load only, failure mode made impossible: surviving load
-// (asserted at phase transition)". Most of these buffers cannot obey that: a
-// pinned staging buffer for the per-step D2H gather exists PRECISELY so that it
-// is pinned once and reused every decode step, so it must survive into
-// `AllocPhase::Serving` by construction. Asserting it away would delete the
-// optimisation. So T5 has two halves, and this is the engine-persistent one;
-// the transient load staging A2 described keeps its own discipline.
-//
-// The seam is an interface rather than a free function for the same reason
-// `Backend` is: it makes the whole thing testable in the CPU-only CI lane
-// (§A6). `graph_slots.h` introduced it for the slot pool; it lives here now
-// because it is a tier, not a detail of one pool.
+// T5's engine-persistent half: pinned host memory with an owner (MEMORY.md A2).
+// `Backend` covers DEVICE memory only, which left every pinned host buffer allocating
+// through the driver directly (the largest remaining I1-allowlist class with no tier).
+// Not simply "T5" as A2 first described it (that row assumes transient load-only
+// staging): a pinned staging buffer for the per-step D2H gather is pinned once and
+// reused every decode step, so it must survive into Serving by construction. T5
+// therefore has two halves; this is the engine-persistent one, and load-only staging
+// keeps its own discipline.
+// An interface, like Backend, so the whole thing is testable in the CPU-only CI lane
+// (A6); introduced for the slot pool but lives here because it's a tier, not a pool
+// detail.
 
 #include <cstddef>
 #include <utility>
 
 namespace imp {
 
-// Whether the allocation must also be visible to the device through a mapped
-// pointer. The engine uses both: `Mapped` for the buffers a kernel or a
-// captured graph reads in place (the conditional-graph ring, step counters),
-// `Plain` for staging that is only ever the target of an explicit copy.
-//
-// Stated honestly, because it was mutation-tested: on a unified-virtual-address
-// platform the two are NOT distinguishable through this interface. Only `Mapped`
-// is ever handed a device view here, and `cudaHostGetDevicePointer` succeeds
-// under UVA even for an allocation made without the mapped flag — so a build
-// that wrongly passed `cudaHostAllocMapped` for everything would pass every test
-// in tests/test_host_pinned.cpp. The distinction is therefore a statement of
-// intent (request mapping only where a device-side view is actually used, and
-// keep the seam correct on a platform where it does matter), not a behaviour the
-// CPU lane can pin. Whether the flag costs anything measurable on sm_120 is
-// unmeasured.
+// Whether the allocation must also be device-visible through a mapped pointer. `Mapped`
+// for buffers a kernel or captured graph reads in place; `Plain` for staging that is
+// only ever an explicit copy target.
+// Not distinguishable on a UVA platform through this interface alone
+// (cudaHostGetDevicePointer succeeds under UVA even without the mapped flag, so a build
+// that always passed cudaHostAllocMapped would still pass every test); the distinction
+// is a statement of intent, kept correct for a platform where it does matter.
 enum class HostPinnedKind { Plain, Mapped };
 
 class HostPinnedAllocator {
 public:
     virtual ~HostPinnedAllocator() = default;
-    // On success writes the host pointer, and for `Mapped` its device-side
-    // view. `out_device` is left null for `Plain`. Never throws: exhaustion is
-    // a false return, which every caller must already handle because that is
-    // what a failed cudaHostAlloc looked like before (I6).
+    // On success writes the host pointer, and for Mapped its device-side view (out_device
+    // left null for Plain). Never throws: exhaustion is a false return, which every caller
+    // must already handle (I6).
     [[nodiscard]] virtual bool alloc(size_t bytes, HostPinnedKind kind, void** out_host,
                                      void** out_device) = 0;
     virtual void free(void* host) = 0;
@@ -59,18 +40,12 @@ public:
 // cudaHostAlloc(Default|Mapped) + cudaHostGetDevicePointer + cudaFreeHost.
 HostPinnedAllocator& cuda_host_pinned_allocator();
 
-// ─────────────────────────────────────────────────────────────────────
-// PinnedBuffer — the owner. Move-only RAII over one pinned host allocation,
-// so a call site holds a member instead of an alloc/free pair it has to
-// remember to match. Same relationship to HostPinnedAllocator that Region has
-// to Backend, and the same reason: the per-object leak stops being possible
-// because there is no per-object free left to forget.
-//
-// An empty buffer is the failure value. `data()` returns null, `bytes()` zero,
-// and `operator bool` is false — the state every consumer of these buffers
-// already tests for, since a failed pinned allocation has always degraded to a
-// slower path rather than being fatal.
-// ─────────────────────────────────────────────────────────────────────
+// PinnedBuffer: the owner. Move-only RAII over one pinned host allocation, so a call
+// site holds a member instead of an alloc/free pair to remember. Same relationship to
+// HostPinnedAllocator that Region has to Backend: no per-object free left to forget.
+// An empty buffer is the failure value (data() null, bytes() zero, operator bool false),
+// the state every consumer already tests for since a failed pinned allocation has always
+// degraded to a slower path rather than being fatal.
 class PinnedBuffer {
 public:
     PinnedBuffer() = default;
@@ -118,28 +93,16 @@ private:
     size_t bytes_ = 0;
 };
 
-// ─────────────────────────────────────────────────────────────────────
-// HostRegistration — pinning memory imp does NOT own.
-//
-// `cudaHostRegister` page-locks an existing mapping (imp's case: the mmap'd
-// GGUF, registered read-only so the H2D copies can DMA). It is not an
-// allocation: there is nothing to free, only something to un-register, which is
-// why PinnedBuffer is the wrong owner and this is a separate type rather than a
-// flag on it. Same discipline though — move-only, releases exactly once, and a
-// failed registration is an empty object rather than an exception.
-//
-// The leak this makes impossible is the asymmetric one: an early return between
-// register and unregister leaves a page-locked region behind that nothing owns,
-// and unlike a leaked allocation it does not show up as missing bytes.
-//
-// The registrar is an interface for the same reason `Backend` and
-// `HostPinnedAllocator` are, and it was not optional: without a device every
-// registration fails, so on the CPU-only CI lane every path through this class
-// collapses to "empty" and the ownership behaviour is unverifiable. Mutation
-// testing showed exactly that — a reset() that forgot to clear its pointer and a
-// dropped null guard both passed. With a substitutable registrar the CPU lane
-// pins the ownership, and the driver call itself is the only untested line.
-// ─────────────────────────────────────────────────────────────────────
+// HostRegistration: pinning memory imp does NOT own. cudaHostRegister page-locks an
+// existing mapping (imp's case: the mmap'd GGUF, read-only, so H2D copies can DMA). Not
+// an allocation, only something to un-register, so it is a separate type rather than a
+// flag on PinnedBuffer. Same discipline: move-only, releases exactly once, a failed
+// registration is an empty object.
+// Prevents the asymmetric leak: an early return between register and unregister leaves a
+// page-locked region behind that nothing owns and does not show up as missing bytes.
+// An interface (like Backend/HostPinnedAllocator) so the CPU-only CI lane can pin the
+// ownership behaviour even though every registration fails there without a device; the
+// driver call itself is the only untested line.
 class HostRegistrar {
 public:
     virtual ~HostRegistrar() = default;

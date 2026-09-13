@@ -53,11 +53,10 @@ bool awq_apply_vector_div(unsigned char* bytes, size_t n_elems, const std::strin
         return false;
     if (dtype != "F32" && dtype != "F16" && dtype != "BF16")
         return false;
-    // The narrowing goes through awq_round_to_dtype rather than through
-    // __float2half here, so the value the planner PREDICTED this fold would
-    // store (and clamped the divisor against) is the value it writes. The two
-    // differ on 1024 subnormal ties out of 2^32 (core/fp_bits.h), which is
-    // nothing on a norm weight and everything for a bound that must hold.
+    // Narrows via awq_round_to_dtype rather than __float2half directly, so the value the
+    // planner PREDICTED this fold would store (and clamped the divisor against) is the value
+    // actually written. The two differ on a small fraction of subnormal ties (core/fp_bits.h) -
+    // nothing on a norm weight, everything for a bound that must hold.
     for (size_t i = 0; i < n_elems; i++) {
         const float d = div[i];
         if (d == 0.0f || d == 1.0f)

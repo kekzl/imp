@@ -1,13 +1,8 @@
-// MoE FFN forward pass — extracted from executor_forward.cu for maintainability.
-// Contains: GraphExecutor::run_moe_ffn() — complete MoE pipeline:
-//   routing → expert dispatch → scatter → residual add
-//
-// Dispatch paths:
-//   1. NVFP4 decode fast (n=1, NVFP4 cached weights)
-//   2. TC fused (tensor-core Q6K/Q4K GEMM, persistent work-queue)
-//   3. Scalar fused (dp4a GEMV for small expert sizes)
-//   4. Batch path (cuBLAS/CUTLASS for large batches)
-//   5. Shared expert path (parallel dense FFN when present)
+// MoE FFN forward pass, extracted from executor_forward.cu.
+// GraphExecutor::run_moe_ffn(): routing -> expert dispatch -> scatter -> residual add.
+// Dispatch paths: 1 NVFP4 decode fast (n=1); 2 TC fused (Q6K/Q4K GEMM);
+// 3 scalar fused (dp4a GEMV, small experts); 4 batch (cuBLAS/CUTLASS,
+// large batches); 5 shared expert (parallel dense FFN when present).
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -88,12 +83,11 @@ __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
 
 namespace {
 
-// `host_pool_ok` lets host-resident experts through: the fused decode kernels
-// address `base + idx * stride`, and the expert cache's per-layer slot pool is
-// exactly that shape, so run_moe_decode_fast can feed them slot indices instead
-// of expert ids. Without it a host-resident layer drops to the serial fallback,
-// which measured ~48 kernel launches per layer against this path's ~3
-// (docs/roadmap.md).
+// host_pool_ok lets host-resident experts through: fused decode kernels
+// address base+idx*stride, and the expert cache's per-layer slot pool is
+// exactly that shape, so run_moe_decode_fast can feed slot indices instead
+// of expert ids. Without it, a host-resident layer drops to the serial fallback (far more kernel launches per
+// layer).
 static bool can_decode_fast(int n, const Tensor& expert_up_packed, QType up_qtype, void* dequant_buf,
                             QType compute_dtype, bool host_pool_ok, bool nvfp4_host_ok) {
     if (n != 1 || compute_dtype != QType::F16)
@@ -116,11 +110,10 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
     configure_moe_workspace(ws_.shared_max_tokens());
 
-    // Phase 4 (MoE host-offload async prefetch). The cache is only initialised
-    // when some experts are host-resident; n_slots_ > 0 is therefore the
-    // gate. Order matters: drain this layer's pending prefetch before
-    // reading the cache, then queue the next layer's prefetch so the
-    // prefetch stream gets compute-time overlap.
+    // Phase 4 (MoE host-offload async prefetch), gated by n_slots_ > 0 (cache
+    // initialised only when some experts are host-resident). Order matters:
+    // drain this layer's pending prefetch before reading the cache, then queue the next layer's prefetch for
+    // compute-time overlap.
     if (expert_cache_.n_slots_ > 0) {
         const int top_k_prefetch = dispatch_policy().moe.prefetch_top_k;
         if (top_k_prefetch > 0) {
@@ -133,10 +126,9 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
         }
     }
 
-    // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
-    // legacy-serial-fallback uninit reads become deterministic zero reads.
-    // Enable via the moe.zero_workspace config flag (was IMP_MOE_ZERO_WORKSPACE env). Cheap (~1 MiB
-    // total memset).
+    // Diagnostic (Phase 2 follow-up): zeroes MoE workspace buffers so any
+    // legacy-serial-fallback uninit read becomes a deterministic zero.
+    // Enabled via moe.zero_workspace. Cheap (~1 MiB memset).
     if (dispatch_policy().moe.zero_workspace) {
         cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
@@ -165,15 +157,12 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     ctx.r  = view_tokens(residual_, ctx.n);
     ctx.no = view_tokens(norm_out_, ctx.n);
 
-    // 1. Save residual (skip if decode fast path will handle it —
-    //    h.data is never written before the final weighted_sum_residual).
-    // Gemma 4: parallel branches — MoE experts use rmsnorm(h, pre_ffw_norm_2),
-    // shared MLP uses rmsnorm(h, ffn_norm). Pick MoE-side norm here; the shared
-    // branch recomputes its own norm later (reading from the saved residual).
-    // Qwen3.5/3.6 GGUFs store FFN input norm as `post_attention_norm` (no
-    // dedicated `ffn_norm`); match the fallback chain used in run_ffn. Without
-    // this, MoE reuses the pre-attention norm and the residual stream explodes
-    // (observed on Qwen3.6-35B-A3B GDN+MoE: logits L2=100k, garbage output).
+    // Save residual (skipped if the decode fast path will handle it). Gemma 4:
+    // parallel branches use rmsnorm(h, pre_ffw_norm_2) for MoE experts vs
+    // rmsnorm(h, ffn_norm) for the shared MLP; pick the MoE-side norm here.
+    // Qwen3.5/3.6 GGUFs store FFN input norm as post_attention_norm (no
+    // dedicated ffn_norm); match the same fallback chain run_ffn uses, or MoE
+    // reuses the pre-attention norm and the residual stream explodes.
     const Tensor& norm_w = (prof.is_gemma4 && ly.ffn_pre_norm_2.data != nullptr)
                                ? ly.ffn_pre_norm_2
                            : (ly.ffn_norm.data != nullptr)       ? ly.ffn_norm
@@ -207,16 +196,15 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
         // decode step that alone was ~8 ms/step at n=16 (nsys 2026-07-12).
         device_copy_async(ctx.r.data, ctx.h.data, ctx.h.nbytes(), stream);
     }
-    // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
-    // Gemma-4 with FP32 accum: compute norm from FP32 residual, then quantize to Q8_1
-    // separately. The fused kernel reads FP16 h which loses ~0.03% per element that
-    // compounds catastrophically through the 128-expert top-8 MoE routing.
+    // Fused RMSNorm+Q8_1 is skipped for NVFP4-covered layers (NVFP4 takes
+    // FP16 directly) and for Gemma-4 FP32 accum (compute norm from the FP32
+    // residual, quantize to Q8_1 separately): the fused kernel's FP16 h read
+    // loses precision that compounds catastrophically through 128-expert top-8 MoE routing.
     ctx.gemma4_fp32_norm = (prof.is_gemma4 && fp32_accum_buf_ != nullptr);
-    // When FP32 residual accumulator is active AND post_ffn_norm exists, defer the
-    // residual add to rmsnorm_fp32_accum_to_fp16_kernel (which keeps fp32_hidden_ in
-    // sync + applies overflow scaling). Without this, moe_weighted_sum_residual
-    // adds residual in FP16 and the shadow goes stale — measured ~7% drift at L3
-    // that compounds to 260% by L29 vs llama.cpp (regenerate with tools/analysis/layer_diff.py).
+    // When the FP32 residual accumulator is active AND post_ffn_norm exists,
+    // defer the residual add to rmsnorm_fp32_accum_to_fp16_kernel (keeps
+    // fp32_hidden_ in sync + applies overflow scaling). Without this,
+    // moe_weighted_sum_residual adds in FP16 and the FP32 shadow goes stale, compounding drift across layers.
     ctx.moe_use_fp32_residual = (prof.is_gemma4 && fp32_accum_buf_ != nullptr &&
                                  ly.post_ffn_norm.data != nullptr);
     ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
@@ -252,15 +240,14 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 
     // 3. Gate logits + top-k routing
     Tensor router_in = ctx.no;
-    // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * (1/sqrt(d)) * gate_inp_scale)
-    // This matches llama.cpp's gemma4-iswa.cpp:151-155.
-    // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
-    // and produces ~2x too small router logits, causing wrong expert selection.
+    // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) *
+    // (1/sqrt(d)) * gate_inp_scale), matching llama.cpp's gemma4-iswa.cpp.
+    // The standard router_in = rmsnorm(h, ffn_pre_norm_2) uses the wrong norm
+    // weight and produces ~2x too-small logits, causing wrong expert selection.
     if (prof.is_gemma4 && ly.ffn_gate_inp_scale.data != nullptr) {
-        // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * scale * (1/sqrt(d)))
-        // Keep router_in in FP32 to prevent precision loss that causes routing instability
-        // at later layers (L29). The FP16 intermediate loses enough precision to change
-        // expert selection in the 128-expert top-8 MoE.
+        // Keeps router_in in FP32 to prevent precision loss that causes routing
+        // instability at later layers: the FP16 intermediate loses enough
+        // precision to change expert selection in the 128-expert top-8 MoE.
         if (fp32_accum_buf_ != nullptr && ctx.n == 1) {
             // FP32 router path: rmsnorm(fp32_h, gate_inp_scale) * 1/sqrt(d) → FP32
             // Stays in FP32 all the way through gate GEMV (no FP16 truncation).
@@ -326,10 +313,9 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
                         ctx.fp32_gate_logits_ready, ctx.will_decode_fast, router_bias_ptr,
                         use_sigmoid, norm_weights, ctx.routing);
 
-    // Build per-expert tensor views for grouped GEMM.
-    // Two paths:
-    // - Pre-dequanted: expert_w_gate[e] etc. are FP16 on GPU (legacy / unquantized packed)
-    // - On-the-fly dequant: expert_*_packed is raw Q6_K/Q8_0/Q4_0 on GPU, dequant per GEMM
+    // Per-expert tensor views for grouped GEMM, two paths: pre-dequanted
+    // (expert_w_gate[e] etc. FP16 on GPU, legacy/unquantized packed) or
+    // on-the-fly dequant (expert_*_packed raw Q6_K/Q8_0/Q4_0, dequant per GEMM).
     ctx.use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr);
 
     // Non-gated expert FFN detection: no gate weights (Nemotron uses SiLU(up(x)) instead of SwiGLU)
@@ -353,21 +339,19 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     }
 }
 
-// Cheap precondition mirror for the CUTLASS 3.x NVFP4 device-args fast path
-// inside try_run_moe_cutlass3x_nvfp4_prefill_ (lines ~1316–1372). Keep the
-// two predicates in sync — if device-args' actual gate flips false at runtime
-// while this returns true, the legacy fallback inside the function gathers
-// lazily, so output stays correct (at most one wasted decision).
-// The path-selection ORDER + arch/config gates are mirrored as a pure function
-// `select_moe_prefill_path` in moe_prefill_decision.h, pinned by
-// test_routing_decision.cpp (R2 / P1.4).
+// Cheap precondition mirror for the CUTLASS 3.x NVFP4 device-args fast
+// path inside try_run_moe_cutlass3x_nvfp4_prefill_. Keep the two
+// predicates in sync: if the real gate flips false at runtime while this
+// returns true, the legacy fallback gathers lazily, so output stays
+// correct. Path-selection order + gates are also mirrored as
+// select_moe_prefill_path (moe_prefill_decision.h), pinned by test_routing_decision.cpp.
 bool GraphExecutor::moe_prefill_uncapturable() const {
     if (!has_moe_)
         return false;
-    // Mirrors the function-entry gate of try_run_moe_cutlass3x_nvfp4_prefill_:
-    // without the CUTLASS 3.x grouped path + packed/scale workspace, every
-    // MoE prefill lands in run_moe_legacy_fallback_, whose host-args guard
-    // throws under capture (moe_host_args_capture_guard).
+    // Mirrors try_run_moe_cutlass3x_nvfp4_prefill_'s entry gate: without the
+    // CUTLASS 3.x grouped path + packed/scale workspace, every MoE prefill
+    // lands in run_moe_legacy_fallback_, whose host-args guard throws under
+    // capture (moe_host_args_capture_guard).
     if (dispatch_policy().moe.no_cutlass3x)
         return true;
     if (!cutlass_grouped_3x_nvfp4_available())
@@ -471,49 +455,38 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // GENERAL PATH: prefill or host-offloaded or non-Q6K/Q8_0 experts
     // =========================================================================
 
-    // =========================================================================
-    // FUSED Q6_K PREFILL PATH: reads Q6_K weights directly, eliminates the
-    // intermediate FP16/FP8 dequant buffer. Two variants:
-    //   TC (tensor core): WMMA 16x16x16; the scalar variant is not dispatched.
-    //   Reachable only with gemm.moe_imma_prefill=false (below).
-    // =========================================================================
+    // Fused Q6_K prefill path: reads Q6_K weights directly, no intermediate
+    // FP16/FP8 dequant buffer. TC (WMMA 16x16x16) and scalar variants; scalar
+    // reachable only with gemm.moe_imma_prefill=false.
     {
-        // gemm.moe_imma_prefill (default true) skips the three per-expert
-        // arms below; they stay as the `--set gemm.moe_imma_prefill=false`
-        // fallback for an expert shape the IMMA kernel declines (reason and
-        // re-measure date at core/config/gemm.h). Measured 2026-06-07:
-        // Qwen3-30B-A3B pp512 3 968 -> 9 970 tok/s with IMMA. Each arm
-        // records itself so the resolved-dispatch line names it (A1-7)
-        // instead of printing `moe_prefill=unset`.
+        // gemm.moe_imma_prefill (default true) skips the three per-expert arms
+        // below; they stay as the --set gemm.moe_imma_prefill=false fallback for
+        // an expert shape the IMMA kernel declines (see core/config/gemm.h). Each
+        // arm records itself so the resolved-dispatch line names it (A1-7).
         const bool moe_imma_pref = dispatch_policy().gemm.moe_imma_prefill;
         if (!moe_imma_pref &&
             try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {
             dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FUSED_Q6K);
             // Falls through to scatter (step 7)
-        // Q4_K/Q5_K fused dp4a prefill: wins when expert_d_ff is small enough
-        // that the 3.5× bandwidth savings from reading Q4_K directly outweighs
-        // cuBLAS's tiled GEMM efficiency. Measured: +20% at eff=512 (Qwen3.6),
-        // -20% at eff=768 (Qwen3-30B). Threshold: eff ≤ 640.
+        // Q4_K/Q5_K fused dp4a prefill: wins when expert_d_ff is small enough that
+        // the 3.5x bandwidth saving from reading Q4_K directly outweighs cuBLAS's
+        // tiled GEMM efficiency. Threshold: eff <= 640.
         } else if (eff <= 640 && !moe_imma_pref &&
                    try_run_moe_q4k_prefill(layer, stream, n, d, eff, ne, expanded,
                                             non_gated_experts, up_qtype, routing, no)) {
             dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FUSED_Q4K_DP4A);
             // Falls through to scatter (step 7)
         } else {
-            // =========================================================================
-            // FP16 BATCH or FP8 BATCH PREFILL PATH
-            // Pre-check: FP16 batch + device-grouped GEMM is preferred (no D2H sync,
-            // simpler pipeline). FP8 batch is only used as fallback when FP16 batch
-            // isn't available.
-            // =========================================================================
+            // FP16 batch or FP8 batch prefill path: FP16 batch + device-grouped GEMM
+            // is preferred (no D2H sync, simpler pipeline); FP8 batch is only the
+            // fallback when FP16 batch isn't available.
 
-            // Gather: reorder tokens by expert assignment (required for batch/legacy paths).
-            // Skipped when the CUTLASS 3.x NVFP4 device-args fast path will fire — that
-            // path reads ctx.no via routing.sorted_token_ids in a fused gather+quantize
-            // kernel and never touches moe_.gathered. Lazy gather inside the legacy
-            // fallback catches the (rare) case where device-args' inner gate flips false
-            // at runtime. Saves ~16 MB HBM write per layer on Qwen3-Coder-30B-A3B-NVFP4.
+            // Gather (reorder tokens by expert assignment) is skipped when the CUTLASS
+            // 3.x NVFP4 device-args fast path will fire: that path reads ctx.no via
+            // routing.sorted_token_ids in a fused gather+quantize kernel and never
+            // touches moe_.gathered. Lazy gather in the legacy fallback catches the
+            // rare case where the inner gate flips false at runtime.
             if (moe_cutlass3x_will_use_device_args_(layer, ctx)) {
                 ctx.moe_gather_done = false;
             } else {
@@ -599,11 +572,9 @@ moe_after_experts:
     moe_ffn_phase8_post_(layer, stream, ctx);
 }
 
-// ---------------------------------------------------------------------------
-// Phase 7: scatter expert outputs back to token positions.
-//   Fused path: token-centric scatter + FP16 convert (+ residual if no shared expert).
-//   Fallback:  atomicAdd scatter into FP32 buffer + FP32→FP16 convert.
-// ---------------------------------------------------------------------------
+// Phase 7: scatter expert outputs back to token positions. Fused path:
+// token-centric scatter + FP16 convert (+ residual if no shared expert).
+// Fallback: atomicAdd scatter into FP32 buffer + FP32->FP16 convert.
 void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     (void)layer;
     const auto& ly = model_->layer(layer);
@@ -647,22 +618,18 @@ void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeF
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 8: post-experts work after `moe_after_experts:` —
-//   Gemma-4 sanitize / post_ffw_norm_2 / shared expert FFN /
-//   post_ffn_norm (FP32-accum or plain variant) / residual add /
-//   debug stats / free routing buffers if owned.
-// ---------------------------------------------------------------------------
+// Phase 8: post-experts work after moe_after_experts: Gemma-4 sanitize /
+// post_ffw_norm_2 / shared expert FFN / post_ffn_norm (FP32-accum or
+// plain) / residual add / debug stats / free routing buffers if owned.
 void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
-    // 8b. Shared expert FFN: all tokens pass through an additional
-    //     dense FFN whose output is added to the routed expert output.
-    //     Reuses MoE workspace buffers (routed computation is complete).
-    //     Supports both gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
-    // Gemma 4: sanitize inf/NaN in MoE scatter output before post-norm.
+    // Shared expert FFN: all tokens pass through a dense FFN whose output adds
+    // to the routed expert output, reusing MoE workspace buffers. Supports
+    // gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
+    // Gemma 4: sanitizes inf/NaN in MoE scatter output before post-norm.
     if (prof.is_gemma4) {
         sanitize_fp16(static_cast<__half*>(ctx.h.data), static_cast<int64_t>(ctx.n) * ctx.d, stream);
     }
@@ -696,12 +663,10 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
         debug_tensor_stats_all(buf, ctx.h, stream);
     }
 
-    // Gemma 4: apply post_ffn_norm (combined post-norm) BEFORE residual add.
-    // If FP32 accumulator is active, fuse post_ffn_norm + residual add into
-    // rmsnorm_fp32_accum_to_fp16_kernel so the residual stays in FP32 precision.
-    // Without this, every MoE layer does a FP16 elementwise_add and the downstream
-    // forced sync (executor_forward.cu:373-381) clobbers the FP32 accum with
-    // FP16-rounded data, accumulating ~1-2% drift per layer over 30 layers.
+    // Gemma 4: apply post_ffn_norm BEFORE residual add. If the FP32 accumulator
+    // is active, fuse post_ffn_norm+residual into rmsnorm_fp32_accum_to_fp16_kernel
+    // so the residual stays FP32; a plain FP16 elementwise_add here plus the
+    // forced downstream sync would clobber the FP32 accum, drifting ~1-2%/layer.
     const bool moe_fp32_accum = (prof.is_gemma4 && ly.post_ffn_norm.data != nullptr &&
                                  fp32_accum_buf_ != nullptr && !ctx.residual_fused);
     if (moe_fp32_accum) {

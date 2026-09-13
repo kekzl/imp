@@ -473,7 +473,7 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
 }
 
 // FP32-output chunkwise launcher for gdn.fp32_scan: scan output must stay FP32 through
-// RMSNorm+Gate+SiLU (Qwen 3.6 L0 sign-flip root cause; see executor_ssm_gdn.cu:483-486).
+// RMSNorm+Gate+SiLU (Qwen 3.6 L0 sign-flip root cause; see executor_ssm_gdn.cu:454-457).
 void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                                 const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                                 int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,

@@ -59,10 +59,10 @@ int64_t mtime_seconds(const fs::directory_entry& e, std::error_code& ec) {
 
 }  // namespace
 
-// Default cache directory: $XDG_CACHE_HOME/imp/warm, else $HOME/.cache/imp/warm,
-// else /tmp/imp-warm-cache. Deliberately NOT next to the model: model mounts
-// are often read-only for the serving user, and cache files should not clutter
-// (or invalidate tooling checksums of) model directories.
+// Default cache directory: $XDG_CACHE_HOME/imp/warm, else $HOME/.cache/imp/warm, else
+// /tmp/imp-warm-cache. Deliberately NOT next to the model: model mounts are often
+// read-only for the serving user, and cache files should not clutter (or invalidate
+// tooling checksums of) model directories.
 static std::string default_warm_cache_dir() {
     if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg)
         return std::string(xdg) + "/imp/warm";

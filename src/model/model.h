@@ -16,11 +16,9 @@
 namespace imp {
 
 class WeightUploadLog;
-// The vision tower of a multimodal checkpoint. Held by Model — not by the
-// pipeline — because its weights come from the SAME checkpoint and are views
-// into the same mapping, so its lifetime IS the model's. Forward-declared so
-// model/ keeps no header dependency on vision/; only model.cpp (destructor) and
-// weight_map.cpp (which fills it) include the definition.
+// Vision tower of a multimodal checkpoint; held by Model, not the pipeline, since its
+// weights are views into the same mapping and share the model's lifetime. Forward-declared
+// so model/ has no header dependency on vision/.
 struct VisionModel;
 
 class Model {
@@ -56,45 +54,27 @@ public:
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
     void set_tokenizer(std::unique_ptr<Tokenizer> tok) { tokenizer_ = std::move(tok); }
 
-    // Upload mmap'd weights to GPU, dequantizing as needed.
-    // For Q4_0: splits block format into packed nibbles + scales on GPU.
-    // For Q8_0: dequantizes to FP16 on GPU.
-    // For F16/BF16: direct upload.
-    // For F32: converts to compute_dtype and uploads.
-    // warm_cache: consult/write the on-disk warm weight cache next to the
-    // model (memory/weight_cache_file.h) — skipped when a suspend-to-RAM
-    // snapshot is armed (that takes precedence).
+    // Uploads mmap'd weights to GPU, dequantizing per dtype (Q4_0 unpacks to nibbles+scales on
+    // GPU, Q8_0 dequants to FP16, F16/BF16 direct, F32 converts to compute_dtype). warm_cache
+    // consults/writes the on-disk cache; skipped when a suspend-to-RAM snapshot is armed.
     bool upload_weights_gpu(QType compute_dtype = QType::F16, cudaStream_t stream = nullptr,
                             size_t expert_reserve_bytes = 1ULL << 30, bool warm_cache = false,
                             const std::string& warm_cache_dir = {});
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
 
-    // True once the executor's pre-dequant consumed source weights in a way a
-    // rebuild cannot survive:
-    //  - freed source tensors to reclaim VRAM (Phase-3 MoE expert-source drop,
-    //    Phase-4b redundant-source drop — both via release_gpu_allocation(),
-    //    which sets this): their .data pointers are dangling afterwards;
-    //  - destructively converted sources in place (Phase-3c MXFP4 unpack
-    //    compacts the GGUF raw blocks within the SAME buffer) or re-pointed
-    //    model tensors at executor-owned cache memory (Phase-3c gdn_alpha/beta
-    //    FP16 replace) — sets this explicitly via mark_sources_consumed().
-    // Either way a SECOND engine on the same model handle would read freed or
-    // already-transformed memory and poison the CUDA context with an illegal
-    // access (#830) — Engine::init rejects it up front. Reload the model for a
-    // fresh engine. Models whose sources stay intact (e.g. dense Q8_0) leave
-    // this false and support create/free/create on one handle.
+    // True once pre-dequant consumed source weights unrecoverably: freed via
+    // release_gpu_allocation() (dangling .data) or destructively transformed in place
+    // (mark_sources_consumed()). A second engine on this handle would read freed/transformed
+    // memory (#830); reload for a fresh engine. Intact sources (e.g. dense Q8_0) support
+    // create/free/create.
     void mark_sources_consumed() { sources_consumed_ = true; }
     bool sources_consumed() const { return sources_consumed_; }
 
-    // True once device weight buffers were transformed IN PLACE after upload
-    // (Phase-3c MXFP4 compaction, native-MXFP4 GGUF unpack, Gemma-4 fused
-    // expert split). A weight snapshot taken afterwards would capture the
-    // transformed bytes and the resume replay would re-transform them —
-    // WeightSnapshot::capture refuses these models (suspend unsupported, v1).
-    // Distinct from sources_consumed_: a DROPPED source only evicts its log
-    // record (that tensor re-uploads cold at resume), it does not poison the
-    // rest of the snapshot.
+    // True once device weight buffers were transformed in place after upload (MXFP4
+    // compaction, native-MXFP4 GGUF unpack, Gemma-4 fused expert split). WeightSnapshot::capture
+    // refuses these (suspend unsupported, v1). Distinct from sources_consumed_: a dropped
+    // source only evicts its log record, it doesn't poison the rest of the snapshot.
     void mark_device_sources_mutated() { device_sources_mutated_ = true; }
     bool device_sources_mutated() const { return device_sources_mutated_; }
 
@@ -134,47 +114,26 @@ public:
     std::vector<TransformerLayer> layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
 
-    // MTP head storage, populated when `model_mtp.safetensors` is present
-    // next to the main weights (DeepSeek-V3-family models, e.g. Qwen3.6).
-    // Phase 1.A: detection only (info populated, .loaded=false).
-    // Phase 1.B: actual weights loaded into named Tensor fields.
-    // Phase 2+: forward+verify wiring.
+    // MTP head storage, populated when model_mtp.safetensors sits next to the main weights
+    // (DeepSeek-V3 family, e.g. Qwen3.6). Phase 1.A: detection only. Phase 1.B: weights
+    // loaded. Phase 2+: forward+verify wiring.
     std::optional<MtpHead> mtp_;
 
-    // The checkpoint carries an MTP head that this load did NOT take, because
-    // speculative.mtp_k defaults to 0 (#1537). The loader logs one INFO line
-    // about it; this makes the same fact readable, so /health can say it and an
-    // operator does not have to grep a startup log to learn a documented
-    // +8 to +22% decode is sitting switched off.
+    // True when the checkpoint carries an MTP head this load did NOT take, because
+    // speculative.mtp_k defaults to 0 (#1537). Lets /health report a documented +8..+22%
+    // decode sitting switched off, instead of requiring a startup-log grep.
     bool mtp_head_available_unloaded_ = false;
 
-    // Load-time scratch for NVFP4 prequant scale tensors.
-    // Keys:
-    //   "L{idx}.{slot}"          per-layer dense (e.g. "L5.wq", "L5.w_gate_shared")
-    //   "L{idx}.expert_w_{kind}.{e}"  per-expert (e.g. "L5.expert_w_gate.7")
-    //   "out_proj"               LM head
-    // Populated by safetensors_loader → weight_map.cpp on the SafeTensors
-    // NVFP4-prequant load path. Cleared after executor_pre_dequant.cu's
-    // Phase 0 promote() copies the device-side scale pointers and the FP32
-    // tensor scalar onto each main weight tensor's .scales / .tensor_scale
-    // sidecars. Empty for GGUF and non-NVFP4 SafeTensors models.
+    // Load-time scratch for NVFP4 prequant scale tensors, keyed "L{idx}.{slot}" (dense),
+    // "L{idx}.expert_w_{kind}.{e}" (per-expert), "out_proj" (LM head). Cleared after Phase 0's
+    // promote() copies scale pointers onto each weight's .scales/.tensor_scale. Empty for GGUF
+    // and non-NVFP4 SafeTensors.
     std::unordered_map<std::string, NvFP4PreQuantWeight> nvfp4_scratch_;
 
-    // Drop the resident pages of the weight-file mappings without unmapping
-    // them. The loaders map with MAP_POPULATE + MADV_WILLNEED, which is right
-    // for the load itself and pointless afterwards: once a tensor is uploaded
-    // its `data` is the device pointer (weight_upload.cu), so nothing reads
-    // those pages again unless the placement left weights on host, and then
-    // they refault from the page cache as minor faults.
-    //
-    // MADV_DONTNEED, not munmap: a host-resident expert or an offloaded layer
-    // still holds a pointer INTO the mapping, and there is no tensor iterator
-    // to prove otherwise field by field. Dropping pages keeps every pointer
-    // valid; unmapping would turn a missed field into a crash.
-    //
-    // Measured on Qwen3.8-27B-NVFP4-vllm: RssFile 18.48 GiB of a 21.53 GiB
-    // VmRSS before. Returns the bytes it advised away, 0 if there is nothing
-    // mapped.
+    // Drops resident pages of weight-file mappings without unmapping: loaders map with
+    // MAP_POPULATE+MADV_WILLNEED for the load, pointless after upload since .data becomes the
+    // device pointer. MADV_DONTNEED not munmap: a host-resident/offloaded weight still holds a
+    // pointer INTO the mapping and there's no iterator to prove otherwise field by field.
     size_t release_weight_pages();
 
     void* mmap_base_ = nullptr;

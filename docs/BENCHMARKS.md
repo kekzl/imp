@@ -108,7 +108,7 @@ on Qwen3-8B), and `llama-bench` has no equivalent. The spec-off column is
   counter never wraps, so the prompt is 0..511 strictly increasing.
 - Every 6-gram in a strictly increasing sequence of distinct ids is unique.
 - The drafter is prompt-lookup over `input + prediction + output` with
-  `speculative.min_match = 6` (`src/core/config/speculative.h:169`).
+  `speculative.min_match = 6` (`src/core/config/speculative.h:79`).
 
 So the prompt contributes **zero** matches by construction, and any draft that
 exists came from the **generation**. Under `ignore_eos` a synthetic counting

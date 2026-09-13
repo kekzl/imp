@@ -33,12 +33,9 @@ static std::vector<std::string> split(const std::string& s, char delim) {
 // which now includes a value too large for an int (`model_limits.h`).
 static int parse_int(const std::string& s) { return parse_index(s); }
 
-// Ensure model.layers_ has at least (idx + 1) elements.
-//
-// The index came out of a tensor name, so it is bounded before it is used:
-// `resize(idx + 1)` on an unchecked index is a single allocation the file
-// picks the size of. The caller has already rejected the name when this
-// returns false.
+// Ensures model.layers_ has at least (idx+1) elements. idx comes from a tensor name, so it
+// is bounded before use: resize(idx+1) on an unchecked index is a file-sized allocation.
+// Caller has already rejected the name when this returns false.
 static bool ensure_layer(Model& model, int idx) {
     if (idx >= kMaxModelLayers) {
         IMP_LOG_WARN("WeightMap: layer index %d exceeds the %d-layer limit, tensor dropped", idx,
@@ -313,10 +310,9 @@ std::string WeightMap::map_name(const std::string& name) const {
     return name;
 }
 
-// Assign one GPTQ sub-tensor (qweight/qzeros/scales/g_idx) by field name.
-// Returns true if `field` named a known slot. Shared by the self_attn and mlp
-// GPTQ branches in apply_weights() (same field set, only the proj→slot mapping
-// differs).
+// Assigns one GPTQ sub-tensor (qweight/qzeros/scales/g_idx) by field name; true iff `field`
+// named a known slot. Shared by the self_attn and mlp GPTQ branches (same field set, only
+// the proj->slot mapping differs).
 static bool assign_gptq_field(TransformerLayer::GPTQWeight* gptq, const std::string& field,
                               const Tensor& t) {
     if (!gptq)
@@ -344,21 +340,19 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     int skipped = 0;
     int mtp_sidecar = 0;  // read by the MTP loader, not a miss here
 
-    // `skipped` stays the total, but a total is not a finding. Dropping a whole
-    // modality and dropping an unreadable layer name are different events, and
-    // folded together neither is greppable: Gemma-4-12B lost 1 audio tensor and
-    // 10 vision-embedder tensors into one number that says "skipped 11".
-    // Counted per class here and named in the summary below.
+    // `skipped` stays the total, but a total is not a finding: dropping a whole modality and
+    // dropping an unreadable layer name are different events, folded into one number they
+    // aren't greppable (Gemma-4-12B lost 1 audio + 10 vision tensors as "skipped 11"). Counted
+    // per class here, named in the summary.
     SkipStats stats{};
 
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
     const bool is_gemma4_moe = is_gemma4 && (model.config_.n_experts > 0);
     const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
     const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
-    // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.5-VL,
-    // Qwen3.6-VL) share the same `model.language_model.*` / `model.vision_tower.*`
-    // (resp. `model.visual.*`) layout plus an `mtp.*` head. Text-only variants
-    // ship bare `model.*` keys, so the strip is prefix-guarded and a no-op there.
+    // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.5-VL, Qwen3.6-VL) share
+    // model.language_model.* / model.vision_tower.* (resp. model.visual.*) plus an mtp.* head.
+    // Text-only variants ship bare model.* keys, so the strip is prefix-guarded and a no-op there.
     const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
                                         model.config_.multimodal_wrapper;
 
@@ -371,10 +365,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 ++stats.vision;
                 continue;
             }
-            // Qwen3.6-VL also ships a separate visual tower under
-            // `model.visual.*` and a multi-token-prediction head under
-            // `mtp.*`. Both arrive in distinct shards we never load, but if
-            // they ever appear in the main shard, drop them here.
+            // Qwen3.6-VL also ships a separate visual tower under model.visual.* and an MTP head under
+            // mtp.*. Both arrive in distinct shards normally never loaded; drop them here if they ever
+            // appear in the main shard.
             const std::string visual_prefix = "model.visual.";
             if (name.compare(0, visual_prefix.size(), visual_prefix) == 0) {
                 // Routed into the vision tower below when there is one; still
@@ -383,11 +376,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 ++stats.vision;
                 continue;
             }
-            // Gemma-4 unified multimodal: audio/vision embedders ship under
-            // model.embed_{audio,vision}.* (not under language_model/vision_tower).
-            // Not part of the text LM, so skipped, but counted apart: the audio
-            // half has no encoder anywhere in imp, so it is a lost modality and
-            // not a lost tensor.
+            // Gemma-4 unified multimodal: audio/vision embedders ship under model.embed_{audio,
+            // vision}.*, not under language_model/vision_tower. Not part of the text LM, so skipped,
+            // but counted apart: the audio half has no encoder anywhere in imp, a lost modality rather
+            // than a lost tensor.
             if (name.compare(0, 18, "model.embed_audio.") == 0) {
                 ++skipped;
                 ++stats.audio;
@@ -414,14 +406,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // Nemotron-H uses `backbone.embeddings/norm_f` for top-level and
-        // `backbone.layers.N.mixer.<sub>` for ALL per-layer weights (Mamba2,
-        // Attention, MoE all share the `mixer` namespace). Translate to the
-        // Qwen-style `model.layers.N.<self_attn|mamba|mlp>.<...>` so the
-        // existing matchers below pick up the weights. Without this, every
-        // tensor falls through to the "unrecognised layer weight" warning,
-        // tensors stay null on TransformerLayer fields, and the first forward
-        // hits an IMA accessing uninitialised memory.
+        // Nemotron-H uses backbone.embeddings/norm_f top-level and backbone.layers.N.mixer.<sub>
+        // for ALL per-layer weights (Mamba2, Attention, MoE share the mixer namespace). Translated
+        // to model.layers.N.<self_attn|mamba|mlp>.<...> so the existing matchers pick them up;
+        // otherwise every tensor falls through to "unrecognised", stays null, and the first forward
+        // hits an IMA reading uninitialised memory.
         if (is_nemotron_h) {
             if (name == "backbone.embeddings.weight") {
                 name = "model.embed_tokens.weight";
@@ -463,10 +452,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                             name += sub;
                             name += suffix;
                         }
-                        // MoE router: mixer.gate.{weight,e_score_correction_bias}
-                        // We translate gate.weight→mlp.gate.weight (matches existing parser);
-                        // e_score_correction_bias becomes mlp.gate.bias so it routes to
-                        // moe_router_bias (DeepSeek-V2 style score correction).
+                        // MoE router: mixer.gate.{weight,e_score_correction_bias}. gate.weight ->
+                        // mlp.gate.weight
+                        // (matches the existing parser); e_score_correction_bias -> mlp.gate.bias, routing to
+                        // moe_router_bias (DeepSeek-V2-style score correction).
                         else if (sub == "gate") {
                             if (suffix == ".e_score_correction_bias") {
                                 name = "model.layers." + layer_idx + ".mlp.gate.bias";
@@ -526,10 +515,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             ++assigned;
             continue;
         }
-        // NVFP4 prequant LM head scales (Model Optimizer / llm-compressor).
-        // Routed into the load-time scratch map under key "out_proj"; Phase 0
-        // promote() in executor_pre_dequant.cu copies the device pointer onto
-        // model.out_proj_'s sidecars and clears the entry.
+        // NVFP4 prequant LM head scales (Model Optimizer/llm-compressor): routed into the load-time
+        // scratch map under key "out_proj"; Phase 0 promote() in executor_pre_dequant.cu copies the
+        // device pointer onto model.out_proj_'s sidecars and clears the entry.
         if (name == "lm_head.weight_scale" || name == "lm_head.weight_scale_2" ||
             name == "lm_head.input_scale") {
             const std::string kind = name.substr(8);  // strip "lm_head."
@@ -539,16 +527,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             continue;
         }
 
-        // -----------------------------------------------------------------
-        // Layer weights: model.layers.{i}.<rest>
-        // -----------------------------------------------------------------
-        // The MTP head is a sidecar with its own loader and its own naming
-        // (`mtp.layers.N.*`). It is not a weight of the main model, so it is
-        // not a finding here. Reported as unrecognised it produced 270 WARN
-        // lines on Nemotron-3.5-Lightning for a head that loaded correctly,
-        // which is worse than silence: "unrecognised weight name" is the string
-        // you grep for after a first load to catch a checkpoint whose tensors
-        // this map does not read, and 270 false ones make it useless.
+        // The MTP head is a sidecar with its own loader/naming (mtp.layers.N.*), not a weight of
+        // the main model, so it is not a finding here: reporting it as unrecognised produced 270
+        // WARN lines on Nemotron-3.5-Lightning for a head that loaded correctly, which is worse
+        // than silence for the "unrecognised weight name" grep signal.
         if (!parts.empty() && parts[0] == "mtp") {
             IMP_LOG_DEBUG("  MTP head tensor, read by the MTP loader: %s", name.c_str());
             ++mtp_sidecar;
@@ -644,20 +626,18 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             matched = true;
         }
 
-        // -- FFN norm: post_attention_layernorm.weight --
-        //    Llama convention: post_attention_layernorm is actually the pre-FFN norm.
-        //    Gemma 3/4 convention: post_attention_layernorm is the sandwich norm
-        //    applied AFTER attention output. Routed below in the Gemma-4 block.
+        // post_attention_layernorm.weight: Llama convention treats it as the pre-FFN norm; Gemma
+        // 3/4 treats it as the sandwich norm applied AFTER attention output (routed separately in
+        // the Gemma-4 block below).
         if (!matched && !is_gemma4 && parts.size() >= 5 && parts[3] == "post_attention_layernorm" &&
             parts[4] == "weight") {
             layer.ffn_norm = t;
             matched = true;
         }
 
-        // -- Gemma 4 MoE: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT,
-        //    NOT dense MLP. Route to w_*_shared instead. Must come before
-        //    the generic dense-MLP branch below. Dense Gemma-4 (31B) falls
-        //    through to the standard w_gate/w_up/w_down path.
+        // Gemma-4 MoE: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT, not dense MLP. Routes
+        // to w_*_shared; must come before the generic dense-MLP branch (dense Gemma-4/31B falls
+        // through to the standard w_gate/w_up/w_down path).
         if (!matched && is_gemma4_moe && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
             if (proj == "gate_proj") {
@@ -672,12 +652,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -- Gemma 4: router + packed MoE experts + per-layer extras --
-        //    experts.gate_up_proj  (3D fused [n_exp, 2*moe_ff, d]) -> expert_gate_packed
-        //    experts.down_proj     (3D      [n_exp, d, moe_ff])    -> expert_down_packed
-        //    router.proj.weight    [n_exp, d]                      -> moe_gate
-        //    *_layernorm(_1|_2) variants                            -> ffn_{pre,post}_norm_{1,2}
-        //    post_attention_layernorm.weight                        -> post_attn_norm
+        // Gemma 4: router + packed MoE experts + per-layer extras:
+        //   experts.gate_up_proj  (3D [n_exp,2*moe_ff,d])  -> expert_gate_packed
+        //   experts.down_proj     (3D [n_exp,d,moe_ff])    -> expert_down_packed
+        //   router.proj.weight    [n_exp,d]                -> moe_gate
+        //   *_layernorm(_1|_2) variants                    -> ffn_{pre,post}_norm_{1,2}
+        //   post_attention_layernorm.weight                -> post_attn_norm
         if (!matched && is_gemma4) {
             // experts.gate_up_proj / experts.down_proj
             if (parts.size() >= 5 && parts[3] == "experts") {
@@ -711,12 +691,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 layer.layer_out_scale = t;
                 matched = true;
             }
-            // Gemma 4 FFN norm variants (parallel shared-MLP + MoE branches).
-            // GGUF analogue: pre_ffw_norm_2/post_ffw_norm_1/post_ffw_norm_2 are
-            // the parallel-branch norms; pre_feedforward_layernorm (base) and
-            // post_feedforward_layernorm (base) are the standard FFN norms,
-            // routed to layer.ffn_norm and layer.post_ffn_norm to mirror the
-            // GGUF loader (gguf_loader.cpp ffn_norm + post_ffw_norm fields).
+            // Gemma-4 FFN norm variants (parallel shared-MLP + MoE branches): pre_ffw_norm_2/
+            // post_ffw_norm_1/post_ffw_norm_2 are the parallel-branch norms (GGUF analogue);
+            // pre/post_feedforward_layernorm (base) are the standard FFN norms, routed to
+            // layer.ffn_norm/post_ffn_norm mirroring the GGUF loader.
             else if (parts.size() >= 5 && parts[4] == "weight") {
                 if (parts[3] == "pre_feedforward_layernorm_2") {
                     layer.ffn_pre_norm_2 = t;
@@ -801,12 +779,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 slot = "kv_b_proj";
             // kv_a_layernorm is a norm weight — never quantized, no scale routing.
             else if (proj == "qkv_proj") {
-                // Scalars (weight_scale_2, input_scale) are per-tensor → route to all
-                // three. weight_scale is per-group [Q+K+V, K/16]; slice it by output-row
-                // range so wk/wv each receive their own per-group scale and get promoted
-                // to NVFP4. (Previously the full fused scale went to wq only → wk/wv had
-                // no weight_scale in the scratch map → Phase 0 skipped promoting them →
-                // garbage K/V projections → degenerate output.)
+                // Scalars (weight_scale_2, input_scale) are per-tensor, routed to all three (wq/wk/wv).
+                // weight_scale is per-group [Q+K+V, K/16]; sliced by output-row range so wk/wv get their
+                // own per-group scale and get promoted to NVFP4 - previously the full fused scale went to
+                // wq only, leaving wk/wv without a weight_scale (Phase 0 skipped promoting them, garbage
+                // K/V projections).
                 if (kind == "weight_scale") {
                     const auto& mc = model.config_;
                     int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
@@ -871,13 +848,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // MoE weights -- Mixtral style
+        // MoE weights, Mixtral style:
         //   block_sparse_moe.gate.weight               -> moe_gate
         //   block_sparse_moe.experts.{e}.w1.weight      -> expert_w_gate[e]
         //   block_sparse_moe.experts.{e}.w3.weight      -> expert_w_up[e]
         //   block_sparse_moe.experts.{e}.w2.weight      -> expert_w_down[e]
-        // -----------------------------------------------------------------
         if (!matched && parts[3] == "block_sparse_moe") {
             if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "weight") {
                 layer.moe_gate = t;
@@ -900,20 +875,16 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // MoE weights -- DeepSeek style
+        // MoE weights, DeepSeek style:
         //   mlp.gate.weight                              -> moe_gate
         //   mlp.gate.bias                                -> moe_router_bias
         //   mlp.experts.{e}.gate_proj.weight             -> expert_w_gate[e]
         //   mlp.experts.{e}.up_proj.weight               -> expert_w_up[e]
         //   mlp.experts.{e}.down_proj.weight             -> expert_w_down[e]
         //   mlp.shared_expert.{gate,up,down}_proj.weight -> w_{gate,up,down}_shared
-        // -----------------------------------------------------------------
         if (!matched && parts[3] == "mlp") {
-            // MoE router: mlp.gate.weight
-            // Note: parts[4]=="gate" && parts[5]=="weight" with exactly 6 parts
-            // distinguishes from dense mlp.gate_proj.weight (which has
-            // parts[4]=="gate_proj").
+            // MoE router: mlp.gate.weight. parts[4]=="gate" && parts[5]=="weight" with exactly 6 parts
+            // distinguishes it from dense mlp.gate_proj.weight (parts[4]=="gate_proj").
             if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "weight") {
                 layer.moe_gate = t;
                 matched = true;
@@ -1008,12 +979,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // MoE experts -- llm-compressor format (Gemma-4 NVFP4):
-        //   experts.{e}.{gate_proj,up_proj,down_proj}.weight         -> expert_w_gate/up/down[e]
-        //   experts.{e}.{proj}.{weight_scale,weight_scale_2,...}     -> expert_nvfp4_*[e]
-        // The standard format has mlp.experts.{e}.*, but llm-compressor omits the mlp. prefix.
-        // -----------------------------------------------------------------
+        // MoE experts, llm-compressor format (Gemma-4 NVFP4):
+        //   experts.{e}.{gate_proj,up_proj,down_proj}.weight      -> expert_w_gate/up/down[e]
+        //   experts.{e}.{proj}.{weight_scale,weight_scale_2,...}  -> expert_nvfp4_*[e]
+        // Standard format has mlp.experts.{e}.*; llm-compressor omits the mlp. prefix.
         if (!matched && parts[3] == "experts" && parts.size() >= 7) {
             int expert_idx = parse_int(parts[4]);
             if (expert_idx >= 0 && ensure_expert(layer, expert_idx)) {
@@ -1077,12 +1046,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // gpt-oss: attention sinks, router (weight+bias), pre-packed MXFP4
-        // experts. Blocks/scales land in the *_packed slots verbatim; the
-        // upload stage converts them to the NVFP4 expert cache (e2m1 nibbles
-        // are bit-identical, ue8m0 scales convert to e4m3 + tensor scale).
-        // -----------------------------------------------------------------
+        // gpt-oss: attention sinks, router (weight+bias), pre-packed MXFP4 experts. Blocks/scales
+        // land in the *_packed slots verbatim; upload converts to the NVFP4 expert cache (e2m1
+        // nibbles are bit-identical, ue8m0 scales convert to e4m3 + tensor scale).
         if (!matched && parts.size() >= 5 && parts[3] == "self_attn" && parts[4] == "sinks") {
             layer.attn_sinks = t;
             matched = true;
@@ -1133,22 +1099,20 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // Gated DeltaNet (linear-attention) layers -- Qwen3.5/3.6 SafeTensors:
-        //   linear_attn.in_proj_qkv.weight   -> ssm_in   (fused Q,K,V)
-        //   linear_attn.in_proj_a.weight     -> gdn_alpha
-        //   linear_attn.in_proj_b.weight     -> gdn_beta
-        //   linear_attn.in_proj_z.weight     -> gdn_gate (output gate / z)
-        //   linear_attn.out_proj.weight      -> ssm_out
-        //   linear_attn.conv1d.weight        -> ssm_conv1d_w
-        //   linear_attn.conv1d.bias          -> ssm_conv1d_b   (if present)
-        //   linear_attn.norm.weight          -> ssm_norm_w
-        //   linear_attn.A_log                -> ssm_a
-        //   linear_attn.dt_bias              -> ssm_dt_b
-        // The Qwen3.6 GGUF layout splits the same weights across mamba.* +
-        // temporal_block.{gate_proj,alpha,beta}.weight; we route the
-        // SafeTensors variants to the same TransformerLayer slots so the
-        // existing GGUF forward path applies unchanged.
+        // Gated DeltaNet (linear-attention) layers, Qwen3.5/3.6 SafeTensors:
+        //   linear_attn.in_proj_qkv.weight -> ssm_in (fused Q,K,V)
+        //   linear_attn.in_proj_a.weight   -> gdn_alpha
+        //   linear_attn.in_proj_b.weight   -> gdn_beta
+        //   linear_attn.in_proj_z.weight   -> gdn_gate (output gate / z)
+        //   linear_attn.out_proj.weight    -> ssm_out
+        //   linear_attn.conv1d.weight      -> ssm_conv1d_w
+        //   linear_attn.conv1d.bias        -> ssm_conv1d_b (if present)
+        //   linear_attn.norm.weight        -> ssm_norm_w
+        //   linear_attn.A_log              -> ssm_a
+        //   linear_attn.dt_bias            -> ssm_dt_b
+        // The Qwen3.6 GGUF layout splits the same weights across mamba.* + temporal_block.*;
+        // SafeTensors routes to the same TransformerLayer slots so the GGUF forward path applies
+        // unchanged.
         if (!matched && parts[3] == "linear_attn" && parts.size() >= 5) {
             const std::string& proj = parts[4];
             // 5-part forms: linear_attn.A_log / linear_attn.dt_bias
@@ -1192,10 +1156,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                     matched = true;
                 } else if (kind == "weight_scale" || kind == "weight_scale_2" ||
                            kind == "input_scale") {
-                    // NVFP4-quantized GDN (linear_attn) projection scales. Route to
-                    // nvfp4_scratch_ so Phase-0 promote() attaches them. in_proj_a/b
-                    // (gdn_alpha/beta) are FP16_ONLY → dequant→FP16 at load; the rest
-                    // (ssm_in/ssm_out/gdn_gate) run native NVFP4 like Nemotron-H Mamba2.
+                    // NVFP4-quantized GDN (linear_attn) projection scales route to nvfp4_scratch_ for Phase-0
+                    // promote(). in_proj_a/b (gdn_alpha/beta) are FP16_ONLY, dequanted to FP16 at load; the
+                    // rest (ssm_in/ssm_out/gdn_gate) run native NVFP4 like Nemotron-H Mamba2.
                     const char* slot = nullptr;
                     if (proj == "in_proj_qkv")
                         slot = "ssm_in";
@@ -1215,12 +1178,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // Post-layer norms -- Gemma-3 style
+        // Post-layer norms, Gemma-3 style:
         //   post_feedforward_layernorm.weight  -> post_ffn_norm
         //   pre_feedforward_layernorm.weight   -> ffn_norm (Gemma variant)
         //   post_attention_layernorm.weight     (already handled as ffn_norm above)
-        // -----------------------------------------------------------------
         if (!matched && parts.size() >= 5 && parts[4] == "weight") {
             if (parts[3] == "post_feedforward_layernorm") {
                 layer.post_ffn_norm = t;
@@ -1231,10 +1192,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // GPTQ weights: self_attn.{q,k,v,o}_proj.{qweight,qzeros,scales,g_idx}
-        //               mlp.{gate,up,down}_proj.{qweight,qzeros,scales,g_idx}
-        // -----------------------------------------------------------------
+        // GPTQ weights: self_attn.{q,k,v,o}_proj.{qweight,qzeros,scales,g_idx},
+        // mlp.{gate,up,down}_proj.{qweight,qzeros,scales,g_idx}.
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn") {
             const std::string& proj = parts[4];
             TransformerLayer::GPTQWeight* gptq = nullptr;
@@ -1261,12 +1220,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             matched = assign_gptq_field(gptq, parts[5], t);
         }
 
-        // -----------------------------------------------------------------
-        // GDN (Gated DeltaNet / Qwen3.5) weights
-        //   temporal_block.gate_proj.weight  -> gdn_gate
-        //   temporal_block.alpha.weight      -> gdn_alpha
-        //   temporal_block.beta.weight       -> gdn_beta
-        // -----------------------------------------------------------------
+        // GDN (Gated DeltaNet/Qwen3.5): temporal_block.gate_proj.weight -> gdn_gate,
+        // temporal_block.alpha.weight -> gdn_alpha, temporal_block.beta.weight -> gdn_beta.
         if (!matched && parts.size() >= 6 && parts[3] == "temporal_block" && parts[5] == "weight") {
             const std::string& proj = parts[4];
             if (proj == "gate_proj") {
@@ -1281,17 +1236,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
         }
 
-        // -----------------------------------------------------------------
-        // SSM (Mamba2 / Nemotron-H) weights
-        //   mamba.in_proj.weight   -> ssm_in
-        //   mamba.out_proj.weight  -> ssm_out
-        //   mamba.conv1d.weight    -> ssm_conv1d_w
-        //   mamba.conv1d.bias      -> ssm_conv1d_b
-        //   mamba.dt_bias          -> ssm_dt_b
-        //   mamba.A_log            -> ssm_a
-        //   mamba.D                -> ssm_d
-        //   mamba.norm.weight      -> ssm_norm_w
-        // -----------------------------------------------------------------
+        // SSM (Mamba2/Nemotron-H) weights:
+        //   mamba.{in_proj,out_proj,conv1d.weight,conv1d.bias,dt_bias,A_log,D,norm.weight}
+        //   -> ssm_{in,out,conv1d_w,conv1d_b,dt_b,a,d,norm_w}
         if (!matched && parts[3] == "mamba") {
             if (parts.size() >= 6 && parts[5] == "weight") {
                 const std::string& proj = parts[4];
@@ -1321,11 +1268,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 layer.ssm_d = t;
                 matched = true;
             }
-            // Mamba2 NVFP4 prequant scales: mamba.{in_proj,out_proj}.{weight_scale,weight_scale_2,input_scale}
-            // Route to nvfp4_scratch_ under "L<i>.ssm_in/ssm_out" so the
-            // pre-dequant promote() in executor_pre_dequant.cu attaches them
-            // to the SSM tensor sidecars (needed for load-time dequant since
-            // SSM weights are excluded from the NVFP4 cache for accuracy).
+            // Mamba2 NVFP4 prequant scales: mamba.{in_proj,out_proj}.{weight_scale,weight_scale_2,
+            // input_scale} route to nvfp4_scratch_ under "L<i>.ssm_in/ssm_out" so promote() in
+            // executor_pre_dequant.cu attaches them (SSM weights are excluded from the NVFP4 cache).
             else if (!matched && parts.size() >= 6 &&
                      (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" ||
                       parts[5] == "input_scale")) {
@@ -1386,11 +1331,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         IMP_LOG_INFO("  skipped: %d vision, %d audio, %d MTP head, %d unrecognised", stats.vision,
                      stats.audio, stats.mtp, stats.unrecognised);
 
-    // Audio is the one class with no owner downstream. Vision tensors are
-    // either routed by the vision mapper below or already announced by the
-    // config loader's "vision tower will be skipped" warning; `mtp.*` has its
-    // own loader. An `model.embed_audio.*` tensor is read by nothing in imp,
-    // so the drop is the whole modality and it gets said out loud once.
+    // Audio is the one tensor class with no owner downstream: vision is routed by the vision
+    // mapper or already announced by the config loader, mtp.* has its own loader, but
+    // model.embed_audio.* is read by nothing in imp, so the drop is a whole lost modality, said
+    // out loud once.
     if (stats.audio > 0)
         IMP_LOG_WARN(
             "WeightMap: %d audio tensor(s) dropped (model.embed_audio.*). imp has no audio "
@@ -1418,30 +1362,17 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         }
     }
 
-    // A MoE model whose experts were all skipped loads, runs, and answers with
-    // garbage — the routing picks experts that are null tensors. Measured on
-    // gpt-oss-20b in BF16, whose experts are 3-D stacks (`experts.gate_up_proj`)
-    // that only the MXFP4 `_blocks`/`_scales` matcher looks for: every layer
-    // logged "unrecognised layer weight", the load succeeded, and generation
-    // produced ":!!!!!!!!!!".
-    //
-    // Deliberately narrow: it fires only when the config declares experts and
-    // NOT ONE layer carries any expert representation — per-expert 2-D, the
-    // Gemma-4 packed pair, or the gpt-oss packed blocks. A partially mapped MoE
-    // is a different question and stays a warning.
+    // A MoE model whose experts were all skipped loads, runs, and answers with garbage
+    // (routing picks null-tensor experts; gpt-oss-20b BF16 logged "unrecognised layer weight"
+    // on every layer and generated ":!!!!!!!!!!"). Deliberately narrow: fires only when the
+    // config declares experts and NOT ONE layer carries any expert representation (per-expert
+    // 2-D, Gemma-4 packed pair, or gpt-oss packed blocks); a partially mapped MoE stays a warning.
     if (model.config_.n_experts > 0) {
-        // The per-expert vectors are RESIZED by `ensure_expert` as soon as any
-        // expert-shaped name is seen, so a non-empty vector says nothing — the
-        // entries can all be default Tensors. Only a non-null `data` means a
-        // weight actually arrived.
-        // Checking only `expert_w_gate` made this fire on every up/down-only MoE
-        // — the whole Nemotron-H family, whose experts are (up_proj, down_proj)
-        // with no gate projection at all. It went unnoticed because the caller
-        // discards this function's bool: Nemotron-3-Nano logs the error and then
-        // loads and generates correctly at 113 tok/s. A guard against garbage
-        // that cries wolf on a working model, and whose verdict nobody reads, is
-        // worse than no guard — so ask about the projections that actually have
-        // to be there.
+        // Per-expert vectors are resized by ensure_expert as soon as any expert-shaped name is
+        // seen, so non-empty says nothing; only non-null `data` means a weight arrived. Checking
+        // only expert_w_gate fired on every up/down-only MoE (the whole Nemotron-H family has no
+        // gate projection); a guard that cries wolf on a working model and whose verdict nobody
+        // reads is worse than none, so ask about the projections that actually must be there.
         bool any_experts = false;
         auto any_data = [](const std::vector<Tensor>& v) {
             for (const auto& w : v)

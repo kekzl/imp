@@ -8,28 +8,10 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Fused INT4 dequantization + GEMM kernel.
-//
-//   C[M,N] = A[M,K] @ dequant(B_quant[N,K/2], scales[N, K/group_size])
-//
-// B_quant is stored in [N, K/2] layout: for each output channel n, K weights
-// are packed 2 per byte (low nibble first, GGML Q4_0 compatible).  This
-// layout means consecutive bytes along the K dimension for a given n, which
-// gives good coalescing when loading the B tile in the K direction.
-//
-// Algorithm: standard tiled GEMM with on-the-fly dequantization of B.
-//   Tile sizes:  Tm x Tn x Tk  =  64 x 64 x 32
-//   Block:       16 x 16 threads  (256 threads)
-//   Each thread accumulates a 4x4 sub-tile of C in registers.
-//
-// For each K-tile iteration:
-//   1. Cooperatively load Tm x Tk tile of A (FP16) into shared memory.
-//   2. Cooperatively load Tn x (Tk/2) bytes of B_quant, dequantize to
-//      Tn x Tk half values in shared memory, using scales[n][k/group_size].
-//   3. Multiply A_smem[tm, tk] * B_smem[tn, tk] accumulated into C_reg.
-//   4. After all K tiles, write C_reg back to global C[M,N].
-// ---------------------------------------------------------------------------
+// Fused INT4 dequant + GEMM: C[M,N] = A[M,K] @ dequant(B_quant[N,K/2], scales[N,
+// K/group_size]). B_quant packs 2 values/byte (low nibble first, GGML Q4_0-compatible),
+// consecutive along K for coalesced loads. Tiled GEMM with on-the-fly B dequant:
+// Tm x Tn x Tk = 64x64x32, 16x16 threads (256), each thread accumulates a 4x4 sub-tile.
 
 static constexpr int TILE_M = 64;
 static constexpr int TILE_N = 64;
@@ -88,12 +70,9 @@ __global__ void quant_gemm_int4_kernel(
             }
         }
 
-        // --- Load & dequantize B tile [TILE_N][TILE_K] ----------------------
-        // B_quant is [N, K/2].  For a given (n, k), the packed byte is at
-        // B_quant[n * (K/2) + k/2], with k%2 selecting low or high nibble.
-        // We load TILE_N * TILE_K = 2048 half values; that's 2048 / 2 = 1024
-        // bytes of packed data, but it's cleaner to just have each element
-        // handled individually (2048 elements / 256 threads = 8 per thread).
+        // Loads & dequantizes B tile [TILE_N][TILE_K]: for (n,k), the packed byte is at
+        // B_quant[n*(K/2)+k/2], k%2 selects low/high nibble. TILE_N*TILE_K=2048 half values
+        // handled one element per thread iteration (2048/256=8 per thread).
         const int half_K = K / 2;
 
 #pragma unroll
@@ -123,10 +102,8 @@ __global__ void quant_gemm_int4_kernel(
 
         __syncthreads();
 
-// --- Compute: accumulate TILE_K products ----------------------------
-// Thread (tx, ty) owns sub-tile:
-//   rows: ty * THREAD_TILE_M  ..  ty * THREAD_TILE_M + 3
-//   cols: tx * THREAD_TILE_N  ..  tx * THREAD_TILE_N + 3
+// Thread (tx,ty) owns sub-tile rows [ty*THREAD_TILE_M .. +3], cols
+// [tx*THREAD_TILE_N .. +3].
 #pragma unroll
         for (int tk = 0; tk < TILE_K; ++tk) {
             // Load A values for this thread's rows.

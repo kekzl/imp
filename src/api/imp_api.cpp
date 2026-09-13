@@ -168,11 +168,9 @@ static imp::QType map_dtype(ImpDType dt) {
     }
 }
 
-// The KV cache takes six of the eleven ImpDType values. The imp.conf surface
-// (engine_init_resolver.cpp) warns on an unknown string and keeps FP16; this
-// surface mapped FP32 / BF16 / FP8_E5M2 / INT32 / FP4_E2M1 and any
-// out-of-range integer to a QType the pool was sized for and the FP16 kernel
-// then read (AUDIT_arch_2026 G-4). Rejected before the model is looked at.
+// KV cache accepts only 6 of 11 ImpDType values; reject invalid/out-of-range
+// dtypes here before the model loads, not after the FP16 kernel misreads them.
+// (AUDIT_arch_2026 G-4)
 static bool kv_cache_dtype_is_valid(ImpDType dt) {
     switch (dt) {
         case IMP_DTYPE_FP16:
@@ -211,10 +209,9 @@ ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp
         }
 
         if (!model) {
-            // Distinguish a genuinely missing path from one that exists but
-            // failed to parse (bad GGUF magic, truncated SafeTensors, …). The
-            // loaders return nullptr for both; reporting "file not found" for a
-            // file that is present but corrupt is misleading (#759).
+            // Distinguish "path missing" from "path exists but failed to parse" (bad GGUF
+            // magic, truncated SafeTensors): loaders return nullptr for both, and
+            // misreporting corrupt as "not found" hides the real cause (#759).
             std::error_code ec;
             if (std::filesystem::exists(path, ec))
                 return IMP_ERROR_INVALID_MODEL;
@@ -333,13 +330,9 @@ int imp_context_max_seq_len(ImpContext ctx) {
 
 // --- Context / Runtime ---
 
-// #1629: the public header told callers to create one context per thread. Two
-// concurrent contexts do not work and cannot be made to work by the caller: the
-// T2 arena and the graph-slot pool are process-global, the second
-// engine_arena_open() returns InvalidArgument (the return value was discarded),
-// and whichever context is freed first closes both out from under the other.
-// Sequential create/free/create is fine and stays fine - reset_static_cuda_state()
-// exists for it - so the count is of LIVE contexts, not of contexts ever made.
+// Only ONE context may be live at a time (#1629): the T2 arena and the
+// graph-slot pool are process-global; a second engine_arena_open() fails.
+// Sequential create/free/create is fine; this counts LIVE, not total, contexts.
 static std::atomic<int> g_live_contexts{0};
 
 ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx) {
@@ -499,13 +492,9 @@ static void apply_sampling_params(imp::Request& req, const ImpGenerateParams* pa
 
 // --- Generation ---
 
-// Thin wrapper helper: tokenise the prompt, prefill, then loop decode_step.
-// `on_token` is invoked for every newly decoded token; return true to keep
-// going, false to stop early (the caller's request gets cancelled).
-//
-// This is the shared body of imp_generate / imp_generate_streaming. Both
-// public entry points stay ABI-stable; only their bodies collapse into this
-// helper + imp_prefill_with_params + imp_decode_step.
+// Shared body of imp_generate / imp_generate_streaming: tokenize, prefill,
+// loop decode_step. on_token returns true to continue, false cancels the
+// request. Public entry points stay ABI-stable; only bodies collapse here.
 namespace {
 
 template <typename OnToken>
@@ -537,13 +526,9 @@ static ImpError generate_via_prefill_decode_loop(ImpContext ctx, const char* pro
     if (err != IMP_SUCCESS)
         return err;
 
-    // The prefill last-chunk sampler emits the FIRST generation token into
-    // req->output_tokens. imp_prefill_with_params marks those as "already
-    // consumed" so a token-level (prefill+decode_step) caller doesn't get
-    // them — but the high-level imp_generate / imp_generate_streaming
-    // contract says every generated token reaches the caller. Reset the
-    // cursor so imp_decode_step drains the prefill-sampled token(s) on its
-    // first call(s) before stepping the engine again.
+    // Prefill's last-chunk sampler already emitted the first token into
+    // output_tokens and imp_prefill_with_params marks it consumed; reset the
+    // cursor so imp_decode_step drains it, since imp_generate must return every token.
     ctx->consumed_output = 0;
 
     // Decode loop: imp_decode_step handles per-step sampling params,
@@ -748,12 +733,9 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         auto req = std::make_shared<imp::Request>();
         req->input_tokens.assign(tokens, tokens + n_tokens);
         req->max_tokens = 4096;  // Large default; decode_step controls actual stopping
-        // Apply caller-supplied sampling params so the prefill last-chunk
-        // sampler honours top_p / top_k / temperature for the FIRST token.
-        // Without this Gemma-4-NVFP4 (and other noisy-logit-tail quants)
-        // can sample garbage like <|end_of_text|> on token #0 and never
-        // recover, even with temperature == 0.7 + properly-loaded
-        // generation_config.json defaults.
+        // Apply caller sampling params to the prefill last-chunk sampler too, else
+        // noisy-logit-tail quants (Gemma-4-NVFP4) can sample garbage on token #0
+        // and never recover, even at temperature 0.7 with correct config defaults.
         if (params) {
             req->temperature = params->temperature;
             req->top_p = params->top_p;
@@ -790,11 +772,9 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
             (void)ctx->engine->step();
         } while (req->status == imp::RequestStatus::PREFILLING);
 
-        // Verify the request was prefilled. A cancellation here reported a flat
-        // OUT_OF_MEMORY whatever the cause, which is where the admission
-        // refusal lost its identity: the scheduler logs "needs N KV blocks but
-        // cache capacity is M" and the caller saw "out of memory", i.e. a
-        // transient-looking condition for something retrying will never fix.
+        // Report cancellation distinctly: collapsing it into OUT_OF_MEMORY hid that
+        // the scheduler refused admission ("needs N KV blocks, cache has M"), a
+        // non-transient condition that retrying never fixes.
         if (req->status == imp::RequestStatus::CANCELLED) {
             const bool capacity = req->cancel_reason == imp::CancelReason::KvCapacity;
             ctx->active_request = nullptr;
@@ -816,11 +796,9 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
     }
 }
 
-// Legacy entry point — defaults to no caller-supplied sampling, leaves the
-// first-token sample at end of prefill on Request struct defaults
-// (top_p=1, top_k=0). Kept for ABI; new callers should use
-// imp_prefill_with_params and pass the same params they'll use in
-// imp_decode_step.
+// Legacy entry point: no caller-supplied sampling, first-token sample uses
+// Request defaults (top_p=1, top_k=0). Kept for ABI; new callers should use
+// imp_prefill_with_params with the same params passed to imp_decode_step.
 ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
     return imp_prefill_with_params(ctx, tokens, n_tokens, nullptr);
 }
@@ -836,24 +814,17 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
     try {
         // Fresh context so the prefill covers exactly this corpus.
         imp_context_reset(ctx);
-        // Chunked-prefill-aware: the engine accumulates per-position NLL
-        // after every chunk it forwards. (The executor's hidden_ only
-        // retains the most recent chunk, so the historical post-hoc
-        // executor()->perplexity_nll() silently scored stale positions
-        // whenever the resolved prefill chunk size was smaller than the
-        // corpus — which is the C-API DEFAULT: prefill_chunk_size=-1
-        // resolves to 512 on dense archs.)
+        // Chunked-prefill-aware NLL: executor hidden_ only retains the most recent
+        // chunk, so accumulate per-chunk instead of post-hoc (which silently scored
+        // stale positions once corpus exceeded the resolved chunk size, default 512).
         if (!ctx->engine->begin_perplexity_capture(std::span(tokens, static_cast<size_t>(n_tokens))))
             return IMP_ERROR_INTERNAL;
         ImpError e = imp_prefill(ctx, tokens, n_tokens);
         double ppl = -1.0;
         const bool reduced = ctx->engine->end_perplexity_capture(&ppl);  // always frees buffers
-        // Release the prefill request's KV + recurrent slot. NOTE: do NOT
-        // null active_request first — imp_context_reset only cleans up
-        // (free_sequence / reset_ssm_state / slot release) when it still
-        // sees the request; nulling early leaked the KV sequence AND the
-        // SSM/GDN slot on every imp_perplexity call, so repeated scoring
-        // on hybrid models drifted (stale recurrent state, slot pool decay).
+        // Do NOT null active_request before imp_context_reset: reset only releases
+        // the KV/SSM slot while it still sees the request. Nulling first leaked the
+        // KV sequence and GDN slot on every imp_perplexity call.
         imp_context_reset(ctx);
         if (e != IMP_SUCCESS)
             return e;
@@ -910,19 +881,17 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
     try {
         auto& req = ctx->active_request;
 
-        // Apply ignore_eos BEFORE the finished check — when benchmarking with
-        // synthetic tokens, prefill may produce EOS as the first output token
-        // (e.g. Gemma-3), marking the request FINISHED.  If the caller wants
-        // to ignore EOS, we must reset the request back to GENERATING.
+        // Apply ignore_eos before the finished check: prefill can emit EOS as the
+        // first output token (e.g. Gemma-3), marking FINISHED; reset to GENERATING
+        // if the caller wants EOS ignored.
         bool caller_ignore_eos = (params->ignore_eos != 0);
         if (caller_ignore_eos && req->status == imp::RequestStatus::FINISHED) {
             req->status = imp::RequestStatus::DECODING;
         }
 
-        // Drain unconsumed tokens BEFORE the finished check — a multi-token
-        // step (spec-ngram verify chunk) can emit several tokens AND finish
-        // the request in the same engine step; returning the error here would
-        // drop the queued tail (#683: CLI output ended mid-chunk).
+        // Drain unconsumed tokens before the finished check: a multi-token step
+        // (spec-ngram verify chunk) can emit several tokens and finish the request
+        // in the same step; erroring here would drop the queued tail (#683).
         if (ctx->consumed_output < req->output_tokens.size()) {
             *out_token = req->output_tokens[ctx->consumed_output++];
             if (req->status == imp::RequestStatus::FINISHED &&
@@ -932,12 +901,9 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
             return IMP_SUCCESS;
         }
 
-        // Check if already finished. FINISHED keeps returning INTERNAL — the
-        // imp_generate loop relies on "INTERNAL + cleared active_request" as
-        // its natural end-of-stream signal. CANCELLED is reported as such:
-        // the engine cancels requests it cannot serve (KV pool exhausted at
-        // decode — the scheduler logs the reason), and surfacing that as a
-        // bare "internal error" hid the cause.
+        // FINISHED keeps returning INTERNAL: imp_generate's loop relies on
+        // "INTERNAL + cleared active_request" as end-of-stream. CANCELLED reports
+        // as such so admission refusals (KV pool exhausted) aren't hidden as INTERNAL.
         if (req->status == imp::RequestStatus::FINISHED || req->status == imp::RequestStatus::CANCELLED) {
             bool cancelled = req->status == imp::RequestStatus::CANCELLED;
             // A capacity refusal is the one cancellation the caller can act on,
@@ -958,12 +924,9 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
         req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
         req->json_mode = (params->json_mode != 0);
 
-        // Need a new engine step (the multi-token drain above returned any
-        // leftovers). A step may legitimately yield ZERO new tokens when it
-        // only launches an async graph-loop burst (n-gram speculation miss
-        // path) — the burst's tokens arrive on the next step's drain. Retry a
-        // bounded number of times; a persistent zero-token stream is still an
-        // internal error.
+        // A step may legitimately yield zero new tokens (async graph-loop burst,
+        // n-gram speculation miss path); its tokens arrive on the next drain.
+        // Retry a bounded number of times; a persistent zero-token stream is an error.
         size_t prev_output_size = req->output_tokens.size();
         for (int attempts = 0;
              attempts < 8 && req->output_tokens.size() == prev_output_size &&

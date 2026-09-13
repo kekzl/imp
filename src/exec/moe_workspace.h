@@ -9,13 +9,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// MoE workspace: holds all MoE-specific tensors and buffers.
-//
-// Phase tensors are views into the executor's shared_workspace_ (no separate
-// allocation). Separately allocated buffers are owned and freed by this struct.
-// All members are public for zero-overhead access in the forward pass.
-// ---------------------------------------------------------------------------
+// MoE workspace: holds all MoE-specific tensors and buffers. Phase tensors are views into
+// the executor's shared_workspace_ (no separate allocation); separately allocated buffers
+// are owned/freed by this struct. All members public for zero-overhead access.
 struct MoEWorkspace {
     // --- Phase tensors (views into shared_workspace_, set by configure_moe_workspace) ---
     MoeRoutingBuffers routing_buffers;
@@ -38,36 +34,27 @@ struct MoEWorkspace {
     void* batch_dequant_buf = nullptr;
     size_t batch_dequant_buf_size = 0;
 
-    // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the
-    // key names a path. [n_layers * n_experts] device counters, incremented once
-    // per (token, k) routing decision. Answers "how skewed is expert selection",
-    // which is what decides whether a resident/host split of MoE experts can pay
-    // (docs/roadmap.md, "CPU-resident cold experts").
+    // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the key names a
+    // path. [n_layers*n_experts] device counters, incremented once per (token,k) routing
+    // decision. Answers how skewed expert selection is, deciding whether a resident/host
+    // split of MoE experts can pay (docs/roadmap.md).
     unsigned int* expert_hist = nullptr;
     int hist_layers = 0;
     int hist_experts = 0;
     int hist_top_k = 0;
 
-    // Per-launch expert imbalance (#1548). max(M_e) is what decides grouped-GEMM
-    // cost: the kernel pads every expert to one M tile, so a single hot expert
-    // sets it for all of them and everything under it is padding. imp computed
-    // that number on the host at three sites, used it to pick the tile, and
-    // dropped it; the only record was a whole-process activation histogram,
-    // which averages exactly that skew away.
-    //
-    // Device-side, because the default NVFP4 prefill path keeps expert args on
-    // the card on purpose (that is what makes it graph-capturable) and reading
-    // them back would trade capture for a diagnostic. Four counters per layer:
-    // [peak_max, sum_max, sum_rows, launches]. Recorded only at n > 1, which is
-    // the only place max(M_e) chooses anything, so decode pays nothing.
+    // Per-launch expert imbalance (#1548): max(M_e) decides grouped-GEMM cost (one hot expert
+    // sets the tile for all, the rest is padding); a whole-process histogram averages this
+    // away. Device-side because the NVFP4 prefill path keeps expert args on-card for graph
+    // capture; reading them back would trade capture for a diagnostic. Four counters per
+    // layer: [peak_max, sum_max, sum_rows, launches], recorded only at n>1 (decode pays nothing).
     unsigned int* imb_acc = nullptr;
     int imb_layers = 0;
     int imb_experts = 0;
 
-    // Per-token expert trace (diagnostics.moe_expert_trace). Flat append of
-    // records [layer, e0..e_{top_k-1}], one per (token, layer), in stream order.
-    // Decode only — a prefill call would append n*top_k at once and break the
-    // fixed record stride the reader relies on.
+    // Per-token expert trace (diagnostics.moe_expert_trace): flat append of
+    // [layer, e0..e_{top_k-1}], one per (token, layer), in stream order. Decode only: a
+    // prefill call would append n*top_k at once and break the fixed record stride.
     int* expert_trace = nullptr;
     unsigned int* trace_cursor = nullptr;  // device counter, in ints
     size_t trace_capacity = 0;             // ints
@@ -81,11 +68,9 @@ struct MoEWorkspace {
     // Per-expert FP8 scale buffer: [n_experts] floats on device.
     float* d_fp8_scales = nullptr;
 
-    // Per-expert token-count buffer: [n_experts] int32 on device.
-    // Populated by compute_M_per_from_offsets_device from routing.expert_offsets.
-    // Replaces the host-side D2H + sync + loop pattern in MoE prefill dispatch
-    // (executor_forward_moe.cu). Prerequisite for CUDA-graph capture of the
-    // prefill path. See plan moe_prefill_graphs_plan_2026_05_10.
+    // Per-expert token-count buffer [n_experts] int32, device. Populated by
+    // compute_M_per_from_offsets_device from routing.expert_offsets. Replaces the host-side
+    // D2H+sync+loop pattern; prerequisite for CUDA-graph capture of the prefill path.
     int32_t* d_M_per = nullptr;
     int d_M_per_count = 0;
 
@@ -96,30 +81,24 @@ struct MoEWorkspace {
     // Active-expert count: [1] int32 on device. Written by compact_alpha_active.
     int32_t* d_na = nullptr;
 
-    // Per-expert SFA byte-offsets into the CUTLASS 3.x SfAtom-padded staging
-    // buffer (Phase 3 of moe_prefill_graphs_plan_2026_05_10). Exclusive prefix
-    // sum of cutlass_nvfp4_sf_size(M_per[e], K) — populated each forward by
-    // compute_sfa_offsets_device. Replaces the host-side sfa_offsets loop in
-    // executor_forward_moe.cu's quantize_once lambda. [n_experts+1] int64.
+    // Per-expert SFA byte-offsets into the CUTLASS 3.x SfAtom-padded staging buffer.
+    // Exclusive prefix sum of cutlass_nvfp4_sf_size(M_per[e], K), populated each forward by
+    // compute_sfa_offsets_device. [n_experts+1] int64.
     int64_t* d_sfa_offsets = nullptr;
 
-    // Phase 3c-full Step 1 caches for the device-args wrapper:
-    // - d_B_ptrs_cache:   [n_experts] device array of per-expert weight pointers
-    // - d_SFB_ptrs_cache: [n_experts] device array of per-expert SFB pointers
-    // - d_alpha_full:     [n_experts] device floats per-expert alpha
-    // Filled per-call from the registry handles (host) via cudaMemcpyAsync;
-    // shared across all three projections (gate / up / down) inside one
-    // forward layer. Replaces the per-call cudaMallocAsync of the MVP wire.
-    // Superseded by per_layer_da_cache below when da_cache_ready is true —
-    // these stay around for any future per-call fallback path.
+    // Phase 3c-full device-args caches: d_B_ptrs_cache/d_SFB_ptrs_cache/d_alpha_full are
+    // [n_experts] device arrays filled per-call from the registry handles via
+    // cudaMemcpyAsync, shared across gate/up/down within one forward layer. Replaces the
+    // per-call cudaMallocAsync of the MVP wire. Superseded by per_layer_da_cache when
+    // da_cache_ready; kept for any future per-call fallback path.
     const void** d_B_ptrs_cache   = nullptr;
     const void** d_SFB_ptrs_cache = nullptr;
     float*       d_alpha_full     = nullptr;
 
-    // Phase 3c-full Step 3: per-layer pre-cached device-args ptr arrays.
-    // Built once at model-load time (pre_dequant_weights) when handle payloads
-    // are populated; reused on every forward call with no host iteration and
-    // no per-call H2D. Prerequisite for CUDA-graph capture of the MoE prefill.
+    // Per-layer pre-cached device-args ptr arrays, built once at model-load time
+    // (pre_dequant_weights) when handle payloads are populated; reused on every forward call
+    // with no host iteration and no per-call H2D. Prerequisite for CUDA-graph capture of the
+    // MoE prefill.
     struct PerLayerNvfp4DeviceArgsCache {
         const void** d_gate_B_ptrs   = nullptr;
         const void** d_gate_SFB_ptrs = nullptr;
@@ -145,33 +124,21 @@ struct MoEWorkspace {
     void* raw_staging_buf = nullptr;
     size_t raw_staging_size = 0;
 
-    // Whole-layer staging for host-resident NVFP4 experts during PREFILL.
-    //
-    // The per-expert route issues two H2D per expert per projection — 18 432
-    // transfers of ~768 KiB + ~96 KiB for one pass over this model — and small
-    // transfers do not reach PCIe bandwidth. Staging a whole projection at once
-    // moves the same bytes as ONE transfer, because the pinned slabs from
-    // `moe.pin_host_experts` already lay a projection's experts back to back
-    // (and the mmap usually does too, which is checked at runtime).
-    //
-    // Sized for one layer only and reused across layers: the forward is
-    // sequential, so layer L+1 overwrites layer L after its kernels have run
-    // on the same stream. Null when the experts are device-resident, when the
-    // model is not NVFP4-prequant, or when one layer does not fit the budget.
+    // Whole-layer staging for host-resident NVFP4 experts during PREFILL. Per-expert route
+    // issues small H2Ds per expert per projection, which don't reach PCIe bandwidth; staging
+    // a whole projection moves the same bytes as ONE transfer (moe.pin_host_experts' pinned
+    // slabs, or the mmap, already lay a projection's experts back to back).
+    // Sized for one layer, reused across layers (forward is sequential). Null when experts
+    // are device-resident, model is not NVFP4-prequant, or one layer doesn't fit the budget.
     void* layer_stage_buf = nullptr;      // [kExpertProjCount][n_experts * expert_bytes]
     size_t layer_stage_proj_bytes = 0;    // per-projection span within the buffer
     size_t layer_stage_size = 0;          // total allocation
     int layer_stage_experts = 0;          // n_experts the buffer was sized for
 
-    // CUTLASS device-args view of the staged layer. The grouped NVFP4 GEMM
-    // wants SfAtom-ordered scale factors and device arrays of per-expert
-    // pointers; the staged bytes carry the native per-16 layout instead, so
-    // the scales are converted once per staged layer into `layer_stage_sf`
-    // and the three pointer arrays are rebuilt to match.
-    //
-    // This is what lets a host-resident layer take the SAME prefill path as a
-    // resident one, instead of the per-expert dequant→cuBLAS fallback that was
-    // 52 % of this path's kernel time.
+    // CUTLASS device-args view of the staged layer: grouped NVFP4 GEMM wants SfAtom-ordered
+    // scale factors and device arrays of per-expert pointers; staged bytes carry the native
+    // per-16 layout, converted once per staged layer into layer_stage_sf with rebuilt pointer
+    // arrays. Lets a host-resident layer take the same prefill path as a resident one.
     void* layer_stage_sf = nullptr;        // [kExpertProjCount][n_experts * sf_size]
     size_t layer_stage_sf_proj_bytes = 0;  // per-projection span
     size_t layer_stage_sf_size = 0;
@@ -179,17 +146,15 @@ struct MoEWorkspace {
     const void** layer_stage_sfb_ptrs = nullptr;  // [kExpertProjCount * n_experts]
     float* layer_stage_alpha = nullptr;           // [kExpertProjCount * n_experts]
 
-    // Slot indices for the host-offload decode path: [3 * top_k] int32, one
-    // block per projection (gate, up, down). The fused MoE decode kernels
-    // address an expert as `base + idx * stride`; with host-resident experts
-    // the contiguous array is the LRU cache's per-layer slot pool, so `idx` is
-    // the expert's slot rather than its id. See docs/roadmap.md.
+    // Slot indices for the host-offload decode path: [3*top_k] int32, one block per
+    // projection (gate, up, down). Fused MoE decode kernels address an expert as
+    // base + idx*stride; idx is the expert's LRU-cache slot, not its id.
     int32_t* d_slot_idx = nullptr;
     int d_slot_idx_count = 0;
 
     // CUTLASS 3.x NVFP4 grouped GEMM staging:
-    //   packed: [max_expanded, max_K/2] — contiguous FP4 activations
-    //   sf:     per-expert SfAtom slabs (worst-case padded to 128 rows per expert)
+    //   packed: [max_expanded, max_K/2] contiguous FP4 activations
+    //   sf: per-expert SfAtom slabs, worst-case padded to 128 rows per expert
     //   sfa_ptrs: device array of [ne] pointers into sf slab (fused-quantize kernel input)
     void* cutlass3x_packed = nullptr;
     size_t cutlass3x_packed_size = 0;

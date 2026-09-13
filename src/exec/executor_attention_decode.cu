@@ -1,21 +1,14 @@
 // Decode attention dispatch block for GraphExecutor::run_attention.
 #include <utility>
-//
-// This is NOT a standalone translation unit — it is textually #include'd inside
-// the body of GraphExecutor::run_attention (executor_attention.cu), as the body
-// of the `decode_attend` lambda: `state`, `n`, `qv`/`kk`/`vv`/`ao` and
-// `layer_block_tables` are its parameters (the whole decode batch, or the
-// rider sub-batch of a mixed prefill+decode step), everything else is captured
-// from run_attention. It is therefore omitted from the CMake source list and
-// must not be compiled on its own. `return` leaves the lambda where the inline
-// block used to `goto after_attention`.
-        // MLA absorbed decode (Phase 3, opt-in attention.mla_absorb): the
-        // current token's latent + decoupled key were just written into the
-        // per-layer latent cache (above, before the prefill/decode branch). Run
-        // the mathematically-equivalent absorbed attention directly from the
-        // latent cache — no full per-head K/V materialization, no paged cache
-        // read. Single-token decode (n==1) only; multi-token (spec) decode falls
-        // through to the materialized paged path.
+// NOT a standalone TU: textually #include'd inside GraphExecutor::run_attention
+// as the body of the `decode_attend` lambda (state/n/qv/kk/vv/ao/
+// layer_block_tables are its parameters; everything else is captured).
+// Omitted from CMake; must not be compiled alone. `return` replaces the old `goto after_attention`.
+        // MLA absorbed decode (opt-in attention.mla_absorb): runs the
+        // mathematically-equivalent absorbed attention directly from the latent
+        // cache (written just before this branch) - no full K/V materialization,
+        // no paged cache read. Single-token decode (n==1) only; multi-token (spec) falls through to the
+        // materialized paged path.
         if (mla_absorb_active && n == 1) {
             half* cache_layer = static_cast<half*>(mla_absorb_cache_) +
                                 static_cast<size_t>(layer) * mla_absorb_layer_stride_;
@@ -62,10 +55,9 @@
                 state.max_blocks_per_seq, state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
                 cfg.rope_neox, longrope_freqs);
             IMP_CUDA_CHECK_LAUNCH();
-            // Sparse decode attention metadata is updated for ALL layers in
-            // one batched launch at the end of the forward (run_forward) -
-            // selection force-includes the recent blocks, so the one-step lag
-            // is harmless.
+            // Sparse decode attention metadata is updated for ALL layers in one
+            // batched launch at the end of the forward: selection force-includes the
+            // recent blocks, so the one-step lag is harmless.
         } else {
             write_kv_cache(layer, state, stream, row_begin, n);
         }
@@ -114,11 +106,10 @@
             int64_t v_shape[2] = {ctx_len, nkv * hd};
             Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
             Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
-            // n=1 cuBLAS attention. causal=true + q_offset=ctx_len-1 makes the
-            // single query row see the full context AND keeps the sliding-window
-            // mask correct (the old causal=false/q_offset=0 form broke SWA
-            // layers: abs_row=0 never triggered the window). Sinks pass through
-            // so this debug arm stays a faithful reference for gpt-oss (#547).
+            // n=1 cuBLAS attention: causal=true + q_offset=ctx_len-1 lets the single
+            // query see the full context AND keeps the sliding-window mask correct
+            // (causal=false/q_offset=0 broke SWA: abs_row=0 never triggered the
+            // window). Sinks pass through so this stays a faithful gpt-oss reference (#547).
             {
                 int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
                 half* s_buf = nullptr;
@@ -146,9 +137,8 @@
         int64_t od[4] = {n_seq, 1, nh, vhd};
         Tensor q4 = qv.reshape(4, qd);
         // attn_out_ is allocated for nh*hd; for MLA the live output is only
-        // nh*vhd (the paged kernel writes nh*vhd contiguously per token).
-        // reshape() enforces equal numel, so build the narrower view from the
-        // pointer directly when vhd != hd; otherwise reshape (identical layout).
+        // nh*vhd. reshape() enforces equal numel, so build the narrower view from
+        // the pointer directly when vhd!=hd; otherwise reshape (identical layout).
         Tensor o4 = (vhd != hd) ? Tensor(ao.data, ao.qtype, 4, od, /*on_device=*/true)
                                 : ao.reshape(4, od);
 
@@ -167,16 +157,12 @@
         // RTX 5090 has 96 MB L2 — enough for ~3K tokens of KV at FP8.
         set_l2_persist_kv(stream, k_c.data, k_c.nbytes() + v_c.nbytes());
 
-        // Sparse decode attention (attention.sparse_topk_tokens): score all
-        // context blocks against the current queries and swap in a compacted
-        // block table + context lens. The paged kernels below are unmodified;
-        // contexts at or below the budget pass through bit-identically.
-        // Covers plain decode AND spec verify chunks (chunk rows are already
-        // presented as per-row "sequences" with their own context lens and
-        // replicated tables - exactly the shape the selection kernels take;
-        // pad rows attend 1 token and ride the identity path). SWA/streaming
-        // layers keep full attention; the init gate limits the metadata pool
-        // to F16/FP8 caches, non-MLA, uniform geometry.
+        // Sparse decode attention (attention.sparse_topk_tokens): scores all
+        // context blocks against current queries, swaps in a compacted block
+        // table + context lens; contexts at/below budget pass through bit-
+        // identically. Covers plain decode AND spec verify chunks (already
+        // per-row "sequences"). SWA/streaming layers keep full attention; the init
+        // gate limits it to F16/FP8 caches, non-MLA, uniform geometry.
         const int* attn_bt = layer_block_tables;
         const int* attn_ctx_lens = state.context_lens;
         int attn_max_blocks = state.max_blocks_per_seq;
@@ -223,13 +209,10 @@
             dispatch_record::set_attn_decode(AttnDecodePath::NVFP4);
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk routes to the WMMA-Q.K variant; default
-            // keeps the scalar-FFMA path unchanged.
-            // The BitDecoding TC variant has no sink pointer, and its residual
-            // reduce is a second reduction that would need its own (#1345). A
-            // sink model therefore stays on the scalar NVFP4 kernel, which
-            // applies them — silently dropping the sink column is what this
-            // whole issue is about.
+            // BitDecoding TC dispatch opt-in (kv_cache.bitdecoding_qk): routes to the
+            // WMMA-Q.K variant; default keeps scalar-FFMA. The TC variant has no sink
+            // pointer and its residual reduce would need its own (#1345), so a sink
+            // model stays on the scalar NVFP4 kernel, which applies sinks correctly.
             bool use_bitdecoding_tc = dispatch_policy().kv_cache.bitdecoding_qk;
             if (use_bitdecoding_tc && attn_sinks) {
                 static bool warned_tc_sinks = false;
@@ -243,11 +226,9 @@
                 use_bitdecoding_tc = false;
             }
             if (use_bitdecoding_tc) {
-                // QW6 from the phase-5 review §2.1 (archived in #604): gate the entire
-                // residual-arg marshalling (8+ trailing args) behind a single
-                // null-check. Default path (residual_on=false) uses the
-                // function's default arguments — no explicit nullptr/0 marshalling
-                // at the call site, no dead per-layer state lookups.
+                // QW6 (#604): gate the entire residual-arg marshalling (8+ trailing args)
+                // behind one null-check. Default path (residual_on=false) uses the
+                // function's default arguments, no explicit marshalling at the call site.
                 const bool residual_on = state.kv_manager != nullptr && state.kv_manager->residual_enabled();
                 const uint8_t* k_scales = static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0));
                 const uint8_t* v_scales = static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0));
@@ -258,13 +239,10 @@
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
                                                     attn_max_blocks);
                 } else {
-                    // Phase 3b residual read. Two activation paths:
-                    //   (multi-seq) state.d_residual_seq_slots != nullptr: kernel
-                    //     reads per-batch metadata from the device arrays. Used by
-                    //     batched decode.
-                    //   (single-seq legacy) state.kv_seq_id >= 0: kernel uses the
-                    //     scalar form. Used by single-seq decode that hasn't been
-                    //     migrated to the array form (e.g. early-init smoke).
+                    // Phase 3b residual read, two activation paths: multi-seq
+                    // (state.d_residual_seq_slots != nullptr) reads per-batch device metadata
+                    // (batched decode); single-seq legacy (state.kv_seq_id >= 0) uses the
+                    // scalar form (unmigrated single-seq decode).
                     const half* k_res = nullptr;
                     const half* v_res = nullptr;
                     int res_count = 0;

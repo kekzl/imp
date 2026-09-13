@@ -42,7 +42,7 @@ __device__ __forceinline__ void cvt_e4m3x4_to_f32x4(uint32_t packed_fp8, float& 
 // Packed FP4 E2M1 conversion. NOTE: FP16->FP4 packed conversion
 // (cvt.rn.satfinite.e2m1x2.f16x2) is in PTX ISA 9.2 but ptxas rejects it on CUDA 13.2.
 // Production paths use the FP32 variant (cvt.rn.satfinite.e2m1x2.f32, see
-// src/quant/nvfp4_quant.cu:148); FP16x2 variant unwired, re-evaluate on next toolkit bump.
+// src/quant/nvfp4_quant.cu:119); FP16x2 variant unwired, re-evaluate on next toolkit bump.
 
 // Blackwell add.f32x2 PTX (sm_120a): 2-lane FP32 add. ptxas on consumer Blackwell
 // decomposes this to 2x scalar FADD at SASS (vectorized HW path not exposed on sm_120);

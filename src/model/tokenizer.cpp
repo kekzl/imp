@@ -48,14 +48,9 @@ static std::string codepoint_to_utf8(uint32_t cp) {
     return s;
 }
 
-// ---- GPT2 byte-level encoding tables ----
-//
-// GPT2 maps each byte (0-255) to a unique Unicode codepoint:
-// - Printable ASCII (33-126): identity mapping
-// - Latin-1 supplement (161-172, 174-255): identity mapping
-// - All other bytes (0-32, 127-160, 173): mapped to 256+ range
-//
-// This ensures every byte has a visible Unicode representation.
+// GPT2 byte-level table: maps each byte (0-255) to a unique Unicode codepoint. Printable
+// ASCII (33-126) and Latin-1 supplement (161-172, 174-255) are identity; everything else
+// (0-32, 127-160, 173) maps to 256+, so every byte gets a visible representation.
 
 static const uint32_t BYTE_TO_CODEPOINT[256] = {
     // 0-32: mapped to 256-288
@@ -359,16 +354,9 @@ static int gpt2_to_byte(const char* s, int len) {
     return -1;
 }
 
-// ---- GPT2 pre-tokenization ----
-//
-// Splits input text into chunks before applying BPE to each independently.
-// This is a simplified version of the cl100k_base / Qwen2 pre-tokenizer.
-// Key rules:
-// - Spaces attach to the following word
-// - Letter sequences form chunks
-// - Digit sequences (up to 3) form chunks
-// - Individual punctuation chars form chunks
-// - Newlines group together
+// GPT2 pre-tokenization: splits text into chunks before BPE, a simplified cl100k_base/Qwen2
+// pre-tokenizer. Spaces attach to the following word; letters and digit runs (up to 3) each
+// form a chunk; punctuation chars are individual chunks; newlines group together.
 
 static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
@@ -435,12 +423,11 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
     return result;
 }
 
-// Lightweight non-ASCII classifier for the regex-faithful pre-tokenizers:
-// returns true when the UTF-8 sequence starting at text[i] is a PUNCTUATION/
-// SYMBOL codepoint (NOT \p{L}/\p{N}) — common typographic and technical
-// blocks only. Everything else ≥0x80 keeps the letter approximation. Without
-// this, " →\n" / " —\n" took the letter rule (no trailing-newline absorption)
-// instead of the symbol run and diverged from canonical segmentation (#657).
+// Lightweight non-ASCII classifier for the regex-faithful pre-tokenizers: true when the
+// UTF-8 sequence at text[i] is PUNCTUATION/SYMBOL (not \p{L}/\p{N}), common typographic/
+// technical blocks only; everything else >=0x80 keeps the letter approximation. Without
+// this " ->\n" took the letter rule instead of the symbol run and diverged from canonical
+// segmentation (#657).
 static bool utf8_punct_symbol(const std::string& text, size_t i) {
     const unsigned char c0 = static_cast<unsigned char>(text[i]);
     uint32_t cp = 0;
@@ -466,31 +453,17 @@ static bool utf8_punct_symbol(const std::string& text, size_t i) {
     return false;
 }
 
-// ---- Qwen2 pre-tokenization ----
-//
-// Faithful hand-rolled scan of the Qwen2 pre-tokenizer regex (the canonical
-// segmentation Qwen2/Qwen3 were trained with; llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2):
-//
-//   (?i:'s|'t|'re|'ve|'m|'ll|'d)            contractions
-//   | [^\r\n\p{L}\p{N}]?\p{L}+              one optional prefix char + letter run
-//   | \p{N}                                 SINGLE digit
-//   |  ?[^\s\p{L}\p{N}]+[\r\n]*             optional space + SYMBOL RUN + newlines
-//   | \s*[\r\n]+                            whitespace ending in newlines
-//   | \s+(?!\S)                             trailing whitespace
-//   | \s+                                   other whitespace
-//
-// The previous routing sent qwen2 through gpt2_pre_tokenize, whose
-// "punctuation = single character" rule makes cross-symbol BPE merges
-// impossible ("->" became "-", ">"; "(x):" four chunks) and whose
-// digit-groups-of-3 rule is non-canonical for Qwen (single digits). On
-// code/markdown text that produced ~20% more tokens than canonical
-// (llama.cpp control: 3084 vs 3690 on a 10 KB corpus) and +70% teacher-forced
-// NLL on matched text (#657) — and every production prompt containing code
-// was segmented non-canonically. \p{L} is approximated as ASCII isalpha() or
-// any non-ASCII byte (same approximation as the other pre-tokenizers here).
-// Shared scanner for the qwen2/cl100k regex family — identical except for the
-// digit rule: qwen2 matches single digits (\p{N}), cl100k groups up to three
-// (\p{N}{1,3}; Phi-4 and the GPT-4/tiktoken cl100k lineage).
+// Faithful hand-rolled scan of the Qwen2 pre-tokenizer regex (canonical Qwen2/Qwen3
+// segmentation; llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2):
+//   (?i:'s|'t|'re|'ve|'m|'ll|'d)        contractions
+//   | [^\r\n\p{L}\p{N}]?\p{L}+          one optional prefix char + letter run
+//   | \p{N}                             SINGLE digit
+//   |  ?[^\s\p{L}\p{N}]+[\r\n]*         optional space + SYMBOL RUN + newlines
+//   | \s*[\r\n]+ | \s+(?!\S) | \s+      whitespace variants
+// Routing through gpt2_pre_tokenize instead (single-char punctuation, digit-groups-of-3)
+// blocks cross-symbol BPE merges and mis-segments code/markdown (#657). \p{L} is
+// approximated as ASCII isalpha() or any non-ASCII byte. Shared with cl100k, which differs
+// only in the digit rule: cl100k groups up to three (\p{N}{1,3}; Phi-4/GPT-4 tiktoken).
 static std::vector<std::string> qwen2_like_pre_tokenize(const std::string& text, int max_digit_run) {
     std::vector<std::string> result;
     const size_t n = text.size();
@@ -638,25 +611,17 @@ std::vector<std::string> cl100k_pre_tokenize(const std::string& text) {
     return qwen2_like_pre_tokenize(text, /*max_digit_run=*/3);
 }
 
-// ---- o200k pre-tokenization (gpt-oss / GPT-4o family) ----
-//
-// Faithful hand-rolled scan of the o200k_harmony pre-tokenizer regex
-// (gpt-oss tokenizer.json; llama.cpp pre type "gpt-4o"):
-//
+// Faithful hand-rolled scan of the o200k_harmony pre-tokenizer regex (gpt-oss
+// tokenizer.json; llama.cpp pre type "gpt-4o"):
 //   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
-//   | [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
-//   | \p{N}{1,3}                          digit runs of up to THREE
-//   |  ?[^\s\p{L}\p{N}]+[\r\n/]*          symbol run + trailing newlines/slashes
-//   | \s*[\r\n]+ | \s+(?!\S) | \s+        whitespace (same as qwen2)
-//
-// Differences vs qwen2: CASE-AWARE letter runs (upper-run then lower-run, so
-// "camelCase" splits "camel|Case" but "HTTPSession" stays whole), contractions
-// attach as a SUFFIX ("don't" is one chunk), digits group 1-3 (not single),
-// and the symbol-run trailing class additionally includes '/'. Verified
-// chunk-by-chunk against HF tokenizers pre_tokenize_str on gpt-oss-20b.
-// \p{Lu} is approximated as ASCII uppercase; non-ASCII bytes count as
-// lowercase-class letters (both regex letter classes include Lm/Lo/M, so the
-// union segmentation is unaffected).
+// | [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+//   | \p{N}{1,3}                       digit runs up to THREE
+//   |  ?[^\s\p{L}\p{N}]+[\r\n/]*       symbol run + trailing newlines/slashes
+//   | \s*[\r\n]+ | \s+(?!\S) | \s+     whitespace (same as qwen2)
+// vs qwen2: CASE-AWARE letter runs (upper-run then lower-run: "camelCase"->"camel|Case",
+// "HTTPSession" stays whole), contractions attach as a SUFFIX, digits group 1-3, symbol run
+// also includes '/'. \p{Lu} approximated as ASCII uppercase; non-ASCII bytes count as
+// lowercase-class letters (union segmentation unaffected since both classes include Lm/Lo/M).
 std::vector<std::string> o200k_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
     const size_t n = text.size();
@@ -835,17 +800,10 @@ bool Tokenizer::load(const std::string& path) {
     // Extract vocabulary from model.vocab
     const JValue* vocab = jobj_find(*model, "vocab");
     if (vocab && vocab->type == JType::OBJECT) {
-        // Find max id to size the vocab vector.
-        //
-        // #1606: an id arrives as a JSON double and is narrowed to int, so it
-        // can be negative or absurd. max_id only ever grew, so a negative id
-        // never widened the vector and `vocab_[id]` below indexed at size_t(-1)
-        // - a heap write before any inference runs, on any checkpoint
-        // directory the operator points at. The decode side of this same file
-        // has always range-checked (decode_spm_token); the load side did not.
-        // The upper bound matters too: max_id + 1 in `int` wraps to INT_MIN at
-        // INT_MAX, and an id of 2^31-1 alone asks for a 2.1-billion-element
-        // vector<string>.
+        // #1606: an id arrives as a JSON double narrowed to int, so it can be negative or absurd.
+        // max_id only ever grew, so a negative id never widened the vector and vocab_[id] indexed
+        // at size_t(-1), a heap write before inference on any checkpoint. max_id+1 in int also wraps
+        // at INT_MAX, and 2^31-1 alone asks for a 2.1-billion-element vector<string>.
         int64_t max_id = -1;
         size_t n_dropped_id = 0;
         for (const auto& [token, val] : vocab->obj) {
@@ -917,11 +875,9 @@ bool Tokenizer::load(const std::string& path) {
                 continue;
             if (id_v->type != JType::NUMBER || content_v->type != JType::STRING)
                 continue;
-            // #1606: same unchecked narrowing as the vocab loop above. The
-            // "ensure vectors are large enough" guard below is a `>=` test,
-            // which a negative id passes without resizing, so it lands as a
-            // write at a negative index - including a vector<bool> proxy write
-            // into added_token_ids_.
+            // #1606: same unchecked narrowing as the vocab loop above. The ">=" resize guard below lets
+            // a negative id pass without resizing, landing a write at a negative index, including a
+            // vector<bool> proxy write into added_token_ids_.
             int64_t id64 = static_cast<int64_t>(id_v->num_val);
             if (id64 < 0 || id64 > kMaxTokenId) {
                 IMP_LOG_WARN("tokenizer.json: added_token with out-of-range id %lld dropped",
@@ -931,17 +887,12 @@ bool Tokenizer::load(const std::string& path) {
             int id = static_cast<int>(id64);
             const std::string& content = content_v->str_val;
             bool is_special = special_v && special_v->type == JType::NUMBER && special_v->num_val != 0.0;
-            // HF semantics: an added token with `normalized=false` is matched
-            // ATOMICALLY against the raw input, regardless of `special` (which
-            // only governs decode-skipping / add_special_tokens). imp previously
-            // keyed atomic matching on `special` alone, so Qwen3's non-special
-            // markers — `<think>`/`</think>` (151667/151668), `<tool_call>`,
-            // `<|fim_*|>` — were BPE-split into "<","think",">" pieces. That broke
-            // the `<think>`-as-stop-token guard and no-think suppression (the
-            // closed `<think></think>` prompt block was just text the model
-            // re-opened) and mis-tokenised tool-call markers. Promote them to
-            // USER_DEFINED so build_special_pieces() pre-splits them atomically;
-            // unlike CONTROL(3) they stay visible in decode (special=false).
+            // HF semantics: an added token with normalized=false is matched ATOMICALLY against raw
+            // input regardless of `special` (which only governs decode-skipping). Keying atomic
+            // matching on `special` alone let Qwen3's non-special markers (<think>, <tool_call>,
+            // <|fim_*|>) get BPE-split, breaking the think-stop-token guard and mis-tokenising tool
+            // calls. Promote them to USER_DEFINED so build_special_pieces() pre-splits atomically while
+            // staying visible in decode (special=false).
             const JValue* normalized_v = jobj_find(tok, "normalized");
             bool is_normalized_false = normalized_v && normalized_v->type == JType::NUMBER &&
                                        normalized_v->num_val == 0.0;
@@ -1009,24 +960,22 @@ bool Tokenizer::load(const std::string& path) {
                     std::string inner_type;
                     jobj_get_string(pt, "type", inner_type);
                     if (inner_type == "Split") {
-                        // HF tokenizer.json carries the literal pre-tokenizer
-                        // regex in a Split step. Discriminate the families by
-                        // their regex fingerprints and route to the faithful
-                        // scanners — without this, SafeTensors models fell to
-                        // the gpt2 fallback (per-char punctuation,
-                        // non-canonical segmentation, #657):
-                        //  - "{1,3}" digit grouping → o200k (gpt-oss/GPT-4o;
-                        //    its regex ALSO contains the contraction list, so
-                        //    this check must come first)
-                        //  - contraction alternation → qwen2
+                        // HF tokenizer.json carries the literal pre-tokenizer regex in a Split step;
+                        // discriminate
+                        // families by regex fingerprint and route to the faithful scanners, or SafeTensors
+                        // models
+                        // fall to the gpt2 fallback's non-canonical segmentation (#657). "{1,3}" digit
+                        // grouping ->
+                        // o200k (check first: its regex also has the contraction list); contraction
+                        // alternation ->
+                        // qwen2.
                         const JValue* pattern = jobj_find(pt, "pattern");
                         std::string rx;
                         if (pattern && pattern->type == JType::OBJECT)
                             jobj_get_string(*pattern, "Regex", rx);
-                        // Fingerprints, most specific first: only o200k uses
-                        // case classes (\p{Lu}); cl100k shares qwen2's rules
-                        // except digit triples ({1,3}); plain contraction
-                        // alternation → qwen2.
+                        // Fingerprints, most specific first: only o200k uses case classes (\p{Lu}); cl100k
+                        // shares
+                        // qwen2's rules except digit triples ({1,3}); plain contraction alternation -> qwen2.
                         if (rx.find("\\p{Lu}") != std::string::npos)
                             pre_tokenizer_ = "o200k";
                         else if (rx.find("{1,3}") != std::string::npos)
@@ -1122,24 +1071,19 @@ void Tokenizer::load_merges(const std::vector<std::string>& merges) {
 
 static const std::string SPIECE_SPACE = "\xe2\x96\x81";
 
-// Cache the list of CONTROL-class added tokens (e.g. <|tool_call>, <|im_start|>,
-// <|channel>) sorted by length descending so that longest-match wins. encode_*
-// uses this list to split the input text on those literals before running BPE,
-// so the rendered chat-template markers round-trip as their assigned token IDs.
+// Caches CONTROL-class added tokens (e.g. <|tool_call>, <|im_start>, <|channel>) sorted by
+// length descending, longest-match first. encode_* splits input on these literals before
+// BPE, so rendered chat-template markers round-trip as their assigned token IDs.
 void Tokenizer::build_special_pieces() {
     special_pieces_.clear();
     if (token_types_.empty())
         return;
     for (size_t id = 0; id < token_types_.size() && id < vocab_.size(); ++id) {
-        // CONTROL (3) markers AND USER_DEFINED (4) symbols. SentencePiece
-        // semantics: user-defined symbols match the RAW input literally and
-        // atomically, before normalization/BPE. gemma-3 stores its multi-space
-        // run tokens ('  ', '   ', …, 27×' ') and HTML tags (<code>, <i>, …)
-        // as USER_DEFINED with literal-space pieces — the ▁-substituting BPE
-        // body can never reproduce them ("▁▁" is not in the vocab), so imp
-        // emitted N single-space tokens per indentation run: +1.3% tokens and
-        // a large share of the +37.5% NLL gap vs llama.cpp on code/markdown
-        // (#657). llama.cpp matches these via its user-defined trie.
+        // CONTROL(3) and USER_DEFINED(4) both pre-split: SentencePiece semantics match
+        // user-defined symbols literally and atomically before normalization/BPE. Gemma-3's
+        // multi-space run tokens and HTML tags (<code>, <i>, ...) are USER_DEFINED with literal
+        // pieces the BPE-substituted body can never reproduce; missing this emitted N single-space
+        // tokens per indentation run (#657).
         if (token_types_[id] != 3 && token_types_[id] != 4)
             continue;
         const std::string& s = vocab_[id];
@@ -1213,11 +1157,10 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     if (text.empty() || vocab_.empty())
         return {};
 
-    // Pre-split on registered control / added tokens. Without this an HF
-    // tokenizer.json with type=spm + special added_tokens (Gemma-4 family,
-    // some Mistral variants) silently BPEs the marker text as raw UTF-8 and
-    // the model never sees the trained single-token id. Recurse once with
-    // the marker stripped so the BPE body below runs on a clean substring.
+    // Pre-splits on registered control/added tokens: without this an HF tokenizer.json with
+    // type=spm plus special added_tokens (Gemma-4 family, some Mistral) silently BPEs the
+    // marker text as raw UTF-8, never emitting the trained single-token id. Recurses once with
+    // the marker stripped so BPE runs on the clean substring.
     if (!special_pieces_.empty()) {
         auto pieces = split_on_special(text, special_pieces_);
         bool any_special = false;
@@ -1385,11 +1328,8 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
 
 // ---- BPE Encode (GPT2 byte-level style) ----
 
-// ---- Llama3 pre-tokenizer ----
-// Key differences from default:
-//  - Contractions like 's, 't, 're etc. split separately
-//  - Spaces are individual tokens (not attached to next word)
-//  - Digits are split individually (not groups of 3)
+// Llama3 pre-tokenizer vs default: contractions split separately; spaces are individual
+// tokens (not attached to the following word); digits split individually (not groups of 3).
 
 static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
@@ -1512,13 +1452,8 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
         }
         if (p.text.empty())
             continue;
-        // Recursive call: re-enter encode_gemma4 with the BPE-only chunk.
-        // (special_pieces_ now matches nothing inside p.text by construction.)
-        // To avoid infinite recursion we call the BPE body directly; we emulate
-        // that by calling this function once specials are stripped — the
-        // first-call splitter has already removed them, so the recursion ends
-        // immediately at the no-match path below.
-        // For simplicity we just inline the BPE path here.
+        // Re-enters encode_gemma4 on the BPE-only chunk; special_pieces_ matches nothing inside it
+        // by construction, so recursion terminates immediately at the no-match path.
         const std::string& bpe_text = p.text;
 
         // 1. Escape spaces → ▁
@@ -1605,10 +1540,9 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
                 if (right >= ns || sdel[right])
                     continue;
 
-                // Re-validate: the pair at this position may have changed since
-                // the merge was enqueued (the right neighbor may have merged
-                // with ITS neighbor). Check that the current pair still has
-                // the popped rank.
+                // Re-validates the pair at this position: the right neighbor may have merged with its own
+                // neighbor since this merge was enqueued, so the current pair may no longer hold the
+                // popped rank.
                 std::string merged = symbols[pos] + symbols[right];
                 {
                     std::string cur_key = symbols[pos] + " " + symbols[right];
@@ -1616,12 +1550,10 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
                     if (vit == merge_ranks_.end() || vit->second != rank)
                         continue;
                 }
-                // Vocab-existence guard: merge_ranks_ contains rules whose output
-                // is not in the final vocab (intermediate merge steps, e.g.
-                // "Lin u → Linu" where "Linu" is not a token). Applying such a
-                // merge produces a symbol that fails vocab lookup and byte-
-                // falls back the entire word. Skipping these keeps sub-parts
-                // that ARE tokens intact. Matches llama.cpp behavior.
+                // Vocab-existence guard: merge_ranks_ has rules whose output isn't in the final vocab
+                // (intermediate merge steps). Applying such a merge produces a symbol that fails lookup and
+                // byte-falls-back the WHOLE word; skipping it keeps sub-parts that ARE tokens intact
+                // (matches llama.cpp).
                 if (token_to_id_.find(merged) == token_to_id_.end())
                     continue;
 
@@ -1657,10 +1589,11 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
                 if (it != token_to_id_.end()) {
                     all_ids.push_back(it->second);
                 } else {
-                    // Fallback: the merge-guard above prevents producing symbols
-                    // that aren't in vocab via merging, so we only land here for
-                    // initial UTF-8 characters that the vocab doesn't cover. Try
-                    // per-character vocab lookup first, then byte fallback.
+                    // Fallback: the merge-guard above prevents producing non-vocab symbols via merging, so
+                    // this
+                    // only fires for initial UTF-8 characters the vocab doesn't cover. Tries per-character
+                    // vocab
+                    // lookup first, then byte fallback.
                     const std::string& sym = symbols[i];
                     for (size_t ci = 0; ci < sym.size();) {
                         int clen = utf8_char_len(static_cast<uint8_t>(sym[ci]));
@@ -1696,11 +1629,9 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     if (text.empty() || vocab_.empty())
         return {};
 
-    // 0. Pre-split on registered control tokens. Models like Qwen3.6 / Hermes
-    //    rely on multi-character markers (e.g. <|im_start|>, <|tool_call>)
-    //    that the pre-tokenizer regex doesn't always isolate cleanly; an
-    //    explicit longest-match pass guarantees the marker round-trips as
-    //    its assigned token id.
+    // Pre-splits on registered control tokens: models like Qwen3.6/Hermes rely on
+    // multi-character markers (e.g. <|im_start|>, <|tool_call>) the pre-tokenizer regex doesn't
+    // always isolate cleanly; an explicit longest-match pass guarantees the round-trip.
     auto pieces = split_on_special(text, special_pieces_);
     std::vector<int32_t> out_ids;
     out_ids.reserve(text.size());
@@ -1718,13 +1649,10 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe") {
             chunks = llama3_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "qwen2" || pre_tokenizer_ == "qwen35") {
-            // Qwen2/Qwen3 family: canonical regex incl. symbol RUNS and single
-            // digits — the gpt2 fallback's per-char punctuation made canonical
-            // merges ("->", "():") impossible (#657). "qwen35" (Qwen3.5/3.6
-            // GGUFs) differs from qwen2 only by adding \p{M} to the letter
-            // run, which is_letter_at already treats as letters — falling
-            // through to gpt2 instead over-split symbol runs (+13% tokens on
-            // the 35B hero corpus).
+            // Qwen2/Qwen3: canonical regex incl. symbol runs and single digits; the gpt2 fallback's
+            // per-char punctuation blocks canonical merges like "->", "():" (#657). "qwen35"
+            // (Qwen3.5/3.6 GGUFs) differs from qwen2 only by adding \p{M} to the letter run, already
+            // covered by is_letter_at; falling through to gpt2 instead over-split symbol runs.
             chunks = qwen2_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "o200k" || pre_tokenizer_ == "gpt-4o") {
             // gpt-oss / GPT-4o family (o200k_harmony): case-aware letter runs,
@@ -1791,10 +1719,9 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
                 if (right >= ns || sdel[right])
                     continue;
 
-                // Re-validate: the pair at this position may have changed since
-                // the merge was enqueued (e.g., the right neighbor was merged
-                // with ITS right neighbor, changing the symbol). Check that the
-                // current pair still maps to the same rank.
+                // Re-validates the pair at this position: the right neighbor may have merged with its own
+                // right neighbor since this merge was enqueued, changing the symbol; check the current pair
+                // still maps to the same rank.
                 {
                     std::string cur_key = symbols[pos] + " " + symbols[right];
                     auto vit = merge_ranks_.find(cur_key);
@@ -1857,10 +1784,8 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     return out_ids;
 }
 
-// ---- NFC Normalization ----
-// Handles the most common combining sequences for Latin scripts.
-// Covers: accented Latin characters (é, ñ, ü, etc.) which are the vast
-// majority of NFC normalization cases in real-world text.
+// NFC normalization: handles the most common combining sequences for Latin scripts
+// (accented characters), which cover the vast majority of real-world NFC cases.
 
 namespace {
 
@@ -2006,10 +1931,9 @@ static const NfcEntry kNfcTable[] = {
 
 static constexpr int kNfcTableSize = sizeof(kNfcTable) / sizeof(kNfcTable[0]);
 
-// Decode one UTF-8 codepoint from text at position pos, advance pos.
-// On truncated input (multi-byte sequence cut short at end of string),
-// returns U+FFFD and advances pos to end-of-string, rather than returning
-// a partial codepoint and advancing past the end.
+// Decodes one UTF-8 codepoint at pos, advances pos. On truncated input (multi-byte sequence
+// cut short at end of string), returns U+FFFD and advances to end-of-string rather than
+// returning a partial codepoint and reading past the end.
 static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
     uint8_t c = static_cast<uint8_t>(s[pos]);
     uint32_t cp;
@@ -2145,13 +2069,10 @@ std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) 
     return encode_spm(normalized, no_prefix);
 }
 
-// ---- BERT WordPiece (#836) ----
-// Uncased basic tokenizer (ASCII lowercase, whitespace split, punctuation
-// isolated) followed by greedy longest-match WordPiece: the first piece of a
-// word matches the raw vocab entry, continuations match "##"-prefixed
-// entries; a word with no full segmentation becomes [UNK]. Accent stripping
-// (NFD + combining-mark removal) is not implemented — the uncased vocab is
-// effectively ASCII and the HF-oracle cosine check gates correctness.
+// BERT WordPiece (#836): uncased basic tokenizer (ASCII lowercase, whitespace split,
+// punctuation isolated) then greedy longest-match WordPiece (first piece = raw vocab entry,
+// continuations = "##"-prefixed); no full segmentation -> [UNK]. Accent stripping (NFD +
+// combining-mark removal) is not implemented; the HF-oracle cosine check gates correctness.
 std::vector<int32_t> Tokenizer::encode_wordpiece(const std::string& text) const {
     std::vector<int32_t> out;
     auto it_unk = token_to_id_.find("[UNK]");
@@ -2232,10 +2153,10 @@ std::string Tokenizer::decode_spm(const std::vector<int32_t>& tokens) const {
     for (int32_t tok : tokens) {
         result += decode_spm_token(tok);
     }
-    // Second pass: byte-fallback tokens contribute single raw bytes that
-    // together may form ▁ (U+2581 = 0xE2 0x96 0x81). The per-token replace
-    // in decode_spm_token can't see across token boundaries, so catch any
-    // remaining ▁ here and convert to ASCII space.
+    // Second pass: byte-fallback tokens contribute single raw bytes that together may spell
+    // the SPM space marker (U+2581, 0xE2 0x96 0x81); decode_spm_token's per-token replace can't
+    // see across token boundaries, so this catches any remaining occurrence and converts it to
+    // ASCII space.
     size_t pos = 0;
     while ((pos = result.find(SPIECE_SPACE, pos)) != std::string::npos) {
         result.replace(pos, SPIECE_SPACE.size(), " ");

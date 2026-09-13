@@ -20,11 +20,10 @@ Qwen3VLPipeline::~Qwen3VLPipeline() { free_buffers(); }
 
 void Qwen3VLPipeline::free_buffers() {
     encoder_.reset();
-    // The tower's blocks live in the T2 arena and are not in `allocs_`; releasing
-    // its slots here keeps a tower that outlives the arena from being read. What
-    // `allocs_` still holds is this pipeline's own scratch, which is sized from
-    // max_patches and so cannot be pre-charged to the arena at open time
-    // (docs/audit/SETTLED.md F-12).
+    // The tower's blocks live in the T2 arena and are not in allocs_; releasing its slots here
+    // keeps a tower that outlives the arena from being read. allocs_ still holds this
+    // pipeline's own scratch, sized from max_patches so it cannot be pre-charged to the arena
+    // at open time (docs/audit/SETTLED.md F-12).
     if (tower_ && uploaded_tower_)
         qwen3vl_release_vision_tower(*tower_);
     uploaded_tower_ = false;

@@ -1,28 +1,12 @@
-// nvfp4_gemm_smallm.cu — small-M NVFP4 GEMM: y[m, n] = W_nvfp4[n, :] @ x[m, :]
-// for M <= 32 activation rows, W in the PLAIN layout (packed nibbles + linear
-// FP8 micro-scales), x in FP16. W4A16, the Marlin recipe: dequantize the
-// weight tile to FP16 in shared memory (scales folded in during dequant) and
-// run plain FP16 tensor-core MMAs — no block-scaled MMA, so no 128-row SF
-// atom constraint on the tile shape.
-//
-// Why it exists (docs/plans/2026-08-24-qwen38-port.md, 2026-08-25): batched
-// decode at n_seq<=32 runs its projections through the CUTLASS 128x128x128
-// block-scaled tile — 40 CTAs on the N=5120 shapes, measured 41.4 us for a
-// 14 MB weight read (19% of the bandwidth floor). The cross-engine profile
-// showed vLLM's Marlin doing the same class of work at ~24% less kernel
-// time on this very card. Prior iterations of this file (v1-v5, preserved
-// in /mnt/data/imp-scratch/) established that a SIMT FMA inner loop caps at
-// ~68 us (smem+ALU bound); this version replaces the inner loop with
-// wmma 16x16x16 HMMA so compute stops being the wall and the kernel becomes
-// what it should be: a weight stream.
-//
-// Block layout: kThreads = 128 (4 warps), block tile M(32) x kNR(32) outputs,
-// each warp owns one 16x16 sub-tile. Per K-tile (kKT elements) the block
-// stages the x tile [32, kKT] and the DEQUANTIZED weight tile [kNR, kKT]
-// (FP16, scale applied) in shared memory, then each warp runs kKT/16 MMAs.
-// Weight bytes are read from DRAM exactly once per GEMM; the x tile re-reads
-// from L2 per block. Global loads for tile t+1 prefetch into registers over
-// the MMA stream of tile t (v4's double buffering, kept).
+// Small-M NVFP4 GEMM: y[m,n] = W_nvfp4[n,:] @ x[m,:] for M<=32, W in PLAIN layout (packed
+// nibbles + linear FP8 micro-scales), x FP16. W4A16, Marlin recipe: dequantizes the weight
+// tile to FP16 in shared memory (scales folded in) and runs plain FP16 tensor-core MMA, no
+// block-scaled MMA so no 128-row SF atom constraint on tile shape.
+// Block layout: 128 threads (4 warps), block tile M(32)xNR(32), each warp owns one 16x16
+// sub-tile; per K-tile the block stages x[32,kKT] and the dequantized weight[NR,kKT] (FP16)
+// in shared memory, kKT/16 MMAs per warp. Weight bytes read from DRAM exactly once per
+// GEMM; x re-reads from L2 per block; global loads for tile t+1 prefetch during tile t's
+// MMA stream (double buffering).
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -37,10 +21,10 @@ namespace {
 
 using namespace nvcuda;
 
-// x is re-read by every block from L2 (the whole [M, K] tile is ~327 KiB of
-// a 96 MiB L2); mark its loads evict-last so the once-only weight stream
-// cannot push it out. The complementary half of the __ldcs on the weights.
-// Blackwell's evict_last needs 256-bit vectors (v8.b32 / v4.b64).
+// x is re-read by every block from L2 (the whole [M,K] tile is ~327 KiB of a 96 MiB L2);
+// its loads are marked evict-last so the once-only weight stream cannot push it out
+// (complementary to the __ldcs on weights). Blackwell's evict_last needs 256-bit vectors
+// (v8.b32/v4.b64).
 __device__ __forceinline__ void ldg_evict_last_256(const void* p, uint4& a, uint4& b) {
     asm volatile("ld.global.L2::evict_last.v4.b64 {%0,%1,%2,%3}, [%4];"
                  : "=l"(*reinterpret_cast<unsigned long long*>(&a.x)),
@@ -62,14 +46,12 @@ constexpr int kSplitK = 3;      // grid.y: K-range splits. 160 blocks starved
                                 // 640 fill them. Deterministic two-kernel
                                 // reduction, not atomics.
 
-// smem: x tile 32*136*2 = 8.5 KiB, w tile 32*136*2 = 8.5 KiB,
-// output staging 32*32*2 = 2 KiB. ~19 KiB — 2+ blocks per SM.
-//
-// kAQuant: the A side reads PACKED NVFP4 activations (+ linear micro-scales,
-// x_ts = activation tensor scale) instead of FP16. The FP16 variant's e2e
-// loss traced to L2: every block re-reads the 327 KiB x tile and the GDN
-// scan evicts it (45.8 us in the real step vs 23.9 isolated). Packed x is
-// ~92 KiB — small enough to survive without an access-policy window.
+// smem: x tile 32*136*2=8.5 KiB, w tile 32*136*2=8.5 KiB, output staging 32*32*2=2 KiB
+// (~19 KiB, 2+ blocks/SM). kAQuant: A side reads PACKED NVFP4 activations (+ linear
+// micro-scales, x_ts=activation tensor scale) instead of FP16 - the FP16 variant's loss
+// traced to L2 (every block re-reads the 327 KiB x tile and the GDN scan evicts it, 45.8 us
+// real-step vs 23.9 isolated); packed x is ~92 KiB, small enough to survive without an
+// access-policy window.
 template <bool kAQuant>
 __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -146,10 +128,9 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
             const int n = n_base + wi / kMbPerTile;
             const int mi = (k_base / kMicroBlockSize) + (wi % kMbPerTile);
             if (n < N_out) {
-                // Streaming load (evict-first): the weight bytes are read
-                // exactly once, and letting them age normally in L2 evicts
-                // the x tile that every block re-reads — measured as a
-                // bimodal 23/59 us kernel until the hint went in.
+                // Streaming load (evict-first): weight bytes are read exactly once, letting them age
+                // normally in L2 would evict the x tile every block re-reads (measured bimodal 23/59 us
+                // kernel until this hint went in).
                 pw[v] = __ldcs(reinterpret_cast<const uint2*>(packed_data + (int64_t)n * (K / 2) +
                                                               (int64_t)mi * 8));
                 pcs[v] = tensor_scale *
@@ -233,10 +214,9 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         __shared__ float s_acc[kSmM][kNR];
         wmma::store_matrix_sync(&s_acc[warp_m * 16][warp_n * 16], acc, kNR, wmma::mem_row_major);
         __syncthreads();
-        // Streaming stores: each partial is written once and read once by
-        // the reduce kernel — letting it age normally in L2 knocks sets out
-        // from under the weight stream (the split-K bimodality: identical
-        // configs read 26 vs 63 us depending on where cudaMalloc landed ws).
+        // Streaming stores: each partial is written once and read once by the reduce kernel;
+        // letting it age normally in L2 knocks out sets the weight stream needs (split-K
+        // bimodality: identical configs read 26 vs 63 us depending on where cudaMalloc landed ws).
         float* plane = ws_partials + (size_t)split * kSmM * N_out;
         for (int i = tid; i < kSmM * kNR; i += kThreads) {
             const int m = i / kNR;
@@ -296,10 +276,9 @@ bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M,
     return true;
 }
 
-// A4 entry: both sides packed NVFP4 with linear micro-scales. x_ts is the
-// activation-side tensor scale (fixed 1.0 when the caller quantizes with a
-// unit global scale). Working set of the A side drops 327 KiB -> ~92 KiB,
-// which is the whole point — see the kernel comment.
+// A4 entry: both sides packed NVFP4 with linear micro-scales. x_ts is the activation-side
+// tensor scale (fixed 1.0 when the caller quantizes with a unit global scale). Drops the A
+// side's working set from 327 KiB to ~92 KiB, which is the whole point of this kernel.
 bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                           int N_out, int K, void* d_workspace, cudaStream_t stream, bool accumulate) {
     if (M <= 0 || M > kSmM || (K % kKT) != 0)

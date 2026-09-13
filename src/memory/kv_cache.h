@@ -15,11 +15,10 @@ class VRAMAllocator;  // forward declaration
 
 static constexpr int kKVBlockSize = 16;  // default tokens per block
 
-// Copy bandwidth (GB/s, read plus write) below which a KV pool is taken to
-// have been spilled into host memory by the WDDM driver. Between the two
-// readings this box was characterised with, ~1530 resident and ~237 spilled
-// (#1103), with room for a partial spill. One driver on one card: it feeds a
-// WARN and a gauge, never a refusal (AUDIT_arch_2026 B-6).
+// Copy bandwidth (GB/s, read+write) below which a KV pool is taken to have been spilled
+// into host memory by the WDDM driver: ~1530 resident vs ~237 spilled (#1103), with room
+// for partial spill. One driver on one card: feeds a WARN and a gauge, never a refusal
+// (AUDIT B-6).
 static constexpr double kKvPoolSpillGbps = 500.0;
 
 // NVFP4 / MXFP4_KV micro-block size: 16 FP4 elements share one scale byte.
@@ -31,64 +30,42 @@ public:
     // Tag for the accounting-only constructor, see for_accounting() below.
     struct AccountingOnly {};
 
-    // `ceiling_blocks` > `max_blocks` asks for a GROWABLE pool: address space
-    // is reserved for the ceiling, physical memory is committed for
-    // `max_blocks`, and try_grow_to() commits more later. Address space costs
-    // nothing, so the ceiling is what the configuration wants and `max_blocks`
-    // is only what fits right now.
-    //
-    // The point is a pool that is no longer sized once, at the moment when the
-    // free-VRAM reading is least trustworthy. A server started while another
-    // process still holds the card lands on the rescue floor and stays there
-    // for its whole life; a growable pool heals when the card frees.
-    //
-    // 0 (the default) keeps the fixed pool, as does a device or build without
-    // virtual memory management. Growth is then simply never available and
-    // every other behaviour is bit-identical.
+    // ceiling_blocks > max_blocks asks for a GROWABLE pool: address space reserved for the
+    // ceiling, physical memory committed for max_blocks, try_grow_to() commits more later.
+    // Address space costs nothing, so the ceiling is what the config wants and max_blocks is
+    // only what fits right now. A pool sized once, at the moment the free-VRAM reading is
+    // least trustworthy, heals as the card frees; 0 (default) keeps the fixed pool
+    // (unchanged behaviour on a device/build without VMM).
     KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks,
             int block_size = kKVBlockSize, VRAMAllocator* alloc = nullptr, int ceiling_blocks = 0);
 
-    // Per-layer-shape constructor (Gemma 4 dual attention geometry).
-    // n_kv_heads_per_layer[l] and head_dim_per_layer[l] define layer l's
-    // KV shape. The scale/sketch pools are sized using max across layers.
-    //
-    // SWA-aware sizing (kv_cache.swa_sizing): when `layer_is_swa` is non-empty,
-    // layers flagged 1 get a small dedicated block group of `swa_max_blocks`
-    // capacity instead of the full `max_blocks` — sliding-window layers only
-    // ever hold the trailing window, so their regions shrink accordingly.
-    // SWA blocks live in a SEPARATE block-id space [0, swa_max_blocks) with
-    // their own free list (allocate_swa_block/free_swa_block); k_ptr/v_ptr
-    // interpret block_id in the layer's group space (per-layer offsets).
+    // Per-layer-shape constructor (Gemma-4 dual geometry): n_kv_heads_per_layer[l] and
+    // head_dim_per_layer[l] define layer l's KV shape; scale/sketch pools size from the max
+    // across layers.
+    // SWA-aware sizing: layers flagged 1 get a small dedicated block group of
+    // swa_max_blocks instead of the full max_blocks (sliding-window layers only ever hold
+    // the trailing window). SWA blocks live in a SEPARATE id space [0, swa_max_blocks) with
+    // their own free list; k_ptr/v_ptr interpret block_id in the layer's group space.
     KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
             const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
             VRAMAllocator* alloc, const std::vector<char>& layer_is_swa = {}, int swa_max_blocks = 0,
             int ceiling_blocks = 0);
     ~KVCache();
 
-    // Accounting-only cache: block ids, ref counts and geometry, NO VRAM.
-    //
-    // Everything that does not touch bytes behaves identically - the id space,
-    // the free list, ref counts, block_size/block_bytes arithmetic - so the
-    // whole prefix-cache and LRU layer above it is exercisable. Every data
-    // pointer (k_ptr, v_ptr, the scale and minmax pointers) aborts instead of
-    // returning an offset into a pool that does not exist.
-    //
-    // It exists because CI has no GPU runner: the block-accounting tests were
-    // written against a real pool, so every one of them opens with
-    // SKIP_IF_NO_CUDA() and the merge gate never ran them. Mutation testing on
-    // 2026-09-02 put a number on that - `content_salt` ignored, prefix reuse no
-    // longer contiguous, the probe overreporting by a block, reclaim leaving a
-    // hash entry pointing at a free block: four real faults, all caught by
-    // test-kv, none reachable from `ctest -L unit`.
-    //
-    // NOT for production: a model cannot run on it, and it says so by aborting
-    // on the first pointer request.
+    // Accounting-only cache: block ids, ref counts, geometry, NO VRAM. Everything not
+    // touching bytes (id space, free list, refcounts, block-size arithmetic) behaves
+    // identically, so the prefix-cache and LRU layer above it is exercisable; every data
+    // pointer aborts instead of returning an offset into a pool that does not exist.
+    // Exists because CI has no GPU runner: block-accounting tests were written against a
+    // real pool and skip when there is none, so the merge gate never ran them. Mutation
+    // testing found several real faults this way that `ctest -L unit` never reached.
+    // NOT for production: a model cannot run on it, and it aborts on the first pointer
+    // request.
     static std::unique_ptr<KVCache> for_accounting(int n_layers, int n_kv_heads, int head_dim, QType dtype,
                                                    int max_blocks, int block_size = kKVBlockSize);
-    // Per-layer-shape form (Gemma 4 dual geometry, SWA block group): the same
-    // layout arithmetic and the same two id spaces as the memory-backed
-    // per-layer constructor, through the same helpers (layout_layers_,
-    // layout_layer_scales_, open_swa_group_). No VRAM.
+    // Per-layer-shape form (Gemma-4 dual geometry, SWA block group): the same layout
+    // arithmetic and the same two id spaces as the memory-backed per-layer constructor,
+    // through the same helpers. No VRAM.
     static std::unique_ptr<KVCache> for_accounting(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
                                                    const std::vector<int>& head_dim_per_layer, QType dtype,
                                                    int max_blocks, int block_size = kKVBlockSize,
@@ -102,10 +79,9 @@ public:
     // How many blocks this pool could grow to. Equals total_blocks() unless it
     // was built growable and has not reached its ceiling.
     int ceiling_blocks() const { return max_blocks_; }
-    // Whether the ceiling can actually be reached. Without this, a client
-    // reading ceiling == total cannot tell a fixed pool from a growable one
-    // sitting at its ceiling, and those want opposite reactions: wait for the
-    // card to free, or stop waiting.
+    // Whether the ceiling can actually be reached. Without this, a client reading
+    // ceiling == total cannot tell a fixed pool from a growable one sitting at its ceiling,
+    // and those want opposite reactions: wait for the card to free, or stop waiting.
     bool growable() const { return growable_; }
     // How many times try_grow_to() actually committed more memory. Exposed for
     // /metrics: a pool that keeps growing under load is the signal an operator
@@ -116,30 +92,25 @@ public:
     // one. What the pool actually costs right now, as opposed to the address
     // space it reserved.
     size_t committed_bytes() const;
-    // Copy bandwidth measured inside the pool by probe_residency(), GB/s
-    // counting read plus write; 0 until probed, or when the pool holds no
-    // memory. Below kKvPoolSpillGbps the pool has most likely been spilled
-    // into host memory: the platform fact the tree repeats most often, and
-    // until 2026-09-07 the one it never checked.
+    // Copy bandwidth measured inside the pool by probe_residency(), GB/s counting read plus
+    // write; 0 until probed, or when the pool holds no memory. Below kKvPoolSpillGbps the
+    // pool has most likely been spilled into host memory.
     double residency_gbps() const { return residency_gbps_; }
-    // Measure it: one timed pass of copies spanning the pool, layer by layer
-    // through the committed prefix of each K and V region, up to 512 MiB
-    // copied (1 GiB of traffic, past the 96 MB L2 that a single slice would
-    // read from). Copies the first half of each region onto its second half,
-    // which is why it belongs at init, on a pool that is still all zero:
-    // there the copy changes nothing. A pool under ~100 MiB reads the L2.
+    // Measure it: one timed pass of copies spanning the pool, layer by layer through the
+    // committed prefix of each K and V region, up to 512 MiB copied (past the 96 MB L2 a
+    // single slice would read from). Copies the first half of each region onto its second
+    // half, which belongs at init on a pool that is still all zero (the copy changes
+    // nothing). A pool under ~100 MiB reads the L2.
     double probe_residency();
     // K plus V bytes one block commits across every attention layer (the
     // scale planes are allocated for the ceiling up front and cost nothing at
     // growth). What try_grow_to() prices a block at against free VRAM.
     size_t bytes_per_block() const;
 
-    // Commit memory for at least `wanted` blocks and make them allocatable.
-    // Returns the capacity afterwards, which is what the caller must believe:
-    // a partial growth is a real, servable capacity and not a failure.
-    //
-    // Costs one driver mapping call per layer region, measured at 1.18 ms per
-    // 256 MiB, so callers grow in coarse steps rather than per block.
+    // Commit memory for at least `wanted` blocks and make them allocatable. Returns the
+    // capacity afterwards, which the caller must believe: a partial growth is a real,
+    // servable capacity, not a failure. Costs one driver mapping call per layer region
+    // (measured ~1.18 ms per 256 MiB), so callers grow in coarse steps, not per block.
     int try_grow_to(int wanted);
 
     // Block allocation / deallocation
@@ -172,11 +143,10 @@ public:
     void* k_ptr(int layer, int block_id);
     void* v_ptr(int layer, int block_id);
 
-    // Sparse decode attention (attention.sparse_topk_tokens): optional per-block
-    // key min/max metadata pool. Layout per (layer, block): n_kv_heads * head_dim
-    // half2 pairs, (min, max) interleaved. Scalar-geometry pools only (the
-    // per-layer ctor refuses). Returns false when ineligible or the allocation
-    // fails; every other behaviour is then unchanged.
+    // Sparse decode attention: optional per-block key min/max metadata pool. Layout per
+    // (layer, block): n_kv_heads * head_dim half2 pairs, (min, max) interleaved.
+    // Scalar-geometry pools only (the per-layer ctor refuses). Returns false when
+    // ineligible or on allocation failure; every other behaviour is then unchanged.
     bool enable_key_minmax();
     bool key_minmax_enabled() const { return minmax_pool_ != nullptr; }
     void* key_minmax_ptr(int layer, int block_id);
@@ -190,13 +160,11 @@ public:
     // Returns scale_block_bytes_ for the standard path.
     size_t scale_block_bytes(int layer) const;
 
-    // Whole-block D2D copy across all layers (+ scale regions when present):
-    // dsts[i] becomes a byte-identical copy of srcs[i]. One kernel launch,
-    // pairs passed by value (no H2D staging). Multi-candidate spec-verify
-    // staging (speculative.token_recycling, route (a)): each candidate gets
-    // a private copy of the committed partial block, the winner's block is
-    // copied back. SWA layer groups are skipped (separate id space; the
-    // multi-candidate route excludes SWA models).
+    // Whole-block D2D copy across all layers (+ scale regions when present): dsts[i]
+    // becomes a byte-identical copy of srcs[i]. One kernel launch, pairs passed by value (no
+    // H2D staging). Multi-candidate spec-verify staging: each candidate gets a private copy
+    // of the committed partial block, the winner's block copied back. SWA layer groups are
+    // skipped (separate id space; the multi-candidate route excludes SWA models).
     static constexpr int kCopyMaxPairs = 16;
     void copy_blocks_device(const int* srcs, const int* dsts, int n_pairs, cudaStream_t stream);
 
@@ -247,10 +215,9 @@ private:
     VRAMAllocator* alloc_ = nullptr;
     size_t block_bytes_;  // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
 
-    // Block ids + refcounts (A7 step 3). The pool owns the id space; the
-    // MEMORY stays here, because the layout is layer-major — one id's bytes
-    // are scattered across per-layer K/V regions of differing size, which a
-    // uniform stride cannot express (BlockPool::open_slots).
+    // Block ids + refcounts (A7 step 3): the pool owns the id space; the MEMORY stays here,
+    // because the layout is layer-major (one id's bytes scatter across per-layer K/V
+    // regions of differing size, which a uniform stride cannot express).
     BlockPool blocks_;
     void* pool_ = nullptr;  // single contiguous GPU allocation (K+V)
     // Held only by a growable pool: the reservation whose committed prefix per
@@ -270,14 +237,12 @@ private:
     bool reserve_pool_(size_t total_bytes, int fixed_blocks);
     int commit_blocks_(int blocks);
 
-    // Per-layer geometry, shared by the memory-backed and the accounting
-    // per-layer constructors so the two cannot disagree about a shape.
-    // layout_layers_: normalises the SWA group (a flag vector without a
-    // capacity, or the reverse, is no group), then block bytes and K/V region
-    // offsets per layer strided by layer_capacity_, then the scalar max-shape
-    // fallbacks; returns the pool byte total. Runs again when max_blocks_
-    // moves. layout_layer_scales_: the NVFP4/MXFP4_KV twin for the scale pool,
-    // after layout_layers_. open_swa_group_: the SWA id space, if any.
+    // Per-layer geometry, shared by the memory-backed and accounting per-layer
+    // constructors so the two cannot disagree about a shape. layout_layers_ normalises the
+    // SWA group, then block bytes and K/V offsets per layer strided by layer_capacity_, then
+    // scalar max-shape fallbacks; returns the pool byte total (re-runs when max_blocks_
+    // moves). layout_layer_scales_ is the NVFP4/MXFP4_KV twin for the scale pool;
+    // open_swa_group_ opens the SWA id space, if any.
     size_t layout_layers_(const std::vector<int>& n_kv_heads_per_layer,
                           const std::vector<int>& head_dim_per_layer);
     size_t layout_layer_scales_(const std::vector<int>& n_kv_heads_per_layer,

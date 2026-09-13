@@ -25,10 +25,9 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
 
     int clamped_lo = 0, clamped_hi = 0;
     for (int e = 0; e < ne; e++) {
-        // Pass 1: per-expert max ue8m0 exponent → tensor scale.
-        // tensor_scale = 2^(max_u - 127 - 8): the largest block scale maps to
-        // e4m3 value 2^8 = 256 (≤ 448), leaving e4m3's ~18 octaves of range
-        // downwards (min subnormal 2^-9 → covers blocks within 2^17 of max).
+        // Pass 1: per-expert max ue8m0 exponent -> tensor scale. tensor_scale = 2^(max_u-127-8):
+        // the largest block scale maps to e4m3 value 2^8=256 (<=448), leaving e4m3's ~18 octaves of
+        // range downward (min subnormal 2^-9 covers blocks within 2^17 of max).
         int max_u = 0;
         const uint8_t* es_base = h_scales + static_cast<size_t>(e) * n_rows_total * kb32;
         for (int64_t r = 0; r < N; r++) {

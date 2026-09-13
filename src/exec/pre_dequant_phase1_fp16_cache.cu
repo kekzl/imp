@@ -1,15 +1,7 @@
-// Pre-dequant Phase 1: FP16 cache.
-// Converts GGUF Q*_K-quantized weights to an FP16 device cache when the
-// planner's per-weight tier decision selects FP16. Phase 5 PR #1 Commit 5.1.2
-// replaces the old NVFP4_DECODE_ONLY all-or-nothing early-exit + per-FFN
-// nvfp4_decode_mode heuristic with a centralised `effective_capabilities(kind,
-// qtype)` check — mirrors the StoragePlanner's policy so Phase 1 and Phase 3
-// agree on which weights belong where. Closes the 2026-05-24 Q4_K_M coverage
-// gap (Gemma-3-12B Q4_K weights got zero cache because Phase 1 early-exited
-// and Phase 3 only caches nvfp4_beneficial weights).
-//
-// Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
-// refactor roadmap. See pre_dequant_internal.h for shared helpers.
+// Phase 1: converts GGUF Q*_K-quantized weights to an FP16 device cache when the
+// planner's per-weight tier decision selects FP16, via effective_capabilities(kind,
+// qtype) so Phase 1 and Phase 3 tier decisions agree (closes the Q4_K_M coverage gap
+// where Phase 1 early-exited and Phase 3 only caches nvfp4_beneficial weights).
 
 #include "exec/executor.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
@@ -44,24 +36,19 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         return;
     }
 
-    // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
-    // Plan-driven gate (Stage 1.3): FP16-cache a weight iff the StoragePlan
-    // routes its source to the FP16 tier, OR the plan flagged it as needing an
-    // FP16 companion. The plan (built in pre_dequant_weights + apply_arch_rules_)
-    // already folds in every rule this gate used to compute inline:
-    //   - Phase 3 owns nvfp4_beneficial weights (Q8_0/Q6_K/Q5_K) → tier NVFP4,
-    //     not FP16 (the #428×#434 starvation guard, now structural).
-    //   - FP8 unavailable → FP8-floor kinds fall back to FP16.
-    //   - gemma-3: NVFP4-tier weights get fp16_companion so the Phase-3 decode
-    //     cache is built FROM the FP16 copy, not from scratch (the <pad>/IMA
-    //     corruption guard) — without a scattered arch check here.
+    // Plan-driven gate (Stage 1.3): FP16-cache a weight iff the StoragePlan routes its
+    // source to FP16, or flags it as needing an FP16 companion. Folds in:
+    //   - Phase 3 owns nvfp4_beneficial weights (Q8_0/Q6_K/Q5_K) -> NVFP4 tier, not FP16
+    //     (the #428/#434 starvation guard, now structural).
+    //   - FP8 unavailable -> FP8-floor kinds fall back to FP16.
+    //   - gemma-3: NVFP4-tier weights get fp16_companion so the Phase-3 decode cache is
+    //     built FROM the FP16 copy, not from scratch (the <pad>/IMA corruption guard).
     auto cache_weight = [&](const Tensor& w, QType qtype, TensorKind kind) {
         (void)kind;
-        // A weight that is already FP8 on disk (Modelopt MIXED_PRECISION) is not
-        // something dequant_gpu handles — GGUF blocks carry their scales inline,
-        // this one has a single per-tensor scalar that Phase 0 put on the
-        // tensor. It still has to land here, because sm_120 has no FP8 prefill
-        // GEMM: left alone it reaches cuBLAS raw and fails with status 15.
+        // A weight already FP8 on disk (Modelopt MIXED_PRECISION) is not something dequant_gpu
+        // handles: it carries one per-tensor scalar (Phase 0), not inline GGUF block scales.
+        // Still must land here because sm_120 has no FP8 prefill GEMM; left alone it reaches
+        // cuBLAS raw and fails with status 15.
         const bool native_fp8 = (qtype == QType::FP8_E4M3);
         if (!w.data || (!dequant_gpu_supported(qtype) && !native_fp8))
             return;
@@ -106,17 +93,11 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         total_cache_bytes += fp16_bytes;
         cached_count++;
 
-        // Decode keeps the checkpoint's own FP8 bytes. The FP16 copy above
-        // exists only because sm_120 has no FP8 prefill GEMM; spending it on
-        // the M=1 GEMV too would read 2 B/elem where the file has 1, on the
-        // one path that is bandwidth-bound — the opposite of why this
-        // checkpoint ships FP8. Phase 4 reads `native_source` and routes
-        // prefill to the FP16 companion, decode here.
-        //
-        // Unlike the fp8_ssm_proj sidecar this costs no extra VRAM and is
-        // lossless: these ARE the published weights, not a requantization.
-        // Same config gate, so `gemm.fp8_ssm_proj = false` falls back to the
-        // FP16 copy for both paths.
+        // Decode keeps the checkpoint's own FP8 bytes; the FP16 copy exists only because sm_120
+        // has no FP8 prefill GEMM. Spending it on the M=1 GEMV too would read 2 B/elem where the
+        // file has 1, on the one path that is bandwidth-bound. Lossless and free: these ARE the
+        // published weights, not a requantization. gemm.fp8_ssm_proj=false falls back to FP16
+        // for both paths.
         if (native_fp8 && dispatch_policy().gemm.fp8_ssm_proj) {
             FP8CacheEntry fe;
             fe.weight = Tensor(w.data, QType::FP8_E4M3, w.ndim, w.shape, true);
@@ -127,11 +108,10 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         }
     };
 
-    // Priority order: attention weights first (critical for cuBLAS prefill),
-    // then SSM, shared experts, and dense FFN.  This ensures hybrid models
-    // like Nemotron (23 SSM + 6 attention layers) cache all attention weights
-    // before SSM weights exhaust the VRAM budget. Tier-decision is plan-driven
-    // (storage_plan_); per-tensor budget pressure still applies.
+    // Priority order: attention weights first (critical for cuBLAS prefill), then SSM,
+    // shared experts, dense FFN. Ensures hybrid models cache all attention weights before
+    // SSM weights exhaust the VRAM budget. Tier decision is plan-driven; per-tensor budget
+    // pressure still applies.
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
         cache_weight(L.wq, L.wq.qtype, TensorKind::WQ);

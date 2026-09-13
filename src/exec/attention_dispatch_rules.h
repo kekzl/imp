@@ -1,25 +1,11 @@
 #pragma once
 
-// Which attention kernel families can serve a given head_dim.
-//
-// These two questions are asked in two places that must agree: the prefill
-// dispatch (executor_attention_prefill.cu), which picks the kernel, and
-// max_safe_prefill_chunk (executor_workspace_buffers.cu), which decides how
-// large a chunk the engine may hand it. When the second believes a family will
-// take the chunk and the first cannot, nothing clamps the chunk and the cuBLAS
-// fallback runs off the end of its S-matrix.
-//
-// That is not hypothetical. The clamp used to return `desired` unclamped
-// whenever the context crossed `attention.fmha_prefill_threshold`, without
-// asking whether the tiled FMHA serves this head_dim at all. On DeepSeek-V2-Lite
-// (MLA, head_dim 192, served by neither FA2 nor FMHA) a perplexity run over a
-// 45k-token corpus reached chunk 2048 at ctx 6144, needing 12 582 912 S-matrix
-// elements against the 3536x3536 = 12 503 296 allocated, and the defense-in-depth
-// check in the dispatch aborted the process with "engine should have prevented
-// this". It was right: the engine should have, and could not, because the two
-// sides disagreed about FMHA.
-//
-// Header is CUDA-free on purpose so the CPU lane can test the rules directly.
+// Which attention kernel families can serve a given head_dim: asked in two
+// places that must agree, prefill dispatch (executor_attention_prefill.cu,
+// picks the kernel) and max_safe_prefill_chunk (executor_workspace_buffers.cu,
+// bounds the chunk). If they disagree, nothing clamps the chunk and cuBLAS
+// runs off the end of its S-matrix (happened on DeepSeek-V2-Lite MLA,
+// hd=192, served by neither FA2 nor FMHA). Header is CUDA-free so the CPU lane tests the rules directly.
 
 namespace imp {
 

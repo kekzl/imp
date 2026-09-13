@@ -7,24 +7,12 @@
 
 namespace imp {
 
-// Minimal SafeTensors writer — the missing half of safetensors_loader.
-//
-// It exists so imp can PRODUCE checkpoints, not just consume them: the NVFP4
-// path currently depends on somebody else publishing a Modelopt /
-// llm-compressor export, which gates both model coverage and quality on a
-// third party (see docs/roadmap.md, gap 1).
-//
-// Layout written (the format's whole spec):
-//   [8 bytes little-endian header length][header JSON][tensor data]
-// The header maps name -> {dtype, shape, data_offsets:[start,end)}, offsets
-// being relative to the start of the data block. Tensor data is written in
-// header order, and the header is padded with spaces so the data block starts
-// 8-byte aligned (what every mainstream reader expects, mmap-friendly).
-//
-// dtype is passed through verbatim and must be a SafeTensors wire name the
-// loader accepts: "F32", "F16", "BF16", "F8_E4M3", "U8", "I8", ... For NVFP4
-// weights that means U8 with the ALREADY-PACKED shape [N, K/2] (two FP4
-// nibbles per byte), F8_E4M3 micro-scales, and an F32 tensor scale.
+// Minimal SafeTensors writer, the missing half of safetensors_loader: lets imp PRODUCE
+// checkpoints instead of only consuming Modelopt/llm-compressor exports (docs/roadmap.md
+// gap 1). Layout: [8-byte LE header length][header JSON][tensor data]; header maps
+// name->{dtype,shape,data_offsets:[start,end)} relative to the data block start, padded to
+// 8-byte alignment. dtype is a SafeTensors wire name the loader accepts; NVFP4 weights are
+// U8 packed [N,K/2] + F8_E4M3 micro-scales + an F32 tensor scale.
 
 struct SafeTensorsOut {
     std::string name;
@@ -34,13 +22,10 @@ struct SafeTensorsOut {
     size_t nbytes = 0;
 };
 
-// Write one .safetensors file. Returns an empty string on success, otherwise a
-// one-line reason. Nothing is left behind on failure: the file is written to a
-// temporary path and renamed only once fully flushed, so a crash or a full disk
-// cannot leave a half-written checkpoint that later loads as garbage.
-//
-// `metadata` entries land under the reserved "__metadata__" key (string->string
-// only, per the format).
+// Writes one .safetensors file; returns "" on success, else a one-line reason. Nothing is
+// left on failure: written to a temp path and renamed only once fully flushed, so a crash
+// or full disk cannot leave a half-written checkpoint that later loads as garbage.
+// `metadata` entries land under the reserved "__metadata__" key (string->string only).
 std::string write_safetensors(const std::string& path, const std::vector<SafeTensorsOut>& tensors,
                               const std::vector<std::pair<std::string, std::string>>& metadata = {});
 

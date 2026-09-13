@@ -1,25 +1,14 @@
 #pragma once
 
-// T3 (pooled fixed-block) of the lifetime taxonomy
-// (docs/internals/MEMORY.md §A2/§A3.4/§A5.1).
-//
-// One contiguous Region carved into fixed-size blocks, handed out through a
-// free list. Fixed size is the whole point: a pool of identical blocks cannot
-// fragment, so the KV pool's failure mode is exhaustion (a clean, typed,
-// admission-controllable condition) and never "there is memory but not in one
-// piece".
-//
-// The pool OWNS the memory; nobody else does. A KV block has three concurrent
-// referents in imp — the owning sequence's block table, the content-addressed
-// prefix cache, and the agentic pin set (plus, out of process, the persisted
-// prefix cache). Today each of those frees by hand, which is why
-// free_block_dropping_stale_hash() exists and documents the double-ownership
-// bug it prevents. Here they all hold BlockRefs and a block returns to the free
-// list when, and only when, its last ref is destroyed. Cancellation, client
-// disconnect and error paths stop being special cases: the refs unwind.
-//
-// BlockRef is move-only. Every additional referent is therefore a visible,
-// greppable share() call rather than an accidental copy.
+// T3 (pooled fixed-block) of the lifetime taxonomy (MEMORY.md A2/A3.4/A5.1). One
+// contiguous Region carved into fixed-size blocks via a free list: fixed size means the
+// pool cannot fragment, so its failure mode is clean exhaustion, never "memory exists but
+// not contiguous".
+// The pool OWNS the memory. A KV block has multiple concurrent referents (owning
+// sequence's block table, prefix cache, agentic pin set); each holds a BlockRef, and a
+// block returns to the free list only when its last ref is destroyed, so cancellation
+// and error paths unwind instead of being special cases. BlockRef is move-only, so every
+// extra referent is a visible share() call, not an accidental copy.
 
 #include "memory/backend.h"
 #include "memory/span.h"
@@ -61,14 +50,9 @@ public:
 
     void reset();
 
-    // Relinquish the handle WITHOUT dropping the reference, returning the id.
-    // The reference stays held and must later be dropped through the pool's
-    // raw API — i.e. this converts a tracked ref into an untracked one.
-    //
-    // Migration scaffolding only (A7 step 3). It exists so the KV cache's
-    // int-based API can keep its exact semantics while the callers move to
-    // BlockRef one at a time. Deleted in step 3's final commit; nothing new
-    // should use it.
+    // Relinquish the handle WITHOUT dropping the reference, returning the id: converts a
+    // tracked ref into an untracked one that must later be dropped through the pool's raw
+    // API. Migration scaffolding only (A7 step 3); nothing new should use it.
     [[nodiscard]] int release();
 
     int id() const { return id_; }
@@ -94,22 +78,17 @@ public:
     // Acquire num_blocks x block_bytes from `backend` as one region.
     [[nodiscard]] MemError open(Backend& backend, size_t block_bytes, int num_blocks, RegionTag tag);
 
-    // Id space only: the pool owns the block ids and their refcounts, the
-    // CALLER owns the memory and computes its own addresses. block() then
-    // returns an empty span.
-    //
-    // This exists because the KV cache's pool is laid out layer-major — one
-    // block id's bytes are scattered across per-layer K and V regions whose
-    // sizes differ per layer (Gemma-4 dual geometry) and per group (SWA layers
-    // hold only the trailing window). A uniform stride cannot express that,
-    // and the addressing was never the part that needed fixing: the ownership
-    // was. See docs/internals/MEMORY.md B2/D10.
+    // Id space only: the pool owns block ids and refcounts, the CALLER owns the memory and
+    // computes its own addresses (block() returns an empty span). Needed because the KV
+    // cache's pool is layer-major: one block id's bytes scatter across per-layer K/V regions
+    // of differing size (Gemma-4 dual geometry, SWA trailing-window groups), which a uniform
+    // stride cannot express.
     [[nodiscard]] MemError open_slots(int num_blocks);
 
-    // Add ids above the current range, for a pool whose memory grew underneath
-    // it. Slot-only pools only: a backed pool owns its Region and would have to
-    // grow that too. Existing ids and refcounts are untouched, so growth is
-    // invisible to every outstanding BlockRef.
+    // Add ids above the current range, for a pool whose memory grew underneath it.
+    // Slot-only pools only: a backed pool owns its Region and would have to grow that too.
+    // Existing ids and refcounts are untouched, so growth is invisible to every outstanding
+    // BlockRef.
     [[nodiscard]] MemError grow_slots(int new_num_blocks);
 
     // Release the region. Asserts (debug) that no refs are outstanding — a
@@ -140,9 +119,8 @@ public:
     size_t block_bytes() const;
     int ref_count(int id) const;
 
-    // ── Untracked, id-based refcounting ──────────────────────────────
-    // Backs KVCache's int API (allocate_block / free_block / inc_ref), which
-    // its own tests exercise directly. Every OWNER above this layer holds a
+    // Untracked, id-based refcounting: backs KVCache's int API (allocate_block/free_block/
+    // inc_ref), exercised directly by its own tests. Every OWNER above this layer holds a
     // BlockRef; these are for the id-based surface only.
     void acquire_raw(int id);
     void release_raw(int id);

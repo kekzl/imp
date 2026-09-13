@@ -330,10 +330,8 @@ std::vector<int32_t> ChatTemplate::apply_phi(const Tokenizer& tok,
     return tokens;
 }
 
-// Harmony (gpt-oss): <|start|>role<|message|>content<|end|> blocks.
-// System turn carries the channel declaration the model was trained on;
-// a user-provided "system" message maps to the developer role per the
-// Harmony spec. Assistant history is rendered as the final channel.
+// Harmony (gpt-oss): <|start|>role<|message|>content<|end|> blocks. System turn carries the
+// channel declaration; a "system" message maps to the developer role per the Harmony spec.
 std::vector<int32_t> ChatTemplate::apply_harmony(const Tokenizer& tok,
                                                  const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
@@ -403,15 +401,9 @@ std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
         return apply(tok, messages, suppress_thinking, force_thinking, reasoning_effort);
     }
 
-    // The image rides the FIRST USER turn — not message index 0. Keying it on
-    // index 0 meant any request opening with a system prompt (the normal shape
-    // for a pipeline) rendered text-only: the picture was still decoded and
-    // encoded, but the prompt held no soft tokens for the embeddings to replace,
-    // so the model answered fluently that it could not see an image (#1246).
-    //
-    // "First user turn" matches what the Qwen3-VL path does with its placeholder
-    // blocks: the request parser keeps pictures in order but not which message
-    // they came from, so this is the position that is known rather than guessed.
+    // Image rides the FIRST USER turn, not message index 0: keying on index 0 rendered
+    // text-only when a request opened with a system prompt (#1246). Matches the Qwen3-VL
+    // placeholder path, since the parser keeps picture order but not source message index.
     size_t image_turn = messages.size();  // == none
     for (size_t mi = 0; mi < messages.size(); mi++) {
         if (messages[mi].role == "user") {

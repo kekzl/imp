@@ -7,13 +7,10 @@ namespace imp {
 
 namespace {
 
-// One axis of the bilinear resample, with align_corners=True — which is what
-// Qwen3-VL uses, and which is why the endpoints land exactly on the table's
-// first and last entry instead of half a texel inside them.
-//
-// `taps` are clamped into the table; `distance` deliberately is NOT computed
-// from the clamped value. At the last index that leaves the second tap with
-// weight 0, which is the whole point: it must not contribute.
+// One axis of the bilinear resample with align_corners=True (Qwen3-VL's convention), so
+// endpoints land exactly on the table's first/last entry. `taps` are clamped into the
+// table; `distance` is deliberately NOT computed from the clamped value, so the last
+// index's second tap gets weight 0 (must not contribute).
 struct AxisTaps {
     int32_t tap[2];
     float weight[2];

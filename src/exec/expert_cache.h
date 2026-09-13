@@ -272,7 +272,7 @@ struct ExpertLRUCache {
     // every cache mutation and bumps `parity_checks_ok_` on success / aborts
     // (via IMP_CHECK) on mismatch. Tests can call it directly.
     // Said IMP_LOG_FATAL until 2026-08-21, and that was a promise the macro
-    // does not keep: IMP_LOG_FATAL only logs (logging.h:58). The contract
+    // does not keep: IMP_LOG_FATAL only logs (logging.h:56). The contract
     // described here is now the one the code implements.
     bool check_parity(cudaStream_t stream) const;
 };

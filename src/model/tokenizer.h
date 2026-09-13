@@ -8,11 +8,10 @@
 
 namespace imp {
 
-// Largest token id a tokenizer.json may declare (#1606). Ids come out of the
-// file as JSON doubles and index vocab_/scores_/token_types_ directly, so they
-// need both a lower and an upper bound: below zero is an out-of-bounds write,
-// and near INT_MAX the `max_id + 1` sizing wraps. 4M is roughly 16x the largest
-// vocabulary any shipped checkpoint uses (Gemma, ~256k).
+// #1606: largest token id a tokenizer.json may declare. Ids arrive as JSON doubles and
+// index vocab_/scores_/token_types_ directly, needing both bounds: below zero is an OOB
+// write, near INT_MAX the max_id+1 sizing wraps. 4M is ~16x the largest shipped vocabulary
+// (Gemma, ~256k).
 constexpr int64_t kMaxTokenId = 4 * 1024 * 1024;
 
 class Tokenizer {
@@ -55,12 +54,10 @@ public:
     void set_chat_template_str(const std::string& tpl) { chat_template_str_ = tpl; }
     const std::string& chat_template_str() const { return chat_template_str_; }
 
-    // Author-shipped flag from tokenizer_config.json::use_default_system_prompt.
-    // When false, the chat-template apply path must inject an empty system
-    // message so the template's "no-system → default_system_message" branch
-    // doesn't fire (e.g. Mistral-Small-3.2 ships this flag false but its
-    // chat_template.jinja line 158 still injects a 600-token default unless
-    // an explicit system message is present).
+    // Author-shipped tokenizer_config.json::use_default_system_prompt. When false, the
+    // chat-template apply path must inject an empty system message so the template's
+    // no-system-> default-message branch doesn't fire (Mistral-Small-3.2 otherwise injects a
+    // 600-token default).
     void set_use_default_system_prompt(bool v) { use_default_system_prompt_ = v; }
     bool use_default_system_prompt() const { return use_default_system_prompt_; }
 
@@ -112,19 +109,17 @@ public:
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] != 1;
     }
 
-    // True if `id` was declared in tokenizer.json's `added_tokens` array (an
-    // explicit added marker), regardless of its `special` flag. Distinguishes a
-    // deliberately-added marker like Qwen3's `</think>` (added, special=false)
-    // from a NORMAL BPE piece that happens to spell "<think>" (Nemotron ID 12,
-    // not added). Empty vector ⇒ no added-token metadata ⇒ always false.
+    // True if `id` was declared in tokenizer.json's added_tokens array, regardless of its
+    // `special` flag. Distinguishes a deliberately-added marker (Qwen3's </think>, added,
+    // special=false) from a normal BPE piece that happens to spell the same text (Nemotron ID
+    // 12, not added). Empty vector => always false.
     bool is_added_token(int id) const {
         return id >= 0 && id < static_cast<int>(added_token_ids_.size()) && added_token_ids_[id];
     }
 
-    // Defensive overlay: mark a token as CONTROL even when it wasn't tagged
-    // by the source tokenizer. Used to cross-check special_tokens_map.json
-    // against tokenizer.json's special-flag column for HF model directories.
-    // No-op when id is invalid; allocates the type vector lazily if empty.
+    // Defensive overlay: marks a token CONTROL even when the source tokenizer didn't tag it.
+    // Used to cross-check special_tokens_map.json against tokenizer.json's special-flag column.
+    // No-op on an invalid id; allocates the type vector lazily if empty.
     void mark_as_control(int32_t id) {
         if (id < 0 || id >= static_cast<int32_t>(vocab_.size()))
             return;
@@ -183,10 +178,9 @@ private:
     // Empty when the source carries no added_tokens array.
     std::vector<bool> added_token_ids_;
 
-    // Cached list of special-token strings (CONTROL type) sorted by length
-    // descending. Used by encode_*() to pre-split input on these literals so
-    // multi-character markers like `<|tool_call>` round-trip as their assigned
-    // single-token id instead of being BPE'd as raw bytes.
+    // Cached special-token strings (CONTROL type) sorted by length descending, so encode_*
+    // pre-splits input on these literals and multi-character markers (e.g. <|tool_call>)
+    // round-trip as their assigned single-token id instead of being BPE'd as raw bytes.
     std::vector<std::pair<std::string, int32_t>> special_pieces_;
     void build_special_pieces();
 };

@@ -10,7 +10,7 @@ numbers in [`BENCHMARKS.md`](BENCHMARKS.md), limitations in
 | Row form | fact + number + decision + ref, one row each |
 | Investigation | goes to `docs/plans/`, the PR body or `LIMITATIONS.md`, never into a table cell |
 | Lifecycle | entries are closed, corrected or superseded in place, never deleted |
-| Citations | `scripts/check_doc_citations.py` checks that a `path:line` EXISTS, not what it says (`weight_map.cpp:369` pointed eleven lines off and stayed green until 2026-08-31); a bare basename matching two files reports `AMBIGUOUS` and passes, so cite the path; a stale `git worktree` checkout makes every basename ambiguous at once |
+| Citations | `scripts/check_doc_citations.py` checks that a `path:line` EXISTS, not what it says (`weight_map.cpp:363` pointed eleven lines off and stayed green until 2026-08-31); a bare basename matching two files reports `AMBIGUOUS` and passes, so cite the path; a stale `git worktree` checkout makes every basename ambiguous at once |
 
 Detail records: [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md)
 (serving and kernel rows, 08-25 .. 09-04),

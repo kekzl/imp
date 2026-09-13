@@ -18,10 +18,9 @@
 
 namespace imp {
 
-// Helper: FP32 ssm_out + FP16 residual → FP16 h. Preserves FP32 GEMM-accum
-// precision through the residual add so downstream RMSNorm sees bit-accurate
-// inputs (fixes Qwen 3.6 sign flips). Used when the gdn.fp32_out config flag (was IMP_GDN_FP32_OUT
-// env) is set.
+// FP32 ssm_out + FP16 residual -> FP16 h: preserves FP32 GEMM-accum
+// precision through the residual add so downstream RMSNorm sees
+// bit-accurate inputs (fixes Qwen 3.6 sign flips). Used when gdn.fp32_out is set.
 __global__ void fp32_plus_fp16_to_fp16(const float* __restrict__ a_fp32, const __half* __restrict__ b_fp16,
                                        __half* __restrict__ out_fp16, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -66,22 +65,16 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     // 1. Save residual + RMSNorm
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
-    // Producer fusion: quantize into the small-M scratch inside the norm
+    // Producer fusion: quantizes into the small-M scratch inside the norm
     // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
-    // tier); falls back to plain rmsnorm. The n==1 packed-input path is
-    // unaffected (producer gate requires n >= 2).
+    // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
 
-    // GemmContext for all weight GEMM dispatches in this function.
-    //
-    // cur_spec_verify_ is load-bearing here and was missing until 2026-08-18:
-    // without it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV
-    // branch (#998/#1055) is unreachable, and every GDN projection in a
-    // speculative verify chunk takes the CUTLASS prefill path instead. FFN and
-    // attention already threaded it; this path did not, and on a GDN hybrid it
-    // is 48 of 64 layers, so the small-M verify optimisation never reached the
-    // layers that dominate the architecture. Measured at 148 CUTLASS launches
-    // and 4.26 ms per verify.
+    // cur_spec_verify_ is load-bearing here (missing until 2026-08-18): without
+    // it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV branch
+    // (#998/#1055) is unreachable, and every GDN projection in a speculative
+    // verify chunk took the CUTLASS prefill path instead. FFN and attention
+    // already threaded it; on a GDN hybrid this is 48 of 64 layers.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
@@ -154,12 +147,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     if (conv_st) {
         if (state.is_prefill) {
-            // Speculative verify: also write the conv window as of d_snap_n
-            // rows into the snapshot slab, so a fully rejected draft can adopt
-            // the state after the chunk's first row instead of re-forwarding.
-            // Same wiring the GDN path has had since #847 — without it the slab
-            // stays uninitialised and engine_spec_ngram.cpp's matched == 0 fast
-            // path commits garbage.
+            // Speculative verify: writes the conv window as of d_snap_n rows into the
+            // snapshot slab too, so a fully rejected draft can adopt state after the
+            // chunk's first row instead of re-forwarding. Same wiring the GDN path has
+            // had since #847; without it the slab stays uninitialised and engine_spec_ngram.cpp's matched==0
+            // fast path commits garbage.
             void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
                                   ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
                                   : nullptr;
@@ -191,16 +183,10 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                        : nullptr;
 
     if (h_st) {
-        // xBC_out layout: [n, conv_channels] where each row = [x(inner) | B(BC_size) | C(BC_size)]
-        // We need contiguous [n, inner], [n, BC_size], [n, BC_size] for the fused scan.
-        // Extract x, B, C from interleaved xBC_out into contiguous y_buf (x), and
-        // reuse ssm_xBC_buf_ for B and C. However, ssm_y_buf_ is the output so
-        // we need separate buffers. Instead, use cudaMemcpy2DAsync to de-interleave.
-        //
-        // Actually, the stride within xBC_out is conv_channels per row, while
-        // ssm_scan_kernel expects stride = inner_size per row for x.
-        // For n=1 decode this is just pointer arithmetic (no copy needed).
-        // For n>1 prefill, we must de-interleave.
+        // xBC_out layout is [n, conv_channels] = [x(inner) | B(BC_size) | C(BC_size)]
+        // interleaved per row; the fused scan needs contiguous [n,inner]/[n,BC_size]
+        // x/B/C. n=1 decode needs no copy (pointer arithmetic); n>1 prefill de-interleaves via
+        // cudaMemcpy2DAsync.
 
         QType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : QType::F32;
 
@@ -224,16 +210,10 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                             static_cast<const half*>(z_buf.data), n_heads, head_dim_ssm, ssize, n_groups,
                             h_dtype, stream);
         } else {
-            // Prefill: de-interleave x, B, C from xBC_out [n, conv_channels]
-            // into contiguous buffers, then single fused kernel launch.
-            // Reuse ssm_y_buf_ tail for temporary B/C storage.
-            // ssm_y_buf_ is [max_tokens, inner] — we need [n, BC_size] for B and C.
-            // B/C total = n * BC_size * 2 * es. inner >= BC_size for typical configs,
-            // so y_buf has enough space. Alternatively, use ssm_xBC_buf_ (already [n, conv_channels]).
-            //
-            // Strategy: extract x into y_buf (will be overwritten by scan output after),
-            // extract B into xBC_in (reusable since conv1d is done),
-            // extract C into second half of xBC_in.
+            // Prefill de-interleaves x/B/C from xBC_out into contiguous buffers before
+            // the single fused scan launch: x extracted into ssm_y_buf_ (overwritten
+            // by scan output after), B into xBC_in, C into the second half of xBC_in
+            // (ssm_xBC_buf_ already sized [n,conv_channels], reused since conv1d is done).
 
             // x: extract [n, inner] from xBC_out with src_pitch=conv_channels*es
             char* x_contig = static_cast<char*>(y_buf.data);  // temp, overwritten by scan
@@ -283,10 +263,10 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // 9. Group RMSNorm on y  [AFTER gating, per llama.cpp reference]
     group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_groups, eps, stream);
 
-    // 10.+11. ssm_out projection + residual. h still holds the residual (r is
-    // its save and nothing wrote h since), so on the batched-decode NVFP4
-    // path the projection accumulates straight into h (smallm beta=1) —
-    // replacing GEMM-to-scratch + elementwise_add + the copy-back.
+    // ssm_out projection + residual: h still holds the residual (r is its
+    // save, untouched since), so on the batched-decode NVFP4 path the
+    // projection accumulates straight into h (smallm beta=1), replacing
+    // GEMM-to-scratch + elementwise_add + copy-back.
     if (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h)) {
         gemm_via_handle_(ly.ssm_out_id, y_buf, h, ctx.with_beta(1.0f));
     } else {
@@ -298,20 +278,17 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     }
 }
 
-// ---------------------------------------------------------------------------
-// Gated DeltaNet (GDN) layer forward pass
-// Same pipeline as Mamba2 SSM but with delta rule scan and separate gating.
-// Pipeline: ssm_in(attn_qkv) → conv1d → SiLU → split(x/B/C) → delta_rule_scan
-//           → gate(SiLU) → group_norm → ssm_out → residual
-// ---------------------------------------------------------------------------
+// Gated DeltaNet (GDN) layer forward: same pipeline as Mamba2 SSM but with
+// delta-rule scan and separate gating. Pipeline: ssm_in(attn_qkv) ->
+// conv1d -> SiLU -> split(x/B/C) -> delta_rule_scan -> gate(SiLU) -> group_norm -> ssm_out -> residual.
 
 void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream) {
     configure_ssm_workspace(ws_.shared_max_tokens());
 
     // Padded verify chunk (#847): state.d_chunk_len carries the real chunk
-    // length on device. The conv1d and delta-rule scan kernels below commit
-    // conv tail + h_state at the real last row; pad rows only produce their
-    // (causally discarded) y values. Same contract as run_ssm.
+    // length on device. conv1d and the delta-rule scan commit conv tail +
+    // h_state at the real last row; pad rows only produce their (causally discarded) y values. Same contract
+    // as run_ssm.
 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
@@ -332,27 +309,24 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     Tensor r = view_tokens(residual_, n);
     Tensor no = view_tokens(norm_out_, n);
 
-    // 1. Save residual + RMSNorm. The batched-decode beta=1 out-projection
-    // (residual_beta1_nvfp4_ok_, same gate as step 10 below) accumulates into
-    // h and never reads r: skip the save there, as the attention and FFN
-    // twins do. Kernel copy, not cudaMemcpyAsync: a memcpy node has no
-    // programmatic edge and cut the PDL chain once per layer.
+    // Save residual + RMSNorm; the batched-decode beta=1 out-projection
+    // (residual_beta1_nvfp4_ok_) accumulates into h and never reads r, so skip
+    // the save there, as the attention/FFN twins do. Kernel copy, not
+    // cudaMemcpyAsync: a memcpy node has no programmatic edge, cutting the PDL chain once per layer.
     const bool skip_residual_save =
         !dispatch_policy().gdn.fp32_out && !dump_hidden_dir() &&
         (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h) || gdn_out_residual_m1_ok_(ly, n, h));
     if (!skip_residual_save)
         device_copy_async(r.data, h.data, h.nbytes(), stream);
-    // Producer fusion: quantize into the small-M scratch inside the norm
+    // Producer fusion: quantizes into the small-M scratch inside the norm
     // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
-    // tier); falls back to plain rmsnorm. The n==1 packed-input path is
-    // unaffected (producer gate requires n >= 2).
+    // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
 
-    // M=1 decode 4-way input fusion: when the load-time pack succeeded, run a
-    // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slice
-    // the output for proj / gate_out / alpha / beta. Saves 3 gemv launches per
-    // layer per decode step. Prefill (n>1) keeps the 4-call path unchanged so
-    // we don't have to deinterleave the GEMM output.
+    // M=1 decode 4-way input fusion: when the load-time pack succeeded, runs a
+    // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slices
+    // the output for proj/gate_out/alpha/beta, saving 3 GEMV launches per
+    // layer per decode step. Prefill (n>1) keeps the 4-call path (avoids deinterleaving the GEMM output).
     const bool fused_input = (n == 1) && (ly.gdn_input_packed.data != nullptr) &&
                              (gdn_fused_proj_buf_.data != nullptr);
     int packed_conv_channels = fused_input ? ly.gdn_packed_conv_channels : 0;
@@ -377,10 +351,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
         // need [n, conv_channels].
         proj = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-        // Batched-decode sibling pair: in-projection and gate both consume
-        // `no`, and the gate output buffer (ssm_z_buf_) is untouched until
-        // RMSNormGated after the scan — computing the gate here is a pure
-        // reorder. One smallm v2 launch for both when both route there.
+        // Batched-decode sibling pair: in-projection and gate both consume `no`,
+        // and the gate output buffer (ssm_z_buf_) is untouched until
+        // RMSNormGated after the scan, so computing the gate here is a pure
+        // reorder; one smallm v2 launch for both when both route there.
         int64_t gate_shape_early[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
         Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
         // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
@@ -413,11 +387,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     if (conv_st) {
         if (state.ragged_prefill()) {
-            // Ragged cross-sequence prefill: each sequence owns its conv state
-            // and its row range — loop the fused prefill conv per sequence.
-            // The scan below batches the sequences in one launch; the conv
-            // stays a per-seq loop because its state handoff is a per-seq
-            // sliding window, not a slot-strided pool access.
+            // Ragged cross-sequence prefill: each sequence owns its conv state and row
+            // range, so the fused prefill conv loops per sequence (its state handoff
+            // is a per-seq sliding window, not a slot-strided pool access). The scan below batches all
+            // sequences in one launch.
             IMP_CUDA_CHECK_LOG(
                 cudaMemcpyAsync(xBC_out.data, xBC_in.data,
                                 static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
@@ -443,12 +416,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         } else if (state.ssm_grouped_chunk()) {
             // Multi-candidate verify chunk: ssm_n_seq candidate groups of
             // ssm_seq_tokens rows, group c on the conv window of slot
-            // ssm_seq_slots[c] - the slot table is DEVICE data (like the
-            // scan's), so a partial-accept replay can swap the winner onto
-            // the live slot without re-capturing the graph. d_chunk_len is
-            // the per-group real row count; the snapshot (state after row 0)
-            // comes from group 0 only - every group's row 0 is the same token
-            // from the same committed state.
+            // ssm_seq_slots[c] (a DEVICE slot table, like the scan's), so a partial-
+            // accept replay can swap the winner onto the live slot without
+            // re-capturing the graph. d_chunk_len is the per-group real row count; the
+            // snapshot (state after row 0) comes from group 0 only, since every
+            // group's row 0 is the same committed-state token.
             device_copy_async(xBC_out.data, xBC_in.data,
                               static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_), stream);
             const int T = state.ssm_seq_tokens;
@@ -461,11 +433,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             int64_t grp_shape[2] = {static_cast<int64_t>(state.ssm_n_seq) * T,
                                     static_cast<int64_t>(conv_channels)};
             Tensor xBC_g(xBC_out.data, compute_dtype_, 2, grp_shape, true);
-            // Batched verify: per-group commit/snapshot slots replace the
-            // slab snapshot (ssm_out_slots / ssm_snap_slots, inference_state.h).
-            // Factored spare: commit the window at the SNAPSHOT length into the
-            // live slot and stash the drafted row's tap, which is the same
-            // thing as committing at both lengths into two slots.
+            // Batched verify: per-group commit/snapshot slots replace the slab
+            // snapshot (ssm_out_slots/ssm_snap_slots). Factored spare: commits the
+            // window at the SNAPSHOT length into the live slot and stashes the
+            // drafted row's tap, equivalent to committing at both lengths into two slots.
             const bool factored = state.ssm_tap_out != nullptr;
             const bool per_group =
                 !factored && state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
@@ -483,10 +454,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                        state.ssm_tap_layer_stride * ssm_idx * 2,
                                    xBC_g.data, T, conv_channels, state.d_chunk_len, state.ssm_seq_slots,
                                    state.ssm_n_seq, stream);
-            // Bucket pad rows past the last group belong to no sequence: no
-            // conv ran for them, and the scan below writes no y for them.
-            // Zero both so the rows that feed the (discarded) pad outputs are
-            // finite rather than whatever the buffers held last.
+            // Bucket pad rows past the last group belong to no sequence: no conv ran
+            // for them and the scan writes no y for them. Both are zeroed so the
+            // (discarded) pad outputs read finite values instead of stale buffer contents.
             const int grouped_rows = state.ssm_n_seq * T;
             if (grouped_rows < n) {
                 const size_t pad_rows = static_cast<size_t>(n - grouped_rows);
@@ -518,16 +488,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                         conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr,
                                         conv_prev);
         } else {
-            // Decode: FP32 fused conv+SiLU (matching llama.cpp precision).
-            // Copy FP16 input to xBC_out first to avoid aliasing: conv_f32
-            // writes FP32 back into ssm_proj_buf_ which overlaps xBC_in.
-            // n rows, not one: at batched decode the step carries one row per
-            // sequence, and copying a single row left the other sequences
-            // reading stale buffer contents (measured as coherent output for
-            // sequence 0 and garbage for the rest). n == 1 on the
-            // single-sequence path, so this is the same copy it always was.
-            // At n == 1 conv_f32 sits past the input row (see above): the
-            // conv reads proj in place, no copy.
+            // Decode: FP32 fused conv+SiLU (matches llama.cpp precision). Copies FP16
+            // input to xBC_out first to avoid aliasing (conv_f32 writes FP32 back into
+            // ssm_proj_buf_, which overlaps xBC_in). Copies n rows, not one: at
+            // batched decode each sequence has one row, and copying a single row left
+            // other sequences reading stale buffer contents (coherent output for seq 0, garbage for the
+            // rest).
             if (n > 1)
                 device_copy_async(xBC_out.data, xBC_in.data,
                                   static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_), stream);
@@ -568,13 +534,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         dump_tensor_npy("gdn_conv_f32", conv_f32_t, stream, layer, cur_decode_step_);
     }
 
-    // 4b. V-head reorder (tiled → grouped) for asymmetric-head GDN models.
-    // The GGUF converter may store V in tiled layout (h0_g0, h1_g1, ... then
-    // h0_g0_r1, ...) while the scan kernel reads V[h*HD+d] assuming grouped
-    // layout. Qwen 3.6 uses 16K/32V asymmetric heads and triggers this
-    // mismatch. Gated by the gdn.vhead_reorder config flag (was IMP_GDN_VHEAD_REORDER env) to avoid
-    // regressing symmetric
-    // models or models whose converters already emit grouped layout.
+    // V-head reorder (tiled -> grouped) for asymmetric-head GDN models: the
+    // GGUF converter may store V tiled (h0_g0,h1_g1,...,h0_g0_r1,...) while the
+    // scan kernel reads V[h*HD+d] assuming grouped layout (Qwen 3.6's 16K/32V
+    // asymmetric heads trigger this). Gated by gdn.vhead_reorder to avoid regressing symmetric models.
     const bool vhead_reorder = dispatch_policy().gdn.vhead_reorder;
     if (vhead_reorder && n_groups != n_heads) {
         const int inner_v = n_heads * head_dim_ssm;  // V channels = 32 * 128 = 4096 for Qwen 3.6
@@ -625,10 +588,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         gate_out = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
         // Pair path already produced it in step 2 (one launch with ssm_in).
         if (!gate_paired) {
-            // ssm_in (above) quantized the same normed input into the
-            // activation scratch and no GEMM dispatches in between — mark it
-            // shared (the dispatch verifies against its scratch tag before
-            // skipping).
+            // ssm_in already quantized the same normed input into the activation
+            // scratch with no GEMM dispatches in between, so mark it shared (the
+            // dispatch verifies against its scratch tag before skipping).
             GemmContext gate_ctx = ctx;
             if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
                 prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
@@ -666,10 +628,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                        2, ab_shape, true);
                 gemm_via_handle_(ly.gdn_alpha_beta_packed_id, no, ab_packed_out, ctx);
             } else {
-                // 4-call fallback: ssm_dt_buf_ for alpha, +offset for beta.
-                // Batched decode runs both in one narrow FP16 launch first
-                // (gdn.alpha_beta_smallm); the two calls stay for every
-                // shape or tier it declines.
+                // 4-call fallback: ssm_dt_buf_ for alpha, +offset for beta. Batched decode
+                // runs both in one narrow FP16 launch first (gdn.alpha_beta_smallm); the
+                // two calls remain for every shape/tier it declines.
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
                 char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
                                  ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
@@ -687,17 +648,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             dump_tensor_npy("gdn_beta", beta_proj_out, stream, layer, cur_decode_step_);
         }
 
-        // 5b. Multi-token delta rule scan.
-        // Default: fused kernel with register-cached state (n×32 fewer launches,
-        // 125× less state memory traffic).
-        // gdn.ref_kernel config flag (was IMP_GDN_REF env): reference kernel with shared-memory state, no
-        // fusion.
-        //   Use when debugging new architectures — if outputs differ it isolates
-        //   bugs to the fused-kernel optimizations.
-        // gdn.fp32_scan config flag (was IMP_GDN_FP32_SCAN env): keep scan output in FP32 through
-        // RMSNorm+Gate.
-        //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
-        //   models with sparse scan activations (Qwen 3.6 L1 head 0).
+        // Multi-token delta rule scan: default is the fused kernel with
+        // register-cached state (n*32 fewer launches, far less state traffic).
+        // gdn.ref_kernel: reference kernel with shared-memory state, no fusion
+        // (use when debugging new architectures to isolate fused-kernel bugs).
+        // gdn.fp32_scan: keeps scan output in FP32 through RMSNorm+Gate (FP16
+        // subnormal truncation ~6e-5 breaks RMS for near-zero heads on sparse-scan models).
         const bool use_ref = dispatch_policy().gdn.ref_kernel;
         // BF16 recurrent state (gdn.state_bf16): only the fused scan has a
         // BF16-state kernel — the chunkwise route stays FP32-only, so a BF16
@@ -717,13 +673,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             throw std::runtime_error(
                 "run_gdn: grouped verify chunk incompatible with gdn.fp32_scan/gdn.ref_kernel");
         if (use_fp32_scan) {
-            // Layout in conv_f32 tail:
-            //   [n*conv_channels)                : conv_f32 (done)
-            //   [+n*inner)                       : y_fp32 scan output
-            //   [+n*inner)                       : y_fp32_postnorm (rmsnorm_gated_silu output)
-            // The post-norm FP32 buffer feeds directly into the ssm_out GEMM when
-            // FP32_OUT is also active — bypasses the FP16 y_buf that would drop
-            // ~3-4 bits of per-element precision (root cause of Qwen 3.6 L0 drift).
+            // conv_f32 tail layout: [0,n*conv_channels) conv_f32 (done);
+            // [+n*inner) y_fp32 scan output; [+n*inner) y_fp32_postnorm (rmsnorm_gated_silu
+            // output). The post-norm FP32 buffer feeds directly into the ssm_out GEMM
+            // when FP32_OUT is active, bypassing the FP16 y_buf that would drop
+            // precision (root cause of Qwen 3.6 L0 drift).
             float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
             float* y_fp32_postnorm = y_fp32 + static_cast<size_t>(n) * n_heads * head_dim_ssm;
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
@@ -752,12 +706,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                        state.d_chunk_len, static_cast<float*>(h_snap),
                                        h_snap ? state.d_snap_n : nullptr);
             }
-            // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
-            // ssm_out matmul. The FP32→FP16 copy below is REQUIRED, not optional
-            // — the !use_fp32_out path of ssm_out reads y_buf as FP16 input. The
-            // older code gated this on debug_forward_enabled() which left y_buf
-            // uninitialized in production runs (= ssm_out fed zeros) and only
-            // appeared coherent under the diagnostics.debug_forward config flag (was IMP_DEBUG_FORWARD env).
+            // FP32-in/FP32-out RMSNorm+Gate+SiLU preserves precision for the ssm_out
+            // matmul; the FP32->FP16 copy below is REQUIRED, not optional, since the
+            // !use_fp32_out path of ssm_out reads y_buf as FP16 input. Gating this on
+            // a debug flag left y_buf uninitialized in production (ssm_out fed zeros).
             gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32, static_cast<const half*>(gate_out.data),
                                              static_cast<const half*>(ly.ssm_norm_w.data), eps, n, n_heads,
                                              head_dim_ssm, stream);
@@ -779,18 +731,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
                                    stream, gl, state.d_chunk_len);
         } else if (state.ssm_seq_slots && state.ssm_n_seq > 1) {
-            // Batched over independent sequences. Two callers land here:
-            //   - batched decode: n rows are n sequences, one token each
-            //     (n_tokens=1, no row offsets);
-            //   - ragged cross-sequence prefill: rows are the concatenation of
-            //     the sequences' chunks, seq_offsets carries the prefix sums
-            //     and n_tokens is ignored per the gdn.h ragged contract.
-            // The chunkwise path is a single-sequence prefill optimisation and
-            // does not apply to either.
-            //   - grouped verify chunk (multi-candidate speculation on a
-            //     hybrid): ssm_n_seq candidates of ssm_seq_tokens rows each,
-            //     uniform seq * n_tokens rebase, the committed row bounded by
-            //     d_chunk_len (per group) and the row-0 snapshot from group 0.
+            // Batched over independent sequences. Two callers: batched decode (n rows
+            // = n sequences, one token each) and ragged cross-sequence prefill (rows =
+            // concatenated sequence chunks, seq_offsets carries prefix sums,
+            // n_tokens ignored per the gdn.h ragged contract). Grouped verify chunk:
+            // ssm_n_seq candidates of ssm_seq_tokens rows, uniform seq*n_tokens rebase,
+            // committed row bounded by d_chunk_len per group, snapshot from group 0.
+            // The chunkwise path (single-sequence prefill only) does not apply to either.
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             const bool ragged = state.ragged_prefill();
             const bool grouped = state.ssm_grouped_chunk();
@@ -799,10 +746,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 throw std::runtime_error("run_gdn: ragged prefill without device seq_offsets");
             const int scan_n_tokens = grouped ? state.ssm_seq_tokens : 1;  // ignored when row_offs != nullptr
             const int* real_n = grouped ? state.d_chunk_len : nullptr;
-            // Factored spare: this layer's slice of the [layer][slot][head]
-            // buffer. fac_out only on a grouped verify chunk (it replaces the
-            // full-state commit there); fac_in on any shape, because the row a
-            // verify left is applied by whatever runs next.
+            // Factored spare: this layer's slice of the [layer][slot][head] buffer.
+            // fac_out only on a grouped verify chunk (replaces the full-state commit
+            // there); fac_in on any shape, since the row a verify left is applied by whatever runs next.
             const int64_t fac_off = state.ssm_fac_layer_stride * static_cast<int64_t>(ssm_idx);
             float* const fac_out = (grouped && state.ssm_fac_out) ? state.ssm_fac_out + fac_off : nullptr;
             const float* const fac_in = state.ssm_fac_in ? state.ssm_fac_in + fac_off : nullptr;
@@ -811,19 +757,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             const bool per_group_snap = grouped && state.ssm_out_slots && state.ssm_snap_slots;
             void* snap = (grouped && !per_group_snap) ? h_snap : nullptr;
             const int* snap_n = (snap || per_group_snap) ? state.d_snap_n : nullptr;
-            // Ragged prefill on the chunk-parallel scan, one member at a time
-            // (gdn.chunkpar_scan): the fused batched kernel walks every token
-            // of every member serially on n_heads x n_seq CTAs, so a packed
-            // 3-4-sequence 1024-row forward paid more scan time than the
-            // single-sequence forwards it replaced (2026-09-02, the budget
-            // fix that packs continuation tails with the next prompt read
-            // neutral until this). Members below the chunk-parallel minimum
-            // take the fused single-sequence kernel on their own rows.
-            // Only when the forward is a few big chunks plus a few tails: a
-            // burst's first forward packs 32 short prompts of ~40 rows each,
-            // and 32 per-member launches of the fused kernel per layer read
-            // -1.5% aggregate and +112 ms TTFT at 32 x 38-token prompts
-            // against the one batched launch (2026-09-03).
+            // Ragged prefill on the chunk-parallel scan runs one member at a time
+            // (gdn.chunkpar_scan): the fused batched kernel walks every token of every
+            // member serially on n_heads x n_seq CTAs, so a packed multi-sequence
+            // forward pays more scan time than the single-sequence forwards it
+            // replaced. Members below the chunk-parallel minimum take the fused
+            // single-sequence kernel on their own rows; many short prompts packed
+            // together are faster on the one batched launch instead.
             bool ragged_chunkpar = ragged && !grouped && dispatch_policy().gdn.chunkpar_scan &&
                                    state.h_seq_offsets != nullptr && state.h_ssm_slots != nullptr &&
                                    gdn_chunkpar_ws_ != nullptr && head_dim_ssm == 128 && ssize == 128;
@@ -905,11 +845,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             }
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            // Chunk-parallel prefill scan (gdn.chunkpar_scan): per-chunk WY
-            // factors on grid (chunks x heads) + a cheap sequential state
-            // pass, instead of 32 CTAs walking every token. Single-sequence
-            // prefill only; padded verify chunks (d_chunk_len) and short
-            // inputs stay on the routes below. Works for both state dtypes.
+            // Chunk-parallel prefill scan (gdn.chunkpar_scan): per-chunk WY factors on
+            // grid (chunks x heads) plus a cheap sequential state pass, instead of 32
+            // CTAs walking every token. Single-sequence prefill only (n>=128); padded
+            // verify chunks and short inputs stay on the routes below. Works for both state dtypes.
             const bool use_chunkpar = dispatch_policy().gdn.chunkpar_scan && !use_ref && n >= 128 &&
                                       state.d_chunk_len == nullptr && gdn_chunkpar_ws_ != nullptr &&
                                       head_dim_ssm == 128 && ssize == 128;
@@ -965,21 +904,18 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     debug_tensor_stats("gdn_after_scan_y", y_buf, stream);
     debug_tensor_stats("gdn_gate_out", gate_out, stream);
 
-    // Per-element dump: raw scan output (FP16), pre-rmsnorm_gated_silu.
-    // Only populated in the default path — FP32_SCAN writes to y_fp32 and only
-    // copies back to y_buf when the diagnostics.debug_forward config flag (was IMP_DEBUG_FORWARD env)
-    // is set. Compare to llama's
-    // `attn_output-{layer}` from common-eval-callback.
+    // Per-element dump of the raw scan output (FP16), pre-rmsnorm_gated_silu.
+    // Only populated in the default path: FP32_SCAN writes to y_fp32 and only
+    // copies back to y_buf when diagnostics.debug_forward is set. Compare against llama's
+    // attn_output-{layer}.
     if (!use_fp32_scan) {
         dump_tensor_npy("gdn_y_post_scan", y_buf, stream, layer, cur_decode_step_);
     }
 
-    // 6. Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
-    // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
-    // When the gdn.fp32_scan config flag (was IMP_GDN_FP32_SCAN env) is active, this was already done
-    // inline with the
-    // scan above (FP32-input variant). Skip to avoid double-applying.
-    // [gdn] norm_eps_override > 0 can override eps (diagnostic).
+    // Fused RMSNormGated + SiLU: y = rmsnorm(y)*silu(gate), one kernel launch
+    // for all tokens x heads (replaces n*32*2 launches). Skipped when
+    // gdn.fp32_scan already did this inline (FP32-input variant), to avoid double-applying.
+    // gdn.norm_eps_override>0 can override eps (diagnostic).
     float norm_eps = eps;
     if (dispatch_policy().gdn.norm_eps_override > 0.0f) {
         norm_eps = dispatch_policy().gdn.norm_eps_override;
@@ -994,12 +930,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // Compare to llama's final_output tensor before build_lora_mm(ssm_out, ...).
     dump_tensor_npy("gdn_y_post_norm", y_buf, stream, layer, cur_decode_step_);
 
-    // 7. ssm_out projection: [n, inner] → [n, d_model]
-    // gdn.fp32_out config flag (was IMP_GDN_FP32_OUT env): compute the ssm_out GEMM with FP32 output
-    // and add the
-    // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
-    // element vs llama.cpp; that small drift amplifies to sign flips in
-    // downstream near-zero projections and breaks Qwen 3.6.
+    // ssm_out projection [n,inner]->[n,d_model]. gdn.fp32_out computes the
+    // GEMM with FP32 output and adds the residual in FP32 before downcast:
+    // FP16 accumulation here drifts ~5%/element vs llama.cpp, which amplifies
+    // to sign flips in downstream near-zero projections and breaks Qwen 3.6.
     const bool use_fp32_out = dispatch_policy().gdn.fp32_out;
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     if (use_fp32_out) {
@@ -1010,11 +944,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         int64_t out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(cfg.d_model)};
         Tensor fp32_out_t(fp32_out, QType::F32, 2, out_shape, true);
 
-        // NOTE: when FP32_SCAN is also active, the post-norm-gated tensor lives
-        // in FP32 memory, but we can't pass it directly to gemm_dispatch because
-        // cuBLAS FP32-input × FP16-cached-weight path silently produces zeros on
-        // sm_120 with CUBLAS_COMPUTE_32F (tested 2026-04-21). Stay on FP16 y_buf
-        // input; precision benefit from FP32 scan is limited to the rmsnorm stage.
+        // When FP32_SCAN is also active the post-norm-gated tensor lives in FP32
+        // memory, but it cannot be passed directly to gemm_dispatch: cuBLAS
+        // FP32-input x FP16-cached-weight with CUBLAS_COMPUTE_32F silently
+        // produces zeros on sm_120 (tested 2026-04-21). Stays on FP16 y_buf input;
+        // FP32 scan's precision benefit is limited to the rmsnorm stage.
         gemm_via_handle_(ly.ssm_out_id, y_buf, fp32_out_t, ctx);
 
         // FP16 residual → FP32 + add + FP16 writeback to h in one kernel.
@@ -1031,10 +965,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // residual save above was skipped under the same gate.
         gdn_out_residual_m1_(ly, y_buf, h, stream);
     } else if (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h) && !dump_hidden_dir()) {
-        // Batched-decode NVFP4: h += out_proj(y) via the smallm accumulate
-        // path (h still holds the residual — see run_ssm's twin). The
-        // pre-residual dump hook needs the scratch, so an active dump dir
-        // keeps the old path.
+        // Batched-decode NVFP4: h += out_proj(y) via the smallm accumulate path (h
+        // still holds the residual, see run_ssm's twin). An active dump dir keeps
+        // the old path, since the pre-residual dump hook needs the scratch.
         gemm_via_handle_(ly.ssm_out_id, y_buf, h, ctx.with_beta(1.0f));
     } else {
         gemm_via_handle_(ly.ssm_out_id, y_buf, out_buf, ctx);

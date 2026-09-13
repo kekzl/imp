@@ -1,21 +1,11 @@
-// Pre-dequant Phase 3c: standalone MXFP4.
-// Handles MXFP4-source GGUF models when the NVFP4 decode pipeline
-// (Phase 3) is disabled. Dequantizes small alpha/beta tensors to FP16
-// (must happen BEFORE in-place unpack, which compacts raw blocks),
-// then registers + in-place unpacks the bulk MXFP4 weights into the
-// CUTLASS sm_120 MXFP4 cache.
-//
-// Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
-// refactor roadmap. This is the final extraction — after this PR,
-// executor_pre_dequant.cu is the pure orchestrator.
-//
-// LEGACY / MAINTENANCE MODE (2026-05-24): MXFP4 is supported but not the
-// dev priority. NVFP4 + SafeTensors is where the hero models live. Ship
-// cleanup fixes here (load errors, missing pointer replaces, resource
-// leaks) and move on — don't chase residual output-quality bugs on
-// community MXFP4 quants without an external reference engine
-// (llama.cpp / HF Transformers) to compare against. See memory note
-// `feedback_gguf_mxfp4_legacy_2026_05_24` for the full rule.
+// Phase 3c: standalone MXFP4, for MXFP4-source GGUF models when the NVFP4 decode
+// pipeline (Phase 3) is disabled. Dequantizes small alpha/beta tensors to FP16 BEFORE
+// the in-place unpack (which compacts raw blocks), then registers + in-place unpacks
+// the bulk MXFP4 weights into the CUTLASS sm_120 MXFP4 cache.
+// Maintenance mode: MXFP4 is supported but not the dev priority (NVFP4 + SafeTensors is
+// where the hero models live). Ship cleanup fixes (load errors, missing pointer
+// replaces, resource leaks); don't chase residual output-quality bugs on community MXFP4
+// quants without an external reference engine to compare against.
 
 #include "exec/executor.h"
 #include "exec/quant_pipeline.h"
@@ -120,10 +110,10 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                             if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
                                 w = it->second;
                                 qt = QType::F16;
-                                // The model tensor now points at EXECUTOR-owned
-                                // cache memory (fp16_bulk_data) — a second
-                                // engine on this handle would read it dangling
-                                // after this executor's teardown (#830).
+                                // The model tensor now points at EXECUTOR-owned cache memory
+                                // (fp16_bulk_data): a second
+                                // engine on this handle would read it dangling after this executor's teardown
+                                // (#830).
                                 const_cast<Model*>(model_)->mark_sources_consumed();
                             }
                         };
@@ -170,16 +160,12 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             wcache_->use_mxfp4 = true;
 
-            // In-place unpack: raw blocks are compacted to [N, K/2] within the
-            // SAME buffer. No separate data allocation, no free needed.
-            // The raw buffer tail (scale bytes) is wasted (~6% overhead) but
-            // avoids the 50% peak VRAM spike of out-of-place unpack.
-            //
-            // The compaction is DESTRUCTIVE: the model's source buffers no
-            // longer hold GGUF raw MXFP4 blocks, so a second engine on this
-            // model handle cannot re-run this unpack (it would read the
-            // already-compacted layout as raw blocks → illegal access, #830).
-            // Mark the model so Engine::init rejects a second engine cleanly.
+            // In-place unpack: raw blocks compact to [N, K/2] within the SAME buffer, no separate
+            // allocation or free. The raw buffer tail (scale bytes) is wasted (~6% overhead) but
+            // avoids the peak VRAM spike of an out-of-place unpack.
+            // Destructive: the model's source buffers no longer hold GGUF raw MXFP4 blocks, so a
+            // second engine on this handle cannot re-run the unpack (illegal access, #830). Mark the
+            // model so Engine::init rejects a second engine cleanly.
             const_cast<Model*>(model_)->mark_sources_consumed();
             // Also suspend-unsupported: a weight snapshot would capture the
             // compacted bytes and the resume replay would compact them again.
