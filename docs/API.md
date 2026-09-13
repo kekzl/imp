@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-04
-commit: 7e03ac25
+verified: 2026-09-13
+commit: 25f300a5
 -->
 
 # API
@@ -56,10 +56,9 @@ all of them at once.
 
 ### Defaults, and where they differ from OpenAI
 
-A request that sets no sampling fields is not served with OpenAI's defaults
-(#1596). Deliberate: the values suit local models better than
-`temperature 1.0` with no truncation, but an identical request returns
-different output than against the OpenAI API.
+A request with no sampling fields uses imp defaults, not OpenAI's (#1596):
+they suit local models better than `temperature 1.0` with no truncation, so an
+identical request returns different output than against the OpenAI API.
 
 | field | imp | OpenAI | to get OpenAI's behaviour |
 |---|---|---|---|
@@ -83,8 +82,7 @@ Two of these do not switch off the way the field name suggests:
 
 ### Metrics for what the server decided
 
-`/metrics` carries counters for the decisions that used to be visible only in
-the server log (#1640, #1641):
+`/metrics` carries counters (#1640, #1641):
 
 | counter | what moves it |
 |---|---|
@@ -131,10 +129,8 @@ fed by every generation path: chat stream and non-stream, `/v1/completions`
 stream and non-stream. A request cancelled or timed out before the worker
 admitted it contributes its wait to `imp_queue_time_seconds` as well.
 `imp_queue_time_seconds` ends when the scheduler puts the request into its
-first batch, so it is the wait behind `max_batch_size` and KV admission
-(until 2026-09-05 it ended at worker pickup, which the worker does every
-loop: a loop-latency reading). `imp_queue_waiting` / `imp_queue_running`
-split `imp_queue_depth` on the same boundary. Gate:
+first batch: the wait behind `max_batch_size` and KV admission.
+`imp_queue_waiting` / `imp_queue_running` split `imp_queue_depth` on the same boundary. Gate:
 `tests/test_server_metrics.py` in `make test-server`. The serving KPI harness
 reads the histograms and counters back per concurrency level
 (`tools/analysis/serving_kpi.py`, definitions in
@@ -183,10 +179,7 @@ constraint entirely.
 
 ## Tool calling
 
-✅, gated by real clients: `make test-agents-external` drives imp with aider
-over the OpenAI dialect, Claude Code over the Anthropic one and the OpenAI
-Agents SDK over `/v1/responses`, each having to land an actual edit in a
-throwaway repository.
+✅. Tested: `make test-agents-external` (aider on OpenAI, Claude Code on Anthropic, Agents SDK on `/v1/responses`).
 
 `tool_choice` that contradicts the request is a `400`: naming a function absent
 from `tools`, or `"required"` with no tools.
@@ -201,9 +194,9 @@ only where the loaded model's chat template has a grammar for it:
 | a named function | `chatml`, `llama3` |
 | `"auto"` / `"none"` / absent | nothing to enforce, every family |
 
-On every other family the constraint used to degrade to a sentence in the prompt
-and the request was answered `200` with prose. Measured before the refusal, 10
-requests each at `temperature 0.7` with one `get_weather` function:
+ChatML parses `<tool_call>` envelopes; other families have no enforced structure.
+
+On every other family (measurement: 10 requests @ temperature 0.7 with one `get_weather` function):
 
 | model | family | `tool_choice` | tool calls |
 |---|---|---|---|
@@ -212,20 +205,15 @@ requests each at `temperature 0.7` with one `get_weather` function:
 | gpt-oss-20b MXFP4 | `harmony` | `required` / named | **0 / 10** each |
 | Qwen3-4B Q8_0 | `chatml` | `required` / named | 10 / 10 each |
 
-`"auto"` is untouched: Gemma-4 produced 1 of 10 there, and a best-effort call is
-what `auto` asks for.
+`"auto"` is not enforced: a best-effort call is what `auto` asks for (Gemma-4: 1 of 10).
 
-**gpt-oss calls tools now** (#1716). Its envelope is a channel with a recipient,
-not a tag:
+**gpt-oss calls tools** (#1716). Envelope: channel with recipient, not tag:
 
 ```
 <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Berlin"}<|call|>
 ```
 
-Before #1716 the parser had no Harmony branch: the call fell through to the
-ChatML `<tool_call>` scanner and was dropped, an **empty `content` with
-`finish_reason: "stop"`**. Measured on `gpt-oss-20b-mxfp4`,
-`tool_choice: "auto"`, 10 requests per row:
+Measurement on `gpt-oss-20b-mxfp4`, `tool_choice: "auto"` (10 requests each):
 
 | path | before | after |
 |---|---|---|
@@ -236,17 +224,15 @@ ChatML `<tool_call>` scanner and was dropped, an **empty `content` with
 for this envelope, so the call is the model's choice rather than a guarantee.
 
 Reasoning models separate their chain of thought into `reasoning_content`
-(Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
-streaming path too, which is where it was once wrong. With thinking off the
-stream still scans the first tokens for a `<think>` the model may open anyway:
-without tools the scan releases on the first word (client-side TTFT on
-Qwen3.8-27B-NVFP4, 27-token prompt, 97-105 -> 32-62 ms), with tools it holds up
-to 256 tokens so a chain of thought cannot stream as the answer.
+(Anthropic: `thinking`) rather than emitting it as the answer. On streaming: with
+thinking off, stream scans first tokens for `<think>` the model may open anyway.
+Without tools: releases on first word (client-side TTFT on Qwen3.8-27B-NVFP4,
+27-token prompt, 97-105 -> 32-62 ms). With tools: holds up to 256 tokens so
+chain of thought does not stream as answer.
 
-**On `/v1/messages`, thinking is opt-in** (#1541). A request without a `thinking`
-field gets no thinking block, so `content[0]` is the text - which is what the
-Anthropic dialect promises. Ask for it and the thinking block comes first, ahead
-of the answer, the way upstream orders it. Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
+**On `/v1/messages`, thinking is opt-in** (#1541). Without `thinking` field:
+no thinking block, `content[0]` is text. With it: thinking block first.
+Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
 
 | request `thinking` | `content` blocks | `content[0].text` |
 |---|---|---|
@@ -294,66 +280,36 @@ Three knobs, and only one of them caps tokens:
 | `thinking.budget_tokens` | Anthropic | a token count, converted to that same fraction (`N / max_tokens`, clamped to 1.0); `0` disables thinking |
 | `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8) |
 
-The fraction alone would let a generous `max_tokens` hand half the budget to a
-reply that never needs it, so the engine also keeps an answer reserve:
-reasoning is force-closed (an injected `</think>`) once it reaches
+Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches
+`max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction,
+whichever is later. `runtime.think_answer_reserve` default 256.
+Example: `max_tokens: 260` + 0.5 default = `max(130, 4) = 130` reasoning tokens max.
 
-    max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)
-
-or the fraction, **whichever is later** - so a larger `max_tokens` only ever
-buys more thinking room, never less. `runtime.think_answer_reserve` (default
-256, values below 0 read as 0) was a compile-time constant until this release.
-At `max_tokens: 260` and the 0.5 default the limit is `max(130, 4) = 130`
-reasoning tokens.
-
-**When the answer never starts anyway**, the response says so rather than
-leaving an empty `content` that reads like a defect:
+When answer never starts, response signals it:
 
 | field | where |
 |---|---|
-| `usage.completion_tokens_details.reasoning_tokens` | OpenAI, non-stream and the `include_usage` chunk |
-| `usage.output_tokens_details.reasoning_tokens` | Anthropic (`message_delta` when streaming), `/v1/responses` |
-| `imp_finish_detail: "reasoning_budget_exhausted"` | beside `finish_reason` in the OpenAI choice (non-stream and the final chunk); beside `stop_reason` in the Anthropic response and `message_delta` |
+| `usage.completion_tokens_details.reasoning_tokens` | OpenAI, non-stream and `include_usage` chunk |
+| `usage.output_tokens_details.reasoning_tokens` | Anthropic (`message_delta` streaming), `/v1/responses` |
+| `imp_finish_detail: "reasoning_budget_exhausted"` | beside `finish_reason` / `stop_reason` (imp-namespaced extra, same shape as `imp_spec_*` usage keys); appears only when `content` empty, no tool call, non-empty reasoning channel |
 | `imp_requests_reasoning_exhausted_total` | `/metrics` |
 
-`finish_reason` and `stop_reason` keep their upstream enums: neither has a
-member for this, and an unknown value breaks strict SDKs. The detail is an
-imp-namespaced extra beside them, the same shape as the `imp_spec_*` usage keys.
-It appears only when the request produced empty `content`, no tool call and a
-non-empty reasoning channel.
+`thinking` blocks carry `signature`, stream emits `signature_delta` before
+`content_block_stop` (deterministic digest of block text, not attestation).
+Prior-turn block with mismatched signature: `400`.
 
-`thinking` blocks carry a `signature`, and the stream emits `signature_delta`
-before the block's `content_block_stop` (SDKs round-trip the pair). It is a
-deterministic digest of the block text, not an attestation: a prior-turn
-block whose signature does not match its text is refused with `400`
-(edited after the server produced it), a block without a signature is taken
-as-is, and nothing stops a client from computing one.
+Stream holds back up to `server.agent_scan_limit` tokens (default 256) with tools
+to scan for reasoning model (`<think>`). Without tools: holds 8 tokens, releases on first word.
 
-On a request with tools the stream holds back up to `server.agent_scan_limit`
-tokens (default 256) while it is still unknown whether the model is reasoning:
-the template renders a pre-closed think block there, so a reasoning model emits
-only the closer. The hold is the TTFT of a prose reply on that path; lower the
-key on a model that never reasons. Plain chat requests hold 8 tokens and
-release on the first word.
-
-Either field alone suffices. Measured on Qwen3.8-27B, JSON prompt at
-`max_tokens: 400`, `reasoning_content` characters: nothing set 160,
-`think_budget: 0` alone **0**, `enable_thinking: false` alone **0**.
-
-**Why disable it:** the answer shares the token budget with the thinking, so a
-small `max_tokens` on a thinking model can be consumed before the reply
-starts: empty `content`, `finish_reason: stop`. For short structured calls
-(a JSON classifier at `max_tokens: 400`), disable thinking rather than raising
-every budget. See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+On `/v1/chat/completions` at `max_tokens: 400` with JSON prompt, `think_budget: 0` and `enable_thinking: false` both fully disable reasoning.
 
 Structured output disables thinking on its own: `json_mode`, `json_schema`,
 `tools`, `regex` and `grammar` all suppress it without either field.
+Answer and thinking share the token budget: a small `max_tokens` on a thinking model can be spent before the reply starts (empty `content`, `finish_reason: stop`). For short structured calls, disable thinking instead of raising every budget; see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 ## Prompt caching
 
-✅ on by default for the server. Prefix blocks are reused across requests that
-share a prefix: a growing agent transcript gets cheaper per turn, not more
-expensive.
+✅ by default. Prefix blocks reused across requests sharing a prefix.
 
 `cache_control` is honoured per breakpoint: the **last** marked block bounds the
 pinned region, rather than pinning the whole prompt. Usage reporting carries
@@ -365,34 +321,23 @@ never replayed.
 
 ## Images
 
-✅ on `/v1/chat/completions`, as `image_url` content parts. Several images in one
-request are encoded in prompt order, at most `--max-images-per-request` of them
-(default 8); a picture wider or taller than 16384 px is a `400` from the decoder.
+✅ on `/v1/chat/completions`, as `image_url` content parts. Multiple images
+encoded in prompt order, max `--max-images-per-request` (default 8).
+Picture wider or taller than 16384 px: `400`.
 
-**A data URI works out of the box; an `http(s)` URL does not.** Fetching one
-opens a server-side connection to a caller-named host with an unauthenticated
-caller, so it is behind `--allow-remote-images` (#1610). With the flag on, the
-destination is refused if it resolves to loopback, link-local (including the
-cloud metadata address), RFC1918, CGNAT or ULA; redirects are not followed,
-body capped at 32 MiB, 10 s read timeout. Residual:
-[`LIMITATIONS.md`](LIMITATIONS.md).
+`http(s)` URLs require `--allow-remote-images` (#1610); destination refused
+if loopback, link-local, RFC1918, CGNAT or ULA. No redirects. Body cap 32 MiB,
+10 s read timeout. Data URIs work by default.
 
-Three deliberate refusals:
+Refusal rules:
 
-- A content part or block this server cannot read is a `400` naming it, on all
-  three dialects. On `/v1/messages` that includes the `system` field, which takes
-  a string or an array of `text` blocks: every other shape folded to an empty
-  system prompt and the model answered without its instructions. `/v1/chat/completions` and `/v1/responses` read `text` and
-  `image_url`; `/v1/messages` reads `text`, `image` (base64 or url source),
-  `tool_use`, `tool_result` and `thinking`. Anything else would be deleted on
-  the way in and answered around.
-- An `image_url` that cannot be read is a `400`, not a skipped picture:
-  dropping one would slide every later image onto the wrong placeholder. The
-  message is the same whatever went wrong and does not echo the URL, so the
-  endpoint cannot distinguish an open port from a closed one.
-- A model whose vision tower imp cannot read loads **text-only** and says so;
-  an image request to it gets `400 vision_unavailable` rather than a confident
-  description of a picture the model never received.
+- Unreadable content part or block: `400` naming it, all three dialects.
+  `/v1/chat/completions`, `/v1/responses`: read `text` and `image_url`.
+  `/v1/messages`: read `text`, `image` (base64 or url), `tool_use`, `tool_result`, `thinking`.
+  On `/v1/messages` the `system` field takes string or array of `text` blocks.
+- Unreadable `image_url`: `400`, not skipped (would misalign later images).
+  Message same regardless of error, does not echo URL.
+- Model with unreadable vision tower: loads text-only, image request gets `400 vision_unavailable`.
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
 
@@ -444,15 +389,11 @@ On `/v1/messages` the `error.type` is always one of Anthropic's own -
 endpoint also carries a `request-id` header, and error bodies repeat it as
 `request_id`.
 
-A stream that ends on a server-side fault emits an `error` SSE event instead of
-`message_delta`/`message_stop`: a request timeout and an admission refusal used
-to arrive as an ordinary completed turn, indistinguishable from the model
-finishing.
+Stream ending on server-side fault emits `error` SSE event instead of
+`message_delta`/`message_stop`.
 
-`anthropic-version` and `anthropic-beta` are read and echoed back, neither
-enforced (upstream: missing version = 400, unknown beta = refused; a client
-that works here can fail there). An unknown beta is logged once per value: imp
-implements no beta surface, and a silent 200 would be a false accept.
+`anthropic-version` and `anthropic-beta`: read and echoed back, not enforced.
+Unknown beta logged once per value.
 
 Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
@@ -476,12 +417,10 @@ restart a server that is swapping or draining). Both routes need no API key.
 
 ### `GET /health`, and which 503 is worth retrying
 
-`/health` answers 200 with `status: "ok"` whenever the process can serve.
-Load, queueing and a transient out-of-memory stay 200 on purpose: the server
-is alive, and an orchestrator restarting on them makes things worse.
+`/health` answers 200 with `status: "ok"` when process can serve.
+Load, queueing, transient OOM: 200 (server alive; restart would worsen them).
 
-**503 only for states that outlast the request that hit them**, with a stable
-`code`:
+503 only for persistent states, with stable `code`:
 
 | `code` | what it means | what a client should do |
 |---|---|---|
@@ -521,7 +460,3 @@ report ceiling == total (fixed pool vs growable at its ceiling), which want
 opposite reactions: wait for the card to free, or stop waiting. A pool that is
 small **and** can still grow is not reported unhealthy: it heals as the card
 frees; wait for the total to climb rather than restart.
-
-Before this field existed the state was silent: `/health` said ok,
-`/v1/models` kept advertising 131 072 tokens, every real prompt came back
-cancelled with a message about the prompt.

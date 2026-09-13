@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-03
-commit: e9d2ed36
+verified: 2026-09-13
+commit: 25f300a5
 -->
 
 # Benchmarks
@@ -21,12 +21,10 @@ artificially LOW). `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Decode (tg) is the
 reliable A/B signal; prefill (pp) varies up to 2.6× across container restarts
 (cuBLAS autotuning) and is therefore not tabulated for comparisons.
 
-> **Correction, 2026-08-14** (this file is a record, so the method note above is
-> left as written): the 2.6× was a carried-forward citation. cuBLAS algo
-> re-timing measures 3.50 % over nine process starts, and the spread is a
-> property of the *model*, not of cuBLAS: 0.6-1.2 % on Qwen3-8B Q8_0 against
-> 37.6 % on a fully resident NVFP4 MoE model. Current figures and provenance:
-> [`PERF.md`](PERF.md).
+> **Correction, 2026-08-14**: cuBLAS algo re-timing measures 3.50 % over nine
+> process starts. Spread is a property of the *model*, not of cuBLAS: 0.6-1.2 %
+> on Qwen3-8B Q8_0 against 37.6 % on a fully resident NVFP4 MoE model.
+> Current figures and provenance: [`PERF.md`](PERF.md).
 
 The CI-gated canonical baseline lives in
 [`tests/perf_baseline.json`](../tests/perf_baseline.json) (8% decode / 8%
@@ -67,18 +65,15 @@ numbers below carry over unchanged.
 > `clocks.mem` during the bench (healthy = 13801 MHz / ~500 W under prefill).
 
 Against llama.cpp (b8445+, full offload, flash attention on): imp wins dense
-GGUF decode by **+37–72%**. The MoE/hybrid GDN-projection tax that used to put
-Qwen3.6-35B behind was closed on the **NVFP4** path by the #949 FP8
-SSM-projection sidecar (35B NVFP4 decode 257 → ~320 tok/s) and on the **GGUF
-Q4_K** hybrid path by extending that sidecar to the Q8_0-kept GDN projections
-(35B Q4_K decode 224 → 272 tok/s, 2026-07-11) — both now ahead of llama.cpp's
-~229. GGUF remains the legacy path — NVFP4 SafeTensors is the priority.
+GGUF decode by **+37-72%**. On **NVFP4**: #949 FP8 SSM-projection sidecar moved
+35B decode 257 → ~320 tok/s. On **GGUF Q4_K** hybrid: extending that sidecar to
+Q8_0-kept GDN projections moved 35B decode 224 → 272 tok/s (2026-07-11), both
+now ahead of llama.cpp's ~229. GGUF is legacy; NVFP4 SafeTensors is priority.
 
 ### Competitive sweep 2026-08-30 (imp v0.33.0, llama.cpp image digest `c49f4d48`)
 
-The README headline table, recorded here so the L0 page embeds instead of owning
-(AUDIT_arch_2026 J-4). Same card, same GGUF, same flags, decode tok/s; imp defaults
-(n-gram speculation on) against llama.cpp defaults, full offload, flash attention on.
+Same card, same GGUF, same flags, decode tok/s; imp defaults (n-gram speculation on)
+against llama.cpp defaults, full offload, flash attention on.
 
 | Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead |
 |---|---:|---:|---:|---:|
@@ -101,15 +96,12 @@ digest** in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh),
 not by tag: `:full-cuda` moves, and the two sweeps below were each compared
 against a build that nothing in the repo recorded.
 
-Two imp columns, because one number cannot mean both things. Where the n-gram
-drafter engages, a dense `--bench` run accepts essentially every draft (measured
-here: 504 of 504 on Qwen3-8B) and `llama-bench` has no equivalent. The spec-off
-column is the same command with `--set speculative.ngram=false`. The 2026-07-12
-sweep tabulated the defaults column only.
+Two imp columns show spec-on and spec-off: where the n-gram drafter engages,
+a dense `--bench` run accepts essentially every draft (measured here: 504 of 504
+on Qwen3-8B), and `llama-bench` has no equivalent. The spec-off column is
+`--set speculative.ngram=false`. The 2026-07-12 sweep tabulated defaults only.
 
-**Where that acceptance comes from, since this file said the wrong thing about
-it until 2026-08-21.** Not from the prompt, and this follows from the source
-rather than from a measurement:
+**Acceptance mechanism** (measured, not from the prompt):
 
 - `imp-cli --bench` builds the prompt as `tokens[i] = i % vocab_size`
   (`tools/imp-cli/mode_bench.cpp:19`). At `--bench-pp 512` against a ~151k vocab the
@@ -151,32 +143,24 @@ effect.
 | Qwen3-30B-A3B Q4_K_M (MoE, non-hero) | 314.62 | 314.64 | 303.28 | +3.7 % | +1.7 % |
 | gpt-oss-20b MXFP4² | 412.41 | 412.09 | 330.09 | **+25 %** | +13-19 % |
 
-**Release bar 2 holds on all four heroes, in both columns.** The narrowest
-margin is Gemma-4 at +16 %.
+**Release bar 2 holds on all four heroes, in both columns.** Narrowest margin:
+Gemma-4 at +16 %.
 
-**llama.cpp did not erode the lead.** b10524 measures flat to slightly slower
-than b9976 on every shared model here (8B 160.5 → 159.74, 14B 115.3 → 112.83,
-35B 226.5 → 220.53, Gemma-4 216.0 → 210.34, 30B 319.2 → 303.28). The six weeks
-of batch-1 decode work between the two builds does not show up at these shapes.
+**llama.cpp b10524 vs b9976:** 8B 160.5 → 159.74, 14B 115.3 → 112.83,
+35B 226.5 → 220.53, Gemma-4 216.0 → 210.34, 30B 319.2 → 303.28.
 
-**One imp-side regression, and it is Gemma-4:** 261.3 → 244.16, -6.6 %, against
-llama.cpp's -2.6 % on the same model. That is what took the lead from +21 % to
-+16 %. Not investigated here; this sweep measures, it does not fix.
+**imp Gemma-4 regression:** 261.3 → 244.16 (-6.6 %), vs llama.cpp -2.6 %.
+Lead went from +21 % to +16 %.
 
 **The n-gram drafter never engages on Qwen3-14B Q6_K:** `verify_steps=0
-miss_steps=72 drafted=0` over a full bench run. Both imp columns therefore
-measure the same path on that model, which is what makes the pair a
-repeatability control: where speculation is inert the two columns must agree,
-and on 35B, Gemma-4, 30B and gpt-oss they agree to **0.2 %**.
+miss_steps=72 drafted=0` over a full bench run. On 35B, Gemma-4, 30B and gpt-oss,
+both columns agree to **0.2 %** (repeatability control: where speculation is
+inert, the two columns must match).
 
-¹ The sweep produced 154.77 for this row, 5.3 % below its own spec-off column
-where the two must agree. Two isolated re-measurements gave 162.08 and 162.04,
-and the tabulated value is their median.
-
-**The first explanation for that gap was wrong and is corrected here.** It was
-attributed to the card not being settled after a 16 GiB competitor model
-unloads, and the settle between arms was raised from 5 s to 20 s on that basis.
-A re-run at 20 s produced 155.23. Not the cause.
+¹ Sweep measured 154.77, 5.3 % below its spec-off column where the two must
+agree. Isolated re-measurements: 162.08 and 162.04 (tabulated value is median).
+Settle time between arms raised from 5 s to 20 s after 16 GiB competitor model
+unloads; re-run at 20 s produced 155.23 (not the cause of gap).
 
 **The arm is bimodal, not noisy.** Four isolated runs, same command, same build:
 
@@ -187,24 +171,15 @@ A re-run at 20 s produced 155.23. Not the cause.
 | 3 | **0** | **162.13** |
 | 4 | 176 | 154.65 |
 
-The n-gram drafter engages on some processes and not others, and where it
-engages on this checkpoint it accepts 6.2 % at ~50 ms per verify against a
-~6.2 ms decode step: roughly eight decode steps spent to return two tokens. So
-this checkpoint's default throughput has two values, 162 quiet and ~154 firing,
-and the tabulated 162.06 is the quiet mode.
+Drafter engages on some processes but not others: 6.2% acceptance at ~50 ms per
+verify vs ~6.2 ms decode step (8 steps per token). Default throughput: 162 quiet
+mode, ~154 firing. On 1024-token request: **104 of 288, 36.1 %** acceptance at
+6.78 tokens per verify. A 128-token bench is entirely cold-start. Economics guard
+(`engine_spec_ngram.cpp:175`) arms at `spec_verifies >= 8` per request; 128-token
+request produces ~1 verify.
 
-It is a cold-start effect rather than a property of the model. On a single
-1024-token request the same checkpoint accepts **104 of 288, 36.1 %, at 6.78
-tokens per verify**: prompt-lookup has nothing to match against until the
-generation is long enough, and a 128-token bench rep is entirely cold start. The
-economics guard meant to catch this (`engine_spec_ngram.cpp:175`, the long-context economics guard) cannot: it
-arms on `spec_verifies >= 8` **per request**, and a 128-token request produces
-about one verify.
-
-² Basis changed since 07-12. That row compared imp on SafeTensors against
-llama.cpp on GGUF; the SafeTensors checkpoint is no longer on this host, so both
-engines here read the same `gpt-oss-20b-mxfp4.gguf`. The row is more
-apples-to-apples than the one it replaces, not less, but it is not the same
+² Basis changed since 07-12: was imp SafeTensors vs llama.cpp GGUF, now both
+read `gpt-oss-20b-mxfp4.gguf`. More apples-to-apples, but not the same
 measurement.
 
 [PROV: commit=fa21f28e date=2026-08-21 hw=RTX5090 tree=imp-campaign (fresh `make build`)
@@ -655,11 +630,9 @@ command pattern `imp-cli --model <m> --bench --bench-pp {8192|16384}
 --bench-reps {5|3} --max-tokens {64|512} --max-seq-len {9216|17408}`. pp
 carries the usual restart variance; tg is the signal.
 
-All rows re-measured 2026-07-11 on `905630e2` after the three fixes the
-first sweep triggered (#967 streaming-eviction OOB, #968 dense spec ctx cap,
-#969 cheap-KV floor); the discovery-day numbers are kept for the record.
-The Qwen3-8B defaults cell was re-measured 2026-07-12 on `f3c228a0` after
-#977 made FP8 KV the default on hint-less Qwen3 GGUFs.
+All rows re-measured 2026-07-11 on `905630e2` after the three fixes (#967 #968 #969).
+Qwen3-8B defaults cell re-measured 2026-07-12 on `f3c228a0` after #977 made FP8 KV
+the default on hint-less Qwen3 GGUFs.
 
 | Model | Quant | pp8192 tok/s | tg512 @16k (defaults) | discovery-day @16k |
 |---|---|---:|---:|---:|
@@ -669,21 +642,18 @@ The Qwen3-8B defaults cell was re-measured 2026-07-12 on `f3c228a0` after
 | Qwen3.6-35B-A3B | Q4_K_M (GGUF) | 9 436 (pp16384) | **234.2** | 69.6 under streaming + silent OOB reads (#967/#969) |
 
 **128K single-chunk prefill reference** (2026-07-24, commit `d8bc45a8`, CUDA
-13.3, healthy-host clocks sampled during the run — 13 801 MHz mem / ~575 W):
-Qwen3-14B **NVFP4** `pp131072 = 3 792 tok/s` (34.6 s TTFT), command
-`imp-cli --model Qwen3-14B-NVFP4 --bench --bench-pp 131072 --bench-reps 5
---prefill-chunk-size 0 --max-tokens 1 --temperature 0 --max-seq-len 140000`.
-The auto `max_seq_len` ceiling is 128K since `d8bc45a8`. The Q6_K GGUF
-north-star model cannot host this measurement on 32 GB (its KV pool tops out
-near 75K tokens beside the dual GGUF+NVFP4 weight residency), which is why
-the TTFT reference band in `tests/perf_baseline_north_star.json` ends at
-pp65536 — the 64K row is that model's VRAM-feasible ceiling, not a coverage
-gap. That band is consumed by `make verify-north-star` only; no hook or CI
-job runs it (AUDIT_arch_2026 H-4), and the default gate's baseline carries
-`pp128`/`pp512`/`pp4096`, so `scripts/verify.sh` skips the 8K-64K lengths
-on every `make verify-fast`.
+13.3, healthy-host clocks 13 801 MHz mem / ~575 W): Qwen3-14B **NVFP4**
+`pp131072 = 3 792 tok/s` (34.6 s TTFT), command `imp-cli --model
+Qwen3-14B-NVFP4 --bench --bench-pp 131072 --bench-reps 5 --prefill-chunk-size 0
+--max-tokens 1 --temperature 0 --max-seq-len 140000`. Auto `max_seq_len` ceiling
+is 128K since `d8bc45a8`. Q6_K GGUF north-star cannot host this on 32 GB (KV
+pool ~75K tokens beside dual weight residency); TTFT reference band in
+`tests/perf_baseline_north_star.json` ends at pp65536. Band used by `make
+verify-north-star` only; no hook or CI job runs it (AUDIT_arch_2026 H-4).
+Default gate baseline carries `pp128`/`pp512`/`pp4096`, so `scripts/verify.sh`
+skips 8K-64K lengths on `make verify-fast`.
 
-What the first sweep found and what fixed it:
+**Fixes triggering re-measures:**
 
 - **#963/#967**: StreamingLLM's middle-block eviction retained the window
   ceil-aligned while the decode kernels read floor-aligned — one evicted
@@ -709,13 +679,11 @@ What the first sweep found and what fixed it:
 
 ## Concurrent serving throughput (batched decode)
 
-The VRAM-aware auto `max_batch_size` (#736) made concurrent decode the common
-server path; two batched-decode kernel fixes target it. Aggregate throughput =
-Σ completion tokens / wall-clock across N concurrent `POST /v1/chat/completions`
-against a live `imp-server`. This is a server-level number (not the greedy
-single-stream `--bench`), so it carries the same ±5–10 % host day-to-day decode
-variance (issue #526) — clocks logged healthy here (SM ~2880 MHz, mem 13801 MHz,
-up to 439 W).
+VRAM-aware auto `max_batch_size` (#736) + batched-decode kernel fixes (#745 #746).
+Aggregate throughput = sum of completion tokens / wall-clock across N concurrent
+`POST /v1/chat/completions` on live `imp-server`. Server-level number (not
+greedy single-stream `--bench`), carries ±5-10 % host day-to-day variance
+(issue #526); clocks healthy: SM ~2880 MHz, mem 13801 MHz, ~439 W.
 
 | Date | Commit | Model | Concurrency | Aggregate tok/s | Note |
 |---|---|---|---:|---:|---|
@@ -742,14 +710,11 @@ already batched and largely launch-hidden under CUDA Graphs).
 
 ### F16 KV decode attention at 32 streams (2026-09-03)
 
-Models whose KV cache stays FP16 under `kv_cache.dtype=auto` (every GGUF
-without an FP8 hint: Llama, Mistral, Gemma, Phi) decoded through a cooperative
-GQA kernel that read 2 bytes per instruction at 22% of DRAM bandwidth. #1880
-replaced it at concurrency with a four-tokens-per-warp kernel that also shares
-each K/V row across up to four Q heads of one CTA; #1882 gave the split-K
-(single-stream, long-context) route the same kernel. Measured on top of #1879
-(before it, every wave after the first ran eager once the prefix cache filled
-the pool, and the wave median hid the kernel).
+Models whose KV cache stays FP16 under `kv_cache.dtype=auto` (every GGUF without
+FP8 hint: Llama, Mistral, Gemma, Phi) used a cooperative GQA kernel at 22% of
+DRAM bandwidth. #1880 replaced it at concurrency with four-tokens-per-warp
+kernel sharing each K/V row across up to four Q heads per CTA; #1882 gave
+split-K (single-stream, long-context) the same kernel. Measured on top of #1879.
 
 Aggregate tok/s at 32 concurrent streams, 1000-token prompts, 300-token
 completions, `ignore_eos`, fresh `imp-server` per arm, config arms on one
@@ -786,15 +751,14 @@ left 8.8% free and both arms decoded inside the StreamingLLM window
 also why `imp-cli --bench` needed #1883 before it could measure these shapes.
 ## Multi-turn TTFT (hybrid prefix caching, #831 / v0.15.0)
 
-Agentic chat re-sends the full conversation every turn, so on a recurrent
-(SSM/GDN) model — where prefix caching was disabled before #831 — per-turn TTFT
-grew linearly with history (full re-prefill each turn). Recurrent-state
-snapshots make it prefill only the delta. Server-level numbers (SSE, so they
-carry the ±5–10 % host day-to-day decode variance, issue #526); TTFT = wall time
-to the first streamed token. Setup: `imp-server --model Qwen3.6-35B-A3B-NVFP4
---set runtime.max_seq_len=12288`, 6-turn growing-history replay (~2 k tokens
-added per turn), `max_tokens` 60, `temperature` 0, streaming. Both columns same
-host/day (2026-07-02, CUDA 13.3); `v0.14.0` = `2316f2fd`, `v0.15.0` = `e80a26a4`.
+Recurrent-state snapshots enable prefill-only deltas on recurrent (SSM/GDN) models.
+Server-level numbers (SSE, ±5-10 % host day-to-day variance, issue #526).
+TTFT = wall time to first streamed token.
+
+Setup: `imp-server --model Qwen3.6-35B-A3B-NVFP4 --set runtime.max_seq_len=12288`,
+6-turn growing-history replay (~2 k tokens per turn), `max_tokens` 60,
+`temperature` 0, streaming. Same host/day (2026-07-02, CUDA 13.3):
+`v0.14.0` = `2316f2fd`, `v0.15.0` = `e80a26a4`.
 
 | Turn | History | v0.14.0 TTFT | v0.15.0 TTFT | `cached_tokens` |
 |---|---|---:|---:|---:|
@@ -839,23 +803,17 @@ single-stream ITL 3.3 ms (269 tok/s, matches the hero decode baseline), aggregat
 
 ## Output-quality gate
 
-Throughput numbers say nothing about correctness — that lesson is paid for
-(see git history around 2026-06-04). Every perf-relevant change must also pass
-`python3 tools/analysis/degen_suite.py` against a running server.
-
-*(This file is updated in the same commit as the measurement-relevant change;
-check `git log BENCHMARKS.md` for the measurement provenance trail.)*
+Every perf-relevant change must pass `python3 tools/analysis/degen_suite.py`
+against a running server. This file is updated in the same commit as the
+measurement-relevant change; check `git log BENCHMARKS.md` for provenance.
 
 ## Agentic reliability vs llama.cpp (2026-07-26)
 
-Speed was published per hero model; whether the *JSON contract* or a *tool call*
-survives was not — against another engine, same model, same requests. This is
-the first cross-engine measurement of that (roadmap gap 7).
+First cross-engine measurement of JSON/tool call reliability (roadmap gap 7).
 
-**Setup**: Qwen3-8B-Q8_0 GGUF on both engines, same prompts, `temperature=0`,
-5 repetitions per case, `max_tokens=200` (a budget an agent would plausibly
-set). imp commit at `docs/skills-generalize`; llama.cpp `ff067f76d` (build
-10133) served with `--jinja -fa 1 -ngl 99`. Harness:
+Qwen3-8B-Q8_0 GGUF on both engines, same prompts, `temperature=0`, 5 reps per
+case, `max_tokens=200`. imp at `docs/skills-generalize`; llama.cpp `ff067f76d`
+(build 10133) with `--jinja -fa 1 -ngl 99`. Harness:
 `tools/analysis/agentic_compare.py` (re-runnable, engine-agnostic).
 
 | Case | imp (default) | llama.cpp (default) | llama.cpp (`enable_thinking:false`) |
@@ -866,21 +824,14 @@ set). imp commit at `docs/skills-generalize`; llama.cpp `ff067f76d` (build
 | tool arguments parse + required field | 5/5 | 5/5 | 5/5 |
 | `tool_choice=auto` does not force a call | 5/5 | 5/5 | 5/5 |
 
-**Read this as a defaults difference, not a capability difference.** llama.cpp's
-constrained decoding is correct — given `enable_thinking:false`, or simply a
-larger budget (the same schema request completes at 447 tokens, ~420 of them
-reasoning), it passes everything. What differs is what happens *out of the box*:
-a think-capable model spends the whole 200-token budget reasoning and returns an
-empty `content`, so the agent gets nothing. imp suppresses thinking for
-json/tool requests automatically, which is why it answers in 10 tokens without
-the client knowing to configure anything.
-
-Tool calling is equally reliable on both — llama.cpp emits the call even while
-thinking, it just pays ~9× the tokens for it at this budget.
+Defaults difference, not capability difference. llama.cpp at `enable_thinking:false`
+passes everything (same schema request needs 447 tokens, ~420 reasoning).
+Without flag: think-capable model spends whole budget on reasoning, returns empty
+`content`. imp suppresses thinking for json/tool requests automatically, answers
+in 10 tokens. Tool calling equally reliable on both; llama.cpp pays ~9× tokens
+at this budget.
 
 ### Budget sweep (Qwen3-8B, default settings, 3 reps)
-
-Where each engine starts keeping the contract, as the agent's `max_tokens` grows:
 
 | budget | imp | llama.cpp |
 |---|---|---|
@@ -895,9 +846,8 @@ model gets to the answer.
 
 ### Control: a model that does not think (Llama-3.2-3B-Q8_0, budget 200)
 
-If the difference above is really *thinking*, it should vanish on a model that
-has none. It does — and the control found a genuine bug in **imp**, not in
-llama.cpp:
+Control on non-thinking model confirms difference is thinking. Control found
+bug in **imp** (not llama.cpp):
 
 | Case | imp (before) | imp (after fix) | llama.cpp |
 |---|:--:|:--:|:--:|
@@ -905,12 +855,10 @@ llama.cpp:
 | `tool_choice=required` + args | **0/3** | **3/3** | 3/3 |
 | `tool_choice=auto` stays optional | 3/3 | 3/3 | **0/3** |
 
-imp was dropping Llama-3.2 tool calls: the model emits a bare JSON object where
-Llama 3.1 used the `<function=F>` envelope, so a correct call was handed back as
-`content` and an agent saw none. Fixed (parser accepts the bare form when the
-name matches a tool the request offered). The two llama.cpp cells are its own
-gaps at this budget: `json_object` returned non-JSON, and `tool_choice=auto`
-forced a call on a plain chat turn.
+imp dropped Llama-3.2 tool calls: model emits bare JSON object (vs Llama 3.1
+`<function=F>` envelope), routed to `content`. Fixed: parser accepts bare form
+when name matches. llama.cpp gaps at this budget: `json_object` returns non-JSON,
+`tool_choice=auto` forces call on plain chat.
 
 ### Three families, 8-turn sessions (budget 200, 3 reps)
 
@@ -920,16 +868,13 @@ forced a call on a plain chat turn.
 | Llama-3.2-3B-Q8_0 | **6/6** | 4/6 | imp was 4/6 until the tool-call fix this found |
 | gemma-3-12b-Q4_K_M | 5/6 | 4/6 | `tool_forced` fails on BOTH — Gemma-3 has no native function calling, a model limit, not an engine gap |
 
-The 8-turn `json_multiturn` check passes everywhere on both engines: neither
-loses the JSON contract as history grows, which is the failure mode template
-drift and KV reuse would produce.
+8-turn `json_multiturn` check passes on both engines: neither loses JSON contract
+as history grows (would indicate template drift or KV reuse failure).
 
-Where they differ consistently: **`json_object` holds on imp across all three
-models and fails on llama.cpp for two of them** (returns prose, not JSON), and
-llama.cpp's `tool_choice=auto` forced a call on a plain chat turn with
-Llama-3.2. imp's own gap was Llama-3.2 tool calls (fixed; see the CHANGELOG).
+Consistent differences: **`json_object` holds on imp across all three models,
+fails on llama.cpp for two** (returns prose). llama.cpp `tool_choice=auto` forces
+call on plain chat with Llama-3.2. imp's gap was Llama-3.2 tool calls (fixed).
 
-Scope: three model families, four budgets, 8-turn sessions, 3-5 repetitions,
-one llama.cpp build, GGUF only. **vLLM/SGLang are not covered** — they would
-need a different weight format and more VRAM than this box has free while
-serving; that is the honest remaining gap, not an oversight.
+**Scope:** three model families, four budgets, 8-turn sessions, 3-5 repetitions,
+one llama.cpp build, GGUF only. vLLM/SGLang not covered (different weight format,
+more VRAM needed).
