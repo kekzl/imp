@@ -1,23 +1,12 @@
 #!/usr/bin/env bash
-# Record MoE expert-activation histograms and report the routing skew.
-#
-# This is the measurement docs/roadmap.md ("CPU-resident cold experts") and
-# docs/GOAL.md leave open: the bandwidth half of the budget is measured
-# (62.5 GB/s streaming read on this host), the skew half was not. Skew decides
-# whether a resident/host expert split streams (1-f) of the active experts every
-# token or far less.
-#
-# NEEDS A FREE GPU. Check `nvidia-smi` and `docker ps` first — a busy card makes
-# the run slow but does not corrupt the histogram, since counts are exact.
-#
-# Usage:  bash tools/analysis/moe_routing_skew.sh [output-dir]
-#
-# METHODOLOGY NOTE, and it matters: the histogram counts EVERY routing decision,
-# prefill and decode alike. The cold-expert question is about DECODE, where the
-# per-token weight traffic is paid. So the prompts below are deliberately short
-# and the generation long — decode decisions then outnumber prefill ones by
-# roughly max_tokens/prompt_tokens. Re-running this with a long prompt and a
-# short generation measures mostly prefill and answers a different question.
+# Records MoE expert-activation histograms and reports routing skew: the measurement
+# docs/roadmap.md and docs/GOAL.md leave open (bandwidth half is measured, skew half wasn't).
+# Skew decides whether a resident/host expert split streams most active experts every token or
+# far fewer. NEEDS A FREE GPU (busy card slows but doesn't corrupt the histogram).
+# Prompts are deliberately short with long generation: the cold-expert question is about
+# DECODE traffic, so decode decisions must outnumber prefill ones; a long-prompt/short-gen run
+# measures mostly prefill and answers a different question.
+# Usage: bash tools/analysis/moe_routing_skew.sh [output-dir].
 set -uo pipefail
 
 OUT="${1:-/tmp/moe_skew}"
@@ -38,11 +27,9 @@ PROMPTS=(
   "List ten prime numbers and say why each is prime."
 )
 
-# 128-expert / top-8 first: it is the structure the 80B-120B class has, and the
-# one where a resident subset is a meaningful choice at all. The 32-expert
-# gpt-oss is the control — if skew looks identical at both expert counts, the
-# result generalises; if not, the expert count is a variable and the 30B answer
-# does not transfer.
+# 128-expert/top-8 first: the structure the 80B-120B class has, where a resident subset is a
+# meaningful choice. 32-expert gpt-oss is the control: if skew matches at both expert counts
+# the result generalises, otherwise expert count is a variable and the 30B answer doesn't transfer.
 MODELS=(
   "qwen3-30b-a3b:/models/Qwen3-30B-A3B-NVFP4-Modelopt"
   "gpt-oss-20b:/models/gpt-oss-20b-mxfp4.gguf"

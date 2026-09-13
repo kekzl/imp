@@ -47,11 +47,9 @@ int derive_block_edge(int64_t n, int64_t k, int64_t scale_rows, int64_t scale_co
     const int64_t from_rows = ceil_div(n, scale_rows);
     if (explains(from_rows))
         return static_cast<int>(from_rows);
-    // When a dimension is NOT a multiple, the edge is underdetermined by the
-    // shapes: 300 rows in 3 scale rows is explained by any b from 100 to 150,
-    // and the division picks 100 rather than the 128 that produced the file.
-    // Trying the edges quantizers actually use resolves it; anything else still
-    // returns 0, because a wrong stride here is silent.
+    // When a dimension isn't a multiple, the block size is underdetermined by the shapes alone
+    // (300 rows in 3 scale rows fits any b from 100-150); trying only the edges real quantizers use
+    // resolves it. Anything else returns 0, since a wrong stride here is silent.
     for (int64_t b : {128, 64, 256, 32, 512}) {
         if (explains(b))
             return static_cast<int>(b);
@@ -82,13 +80,10 @@ std::expected<std::vector<uint16_t>, std::string> fp8_block_scaled_to_fp16(const
         for (size_t i = 0; i < scales.size(); i++)
             scales[i] = bf16_to_float(s16[i]);
     } else if (scale_inv.dtype == "F16") {
-        // Not seen in a released checkpoint, but cheap to accept correctly
-        // rather than to mis-read as BF16, which would be off by a factor.
-        // This used to widen the half by hand, and got subnormals wrong: it
-        // pasted the subnormal mantissa under a normal exponent instead of
-        // renormalising, so all 2046 subnormal patterns came out up to 1025x
-        // too large (0x0001 read as 6.1e-05 instead of 5.96e-08). Every scale
-        // in that range therefore scaled its whole weight block wrong.
+        // Not seen in a released checkpoint yet, but cheap to accept correctly rather than mis-read
+        // as BF16 (off by a factor). A hand-widened version once got subnormals wrong (pasted the
+        // mantissa under a normal exponent instead of renormalising, up to 1025x too large), scaling
+        // its whole weight block wrong.
         const auto* s16 = static_cast<const uint16_t*>(scale_inv.data);
         for (size_t i = 0; i < scales.size(); i++)
             scales[i] = half_to_float(s16[i]);

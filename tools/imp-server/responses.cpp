@@ -49,10 +49,9 @@ std::string make_item_id(const char* prefix, uint64_t counter) {
 }
 
 json responses_to_openai_body(const json& rsp) {
-    // Statelessness guards: imp keeps no response store, so continuation via
-    // previous_response_id / retrieval via store=true cannot be honored.
-    // Agentic clients (Codex CLI, Agents SDK) run with store=false and send
-    // the full transcript as `input` each turn — exactly what works here.
+    // Statelessness guard: imp keeps no response store, so previous_response_id / store=true cannot
+    // be honored (rejected). Agentic clients (Codex CLI, Agents SDK) run store=false and resend the
+    // full transcript each turn, which this server supports.
     if (rsp.contains("previous_response_id") && !rsp["previous_response_id"].is_null())
         throw std::invalid_argument(
             "previous_response_id is not supported (imp-server is stateless — send the "
@@ -144,12 +143,10 @@ json responses_to_openai_body(const json& rsp) {
             oai["tool_choice"] = {{"type", "function"},
                                   {"function", {{"name", tc.value("name", "")}}}};
         } else {
-            // Neither arm matching wrote nothing at all, and the chat parser
-            // then applied its own default "auto". A caller demanding a tool
-            // call - `{"type":"allowed_tools","mode":"required",...}`, the shape
-            // the Agents SDK emits - got a fluent 200 with no call and no
-            // reason. `validate_tool_choice` could not catch it either: it runs
-            // on the transformed body, where the field no longer exists.
+            // tool_choice {"type":"allowed_tools","mode":"required"} (the Agents SDK shape) fell through
+            // both transform arms writing nothing, so the chat parser defaulted to "auto" and a caller
+            // demanding a call got a fluent 200 with none - validate_tool_choice runs post-transform and
+            // never saw the original field.
             const std::string tct = tc.is_object() ? tc.value("type", "") : "";
             throw std::invalid_argument("unsupported tool_choice " +
                                         (tct.empty() ? std::string("shape") : "type: \"" + tct + "\"") +
@@ -177,11 +174,9 @@ json responses_to_openai_body(const json& rsp) {
                 js["strict"] = fmt["strict"];
             oai["response_format"] = {{"type", "json_schema"}, {"json_schema", std::move(js)}};
         } else if (ftype == "regex" || ftype == "grammar") {
-            // Both are imp's own extensions and both work on
-            // /v1/chat/completions; only this transform did not carry them, so
-            // the same request was constrained on one endpoint and free text on
-            // the other. Passed through whole: the chat parser owns the field
-            // names and refuses an uncompilable pattern with its own message.
+            // response_format/grammar are imp extensions that already work on /v1/chat/completions; this
+            // transform must pass them through whole (chat parser owns validation) or the same request is
+            // constrained on one endpoint and free text on the other.
             oai["response_format"] = fmt;
         } else {
             // Anything else wrote no response_format, so the chat parser's

@@ -258,10 +258,8 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         out += "# HELP imp_kv_pool_growths_total Times the growable KV pool committed more memory\n";
         out += "# TYPE imp_kv_pool_growths_total counter\n";
         out += "imp_kv_pool_growths_total " + std::to_string(kv_growths) + "\n";
-        // The two preemption events that were log lines only: StreamingLLM
-        // auto-enable (which also demotes CUDA graphs one-way) and prefix-cache
-        // block reclaims. usage.evicted_tokens is the per-request size; these
-        // are the rates.
+        // Exposes StreamingLLM auto-enable (demotes CUDA graphs one-way) and prefix-cache block reclaim
+        // as rate metrics - previously log lines only. usage.evicted_tokens (id 573) is the per-request size.
         out +=
             "# HELP imp_streaming_kv_auto_enables_total Times the KV pool ran >90% full and "
             "StreamingLLM eviction was auto-enabled (CUDA graphs demoted one-way)\n";
@@ -279,10 +277,8 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
 
     append_memory_metrics(out, state);
 
-    // Latency histograms (Prometheus histogram: cumulative _bucket{le=...},
-    // plus _sum and _count). Buckets are in seconds.
-    // `labels` is the label set without the trailing `le`, e.g.
-    // `endpoint="messages",`; empty for the unlabelled totals.
+    // Emits a Prometheus histogram (cumulative _bucket{le=...}, _sum, _count; seconds). `labels` is
+    // the label set without the trailing `le` (empty for the unlabelled totals).
     auto emit_histogram_body = [&out](const char* name, const std::string& labels,
                                       const LatencyHistogram& h) {
         for (int i = 0; i < LatencyHistogram::kNumBuckets; ++i) {
@@ -379,10 +375,8 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_rejected_total Requests refused with a 4xx\n";
     out += "# TYPE imp_requests_rejected_total counter\n";
     out += "imp_requests_rejected_total " + std::to_string(m.requests_rejected.load()) + "\n";
-    // Decode batch size, as a counter pair so a dashboard can rate() both and
-    // divide - the average over any window, without the server keeping one.
-    // The counters live on the BatchingEngine, which is where the batch is
-    // formed; read under the same bounded lock the rest of this endpoint uses.
+    // Decode batch size exposed as a counter pair so a dashboard can rate() both and divide for the
+    // average over any window, without the server maintaining one itself.
     {
         int64_t steps = 0, rows = 0, bmax = 0, blast = 0;
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
@@ -521,10 +515,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         return;
     }
 
-    // Response encoding: OpenAI supports "float" (JSON array) and "base64"
-    // (little-endian float32 bytes, base64). base64 is the default in the
-    // OpenAI Python SDK — reject anything else rather than silently returning
-    // floats a base64-expecting client would then mis-decode.
+    // encoding_format: OpenAI supports "float" (JSON array) or "base64" (default in the OpenAI
+    // Python SDK, little-endian float32 bytes). Anything else is rejected (400), not silently floats.
     std::string encoding_format = body.value("encoding_format", std::string("float"));
     if (encoding_format != "float" && encoding_format != "base64") {
         send_json_error(res, 400, "invalid_request_error",
@@ -556,21 +548,17 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         return;
     }
 
-    // Validate the requested model / auto-load when started model-less, exactly
-    // like the chat and completions endpoints (ensure_model_loaded returns 404
-    // model_not_found for an unknown model instead of serving whatever is
-    // loaded). Lenient default: an absent "model" field uses the loaded model.
+    // Validates/auto-loads the requested model exactly like chat/completions (ensure_model_loaded,
+    // 404 on unknown). Absent "model" field is lenient: uses the loaded model.
     std::string requested_model = body.value("model", std::string());
     if (requested_model.empty())
         requested_model = state.model_name;
     if (!ensure_model_loaded(state, requested_model, res))
         return;
 
-    // Decoder models with a running batching worker take the SCHEDULED path
-    // (#1005): embeddings ride the normal request queue as prefill-only
-    // requests (engine-side pooling), batching WITH concurrent decodes
-    // instead of pausing them. Encoder models (dedicated bidirectional
-    // forward) and worker-less setups keep the legacy exclusive path below.
+    // Decoder models with a running batching worker take the SCHEDULED path (#1005): embeddings
+    // queue as prefill-only requests, batching alongside concurrent decodes. Encoder models
+    // (bidirectional forward) and worker-less setups keep the legacy exclusive pause path.
     const bool is_encoder =
         state.ctx && state.ctx->engine && state.ctx->engine->is_encoder_model();
     if (!is_encoder && state.batching && state.batching->is_running()) {
@@ -694,13 +682,9 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         return;
     }
 
-    // Pause the batching engine for exclusive C-API access (imp_prefill drives
-    // engine->step() directly, which must not race the worker). pause() lets
-    // in-flight generations FINISH before parking the worker — stop() would
-    // cancel them, so any chat running concurrently with this embeddings call
-    // returned an empty `finish_reason:"cancelled"` completion (the "0
-    // completion tokens" wedge). We hold state.mtx, so no new chat is admitted
-    // while paused; resume() unparks on scope exit.
+    // Pauses (not stops) the batching engine for exclusive C-API access during imp_prefill: stop()
+    // would cancel concurrent chat (the "0 completion tokens" wedge); pause() lets in-flight finish.
+    // state.mtx blocks new admission meanwhile; resume() unparks on scope exit.
     bool had_batching = (state.batching && state.batching->is_running());
     if (had_batching) {
         if (!state.batching->pause()) {
@@ -819,15 +803,10 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             continue;
         }
 
-        // Reject over-long inputs before prefill. Two independent bounds:
-        //   1. the engine's allocated context (state.max_seq_len), and
-        //   2. the executor's single-pass hidden capacity (max_tokens()): the
-        //      embeddings path mean-pools EVERY token's hidden state, which only
-        //      works when the whole input is prefilled in one pass. A longer
-        //      input is chunked and hidden_ keeps only the last chunk, so
-        //      view_hidden(n) would slice [0,n) out of a [max_tokens,*] buffer
-        //      and abort the whole server (Tensor::slice IMP_CHECK). max_tokens
-        //      can be far below max_seq_len (e.g. 4096 vs a 32768 context).
+        // Rejects over-long embeddings input against TWO bounds: state.max_seq_len (engine context) and
+        // the executor's single-pass hidden capacity max_tokens() - embeddings mean-pools every token,
+        // needing the whole input in one prefill pass; exceeding it slices out of bounds and aborts the
+        // process (Tensor::slice IMP_CHECK). max_tokens can be far below max_seq_len.
         int embed_cap = state.max_seq_len;
         if (state.ctx && state.ctx->engine && state.ctx->engine->executor()) {
             int hid = state.ctx->engine->executor()->max_tokens();

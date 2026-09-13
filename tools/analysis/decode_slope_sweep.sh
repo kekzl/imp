@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Decode tok/s across sparse budgets, prefill cancelled by construction.
-# Same 77k-token prompt at two generation lengths; the slope
-# (n2-n1)/(wall2-wall1) is decode throughput with the prefill term removed.
-# A single wall reading at a 77k prompt cannot price a decode-side knob: at
-# gen=256 every budget read ~13 s because prefill is ~80% of it (2026-09-12).
+# Decode tok/s across sparse budgets, prefill cancelled by construction: same long prompt at
+# two generation lengths, slope (n2-n1)/(wall2-wall1) is decode throughput with the prefill
+# term removed. A single wall reading at a long prompt can't price a decode-side knob when
+# prefill dominates short generations.
 set -u
 
 MODEL=Qwen3.8-27B-NVFP4-vllm

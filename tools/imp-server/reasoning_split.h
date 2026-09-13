@@ -1,26 +1,12 @@
 #pragma once
 
-// Pure (no-engine, no-HTTP) streaming reasoning/content demux for the DeepSeek
-// "<think>…</think>" format. This is the single source of truth used by both
-// streaming handlers (handlers_chat_stream.cpp, OpenAI; handlers_messages.cpp,
-// Anthropic) — previously each carried its own copy of this state machine.
-//
-// Why it exists as a unit: the non-streaming path (utils.cpp extract_reasoning)
-// splits at the LAST </think>, so a model that re-deliberates after closing its
-// first think block keeps that second pass in reasoning_content. The streaming
-// copies flipped REASONING->CONTENT at the FIRST </think> and could only detect
-// a *second* <think> via a single-token-id compare — which never fires for
-// Qwen3.6, whose <think>/</think> ship as multi-BPE added_tokens (special=False;
-// see src/runtime/request.h:78-84). The result was reasoning leaking into
-// `content` on the streaming path only.
-//
-// This unit closes that gap: in the CONTENT phase it detects a re-opened
-// <think> by TEXT scan (mirroring the SCAN/REASONING phases), holds a small
-// overlap so a marker split across SSE pieces is still caught, and reclassifies
-// a stray </think> back into reasoning. What it cannot do online is un-stream
-// content already flushed before a far-later </think> arrives — that is a
-// fundamental streaming-vs-offline limit (shared with vLLM's qwen3 parser);
-// only marker-less reasoning prose with no further </think> can still leak.
+// Pure streaming reasoning/content demux for DeepSeek "<think>...</think>", the single source of
+// truth for both OpenAI and Anthropic streaming (each used to carry its own copy).
+// Non-streaming splits at the LAST </think>; the old streaming code flipped at the FIRST and
+// detected re-opening only via token-id compare, which never fires for Qwen3.6 (multi-BPE
+// <think>), leaking reasoning into content on streaming only. This unit re-detects by text scan
+// with overlap across SSE pieces instead; it cannot un-stream content already flushed before a
+// far-later </think> (shared limit with vLLM's qwen3 parser).
 
 #include <cstddef>
 #include <string>
@@ -29,45 +15,20 @@
 
 namespace imp::server {
 
-// Reconcile a heuristic "thinking is on" default against what the chat
-// template ACTUALLY rendered into the prompt tail. The render is ground truth
-// for whether the model's generation begins inside an open <think> block:
-//   open block   (<think> present, no matching </think>) -> thinking ON
-//   closed block (<think> AND </think> present)          -> thinking OFF
-//   no <think>   (neither)                               -> keep `current`
-// The closed-block downgrade is #934: templates such as Qwen3.5-4B default
-// enable_thinking to a pre-closed empty block `<think>\n\n</think>\n\n` (the
-// model answers directly), but the upstream heuristic only sees the template
-// *mention* thinking (its Jinja names `enable_thinking`) and turns it ON.
-// Starting the reasoning splitter in REASONING then traps the whole answer in
-// reasoning_content with empty user-visible content. The upgrade direction was
-// already handled inline; this makes the decision symmetric and testable. An
-// explicit caller `enable_thinking` request is left untouched (a closed-block
-// template cannot honor an explicit `true` anyway, and we do not silently flip
-// an explicit choice — that is the caller's to make).
-// Does this request ask for STRUCTURED output, i.e. a constraint covering the
-// whole reply? Such a reply has no room for a reasoning preamble: the
-// constrainer's gate would hold the mask open while the model spends its budget
-// thinking, and the caller gets prose instead of the format.
-//
-// A predicate rather than an inline conjunction because the list has already
-// been wrong by omission: `json_schema` was missing from it (#1431), which on a
-// model whose `</think>` is a multi-token BPE sequence returned EMPTY content,
-// the answer having stayed in the reasoning channel. Every entry here is a
-// constraint over the entire response; adding one is adding it to this list.
+// Reconcile the heuristic "thinking on" default against what the template actually rendered:
+// open <think> (no closing) -> ON; closed block (<think>+</think>) -> OFF (#934, e.g. Qwen3.5-4B
+// pre-closes despite mentioning enable_thinking); neither -> keep current. Explicit caller
+// enable_thinking is left untouched either way.
+// structured_output_excludes_thinking: true when the reply is constrained end-to-end (json_mode,
+// tools, json_schema - #1431 added the last), leaving no room for a reasoning preamble.
 inline bool structured_output_excludes_thinking(bool json_mode, bool has_tools, bool has_json_schema,
                                                 bool has_regex, bool has_grammar) {
     return json_mode || has_tools || has_json_schema || has_regex || has_grammar;
 }
 
-// Should the render STAMP `enable_thinking=false` into the template context?
-//
-// The distinction that matters: not stamping is not the same as stamping false.
-// Unstamped, a template falls back to its own default, and some default to an
-// OPEN `<think>` (Qwen3.8). The server then believes thinking is off while the
-// prompt says it is on, and the splitter is correctly reconciled to REASONING
-// for a block that will never close. So any reason to not want thinking has to
-// reach the template, not just the server's own flags.
+// should_stamp_thinking_off: NOT stamping is not the same as stamping false - an unstamped
+// template falls back to its own default, which can be OPEN <think> (Qwen3.8). Any reason not
+// to want thinking must reach the template, not just the server's own flags.
 inline bool should_stamp_thinking_off(bool is_think_model, bool enable_thinking, bool budget_disabled,
                                       bool want_thinking) {
     return is_think_model && !enable_thinking && (budget_disabled || !want_thinking);
@@ -86,22 +47,17 @@ enum class ThinkPhase { SCAN, REASONING, CONTENT };
 
 class StreamReasoningSplitter {
 public:
-    // The reasoning/content text produced by one feed()/finish() call. Both
-    // fields may be non-empty (a single piece can finish reasoning AND open
-    // content). reasoning_tokens is the count to add to the handler's
-    // n_reasoning_tokens for this step.
+    // Result of one feed()/finish() call: both reasoning and content may be non-empty (a piece can
+    // finish reasoning and open content). reasoning_tokens is the count to add for this step.
     struct Result {
         std::string reasoning;
         std::string content;
         int reasoning_tokens = 0;
     };
 
-    // start: REASONING when the prompt injected a <think> opener
-    // (enable_thinking), SCAN when the model decides whether to think, CONTENT
-    // when no reasoning extraction applies (the splitter is then a pass-through).
-    // think_start_id / think_end_id are the special-token ids when the markers
-    // are single tokens (-1 if the model emits them as multi-BPE text — the
-    // text-scan paths still catch those).
+    // StreamReasoningSplitter start phase: REASONING (prompt injected <think>), SCAN (model decides),
+    // CONTENT (pass-through). think_start_id/think_end_id are -1 when the model emits multi-BPE
+    // markers as text (the text-scan paths still catch those).
     StreamReasoningSplitter(ThinkPhase start, int think_start_id, int think_end_id,
                             int scan_limit = 8, int max_reentries = 1)
         : phase_(start),
@@ -118,19 +74,13 @@ public:
     // since a call is never reasoning — use this to inspect and then release it.
     const std::string& held() const { return scan_buf_; }
 
-    // Release the SCAN hold as soon as the held text can no longer be the start
-    // of a marker (see could_open_marker). Off by default: the bounded hold is
-    // what keeps an unmarked chain of thought from streaming as the answer on
-    // the agent path, where the client waits for a tool call anyway. A plain
-    // chat request with thinking off paid the whole hold (8 tokens, ~85 ms on
-    // Qwen3.8-27B) on every answer for a protection that only ever covered a
-    // chain of thought shorter than the hold.
+    // set_release_on_plain_text: off by default (agent path) holds SCAN for the full window to keep
+    // an unmarked chain-of-thought from streaming as the answer; a plain chat request with thinking
+    // off paid that whole 8-token hold (~85ms, Qwen3.8-27B) for no benefit, so this can release early.
     void set_release_on_plain_text(bool on) { release_on_plain_text_ = on; }
 
-    // True while `buf` (leading whitespace ignored) is empty or a prefix of
-    // "<think>" / "</think>": the model may still be opening (or closing) a
-    // block, so the text is undecided. False for anything else: a first word
-    // proves the answer started here.
+    // could_open_marker: true while `buf` (leading whitespace ignored) is empty or a prefix of
+    // "<think>"/"</think>" (still undecided); false once a real word proves the answer started.
     static bool could_open_marker(const std::string& buf) {
         size_t ns = buf.find_first_not_of("\n\r\t ");
         if (ns == std::string::npos)
@@ -170,14 +120,10 @@ public:
                     r.reasoning_tokens++;
                     return r;
                 }
-                // A CLOSER with no opener. The chat template rendered the
-                // `<think>` into the PROMPT (a pre-closed block on a suppressed
-                // -thinking request, say) and the model reasoned anyway, so the
-                // output carries only `</think>` — scanning for an opener can
-                // never succeed. Everything held so far was reasoning. The
-                // offline path reaches the same conclusion via split_last_think;
-                // streaming only gets one shot at it, which is what the scan
-                // buffer is holding output for.
+                // A </think> with no opener: the template rendered <think> into the PROMPT (e.g. a
+                // suppressed-
+                // thinking request) and the model reasoned anyway, so scanning for an opener never succeeds -
+                // everything held so far is reasoning (offline reaches the same via split_last_think).
                 if (token_live && think_end_id_ >= 0 && token == think_end_id_) {
                     r.reasoning += scan_buf_;
                     r.reasoning_tokens += scan_count_ + 1;
@@ -252,10 +198,11 @@ public:
                     token_live = false;
                     continue;  // process the post-</think> remainder as content
                 }
-                // Same rule as CONTENT below: hold back only a trailing partial
-                // marker or an incomplete codepoint. The fixed 7-byte overlap
-                // this replaced cost the first reasoning delta one to two
-                // tokens (measured 20-27 ms client-side on Qwen3.8-27B-NVFP4).
+                // Holds back only a trailing partial marker or incomplete codepoint (not a fixed overlap):
+                // the
+                // fixed 7-byte overlap this replaced cost the first reasoning delta 1-2 tokens (20-27ms
+                // measured,
+                // Qwen3.8-27B-NVFP4).
                 {
                     size_t hold = pending_tag_prefix(rbuf_);
                     size_t utf8_tail = rbuf_.size() - imp::stream::utf8_complete_len(rbuf_);
@@ -307,12 +254,9 @@ public:
             }
             if (reenter)
                 continue;  // re-process `work` as reasoning
-            // Hold back ONLY a trailing partial <think>/</think> (so a marker
-            // split across pieces is still caught next call) or an incomplete
-            // trailing UTF-8 codepoint. Everything else streams immediately: a
-            // fixed overlap here would desync the handler's tool-call/stop
-            // machinery, which reorders the content stream (the held tail gets
-            // appended after a tool-call delta instead of in place).
+            // Holds back only a trailing partial <think>/</think> marker or incomplete UTF-8 codepoint;
+            // everything else streams immediately - a fixed overlap here would desync the handler's
+            // tool-call/stop machinery (which reorders content around tool-call deltas).
             size_t hold = pending_tag_prefix(cbuf_);
             size_t utf8_tail = cbuf_.size() - imp::stream::utf8_complete_len(cbuf_);
             if (utf8_tail > hold)
@@ -349,11 +293,8 @@ public:
 private:
     static constexpr size_t kOverlap = 7;  // longest partial "</think>"/"<think>"
 
-    // Length of the longest suffix of `buf` that is a proper prefix of "<think>"
-    // or "</think>" — the bytes that might still grow into a marker and so must
-    // be held back in the CONTENT stream. Returns 0 for content with no pending
-    // partial marker (the common case: plain text, JSON tool calls) so it streams
-    // with no added latency.
+    // pending_tag_prefix: length of the longest trailing suffix of `buf` that could still grow into
+    // "<think>"/"</think>" - must be held back. Returns 0 for plain text/JSON (no added latency).
     static size_t pending_tag_prefix(const std::string& buf) {
         static const char* const needles[] = {"<think>", "</think>"};
         size_t best = 0;

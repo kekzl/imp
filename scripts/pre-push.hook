@@ -1,44 +1,11 @@
 #!/bin/bash
-# pre-push hook: gate pushes on scripts/verify.sh fast.
-#
-# Two tiers, because the two halves of verify-fast answer different questions:
-#
-#   correctness (gtests, degeneration smoke, graphs ON/OFF sanity)
-#       runs whenever a source file changed. CI has no GPU runner, so this local
-#       run is the only thing in the project that ever puts a CUDA kernel in
-#       front of a correctness check.
-#
-#   throughput (the perf gate: 3 benched processes, ~half the wall clock)
-#       runs only when the diff can actually move a number: the kernel and
-#       dispatch trees, any .cu/.cuh, the build definition, or the baseline
-#       itself. Everything else pushes with IMP_VERIFY_SKIP_PERF=1, because on
-#       this host a decode reading drifts several percent between sessions and a
-#       gate that fires on a server-handler edit reports the box, not the change.
-#
-#   paired A/B (make verify-ab, AUDIT_arch_2026 H-3)
-#       replaces the single-arm perf gate on kernel diffs (src/compute, src/exec).
-#       The single arm cannot resolve a delta smaller than the host's own
-#       between-session movement (4-8 % on one tree, threshold 8 %); the paired
-#       arm alternates origin/main (imp:ab-<sha>, built once per sha) against
-#       imp:test in one session and judges the mean paired decode delta (2 %).
-#       IMP_SKIP_AB=1 falls back to the single-arm gate. Costs ~5 min, which is
-#       why the other measured paths keep the single arm.
-#
-#   docker build runs once per tree: `make build` skips when imp:test already
-#       carries the tree fingerprint (scripts/build_image.sh, label imp.tree).
-#
-#   roofline (tools/roofline/, per-kernel %-of-peak) has no automated arm: CI
-#       has no GPU runner and roofline.yml only re-parses committed history. A
-#       diff under src/compute/ or src/exec/ gets a reminder with the age of the
-#       newest history run; `make roofline-measure` is the manual step (H-2).
-#
-# The peak-VRAM gate stays on in both tiers: own_peak_mb is byte-identical
-# across repeat runs, so it cannot produce the false positive this split exists
-# to remove, and it costs almost nothing (measured 36 s full, 18 s without the
-# perf gate).
-#
-# The release gate (scripts/check-release.sh) always runs everything.
-# Override with: git push --no-verify   (use sparingly — see CLAUDE.md)
+# Two tiers: correctness (gtests, degen smoke, graphs ON/OFF) runs on any source change - CI
+# has no GPU, so this is the only real-kernel correctness check. Throughput (perf gate) runs
+# only when the diff can move a number (kernel/dispatch trees, .cu/.cuh, build def, baseline);
+# else IMP_VERIFY_SKIP_PERF=1 (host decode drifts several percent between sessions).
+# Paired A/B (make verify-ab, AUDIT_arch_2026 H-3) replaces the single-arm gate on kernel diffs
+# (src/compute, src/exec): 8% single-arm threshold vs 2% mean paired delta; IMP_SKIP_AB=1 falls
+# back. docker build skips when imp:test already has the tree fingerprint. Override: git push --no-verify.
 set -uo pipefail
 
 REMOTE="$1"
@@ -64,27 +31,13 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     fi
     FILES=$(git diff --name-only "$BASE" "$LOCAL_SHA" 2>/dev/null || true)
     [ -z "$FILES" ] && continue
-    # Documentation cannot move a number or break a kernel, wherever it lives.
-    # Without this, src/compute/CLAUDE.md matches PERF_RE and a docs-only push
-    # pays the full perf gate — which then reports the host, not the change.
-    #
-    # Python neither: scripts/verify.sh invokes no .py at all (checked, not
-    # assumed), so nothing a Python edit can touch reaches the tests, the perf
-    # gate or the smoke prompts. tools/ and tests/ are full of it — the gate
-    # scripts and the API contract suite — and SOURCE_RE matches those
-    # directories by prefix. Same reasoning as the pre-commit filter (#1723).
-    #
-    # .hook joined them 2026-08-31 on the same check: these two files are read
-    # by `make install-hooks` and by nothing else - not verify.sh, not the
-    # build, not a test. Editing THIS file used to demand the full GPU gate,
-    # which then reports the host rather than the change; what actually guards
-    # the pair is guard_precommit_filter / guard_verify_filter in the CPU lane.
+    # Docs can't move a number or break a kernel: excluding .md/.py/.hook (and tools/mutation/)
+    # keeps a docs-only push from paying the full perf gate and reporting the host, not the change.
+    # verify.sh invokes no .py at all (checked). .hook files are read only by make install-hooks.
     FILES=$(echo "$FILES" | grep -vE '\.(md|py|hook)$|^tools/mutation/' || true)
-    # Same reasoning one level down for scripts/*.sh: `^scripts/` in SOURCE_RE
-    # is right for verify.sh and the guard scripts CMake registers as ctests,
-    # and wrong for the 17 that verify.sh's path never reaches (ci_static_gates,
-    # check-release, the bench harnesses). The membership test lives in
-    # verify_touches.sh so the hook and its guard read one source.
+    # scripts/*.sh membership test lives in verify_touches.sh (single source read by both the
+    # hook and its guard): right for verify.sh and the ctest-registered guard scripts, wrong for
+    # the 17 scripts verify.sh's path never reaches (ci_static_gates, check-release, bench harnesses).
     FILES=$(echo "$FILES" | while read -r f; do
         case "$f" in
             scripts/*.sh) "$ROOT/scripts/verify_touches.sh" "$f" >/dev/null 2>&1 && echo "$f" ;;
@@ -102,14 +55,10 @@ if [ "$NEEDS_VERIFY" -eq 0 ]; then
     exit 0
 fi
 
-# Cheap static gates first (seconds, no GPU, no build): everything that would
-# otherwise surface only in CI, one full roundtrip after the push. Both
-# 2026-08-25 "File size" reds were the lane pin, and the 2026-08-26 #1782
-# scheduler split went red in CI on a roadmap.md citation — each class below
-# has cost a roundtrip at least once. All six selections together measure
-# ~2 s; only `kernels` (needs a built artifact) and `hygiene` (subsumes
-# citations via check-release.sh and runs the full release checklist) stay
-# CI-side.
+# Cheap static gates first (seconds, no GPU, no build): everything that would otherwise
+# surface only in CI, one full roundtrip after the push already ran.
+# Only `kernels` (needs a built artifact) and `hygiene` (subsumes citations via
+# check-release.sh) stay CI-side.
 if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
     if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards layering docs citations; then
         echo "pre-push: static gates failed (see above) - fix or push --no-verify"
@@ -117,19 +66,16 @@ if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_ga
     fi
 fi
 
-# Both tiers below run kernels, so neither can judge anything on a busy card.
-# Checked after the "no source changes" exit above: a docs-only push must not
-# wait for a card it never touches.
-# Guarded: an installed hook outlives the branch it came from, and a checkout
-# that predates this script must still run the gate rather than die on it.
+# Both tiers below run kernels, so neither can judge anything on a busy card. Checked after
+# the "no source changes" exit above: a docs-only push must not wait for a card it never touches.
+# Guarded: an installed hook may predate this script and must still run rather than die on it.
 if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-push" || exit 1
 fi
 
-# Roofline (per-kernel %-of-peak, tools/roofline/) has no automated arm: CI has
-# no GPU runner and roofline.yml only re-parses committed history, so a kernel
-# diff is compared against nothing unless someone measures. Say so, with the
-# age of the newest run, where the diff is being pushed (AUDIT_arch_2026 H-2).
+# Roofline (per-kernel %-of-peak, tools/roofline/) has no automated arm: CI has no GPU runner
+# and roofline.yml only re-parses committed history, so a kernel diff compares against nothing
+# unless someone measures. Reminder names the age of the newest run (AUDIT_arch_2026 H-2).
 if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ -s "$ROOT/tools/roofline/history/index.jsonl" ]; then
     _rl_run="$(tail -1 "$ROOT/tools/roofline/history/index.jsonl" | sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p')"
     _rl_date="$(echo "$_rl_run" | sed -n 's/^[0-9a-f]*_\([0-9]\{8\}\)_.*/\1/p')"
@@ -143,12 +89,10 @@ if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ -s "$ROOT/tools/roofline/history/index.jsonl
 fi
 
 if [ "$NEEDS_PERF" -eq 1 ]; then
-    # Kernel paths get the paired A/B (2 % against origin/main, ~5 min) and
-    # skip the single-arm perf gate, which cannot resolve below the host's own
-    # 4-8 % session drift (263 vs 286 tok/s on one tree, 2026-09-10). The
-    # other measured paths (runtime, model, quant, cmake) keep the single-arm
-    # gate: their changes move a number rarely, and the A/B would cost every
-    # push 5 min for it.
+    # Kernel paths get the paired A/B (2% against origin/main, ~5min) and skip the single-arm perf
+    # gate, which cannot resolve below the host's own 4-8% session drift.
+    # Other measured paths (runtime, model, quant, cmake) keep the single-arm gate: their changes
+    # move a number rarely, and the A/B would cost every push 5min for it.
     if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ "${IMP_SKIP_AB:-0}" != "1" ]; then
         echo "pre-push: kernel paths changed → make verify-fast (correctness) + paired A/B (make verify-ab)"
         IMP_VERIFY_SKIP_PERF=1 make -s verify-fast || exit 1

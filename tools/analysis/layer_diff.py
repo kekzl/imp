@@ -69,11 +69,8 @@ def parse_llamacpp_log(path: str) -> List[LlamaTensor]:
                 ))
                 # reset current_name so lone "sum =" doesn't re-attribute
                 current_name = None
-            # new forward pass indicator: reset flag on any non-debug-cb line
-            # (actually: just reset per eval based on attn_out-0 reappearance,
-            # which we handle via seen_attn0_in_current_forward above).
-            # To re-detect next forward, clear the flag when we pass attn_out-29
-            # or any sensible boundary.
+            # New forward pass indicator: reset the flag on attn_out-0 reappearance; cleared again at
+            # attn_out-29 (or another forward-boundary marker) to re-detect the next forward.
             if current_name is not None and current_name.endswith("-29"):
                 seen_attn0_in_current_forward = False
     return tensors

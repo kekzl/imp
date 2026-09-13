@@ -1,7 +1,5 @@
-# Turns the web UI into a header the server links in, so the binary carries the
-# page with it — no runtime asset path to get wrong inside the container image.
-#
-# Invoked as a script: cmake -DIN=<html> -DOUT=<header> -P embed_webui.cmake
+# Embeds the web UI as a header the server links in: binary carries the page, no runtime
+# asset path to get wrong in the container. Usage: cmake -DIN=<html> -DOUT=<header> -P embed_webui.cmake
 
 file(READ "${IN}" IMP_WEBUI_PAYLOAD)
 

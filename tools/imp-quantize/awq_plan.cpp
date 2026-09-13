@@ -1,41 +1,13 @@
-// Builds the AWQ transform for one checkpoint: which input channels each
-// weight group protects, and where the compensating 1/s is folded so the
-// exported checkpoint stays a plain NVFP4 checkpoint that needs no runtime
-// support.
-//
-// The site table (which consumers share an activation, which producer absorbs
-// 1/s, whether that producer's norm carries a unit offset) lives in
-// awq_sites.h and is decided from tensor names alone, so the CPU lane holds
-// it. This file does the parts that need the checkpoint and the GPU: the
-// activation statistic, the scale search, the safety scan over consumers this
-// planner does not know by name, and the storage bound on the fold.
-//
-//   A  q,k,v            <- input_layernorm            fold into the norm
-//   G  linear_attn.in_proj_{qkv,z,a,b} <- input_layernorm          same norm
-//   B  gate,up          <- post_attention_layernorm    fold into the norm
-//   C  o_proj           <- v_proj output channels      fold into v_proj rows
-//   D  down_proj        <- up_proj output channels     fold into up_proj rows
-//   E  linear_attn.out_proj <- linear_attn.norm        tied across value heads
-//
-// The norm folds are exact for BOTH conventions: for y = (x/rms(x)) * g the
-// producer stores g/s, and for y = (x/rms(x)) * (1 + g) it stores
-// (1 + g)/s - 1, so that (1 + g') = (1 + g)/s. rms(x) is computed before g in
-// either case, so the norm's own statistic does not move. What is NOT exact is
-// the STORAGE: near a gain of zero a BF16 half-ulp on a delta near -1 is an
-// unbounded relative error on the gain, so every norm divisor is passed
-// through awq_clamp_norm_divisors before it reaches either side of the pair
-// (quant/awq_norm_fold.h).
-//
-// C, D and E are exact because attention is linear in v, SwiGLU's product is
-// elementwise, and the GDN gate multiplies after the norm: scaling one output
-// channel of the producer scales precisely the matching input channel of the
-// consumer. C and E additionally tie the ACTIVATION statistic across the heads
-// that share a producer channel, which is what guarantees the fold exists at
-// all: s is then a pure function of a.
-//
-// The row folds are searched first because their producers (v_proj, up_proj)
-// are themselves members of the norm groups, and those searches must see the
-// weights they will actually be quantizing.
+// Builds the AWQ transform for one checkpoint: which channels each weight group protects,
+// where the compensating 1/s folds, so the export stays a plain NVFP4 checkpoint.
+// Site table (awq_sites.h, from tensor names, CPU lane): A q,k,v<-input_layernorm; G
+// linear_attn.in_proj_*<-input_layernorm; B gate,up<-post_attention_layernorm; C o_proj<-v_proj
+// rows; D down_proj<-up_proj rows; E linear_attn.out_proj<-linear_attn.norm (tied across heads).
+// Norm folds are exact algebraically; NOT exact is STORAGE near zero gain (BF16 half-ulp), so
+// every norm divisor passes through awq_clamp_norm_divisors (quant/awq_norm_fold.h).
+// C/D/E exact because attention is linear in v, SwiGLU is elementwise, GDN gate multiplies
+// after the norm. Row folds (C, D) are searched first since their producers are norm-group
+// members that must be searched against the weights they'll actually quantize.
 
 #include "awq.h"
 
@@ -127,16 +99,11 @@ bool raw_to_float(const RawTensor& t, std::vector<float>& out) {
     return false;
 }
 
-// Every 2-D `.weight` under `prefix` that is not a member and not explicitly
-// exempt. Used to catch consumers this file does not know about by name — a new
-// architecture adding a second reader of a pre-norm must not silently break the
-// fold.
-//
-// This is not hypothetical. Two weight roles are deliberately excluded from
-// quantization (MLA latent projections, MoE router) and therefore never receive
-// the compensating column scale, and the MoE router reads exactly the norm
-// group B folds into. A MoE checkpoint whose expert names happened to match
-// would have had its router silently fed inputs divided by s.
+// Every 2-D `.weight` under `prefix` that is not a listed member and not explicitly exempt:
+// catches a consumer this file doesn't know by name, so a new architecture adding a second
+// pre-norm reader doesn't silently break the fold. Not hypothetical: MLA latent projections and
+// the MoE router are excluded from quantization, and the router reads exactly what group B
+// folds into - a matching expert name would have fed it inputs divided by s.
 std::vector<std::string> unlisted_consumers(const std::map<std::string, const RawTensor*>& index,
                                             const std::string& prefix,
                                             const std::vector<std::string>& members,
@@ -160,14 +127,11 @@ std::vector<std::string> unlisted_consumers(const std::map<std::string, const Ra
     return out;
 }
 
-// The site's activation statistic: the max over the kinds that read this
-// activation, then tied across the producer channels the fold shares. Taking
-// the max is robustness against one kind being absent from the calibration
-// file; tying BEFORE the search is what makes the resulting scale foldable.
-// Both moments travel together: mean_abs generates the scale candidates,
-// mean_sq weights the error the search minimises (calibration_stats.h). The
-// second moment is dropped whole if ANY contributing entry lacks it, so the
-// search never mixes a true E[x^2] on some channels with a fallback on others.
+// Site's activation statistic: max over the kinds reading this activation, tied across the
+// producer channels the fold shares (max for robustness against a missing kind; tying BEFORE
+// the search is what makes the scale foldable). mean_abs generates scale candidates, mean_sq
+// weights the search's error (calibration_stats.h); the second moment is dropped whole if ANY
+// contributing entry lacks it, so the search never mixes true E[x^2] with a fallback.
 bool site_statistic(const CalibrationStats& stats, int layer, const FoldSite& site, int64_t K,
                     const std::vector<int64_t>& tie, int64_t producer_len, std::vector<float>& out,
                     std::vector<float>& out_sq) {
@@ -402,10 +366,9 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         return std::unexpected("cannot parse " + config_json_path);
     }
 
-    // The convention is looked up, not guessed: imp applies the +1 at load for
-    // the qwen3_5 family and at kernel time for Gemma, and the fold has to know
-    // which. A wrapper config states the text model's own type under
-    // text_config, so both spellings are tried.
+    // Convention is looked up, not guessed: imp applies the +1 at load for qwen3_5 and at kernel
+    // time for Gemma. A wrapper config states the text model's own type under text_config, so both
+    // spellings are tried.
     const JValue* text_cfg = obj_get(cfg, "text_config");
     std::string model_type = obj_str(cfg, "model_type");
     auto conv = arch_norm_convention(model_type);
@@ -440,10 +403,9 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
     }
     const Geometry geo{head_dim, n_heads / n_kv_heads};
 
-    // The layer prefix comes off the checkpoint. Hardcoding "model.layers."
-    // cost nothing visible on a hybrid that names them
-    // model.language_model.layers.N: every group found zero members and the
-    // export was labelled calibrated.
+    // Layer prefix comes off the checkpoint: hardcoding "model.layers." cost nothing visible on
+    // a hybrid naming them model.language_model.layers.N (every group found zero members, export
+    // labelled calibrated regardless).
     std::set<std::string> names;
     for (const auto& [name, t] : index)
         names.insert(name);
@@ -465,10 +427,9 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
             if (!ran)
                 return std::unexpected(ran.error());
         }
-        // A MoE layer's FFN weight is in per-expert tensors this planner does
-        // not group, so the experts - the bulk of the model - stay at
-        // round-to-nearest. Say so; a silent absence reads like a technicality
-        // rather than "most of the weights were not calibrated".
+        // A MoE layer's FFN weight is in per-expert tensors this planner doesn't group, so the
+        // experts (the bulk of the model) stay at round-to-nearest. Said explicitly rather than left
+        // silent, which would read as a technicality.
         if (all.empty() && index.count(base + "mlp.experts.0.gate_proj.weight")) {
             plan.notes.push_back("layer " + std::to_string(L) +
                                  ": MoE experts NOT calibrated (per-expert groups are not "

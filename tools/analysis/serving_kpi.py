@@ -1,33 +1,13 @@
 #!/usr/bin/env python3
-# serving_kpi.py - serving KPI sweep against an OpenAI-compatible server
-# (imp-server; vLLM accepts the same requests, its /metrics differ).
-#
-# Per concurrency level (closed loop: C workers, each sends its next request
-# when the previous one finished):
-#   latency    TTFT, TPOT (per request), ITL (per token), E2E, normalized
-#              latency (E2E / output tokens), each p50 / p95 / p99
-#   throughput req/s, output / input / total tok/s over the level's wall
-#   goodput    requests meeting BOTH SLOs (TTFT <= --slo-ttft-ms and
-#              TPOT <= --slo-tpot-ms), as req/s, tok/s and attainment %
-#   server     /metrics deltas across the level: queue wait p50/p95/p99 from
-#              imp_queue_time_seconds, decode rows per step, prefix-cache hit
-#              rate, speculative acceptance, KV-pressure rejections,
-#              StreamingLLM auto-enables, prefix-cache evictions; sampled
-#              imp_kv_blocks_live / imp_kv_blocks_total and
-#              imp_decode_batch_last_rows (mean, max)
-#   power      nvidia-smi power.draw integrated over the level: mean W,
-#              J per 1k output tokens, mean SM clock (the host-health check of
-#              docs/internals/BENCHMARKING.md)
-#
-# Stdlib only, runs on the host like the other tools/analysis clients. Prompts
-# are unique per request (a header token plus --prompt-tokens of filler), so
-# the prefix cache does not turn the sweep into a cache benchmark.
-#
-# Usage:
-#   serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,32 --max-tokens 300
-#       [--requests-per-level N (default max(32, 2*C))] [--prompt-tokens 0]
-#       [--slo-ttft-ms 500] [--slo-tpot-ms 50] [--ignore-eos] [--endpoint chat|completions]
-#       [--no-power] [--json FILE] [--md-out FILE] [--tag x]
+# Serving KPI sweep against an OpenAI-compatible server (imp-server; vLLM accepts the same
+# requests, /metrics differ). Per concurrency level (closed loop): latency (TTFT/TPOT/ITL/E2E,
+# p50/p95/p99), throughput (req/s, tok/s), goodput (requests meeting TTFT/TPOT SLOs), server
+# /metrics deltas (queue wait, decode rows/step, cache hit rate, spec acceptance, KV rejections),
+# power (nvidia-smi draw integrated, J/1k tokens, mean SM clock).
+# Prompts are unique per request so the prefix cache doesn't turn the sweep into a cache bench.
+# Usage: serving_kpi.py --url <url> --levels 1,8,32 --max-tokens 300 [--requests-per-level N]
+# [--prompt-tokens 0] [--slo-ttft-ms 500] [--slo-tpot-ms 50] [--ignore-eos]
+# [--endpoint chat|completions] [--no-power] [--json FILE] [--md-out FILE] [--tag x].
 import argparse
 import json
 import math

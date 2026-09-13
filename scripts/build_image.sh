@@ -1,19 +1,7 @@
 #!/bin/bash
-# build_image.sh <tag> [docker build args...]
-#
-# `docker build` unless <tag> already carries this exact tree. The image is
-# labelled imp.tree=<fingerprint> at build time; the fingerprint is the index
-# tree (`git write-tree`) plus the build arguments, and it exists only when the
-# working tree IS the index: no unstaged change to a tracked file, no untracked
-# file that .gitignore does not cover. Anything else builds unconditionally,
-# because `COPY . .` would ship what the index does not describe.
-#
-# Measured cost of the rebuild this skips: ~6 min cold, 10-40 s from a warm
-# ccache (2026-09-11), per `make build`, which the
-# pre-commit hook (test-gpu), the pre-push hook (verify-fast) and verify-ab
-# each reached for the same tree.
-#
-# IMP_FORCE_BUILD=1 builds regardless.
+# build_image.sh <tag> [docker build args...]: docker build unless <tag> already carries this
+# exact tree (label imp.tree=<fingerprint> = git write-tree + build args, valid only when the
+# working tree matches the index exactly). IMP_FORCE_BUILD=1 builds regardless.
 set -eu
 TAG="${1:?usage: build_image.sh <tag> [docker build args...]}"
 shift

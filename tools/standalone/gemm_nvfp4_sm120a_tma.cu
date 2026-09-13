@@ -1,79 +1,22 @@
-// gemm_nvfp4_sm120a_tma.cu
-// =============================================================================
-// EXPERIMENTAL BRANCH / DOCUMENTED NEGATIVE RESULT — not the winning kernel.
-// This is gemm_nvfp4_sm120a.cu rebuilt with TMA (cp.async.bulk.tensor +
-// cuTensorMapEncodeTiled, resolved at runtime so there is no libcuda link dep) +
-// producer/consumer WARP-SPECIALIZATION (full/empty mbarrier pairs, no
-// __syncthreads). It is bit-exact and deadlock-free, and TMA *did* cut L2
-// requests (82->68%). But the 9-warp/288-thread warp-spec block drops to 1
-// block/SM (occupancy 32->18.75%) and the single-thread TMA issue serializes vs
-// 256-thread parallel cp.async -> it nets SLOWER (509 vs the cp.async 629).
-// Kept as evidence that on sm_120, for this NVFP4 GEMM, TMA+warp-spec does NOT
-// beat a well-laid-out cp.async kernel. The actual win (807/972 TFLOP/s, beats
-// production) lives in gemm_nvfp4_sm120a.cu via two LAYOUT tricks instead.
-// =============================================================================
-//
-// A self-contained, from-scratch NVFP4 GEMM for the RTX 5090 (GB202, sm_120a —
-// consumer Blackwell). No imp engine headers, no CUTLASS. One file: prep +
-// kernel + CPU reference + correctness check + timing. Companion to
-// fa2_sm120a_optimal.cu.
-//
-// Computes  C[M,N] = A[M,K] . B[N,K]^T   (B is the mma "col" operand, stored
-// row-major [N][K]). Both A,B are NVFP4 (E2M1, 4-bit) on the tensor cores via
-// the peak sm_120 path:
-//   mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
-// k=64 per MMA, hardware per-16-element UE4M3 block scale. This is THE GEMM that
-// dominates prefill (projections + FFN/MoE).
-//
-// Optimization trail (profiling-driven, ncu on RTX 5090; numbers @ S=4k / 8k cubed):
-//   0. scaffold: 1 warp / 16x8 tile, on-the-fly f16->E2M1 quant, no reuse  ~1.8 TFLOP/s
-//      ncu: L1/TEX 55% (no reuse) + Compute(SM) 47% (the quantize ALU) co-bound.
-//   1. PRE-PACK A,B to E2M1 [rows][K/8] (k-contiguous) + smem-tiled 64x64 CTA.
-//      The packed layout makes each mma fragment a single uint32 smem load
-//      (k=T0*8+V0 is exactly one packed column -> NO gather), and smem gives
-//      A/B reuse. Kills the quant compute AND the redundant traffic .. 347 / 281
-//   2. cp.async double-buffer of the A/B tiles (prefetch chunk kc+1). Hides the
-//      L2 load latency; also removes the large-K regression ......... 386 / 391
-//   3. 128x128 CTA tile, 4x4 register-blocked warp tiles (16 accumulators). AI
-//      32->64 halves the L2 traffic per FLOP (L2 was 92% bound) ..... 660 / 724
-//   (128x256 tried: 795 @ 8k but regresses to 584 @ 4k — bigger tiles need a
-//    bigger grid to fill the machine; 128x128 is the robust default.)
-//   4. REAL per-16 UE4M3 block scales (was uniform 1.0). Production encoding:
-//      sfa = the row's 4 chunk-block bytes as one uint32, scale-row m_sfa =
-//      T1+(T0&1)*8, bid=tid=0. Naively this halved perf (strided 4-byte scale
-//      reads waste whole L2 sectors); storing the scales TRANSPOSED [chunk][row]
-//      makes the chunk's rows contiguous -> coalesced 16-byte cp.async, recovering
-//      it: the full block-scale path costs only ~3-5% .............. 644 / 683
-//
-// ldmatrix was investigated and is N/A here: the mxf4nvf4 A operand is m16k64
-// with a CuTe layout that doesn't match ldmatrix's f16 m16k16 pattern — imp's own
-// production NVFP4 GEMM also loads the fragments with scalar uint32 loads (which
-// is exactly what this kernel does). So the single-uint32 fragment load is optimal.
-//
-// Bottleneck: L2 BANDWIDTH-bound — lts 82%, DRAM 12%, SM 50% @ 4k. We sit at
-// ~32-34% of the ~2019-TOPS measured FP4 peak vs imp's production CUTLASS path
-// ~41%. The gap is specifically L2-bandwidth, which narrows WHICH levers help:
-//   - threadblock swizzle:  tried, REVERTED (-7% @ 4k). Reduces DRAM traffic /
-//     L2 hit rate, but the same bytes flow through the L2 *pipe* regardless.
-//   - 3-stage pipeline:     tried, no gain. A latency lever; we are bandwidth-
-//     bound, not latency-bound (and the 3rd buffer lowers occupancy).
-//   - warp-specialization alone: an overlap lever; doesn't cut L2 bandwidth.
-//   - TMA (cp.async.bulk.tensor / UTMALDG): the ONE lever that helps — bulk
-//     descriptor-driven loads cut the per-request L2 overhead. This is exactly
-//     what the production smallM kernel uses (with warp-spec to feed it). It
-//     needs the CUDA driver API (cuTensorMapEncodeTiled via dlopen libcuda) +
-//     mbarriers — a major addition, deliberately not in this self-contained ref.
-// So 3 of the 4 "production levers" are red herrings for this bottleneck (2
-// measured); production's real edge is TMA-driven L2 efficiency.
-// Correctness: bit-exact vs a CPU reference that quantizes + block-scales identically.
-//
-// Build & run (host has no CUDA toolkit — use the CUDA 13.3 container).
-// NOTE: block-scale mxf4nvf4 needs the explicit compute_120a gencode; the
-// `-arch=sm_120a` shorthand does NOT enable .block_scale (ptxas rejects it):
+// gemm_nvfp4_sm120a_tma.cu: EXPERIMENTAL BRANCH, documented NEGATIVE RESULT (not the winning
+// kernel). gemm_nvfp4_sm120a.cu rebuilt with TMA (cp.async.bulk.tensor, cuTensorMapEncodeTiled
+// resolved at runtime) + producer/consumer warp-specialization (mbarriers, no __syncthreads).
+// Bit-exact, deadlock-free; TMA cut L2 requests 82->68%, but the 9-warp/288-thread warp-spec
+// block drops to 1 block/SM (occupancy 32->18.75%) and single-thread TMA issue serializes vs
+// 256-thread cp.async, netting SLOWER (509 vs 629 TFLOP/s). Conclusion: on sm_120, for this
+// NVFP4 GEMM, TMA+warp-spec does NOT beat a well-laid-out cp.async kernel - the actual win
+// (807/972, beats production) lives in gemm_nvfp4_sm120a.cu via two LAYOUT tricks instead.
+// Optimization trail before the TMA attempt (ncu, @S=4k/8k): scaffold ~1.8 (L1/TEX 55% + SM 47%
+// co-bound) -> pre-pack E2M1 + smem tiling (347/281) -> cp.async double-buffer (386/391) ->
+// 128x128 CTA 4x4 warp tiles, AI 32->64 (660/724; 128x256 regresses at 4k) -> real per-16 UE4M3
+// scales, transposed for coalescing (644/683). Bottleneck here: L2 BANDWIDTH-bound (lts 82%,
+// DRAM 12%, SM 50% @4k), ~32-34% of FP4 peak vs production's ~41%. Of the "standard" levers only
+// TMA helps this bottleneck (cuts per-request L2 overhead, what production's smallM kernel
+// actually uses); swizzle/3-stage-pipeline/warp-spec-alone do not.
+// Build (needs the explicit compute_120a gencode for .block_scale):
 //   docker run --rm --gpus all -v "$PWD":/w -w /w nvidia/cuda:13.3.1-devel-ubuntu26.04 \
 //     sh -c 'nvcc -O3 -std=c++23 --generate-code=arch=compute_120a,code=sm_120a \
-//            gemm_nvfp4_sm120a.cu -o gemm && ./gemm'
-// -----------------------------------------------------------------------------
+//            gemm_nvfp4_sm120a_tma.cu -o gemm && ./gemm'
 
 #include <cuda.h>  // CUtensorMap + driver types (entry point resolved at runtime)
 #include <cuda_fp16.h>
@@ -301,10 +244,9 @@ __global__ void __launch_bounds__(NTHREADS) gemm_nvfp4_tiled(
     const int kchunks = K / BK;
 
     if (warp >= N_CONS_WARPS) {
-        // ===================== PRODUCER warp (no MMA) =======================
-        // lane 0 issues the two TMAs (arrive.expect_tx); the other 31 lanes
-        // cp.async the block scales then plain-arrive -> full[s] completes when
-        // all 32 producers arrived AND the TMA bytes landed.
+        // PRODUCER warp (no MMA): lane 0 issues the two TMAs (arrive.expect_tx); the other 31 lanes
+        // cp.async the block scales then plain-arrive. full[s] completes only when all 32 arrived AND
+        // the TMA bytes landed.
         uint32_t pe_phase[2] = {0, 0};
         for (int kc = 0; kc < kchunks; ++kc) {
             const int s = kc & 1;

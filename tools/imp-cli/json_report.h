@@ -1,13 +1,9 @@
 #pragma once
 
-// The --json documents imp-cli emits (#1583). Separate from main.cpp because
-// main() sits exactly on the 800-line hard-review threshold, and because the
-// key names here are a contract that scripts/gen_perf_baseline.sh,
-// scripts/verify.sh and scripts/bench_gate.sh read - a contract is easier to
-// keep when it is in one place.
-//
-// Each function writes the document through imp_tools::json_emit(), which is a
-// no-op unless json_stdout_reserve() ran.
+// The --json documents imp-cli emits (#1583). Separate from main.cpp (which sits at the
+// 800-line hard-review threshold). Key names here are a contract scripts/gen_perf_baseline.sh,
+// scripts/verify.sh and scripts/bench_gate.sh read; each writer uses imp_tools::json_emit(),
+// a no-op unless json_stdout_reserve() ran.
 
 #include <string>
 

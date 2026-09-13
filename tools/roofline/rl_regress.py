@@ -4,10 +4,9 @@ import rl_table
 
 
 def compare(baseline_run, current_run, cfg, threshold_pct):
-    # Raw counter sets / classification regexes are versioned; comparing runs
-    # measured under different config_versions is invalid (the 06-11 CI red
-    # was a v3 run gated against the long-stale v2 pin). Fail loudly — the
-    # remedy is a conscious re-pin, not a silent pass.
+    # Counter sets and classification regexes are versioned; comparing runs measured under different
+    # config_versions is invalid (a v3 run once got gated against a stale v2 pin). Fails loudly - the
+    # remedy is a conscious re-pin, never a silent pass.
     bv = baseline_run["meta"]["config_version"]
     cv = current_run["meta"]["config_version"]
     if bv != cv:

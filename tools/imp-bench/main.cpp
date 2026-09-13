@@ -11,10 +11,8 @@
 #include <vector>
 
 namespace imp {
-// bool, not void (#1584): each of these returns early when there is no CUDA
-// device, and every one of them used to do that silently into an exit 0. A
-// benchmark that measured nothing is not a successful benchmark run - it is
-// the one result a CI job or a shell script must be able to see.
+// bool, not void (#1584): each returns early with no CUDA device, previously silently exit 0.
+// A benchmark that measured nothing must be visible to a CI job or shell script as a failure.
 bool bench_gemm();
 bool bench_gemm_nvfp4_cutlass();
 bool bench_attention();
@@ -61,12 +59,9 @@ int main(int argc, char** argv) {
     bool run_decode_attn = false;
     bool run_e2e = false;
 
-    // Every argument is examined. This used to read argv[1] and nothing else,
-    // so `imp-bench gemm --set runtime.deterministic_gemm=true` measured the
-    // default configuration while looking like it measured the flag — the same
-    // trap imp-cli's main already warns about ("this is how a benchmark ends up
-    // measuring a configuration nobody asked for"). A benchmark that silently
-    // drops its knobs is worse than one that has none.
+    // Every argument is examined; used to read only argv[1], so `imp-bench gemm --set
+    // runtime.deterministic_gemm=true` measured the default config while looking like it measured
+    // the flag. A benchmark that silently drops its knobs is worse than one with none.
     std::string config_path;
     std::vector<std::string> config_overrides;
     const char* benchmark = nullptr;
@@ -180,11 +175,9 @@ int main(int argc, char** argv) {
            benchmarks_requested, total_s);
 
     if (json_out) {
-        // Per-benchmark timings and the measured flag, not the tables: the five
-        // bench entry points return bool, and the numbers inside them (GFLOPS,
-        // tok/s, per-shape rows) have no shared shape to serialise. The
-        // consumer that needed machine-readable throughput is
-        // scripts/gen_perf_baseline.sh, and it reads `imp-cli --bench --json`.
+        // Per-benchmark timings and the measured flag, not the tables: the five bench entry points
+        // return bool with no shared shape to serialise. Machine-readable throughput consumer is
+        // scripts/gen_perf_baseline.sh, which reads `imp-cli --bench --json` instead.
         imp_tools::JsonOut j;
         j.str("mode", "bench-suite")
             .intg("requested", benchmarks_requested)

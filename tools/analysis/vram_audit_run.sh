@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# Phase-0 VRAM-audit run orchestrator.
-#
-# Boots imp-server inside the imp:test container with the MemAccount audit
-# harness enabled, drives the fixed 8-concurrent workload, and collects:
-#   - the init-time per-component VRAM table (server stdout, "init_complete")
-#   - the device-used PEAK + final table on shutdown ("shutdown")
-#   - the append-only dump file (mounted to host)
-#
-# Reproducible: same model, ctx, concurrency every run. Results land in
-# $OUT_DIR (default /tmp/vram_audit). NOT committed — the AUDIT table in
-# docs/vram_audit.md is the curated, append-only record.
+# Phase-0 VRAM-audit run orchestrator: boots imp-server in imp:test with the MemAccount audit
+# harness, drives a fixed 8-concurrent workload, collects the init-time per-component VRAM
+# table, the device-used PEAK+final table on shutdown, and the append-only dump file.
+# Reproducible: same model/ctx/concurrency every run. Results land in $OUT_DIR (default
+# /tmp/vram_audit); NOT committed (docs/vram_audit.md is the curated record).
 set -euo pipefail
 
 MODEL=${MODEL:-/models/Qwen3-Coder-30B-A3B-Instruct-FP4}

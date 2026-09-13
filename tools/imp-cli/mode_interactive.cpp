@@ -95,13 +95,10 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             // Multi-turn: append user message and apply full template
             history.push_back({"user", input});
             std::vector<int32_t> tokens;
-            // Same three-way split as the single-prompt path below: a
-            // pending Qwen-VL image has a count only the encoder knows, an
-            // mmproj image has a fixed one, and most turns have neither.
-            // Testing only `has_vision_input()` here — which is the mmproj
-            // tower alone — rendered a prompt with no image tokens at all,
-            // so a picture loaded with /image was never referenced and the
-            // model answered as if it had not been given one.
+            // Same three-way split as the single-prompt path: a pending Qwen-VL image has a count only
+            // the encoder knows, an mmproj image has a fixed one, most turns have neither. Testing only
+            // has_vision_input() (mmproj tower alone) rendered zero image tokens for a Qwen-VL image, so a
+            // loaded picture was never referenced.
             const int pending_img_tokens = imp_pending_image_tokens(ctx);
             if (pending_img_tokens > 0) {
                 const std::vector<int> counts = ctx->engine->pending_image_token_counts();

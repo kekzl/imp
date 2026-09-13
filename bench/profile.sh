@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# Nsight Compute profiling for imp inference engine.
-#
-# Usage:
-#   ./bench/profile.sh <model_path> [prompt_tokens] [gen_tokens]
-#
-# Examples:
-#   ./bench/profile.sh models/Qwen3-8B-Q8_0.gguf
-#   ./bench/profile.sh models/Qwen3-8B-Q8_0.gguf 512 64
-#
-# Output: bench/results/imp_profile.ncu-rep
-#
-# Requires: Nsight Compute (ncu) installed and accessible.
+# Nsight Compute profiling for imp. Usage: ./bench/profile.sh <model_path> [prompt_tokens] [gen_tokens]
+# Output: bench/results/imp_profile.ncu-rep. Requires Nsight Compute (ncu).
 
 set -euo pipefail
 

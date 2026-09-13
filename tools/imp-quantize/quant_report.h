@@ -1,20 +1,11 @@
 #pragma once
 
-// What an export cost, per tensor, and the one line that says so.
-//
-// The tool computed a quantization error before this existed and threw it
-// away: awq.cu fills SearchResult::err_rtn / err_best and nothing ever read
-// them, so a group that got 3x better and a group that got 1.02x better
-// printed the same "scaled". Worse, an UNCALIBRATED export computed no error
-// at all, so the one number an operator needs to decide whether a checkpoint
-// is usable came from a perplexity run on a different machine.
-//
-// Both are reported here. The per-tensor figures are measured on the bytes
-// that were actually written: the packed nibbles and the FP8 micro-scales are
-// already on the host after quantize_one, so decoding them back costs no GPU
-// and no second quantization. Decoding is done against the FORMAT
-// (val = e2m1(nibble) * fp8(micro) * tensor_scale), not by calling imp's
-// dequant kernel, so a paired bug in quantize+dequant cannot cancel.
+// What an export cost per tensor, and the one line that says so: awq.cu computed
+// SearchResult::err_rtn/err_best and nothing read them, so a 3x-better group and a 1.02x-better
+// group both printed "scaled", and an uncalibrated export computed no error at all.
+// Per-tensor figures are measured on the bytes actually written (packed nibbles + FP8
+// micro-scales already on host after quantize_one), decoded against the FORMAT rather than
+// imp's dequant kernel, so a paired quantize/dequant bug can't cancel out.
 
 #include <cstdint>
 #include <expected>
@@ -38,11 +29,10 @@ struct GroupError {
     double err_best = 0.0;
 };
 
-// Decodes the written bytes and compares against the FP16 the quantizer was
-// handed. `packed` is [N, K/2], `micro` is [N, K/16] FP8 E4M3.
-// max_rel is normalised by the tensor's own absmax rather than per element:
-// a near-zero weight has no meaningful relative error, and dividing by it is
-// how a 4-bit format reports 800 % on a value nobody notices.
+// Decodes the written bytes and compares against the FP16 the quantizer was handed (packed
+// [N,K/2], micro [N,K/16] FP8 E4M3). max_rel is normalised by the tensor's own absmax, not per
+// element: dividing a near-zero weight's error by itself is how 4-bit reports 800% on a value
+// nobody notices.
 TensorError nvfp4_tensor_error(const std::string& name, const uint16_t* src_fp16, const unsigned char* packed,
                                const unsigned char* micro, float tensor_scale, int64_t N, int64_t K);
 

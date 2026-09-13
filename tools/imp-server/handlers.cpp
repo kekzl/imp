@@ -44,10 +44,8 @@ std::string make_completion_id(ServerState& state) {
     return "imp-" + std::to_string(state.next_id.fetch_add(1));
 }
 
-// The id a client quotes when reporting a problem, and the one that ties a
-// response to its line in the JSONL request log. No error body carried one and
-// no response carried the header (#1561). Same counter as the completion id, so
-// the two cannot collide.
+// Request id: ties a response/error body to its JSONL request-log line (#1561). Shares the
+// completion-id counter so the two ids cannot collide.
 std::string make_request_id(ServerState& state) {
     char buf[48];
     std::snprintf(buf, sizeof(buf), "req_imp_%016llx",
@@ -62,11 +60,8 @@ int64_t unix_timestamp() {
 }
 
 void handle_health(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
-    // Never block unbounded on state.mtx: a long /v1/embeddings call holds it
-    // across its whole computation, so an unbounded lock here would hang a
-    // liveness probe (#889). Grab it with a short timeout and fall back to the
-    // lock-free status snapshot on contention — a held lock means a request is
-    // in flight, i.e. the server is alive and cannot be faulted right now.
+    // Never block unbounded on state.mtx (a long /v1/embeddings call holds it, #889): use a short
+    // timeout and fall back to the lock-free status snapshot on contention.
     bool loaded = false;
     int queue = -1;
     bool faulted = false;
@@ -83,10 +78,8 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
             queue = state.batching->queue_depth();
             faulted = state.batching->faulted();
         }
-        // Capacity, not occupancy (invariant I7): the number a caller needs
-        // before it sends a long prompt, and the one a harness needs to refuse
-        // to measure a clamped server. Reporting it here rather than only in
-        // /metrics keeps a liveness probe and a precondition check as one read.
+        // Reports KV capacity, not occupancy (invariant I7): callers need it before sending a long
+        // prompt; harnesses need it to refuse measuring a clamped server.
         if (state.ctx && state.ctx->engine) {
             kv_floored = state.ctx->engine->kv_pool_floored();
             if (const auto* kv = state.ctx->engine->kv_cache()) {
@@ -101,10 +94,8 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     } else {
         loaded = state.model_status_snapshot().loaded;  // queue_depth stays -1 (unknown)
     }
-    // A growable pool that started small is not the same state as one stuck
-    // there: it heals when the card frees, so a client should wait rather than
-    // restart it, and an orchestrator must not be told to recycle a server that
-    // is recovering on its own.
+    // can_grow: a growable pool below its ceiling heals as the card frees (wait, do not restart);
+    // distinguish from a pool stuck at its ceiling, which never will.
     const bool can_grow = kv_ceiling > kv_blocks;
     const std::string unservable = health_unservable_reason(faulted, kv_floored && !can_grow, kv_blocks,
                                                             kv_block_size);
@@ -121,22 +112,15 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         // The ceiling a growable pool may still reach. Equal to the total for a
         // fixed pool, so a caller can compare the two rather than test a flag.
         body["kv_ceiling_blocks"] = kv_ceiling;
-        // A fixed pool reports ceiling == total, and so does a growable one
-        // already at its ceiling. Same pair, opposite advice: one heals as the
-        // card frees, the other never will. Say which, rather than leaving the
-        // caller to derive it from a pair that cannot express it.
+        // kv_pool_growable disambiguates ceiling==total: a fixed pool at capacity vs a growable pool
+        // already at its ceiling look identical otherwise, and only one of them ever heals.
         body["kv_pool_growable"] = kv_growable;
-        // Copy bandwidth measured inside the pool at init, GB/s (read plus
-        // write). Resident memory on this card reads ~1500; a pool the WDDM
-        // driver spilled into host memory reads ~240 and serves at that
-        // fraction with everything else reporting ok. 0 = not measured.
+        // kv_pool_bandwidth_gbps, GB/s measured at pool init (read+write). ~1500 = resident on this
+        // card, ~240 = WDDM-spilled to host memory at that fraction of throughput. 0 = not measured.
         body["kv_pool_bandwidth_gbps"] = kv_bandwidth;
     }
-    // #1537: the checkpoint carries an MTP head this load did not take. Since
-    // the mtp_k auto default that is normally a REGIME decision (a serving
-    // server drafts for one request at a time while the head's VRAM comes out
-    // of every slot's budget), so name the reason - an operator running a
-    // container never sees the startup log.
+    // #1537: name why an MTP head this checkpoint ships was declined at load (mtp_k=auto is a
+    // per-server regime decision) - a container operator never sees the startup log.
     if (state.model && state.model->model && state.model->model->mtp_head_available_unloaded_) {
         body["mtp_head_available"] = true;
         body["mtp_head_hint"] =
@@ -164,11 +148,9 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     res.set_content(dump_safe(body), "application/json");
 }
 
-// Readiness is a status code, not a JSON field: an orchestrator probe keyed on
-// the code routed traffic to a server that answered 503 on every inference
-// route (model-less start, /admin/suspend, a swap in progress) because
-// /health said 200 for all three (AUDIT_arch_2026 E-5). No mutex here: the
-// swap holds it for the whole load, and that is exactly when this must answer.
+// Readiness must be a status code, not a JSON field: an orchestrator keyed on the code got
+// traffic during model-less/suspend/swap states because /health said 200 for all three
+// (AUDIT_arch_2026 E-5). No mutex: the swap holds it for the whole load, when this must answer.
 void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     const char* code = nullptr;
     if (g_draining.load(std::memory_order_relaxed))
@@ -246,13 +228,8 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     bool loaded = false;
     std::string model_name;
     int max_seq_len = 0;
-    // What the KV pool can actually hold. `max_seq_len` is what the resolver
-    // planned; the pool is clamped after that, and on a tight card the two
-    // differ by a lot - 97204 against 52256 on Qwen3.8-27B-NVFP4, so a prompt
-    // between them was advertised as servable and was not (#1542). /health has
-    // reported the real number all along; /v1/models reported the plan.
-    // A growable pool holds its ceiling, not its current commit: the scheduler
-    // grows it at admission (kv_capacity_ceiling_tokens).
+    // kv_capacity_tokens = what the pool can actually hold, not max_seq_len (the plan); they can
+    // differ hugely on a tight card (#1542). Growable pools report their ceiling, not current commit.
     long long kv_capacity_tokens = -1;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
@@ -274,18 +251,8 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     }
     max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 
-    // Expose what this server can actually serve. That used to mean the loaded
-    // model alone, because listing the directory invited clients to request a
-    // model the server then had to swap in mid-flight. With server.model_swap
-    // those requests are served safely (drain + restore-on-failure), so the
-    // rest of the directory is listed too — a harness cannot pick a model it
-    // cannot see. The loaded one comes first and is the only one whose context
-    // window is known; the others report none until they are loaded.
-    //
-    // The context window is not part of OpenAI's model object, but every major
-    // OpenAI-compatible server bolts it on so clients can auto-detect it. We
-    // follow both live conventions on the same object: vLLM's `max_model_len`
-    // and llama.cpp's `meta.n_ctx_train`. See also GET /props and GET /info.
+    // Lists every model in the models dir (not just the loaded one) now that server.model_swap
+    // makes swap-in-flight safe. Loaded model first with known context window; others report none.
     if (loaded) {
         json model = {{"id", model_name},
                       {"object", "model"},
@@ -316,12 +283,7 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     res.set_content(dump_safe(body), "application/json");
 }
 
-// GET /v1/models/{id} — `client.models.retrieve(...)` (#1599).
-//
-// The route did not exist, so the SDK call fell through to the unmatched-route
-// handler and 404'd even for the model the server is currently serving. There
-// is no path-parameter route anywhere else in this server, which is why it was
-// missed: the list endpoint looked like complete coverage.
+// GET /v1/models/{id}: client.models.retrieve(...) 404'd for lack of a path-param route (#1599).
 void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
                            const std::string& model_id) {
     bool loaded = false;
@@ -409,10 +371,8 @@ static void snapshot_ctx(ServerState& state, bool& loaded, std::string& model_na
     max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 }
 
-// GET /props — llama.cpp-compatible context probe. llama.cpp clients read the
-// context window from `default_generation_settings.n_ctx` (and a top-level
-// `n_ctx`); we mirror both so an auto-detect path written for llama.cpp works
-// unchanged against imp.
+// GET /props (llama.cpp-compatible): mirrors default_generation_settings.n_ctx and top-level
+// n_ctx so llama.cpp auto-detect clients work unchanged against imp.
 void handle_props(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     bool loaded = false;
     std::string model_name;
@@ -447,12 +407,8 @@ void handle_info(const httplib::Request& /*req*/, httplib::Response& res, Server
     res.set_content(dump_safe(body), "application/json");
 }
 
-// Find a model by name. Returns the full path or "" (which the callers turn
-// into a 404 / 503, never a load). The name is a basename looked up among
-// the entries of models_dir, or an "org/repo" HuggingFace id resolved from
-// the local HF cache; it is never used as a filesystem path
-// (model_name_policy.h, AUDIT_arch_2026 F2-1: `{"model": "/any/x.gguf"}`
-// used to load that file and evict the resident model).
+// find_model_path: name resolves only as a models_dir basename or HF cache id, never as a raw
+// filesystem path (AUDIT_arch_2026 F2-1: {"model":"/any/x.gguf"} loaded and evicted the resident model).
 std::string find_model_path(const ServerState& state, const std::string& name) {
     using imp_server::ModelNameKind;
     switch (imp_server::classify_model_name(name)) {
@@ -482,23 +438,9 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
     return "";
 }
 
-// Resolve the model a request asks for, loading or swapping as needed.
-//
-// A first-generation auto-swap was removed once because it tore the engine down
-// mid-stream (cancelling every in-flight request) and could leave the process
-// with no model when the new one did not fit. Both causes are now closed, so
-// swapping is back under `server.model_swap` (default on): in-flight
-// generations DRAIN before teardown and are never cancelled (the /admin/suspend
-// contract), and a failed load restores the previous model instead of leaving
-// the server empty. What is not solved — and cannot be on 32 GB — is serving
-// two models at once: a swap is serial and the requesting call pays one model
-// load. Set server.model_swap=false for the strict single-model contract.
-//
-// Unknown names never load anything: the name must resolve inside the models
-// directory (or as a HuggingFace repo id), otherwise this is a 404.
-//
-// Returns true if the requested model is loaded. Must be called with
-// state.mtx held.
+// ensure_model_loaded: resolves/loads/swaps as needed. server.model_swap (default on) drains
+// in-flight generations before teardown and restores the prior model on a failed load. Unknown
+// names 404 without loading anything. Caller must hold state.mtx.
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res) {
     // Suspended (/admin/suspend): the GPU is deliberately free — do NOT
     // auto-load a cold copy. Inference waits for POST /admin/resume.
@@ -541,17 +483,13 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         return true;  // Already loaded
     }
 
-    // A different model was asked for. If it resolves inside the models
-    // directory, swap to it rather than refusing: agent harnesses drive a big
-    // model beside a small one, and 32 GB serves one at a time. An unresolvable
-    // name falls through to the 404 below, so a typo never triggers a load.
+    // A different resolvable model triggers a swap rather than a refusal (agent harnesses run a big
+    // model beside a small one); an unresolvable name falls through to 404, never a load.
     if (state.runtime_config.server.model_swap) {
         std::string path = find_model_path(state, requested_model);
         if (!path.empty()) {
-            // Drain first: in-flight generations finish, they are never
-            // cancelled (same contract as /admin/suspend). state.mtx is held,
-            // so no new request can be submitted while we tear down. On
-            // timeout nothing has been touched and the current model keeps
+            // Swap drains in-flight generations first (never cancelled, same contract as /admin/suspend).
+            // state.mtx held throughout; on drain timeout nothing is torn down and the current model keeps
             // serving.
             const int drain_ms = state.runtime_config.server.model_swap_drain_ms;
             if (state.batching && !state.batching->pause(drain_ms)) {
@@ -626,12 +564,8 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
 
     config.device_id = args.device;
 
-    // max_seq_len / max_batch_size: 0 = auto-detect in engine.
-    // Precedence for the batch size: --max-batch CLI flag > [runtime]
-    // max_batch_size from imp.conf > 0 (engine auto-sizes from the model's
-    // weight footprint; a >20 GiB MoE auto-picks 1). The imp.conf value used
-    // to be dropped here — only the CLI arg seeded sizing — so `[runtime]
-    // max_batch_size` silently affected nothing but the decode cap.
+    // max_batch_size precedence: --max-batch CLI > [runtime] max_batch_size (imp.conf) > 0 (engine
+    // auto-sizes from weight footprint; >20 GiB MoE auto-picks 1). All paths must resolve here.
     config.max_batch_size = resolve_max_batch_size(args, runtime_cfg);
 
     // Hard per-process VRAM cap for multi-server-per-GPU deployments.
@@ -675,11 +609,8 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
 
-    // Prefix caching: [server] prefix_cache, default ON since the #536/#538
-    // stale-block-table fix (the historical "FP rounding / physical address"
-    // off-by-default rationale was a misattribution of that bug —
-    // PrefixCacheE2ETest is the ship gate). Disabled automatically for
-    // recurrent (SSM/GDN) models in the engine.
+    // [server] prefix_cache defaults ON since the #536/#538 stale-block-table fix; PrefixCacheE2ETest
+    // is the ship gate. Auto-disabled for recurrent (SSM/GDN) models in the engine.
     config.use_prefix_caching = runtime_cfg.server.prefix_cache ? 1 : 0;
     config.prefix_pin_budget_pct = runtime_cfg.server.prefix_pin_budget_pct;
 
@@ -730,17 +661,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // Auto-detect format from path
     ImpModelFormat format = imp::is_safetensors_dir(path) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
 
-    // Load model. speculative.mtp_k > 0 opts into loading the MTP draft-head
-    // sidecar (~1.6 GiB VRAM; SafeTensors models shipping
-    // model_mtp.safetensors) so MTP drafting can be enabled below.
-    // speculative.mtp_k is a tri-state (-1 auto, 0 off, >0 fixed). Auto only
-    // engages for a server pinned to a single stream: with concurrent decode
-    // the head binds one request and its VRAM comes out of the batch's slots.
-    // The RESOLVED batch, not the raw CLI flag: `runtime.max_batch_size=1` from
-    // imp.conf or a `--set` is just as much a single-stream server as
-    // `--max-batch 1`, and reading only the flag left auto declining on it
-    // (found by a peer conformance run, 2026-08-29: 88.1 -> 117.2 tok/s left
-    // on the table for exactly that configuration).
+    // speculative.mtp_k=auto engages only for a single-stream server: read the RESOLVED batch size
+    // (imp.conf/--set/--max-batch all count), not the raw CLI flag, or auto declines wrongly
+    // (2026-08-29: cost 88.1 -> 117.2 tok/s on such a config).
     state.resolved_max_batch_size = resolve_max_batch_size(state.default_args, state.runtime_config);
     int mtp_k = imp::tools::mtp_auto_request_k(state.runtime_config, state.resolved_max_batch_size);
     ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
@@ -758,10 +681,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
 
-    // Create context (engine auto-detects config from model metadata).
-    // Re-stash the runtime config so Engine::init's take_pending_runtime_config()
-    // picks it up. The server may load a model at runtime (auto-load on first
-    // request); each load rebuilds the Engine and consumes the pending slot.
+    // Re-stash the runtime config before each Engine construction so take_pending_runtime_config()
+    // picks it up: a runtime model load rebuilds the Engine and consumes the pending slot.
     imp::set_pending_runtime_config(state.runtime_config);
     ImpConfig config = build_config(state.default_args, state.runtime_config, path);
     err = imp_context_create(state.model, &config, &state.ctx);
@@ -781,11 +702,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
                             "continuing without MTP drafts\n",
                     mtp_k, imp_error_string(mtp_err));
     }
-    // Publish what the load actually produced. `head_present` is true for a
-    // checkpoint that ships MTP tensors this process declined to upload -
-    // which is what the concurrency decline looks like from a request's side,
-    // and what makes its refusal reportable instead of indistinguishable from
-    // a model that has no head at all.
+    // head_present: true when the checkpoint ships MTP tensors this load declined to upload, so a
+    // concurrency-driven decline is distinguishable from "no head at all".
     state.armed_mtp_k.store(state.ctx ? state.ctx->engine->mtp_spec_decode_k() : 0,
                             std::memory_order_relaxed);
     state.mtp_head_loaded.store(state.model->model->mtp_.has_value() &&
@@ -795,10 +713,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
                                      state.model->model->mtp_head_available_unloaded_,
                                  std::memory_order_relaxed);
 
-    // Extract model name from path. Strip trailing separators first so a
-    // directory passed with a trailing slash (e.g. /models/Foo-NVFP4/) still
-    // yields a non-empty id instead of "" — an empty id makes the model
-    // unaddressable over the HTTP API (#756).
+    // Strip trailing path separators first: a directory path ending in "/" must still yield a
+    // non-empty model id (#756), or the model becomes unaddressable over the HTTP API.
     std::string id_path = path;
     while (id_path.size() > 1 && (id_path.back() == '/' || id_path.back() == '\\'))
         id_path.pop_back();
@@ -826,12 +742,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         }
     }
 
-    // Store max sequence length for prompt-length gating. Use the EFFECTIVE
-    // context the engine actually allocated, not the model's declared max: the
-    // engine VRAM-auto-sizes it and can land well below the model max (e.g.
-    // ~4096 for a 14B on a tight budget). Gating on the model max let an
-    // over-long prompt pass the length check and overrun the KV/position
-    // buffers — a SIGSEGV instead of a clean 400.
+    // Gate prompt length on the engine's EFFECTIVE allocated context, not the model's declared max:
+    // the engine VRAM-auto-sizes lower, and gating on the model max let an over-long prompt overrun
+    // the KV/position buffers (SIGSEGV instead of a 400).
     state.max_seq_len = imp_context_max_seq_len(state.ctx);
     if (state.max_seq_len <= 0)
         state.max_seq_len = imp_model_max_seq_len(state.model);

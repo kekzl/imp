@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# burst_stream_client.py - N concurrent streaming completions against a running
-# OpenAI-compatible server (imp-server or vLLM), unique prompts per stream and
-# wave, greedy gens; per wave: aggregate tok/s (sum of emitted tokens / wall),
-# TTFT p50/p90/max, inter-token latency (ITL) p50/p95/max over every token of
-# every stream, and the count of ITL gaps over 100 ms. The prompt shape is the
-# one of conc_client.py (PLEN filler tokens after a unique header).
-# Usage: burst_stream_client.py PORT CONC WAVES [TAG] [PLEN]; env GEN=<n> (300),
-# IGNORE_EOS=1 (every stream runs to GEN tokens, imp and vLLM both accept it).
+# N concurrent streaming completions against an OpenAI-compatible server (imp-server or vLLM):
+# unique prompts per stream/wave, greedy gens. Per wave: aggregate tok/s, TTFT p50/p90/max, ITL
+# p50/p95/max over every token, count of ITL gaps > 100ms.
+# Usage: burst_stream_client.py PORT CONC WAVES [TAG] [PLEN]; env GEN=<n> (default 300),
+# IGNORE_EOS=1 (every stream runs to GEN tokens).
 import json
 import os
 import statistics
@@ -23,10 +20,9 @@ PLEN = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 GEN = int(os.environ.get("GEN", "300"))
 MODEL = os.environ.get("MODEL_NAME", "Qwen3.8-27B-NVFP4-vllm")
 IGNORE_EOS = os.environ.get("IGNORE_EOS", "0") == "1"  # imp/vLLM: run every stream to GEN tokens
-# Protection scenario of runtime.prefill_chunk_decode_cap: LATE_PLEN > 0 adds one
-# stream with a LATE_PLEN-token prompt that arrives LATE_DELAY seconds into the
-# wave while the CONC short streams decode; the wave line then also reports the
-# short streams' ITL max / p95 during the ingest and the late stream's TTFT.
+# Protection scenario of runtime.prefill_chunk_decode_cap: LATE_PLEN > 0 adds one stream with
+# a LATE_PLEN-token prompt arriving LATE_DELAY seconds into the wave while CONC short streams
+# decode; the wave line also reports their ITL max/p95 during ingest and the late stream's TTFT.
 LATE_PLEN = int(os.environ.get("LATE_PLEN", "0"))
 LATE_DELAY = float(os.environ.get("LATE_DELAY", "2.0"))
 FILLER_SENTENCES = [

@@ -1,23 +1,10 @@
 #!/usr/bin/env bash
-# Does imp-server start on SHIPPED DEFAULTS? (#1631)
-#
-# Every other server battery passes flags: scripts/test_server.sh boots with
-# --max-concurrent / --rate-limit / --max-input-tokens, and the audit's own
-# runtime pass used --set runtime.max_seq_len=8192 --max-batch 4 because the
-# defaults did not start. So the one configuration a first-time reader actually
-# runs was the one nothing exercised, and it exited 1 with 537 CUDA OOM lines on
-# the repo's own perf-baseline model, on an idle 32 GB card.
-#
-# The gate is deliberately narrow: `imp-server --model <path>` and nothing else,
-# then /health, then one generation. A start that reaches /health but cannot
-# answer is not a pass.
-#
-# Usage:   bash scripts/test_server_default_start.sh
-# Env:     IMP_DEFAULT_START_MODEL  file name under the models dir
-#                                   (default: the perf-baseline model)
-#          IMP_MODELS_DIR           host dir mounted at /models (default $HOME/models)
-#          IMP_SRV_PORT             (default 8080)
-#          IMP_TEST_IMG             (default imp:test)
+# Does imp-server start on SHIPPED DEFAULTS (#1631)? Every other server battery passes
+# capacity flags, so the config a first-time reader actually runs was the one nothing exercised.
+# Gate is deliberately narrow: `imp-server --model <path>` only, then /health, then one
+# generation; reaching /health but failing to answer is not a pass.
+# Usage: bash scripts/test_server_default_start.sh. Env: IMP_DEFAULT_START_MODEL,
+# IMP_MODELS_DIR, IMP_SRV_PORT, IMP_TEST_IMG.
 set -uo pipefail
 
 MODEL="${IMP_DEFAULT_START_MODEL:-Qwen3-8B-Q8_0.gguf}"

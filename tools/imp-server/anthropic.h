@@ -11,35 +11,23 @@ namespace imp_server::anthropic {
 
 using json = nlohmann::json;
 
-// Transform an Anthropic /v1/messages request body into an equivalent
-// OpenAI /v1/chat/completions body. The returned body can be fed back
-// into handle_chat_completions unchanged.
-//
-// Throws nothing; malformed fields default to OpenAI-sensible values.
+// Transforms an Anthropic /v1/messages request body into an equivalent OpenAI
+// /v1/chat/completions body, feedable back into handle_chat_completions unchanged. Throws
+// nothing; malformed fields default to OpenAI-sensible values.
 json anthropic_to_openai_body(const json& anth);
 
-// Inverse: translate an OpenAI non-streaming chat.completion response
-// into an Anthropic Messages response.
-//
-// `anth_model` is the model name passed in the original Anthropic request
-// (used verbatim in the response — Anthropic clients expect the name they
-// sent, not whatever alias the OpenAI side resolved to).
-// `stop_sequence` is the text that ended the generation, when one did. OpenAI's
-// finish_reason "stop" means both "the model ended its turn" and "a stop
-// sequence matched"; Anthropic reports them as end_turn and stop_sequence, and
-// names the matched text (#1550). The caller reads it off the shim
-// (g_shim_stop_sequence) or the stream loop result.
-// `omit_thinking` drops the thinking block from the result, for
-// `thinking.display: "omitted"` (#1560). The model still reasons; the client
-// asked not to be shown it.
+// Inverse: translates an OpenAI non-streaming chat.completion response into an Anthropic
+// Messages response. anth_model is used verbatim (the name the client sent, not a resolved
+// alias). stop_sequence names the matched text when OpenAI's finish_reason="stop" meant a
+// stop sequence rather than end_turn (#1550), read off the shim (g_shim_stop_sequence) or the
+// stream loop result. omit_thinking drops the thinking block for thinking.display:"omitted"
+// (#1560); the model still reasons, the client just isn't shown it.
 json openai_to_anthropic_response(const json& oai, const std::string& anth_model,
                                   const std::string& stop_sequence = {}, bool omit_thinking = false);
 
-// The `signature` a thinking block carries. Anthropic's SDKs round-trip
-// thinking blocks and expect the field; imp is not the model vendor and cannot
-// attest anything, so this is a deterministic digest of the block text (#1555).
-// It survives a round trip and proves the block came back unedited - nothing
-// more, and the header of the emitting code says so.
+// The `signature` a thinking block carries: Anthropic SDKs round-trip and expect the field;
+// imp cannot attest anything, so this is a deterministic digest of the block text (#1555),
+// proving only that it came back unedited.
 std::string thinking_signature(const std::string& thinking);
 
 // True when the request asked for `thinking.display: "omitted"`. Display is not
@@ -47,11 +35,9 @@ std::string thinking_signature(const std::string& thinking);
 // than transformed into the OpenAI body.
 bool thinking_display_omitted(const json& anth_body);
 
-// OpenAI finish_reason -> Anthropic stop_reason, in one place because the
-// streaming and non-streaming paths had two copies that disagreed: the
-// streaming one passed the engine's "capacity" straight through as a
-// stop_reason, which is not in Anthropic's enum (#1552), and neither could
-// produce "stop_sequence" (#1550).
+// OpenAI finish_reason -> Anthropic stop_reason, in one place: the streaming and
+// non-streaming paths had two copies that disagreed (streaming passed "capacity" straight
+// through, not in Anthropic's enum, #1552; neither produced "stop_sequence", #1550).
 const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_sequence_matched);
 
 // Generate an Anthropic message id (msg_XXXX). Uses the same atomic counter

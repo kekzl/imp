@@ -127,10 +127,9 @@ std::expected<SearchResult, std::string> search_group_scale(const std::vector<Gr
     for (int step = 0; step < kAlphaSteps; step++) {
         const float alpha = static_cast<float>(step) / static_cast<float>(kAlphaSteps - 1);
 
-        // s_j = (a_j / mean(a))^alpha, then normalised so the geometric span is
-        // centred on 1 — a uniform rescale is free (the NVFP4 tensor scale
-        // absorbs it exactly), but keeping s near 1 keeps the folded norm
-        // weights inside their dtype's range.
+        // s_j = (a_j / mean(a))^alpha, normalised so the geometric span centres on 1: a uniform
+        // rescale is free (NVFP4 tensor scale absorbs it exactly), but keeping s near 1 keeps the
+        // folded norm weights inside their dtype's range.
         float smin = 3.4e38f, smax = 0.0f;
         for (int64_t j = 0; j < K; j++) {
             const float a = std::max(act_mean[static_cast<size_t>(j)], floor_a);
@@ -145,11 +144,9 @@ std::expected<SearchResult, std::string> search_group_scale(const std::vector<Gr
                 for (auto& v : s)
                     v /= norm;
         }
-        // Error weight. The layer's output error is sum_j dw_j^2 E[x_j^2] once
-        // the cross terms are dropped, so E[x^2] is the right weight and
-        // (E|x|)^2 under-weights a heavy-tailed channel by its variance.
-        // Pre-IMPCAL02 calibration files carry no second moment and keep the
-        // old weight, which is what act_sq being empty means.
+        // Error weight: layer output error is sum_j dw_j^2 E[x_j^2] once cross terms drop, so E[x^2]
+        // is the right weight ((E|x|)^2 under-weights a heavy-tailed channel by its variance).
+        // Pre-IMPCAL02 calibration files carry no second moment (act_sq empty) and keep the old weight.
         const bool have_sq = static_cast<int64_t>(act_sq.size()) == K;
         for (int64_t j = 0; j < K; j++) {
             const float sj = s[static_cast<size_t>(j)];

@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
-# Measure real gcov LINE coverage of tools/imp-server/ over an end-to-end run.
-#
-# The CI suite only unit-tests the server's pure helpers (anthropic/SSE/stream
-# utils) and runs a Python *mock* contract — it never executes the real
-# handlers.cpp/main.cpp/batching_engine.cpp. This harness builds imp-server with
-# gcov instrumentation (only the server TUs; the CUDA imp lib is left alone),
-# drives every endpoint + the manual server batteries against a real model on
-# the GPU, and reports measured line coverage.
-#
-# Usage:   scripts/coverage_server.sh
-# Env:     IMP_COV_MODEL    (default Qwen3-8B-NVFP4-cortecs) — must support /v1/embeddings + tools
-#          IMP_MODELS_DIR   (default $HOME/models)      — host dir mounted at /models
-#          IMP_COV_PORT     (default 8080)
-#          IMP_COV_KEEP     (set to 1 to keep the imp:cov image + container)
-# Output:  prints the gcovr table; writes build/coverage/ (txt + html) if -DIMP_COVERAGE produced data.
+# Measures real gcov LINE coverage of tools/imp-server/ end to end: CI only unit-tests pure
+# helpers plus a Python mock contract, never handlers.cpp/main.cpp/batching_engine.cpp for real.
+# Builds imp-server with gcov instrumentation (server TUs only), drives every endpoint against
+# a real model on GPU. Usage: scripts/coverage_server.sh. Env: IMP_COV_MODEL, IMP_MODELS_DIR,
+# IMP_COV_PORT, IMP_COV_KEEP. Output: build/coverage/ (txt+html).
 set -euo pipefail
 
 MODEL="${IMP_COV_MODEL:-Qwen3-8B-NVFP4-cortecs}"

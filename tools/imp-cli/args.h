@@ -49,12 +49,9 @@ struct CliArgs : CommonArgs {
     bool interactive = false;
     int mtp_spec_decode_k = 0;           // --mtp-spec-decode K: 0 = off, >0 = MTP draft length
     bool prefill_fp8 = false;            // --prefill-fp8: use FP8 E4M3 weight cache for prefill
-    // --token-trace: emit a `[tok=ID 'piece']` marker on stderr for EVERY
-    // generated token. Off by default because a 4k generation would bury the
-    // rest of stderr; the decode loop otherwise caps the markers at the first
-    // ten steps. `scripts/verify.sh` turns it on: its degeneration gate reads
-    // that stream, and with the cap it was reading the opening of every run
-    // while its own comment said "the last 32 tokens".
+    // --token-trace: emits a `[tok=ID 'piece']` marker on stderr for EVERY generated token. Off
+    // by default (a 4k generation would bury stderr); the decode loop otherwise caps markers at the
+    // first ten steps. scripts/verify.sh's degeneration gate needs the full stream, not the cap.
     bool token_trace = false;
     bool prefix_caching = false;         // --prefix-caching: reuse KV blocks for shared prefixes
     bool streaming_kv = false;           // --streaming-kv: StreamingLLM smart KV cache (sinks + window)

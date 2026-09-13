@@ -1,18 +1,7 @@
 #!/bin/sh
-# Guard the deterministic-mode E2E suite against a filter that matches nothing.
-#
-# `DetEvalE2ETest` is value-parameterised over the model env vars (#1299), so
-# its tests are named `Models/DetEvalE2ETest.<Case>/<label>` — NOT
-# `DetEvalE2ETest.<Case>`. A `--gtest_filter='DetEvalE2ETest.*'` therefore
-# matches zero tests and gtest reports `[  PASSED  ] 0 tests`, which reads as
-# green. This suite has already been invisible once: it was gated on an env var
-# nothing set, so it skipped from #542 until #1299 found it red.
-#
-# This asserts the filter used by `make test-e2e` resolves to a non-empty set
-# covering every instantiated model row. It needs no GPU — `--gtest_list_tests`
-# runs no test bodies — so it belongs in the CPU unit lane.
-#
-# Usage: check_det_suite_filter.sh <path-to-test-e2e> "<gtest_filter>"
+# DetEvalE2ETest is value-parameterised over model env vars (#1299): tests are named
+# Models/DetEvalE2ETest.<Case>/<label>, not DetEvalE2ETest.<Case>, so a naive filter matches
+# zero tests and gtest reports PASSED. --gtest_list_tests needs no GPU; CPU-lane check.
 
 set -eu
 

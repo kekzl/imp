@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# A/B of attention.fa2_hd256_bkv (64 vs 32) on a hd=256 hybrid checkpoint:
-# alternating `imp-cli --bench` pairs under nsys, reporting the FA2 kernel
-# time sum per arm (the only number that resolves a <5% prefill-kernel delta,
-# docs/internals/BENCHMARKING.md) next to the e2e pp tok/s.
-#
-#   tools/analysis/fa2_hd256_bkv_ab.sh [PP] [PAIRS]
-#
-# Runs build-dev/imp-cli inside imp:toolchain (the only image with nsys, same
-# recipe as serving_idle_profile.sh); the .qdstrm import and `nsys stats` run
-# on the host nsys. Env: MODEL (default Qwen3.8-27B-NVFP4-vllm), MODELS_DIR,
-# OUT (results dir).
+# A/B of attention.fa2_hd256_bkv (64 vs 32) on a hd=256 hybrid checkpoint: alternating
+# imp-cli --bench pairs under nsys, reporting the FA2 kernel time sum per arm (the only number
+# that resolves a <5% prefill-kernel delta, docs/internals/BENCHMARKING.md) next to e2e pp tok/s.
+# Runs build-dev/imp-cli inside imp:toolchain (only image with nsys); qdstrm import and nsys
+# stats run on the host nsys.
+# Usage: tools/analysis/fa2_hd256_bkv_ab.sh [PP] [PAIRS]. Env: MODEL (default
+# Qwen3.8-27B-NVFP4-vllm), MODELS_DIR, OUT.
 set -euo pipefail
 PP="${1:-4096}"
 PAIRS="${2:-3}"

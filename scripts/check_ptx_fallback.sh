@@ -1,18 +1,8 @@
 #!/bin/bash
-# Assemble the compute_120f PTX fallback (#1650).
-#
-# The build emits the fallback as `code=compute_120f`, which is the PTX-only
-# form: ptxas never runs over it here or in CI, and the first thing that would
-# assemble it is the driver's JIT on the user's GB203. A PTX image that ptxas
-# rejects is therefore a runtime failure on a card nobody in this project owns,
-# discovered by whoever bought one.
-#
-# This extracts every PTX image from a built binary and assembles it. It needs
-# no GPU: ptxas is a compiler.
-#
-# Usage: check_ptx_fallback.sh <binary> [arch]
-# Exit 0 = every PTX image assembles, or the build opted out of the fallback.
-# Exit 1 = one did not assemble, or a build that kept the fallback carries none.
+# Assembles the compute_120f PTX fallback (#1650): emitted as code=compute_120f (PTX-only,
+# ptxas never runs over it here or in CI); the driver's JIT on a GB203 is the first thing that
+# assembles it, so a rejected image is a field failure on a card nobody here owns.
+# Needs no GPU (ptxas is a compiler).
 
 set -uo pipefail
 
@@ -35,12 +25,9 @@ BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# Whether there is a fallback to check is a property of the build, not a thing
-# to infer from the image count. IMP_DISABLE_120F_FALLBACK=ON emits sm_120a
-# SASS only, so zero PTX images is that build doing what it was told; reading
-# it out of the CMakeCache next to the binary is what tells that apart from a
-# build that lost the fallback. Guessing instead is how this guard first
-# shipped, and it turned CI's deliberate opt-out into a red required check.
+# Whether a fallback should exist is a build property, not inferred from image count:
+# IMP_DISABLE_120F_FALLBACK=ON emits sm_120a SASS only (0 PTX images is correct there).
+# Read from CMakeCache.txt next to the binary to tell that apart from a build that lost it.
 CACHE="$(dirname "$BIN")/CMakeCache.txt"
 if [ -f "$CACHE" ] && grep -q '^IMP_DISABLE_120F_FALLBACK:BOOL=ON$' "$CACHE"; then
     echo "check_ptx_fallback: SKIP - $CACHE sets IMP_DISABLE_120F_FALLBACK=ON"

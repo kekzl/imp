@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
-# Invariant I2 (docs/internals/MEMORY.md): nothing allocates device memory while
-# the engine is serving. `steady_state_allocations()` only ever sees what routes
-# through Backend, so the counter reads zero in every shipping build no matter
-# what the 469 direct allocation sites outside src/memory/ do. The --wrap
-# interposer is what closes that gap, and until this target existed it compiled
-# in no make target and no CI job (DEBT_LEDGER_2026_08_21, item 3).
-#
-# Two server configs, because the serving-phase allocators exclude each other:
-#   A  batch > 1 + NVFP4 residual KV + MTP chain
-#      -> engine_scheduler.cpp cudaMallocAsync (B9), the speculative path's
-#         per-step buffers. Residual KV and MTP both switch ragged prefill
-#         OFF (prefill_ragged_enabled_) and MTP keeps json requests off the
-#         constrained pipeline (pipeline_compatible), so phase A never sees
-#         either.
-#   B  MTP off, default KV, four ~1.5k-token prompts at once + json_object
-#      -> ragged prefill (engine_prefill_ragged.cpp, AUDIT_arch_2026 B-4) and
-#         the constrained pipeline (cpipe_).
-# Each phase has its own liveness check and its own pin.
-#
-# Run via `make check-alloc-interpose`, which builds the binary this needs.
+# Invariant I2 (docs/internals/MEMORY.md): nothing allocates device memory while serving.
+# steady_state_allocations() only sees Backend-routed calls; the --wrap interposer closes that
+# gap for every direct allocation site. make check-alloc-interpose builds and runs this.
+# Phase A: batch>1 + NVFP4 residual KV + MTP chain. Phase B: MTP off, default KV, ragged prefill
+# + json_object constrained pipeline. Each phase has its own liveness check and pin.
 set -uo pipefail
 
 BIN=${BIN:-build-interpose/imp-server}
@@ -66,12 +51,9 @@ stop_server() {
     docker logs interpose > "$1" 2>&1
 }
 
-# calls <log>: the per-class call counts summed out of the violation banner.
-# Match on "<class> <n> calls" anywhere in the line, NOT anchored at the start
-# of one. The first class used to be glued to the banner, so an anchored reader
-# skipped it and this gate reported 2 allocations when there were 19.
-# awk, not bc: bc is not installed on this host, and a missing binary would
-# read as "0 allocations" rather than as a broken gate.
+# Matches "<class> <n> calls" anywhere in the line, not anchored at the start (an anchored
+# read used to skip the first class, undercounting 2 vs 19 real allocations).
+# awk, not bc: bc isn't installed on this host, and a missing binary would read as 0 allocations.
 calls() {
     sed -n '/alloc-interpose\] I2 VIOLATIONS/,/pinned host/p' "$1" \
         | grep -oP '(cudaMalloc|cudaMallocAsync|pinned host)\s+\K[0-9]+(?=\s+calls)' \
@@ -117,27 +99,12 @@ verdict() {
     echo "PASS($phase): $n serving allocation(s), exactly the pinned residue (log: $log)"
 }
 
-# Known residue, pinned by CALL COUNT per phase and named by site. A pin may
-# only ever go DOWN: the gate fails on a rise (a new serving allocation) and
-# on a fall (someone fixed one and left the pin stale), the same two-way shape
-# as tools/alloc_allowlist.txt. A pin that can be raised is an exemption with
-# extra steps. Each entry is a work item, not a blessing;
-# docs/audit/DEBT_LEDGER_2026_08_21.md section (g) tracks them.
-#
-# Phase A: 0. Was 19 until 2026-09-07 (15 async graph-loop tables, 2
-# chunk_eager, 1 banned-token upload, 1 arena; the metadata family moved into
-# the serving metadata pool, engine_kv_cache_init.cpp), then 1 (the MTP
-# post-norm feed scratch, a file-static that re-grew per feed length; sized
-# once at enable time since #1940).
+# Per-phase call-count pin, named by site (docs/audit/DEBT_LEDGER_2026_08_21.md section g).
+# Pin may only go DOWN: a rise fails (new serving allocation), a fall fails too (stale pin).
+# Phase A: 0 (the MTP post-norm feed scratch is sized once at enable time since #1940).
 PINNED_A=0
-# Phase B:
-#   3 calls, 0.7 MiB   JsonConstrainer::init (src/compute/constrain_device_buffers.h)
-#                      the constrainer's device tables, built per json request
-#                      on the scheduler thread. Not upload metadata; belongs to
-#                      the constraint-compile cache question.
-#   (closed 2026-09-07: 1 call, 24 KB, VRAMAllocator::allocate <- bind_mrope_
-#    <- bind_mrope_prefill_, the M-RoPE position upload growing to the first
-#    2k-row chunk; sized at init with the serving metadata pool)
+# Phase B: 3 calls, 0.7 MiB, JsonConstrainer::init (src/compute/constrain_device_buffers.h):
+# per-json-request device tables built on the scheduler thread, not upload metadata.
 PINNED_B=3
 
 # ---------------------------------------------------------------- phase A

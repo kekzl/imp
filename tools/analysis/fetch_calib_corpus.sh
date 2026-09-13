@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
-# Assemble the activation-calibration corpus for imp-quantize --calib.
-#
-# Deliberately NOT ppl_corpus_45k.txt. That file is imp's own architecture doc
-# and it is what the quantizer is SCORED on; calibrating on it would tune the
-# scales to the evaluation text and report a gain that does not exist off it.
-# This corpus is general public-domain English prose instead, so a perplexity
-# win on the technical corpus is a win the calibration generalised to.
-#
-# ~150k characters ≈ 35-40k tokens, which is the order AWQ-class methods use.
-# Not checked in: it is a fetched artifact, not source.
-#
-# usage: tools/analysis/fetch_calib_corpus.sh [out-file]
+# Assembles the activation-calibration corpus for imp-quantize --calib. Deliberately NOT
+# ppl_corpus_45k.txt (imp's own arch doc, what the quantizer is SCORED on): calibrating and
+# scoring on one text would report a gain that doesn't generalise.
+# ~150k chars (~35-40k tokens), the order AWQ-class methods use. Not checked in (fetched
+# artifact, not source). Usage: tools/analysis/fetch_calib_corpus.sh [out-file].
 set -euo pipefail
 
 OUT="${1:-/tmp/imp_calib_corpus.txt}"

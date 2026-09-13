@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
-# Decode throughput vs CONFIGURED context capacity, at a fixed (short) live
-# sequence — the measurement behind issue "decode pays for context capacity it
-# never uses".
-#
-# WHY THIS EXISTS: the pinned perf baseline is measured with `imp-cli --bench`,
-# which sizes the engine to the bench workload. imp-server defaults to the
-# model's FULL context. On Qwen3-14B-Q6_K that difference is -38% decode on a
-# ~280-token sequence — i.e. the number the gate protects is not the number a
-# server delivers. This script makes that reproducible in one command.
-#
-# Reports decode tok/s and the captured decode-body graph size (the kernel-node
-# count tracks the penalty exactly), per capacity.
-#
-# Usage: tools/analysis/ctx_capacity_decode_sweep.sh [MODEL] [PORT]
+# Decode throughput vs CONFIGURED context capacity at a fixed short live sequence.
+# The pinned perf baseline sizes the engine to the bench workload, but imp-server defaults to
+# the model's FULL context; on Qwen3-14B-Q6_K that gap is -38% decode on a ~280-token sequence,
+# i.e. the gate's number is not what a server delivers. Reports decode tok/s and the captured
+# decode-body graph size (kernel-node count tracks the penalty) per capacity.
+# Usage: tools/analysis/ctx_capacity_decode_sweep.sh [MODEL] [PORT].
 set -euo pipefail
 
 MODEL="${1:-Qwen3-14B-Q6_K.gguf}"

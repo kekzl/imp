@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# imp-quantize quality A/B: BF16 source vs round-to-nearest NVFP4 vs
-# AWQ-calibrated NVFP4, all three scored by the same imp binary on the same
-# corpus.
-#
-# The two corpora are deliberately different. Calibration reads general
-# public-domain prose (fetch_calib_corpus.sh); scoring reads imp's own
-# architecture doc (ppl_corpus_45k.txt), which is the repo's established PPL
-# corpus. Calibrating and scoring on one text would report a gain that exists
-# only on that text.
-#
-# usage: MODEL_DIR=/home/user/models/Qwen3-0.6B tools/analysis/awq_ppl_ab.sh
+# imp-quantize quality A/B: BF16 source vs RTN NVFP4 vs AWQ-calibrated NVFP4, scored by the
+# same imp binary on the same corpus.
+# Calibration corpus (fetch_calib_corpus.sh, general prose) and scoring corpus
+# (ppl_corpus_45k.txt, imp's own arch doc) are deliberately different, or a gain would only
+# exist on the calibration text. Usage: MODEL_DIR=<path> tools/analysis/awq_ppl_ab.sh.
 set -euo pipefail
 
 MODELS_HOST="${MODELS_HOST:-$HOME/models}"

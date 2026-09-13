@@ -1,9 +1,6 @@
-// AUTO-SPLIT from handlers.cpp (verbatim move; see handlers_internal.h).
-// Shared chat-completion machinery: request-log, state snapshot + tokenize,
-// and the non-streaming chat response builder. Body parsing lives in
-// handlers_chat_params.cpp (split when this TU crossed the 800-LOC hard
-// gate). Used by the OpenAI chat endpoint (handlers_chat.cpp) and the
-// Anthropic messages endpoint (handlers_messages.cpp).
+// AUTO-SPLIT from handlers.cpp. Shared chat-completion machinery: request-log, snapshot+tokenize,
+// non-streaming response builder. Body parsing split into handlers_chat_params.cpp
+// (800-LOC hard gate). Used by OpenAI chat and Anthropic messages endpoints.
 
 #include "runtime/engine.h"
 #include "handlers.h"
@@ -40,19 +37,13 @@
 // so the Anthropic call only logs once at the outer handler.
 thread_local bool g_in_anthropic_shim = false;
 
-// The stop sequence that ended the last non-streaming generation on this
-// thread, or empty. The Anthropic shim runs the OpenAI handler in-process and
-// reads its JSON body back, and that body has no field for this - OpenAI's
-// finish_reason "stop" covers both "the model ended its turn" and "a stop
-// sequence matched". Anthropic distinguishes the two (#1550), so the fact
-// travels beside the body rather than inside it, the same way the log-suppress
-// flag above does.
+// g_shim_stop_sequence: the stop sequence that ended the last non-stream generation on this
+// thread. OpenAI's finish_reason "stop" doesn't distinguish natural end from a stop-sequence
+// match; Anthropic does (#1550), so this travels beside the JSON body.
 thread_local std::string g_shim_stop_sequence;
 
-// Write one JSONL line capturing this request: timing, endpoint, raw client
-// body, token counts, finish reason, and (for non-streaming) the response.
-// Streaming responses pass an empty `response_body` since per-chunk text is
-// not accumulated.
+// Writes one JSONL request-log line: timing, endpoint, raw client body, token counts, finish
+// reason, and (non-streaming only) the response body.
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
                        const std::string& raw_body, double latency_ms, int prompt_tokens,
@@ -101,17 +92,9 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
     state.request_logger.log(record);
 }
 
-// Parses request body, validates params, builds chat_msgs from messages array.
-// Acquires state.mtx lock, snapshots engine state into ctx.snap, sets up
-// tool defs / vision lock / thinking detection, tokenizes the prompt with
-// the chat template, validates prompt length, clamps max_tokens to remaining
-// context, and starts timing. Returns true if OK; sets res with 400/503 and
-// returns false on failure (model not loaded, prompt too long, vision lock
-// timeout, image processing failure).
-// Enforced tool calling (#1002): derive the FSM constraint from the
-// POST-SNAPSHOT template (family + body dialect). Runs after
-// ensure_model_loaded so an auto-loaded or switched model gets the grammar
-// its own template teaches; the parse-time family is never baked in.
+// Enforced tool calling (#1002): derives the FSM constraint from the POST-snapshot template
+// (family+dialect), run after ensure_model_loaded so an auto-loaded/switched model gets its own
+// template's grammar rather than the parse-time guess.
 static void collect_tool_enforcement_(ChatRequestContext& ctx) {
     if (!ctx.params.has_tools)
         return;
@@ -135,11 +118,9 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
             ctx.params.tool_envelope_close = "\n</tool_call>";
         }
     }
-    // Qwen-Coder / Qwen3.6 XML templates: same <tool_call> envelope and
-    // selection logic, but the BODY grammar is the XML dialect
-    // (<function=NAME><parameter=KEY> with raw-text values) — flag it so the
-    // engine builds the XML FSM instead of the JSON body FSM, which masks raw
-    // newlines and mangles multi-line (code) arguments.
+    // Qwen-Coder/Qwen3.6 XML templates share the <tool_call> envelope but the BODY grammar is XML
+    // (<function=NAME><parameter=KEY>, raw-text values): flag it so the engine builds the XML FSM,
+    // not the JSON one, which masks newlines and mangles multi-line arguments.
     if (!ctx.params.tool_constraint_tools.empty() &&
         ctx.snap.tpl_family == imp::ChatTemplateFamily::CHATML && ctx.snap.have_template &&
         ctx.snap.chat_tpl.tool_xml_dialect())
@@ -160,10 +141,9 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
 }
 
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx) {
-    // Read under the lock, acted on after it: whether the LOADED model can see
-    // images at all. A request that carries pictures a model has no tower for
-    // used to fall through to the text-only path and be answered as if nothing
-    // had been sent (#1198).
+    // model_has_vision: whether the LOADED model can see images at all. Without this check, a
+    // request carrying images for a model with no vision tower answered as if nothing had been
+    // sent (#1198).
     bool model_has_vision = false;
     // Snapshot all state fields needed for request processing under lock.
     // This protects against concurrent model load/unload invalidating pointers.
@@ -197,12 +177,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.has_vision_request = !ctx.params.images.empty() && model_has_vision;
     }
 
-    // Refuse rather than answer from the text alone. Silently dropping the
-    // image is the worst of the three options: a refusal is trivial for a
-    // caller to handle, but a fluent answer about a picture the model never
-    // received is indistinguishable from a real one — it reads as a verdict.
-    // The load-time WARN ("the vision tower will be skipped") is in the server
-    // log, not in the response, so nothing reached the client at all.
+    // Refuse (not silently drop) images when the loaded model has no vision tower: a fluent
+    // text-only answer about a picture the model never received is indistinguishable from a real
+    // one. The load-time WARN never reaches the client.
     if (!ctx.params.images.empty() && !model_has_vision) {
         res.status = 400;
         json error = {
@@ -220,33 +197,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
 
-    // Enforced tool calling (#1002): tool_choice=required / forced function /
-    // strict:true constrains generation via the schema FSM (JSON or XML body
-    // per the template's dialect). Collected HERE, after ensure_model_loaded:
-    // the request may have auto-loaded or switched the model, so the grammar
-    // must derive from the template that actually renders this prompt — the
-    // parse-time family in handlers_chat_params is a pre-load best guess.
+    // Called after ensure_model_loaded (#1002): the request may have auto-loaded or switched the
+    // model, so the grammar must derive from the template that actually renders this prompt, not
+    // the parse-time family guess.
     collect_tool_enforcement_(ctx);
 
-    // #1592: refuse rather than degrade. `tool_choice: "required"` and a named
-    // function are enforced by the decode FSM only where the family's tool
-    // envelope has a grammar; everywhere else the constraint used to become a
-    // sentence in the prompt and the request was answered 200 with prose, with
-    // nothing saying so. An agent doing `msg.tool_calls[0]` gets a TypeError;
-    // one branching on finish_reason treats a required call as a chat turn.
-    //
-    // Measured on this build, `tool_choice: "required"` or a named function,
-    // 10 requests each at temperature 0.7:
-    //
-    //   gemma-3-12b Q4_K_M   (GEMMA)    0/10 required, 0/10 named
-    //   gemma-4-26B  Q4_K_M  (GEMMA)    0/10 required   ("<call>get_weather(city='Berlin')" as prose)
-    //   gpt-oss-20b MXFP4    (HARMONY)  0/10 required, 0/10 named (empty content)
-    //   Qwen3-4B Q8_0        (CHATML)   10/10 required, 10/10 named
-    //
-    // 0 of 40 on the families without a grammar. That is not "degrades
-    // sometimes", and a 400 the caller can branch on beats prose it cannot.
-    // `tool_choice: "auto"` is untouched - Gemma-4 still produced 1/10 there,
-    // and a best-effort call is what auto asks for.
+    // #1592: refuse (400) tool_choice "required"/named-function when the family's template has no
+    // tool-call grammar, rather than degrade to a prose hint with 200. Measured 0/40 across
+    // gemma-3/gemma-4/gpt-oss (no grammar) vs 10/10 on Qwen3-4B ChatML (has one); "auto" is untouched.
     if (ctx.params.has_tools && !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice)) {
         const char* fam = imp::chat_template_family_name(ctx.snap.tpl_family);
         const bool named = ctx.params.tool_choice.is_object();
@@ -266,11 +224,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
 
-    // Channel models (Gemma-4) are more susceptible to sampling-driven
-    // degeneration on casual prompts than DeepSeek-style reasoning models.
-    // If the caller didn't specify a sampler parameter, tighten the default
-    // to suppress the tail of the distribution. Qwen3 / DeepSeek / non-channel
-    // models retain the 0.95 / 40 / 1.0 defaults.
+    // Channel models (Gemma-4) degenerate more easily on casual prompts under default sampling;
+    // tighten the default when the caller doesn't specify a sampler param. Qwen3/DeepSeek keep
+    // 0.95/40/1.0 defaults.
     if (ctx.snap.channel_open_id >= 0) {
         if (!ctx.params.top_p_explicit)
             ctx.params.top_p = 0.9f;
@@ -297,11 +253,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // tools_via_jinja tracks whether we'll attempt the Jinja2 tools path
     ctx.snap.tools_via_jinja = !ctx.snap.tool_defs.empty();
 
-    // Vision (per-request, F-A5): CPU-preprocess the image into
-    // ctx.snap.vision_image — no engine pause, no global image. Each
-    // request-build site copies it to req->image; the batch worker encodes +
-    // binds it per-request on admission, so a vision request batches like text.
-    // Soft-token placeholders are injected by apply_with_image() below.
+    // Vision (per-request, F-A5): CPU-preprocess into ctx.snap.vision_image, no engine pause and no
+    // global image state. Batch worker encodes+binds per-request on admission so vision batches like text.
     if (ctx.snap.has_vision_request) {
         auto fail = [&](const std::string& why) {
             res.status = 400;
@@ -347,39 +300,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         }
     }
 
-    // Thinking mode default: ON for think models in plain chat. These models
-    // are trained with the <think> prefix; serving them without it produces
-    // bare reasoning that cannot be separated and leaks into user-visible
-    // content ("Okay, let's see. The user is asking..." as the answer — the
-    // recurring think-leak bug class). Exceptions, where entering reasoning
-    // mode breaks the requested output format: structured output (json_mode)
-    // and tool calls keep the old default OFF. An explicit "enable_thinking"
-    // in the request always wins in both directions.
-    // Template evidence guard: vocab-level <think> specials alone are not
-    // proof of a think-trained model — Qwen3-*-Instruct-2507 ships the Qwen3
-    // vocab (incl. <think>) but never opens a think block; defaulting it to
-    // thinking traps the entire answer in reasoning_content (content "").
-    // Default ON only when the chat template itself references thinking.
-    // Models without a Jinja template keep the previous default (no evidence
-    // either way); an explicit "enable_thinking" still wins in both cases.
-    // Only a present-but-silent Jinja template counts as evidence AGAINST
-    // thinking; hardcoded families / templateless runs keep the old default.
+    // Thinking defaults ON for think-trained models in plain chat (avoids reasoning leaking into
+    // content); OFF for json_mode/tool-calls. Explicit enable_thinking always wins. Flips OFF only
+    // when the Jinja template itself never mentions thinking (guards e.g. Qwen3-Instruct-2507).
     const bool template_think_evidence = !ctx.snap.have_template || !ctx.snap.chat_tpl.has_jinja() ||
                                          ctx.snap.chat_tpl.mentions_thinking();
-    // A regex or grammar constraint is structured output too: it covers the
-    // WHOLE reply, so a reasoning preamble cannot be emitted without violating
-    // it — the constrainer's gate would hold the mask open while the model
-    // spends the budget thinking, and the caller gets prose instead of the
-    // format.
-    //
-    // `json_schema` belongs in that list and was missing from it, which is the
-    // whole of #1431: a schema request kept thinking on, the gate held the mask
-    // open for the reasoning, and on a model whose `</think>` is a multi-token
-    // BPE sequence (Qwen3.8: `think_start_id` is -1) the block never closed in
-    // the text the splitter reads. The answer was written inside the reasoning
-    // channel and `content` came back EMPTY. Measured before the fix: 0 of 8 at
-    // temperature 0, against 10 of 10 on Qwen3.6-27B, whose `</think>` IS a
-    // single token.
+    // #1431: any structured-output constraint (regex/grammar/json_schema) covers the WHOLE reply, so
+    // thinking must be disabled - the constrainer would hold the mask open through reasoning. On a
+    // model whose </think> is multi-token BPE the block never closed in text (0/8 wrong vs 10/10 fixed).
     const bool thinking_default =
         ctx.snap.is_think_model && template_think_evidence &&
         !imp::server::structured_output_excludes_thinking(
@@ -387,26 +315,15 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             !ctx.params.regex_pattern.empty(), !ctx.params.grammar.empty());
     const bool want_thinking = ctx.params.enable_thinking_set ? ctx.params.enable_thinking_requested
                                                               : thinking_default;
-    // think_budget is the fraction of max_tokens reserved for reasoning;
-    // think_budget <= 0 means "no reasoning headroom" → disable thinking entirely
-    // (documented "0 = disabled"). Folding it into enable_thinking keeps the two
-    // flags consistent: without this, budget=0 left thinking ON yet never armed
-    // the force-close, so the model reasoned to max_tokens and returned empty
-    // content (#752). The Anthropic "disabled" path already zeroes the budget.
+    // think_budget<=0 disables thinking entirely (folded into enable_thinking): budget=0 used to
+    // leave thinking ON without arming the force-close, so the model reasoned to max_tokens with
+    // empty content (#752).
     const bool budget_disables_thinking = ctx.params.think_budget <= 0.0f;
     ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 && want_thinking &&
                                !budget_disables_thinking;
-    // Suppressing means STAMPING `enable_thinking=false` into the Jinja context,
-    // which is the only thing that makes a template render its pre-closed
-    // `<think></think>` block. Leaving it unstamped lets the template fall back
-    // to its own default, and Qwen3.8's default is an OPEN `<think>`: the server
-    // then believes thinking is off while the prompt says it is on, and the
-    // reconcile step correctly flips the splitter to REASONING for a block that
-    // never closes.
-    //
-    // So it is not enough that thinking was disabled: it has to be disabled
-    // where the template can see it. Any reason to not want thinking now
-    // suppresses, rather than only a zero budget.
+    // Suppressing thinking means stamping enable_thinking=false into the Jinja context: an unstamped
+    // template falls back to its own default, and e.g. Qwen3.8 defaults to an OPEN <think> block,
+    // which the reconcile step below would then read as reasoning that never closes.
     ctx.snap.suppress_thinking = imp::server::should_stamp_thinking_off(
         ctx.snap.is_think_model, ctx.snap.enable_thinking, budget_disables_thinking, want_thinking);
     ctx.snap.reasoning_effort = ctx.params.reasoning_effort;
@@ -417,21 +334,16 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ids.erase(std::remove(ids.begin(), ids.end(), ctx.snap.think_start_id), ids.end());
     }
 
-    // Guard against hallucinated turn boundaries ("Human\n") that thinking
-    // models emit at high temperature. Only inject if the caller didn't
-    // already provide stop sequences (respect user intent).
-    // Not under ignore_eos: a benchmark run past EOS rambles into "\nHuman"
-    // within a few tokens and the implicit stop would end it early.
+    // Injects an implicit stop on hallucinated turn boundaries ("Human\n") that thinking models emit
+    // at high temperature, only when the caller supplied no stop sequences. Skipped under ignore_eos
+    // (a benchmark run past EOS would stop early).
     if (ctx.snap.is_think_model && ctx.params.stop_sequences.empty() && !ctx.params.ignore_eos) {
         ctx.params.stop_sequences.push_back("\nHuman");
     }
 
-    // force_thinking stamps enable_thinking=true INTO the Jinja render, so a
-    // template that defaults the variable to a pre-closed block (Qwen3.5-4B)
-    // actually opens the think block when the caller EXPLICITLY asked for
-    // thinking — otherwise `enable_thinking:true` was a silent no-op on such
-    // templates. Only for an explicit request: the default case stays undefined
-    // so each template author's own default wins (Qwen3 open vs Gemma-4 closed).
+    // force_thinking stamps enable_thinking=true into the Jinja render so a template defaulting to a
+    // pre-closed block (Qwen3.5-4B) actually opens thinking when the caller explicitly asks - an
+    // explicit enable_thinking:true was otherwise a silent no-op on such templates.
     const bool force_thinking = ctx.params.enable_thinking_set && ctx.params.enable_thinking_requested &&
                                 ctx.snap.enable_thinking;
 
@@ -446,15 +358,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     // Tokenize with chat template (with image tokens if vision is active)
     if (ctx.snap.have_template && !ctx.snap.qwen_patches.empty()) {
-        // The chat template renders one <|image_pad|> per block — at template
-        // time nobody knows how big each image will be after smart_resize. Put
-        // one block per image in front of the first user turn, render, then
-        // expand each placeholder to its own count.
-        //
-        // All of them go on the first user turn, which is where a single image
-        // already went: the request parser keeps the pictures in order but not
-        // which message they came from, so this is the position that is
-        // actually known rather than guessed.
+        // Chat template renders one <|image_pad|> per image before sizes are known (smart_resize runs
+        // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
+        // then each placeholder expands to its real token count.
         std::string blocks;
         for (size_t i = 0; i < ctx.snap.qwen_patches.size(); ++i)
             blocks += "<|vision_start|><|image_pad|><|vision_end|>";
@@ -490,11 +396,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         // If Jinja2 tools render failed, fall back to text-based tool prompt injection
         if (ctx.snap.tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
-            // The text fallback advertises the ChatML JSON body — an armed XML
-            // body constraint would fight the prompt. Drop to the hint (not to
-            // the JSON FSM: an XML-finetuned model would fight that grammar
-            // too). bare_args is never set on this path (xml implies the
-            // ChatML collectors matched, see collect_tool_enforcement_).
+            // Text-fallback hint advertises the ChatML JSON body; when an XML tool constraint is armed, drop
+            // to the hint (not the JSON FSM) so an XML-finetuned model isn't fought with the wrong grammar.
             if (ctx.params.tool_constraint_xml) {
                 ctx.params.tool_constraint_xml = false;
                 ctx.params.tool_constraint_tools.clear();
@@ -563,12 +466,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.tokens = ctx.snap.tok->encode(raw);
     }
 
-    // cache_control per-breakpoint boundary (#1046): re-render the leading
-    // messages up to the marked block and count tokens — the engine then pins
-    // only that many prompt tokens (rounded down to full KV blocks) instead
-    // of the whole prompt. Render jitter vs. the full prompt (generation
-    // prompt, template joins) is at most ~a block; pins are eviction
-    // protection, not correctness state, so approximate is fine.
+    // cache_control breakpoint (#1046): re-render leading messages up to the marked block and count
+    // tokens; engine pins that many tokens (rounded down to full KV blocks) against eviction.
+    // Approximate is fine - pins are eviction protection, not correctness state.
     if (ctx.params.cache_prompt && ctx.params.cache_prefix_messages > 0 &&
         ctx.params.cache_prefix_messages < static_cast<int>(ctx.params.chat_msgs.size()) &&
         ctx.snap.have_template) {
@@ -582,30 +482,11 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                 .size());
     }
 
-    // Thinking-state pipeline (single source of truth = the rendered prompt):
-    //   1. INTENT  — `want_thinking` above: explicit request, else heuristic.
-    //   2. RENDER  — apply() stamps enable_thinking only when we force/suppress
-    //      (above); otherwise the template author's own default decides.
-    //   3. GROUND TRUTH — the block below reconciles enable_thinking against what
-    //      the render actually produced in the prompt tail (open <think> prefix →
-    //      thinking on; pre-closed block → off), then force-appends <think> for
-    //      templateless think-models. Stages 2–3 keep the splitter's start phase
-    //      consistent with the bytes the model will actually continue from.
-    //
-    // Detect chat-template-injected <think> prefix (Qwen3 / Qwen3.5 / Qwen3.6
-    // / DeepSeek-R1 add `<think>\n` via add_generation_prompt by default). When
-    // present, the model output starts mid-thinking with no opener — only a
-    // closing `</think>` mid-stream. Matches vLLM's qwen3 reasoning_parser
-    // auto-detection (see vllm/reasoning/qwen3_reasoning_parser.py docstring).
-    // Treating these models as thinking-enabled lets the SSE stream emit
-    // `reasoning_content` chunks until `</think>` is seen, then `content`.
-    //
-    // Detection is done over decoded text (not token-ID equality) because
-    // Qwen3.6 ships `<think>`/`</think>` as `added_tokens` with `special=False`,
-    // so the BPE tokenizer breaks them into 3 pieces (`<`, `think`, `>`)
-    // rather than the single special-token id. vLLM's parser sidesteps this
-    // by promoting them at AutoTokenizer load; imp's tokenizer doesn't, so
-    // we match on the rendered string instead.
+    // Thinking-state pipeline: INTENT (explicit request or heuristic) -> RENDER (apply() stamps
+    // enable_thinking only when forced/suppressed) -> GROUND TRUTH (below: reconcile against the
+    // actual rendered prompt tail, matching vLLM's qwen3_reasoning_parser auto-detection).
+    // Detects on decoded text, not token-ID equality: Qwen3.6 ships <think>/</think> as non-special
+    // added_tokens, so BPE splits them into 3 pieces instead of one special-token id.
     auto prompt_tail_contains = [&](const char* needle, int max_tail_tokens) -> bool {
         int n = static_cast<int>(ctx.snap.tokens.size());
         int start = std::max(0, n - max_tail_tokens);
@@ -615,37 +496,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         }
         return tail_text.find(needle) != std::string::npos;
     };
-    // No special-token requirement here: Nemotron-style models think at TEXT
-    // level ("<think>" renders as plain text pieces, "</think>" closes it) —
-    // when their chat template injects the prefix, the output is reasoning
-    // from token 0 and must flow into reasoning_content, not content.
-    //
-    // Only an OPEN think prefix counts: when thinking is suppressed, Qwen3's
-    // template injects a *closed* empty block `<think>\n\n</think>\n\n` (so the
-    // model answers directly). That tail contains "<think>" too — re-enabling on
-    // it would defeat suppression entirely (the model thinks despite the closed
-    // block). Require "<think>" present AND no matching "</think>" in the tail.
-    // Window 16 (not 8) so both tags of the adjacent closed block fall inside
-    // the same tail — otherwise "<think>" could be in-window while "</think>"
-    // just falls off, mis-reading a closed block as an open prefix.
-    // Reconcile enable_thinking with what the template actually rendered — the
-    // prompt tail is ground truth. An OPEN prefix (<think>, no </think>) is
-    // mid-reasoning and turns thinking ON; a pre-closed block (<think> AND
-    // </think>) means the template chose answer-directly and turns it OFF, even
-    // if the heuristic defaulted it ON (#934: Qwen3.5-4B mentions enable_thinking
-    // but defaults to a closed block — without this the whole answer is trapped
-    // in reasoning_content). Window 16 so both tags of the adjacent closed block
-    // fall in the same tail (a lone in-window "<think>" would else read as open).
+    // Reconcile: an OPEN <think> prefix (no matching </think> in the tail) turns thinking ON; a
+    // pre-closed block (<think>...</think>) turns it OFF even if the heuristic defaulted ON (#934:
+    // Qwen3.5-4B mentions enable_thinking but defaults closed, else content is empty).
+    // Window 16 (not 8) so both tags of an adjacent closed block land in the same tail scan.
     {
         const bool tail_has_think = prompt_tail_contains("<think>", 16);
         const bool tail_has_close = prompt_tail_contains("</think>", 16);
         const bool was_thinking = ctx.snap.enable_thinking;
         ctx.snap.enable_thinking = imp::server::reconcile_thinking_with_prompt_tail(
             ctx.snap.enable_thinking, ctx.params.enable_thinking_set, tail_has_think, tail_has_close);
-        // If the reconcile turned thinking OFF after the snapshot had removed the
-        // provisional <think> stop token (removed above while it was ON), restore
-        // it: a non-thinking think-model still needs the phantom-"<think>"-turn
-        // guard. (The upgrade direction keeps the prior behavior untouched.)
+        // If reconcile flips thinking OFF after the snapshot already removed the provisional <think>
+        // stop token (added while ON), restore it - a non-thinking think-model still needs the
+        // phantom-"<think>"-turn guard.
         if (was_thinking && !ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
             auto& ids = ctx.snap.stop_token_ids;
             if (std::find(ids.begin(), ids.end(), ctx.snap.think_start_id) == ids.end())
@@ -667,10 +530,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     ctx.snap.n_prompt_tokens = static_cast<int>(ctx.snap.tokens.size());
 
-    // Predicted Outputs: tokenize the prediction text while we hold the
-    // tokenizer. Plain encode (no template, no specials) — these tokens only
-    // seed the n-gram draft corpus, they are never forwarded. Clamped to the
-    // model context so a hostile prediction can't blow up the host-side scan.
+    // Predicted Outputs: tokenize `prediction.content` (plain encode, no template/specials) to seed
+    // the n-gram draft corpus only - never forwarded as output. Clamped to model context.
     if (!ctx.params.prediction_text.empty()) {
         ctx.snap.prediction_tokens = ctx.snap.tok->encode(ctx.params.prediction_text);
         if (ctx.snap.max_seq_len > 0 &&
@@ -697,11 +558,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
 
-    // Per-request LoRA selection (#522): the name is resolved here; the
-    // batching worker switches the engine-global adapter at admission, once
-    // nothing of another adapter is in flight (AUDIT_arch_2026 E-1). One
-    // adapter is active at a time; a request naming a different one queues
-    // behind that barrier rather than racing the worker from this thread.
+    // Per-request LoRA selection (#522): name resolved here; batching worker switches the
+    // engine-global adapter at admission once nothing of another adapter is in flight
+    // (AUDIT_arch_2026 E-1). One adapter active at a time; others queue behind the barrier.
     {
         int32_t want = 0;
         if (!ctx.params.lora_name.empty()) {
@@ -791,11 +650,8 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tpl_family = ctx.snap.tpl_family;
     req->logit_bias = ctx.params.logit_bias;
     req->think_budget = ctx.params.think_budget;
-    // Generation starts INSIDE the think block when the prompt carries the
-    // <think> prefix (template-injected or server-appended). Without this
-    // the engine's think-budget enforcement never sees an opener in the
-    // output, counts zero reasoning tokens, and lets the model think until
-    // max_tokens (content empty, finish=length).
+    // req->started_in_think = enable_thinking: without it the engine's think-budget enforcement
+    // never sees an opener in the output and lets the model reason to max_tokens (content empty).
     req->started_in_think = ctx.snap.enable_thinking;
     req->in_think_block = ctx.snap.enable_thinking;
     // Stream requests stay on per-step decode for real per-token SSE (#754).
@@ -804,10 +660,8 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     return req;
 }
 
-// Non-streaming chat completion: run n_completions independent generations
-// sequentially via the batching engine, build the choices array with
-// reasoning_content / tool_calls / logprobs as appropriate, send a single
-// JSON response. Caller has already submitted server_req via state.batching.
+// Runs n_completions independent generations sequentially via the batching engine, then sends
+// one JSON response with the combined choices array.
 void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
                               std::shared_ptr<imp::Request>& imp_req,
                               std::shared_ptr<ServerRequest>& server_req,
@@ -873,10 +727,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             int32_t token = evt.token_id;
 
-            // Silently drop structural stop tokens that slipped through.
-            // The engine's think-block implicit-close passes ONE EOS-like
-            // token through to recover from empty thinking; it must not
-            // appear as user-visible content.
+            // Drops structural stop tokens that slip through: the engine's think-block implicit-close passes
+            // one EOS-like token to recover from empty thinking, which must never reach user-visible content.
             bool is_structural_stop = (token == ctx.snap.tok->eos_id());
             if (!is_structural_stop && ctx.snap.have_template) {
                 for (int32_t stop_id : ctx.snap.stop_token_ids) {
@@ -935,10 +787,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                 if (q >= 0.0)
                     state.metrics.queue_time.observe(q / 1000.0);
             } else if (!output_ids.empty()) {
-                // ITL was observed on the streaming path only (#1577), so the
-                // histogram described streaming traffic and said nothing
-                // about this loop's tokens. Per completion: the first token of
-                // a second n>1 completion is not a gap.
+                // ITL was observed on the streaming path only (#1577); this loop adds it for non-streaming
+                // too.
+                // Per completion: the first token of a second (n>1) completion is not a gap.
                 state.metrics.inter_token.observe(
                     std::chrono::duration<double>(t_tok - t_prev_token).count());
             }
@@ -949,10 +800,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             if (!ctx.params.stop_sequences.empty()) {
                 output_text += ctx.snap.tok->decode_token(token);
                 bool stop_found = false;
-                // Earliest occurrence, and remember which one: the Anthropic
-                // shim reports the matched sequence (#1550), and taking the
-                // first list entry that occurs anywhere cuts at the wrong
-                // offset when two stops are present.
+                // Finds the earliest-occurring stop sequence and which one matched (#1550, Anthropic shim
+                // reports it) - taking the first list entry regardless of position cuts at the wrong offset
+                // when two stop sequences are both present.
                 size_t best = std::string::npos;
                 for (const auto& stop : ctx.params.stop_sequences) {
                     auto pos = output_text.find(stop);
@@ -980,18 +830,12 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         if (!finish)
             finish = "length";
 
-        // Admission refusal (I6): the KV pool can never hold this prompt, so no
-        // amount of waiting or retrying at the same length helps. Returning a
-        // 200 with an empty completion — which is what a generic "cancelled"
-        // produced — makes an unservable request look like a model that chose
-        // to say nothing. 503 with the reason is the honest answer, and it is
-        // the code a client is expected to back off / re-route on.
+        // Admission refusal (invariant I6): the KV pool can never hold this prompt, so retrying at the
+        // same length never helps. 503 with the reason (not 200 with an empty completion, which read as
+        // "the model chose to say nothing").
         if (std::strcmp(finish, "capacity") == 0) {
-            // On a pool that fell back to its rescue floor, "shorten the prompt"
-            // is advice that cannot be followed: the pool holds a few hundred
-            // tokens and the fault is the startup, not the request. Say which
-            // of the two situations this is, or the caller tunes the prompt
-            // against a server that will refuse every length worth sending.
+            // floored: true when the pool fell back to its rescue floor (a few hundred tokens) - "shorten
+            // the prompt" is not actionable advice there, it's a startup fault. Name which situation this is.
             bool floored = false;
             if (state.ctx && state.ctx->engine)
                 floored = state.ctx->engine->kv_pool_floored();
@@ -1030,37 +874,27 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // different text for the same request (#1310).
         drop_incomplete_utf8_tail(content);
 
-        // Extract reasoning content (DeepSeek format) or strip think blocks.
-        // enable_thinking also covers text-level thinkers (Nemotron) whose
-        // template injects "<think>" as plain text — is_think_model is false
-        // but the output is reasoning until the literal "</think>".
+        // Extracts reasoning_content (DeepSeek marker format) or strips think blocks. enable_thinking
+        // also covers text-level thinkers (Nemotron): is_think_model is false but output is reasoning
+        // until the literal "</think>".
         std::string reasoning_content;
-        // Harmony's tool call IS a channel, and the split below consumes the
-        // channels. The tool parse runs ~60 lines further down, on `content` -
-        // by then the markup is gone and there is nothing left to find, which
-        // is why #1716 survived a green unit test of the parser itself. Keep
-        // the raw text for it.
+        // harmony_raw: kept because gpt-oss's tool call IS a Harmony channel and the split below consumes
+        // channels. The tool-call parser runs later on `content`, where the markup is already gone
+        // (#1716 survived a green unit test of the parser alone).
         std::string harmony_raw;
         if (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY) {
             harmony_raw = content;
-            // gpt-oss Harmony: split the <|channel|>analysis|final<|message|>…
-            // blocks so the analysis channel becomes reasoning_content and the
-            // final channel becomes the answer. Without this the raw Harmony
-            // markup leaks verbatim into content (#760).
+            // gpt-oss Harmony: splits <|channel|>analysis|final<|message|>... into reasoning_content
+            // (analysis) and content (final); without this the raw markup leaks verbatim (#760).
             auto segs = split_harmony_channels(content);
             content = std::move(segs.content);
             if (state.default_args.reasoning_format != "none")
                 reasoning_content = std::move(segs.reasoning);
         } else if ((ctx.snap.is_think_model || ctx.snap.enable_thinking) &&
                    state.default_args.reasoning_format == "deepseek") {
-            // Generation that started inside an injected <think> prefix
-            // (chat-template or server-appended; see prompt_tail_contains
-            // above) carries no opener in its output. If it also never
-            // reached </think> — budget exhausted mid-think, or the model
-            // stopped while reasoning — the WHOLE text is reasoning.
-            // extract_reasoning() can't tell that from text alone and would
-            // spill it into user-visible content (the streaming path gets
-            // this right via its in-think state machine).
+            // If generation started inside an injected <think> prefix and never reached </think> (budget
+            // exhausted, or stopped mid-think), the WHOLE text is reasoning - extract_reasoning() cannot
+            // tell that from text alone (streaming path handles it via its state machine).
             if (ctx.snap.enable_thinking && content.find("</think>") == std::string::npos &&
                 content.find("<think>") == std::string::npos) {
                 reasoning_content = std::move(content);
@@ -1074,11 +908,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             strip_think_block(content);
         }
 
-        // Gemma-4 channel headers: structural "<|channel>NAME[<channel|>]…"
-        // wraps both the chain-of-thought and the user-facing answer. Split
-        // them so "thought" content goes to reasoning_content (OpenAI-
-        // compat) and "final" content stays in content. Falls back to
-        // strip-only if the request asked reasoning_format=none.
+        // Gemma-4 channel headers "<|channel>NAME[<channel|>]..." wrap both CoT and answer: "thought"
+        // goes to reasoning_content, "final" stays in content. Falls back to strip-only for
+        // reasoning_format=none.
         if (ctx.snap.channel_open_id >= 0) {
             if (state.default_args.reasoning_format == "none") {
                 strip_channel_headers(content);
@@ -1091,11 +923,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             }
         }
 
-        // usage.completion_tokens_details.reasoning_tokens. The streaming path
-        // has reported it from its split state machine since #1593; this one
-        // reported nothing, so the same request answered two different numbers
-        // depending on the transport and /v1/responses non-stream always said 0
-        // (responses.cpp reads the OpenAI field). Counting rule: utils.h.
+        // completion_tokens_details.reasoning_tokens: streaming has reported this since #1593; without
+        // it here the same request answered different numbers depending on transport, and non-stream
+        // /v1/responses always said 0. Counting rule lives in utils.h.
         total_reasoning_tokens += nonstream_reasoning_tokens(
             output_ids, ctx.snap.think_start_id, ctx.snap.think_end_id,
             active_req && active_req->started_in_think, reasoning_content.size(),
@@ -1109,11 +939,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size());
         }
 
-        // Parse tool calls from model output. Run even on finish=length:
-        // the model may have emitted a complete tool_call and then kept
-        // generating until the budget ran out (common before we hook the
-        // family-specific close marker as a stop token). The parser is
-        // tolerant of trailing garbage after the closing marker.
+        // Tool-call parsing runs even on finish=length: the model may emit a complete tool_call then
+        // keep generating until the budget runs out. Parser tolerates trailing garbage after the closing
+        // marker.
         std::vector<ParsedToolCall> tool_calls;
         std::string tool_validation_error;
         if (ctx.params.has_tools) {
@@ -1172,12 +1000,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         }
 
         json choice = {{"index", ci}, {"message", msg}, {"finish_reason", openai_finish_reason(finish)}};
-        // finish_reason stays "stop"/"length" (client compatibility: the enum
-        // has no member for this and an unknown value breaks strict SDKs). The
-        // imp-namespaced detail beside it is the machine-readable half a caller
-        // can act on, replacing "read the server log" as the only way to tell
-        // an exhausted reasoning budget from a model that chose silence. The
-        // decision AND the write live in utils.h, where a CPU test reaches them.
+        // finish_reason stays "stop"/"length" for SDK compatibility (an unknown enum value breaks strict
+        // SDKs); the imp-namespaced detail beside it is the machine-readable half a caller can act on.
+        // Decision and write both live in utils.h, reachable from a CPU test.
         attach_reasoning_finish_detail(choice, !tool_calls.empty(), content.empty(),
                                        !reasoning_content.empty());
         if (!logprobs_obj.is_null()) {

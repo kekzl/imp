@@ -55,16 +55,10 @@ async def main() -> int:
         ),
         tools=[write_file, read_file],
         model=model,
-        # temperature=0 because this gate asserts the LOOP works, not that
-        # sampling got lucky.
-        #
-        # max_tokens is the setting that actually decides the outcome, and the
-        # reason is the MODEL, not the server. Measured on Qwen3-8B-Q8_0 against
-        # this exact request: at 400 the reply is `reasoning` + `function_call`
-        # (232 output tokens); at 1400 it is a bare `message` (511) — given room,
-        # the model reasons its way past the call and answers in prose instead.
-        # imp emits both shapes correctly, which is why the leg pins the budget
-        # rather than the dialect.
+        # temperature=0: this gate asserts the LOOP works, not that sampling got lucky.
+        # max_tokens is what decides the outcome (the MODEL, not the server): on Qwen3-8B-Q8_0, 400
+        # yields reasoning+function_call, 1400 yields a bare message (model reasons past the call given
+        # room). imp emits both shapes correctly; the leg pins the budget for that reason.
         model_settings=ModelSettings(temperature=0.0, max_tokens=400),
     )
 

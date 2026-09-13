@@ -1,27 +1,15 @@
 #!/bin/bash
-# verify_ab.sh - paired, alternating A/B of the perf-gate bench between two images.
-#
-# WHY THIS EXISTS
-# scripts/verify.sh compares one arm against tests/perf_baseline.json, a pin
-# measured weeks earlier. This host's same-tree movement between sessions is
-# 4-6 % (release day 2026-09-04: 294.53 vs 277.73 tg128 on one tree), so the
-# single-arm 8 % gate cannot resolve anything smaller: its one demonstrated
-# catch is -36 % (M29), and -7.3 % shipped at +0.33 % (#1270). A paired A/B in
-# one session cancels the host: arm A = origin/main built into imp:ab-<sha>
-# (scripts/ab_base_image.sh), arm B = imp:test (this tree). PAIRS alternating
-# pairs (A B, B A, A B), the bench line verify.sh uses, one process per arm
-# run, the delta per pair and the mean over pairs (AUDIT_arch_2026 H-3).
-#
-# Usage: scripts/verify_ab.sh [IMG_A] [IMG_B]
-#   AB_PAIRS=3                 pairs (each pair = one run of each arm)
-#   AB_THRESHOLD_PCT=<n>       overrides thresholds.paired_decode_regression_pct
-#   MODELS_DIR=$HOME/models    where the pin's model lives
-#   IMP_VERIFY_BASELINE        pin to read model + threshold from
-#   IMP_VERIFY_CHUNK_SIZE=0    prefill chunk, as in verify.sh
-#   AB_MODEL=<file>            bench this model (under MODELS_DIR) instead of the pin's
-#   AB_EXTRA="--set k=v ..."   extra imp-cli args, applied to BOTH arms (an ad-hoc
-#                              A/B of a path the pin's default config does not take)
-# Exit 1 when the mean paired decode delta is below -threshold; prefill warns.
+# Paired, alternating A/B of the perf-gate bench between two images: verify.sh compares one
+# arm against a weeks-old pin, but this host's same-tree movement between sessions is 4-6%, so
+# the single-arm 8% gate can't resolve anything smaller (one demonstrated catch is -36%; a
+# -7.3% regression once shipped at +0.33%, #1270).
+# Arm A = origin/main built into imp:ab-<sha> (ab_base_image.sh), arm B = imp:test (this tree).
+# Alternates pairs (A B, B A, ...), one process per arm run, reports delta per pair and mean
+# over pairs (AUDIT_arch_2026 H-3).
+# Usage: scripts/verify_ab.sh [IMG_A] [IMG_B]. AB_PAIRS=3, AB_THRESHOLD_PCT=<n>,
+# MODELS_DIR=$HOME/models, IMP_VERIFY_BASELINE, IMP_VERIFY_CHUNK_SIZE=0, AB_MODEL=<file>,
+# AB_EXTRA="--set k=v..." (applied to both arms). Exit 1 when mean paired decode delta is below
+# -threshold; prefill warns.
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"

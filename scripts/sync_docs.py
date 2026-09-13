@@ -43,12 +43,9 @@ def render(data: dict) -> str:
     out = ["| metric | value | threshold |", "|---|---|---|"]
     out += [f"| {a} | {b} | {c} |" for a, b, c in rows]
     out.append("")
-    # #1684: cuda, commit and quant were string literals here, and cuda=13.3
-    # OVERWROTE the baseline's own "unknown" - a provenance block asserting a
-    # toolchain version the measurement never recorded. Read what the file has,
-    # say `unknown` where it has nothing. gen_perf_baseline.sh does try to
-    # capture the CUDA version; that it produced "unknown" is the finding, and
-    # hiding it behind a constant is what this block is for.
+    # #1684: cuda/commit/quant were string literals here and cuda=13.3 overwrote the baseline's
+    # own "unknown" - a provenance block asserting a toolchain version never actually recorded.
+    # Read what the file has, say "unknown" where it has nothing.
     cuda = data.get("cuda") or "unknown"
     commit = data.get("commit") or "unknown"
     quant = data.get("quant") or _quant_from_model(model)

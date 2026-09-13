@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# vllm_conc_ab.sh - alternating cross-ENGINE aggregate-throughput A/B at CONC
-# streams on the same checkpoint: arm I runs imp (IMG_IMP, pinned 32/4096
-# config of two_image_conc_ab.sh), arm V runs vLLM (IMG_VLLM, the flags of the
-# 2026-08-25 BENCHMARKS.md row); fresh server per arm, TRIALS alternating
-# pairs, WAVES waves each, client tools/analysis/conc_client.py (unique
-# prompts, 300-token greedy gens, aggregate = completion tokens / wall).
-#
-# Usage: bash tools/analysis/vllm_conc_ab.sh
-#        IMG_IMP=imp:test IMG_VLLM=vllm/vllm-openai:v0.27.1 CONC=32 TRIALS=3 WAVES=3
-#        VLLM_EXTRA="--foo" IMP_EXTRA="--set x=y" PLEN=1000 (long-prompt shape)
+# Alternating cross-ENGINE aggregate-throughput A/B on the same checkpoint: arm I=imp
+# (IMG_IMP, pinned 32/4096 config), arm V=vLLM (IMG_VLLM), fresh server per arm, TRIALS
+# alternating pairs, WAVES waves each, client conc_client.py.
+# Usage: bash tools/analysis/vllm_conc_ab.sh [IMG_IMP=imp:test]
+# [IMG_VLLM=vllm/vllm-openai:v0.27.1] [CONC=32] [TRIALS=3] [WAVES=3] [VLLM_EXTRA=...]
+# [IMP_EXTRA=...] [PLEN=1000].
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"

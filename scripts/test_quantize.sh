@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
-# imp-quantize round trip (AUDIT_arch_2026 I-6): quantize a small BF16
-# SafeTensors checkpoint to NVFP4 with the shipped tool, load the result
-# through imp-cli, and require a coherent greedy answer. Nothing ran the tool
-# end to end before: three of its sources are unit-tested in test-core, and the
-# tensor-selection rule they cover had already shipped a broken checkpoint
-# (#1159) once.
-#
-# Usage:   make test-quantize   (or: scripts/test_quantize.sh)
-# Env:     IMP_QUANT_MODEL   (default Qwen3-0.6B)   BF16 SafeTensors dir under $IMP_MODELS_DIR
-#          IMP_MODELS_DIR    (default $HOME/models)  host dir mounted at /models
-#          IMP_TEST_IMG      (default imp:test)      built by `make build`
-#          IMP_QUANT_FORMAT  (default modelopt)      modelopt | vllm
+# imp-quantize round trip (AUDIT_arch_2026 I-6): quantize a small BF16 SafeTensors checkpoint
+# to NVFP4, load through imp-cli, require a coherent greedy answer.
+# Usage: make test-quantize (or scripts/test_quantize.sh). Env: IMP_QUANT_MODEL (default
+# Qwen3-0.6B), IMP_MODELS_DIR (default $HOME/models), IMP_TEST_IMG (default imp:test),
+# IMP_QUANT_FORMAT (default modelopt, or vllm).
 set -euo pipefail
 MODEL=${IMP_QUANT_MODEL:-Qwen3-0.6B}
 MODELS_DIR=${IMP_MODELS_DIR:-$HOME/models}

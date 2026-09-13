@@ -36,11 +36,8 @@ def check(doc, root):
         if not os.path.exists(full):
             hits = index.get(basename, [])
             if not hits:
-                # No file of that name anywhere: the citation is dead, and this
-                # is the commoner drift of the two (a rename or a split, e.g.
-                # the #1782 scheduler split). It read as AMBIGUOUS and passed
-                # until 2026-09-02, so a citation to a file that no longer
-                # exists was the one shape this gate did not catch.
+                # No file of that name anywhere: the citation is dead from a rename/split (e.g. the #1782
+                # scheduler split). Used to read as AMBIGUOUS and pass; now caught.
                 bad.append(f"{path}:{line} - no file of that name in the tree")
                 continue
             if len(hits) > 1:

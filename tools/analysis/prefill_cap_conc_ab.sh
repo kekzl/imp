@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
-# prefill_cap_conc_ab.sh - alternating config A/B/C at CONC streams on ONE
-# image with the streaming burst client (tools/analysis/burst_stream_client.py:
-# aggregate tok/s, TTFT p50/p90/max, ITL p50/p95/max, gaps > 100 ms per wave).
-# Built for the long-prompt serving question (runtime.prefill_chunk_decode_cap,
-# runtime.prefill_batch_decode_cap); any --set string works as an arm. Fresh
-# server per arm, pinned mbs/seq/kv like two_image_conc_ab.sh, arm order
-# rotates per trial.
-#
-# Usage: ARM_A="" ARM_B="--set runtime.prefill_chunk_decode_cap=0" \
-#        [ARM_C="..."] CONC=32 PLEN=1000 TRIALS=3 WAVES=3 \
-#        bash tools/analysis/prefill_cap_conc_ab.sh
-# Two-IMAGE form (a code change): IMG_A=imp:base IMG_B=imp:test with the same
-# ARM_* sets (default empty), IGNORE_EOS=1 forces equal token counts per arm.
-# LATE_PLEN=5000 LATE_DELAY=2 adds one late long ingest per wave (the cap's
-# protection scenario: the short streams' ITL during that ingest is reported).
+# Alternating config A/B/C at CONC streams on one image with the streaming burst client:
+# aggregate tok/s, TTFT p50/p90/max, ITL p50/p95/max, gaps>100ms per wave. Built for the
+# long-prompt serving question (runtime.prefill_chunk_decode_cap/prefill_batch_decode_cap); any
+# --set string works as an arm. Fresh server per arm, arm order rotates per trial.
+# Two-image form (IMG_A/IMG_B) A/Bs a code change; IGNORE_EOS=1 forces equal token counts.
+# LATE_PLEN/LATE_DELAY add a late long ingest per wave (the cap's protection scenario).
+# Usage: ARM_A=... ARM_B=... [ARM_C=...] CONC=32 PLEN=1000 TRIALS=3 WAVES=3
+# bash tools/analysis/prefill_cap_conc_ab.sh.
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"

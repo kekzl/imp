@@ -55,11 +55,9 @@ def bench_args(model_path, shape, no_graphs=True, cap_seq=False):
             "--max-tokens", str(shape["max_tokens"]),
             "--temperature", "0", "--seed", "42"]
     if cap_seq:
-        # imp auto-sizes the KV cache to fill VRAM; under ncu that collides with
-        # the profiler's own GPU buffers (StoragePlanner "vram budget
-        # insufficient", driver "resource unavailable" on 12B+ models). Cap the
-        # context to the bench needs + margin — kernel behavior in the measured
-        # window is unchanged, only the KV pool shrinks.
+        # Caps --max-seq-len to bench needs + margin: imp auto-sizing the KV cache to fill VRAM collides
+        # with ncu's own GPU buffers (StoragePlanner "insufficient" / driver "resource unavailable" on
+        # 12B+ models). Kernel behavior in the measured window is unchanged, only the KV pool shrinks.
         args += ["--max-seq-len", str(shape["bench_pp"] + shape["max_tokens"] + 512)]
     if no_graphs:
         args.append("--no-cuda-graphs")

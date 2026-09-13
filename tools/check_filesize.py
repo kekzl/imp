@@ -373,10 +373,9 @@ def main():
         for p in sorted(stale):
             print(f"  {p}")
 
-    # The ceiling half of the allowlist: a listed file may not grow past its
-    # pin's ceiling, because a stale number is what let engine_scheduler.cpp
-    # grow 83 % with the gate green. Shrinking and growth inside the slack are
-    # notes, so a merge does not turn into a re-pin conflict.
+    # Ceiling half of the allowlist: a listed file may not grow past its pin's ceiling (a stale
+    # ceiling is what let engine_scheduler.cpp grow 83% with the gate green). Shrinking and growth
+    # inside the slack are notes, so a merge doesn't turn into a re-pin conflict.
     drift = []
     measured = {r["path"]: r["code"] for r in rows}
     for path, entry in sorted(allow.items()):

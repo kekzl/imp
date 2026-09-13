@@ -1,23 +1,8 @@
 #!/bin/sh
-# Guard: every abnormal end of a request goes through Engine::cancel_sequence_.
-#
-# #1632. Six sites in engine_scheduler.cpp called kv_manager_->free_sequence()
-# and nothing else. KV came back; the recurrent-state slot did not, and it is a
-# fixed-size pool - once empty, every later sequence falls back to `id % cap`
-# aliasing and two live sequences share one SSM state.
-#
-# The compiler cannot catch a seventh site, because calling free_sequence() is
-# a perfectly valid thing to write. This asserts that the scheduler reaches it
-# only through the teardown helper, so adding a cancel path without the slot
-# release fails here rather than in someone's output six months later.
-#
-# Scope: the engine step-execution TUs. engine_scheduler.cpp was split on
-# 2026-08-26 (engine_prefill.cpp, engine_decode_pipeline.cpp came out of it;
-# engine_prefill_ragged.cpp existed since #1780), so the guard walks the
-# family instead of one file.
-#
-# Usage: check_cancel_teardown.sh <repo-root>
-# Exit 0 = no direct call; non-zero = a site bypasses the helper.
+# Guard: every abnormal request end must go through Engine::cancel_sequence_ (#1632).
+# A site calling kv_manager_->free_sequence() directly frees KV but not the recurrent-state
+# slot (fixed-size pool); once empty, later sequences alias via id%cap and share one SSM state.
+# Usage: check_cancel_teardown.sh <repo-root>. Exit 0 = no direct call.
 
 set -eu
 
@@ -47,10 +32,8 @@ for f in $FILES; do
     CALLS=$((CALLS + C))
 done
 
-# A guard that only ever says "I found nothing bad" is indistinguishable from
-# one pointed at the wrong file. This one asserts the positive too: the cancel
-# sites the helper replaced must still be calling it. Rename the files, move
-# the code, or delete the helper, and this fails instead of passing.
+# Asserts the positive too: the cancel sites the helper replaced must still call it, so
+# renaming/moving the code or deleting the helper fails here instead of passing on "found nothing".
 MIN_CALLS=6
 
 if [ "$CALLS" -lt "$MIN_CALLS" ]; then

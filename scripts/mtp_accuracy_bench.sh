@@ -1,43 +1,23 @@
 #!/usr/bin/env bash
-# =============================================================================
-# mtp_accuracy_bench.sh — Phase 5.5 validation harness
-# =============================================================================
-#
-# Runs the released MTP checkpoint with --mtp-spec-decode 1 across 4 prompt
-# classes and reports the MTP draft accuracy for each. Acceptance rate
-# tells us whether the current MTP forward (Phase 2.2.MoE + 2.2.Attn MVP)
-# can produce drafts that match the main model's predictions.
-#
-# Run:
-#   bash scripts/mtp_accuracy_bench.sh
-#
-# Decision thresholds:
-#   ≥ 60% on ≥ 3/4 prompt classes  → batched-verify Phase 3.5 is ROI-worthy
-#   < 30% across the board         → Phase 2.2.Attn+KV (real attention with
-#                                    MTP-side KV cache) is the blocker
-# =============================================================================
+# Runs the released MTP checkpoint with --mtp-spec-decode 1 across 4 prompt classes, reports
+# MTP draft acceptance rate (measures whether the current MTP forward matches the main model).
+# Decision: >=60% on >=3/4 classes -> batched-verify is ROI-worthy; <30% across the board ->
+# real attention with MTP-side KV cache is the blocker.
 
 set -euo pipefail
 
-# Default: the checkpoint MTP is released for (docs/LIMITATIONS.md). It was
-# Qwen3.6-35B-A3B-NVFP4, which is also on this box and also released, but the
-# number this harness produces belongs beside the +21.3 % decode figure, and
-# that figure is Qwen3.8-27B's.
+# Default checkpoint MTP is released for (docs/LIMITATIONS.md): Qwen3.8-27B-NVFP4-vllm.
+# The decode-lift figure this harness's number sits beside belongs to that model, not
+# Qwen3.6-35B-A3B-NVFP4 (also on this box, also released).
 MODEL=${MTP_MODEL:-$HOME/models/Qwen3.8-27B-NVFP4-vllm}
 MAX_TOKENS=${MTP_MAX_TOKENS:-128}
 K=${MTP_K:-1}
 
-# The telemetry this harness reads (Engine::mtp_accuracy_, incremented in
-# engine_scheduler.cpp's per-step block) only scores EAGER decode steps: it asks
-# whether the head's depth-1 draft equals the token the main model then emits.
-# With the verify loop running, most steps are verify steps and the counter sees
-# almost nothing — and once the economics guard unbinds the head it sees nothing
-# at all, which is how this script came to print "WARN: no mtp line" on
-# Nemotron-3.5 while the head was drafting fine. So the verify loop is pinned
-# off and the guard with it: teacher-forced accuracy is what the number means.
-# speculative.hybrid=false is what removes the verify loop on a hybrid; on a
-# non-hybrid the drafts still reach a verify chunk and the sample will be small,
-# which the diagnosis below names rather than hides.
+# mtp_accuracy_ (Engine::mtp_accuracy_, engine_scheduler.cpp) scores only EAGER decode steps
+# (head's depth-1 draft vs the main model's next token); with the verify loop running, or the
+# economics guard unbinding the head, it sees almost nothing.
+# speculative.hybrid=false removes the verify loop on a hybrid so this measures teacher-forced
+# accuracy; on a non-hybrid the sample stays small (diagnosed, not hidden).
 SPEC_PINS=(--set speculative.hybrid=false --set speculative.mtp_econ_min_emit=0)
 
 if [[ ! -d "$MODEL" ]]; then

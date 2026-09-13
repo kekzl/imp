@@ -1,9 +1,6 @@
-// AUTO-SPLIT from handlers_chat_core.cpp (verbatim move; see
-// handlers_internal.h) — the file crossed the 800-code-LOC hard gate after
-// #1017/#1018. Body parsing for the shared chat-completion machinery:
-// parse_chat_request_params populates ChatRequestContext from the request
-// JSON (sampling params, response_format, tools + enforced tool constraints,
-// logit_bias, vision parts, stop sequences, thinking knobs).
+// AUTO-SPLIT from handlers_chat_core.cpp (800-code-LOC hard gate, #1017/#1018). Body parsing:
+// parse_chat_request_params populates ChatRequestContext (sampling, response_format, tools,
+// logit_bias, vision, stop sequences, thinking knobs) from the request JSON.
 
 #include "runtime/engine.h"
 #include "handlers.h"
@@ -37,10 +34,8 @@
 // while handle_messages delegates through the OpenAI shim.
 extern thread_local bool g_in_anthropic_shim;
 
-// Populates ctx.params, ctx.log_*, ctx.req_id, ctx.snap.tpl_family (early best-
-// effort snapshot used to format tool-role messages in the conversion loop).
-// On parse/validation failure: sets res with 400 + error JSON and returns false.
-// On success: returns true; caller proceeds to state snapshot + tokenize.
+// Populates ctx.params/log_*/req_id/snap.tpl_family (early best-effort). Returns false with a
+// 400 JSON error on validation failure; true means proceed to state snapshot + tokenize.
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
                                ChatRequestContext& ctx) {
     // Capture inputs for opt-in JSONL request logging. Only used when
@@ -98,12 +93,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.top_p_explicit = body.contains("top_p");
     ctx.params.top_k_explicit = body.contains("top_k");
     ctx.params.rep_pen_explicit = body.contains("repetition_penalty");
-    // 1.05 default is mild — breaks pathological repetition loops on
-    // verbose-think models (Qwen3.6-NVFP4 falling into "Wie wär es mit
-    // diesem hier?" 40-iteration spirals on multi-turn sensitive prompts)
-    // without disrupting structurally-repetitive valid output (JSON keys,
-    // markdown lists, code idioms). Callers that need deterministic
-    // sampling (validation harness, perf tests) can pass 1.0 explicitly.
+    // repetition_penalty default 1.05: breaks pathological repetition loops (Qwen3.6-NVFP4 40-turn
+    // spirals) without disrupting valid structural repetition (JSON keys, markdown, code idioms).
+    // top_p default 0.95; pass 1.0 explicitly for deterministic sampling (validation/perf harnesses).
     ctx.params.top_p = body.value("top_p", 0.95f);
     ctx.params.top_k = body.value("top_k", 40);
     // "max_completion_tokens" (current OpenAI SDKs) takes precedence over the
@@ -118,10 +110,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.n_completions = body.value("n", 1);
     if (ctx.params.n_completions < 1)
         ctx.params.n_completions = 1;
-    // Each n is a full independent generation, run sequentially, and the whole
-    // request still counts as ONE against --rate-limit and --max-concurrent.
-    // The neighbouring max_tokens is clamped to the context window; this was
-    // not clamped at all (#1616).
+    // Each n is a full independent generation, run sequentially, but the whole request still counts
+    // as ONE against --rate-limit and --max-concurrent. max_tokens is clamped to context; n was not
+    // clamped at all before (#1616).
     if (state.max_n > 0 && ctx.params.n_completions > state.max_n) {
         send_json_error(res, 400, "invalid_request_error",
                         "\"n\" is " + std::to_string(ctx.params.n_completions) +
@@ -155,10 +146,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.mirostat_eta = body.value("mirostat_eta", 0.1f);
     ctx.params.think_budget = body.value("think_budget", state.default_think_budget);
 
-    // Parse stop sequences (string or array). OpenAI caps at 4 but Anthropic
-    // /v1/messages does not, and its stop_sequences convert through this
-    // parser — allow up to 16 and warn when truncating (the stop-scan
-    // machinery handles arbitrary lists; max_stop_len derives from the vector).
+    // OpenAI caps stop sequences at 4; Anthropic /v1/messages does not, and its stop_sequences
+    // convert through this parser - allow up to kMaxStopSequences=16 and warn when truncating.
     constexpr size_t kMaxStopSequences = 16;
     if (parse_stop_field(body, kMaxStopSequences, ctx.params.stop_sequences)) {
         IMP_LOG_WARN("request sent %zu stop sequences; keeping the first %zu", body["stop"].size(),
@@ -234,12 +223,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 auto& js = body["response_format"]["json_schema"];
                 if (js.contains("schema") && js["schema"].is_object()) {
                     const auto& sch = js["schema"];
-                    // Free-form object schema ({"type":"object"} without
-                    // properties/enum) carries no structure the schema
-                    // constrainer could enforce — its key phase would reject
-                    // every token. Semantically this is json_object: leave
-                    // json_schema_str empty so the whole request (scheduler
-                    // included) takes the any-JSON constrainer path.
+                    // Free-form object schema ({"type":"object"}, no properties/enum) carries no structure
+                    // the
+                    // constrainer could enforce (its key phase would reject every token). Treated as
+                    // json_object:
+                    // leave json_schema_str empty so the request takes the any-JSON constrainer path.
                     const bool free_form = sch.value("type", "") == "object" &&
                                            (!sch.contains("properties") || sch["properties"].empty()) &&
                                            !sch.contains("enum");
@@ -249,10 +237,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 }
             }
         } else if (fmt_type != "text") {
-            // The whole point of response_format is that the answer is
-            // constrained. A type this build does not know is not a weaker
-            // request, it is a different one, and answering it as free text
-            // with 200 tells the caller their constraint held (#1591).
+            // A response_format type this build does not know is a DIFFERENT request, not a weaker one:
+            // answering it as free text with 200 tells the caller their constraint held (#1591).
             send_json_error(res, 400, "invalid_request_error",
                             "unknown \"response_format.type\": \"" + sanitize_for_echo(fmt_type, 64) +
                                 "\" (known: text, json_object, json_schema, regex, grammar)");
@@ -266,10 +252,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         body["guided_regex"].is_string())
         ctx.params.regex_pattern = body["guided_regex"].get<std::string>();
 
-    // Grammars have two established top-level spellings and no response_format
-    // convention at all: llama.cpp takes `grammar`, vLLM takes
-    // `guided_grammar`. Accept both, so a client written against either server
-    // works here unchanged.
+    // Grammars have two established spellings and no response_format convention: llama.cpp takes
+    // `grammar`, vLLM takes `guided_grammar`. Accept both.
     if (ctx.params.grammar.empty() && body.contains("grammar") && body["grammar"].is_string())
         ctx.params.grammar = body["grammar"].get<std::string>();
     if (ctx.params.grammar.empty() && body.contains("guided_grammar") && body["guided_grammar"].is_string())
@@ -277,10 +261,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     // Parse logit_bias: map of token_id (string) -> bias (float)
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
-        // Every entry costs a blocking device-to-host copy per decode step, so
-        // the map size multiplies the cost of every token, not of the request
-        // (#1617). Refuse rather than truncate: a silently dropped bias changes
-        // the output without saying so.
+        // Every logit_bias entry costs a blocking device-to-host copy per decode step, so map size
+        // multiplies the cost of every token, not of the request (#1617). Refuse rather than truncate:
+        // a silently dropped bias changes output without saying so.
         if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
             send_json_error(res, 400, "invalid_request_error",
                             "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
@@ -310,12 +293,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     if (body.contains("cache_prefix_messages") && body["cache_prefix_messages"].is_number_integer())
         ctx.params.cache_prefix_messages = body["cache_prefix_messages"].get<int>();
 
-    // Per-request speculative-decode contract (imp extension). Absent → leave
-    // the tri-state at -1 (server default). `true`/`false` force every drafter
-    // on/off; `{"mtp_k": N}` sets the MTP chain depth for this request alone.
-    // A depth outside the armed range is a 400 naming the range, not a
-    // silently ignored field - the class of defect this repo keeps paying for
-    // (#1384, the Anthropic shim deleting content blocks before the check).
+    // Per-request speculative-decode contract (imp extension). Absent -> tri-state stays -1 (server
+    // default). true/false forces every drafter on/off; {"mtp_k":N} sets MTP depth for this request
+    // alone. A depth outside the armed range is a 400 naming the range, never silently ignored (#1384).
     {
         const int armed_mtp_k = state.armed_mtp_k.load(std::memory_order_relaxed);
         const SpecFieldParse sp = parse_spec_field_(body, armed_mtp_k);
@@ -327,10 +307,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         ctx.params.spec_mtp_k = sp.mtp_k;
     }
 
-    // OpenAI Predicted Outputs: {"prediction": {"type": "content", "content":
-    // string | [{"type":"text","text":...}...]}}. The text is a draft hint —
-    // it never changes the output, only speeds up verify-accept — so unknown
-    // shapes are ignored rather than rejected.
+    // OpenAI Predicted Outputs: {"prediction":{"type":"content","content": string | [{"type":"text",...}]}}.
+    // The text only speeds up verify-accept, never changes output - unknown shapes are ignored, not rejected.
     if (body.contains("prediction") && body["prediction"].is_object()) {
         const auto& pred = body["prediction"];
         if (pred.value("type", "content") == "content" && pred.contains("content")) {
@@ -355,11 +333,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                            !(ctx.params.tool_choice.is_string() &&
                              ctx.params.tool_choice.get<std::string>() == "none");
 
-    // tools + response_format=json_schema/json_object: the engine-side gate
-    // stays "no-mask" through tool-call bodies (see ConstraintManager::prepare
-    // and PreambleGate::configure_with_tools), so we keep both signals set
-    // and the gate decides at runtime which path the model takes. Tool-call
-    // dialect comes from tpl_family, captured below into the request.
+    // tools + response_format=json_schema/json_object: the engine-side gate stays "no-mask" through
+    // tool-call bodies (ConstraintManager::prepare, PreambleGate::configure_with_tools) and decides
+    // at runtime which path the model takes; tool-call dialect comes from tpl_family.
 
     // Snapshot template family (may be re-snapshotted under lock in the orchestrator)
     bool tool_xml_dialect = false;
@@ -379,12 +355,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             "fast path for eager decode (expect ~2x slower decode)");
     }
 
-    // Enforced tool calling (#1002) is collected POST-snapshot in
-    // handlers_chat_core (collect_tool_enforcement): the request may auto-load
-    // or name a different model, and the constraint dialect must come from the
-    // template that will actually render this prompt — the parse-time family
-    // above is a pre-load best guess (fine for message flattening, wrong to
-    // bake a grammar from).
+    // Enforced tool calling (#1002) is collected POST-snapshot in handlers_chat_core: the request
+    // may auto-load or name a different model, so the constraint dialect must come from the
+    // template that will actually render this prompt, not the parse-time family guess here.
 
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     for (const auto& msg : messages) {
@@ -393,11 +366,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         if (role == "tool") {
             // Tool response message — format for the model
             std::string content = format_tool_response(ctx.snap.tpl_family, msg);
-            // Gemma's chat-template skips standalone role=tool messages and
-            // expects tool_response markers to be glued onto the assistant
-            // message that produced the call. Append to previous assistant
-            // entry instead of pushing a fresh ChatMessage; ChatML/Llama3
-            // templates render standalone tool messages so keep the push.
+            // Gemma's chat template skips standalone role=tool messages and expects tool_response markers
+            // glued onto the assistant message that produced the call; ChatML/Llama3 templates render
+            // standalone tool messages, so keep the push there.
             if (ctx.snap.tpl_family == imp::ChatTemplateFamily::GEMMA && !ctx.params.chat_msgs.empty() &&
                 ctx.params.chat_msgs.back().role == "assistant") {
                 ctx.params.chat_msgs.back().content += content;
@@ -405,15 +376,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.chat_msgs.push_back({"tool", content});
             }
         } else if (role == "assistant" && msg.contains("tool_calls")) {
-            // Assistant message with tool_calls — reconstruct model output
-            // format. On XML-dialect templates (Qwen-Coder) prior calls must
-            // replay in the XML shape the model itself emits, not the ChatML
-            // JSON body — a JSON replay teaches the model the wrong dialect
-            // for its NEXT call, exactly what the armed XML grammar forbids.
-            // (Parse-time dialect: flattening happens pre-model-load; a
-            // cross-model first request may replay in the previous template's
-            // dialect — moving message conversion post-snapshot is the deeper
-            // fix, tracked in the PR.)
+            // XML-dialect templates (Qwen-Coder) must replay prior tool_calls in the XML shape the model
+            // itself emits, not the ChatML JSON body - a JSON replay teaches the model the wrong dialect for
+            // its NEXT call, exactly what the armed XML grammar forbids.
             std::string content_str;
             if (msg.contains("content") && !msg["content"].is_null()) {
                 content_str = msg["content"].get<std::string>();
@@ -432,10 +397,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     text_parts += part.value("text", "");
                 } else if (type == "image_url" && part.contains("image_url")) {
                     std::string url = part["image_url"].value("url", "");
-                    // Each part is decoded at full resolution on a worker
-                    // thread, so the count is bounded before the bytes are
-                    // read (AUDIT_arch_2026 F2-4); the mmproj path's one-image
-                    // rule applies on top of this.
+                    // Each image part is decoded at full resolution on a worker thread, so the count is
+                    // bounded
+                    // before the bytes are read (AUDIT_arch_2026 F2-4); the mmproj one-image rule applies on
+                    // top.
                     if (state.max_images > 0 &&
                         static_cast<int>(ctx.params.images.size()) >= state.max_images) {
                         send_json_error(res, 400, "invalid_request_error",
@@ -455,13 +420,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                             image_bytes = base64_decode(url.substr(comma + 1));
                         }
                     } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
-                        // #1610: this used to build an httplib client straight
-                        // from the request's host, follow redirects, and buffer
-                        // whatever came back. That is an SSRF primitive on an
-                        // endpoint that is unauthenticated by default: the
-                        // caller picks the host and port and the server has
-                        // reach the caller does not. Off by default now, and
-                        // bounded when on. See image_fetch.h.
+                        // #1610: this used to build an httplib client straight from the request's host,
+                        // follow
+                        // redirects, and buffer the response - an SSRF primitive on an
+                        // unauthenticated-by-default
+                        // endpoint. Off by default now, and bounded when on (image_fetch.h).
                         auto fetched = imp_server::fetch_remote_image(url,
                                                                       state.default_args.allow_remote_images);
                         if (fetched.ok) {
@@ -470,18 +433,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                             IMP_LOG_WARN("image_url not fetched: %s", fetched.detail.c_str());
                         }
                     }
-                    // A scheme we do not fetch (file://, plain paths) leaves the
-                    // slot empty, same as a failed request. Both are refused
-                    // below rather than silently dropping a picture.
-                    //
-                    // One string for every cause, and it does NOT echo the URL.
-                    // Distinguishable errors turned this into a port scanner of
-                    // the server's own network: "connection refused" and "200
-                    // with unparseable bytes" read differently from outside.
-                    //
-                    // The two variants below differ by SERVER CONFIGURATION,
-                    // never by what the URL named, so neither tells a caller
-                    // anything about the destination.
+                    // An unfetched scheme (file://, plain paths) and a failed request are both refused the
+                    // same way,
+                    // with ONE error string that does not echo the URL: distinguishable errors turned this
+                    // into a
+                    // port scanner of the server's own network.
                     if (image_bytes.empty() && ctx.params.image_error.empty()) {
                         const bool remote = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
                         ctx.params.image_error =
@@ -527,11 +483,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.enable_thinking_requested = body.value("enable_thinking", false);
     ctx.params.enable_thinking_set = body.contains("enable_thinking") && body["enable_thinking"].is_boolean();
 
-    // reasoning_effort: handed to the chat template verbatim. A non-string is
-    // ignored rather than rejected, matching how the other optional scalars
-    // here treat a wrong type. Templates that do not reference the variable are
-    // unaffected; one that does and dislikes the value says so through its own
-    // raise_exception (imp logs it and renders without the branch).
+    // reasoning_effort: handed to the chat template verbatim. A non-string is ignored rather than
+    // rejected, matching the other optional scalars; a template that dislikes the value raises its
+    // own exception (imp logs it and renders without the branch).
     if (body.contains("reasoning_effort") && body["reasoning_effort"].is_string())
         ctx.params.reasoning_effort = body["reasoning_effort"].get<std::string>();
 

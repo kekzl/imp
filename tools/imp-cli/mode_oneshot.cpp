@@ -59,10 +59,9 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
         std::vector<int32_t> tokens;
         const int pending_img_tokens = imp_pending_image_tokens(ctx);
         if (have_template && pending_img_tokens > 0) {
-            // Dynamic resolution: the template emits one <|image_pad|> per
-            // block, because the count is not knowable until the image has
-            // been resized. Render one block per image, then expand each to
-            // what its own encoder pass produced.
+            // Dynamic resolution: the template emits one <|image_pad|> per block since the count isn't
+            // knowable until the image is resized. Render one block per image, then expand each to what
+            // its own encoder pass produced.
             const std::vector<int> counts = ctx->engine->pending_image_token_counts();
             std::string blocks;
             for (size_t i = 0; i < counts.size(); ++i)
@@ -118,10 +117,9 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
         for (const auto& s : args.stop_sequences)
             max_stop_len = std::max(max_stop_len, s.size());
 
-        // Resolve think token IDs for output filtering.
-        // find_token("<think>") fails on Qwen3 BPE where <think> is a
-        // regular vocab token (ID 123649, decodes to bytes not "<think>").
-        // Fall back to encode() which handles both special and BPE tokens.
+        // Resolve think token IDs for output filtering. find_token("<think>") fails on Qwen3 BPE
+        // where <think> is a regular vocab token (ID 123649, decodes to bytes not "<think>"); fall
+        // back to encode(), which handles both special and BPE tokens.
         int32_t think_start = tok->find_token("<think>");
         int32_t think_end = tok->find_token("</think>");
         if (think_start < 0) {
@@ -180,16 +178,11 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
             if (err != IMP_SUCCESS)
                 break;
 
-            // Hide stop tokens from the user but DON'T break the loop —
-            // the engine has the authoritative stop logic (think-state
-            // suppression, max_tokens budget). When the engine actually
-            // finishes the request the next imp_decode_step returns
-            // IMP_ERROR_INTERNAL and we exit above. Bailing here on the
-            // first eos / im_end stops generation while the engine is
-            // still inside a <think> block on Qwen3.6-NVFP4 long-context
-            // (model emits <|im_end|> after empty thought; engine flips
-            // in_think to false implicitly and continues into the actual
-            // answer; CLI was previously cutting it off mid-recovery).
+            // Hide stop tokens from the user but DON'T break the loop: the engine has authoritative stop
+            // logic (think-state suppression, max_tokens budget), signalled by IMP_ERROR_INTERNAL on the
+            // next imp_decode_step. Bailing on the first eos/im_end stopped generation while the engine
+            // was still inside a <think> block on Qwen3.6-NVFP4 long-context (empty-thought im_end, engine
+            // flips in_think false and continues into the real answer).
             bool hide_token = (token == tok->eos_id());
             if (have_template && !hide_token) {
                 for (int32_t stop_id : chat_tpl.stop_token_ids()) {
@@ -211,12 +204,10 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
                 hide_token = true;
             }
             std::string piece = tok->decode_token(token);
-            // The cap keeps stderr readable on a long run. It also made the
-            // marker stream a sample of the OPENING of a generation, not of the
-            // generation: `scripts/verify.sh`'s degeneration gate reads exactly
-            // this stream and treated the eleven markers it got as "the last 32
-            // tokens", so a repetition loop starting at step 11 was invisible
-            // to it. `--token-trace` lifts the cap for callers that measure.
+            // The cap keeps stderr readable on a long run, but also makes the marker stream a sample of
+            // the OPENING of a generation: scripts/verify.sh's degeneration gate read the eleven markers it
+            // got as "the last 32 tokens", hiding a repetition loop starting at step 11. --token-trace
+            // lifts the cap for callers that measure.
             if (args.token_trace || step < 10)
                 fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
             if (!hide_token) {

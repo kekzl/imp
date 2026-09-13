@@ -1,21 +1,11 @@
 #!/usr/bin/env bash
-# Re-runnable SASS audit: enumerate every kernel in imp's sm_120a build that
-# emits OMMA (hardware FP4 block-scaled MMA), bucket by source file, and
-# flag suspicious absences (kernels you'd expect to use OMMA but don't).
-#
-# Why: the FP4 hot-path on consumer-Blackwell SM120 is `OMMA.SF.16864` —
-# *not* HMMA, *not* TCGEN05/UMMA/BMMA. Two earlier audit memos
-# (`sass_audit_120a_no_tcgen05_2026_05_04`,
-#  `nvfp4_moe_prefill_landscape_2026_05_10`) drew opposite conclusions
-# about which opcode actually drives FP4. This script gives a definitive
-# per-kernel breakdown so future kernel changes can be checked against it.
-#
-# Run after each significant NVFP4/MXFP4 change to verify:
-#   1) New CUTLASS dispatch sites still emit OMMA (not silent FP16 fallback).
-#   2) Hand-rolled FP4 kernels (smallM, FMHA-MXFP4) keep their OMMA count.
-#   3) No regression to `MUFU`-heavy software-dequant pattern.
-#
-# Usage: bash tools/analysis/sass_omma_audit.sh
+# Re-runnable SASS audit: enumerates every kernel in imp's sm_120a build emitting OMMA
+# (hardware FP4 block-scaled MMA), buckets by source file, flags suspicious absences.
+# The FP4 hot-path on sm_120 is OMMA.SF.16864, not HMMA/TCGEN05/UMMA/BMMA.
+# Run after each NVFP4/MXFP4 change to verify: new CUTLASS dispatch sites still emit OMMA (not
+# silent FP16 fallback), hand-rolled FP4 kernels keep their OMMA count, no regression to
+# MUFU-heavy software-dequant.
+# Usage: bash tools/analysis/sass_omma_audit.sh.
 set -euo pipefail
 
 BIN="${IMP_CLI_BIN:-/usr/local/bin/imp-cli}"

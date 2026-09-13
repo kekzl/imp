@@ -1,7 +1,5 @@
-// Anthropic /v1/messages: the handle_messages endpoint (bottom of file) plus
-// its streaming machinery — the AnthropicSSE event writer and the Anthropic
-// dialect adapter for the shared token loop (stream_driver.h), which emits
-// native Anthropic SSE events.
+// Anthropic /v1/messages: handle_messages endpoint plus its streaming machinery (AnthropicSSE
+// event writer, dialect adapter for the shared token loop) emitting native Anthropic SSE events.
 
 #include "runtime/engine.h"
 #include "handlers.h"
@@ -20,16 +18,9 @@
 #include <set>
 #include <string>
 
-// ===========================================================================
-// Anthropic /v1/messages — native SSE streaming
-// ===========================================================================
-//
-// Non-streaming reuses the OpenAI code path (Anthropic→OpenAI body in,
-// OpenAI→Anthropic response out). Streaming drives the same real per-token
-// batching-engine loop the OpenAI streaming path uses (run_stream_loop_), but
-// emits native Anthropic SSE events incrementally so TTFT == real first-token
-// latency rather than full-generation latency.
-// ---------------------------------------------------------------------------
+// Non-streaming reuses the OpenAI path (Anthropic->OpenAI body in, OpenAI->Anthropic response
+// out). Streaming drives the same per-token batching-engine loop as OpenAI streaming
+// (run_stream_loop_) but emits native Anthropic SSE events so TTFT is real first-token latency.
 
 namespace {
 
@@ -47,12 +38,9 @@ struct AnthropicSSE {
         return sink.write(buf.data(), buf.size());
     }
 
-    // #1657: the per-token path. emit() above builds a nested json object and
-    // dump()s it for EVERY token, which is exactly what the shared writer's own
-    // header forbids on the hot path (utils.h:167-168) and what
-    // /v1/chat/completions has avoided since it got SSEChunkWriter. The frame
-    // around a delta is constant for the whole block, so it is built once at
-    // block start and the token only gets escaped between the two halves.
+    // #1657: builds the SSE frame once per block and only escapes the token per call - dumping a
+    // json object per token violates the hot-path rule (utils.h:167-168) that
+    // /v1/chat/completions already avoids via SSEChunkWriter.
     bool emit_delta(const std::string& prefix, const std::string& suffix, const std::string& text) {
         hot_buf.clear();
         hot_buf += prefix;
@@ -82,10 +70,8 @@ enum class AnthBlock { NONE, THINKING, TEXT, TOOL_USE };
 
 }  // anonymous namespace
 
-// Anthropic dialect adapter: maps the shared token loop onto Anthropic blocks:
-//   reasoning -> thinking block (thinking_delta)
-//   content   -> text block (text_delta)
-//   tool call -> tool_use block (input_json_delta, chunked)
+// Anthropic dialect adapter: reasoning -> thinking_delta, content -> text_delta, tool call ->
+// tool_use block (input_json_delta, chunked).
 bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                            const std::shared_ptr<ServerRequest>& server_req, const std::string& anth_model,
                            const std::string& msg_id, bool omit_thinking) {
@@ -96,19 +82,9 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
 
     // ---- message_start ----------------------------------------------------
     {
-        // Cache accounting (#1006): harnesses read cache_read/creation from
-        // message_start to display live hit rates, and cached_tokens is set at
-        // ADMISSION rather than at submit. This used to wait for the
-        // PENDING->PREFILLING transition first - 50 x 2 ms - on the claim that
-        // it cost no measurable TTFT. It cost exactly what it looks like, and
-        // inverted against its own justification: the poll exits on the first
-        // iteration when the queue is empty and runs the full 100 ms when the
-        // request is queued, which is when TTFT matters. Measured on
-        // Qwen3-4B-Instruct-2507-Q8_0 with 8 concurrent streams, time to
-        // message_start: median 118.5 ms with the poll (max 121.0), 11.4 ms
-        // without (max 12.8) (#1558). The final message_delta already re-reports the accounting
-        // and stays the corrective source, which is what makes the wait
-        // buy presentation accuracy rather than correctness.
+        // Cache accounting (#1006): cached_tokens read at ADMISSION, not submit. A prior version polled
+        // for PENDING->PREFILLING first, claiming no TTFT cost; measured cost was real (median 118.5 ms
+        // vs 11.4 ms, 8 streams, #1558). message_delta re-reports the final, corrective count.
         const int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
         const int creation = active_req ? cache_creation_tokens_(active_req, n_prompt_tokens) : 0;
         json usage = {{"input_tokens", n_prompt_tokens - cached},
@@ -129,11 +105,8 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return false;
     }
 
-    // ---- ping (initial keepalive) -----------------------------------------
-    // Anthropic streams emit periodic `ping` events; sending one immediately
-    // signals liveness before the first token (TTFT can be >1s under load /
-    // long prefills), and the shared loop re-pings during idle gaps so clients
-    // and intermediary proxies don't time out the connection.
+    // Sends an Anthropic `ping` event immediately (signals liveness before TTFT, which can exceed 1s
+    // under load) and periodically during idle gaps so clients/proxies don't time out.
     if (!out.emit("ping", json{{"type", "ping"}}))
         return false;
 
@@ -271,10 +244,8 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return false;
         const std::string& args = tc.arguments;
         constexpr size_t kChunk = 48;
-        // #1554: the slice is at most kChunk bytes AND ends on a codepoint
-        // boundary. A fixed byte slice cut multi-byte characters in half and
-        // each half became U+FFFD in dump_safe, so a tool argument with a
-        // German city name or an emoji reached the client corrupted.
+        // #1554: slices tool-argument text at most kChunk bytes AND on a codepoint boundary - a fixed
+        // byte slice cut multi-byte UTF-8 in half, each half becoming U+FFFD in dump_safe.
         for (size_t off = 0; off < args.size();) {
             const size_t n = utf8_chunk_len(args, off, kChunk);
             if (!emit_tool_args_delta(args.substr(off, n)))
@@ -295,12 +266,9 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     // (#1552) and could not report a stop-sequence match (#1550).
     const std::string stop_reason = anth::anthropic_stop_reason(res.finish, !res.stop_sequence.empty());
 
-    // A fault that ends the stream is an `error` event, not a completed turn
-    // (#1553). The status line is long gone by here, so the event is the only
-    // way to say the answer is not the model's: a server-side timeout used to
-    // arrive as stop_reason "max_tokens", indistinguishable from the model
-    // reaching its budget, and an admission refusal as "capacity", which is not
-    // an Anthropic stop_reason at all.
+    // #1553: a fault that ends the stream emits an `error` event, not a fake completed turn - a
+    // server timeout used to arrive as stop_reason "max_tokens" (indistinguishable from budget
+    // exhaustion) and admission refusal as "capacity" (not a real Anthropic stop_reason).
     if (res.error_type) {
         out.emit("error", json{{"type", "error"},
                                {"error", {{"type", res.error_type}, {"message", res.error_message}}}});
@@ -342,12 +310,9 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     return true;
 }
 
-// ===========================================================================
-// Anthropic /v1/messages endpoint (moved here from handlers_chat.cpp to keep
-// that TU under the file-size gate; co-located with run_anthropic_stream_).
-// Non-streaming reuses the OpenAI path via a shim; streaming drives the real
-// per-token loop above.
-// ===========================================================================
+// Anthropic /v1/messages endpoint (moved here from handlers_chat.cpp for the file-size gate;
+// co-located with run_anthropic_stream_). Non-streaming shims to the OpenAI path; streaming
+// drives the real per-token loop above.
 static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state,
                                  const std::string& request_id);
 
@@ -358,15 +323,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     const std::string request_id = make_request_id(state);
     res.set_header("request-id", request_id);
 
-    // anthropic-version and anthropic-beta were read by nothing (#1562).
-    // Upstream, a missing version is a 400 and an unknown beta is refused; imp
-    // deliberately does neither, because a client that works here and fails
-    // there is the lesser harm compared to 400-ing every request that omits a
-    // header this server does not need. What it must not do is stay silent: a
-    // beta header is a request for behaviour imp does not implement, and
-    // answering 200 makes that a false accept the client cannot see. Both are
-    // echoed back so the client can tell it was read, and an unknown beta warns
-    // once per value.
+    // anthropic-version/anthropic-beta were read by nothing (#1562). imp accepts both rather than
+    // 400ing like upstream (a client that works here and fails there is the lesser harm) but echoes
+    // both back and warns once per unknown beta value, so a false-accept isn't silent.
     {
         const std::string version = req.get_header_value("anthropic-version");
         if (!version.empty())
@@ -389,12 +348,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         }
     }
 
-    // Any exception escaping the impl — notably from the inner
-    // handle_chat_completions shim on the non-streaming path — must return the
-    // Anthropic error envelope ({"type":"error",...}), not the OpenAI-shaped one
-    // the global exception handler emits, which strict Anthropic SDK clients
-    // fail to parse (#891). res is untouched by the shim (it writes a separate
-    // shim_res) when the throw propagates, so it is safe to rewrite here.
+    // Any exception escaping this handler (notably from the inner handle_chat_completions shim) must
+    // return the Anthropic error envelope, not the OpenAI-shaped one from the global handler, which
+    // strict Anthropic SDK clients fail to parse (#891).
     try {
         handle_messages_impl(req, res, state, request_id);
     } catch (const std::exception& e) {
@@ -464,10 +420,8 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         return;
     }
 
-    // ---- Real streaming path -------------------------------------------
-    // For stream=true we drive the same per-token batching-engine loop the
-    // OpenAI streaming path uses and emit native Anthropic SSE events as
-    // tokens arrive — TTFT is real first-token latency, not full-gen latency.
+    // stream=true drives the same per-token batching-engine loop as OpenAI streaming, emitting
+    // native Anthropic SSE events - TTFT is real first-token latency, not full-generation latency.
     if (want_stream) {
         // Build the chat request context from the transformed OpenAI body.
         httplib::Request shim_req = req;
@@ -556,16 +510,13 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     handle_chat_completions(shim_req, shim_res, state);
     g_in_anthropic_shim = false;
 
-    // Propagate error envelopes (transform them to Anthropic error shape).
-    // httplib::Response defaults status to -1 and auto-promotes to 200 only
-    // at send time; any other non-200 code set by handle_chat_completions is
-    // a real error we should forward.
+    // httplib::Response defaults status to -1 (auto-promotes to 200 only at send time): any other
+    // non-200 status set by the inner handle_chat_completions shim is a real error to forward.
     const bool is_error = shim_res.status >= 400;
     if (is_error) {
-        // The shim answers in the OpenAI dialect, and its `type` was forwarded
-        // verbatim inside the Anthropic envelope - so `capacity_error` and
-        // `server_error`, neither of which Anthropic defines, reached SDK
-        // clients (#1556). Translate; keep param/code, which are additive.
+        // #1556: the OpenAI shim's error `type` was forwarded verbatim inside the Anthropic envelope,
+        // leaking non-Anthropic types (capacity_error, server_error) to SDK clients. Translated here;
+        // param/code are kept (additive fields).
         json inner;
         try {
             inner = json::parse(shim_res.body).value("error", json::object());

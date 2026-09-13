@@ -3,16 +3,10 @@
 #
 # Usage: perf_ab.sh <MID> [model] [rounds]
 #
-# Iteration 1 recorded "no *test* catches M29" as proven and "nothing catches
-# it" as unproven, because the repo's real perf gate is tests/perf_baseline.json
-# via `make verify-fast` against the imp:test image, and running that per mutant
-# needs a full `make build`. This measures the delta directly instead.
-#
-# Caveat, stated because it matters: this benchmarks the incremental build-dev
-# binary, which the repo forbids for *pinning* a baseline. It is defensible for
-# a *delta*: both arms come from the same tree with one line different, and the
-# arms alternate so drift cancels. The question is only whether the delta clears
-# the gate's 8 % decode threshold.
+# The real perf gate (tests/perf_baseline.json via make verify-fast) needs a full make build per
+# mutant; this measures the delta directly on the incremental build-dev binary instead.
+# Defensible for a delta only (not for pinning a baseline): both arms come from the same tree
+# with one line different, alternating so drift cancels; checked against the gate's 8% decode threshold.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 MID=${1:-M29}

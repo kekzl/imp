@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# Pin the degeneration verdicts against known token streams.
-#
-# The thresholds in degen_verdict.sh had never been exercised on a real
-# generation: verify.sh read imp-cli's `[tok=...]` markers and imp-cli capped
-# them at the first ten decode steps, so the gate judged eleven tokens of every
-# run and called them "the last 32". The first run that could see a whole
-# generation failed CORRECT output on two of the three thresholds. They are
-# calibrated here, against streams whose verdict is not in question, so a future
-# edit cannot quietly re-break them.
-#
-# The healthy streams are real: the 64 tokens Qwen3-4B-Instruct-2507-Q8_0 and
-# Qwen3.5-4B-mxfp4 produced for "The capital of France is" on 2026-09-07.
-#
-# Usage: check_degen_thresholds.sh <repo-root>
-# Exit 0 = every case matches; 1 = a verdict moved.
+# Pins degeneration verdicts against known real-generation token streams (Qwen3-4B-Instruct,
+# Qwen3.5-4B-mxfp4) so a future edit can't silently re-break degen_verdict.sh's thresholds.
+# Usage: check_degen_thresholds.sh <repo-root>. Exit 0 = every case matches.
 
 set -uo pipefail
 ROOT="${1:?usage: check_degen_thresholds.sh <repo-root>}"
@@ -59,10 +47,8 @@ rep() { python3 -c "import sys; print(' '.join(sys.argv[1].split()*int(sys.argv[
 
 echo "degeneration verdicts:"
 
-# --- healthy, must pass -----------------------------------------------------
-# Qwen3-4B dense: " Paris, and the capital of Germany is Berlin. The capital of
-# Spain is Madrid, ..." - "the capital of" recurs 4 times because the CONTENT is
-# a list of capitals. The old flat "3-gram more than 3 times" limit failed this.
+# Qwen3-4B dense stream: "the capital of" recurs 4x because the CONTENT is a list of capitals.
+# A flat "3-gram more than 3 times" limit would fail this correct output.
 check "dense-capitals" OK 5 \
   "12095 11 323 279 6722 315 9856 374 19846 13 576 6722 315 17689 374 24081 11 323 279 6722 315 15344 374 21718 13 576 6722 315 279 3639 15072 374 7148 11 323 279 6722 315 279 3639 4180 374 6515 11 422 727 13 576 6722 315 6323 374 26194 11 323 279 6722 315 5616 374 26549 13 576 6722"
 
@@ -92,10 +78,8 @@ check "alternation" FAIL 5 "$(rep '77 88' 32)"
 # other checks pass while the output is a loop.
 check "phrase-loop" FAIL 5 "$(rep '11 12 13 14 15 16 17 18 19 20' 6)"
 check_reason "phrase-loop" "repeated 3-grams" 5 "$(rep '11 12 13 14 15 16 17 18 19 20' 6)"
-# Low variety WITHOUT literal repetition: a de Bruijn sequence over 4 token ids
-# contains every 3-gram exactly once, so the repeated-3-gram share is 0 and the
-# run length is 1. Only the distinct-token check sees it. A model emitting four
-# token types in a shuffled order is broken even though nothing repeats.
+# De Bruijn sequence over 4 token ids: every 3-gram appears exactly once, so repeated-3-gram
+# share is 0 and run length is 1; only the distinct-token check catches this shuffled-but-broken output.
 check "low-variety" FAIL 5 "101 101 101 102 101 101 103 101 101 104 101 102 102 101 102 103 101 102 104 101 103 102 101 103 103 101 103 104 101 104 102 101 104 103 101 104 104 102 102 102 103 102 102 104 102 103 103 102 103 104 102 104 103 102 104 104 103 103 103 104 103 104 104 104"
 check_reason "low-variety" "distinct tokens" 5 "101 101 101 102 101 101 103 101 101 104 101 102 102 101 102 103 101 102 104 101 103 102 101 103 103 101 103 104 101 104 102 101 104 103 101 104 104 102 102 102 103 102 102 104 102 103 103 102 103 104 102 104 103 102 104 104 103 103 103 104 103 104 104 104"
 # ` own own own own own` - the shape the gate is named for.

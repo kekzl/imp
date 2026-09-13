@@ -41,12 +41,10 @@ TOOL_DEFS = (
     "conventions, produce minimal diffs, never fabricate paths or APIs. "
 )
 
-# A menu of structurally DISTINCT function bodies. Each snippet also gets a
-# per-(turn, index) unique name, so no two 16-token windows collide across
-# turns — repetitive content would trigger prefix-cache block reuse on
-# non-identical prefixes and zero out the response (a pathological-input edge
-# case, not a real agent workload). Growing-prefix cache reuse is still
-# exercised: turn i's prompt shares its first i turns verbatim with turn i-1.
+# CODE_SNIPPETS: structurally distinct bodies, uniquely named per (turn,index) so no two 16-token
+# windows collide across turns (would trigger prefix-cache reuse on non-identical prefixes and
+# zero the response). Growing-prefix reuse is still exercised: turn i shares turns 0..i-1 verbatim
+# with turn i-1.
 CODE_SNIPPETS = [
     """def {name}(items, cfg):
     out = []
