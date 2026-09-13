@@ -611,7 +611,7 @@ Draft/verify staging buffers and `spec_graphs_` are T2, sized by the plan from `
 - Configurable capacity: budget-exhaustion paths testable without a 32 GiB card.
 - Full allocation journal: `(seq, phase, tag, bytes, op)` for every acquire / release / commit / decommit.
 - Poison-on-release (`0xDE`): use-after-free becomes a deterministic data comparison, not a GPU fault.
-- Injectable failure (fail the *n*-th acquisition), exercising the rollback paths that today are hand-written per call site (`rollback_partial_allocation`, the `moe_3x_packed`/`sf` unwind in `executor_workspace_buffers.cu:641`, the KV `allocate_blocks` rollback).
+- Injectable failure (fail the *n*-th acquisition), exercising the rollback paths that today are hand-written per call site (`rollback_partial_allocation`, the `moe_3x_packed`/`sf` unwind in `executor_workspace_buffers.cu:572`, the KV `allocate_blocks` rollback).
 - Growth simulation for the VMM path: `commit`/`decommit` succeed or fail on command; the fake asserts the base address never changes (host-side proof of I3 under growth).
 
 Invariants asserted against it:
@@ -902,7 +902,7 @@ First measurement, dense config, 15 serving requests:
 
 Two things this settles:
 
-1. **`calibrate_fp8_scale()` allocated twice per call** (`fp8_quant.cu:211/212`), 144 of the 414, listed by no inventory. One-shot per layer (`executor_kv_write.cu` gates on `kv_calibrated_[kv_layer]`), so an I2 violation by the letter rather than hot-path traffic. Fixed via persistent arena scratch: 414 → 315. The rest of the named sites are `CudaGraphConditionalRunner::setup`, which the step-5 inventory did list and which is genuinely per burst.
+1. **`calibrate_fp8_scale()` allocated twice per call** (`fp8_quant.cu:193/212`), 144 of the 414, listed by no inventory. One-shot per layer (`executor_kv_write.cu` gates on `kv_calibrated_[kv_layer]`), so an I2 violation by the letter rather than hot-path traffic. Fixed via persistent arena scratch: 414 → 315. The rest of the named sites are `CudaGraphConditionalRunner::setup`, which the step-5 inventory did list and which is genuinely per burst.
 2. **The bytes are irrelevant; the count is not.** 1.15 MiB is three orders of magnitude below M2's +190 MiB, so that delta is library/driver internal growth, not imp's allocations (AUDIT B30). Step 5's value is removing 414 driver round-trips from the hot path, not reclaiming memory.
 
 ### Invariants now under test

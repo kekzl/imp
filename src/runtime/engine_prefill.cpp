@@ -31,7 +31,7 @@ void Engine::step_prefill(cudaStream_t stream) {
     int resolved = resolve_prefill_chunk_size_();
     int effective_chunk = (resolved > 0) ? resolved : executor_->max_tokens();
     // Hard cap: chunk size must never exceed the executor's max_tokens (itself
-    // capped to 2048 for SSM/GDN hybrids, executor_workspace.cu:252). Without
+    // capped to 2048 for SSM/GDN hybrids, executor_workspace.cu:240). Without
     // this a server-side prefill_chunk_size default overflows the workspace
     // (`n_tokens (X) exceeds max_tokens (Y)` -> reshape numel mismatch).
     if (effective_chunk > executor_->max_tokens()) {

@@ -908,7 +908,7 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
 // ===========================================================================
 // The IMP_LOG_FATAL class
 //
-// IMP_LOG_FATAL only LOGS (logging.h:58); IMP_CHECK is the only thing that
+// IMP_LOG_FATAL only LOGS (logging.h:56); IMP_CHECK is the only thing that
 // reaches std::abort(). Of the 12 sites in the tree, ten logged at FATAL and
 // then carried on - three of them after a comment saying that carrying on
 // hands a host pointer to a device kernel. These two are the dispatch pair:

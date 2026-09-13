@@ -79,7 +79,7 @@ TEST(MtpForwardTest, DraftStepProducesValidToken) {
 
     // upload_weights_gpu automatically uploads the MTP sidecar when
     // model->mtp_->loaded is set (the safetensors loader sets it after
-    // parsing the sidecar tensors). See weight_upload.cu:2027 for the gate.
+    // parsing the sidecar tensors). See weight_upload.cu:1903 for the gate.
     ASSERT_TRUE(model->upload_weights_gpu(imp::QType::F16, nullptr, 1ULL << 30));
     ASSERT_TRUE(model->mtp_->loaded);
 

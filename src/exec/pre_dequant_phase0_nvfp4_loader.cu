@@ -175,7 +175,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         }
 
         // F6: enforce group_size=16 between weight_packed [N, K/2] and weight_scale [N, K/16].
-        // The kernel hard-codes kMicroBlockSize=16 (nvfp4_gemm.cu:31); a mismatch would silently
+        // The kernel hard-codes kMicroBlockSize=16 (nvfp4_gemm.cu:27); a mismatch would silently
         // add ~12.5% per-element step quant noise (group_size != 16) or misalign scales onto
         // wrong rows (transposed weight_scale). Both routes are 2D at promote time.
         if (w.ndim == 2 && sc.weight_scale.ndim == 2) {

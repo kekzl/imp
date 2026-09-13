@@ -1,6 +1,6 @@
 # Sites that log at FATAL and then continue, where continuing is CORRECT.
 #
-# IMP_LOG_FATAL only logs (logging.h:58); IMP_CHECK is what aborts. So a site
+# IMP_LOG_FATAL only logs (logging.h:56); IMP_CHECK is what aborts. So a site
 # that logs and continues is a defect unless the function's contract is to
 # report a verdict rather than to stop. Format: `path:line  # reason`. The
 # reason is mandatory and a stale entry fails the gate, so the list cannot rot

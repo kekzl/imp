@@ -269,7 +269,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
     if (cached) {
         // IMP_CHECK, not a bare call: both call sites used to DISCARD the
         // verdict, so the parity checker detected a host/device divergence,
-        // logged it at FATAL (which does not abort - logging.h:58) and
+        // logged it at FATAL (which does not abort - logging.h:56) and
         // returned false into nothing. A debug facility that finds the
         // invariant break and then continues is not a facility. The header
         // documented this as "aborts on mismatch"; now it does.
@@ -333,7 +333,7 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
         // it from a single range would leave the scales as whatever the
         // previous occupant left behind, which decodes to fluent nonsense
         // rather than failing. Refuse where the two paths disagree.
-        // IMP_CHECK, not IMP_LOG_FATAL: the latter only LOGS (logging.h:58), so this
+        // IMP_CHECK, not IMP_LOG_FATAL: the latter only LOGS (logging.h:56), so this
         // reported the wrong-API call and then made it anyway. Abort rather than throw -
         // expert_cache.h:273 documents this contract as aborting on mismatch, and a
         // wrong-API call is a programming error, not a request that can be failed.

@@ -31,7 +31,7 @@ Source: `src/model/model_arch.h`, `src/model/model.cpp`.
 | architecture | status | note |
 |---|---|---|
 | LLaMA, Mistral, Mixtral | ✅ | Mixtral: the gate is the synthetic 8-expert case in `tests/test_moe_executor.cu` plus the template-family test; no Mixtral checkpoint has a `MODELS.md` row |
-| Phi-4 | 🟡 | **an alias onto the LLaMA path** (`src/model/model.cpp:391`), not a separate loader. No checkpoint of its own in any gate (#1680) |
+| Phi-4 | 🟡 | **an alias onto the LLaMA path** (`src/model/model.cpp:299`), not a separate loader. No checkpoint of its own in any gate (#1680) |
 | DeepSeek, incl. V2 multi-head latent attention | ✅ | validated on DeepSeek-V2-Lite; latent-KV decode is opt-in |
 | Qwen3, Qwen3-MoE | ✅ | the pinned gate model is Qwen3-8B-Q8_0 |
 | Qwen3.5, Qwen3.5-MoE (Qwen3.6-27B and Qwen3.8-27B run on the same `qwen3_5` architecture path) | ✅ | Gated DeltaNet family; Qwen3.8-27B is the README worked example |

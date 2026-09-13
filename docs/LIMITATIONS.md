@@ -65,7 +65,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
 - **No soak or endurance test** (#1642). Largest driven load: 10 concurrent requests
   (`tests/api/test_concurrency.py:37`). Three shipped comments describe what a soak would assert:
   `tools/imp-server/metrics_memory.cpp:56`, `tests/test_memory_backend.cpp:223`,
-  `src/memory/alloc_interpose.cpp:129`. Leaks, KV-pool fragmentation and handle exhaustion surface
+  `src/memory/alloc_interpose.cpp:111`. Leaks, KV-pool fragmentation and handle exhaustion surface
   in production.
 - **No device-memory checker has run against the kernels in any automated lane**
   (AUDIT_arch_2026 F2-7). The CI `test` job's memcheck step sits behind `HAS_GPU_RUNNER` (unset)
@@ -340,7 +340,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   | q/k/v, gate/up projections | K reduced in 32 partial sums (decode, `gemv_nvfp4_multirow_kernel<8>`, one warp per output row) vs 128 (verify, `gemv_nvfp4_kpar_mb_fp16_kernel`, one block per output row) | **fixed**, `speculative.verify_row_parity` |
   | down projection GEMM | none: `n_mb = 1088 > 512`, both take the 128-wide path (measured) | already equal |
   | SwiGLU into down | decode keeps `silu(gate)*up` in float registers, verify rounds to FP16 in a separate kernel | open |
-  | RoPE + KV write, QK-norm | `can_fuse_rope_kv` and the fused QK-norm are `n == 1` only (`executor_attention.cu:390,405`) | open |
+  | RoPE + KV write, QK-norm | `can_fuse_rope_kv` and the fused QK-norm are `n == 1` only (`executor_attention.cu:365,405`) | open |
 
   Inner loops otherwise instruction-identical (same `cvt.rn.f16x2.e2m1x2` dequant, same 16 fma
   pairs, same scale); site 1 is a pure grouping difference, closed free
@@ -512,9 +512,9 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   |---|---|---|---|
   | 1 | GDN chunkwise scan | `--set gdn.chunkwise_scan=false` | byte-inert both arms |
   | 2 | fused QK-norm + RoPE | `--set attention.no_qknorm_fused=true` | byte-inert both arms |
-  | 3 | NVFP4 `use_multirow` K-partition split | patch at `src/quant/nvfp4_gemv_dense.cu:387`; dispatch log shows 10240x5120 and 12288x5120 moved `multirow=1` -> `multirow=0` at decode | byte-inert both arms |
+  | 3 | NVFP4 `use_multirow` K-partition split | patch at `src/quant/nvfp4_gemv_dense.cu:380`; dispatch log shows 10240x5120 and 12288x5120 moved `multirow=1` -> `multirow=0` at decode | byte-inert both arms |
   | 4 | fused NVFP4 FFN at decode | two-site patch at `src/exec/executor_ffn.cu:98,140`; log shows both FFN shapes on `gemv_nvfp4_kpar`, `gemv_nvfp4_gate_up_fused` never fired | decode byte-identical to stock across 2281 greedy tokens |
-  | 5 | attention kernel family | mirror flip at `src/exec/executor_attention.cu:516` (decode on the chunk's FA2 path) | moves prompts 2 and 3 decode-side, prompt 1 byte-identical; with `--set speculative.capture=false` (both paths eager `FA2_FP16QK`) divergence still at byte 79 |
+  | 5 | attention kernel family | mirror flip at `src/exec/executor_attention.cu:473` (decode on the chunk's FA2 path) | moves prompts 2 and 3 decode-side, prompt 1 byte-identical; with `--set speculative.capture=false` (both paths eager `FA2_FP16QK`) divergence still at byte 79 |
 
   All five are decode-side; direction matters. A chunk-side substitution does move the text:
   `--set speculative.verify_nvfp4_gemm=false` moves the first difference to bytes 58 / 130 / 150

@@ -298,7 +298,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                            : longrope_long_freqs_;
     }
     // Gemma 4: per-layer rope_freqs (pre-computed effective frequencies for
-    // global layers, gguf_loader.cpp:1221), matching llama.cpp's
+    // global layers, gguf_loader.cpp:1160), matching llama.cpp's
     // gemma4-iswa.cpp passing them as freq_factors to ggml_rope_ext on
     // full_attention layers (n_rot=hd, proportional-rope schema ccss000000000000).
     if (prof.attn_variant == AttnVariant::GEMMA4_SWA) {

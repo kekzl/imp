@@ -3,9 +3,9 @@
 
 WHY THIS EXISTS
 ---------------
-`IMP_LOG_FATAL` sounds like it ends the process. It does not. `logging.h:58`
+`IMP_LOG_FATAL` sounds like it ends the process. It does not. `logging.h:56`
 makes it a plain `log_message(LogLevel::FATAL, ...)` call; `IMP_CHECK`
-(`logging.h:68-74`) is the only thing in the tree that reaches `std::abort()`,
+(`logging.h:62-68`) is the only thing in the tree that reaches `std::abort()`,
 and its own comment says so. So the macro's name promises what only its sibling
 delivers, and every site that wrote `IMP_LOG_FATAL(...)` expecting the process
 to stop got a log line instead.
