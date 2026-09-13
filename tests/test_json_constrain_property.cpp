@@ -1,23 +1,12 @@
-// ===========================================================================
-// Property tests for the schema-less json_object FSM (JsonConstrainer).
-//
-// The example-based batteries next door encode bugs we already shipped
-// (#517, #650, #761, #850, #1014, #1067 — every one found by a symptom, none
-// by a test). These tests attack the same surface generatively instead: a
-// random document generator plus nlohmann/json as an INDEPENDENT oracle, so a
-// grammar regression fails here without anyone having to imagine the shape
-// first. GOAL.md release bar 7 ("valid, terminating JSON under any sampler
-// state") is the contract under test.
-//
-// CPU-only by construction: the default-constructed JsonConstrainer touches no
-// CUDA (its device pointers stay null without init(), so the destructor frees
-// nothing), which puts these in the `unit` lane — the lane CI actually runs.
-// That matters: the FSM lives in a .cu, so every bug above escaped CI, which
-// has no GPU runner.
-//
-// Determinism: one fixed seed, and every failure message prints the exact
-// document so a failure is reproducible without re-rolling the dice.
-// ===========================================================================
+// Property tests for the schema-less json_object FSM: the example-based batteries encode
+// bugs already shipped (#517,#650,#761,#850,#1014,#1067, each found by symptom, none by a
+// test). These attack the same surface generatively: a random document generator + nlohmann/
+// json as an INDEPENDENT oracle, so a grammar regression fails without imagining the shape
+// first. GOAL.md release bar 7 ("valid, terminating JSON under any sampler state") is the
+// contract under test.
+// CPU-only: default-constructed JsonConstrainer touches no CUDA, so this runs in the unit
+// lane CI actually runs (the FSM lives in a .cu, so every bug above escaped CI's no-GPU
+// lane). Fixed seed; every failure prints the exact document for reproducibility.
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -34,19 +23,13 @@ namespace {
 
 constexpr uint32_t kSeed = 0x5EED1067;  // fixed: failures must reproduce
 
-// --- Random valid-JSON generator -------------------------------------------
-// Escape-free on purpose (escapes have their own example-based battery), but
-// NOT ASCII-only. It used to be, and the comment here called non-ASCII "a known,
-// deliberate limitation of the token classifier" — a sentence that turned out to
-// describe #1197, where constrained German output silently lost every umlaut.
-//
-// Worth being precise about what this generator does and does not cover: these
-// tests drive the FSM, and the FSM was never the broken part — it compares
-// through `unsigned char` and accepted umlauts all along. The bug was one layer
-// out, in classify_token()'s category pre-filter, which the mask consults BEFORE
-// the FSM is asked (see TokenCategory.NonAsciiCountsAsStringContent, which is
-// what actually fails when the fix is reverted). So this covers UTF-8 through
-// the grammar; it does not cover the mask. Both are needed.
+// Random valid-JSON generator: escape-free (escapes have their own battery) but NOT
+// ASCII-only - it used to be, and calling that "a deliberate limitation" is what #1197 turned
+// out to be (constrained German output silently lost every umlaut).
+// The FSM was never the broken part (compares through unsigned char, always accepted
+// umlauts); the bug was one layer out, in classify_token()'s category pre-filter, which the
+// mask consults BEFORE the FSM (see TokenCategory.NonAsciiCountsAsStringContent). This covers
+// UTF-8 through the grammar, not the mask - both are needed.
 
 std::string gen_string(std::mt19937& rng) {
     static const char kAlphabet[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123456789_ -";
@@ -129,11 +112,8 @@ std::string gen_document(std::mt19937& rng) {
     return pick(rng) ? gen_object(rng, 0) : gen_array(rng, 0);
 }
 
-// ===========================================================================
-// P1 — Soundness: every document the oracle calls valid must be accepted.
-// This is the direction #1067 broke (valid nested docs were REJECTED:
-// `{"a":{"b":1},"c":2}` hit a premature DONE).
-// ===========================================================================
+// P1 Soundness: every document the oracle calls valid must be accepted. This is the
+// direction #1067 broke (valid nested docs REJECTED: {"a":{"b":1},"c":2} hit a premature DONE).
 TEST(JsonConstrainPropertyTest, AcceptsEveryValidDocument) {
     std::mt19937 rng(kSeed);
     for (int i = 0; i < 2000; i++) {
@@ -144,11 +124,8 @@ TEST(JsonConstrainPropertyTest, AcceptsEveryValidDocument) {
     }
 }
 
-// ===========================================================================
-// P2 — Prefix closure: the FSM is a prefix machine. Every prefix of a valid
-// document must stay legal, because that is exactly the state the model is in
-// mid-generation. A rejected prefix means a dead end the sampler cannot escape.
-// ===========================================================================
+// P2 Prefix closure: every prefix of a valid document must stay legal - that is exactly the
+// state the model is in mid-generation. A rejected prefix is a dead end the sampler can't escape.
 TEST(JsonConstrainPropertyTest, AcceptsEveryPrefixOfValidDocument) {
     std::mt19937 rng(kSeed + 1);
     for (int i = 0; i < 500; i++) {
@@ -162,12 +139,8 @@ TEST(JsonConstrainPropertyTest, AcceptsEveryPrefixOfValidDocument) {
     }
 }
 
-// ===========================================================================
-// P3 — No dead ends: from any prefix of a valid document at least one ASCII
-// continuation must be legal. This is release-bar 7 ("terminating JSON under
-// any sampler state") stated as an invariant: a state with an all-masked
-// vocabulary would leave the sampler with nothing to emit.
-// ===========================================================================
+// P3 No dead ends: from any prefix of a valid document at least one ASCII continuation must
+// be legal - release bar 7 ("terminating JSON under any sampler state") as an invariant.
 TEST(JsonConstrainPropertyTest, NoDeadEndStates) {
     std::mt19937 rng(kSeed + 2);
     for (int i = 0; i < 300; i++) {
@@ -187,14 +160,9 @@ TEST(JsonConstrainPropertyTest, NoDeadEndStates) {
     }
 }
 
-// ===========================================================================
-// P4 — Rejection: mutations that cannot be a prefix of ANY valid document must
-// be rejected. Two families that are structurally guaranteed to be illegal:
-//   (a) swapped closer  — '}' <-> ']' at the final position
-//   (b) trailing content after the root value closes
-// (a) is the shape #1067 accepted (`,"bare-string"` then `]]` while the FSM
-// believed it was in array context).
-// ===========================================================================
+// P4 Rejection: mutations that cannot be a prefix of ANY valid document must be rejected -
+// swapped closer ('}' <-> ']' at the final position, the shape #1067 accepted) and trailing
+// content after the root value closes.
 TEST(JsonConstrainPropertyTest, RejectsSwappedFinalCloser) {
     std::mt19937 rng(kSeed + 3);
     int checked = 0;
@@ -210,16 +178,11 @@ TEST(JsonConstrainPropertyTest, RejectsSwappedFinalCloser) {
     EXPECT_GT(checked, 0);
 }
 
-// P4c - trailing commas (#1096). gen_document() never produces one, and the two
-// rejection families above (swapped final closer, trailing content after the
-// root) cannot create one either, so this shape had no coverage at all.
-//
-// Measured, so the comment does not overclaim: re-admitting CLOSE_BRACKET in
-// ARRAY_NEED_VALUE and CLOSE_BRACE in OBJECT_NEED_KEY - i.e. undoing #1096 in
-// compute_allowed_mask() - does NOT make this test fail. apply_mask() uses the
-// mask only as a pre-filter and then runs sim_token_valid() on every candidate
-// that passes it, and advance_char() enforces the rule independently. The mask
-// half of #1096 is defence in depth; this test covers the half that decides.
+// P4c trailing commas (#1096): gen_document() and the two rejection families above never
+// produce this shape, so it had zero coverage. MEASURED: re-admitting CLOSE_BRACKET in
+// ARRAY_NEED_VALUE / CLOSE_BRACE in OBJECT_NEED_KEY (undoing #1096's mask half) does NOT fail
+// this test, because apply_mask() only pre-filters and advance_char() enforces the rule
+// independently - the mask half is defence in depth, this covers the deciding half.
 TEST(JsonConstrainPropertyTest, RejectsTrailingCommas) {
     static const char* kDocs[] = {
         "[1,]", "[1, 2,]", "[[1],]", "[{\"a\":1},]",
@@ -246,18 +209,10 @@ TEST(JsonConstrainPropertyTest, RejectsTrailingContentAfterRoot) {
     }
 }
 
-// ===========================================================================
-// P4b — Trailing commas (#1096). A comma before a closer is the single most
-// common way a model writes almost-JSON, and the FSM used to allow it: after a
-// value, `,` returned to the same state an OPENER produces — and that state
-// legally accepts the closer, because an empty `[]` / `{}` is valid. So `[1,]`
-// and `{"a":1,}` passed the mask and the reply did not parse, which is exactly
-// the contract json_object exists to keep.
-//
-// Generative, because the failing shape found in the wild was three levels
-// deep inside a larger document; an example-based test would have had to
-// imagine that.
-// ===========================================================================
+// P4b Trailing commas (#1096): after a value, `,` used to return to the same state an
+// OPENER produces, which legally accepts a closer (since empty [] / {} is valid) - so
+// `[1,]` and `{"a":1,}` passed the mask and produced invalid JSON. Generative because the
+// failing shape found in the wild was three levels deep, too specific to imagine example-based.
 TEST(JsonConstrainPropertyTest, RejectsTrailingCommaBeforeAnyCloser) {
     std::mt19937 rng(kSeed + 6);
     int mutated_docs = 0;
@@ -298,12 +253,9 @@ TEST(JsonConstrainPropertyTest, RejectsMinimalTrailingComma) {
     }
 }
 
-// ===========================================================================
-// P5 — Structural truncation: cutting a document short and closing it with the
-// WRONG bracket must be rejected. Catches context confusion one level up, the
-// exact failure mode of #1067 (close popped its own frame but resumed in the
-// grandparent's state).
-// ===========================================================================
+// P5 Structural truncation: cutting a document short and closing with the WRONG bracket must
+// be rejected - catches context confusion one level up, #1067's exact failure mode (close
+// popped its own frame but resumed in the grandparent's state).
 TEST(JsonConstrainPropertyTest, RejectsWrongCloserAtNestedDepth) {
     std::mt19937 rng(kSeed + 5);
     int exercised = 0;
@@ -327,11 +279,9 @@ TEST(JsonConstrainPropertyTest, RejectsWrongCloserAtNestedDepth) {
     EXPECT_GT(exercised, 0) << "generator produced no nested closers — test is vacuous";
 }
 
-// --- #1104 probe: does the number FSM reject a second decimal point? --------
-// The live failure on Qwen3.6-35B-A3B-NVFP4 was `{"city":    3.5.5.5.5...`,
-// i.e. the mask admitted `.` inside an already-fractional number. If the FSM
-// itself accepts that, the bug is grammar-level and CPU-reproducible; if it
-// rejects it, the mask is right and something bypasses it at decode time.
+// #1104 probe: does the number FSM reject a second decimal point? Live failure on
+// Qwen3.6-35B-A3B-NVFP4 was `{"city": 3.5.5.5...}` - if the FSM itself accepts it the bug is
+// grammar-level and CPU-reproducible; if it rejects, something bypasses the mask at decode time.
 TEST(JsonConstrainFsm, RejectsSecondDecimalPointInNumber) {
     JsonConstrainer c;
     c.advance_text("{\"city\":");
@@ -393,15 +343,13 @@ TEST(JsonConstrainFsm, SimulationDoesNotMutateNumberSubState) {
     EXPECT_TRUE(fsm.sim_token_valid("e5"));   // exponent still available afterwards
     EXPECT_TRUE(fsm.sim_token_valid("}"));    // and the number can still be closed
 }
-// --- #1104 part 2: force-close near the token budget ------------------------
-// The grammar fix alone still let a wandering model run to max_tokens inside a
-// long string, returning a truncated document. With the remaining allowance
-// known, the mask must narrow to the closers.
+// #1104 part 2: force-close narrows the mask to closers once the remaining token allowance
+// is known - the grammar fix alone still let a wandering model run to max_tokens inside a
+// long string, returning a truncated document.
 TEST(JsonConstrainFsm, ForceCloseNarrowsMaskWhenBudgetIsSpent) {
-    // Deep inside a string value: {"a":"xxxx  → open object + open string.
-    // The narrowing is a MASK decision, so assert on the category mask —
-    // sim_token_valid() answers grammar legality, and "y" is legal in a string
-    // no matter how little budget is left.
+    // Deep inside a string value ({"a":"xxxx): assert on the category MASK, not
+    // sim_token_valid() - grammar legality says "y" is legal in a string regardless of budget,
+    // but the narrowing under test is a mask decision.
     JsonConstrainer fsm;
     fsm.advance_text("{\"a\":\"xxxx");
 
@@ -431,18 +379,13 @@ TEST(JsonConstrainFsm, ForceCloseStillReachesAValidDocument) {
     EXPECT_TRUE(fsm.sim_token_valid("}")) << "grammar rejects the closer the mask offers";
 }
 
-// --- #1291: the force-close has to walk out of a state that owes something ---
-//
-// #1096 forbids a closer straight after a comma so `[1,]` cannot happen. #1104
-// demands a closer once the budget is spent. Where they meet, the narrowing
-// used to leave NOTHING legal, the empty-allow net retried with the ordinary
-// mask, and the reply came back truncated anyway — the exact outcome the
-// force-close exists to prevent. Measured on Qwen3.6-35B-A3B-NVFP4 at
-// max_tokens=40: the mask narrowed to `}`/`]` in ARRAY_NEED_VALUE and the
-// model emitted a quote instead (#1291).
-//
-// The mask must therefore offer the cheapest step OUT of the owing state, and
-// the budget must cover the whole walk.
+// #1291: force-close must walk OUT of a state that owes something. #1096 forbids a closer
+// right after a comma; #1104 demands a closer once budget is spent; where they met, the
+// narrowing used to leave NOTHING legal, the empty-allow net retried the ordinary mask, and
+// the reply still came back truncated. Measured on Qwen3.6-35B-A3B-NVFP4 at max_tokens=40:
+// mask narrowed to }/] in ARRAY_NEED_VALUE and the model emitted a quote instead.
+// The mask must offer the cheapest step OUT of the owing state, with budget covering the
+// whole walk.
 
 TEST(JsonConstrainFsm, ForceCloseOffersAValueAfterAnArrayComma) {
     JsonConstrainer fsm;
@@ -484,11 +427,10 @@ TEST(JsonConstrainFsm, ForceCloseWalksOutOfAnArrayCommaToAClosableDocument) {
     EXPECT_TRUE(fsm.sim_token_valid("}")) << "object still not closable after the array";
 }
 
-// The walk needs one token more than the states it passes through suggest: the
-// forced value itself enters a frame (a number lands in IN_NUMBER *inside* its
-// container). Without that margin the e2e walk emits `-1]` and runs out before
-// the `}` — measured on the #1291 repro. At `{"a":[1,` the stack owes 1, the
-// array owes 1, the value owes 1, so the narrowing has to be live at 4.
+// The walk needs one token more than the states it passes through suggest: a forced value
+// itself enters a frame (a number lands in IN_NUMBER inside its container). Without that
+// margin the e2e walk emits `-1]` and runs out before `}` (measured on the #1291 repro): at
+// `{"a":[1,` the stack/array/value each owe 1, so narrowing must be live at 4.
 TEST(JsonConstrainFsm, ForceCloseKeepsAMarginForTheForcedValuesOwnFrame) {
     JsonConstrainer fsm;
     fsm.advance_text("{\"a\":[1,");
@@ -508,11 +450,10 @@ TEST(JsonConstrainFsm, ForceCloseStaysOffInNeedStatesWithBudget) {
     EXPECT_TRUE(m & CAT_OPEN_BRACKET) << "a nested array is legal here and the budget is ample";
 }
 
-// #1104: raw control characters must never reach a string. The grammar has
-// always rejected them; apply_mask's in-string fast path skipped the check for
-// any token without a quote or a backslash, which is exactly what a newline
-// token is. Pinned at the grammar level here — the fast path is a GPU path,
-// but it now defers to the same rule.
+// #1104: raw control characters must never reach a string. The grammar always rejected them,
+// but apply_mask's in-string fast path skipped the check for any token without a quote or
+// backslash - exactly what a newline token is. Pinned at the grammar level; the GPU fast path
+// now defers to the same rule.
 TEST(JsonConstrainFsm, RejectsRawControlCharsInsideStrings) {
     JsonConstrainer fsm;
     fsm.advance_text("{\"k\":\"abc");
@@ -523,16 +464,11 @@ TEST(JsonConstrainFsm, RejectsRawControlCharsInsideStrings) {
     EXPECT_TRUE(fsm.sim_token_valid("\\n")) << "ESCAPED newline must stay legal";
 }
 
-// ---------------------------------------------------------------------------
-// #1197: constrained output lost every non-ASCII character — "Die Bären hören"
-// came back as "Die Baren horen". The FSM was never the problem; it casts to
-// unsigned char before comparing. classify_token() did not, and `char` is
-// signed here, so every byte of a multi-byte UTF-8 sequence read as negative:
-// the single-char path failed `first >= 32` and the multi-char path hit
-// `c < 32` and cleared is_str. Tokens carrying an umlaut therefore lost
-// CAT_STRING_CHAR and were masked out by category, before the FSM was ever
-// asked. The model then spelled the nearest ASCII word it was allowed to.
-// ---------------------------------------------------------------------------
+// #1197: constrained output lost every non-ASCII character ("Baren" for "Baeren"). The FSM
+// casts to unsigned char and was never the problem; classify_token() did not, and char is
+// signed here, so every byte of a multi-byte UTF-8 sequence read negative, failing `first >=
+// 32` (single-char path) or hitting `c < 32` (multi-char path) and clearing is_str - masking
+// umlaut-carrying tokens out by category before the FSM was ever asked.
 TEST(TokenCategory, NonAsciiCountsAsStringContent) {
     // A whole word, the way a BPE vocabulary usually carries it.
     EXPECT_TRUE(classify_token("Bären") & CAT_STRING_CHAR) << "multi-byte word rejected";
@@ -556,19 +492,13 @@ TEST(TokenCategory, NonAsciiCountsAsStringContent) {
     EXPECT_FALSE(classify_token("ab\nc") & CAT_STRING_CHAR) << "embedded newline accepted";
 }
 
-// ---------------------------------------------------------------------------
-// #1199 follow-up: a free string value could not be CLOSED. The end of a string
-// is spelled by a BPE vocabulary far more often as `."`, `n"`, `!"` than as a
-// bare `"`. Those tokens got neither CAT_STRING_CHAR (is_str clears on any
-// quote) nor CAT_QUOTE (it keyed on `first == '"'`), so their category was
-// 0x0000 and the STRING_VALUE pre-filter — CAT_STRING_CHAR | CAT_QUOTE —
-// dropped them before token_legal, which accepts them, was consulted.
-//
-// Measured on Qwen3-8B-NVFP4 at the position after `...rascheln`: unmasked, `."`
-// is top-1 at logprob 0.0 and `.”` sits 13.4 nats behind it; masked, `."` is not
-// in the top 5 at all and `.”` wins. The model then wrote a typographic quote —
-// legal string content — and the value ran to max_tokens as invalid JSON.
-// ---------------------------------------------------------------------------
+// #1199 follow-up: a free string value could not be CLOSED. A BPE vocabulary spells string
+// end far more often as `."`, `n"`, `!"` than a bare `"`; those tokens got neither
+// CAT_STRING_CHAR (is_str clears on any quote) nor CAT_QUOTE (keyed on first=='"'), so their
+// category was 0x0000 and the STRING_VALUE pre-filter dropped them before token_legal (which
+// accepts them) was ever consulted. Measured on Qwen3-8B-NVFP4: unmasked `."` is top-1;
+// masked it drops out of the top 5 and a typographic quote wins, running the value to
+// max_tokens as invalid JSON.
 TEST(TokenCategory, StringEndingTokensCarryQuote) {
     const uint16_t string_phase = CAT_STRING_CHAR | CAT_QUOTE;  // schema STRING_VALUE
     // The forms a vocabulary actually uses to end a string.

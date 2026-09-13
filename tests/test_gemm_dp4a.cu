@@ -138,10 +138,8 @@ TEST(GemmDP4ATest, Q6K_Q8_1_Basic) {
     for (auto& v : h_x)
         v = (rand() % 200 - 100) / 200.0f;
 
-    // Build Q6_K weight manually: encode each 256-element row.
-    // Q6_K layout per block: ql[128] + qh[64] + scales[16] + d(FP16)[2]
-    // Each of 256 values is 6-bit [-32..31].
-    // For simplicity, encode all zeros with scale=1 except for a known pattern.
+    // Q6_K layout per block: ql[128]+qh[64]+scales[16]+d(FP16)[2], 256 values, 6-bit [-32..31].
+    // Encodes all zeros with scale=1 except a known pattern.
     int blocks_per_row = K / Q6_K_BLOCK_ELEMS;
     std::vector<uint8_t> w_q6k(M * blocks_per_row * Q6_K_BLOCK_SIZE, 0);
 

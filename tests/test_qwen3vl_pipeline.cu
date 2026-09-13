@@ -1,13 +1,6 @@
-// Image bytes through the real Qwen3-VL tower.
-//
-// The synthetic encoder test (`test_qwen3vl_encoder.cu`) proves the algorithm
-// against a CPU reference; this proves the plumbing against the actual
-// checkpoint — real shapes (hidden 1024, head_dim 64, 24 blocks, 3 DeepStack
-// taps), real patch counts, real smart_resize output. Those are exactly the
-// things a synthetic tower with round numbers cannot catch.
-//
-// Skipped unless IMP_TEST_MODEL_QWEN3VL points at a Qwen3-VL checkpoint
-// directory, so it costs nothing where the model is not staged.
+// Plumbing test against the actual checkpoint (real shapes: hidden 1024, head_dim 64,
+// 24 blocks, 3 DeepStack taps, real patch counts, real smart_resize) - what a synthetic
+// tower with round numbers can't catch. Skipped unless IMP_TEST_MODEL_QWEN3VL is set.
 
 #include "memory/vram_allocator.h"
 #include "model/model.h"
@@ -50,10 +43,8 @@ protected:
         model_ = load_safetensors(model_dir(), /*load_mtp_head=*/false);
         ASSERT_NE(model_, nullptr);
         ASSERT_NE(model_->vision_tower, nullptr) << "checkpoint carries no vision tower";
-        // The tower is a T2 arena tenant, so this fixture has to open an arena the
-        // way Engine::init does — and size it the way Engine::init does too, from
-        // the tower's own tensor list rather than from a guess that silently rots
-        // when the fixture checkpoint changes.
+        // Tower is a T2 arena tenant: fixture opens/sizes the arena exactly like Engine::init does,
+        // from the tower's own tensor list rather than a guess that rots when the checkpoint changes.
         const size_t vision_bytes = qwen3vl_vision_tower_device_bytes(*model_->vision_tower) +
                                     Qwen3VLPipeline::demand_bytes(*model_->vision_tower, 4096);
         arena_ = std::make_unique<ScopedEngineArena>(vision_bytes + vision_bytes / 8);
@@ -70,10 +61,9 @@ protected:
     Qwen3VLPipeline pipeline_;
 };
 
-// The reservation and the allocation are two separate expressions of the same
-// buffer list, and nothing but this test stops them drifting: a buffer added to
-// init() without updating demand_bytes() under-reserves the arena, which would
-// surface as an exhaustion on whichever model happens to be tight.
+// Reservation and allocation are two separate expressions of the same buffer list; nothing
+// but this test stops them drifting - a buffer added to init() without updating demand_bytes()
+// under-reserves the arena, surfacing as exhaustion on whichever model is tight.
 TEST_F(Qwen3VLPipelineTest, ReservedBytesMatchTakenBytes) {
     EXPECT_EQ(pipeline_.taken_bytes(), Qwen3VLPipeline::demand_bytes(*model_->vision_tower, 4096));
 }

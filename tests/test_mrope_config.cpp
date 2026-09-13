@@ -1,9 +1,6 @@
-// Reading `mrope_section` out of an HF config.
-//
-// The section split lives under `rope_scaling` in the Qwen2-VL generation and
-// under `rope_parameters` in Qwen3-VL. Reading only one of them leaves a
-// multimodal model silently on single-axis RoPE — which still generates text,
-// just with every image token positioned as if it were a text token.
+// mrope_section lives under rope_scaling in Qwen2-VL config, under rope_parameters in
+// Qwen3-VL. Reading only one silently drops a multimodal model to single-axis RoPE: it
+// still generates text, but every image token is positioned as if it were a text token.
 
 #include "model/hf_config_loader.h"
 #include "model/json_util.h"
@@ -25,10 +22,8 @@ namespace {
 class MRopeConfig : public ::testing::Test {
 protected:
     void SetUp() override {
-        // mkdtemp creates the directory atomically and reports the name it
-        // actually used. tmpnam only guesses one — which is what the linker
-        // warns about — and that guess then went into `system("rm -rf " + dir)`
-        // on teardown: a shell taking apart a path nobody had validated.
+        // mkdtemp creates the directory atomically and reports the name actually used; tmpnam only
+        // guesses, and that guess fed system("rm -rf " + dir) on teardown unvalidated.
         const std::string tmpl = (std::filesystem::temp_directory_path() / "imp_mrope_XXXXXX").string();
         std::vector<char> buf(tmpl.c_str(), tmpl.c_str() + tmpl.size() + 1);
         ASSERT_NE(::mkdtemp(buf.data()), nullptr) << "could not create a temp directory";

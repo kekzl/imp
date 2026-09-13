@@ -1,11 +1,8 @@
-// GraphSlotPool — the T2 slot pool behind the conditional graph loop
-// (docs/internals/MEMORY.md A7 step 5.3).
-//
-// CPU lane on purpose. The pool's device side goes through Backend and its
-// pinned-host side through HostPinnedAllocator, so both halves substitute and
-// the layout arithmetic — the part that can silently hand out overlapping
-// buffers — is testable without a GPU. CI has no GPU runner, so a GPU-lane
-// test here would never actually run.
+// GraphSlotPool, the T2 slot pool behind the conditional graph loop
+// (docs/internals/MEMORY.md A7 step 5.3). CPU lane on purpose: both the device side
+// (Backend) and pinned-host side (HostPinnedAllocator) substitute, so the layout arithmetic
+// (which can silently hand out overlapping buffers) is testable without a GPU - which CI
+// doesn't have.
 
 #include <gtest/gtest.h>
 

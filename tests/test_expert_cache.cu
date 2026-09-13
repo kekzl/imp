@@ -1,15 +1,7 @@
-// Phase 2 + Phase 3 (MoE host-offload + CUDA Graphs design): unit tests for
-// the ExpertLRUCache device-side mirror + per-layer slot pool partitioning.
-//
-// Phase 2 invariant: every host-LRU mutation is mirrored into a device-side
-// int32 table sized [n_layers × 3 × n_experts]. Cell value is the
-// layer-relative slot index (Phase 3 narrows this from the old global slot
-// index) or -1 if not cached.
-//
-// Phase 3 invariant: the slot pool is partitioned per-layer so layer L's
-// cache state cannot be evicted by layer M's misses. Each layer owns
-// `slots_per_layer_` slots inside the shared pool_, with independent LRU
-// recency + key→slot maps.
+// Phase 2 invariant: every host-LRU mutation mirrors into a device-side int32 table
+// [n_layers x 3 x n_experts], cell = layer-relative slot index or -1 if uncached.
+// Phase 3 invariant: the slot pool is partitioned per-layer so layer L's cache cannot be
+// evicted by layer M's misses; each layer owns slots_per_layer_ slots with independent LRU.
 
 #include <gtest/gtest.h>
 #include "exec/executor.h"
@@ -23,10 +15,9 @@ namespace {
 
 class ExpertCachePhase3Test : public ::testing::Test {
    protected:
-    // Pick a tiny budget that yields exactly 2 slots per layer with 3
-    // layers — enough to test eviction within a layer (2 inserts then a
-    // 3rd in the same layer evicts the LRU) and per-layer isolation
-    // (filling layer 0 doesn't touch layer 1).
+    // Tiny budget yields exactly 2 slots/layer x 3 layers: enough to test within-layer eviction
+    // (2 inserts then a 3rd evicts the LRU) and per-layer isolation (filling layer 0 doesn't
+    // touch layer 1).
     static constexpr int kSlotBytes = 64;
     static constexpr int kNLayers = 3;
     static constexpr int kSlotsPerLayer = 2;

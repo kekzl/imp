@@ -184,31 +184,19 @@ TEST(SamplingTest, TopPFiltering) {
     free_gpu_tensor(d_logits);
 }
 
-// =========================================================================
-// top_p must actually truncate (#1300)
-//
-// TopPFiltering above documents top_p=0.5 but passes 0.99, against logits whose
-// tail mass is ~e^-105 — nucleus truncation is a no-op on that fixture, so both
-// sampler paths pass with the top_p cutoff removed entirely (mutants M20/M21).
-// Across the whole suite top_p only ever took the values 1.0, 0.95 and 0.99.
-//
-// This builds a genuinely spread distribution and computes the nucleus IN the
-// test from the same probabilities — an oracle, not a golden. The control
-// assertion (the same seeds DO reach outside the nucleus at top_p=1.0) is what
-// stops this test from degenerating the way the old one did: a fixture whose
-// tail is unreachable would satisfy the main assertion while proving nothing.
-// =========================================================================
+// #1300: TopPFiltering's fixture used top_p=0.99 against logits with ~e^-105 tail mass, a
+// no-op nucleus that passed with the cutoff removed entirely (mutants M20/M21); top_p only
+// ever took 1.0/0.95/0.99 across the suite. This builds a genuinely spread distribution and
+// computes the nucleus IN the test as an oracle; the control (same seeds DO reach outside the
+// nucleus at top_p=1.0) stops the fixture from being unreachable again.
 void run_top_p_truncation_case(int top_k, const char* path_name, float logit_offset = 0.0f) {
     constexpr int V = 512;
     constexpr int kSeeds = 200;
     constexpr float kTopP = 0.75f;
 
-    // p: 0.40 / 0.25 / 0.15 on the head (cum 0.80 crosses kTopP at rank 2),
-    // 0.02 on each of ten tail tokens (0.20 of reachable mass), ~0 elsewhere.
-    //
-    // The head deliberately does NOT sit at index 0: a sampler that silently
-    // returns its error sentinel (token 0) must be distinguishable from one
-    // that always returns the argmax, and both from one that samples.
+    // Head mass 0.40/0.25/0.15 (cum 0.80 crosses kTopP at rank 2), 0.02 x10 tail tokens (0.20 of
+    // reachable mass). Head deliberately not at index 0, so an error-sentinel return (token 0) is
+    // distinguishable from an always-argmax sampler and from one that samples.
     constexpr int kHead[3] = {137, 42, 301};
     constexpr int kTail[10] = {5, 63, 99, 150, 188, 222, 260, 333, 400, 470};
     std::vector<float> probs(V, 1e-9f);
@@ -292,9 +280,8 @@ TEST(SamplingTest, TopPTruncatesCubPath) {
 }
 
 TEST(SamplingTest, TopPTruncatesCubPathShifted) {
-    // Same distribution, every logit shifted by +5 so the maximum is positive.
-    // Softmax is shift-invariant: this must behave identically to the case
-    // above. If only one of the two passes, the sampler's max reduction is
+    // Same distribution shifted +5 so the max is positive: softmax is shift-invariant, so this
+    // must behave identically to the unshifted case, or the sampler's max reduction is
     // sign-dependent.
     run_top_p_truncation_case(/*top_k=*/200, "CUB, shifted logits", /*logit_offset=*/5.0f);
 }
@@ -382,13 +369,9 @@ TEST(SamplingTest, SingleNonNegInf) {
     free_gpu_tensor(d_logits);
 }
 
-// =========================================================================
-// Async (enqueue-only) sampler variants — the batched-decode fast path
-// (executor sample_from_logits) enqueues one sampler per sequence into its
-// own SAMPLE_SCRATCH_BYTES slot and gathers all tokens with one strided
-// pinned D2H + one sync. Tokens must be bit-identical to the synchronous
-// per-sequence variants for the same logits and seeds.
-// =========================================================================
+// Async (enqueue-only) samplers: batched-decode fast path enqueues one sampler per sequence
+// into its own SAMPLE_SCRATCH_BYTES slot and gathers with one strided pinned D2H + one sync.
+// Tokens must be bit-identical to the synchronous per-sequence variants.
 
 TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
     const int n_seq = 8;
@@ -444,13 +427,10 @@ TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
     for (int i = 0; i < n_seq; i++)
         EXPECT_EQ(h_pinned[i], ref_greedy[i]) << "greedy token diverged for sequence " << i;
 
-    // The CUB regime (top_k > SAMPLE_MAX_TOP_K) enqueues like any other k
-    // (#1654), and must produce the SAME token the synchronous CUB path does.
-    // This used to assert the async form DECLINED - which is what sent the
-    // whole batch to per-sequence synchronous sampling, at -14.5% aggregate
-    // throughput for a top_k one candidate over the limit. Declining is no
-    // longer the contract, so asserting the tokens match is the property left
-    // to guard.
+    // CUB regime (top_k > SAMPLE_MAX_TOP_K) now enqueues like any other k (#1654) and must match
+    // the synchronous CUB token. Used to assert the async form DECLINED, sending the whole batch
+    // to synchronous per-sequence sampling at -14.5% aggregate throughput for one candidate over
+    // the limit; declining is no longer the contract.
     for (int cub_k : {SAMPLE_MAX_TOP_K + 1, 0}) {
         const int32_t want = sample_topk_topp(logits[0], cub_k, top_p, temperature, 42u, d_ref, nullptr);
         auto* slot = reinterpret_cast<int32_t*>(d_slots);
@@ -471,20 +451,12 @@ TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
 }
 
 }  // namespace
-// Issue #1142: the sampler drew the SAME quantile on every token.
-//
-// The engine hands the samplers `base_seed + step` — consecutive integers, one
-// per generated token — and the device side took a single LCG step from it. An
-// LCG's first output is affine in its seed, so seed+1 moved the drawn float by
-// 1664525 / 2^32 ~= 0.0004: over a whole generation the draw is effectively
-// constant and the sampler keeps picking the same RANK. At small top_k that
-// rank is the argmax, which reads as fluent greedy text and is why this hid;
-// at top_k = 2000 it is a fixed token deep in the tail and the model emits it
-// forever.
-//
-// The probe is the shape of the bug: 200 CONSECUTIVE seeds over a distribution
-// whose top token holds well under all the mass. Before the scramble this
-// returned exactly ONE distinct token on both sides of the k=128 path split.
+// #1142: engine hands samplers base_seed+step (consecutive integers); the device LCG's first
+// output is affine in its seed, so seed+1 moves the draw by 1664525/2^32 ~= 0.0004 -
+// effectively constant over a generation, so the sampler keeps the same RANK (argmax at small
+// top_k, reading as fluent greedy; a fixed deep-tail token at top_k=2000, emitted forever).
+// Probe: 200 consecutive seeds; pre-fix this returned exactly ONE distinct token on both
+// sides of the k=128 path split.
 TEST(SamplerSeeding, ConsecutiveSeedsDoNotAllDrawTheSameToken) {
     const int V = 4096;
     std::vector<float> h(V);
@@ -530,19 +502,11 @@ TEST(SamplerSeeding, ConsecutiveSeedsDoNotAllDrawTheSameToken) {
     free_gpu_tensor(d_logits);
 }
 
-// Issue #1142: the CUB path (top_k > SAMPLE_MAX_TOP_K) served STALE candidates.
-//
-// cub::DeviceTopK::MaxPairs filled its output on the first call, wrote nothing
-// on the second while still returning cudaSuccess, and failed permanently with
-// `invalid device ordinal` from the fourth — all on one thread, one stream,
-// device 0. Nobody checked the return code, so the sampler kept drawing from
-// whatever the previous call had left in the buffer. On a real model that is a
-// token loop; every existing test missed it for one reason:
-//
-//   THE LOGITS HAVE TO CHANGE BETWEEN CALLS. Feed the same distribution twice
-//   and the stale candidates ARE the correct candidates, so a broken run is
-//   indistinguishable from a working one. This test moves the winner every
-//   iteration, which is what a real decode step does.
+// #1142: cub::DeviceTopK::MaxPairs filled output on the first call, wrote nothing on the
+// second (still cudaSuccess), then failed permanently from the fourth - unchecked, so the
+// sampler drew from a stale buffer, a token loop on a real model. Every prior test missed it
+// because feeding the SAME distribution twice makes stale candidates indistinguishable from
+// correct ones; this moves the winner every iteration.
 TEST(SamplerCubPath, EachCallSamplesFromItsOwnLogitsNotThePreviousCalls) {
     const int V = 151936;   // the vocabulary the issue was reported on
     const int top_k = 200;  // > SAMPLE_MAX_TOP_K, so the CUB path runs
@@ -572,10 +536,9 @@ TEST(SamplerCubPath, EachCallSamplesFromItsOwnLogitsNotThePreviousCalls) {
                               << " — the candidate list came from an earlier call";
 }
 
-// Row-batched greedy (launch_greedy_rows) must be BIT-identical per row to
-// sample_greedy_async — same partial/reduce geometry, same slot scratch.
-// This is the gate for the 2026-08-27 stash that replaced 31 serialized
-// argmax pairs per decode step with one batched pair.
+// launch_greedy_rows must be BIT-identical per row to sample_greedy_async (same
+// partial/reduce geometry, same slot scratch): gate for the 2026-08-27 stash replacing 31
+// serialized argmax pairs per decode step with one batched pair.
 TEST(SamplingTest, GreedyRowsMatchPerRowLaunch) {
     constexpr int kVocab = 151936;
     constexpr int kRows = 7;
@@ -655,11 +618,9 @@ TEST(SamplingTest, PenaltyRowsMatchPerRowLaunch) {
                         freq, pres, nullptr);
         h_rows[r] = {static_cast<float*>(bat_logits[r].data), d_hist[r], hist_n[r], rep, freq, pres};
     }
-    // Rows 1 and 3 also carry a ban list in the same sweep (the serving
-    // default: repetition_penalty 1.05 + the engine's banned special tokens).
-    // Id 5 is both banned AND repeated in the history - the ban must win,
-    // written once by the thread that owns the entry. Row 4 bans without
-    // any penalty history (n_tokens = 0).
+    // Rows 1 and 3 carry a ban list plus the serving default (repetition_penalty 1.05 + banned
+    // special tokens); id 5 is both banned and repeated, ban must win, written once by the owning
+    // thread. Row 4 bans without any penalty history (n_tokens=0).
     const std::vector<int32_t> h_ban{7, 5, kVocab - 1};
     int32_t* d_ban = nullptr;
     ASSERT_EQ(cudaMalloc(&d_ban, h_ban.size() * sizeof(int32_t)), cudaSuccess);
@@ -700,11 +661,9 @@ TEST(SamplingTest, PenaltyRowsMatchPerRowLaunch) {
 }
 
 
-// The history-sized penalty kernels (one block per row, token counts in the
-// T2 arena) must leave every row's logits BIT-identical to the vocab sweep:
-// long histories over a narrow token range (counts well above 1), bans that
-// overlap the history, an empty-history row, and the two M=1 launchers with
-// the repeat_last_n window applied on the device side.
+// History-sized penalty kernels (one block per row, T2-arena token counts) must leave every
+// row's logits BIT-identical to the vocab sweep: long histories, bans overlapping history, an
+// empty-history row, and the two M=1 launchers with the device-side repeat_last_n window.
 TEST(SamplingTest, PenaltyHistoryMatchesVocabSweep) {
     constexpr int kVocab = 151936;
     constexpr int kRows = 6;
@@ -862,12 +821,10 @@ TEST(SamplingTest, PenaltyHistoryTiming) {
     sampling_reset_penalty_counts();
 }
 
-// The logit_bias arena slots must be re-taken after the reset hooks ran:
-// ~Engine closes the arena and then runs the hooks, so a capacity guard that
-// survives them hands the next engine in the process a pointer into released
-// memory (AUDIT_arch_2026 B-1, reachable through server.model_swap). Mutation:
-// drop sampling_penalties.cu's hook and the second preallocate short-circuits
-// on the stale capacity, so the arena does not move and the test fails.
+// logit_bias arena slots must be re-taken after reset hooks run: ~Engine closes the arena
+// then runs hooks, so a capacity guard surviving them hands the next engine a pointer into
+// released memory (AUDIT_arch_2026 B-1, via server.model_swap). Mutation: drop
+// sampling_penalties.cu's hook and the second preallocate short-circuits on stale capacity.
 TEST(SamplingTest, LogitBiasRearmsAfterStaticReset) {
     ASSERT_TRUE(engine_arena().is_open());
     reset_static_cuda_state();  // known state, whatever earlier tests left behind

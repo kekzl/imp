@@ -1,14 +1,8 @@
-// KV-pool sizing vs weight-cache demand (Ornith-35B Q4_K_M regression).
-//
-// Q4_K sources are not nvfp4_beneficial, so the heuristic weight-cache
-// estimate in compute_vram_budget is ~0 while the StoragePlanner (source-
-// aware) routes them to the FP16 cache. Before the fix the KV backstop
-// sized the pool to available-minus-heuristic — i.e. it ate all post-weight
-// VRAM, phases 1/3 built 0 cache tensors, and decode fell back to
-// on-the-fly dequant (11 tok/s instead of a cached decode path).
-//
-// The budget must reserve the planner projection (capped so one full
-// max_seq_len sequence always fits) before the KV pool fills the rest.
+// Q4_K sources aren't nvfp4_beneficial, so compute_vram_budget's heuristic weight-cache
+// estimate is ~0 while the source-aware StoragePlanner routes them to the FP16 cache. Before
+// the fix the KV backstop sized to available-minus-heuristic, ate all post-weight VRAM, built
+// 0 cache tensors, and decode fell back to on-the-fly dequant (11 tok/s). Budget must reserve
+// the planner projection (capped so one full max_seq_len sequence fits) before KV fills the rest.
 
 #include <gtest/gtest.h>
 
@@ -76,10 +70,9 @@ TEST(VramBudgetReserve, PlannerDemandKeepsKvPoolFromEatingWeightCacheRoom) {
     config.use_nvfp4_decode = 2;   // mode 2: reserve floor is the flat 512 MiB
     config.use_cuda_graphs = false;
     config.kv_cache_dtype = QType::F16;
-    // Isolate this test from the library charge (#1109 floors reserve_bytes at
-    // what cuBLAS/CUTLASS claim on the first forward). That charge has its own
-    // test below; folding it in here made this one assert the sum of two
-    // unrelated policies, which is how it went red for three PRs (AUDIT B63).
+    // Isolated from the library charge (#1109 floors reserve_bytes at cuBLAS/CUTLASS's first
+    // forward claim, its own test below): folding it in made this assert the sum of two unrelated
+    // policies, which went red for three PRs (AUDIT B63).
     config.library_reserve_mb = 0;
 
     const int n_kv_layers = 32;
@@ -103,12 +96,10 @@ TEST(VramBudgetReserve, PlannerDemandKeepsKvPoolFromEatingWeightCacheRoom) {
         << "KV pool ate the weight-cache room again (heuristic-only backstop)";
 }
 
-// #963 follow-up: when KV is cheap (hybrid — few attention layers), the
-// auto floor must cover the full advertised context plus the StreamingLLM
-// headroom, not stop at the flat 16384-token cap. With the old floor a
-// max_seq_len=17408 hybrid got a pool a 16k prompt fills to 94%, tripping
-// the >90% streaming valve (graphs off, windowed attention) on a request
-// that fits outright.
+// #963 follow-up: when KV is cheap (hybrid, few attention layers), the auto floor must cover
+// the full advertised context plus StreamingLLM headroom, not stop at the flat 16384-token
+// cap. The old floor let a max_seq_len=17408 hybrid's 16k prompt fill the pool to 94%,
+// tripping the >90% streaming valve (graphs off, windowed attention) on a request that fits.
 TEST(VramBudgetReserve, CheapKvFloorCoversFullMaxSeqLen) {
     SKIP_IF_NO_CUDA();
 
@@ -152,28 +143,19 @@ TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
     config.use_nvfp4_decode = 2;
     config.use_cuda_graphs = false;
     config.kv_cache_dtype = QType::F16;
-    // Isolate this test from the library charge (#1109 floors reserve_bytes at
-    // what cuBLAS/CUTLASS claim on the first forward). That charge has its own
-    // test below; folding it in here made this one assert the sum of two
-    // unrelated policies, which is how it went red for three PRs (AUDIT B63).
+    // Isolated from the library charge (#1109 floors reserve_bytes at cuBLAS/CUTLASS's first
+    // forward claim, its own test below): folding it in made this assert the sum of two unrelated
+    // policies, which went red for three PRs (AUDIT B63).
     config.library_reserve_mb = 0;
 
     const size_t GiB = 1024ull * 1024 * 1024;
     VRAMBudget with_planner = compute_vram_budget(m, config, 32, 128, 8 * GiB);
 
-    // Q6_K routes to the NVFP4 tier: heuristic ≈ planner, so KV keeps most of
-    // the post-reserve VRAM (well above the one-sequence floor).
-    //
-    // Threshold restated 2026-07-28 (#1103). This used to assert an absolute
-    // `kv_bytes >= 4 GiB`, which silently encoded the old mode-2 safety reserve
-    // of 512 MiB. That reserve was wrong: it planned KV down to a level the
-    // VRAMAllocator refuses to allocate against (it requires free >= bytes +
-    // 5% of total for anything >=16 MiB), so the plan could not be executed and
-    // the caches it starved failed mid-build. With the reserve corrected the
-    // absolute number is unreachable in this synthetic 8 GiB scenario. The
-    // property under test is unchanged — the planner-driven weight-cache
-    // reservation must not fire — so express it relative to what is actually
-    // distributable, which is what "KV keeps most of it" always meant.
+    // Q6_K routes to NVFP4 tier (heuristic ~= planner), so KV keeps most of post-reserve VRAM.
+    // #1103: used to assert an absolute kv_bytes >= 4 GiB, silently encoding the old 512 MiB
+    // mode-2 safety reserve, which planned KV below what VRAMAllocator's can_allocate() permits
+    // (free >= bytes + 5% of total for >=16 MiB), so caches failed mid-build. With the reserve
+    // corrected, express the property relative to distributable VRAM instead of an absolute number.
     const size_t per_block = 16ull * 8 * 128 * 2 * 2 * 32;
     const size_t kv_bytes = static_cast<size_t>(with_planner.kv_max_blocks) * per_block;
     const size_t distributable = 8 * GiB - with_planner.reserve_bytes;
@@ -182,11 +164,8 @@ TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
                                            << distributable / (1024 * 1024) << " MiB distributable)";
 }
 
-// --- imp.conf [vram] knobs (kv_fraction / reserve_floor_pct) ---
-//
-// F16 weights keep both the heuristic and the planner projection at zero, so
-// the KV math is undisturbed by weight-cache reservations — the knobs' effect
-// is exactly observable. max_seq_len is small enough that neither the
+// F16 weights keep both the heuristic and planner projection at zero, isolating the
+// kv_fraction/reserve_floor_pct knobs' effect; max_seq_len is small enough that neither the
 // min-KV floor nor the target_blocks clamp rewrites the fraction result.
 
 namespace {
@@ -235,10 +214,9 @@ TEST(VramBudgetReserve, KvFractionScalesKvPool) {
 
     VRAMBudget b08 = compute_vram_budget(m, cfg_08, 32, 128, 8 * GiB);
     VRAMBudget b04 = compute_vram_budget(m, cfg_04, 32, 128, 8 * GiB);
-    // Same `available` in both runs — halving the fraction halves the pool
-    // target. (kv_max_blocks can converge to the same value downstream via
-    // the physical-fit backstop / min-KV floor, which are fraction-
-    // independent — the bytes target is the knob's contract.)
+    // Same `available` in both runs: halving kv_fraction halves the bytes target
+    // (kv_max_blocks can converge downstream via the fraction-independent physical-fit backstop
+    // / min-KV floor, but the bytes target is the knob's own contract).
     EXPECT_EQ(b04.kv_cache_bytes * 2, b08.kv_cache_bytes);
     EXPECT_LE(b04.kv_max_blocks, b08.kv_max_blocks);
 }
@@ -253,10 +231,8 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     EngineConfig cfg_10 = knob_config();
     EngineConfig cfg_20 = knob_config();
     cfg_20.vram_reserve_floor_pct = 20;
-    // The floor percentage is what this test is about; the library charge is a
-    // separate floor with its own test (ReserveIsFlooredAtTheLibraryCharge).
-    // With both live, reserve_bytes is max(pct floor, library charge) and the
-    // library charge wins on any real card — which is exactly what silently
+    // reserve_bytes = max(pct floor, library charge); the library charge (its own test,
+    // ReserveIsFlooredAtTheLibraryCharge) wins on any real card, which is exactly what silently
     // broke this test in #1109 (AUDIT B63).
     cfg_10.library_reserve_mb = 0;
     cfg_20.library_reserve_mb = 0;
@@ -276,13 +252,10 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     EXPECT_GE(b20.reserve_bytes, b10.reserve_bytes);
 }
 
-// --- Mandatory native-NVFP4 decode-cache demand + balloon prealloc ---
-//
-// compute_native_cache_demand must mirror phase 3b's SfAtom slab sizing
-// exactly (cutlass_nvfp4_sf_size + 256-byte per-entry alignment; contiguous
-// expert groups as ONE entry) and include the GDN/SSM projections that
-// phase 0b registers — the old inline elems/16 heuristic omitted them and
-// was not an upper bound under SfAtom padding.
+// compute_native_cache_demand must mirror phase 3b's SfAtom slab sizing exactly
+// (cutlass_nvfp4_sf_size + 256-byte alignment, contiguous expert groups as ONE entry) and
+// include the GDN/SSM projections phase 0b registers; the old elems/16 heuristic omitted
+// them and was not an upper bound under SfAtom padding.
 
 namespace {
 
@@ -357,13 +330,11 @@ TEST(VramBudgetReserve, NativeCacheDemandZeroForNonPrequant) {
     EXPECT_EQ(d.moe_slab_bytes, 0u);
 }
 
-// #1765 regression: the TRANSIENT init headroom folded into the weight-cache
-// estimate (phase3 reserve, max(total/10, floor) + margin) must not be
-// charged against KV in the shadow plan. Fed whole, the plan granted the
-// "optional caches" everything above the one-sequence floor and collapsed
-// the KV pool to 128 blocks while GiBs sat free. The engine now feeds
-// estimate - transient; the old feeding is kept in the test as the contrast
-// arm so the assertion cannot pass vacuously.
+// #1765: transient init headroom folded into the weight-cache estimate (phase3 reserve,
+// max(total/10,floor)+margin) must not be charged against KV in the shadow plan; fed whole,
+// the plan granted optional caches everything above the one-sequence floor and collapsed KV
+// to 128 blocks with GiBs free. Engine now feeds estimate-transient; old feeding kept as the
+// contrast arm so the assertion can't pass vacuously.
 TEST(VramBudgetReserve, TransientReserveDoesNotStarveTheKvPlan) {
     SKIP_IF_NO_CUDA();
 
@@ -466,10 +437,9 @@ TEST(VramBudgetReserve, ReserveIsFlooredAtTheLibraryCharge) {
     fill_model(m, QType::F16, QType::F16);
     const size_t GiB = 1024ull * 1024 * 1024;
 
-    // A VRAM-BOUND pool, deliberately: knob_config()'s 2048-token context makes
-    // the pool demand-bound (512 blocks either way), and an assertion about the
-    // reserve would then pass for the wrong reason. At 32k the pool is sized by
-    // what is left, which is what the charge is supposed to move.
+    // Deliberately VRAM-bound: knob_config()'s 2048-token context makes the pool demand-bound
+    // (512 blocks either way), which would let a reserve assertion pass for the wrong reason. At
+    // 32k the pool is sized by what's left, which is what the charge is supposed to move.
     EngineConfig uncharged;
     uncharged.max_seq_len = 32768;
     uncharged.max_batch_size = 8;
@@ -501,17 +471,11 @@ TEST(VramBudgetReserve, ReserveIsFlooredAtTheLibraryCharge) {
         << "an unset library_reserve_mb must still charge the measured constant";
 }
 
-// V8 — plan sufficiency, which is what A7 actually asked for ("assert no tier is
-// exceeded"). This replaced an assertion of mine that was simply wrong:
-// `live <= plan`. It read well, it passed on five VRAM-generous shapes, and the
-// bench-sized shape below disproves it — the live pass hands out 224 KV blocks
-// where the plan affords 56, because the two answer different questions. Since
-// #1135 the pool takes the PLAN's number, so the live pass being more generous
-// costs nothing and is not a violation of anything.
-//
-// What must hold is the plan's own contract: a plan that reports ok must fit
-// inside the budget it was handed. If that ever fails, every number downstream
-// of it is furniture.
+// V8 plan sufficiency ("no tier exceeded"): replaces a wrong live<=plan assertion that
+// passed on five VRAM-generous shapes but failed on a bench-sized shape (live hands out 224
+// KV blocks where the plan affords 56 - different questions; since #1135 the pool takes the
+// PLAN's number, so live being more generous costs nothing). What must hold: a plan reporting
+// ok must fit inside its own budget, or everything downstream of it is furniture.
 TEST(VramBudgetReserve, PlanNeverExceedsTheBudgetItWasGiven) {
     SKIP_IF_NO_CUDA();
 
@@ -589,18 +553,15 @@ TEST(VramBudgetReserve, PlanNeverExceedsTheBudgetItWasGiven) {
     EXPECT_GE(checked, 3) << "only " << checked
                           << " of 7 cases produced a plan — the rest were refused, so the "
                              "sufficiency half of this test is not measuring what it claims";
-    // Without a case that genuinely cannot fit, the EXPECT_LE above is a
-    // tautology: every plan it sees has already passed the very check it is
-    // asserting. Mutation-verified — removing the fit check inside plan_memory()
-    // left this test green until the impossible case was added.
+    // Without a case that genuinely cannot fit, the fit assertion is a tautology (every plan
+    // already passed the check it asserts). Mutation-verified: removing the fit check inside
+    // plan_memory() left this green until the impossible case was added.
     EXPECT_GE(refused, 1) << "no case exercised the refusal path";
 }
 
-// The divergence the old assertion mistook for a bug, pinned so nobody restores
-// it. The live pass sizes KV from kv_fraction of what is free and clamps; the
-// plan grants blocks_per_seq x batch out of a computed residual. At a small
-// advertised context those answers differ by 4x, and neither is wrong — they are
-// answers to different questions. The pool takes the plan's (B69).
+// Live pass sizes KV from kv_fraction of free VRAM and clamps; the plan grants
+// blocks_per_seq*batch out of a computed residual. At a small advertised context they differ
+// by 4x, neither wrong - answers to different questions. The pool takes the plan's (B69).
 TEST(VramBudgetReserve, LivePassMayExceedThePlanAtSmallContexts) {
     SKIP_IF_NO_CUDA();
 
@@ -664,12 +625,10 @@ TEST(VramBudgetReserve, VramKnobsAreClamped) {
     EXPECT_EQ(a.kv_max_blocks, b.kv_max_blocks);
 }
 
-// #1103: the budget and the VRAMAllocator must agree on the headroom. Mode 2
-// deliberately skips the 10% reserve-floor POLICY to fit larger weight caches,
-// but the allocator's 5% is not policy — can_allocate() refuses any allocation
-// >=16 MiB that would leave less free than that. A plan below it cannot be
-// executed: the KV pool was sized against 512 MiB of assumed headroom while
-// every cache allocation needed 1630 MiB, so the caches failed mid-build.
+// #1103: budget and VRAMAllocator must agree on headroom. Mode 2 skips the 10% reserve-floor
+// POLICY to fit larger caches, but the allocator's 5% is not policy - can_allocate() refuses
+// any >=16 MiB allocation leaving less free than that. A plan below it can't execute: KV was
+// sized against 512 MiB assumed headroom while caches needed 1630 MiB and failed mid-build.
 TEST(VramBudgetReserve, ReserveNeverUndercutsTheAllocatorHeadroom) {
     SKIP_IF_NO_CUDA();
 
@@ -696,10 +655,10 @@ TEST(VramBudgetReserve, ReserveNeverUndercutsTheAllocatorHeadroom) {
     }
 }
 
-// kv_block_bytes_per_layer (#942): the single source for KV-size estimates.
-// The pre-upload expert-offload reserve used to multiply by raw dtype_size(),
-// which returns 0 for NVFP4/MXFP4_KV (zeroing the KV headroom) and 1 byte/elem
-// for INT4 (2x the packed size), and never counted scale overhead.
+// #942: kv_block_bytes_per_layer is the single source for KV-size estimates. The pre-upload
+// expert-offload reserve used to multiply by raw dtype_size(), which returns 0 for
+// NVFP4/MXFP4_KV (zeroing KV headroom) and 1 byte/elem for INT4 (2x the packed size), and
+// never counted scale overhead.
 TEST(VramBudgetReserve, KvBlockBytesPerLayerIsPackingAndScaleAware) {
     constexpr int bs = 16, nkv = 8, hd = 128;
     const size_t elems = static_cast<size_t>(bs) * nkv * hd;
@@ -725,12 +684,10 @@ TEST(VramBudgetReserve, KvBlockBytesPerLayerIsPackingAndScaleAware) {
     EXPECT_GT(kv_block_bytes_per_layer(QType::NVFP4, bs, nkv, hd), 0u);
 }
 
-// #1747: the divergence log printed kv_max_blocks under "live pass would have
-// said", and kv_max_blocks may already have been raised by the min_kv_tokens
-// rescue floor. A start that hit the floor therefore reported a lower bound of
-// the CONFIGURATION as if it were a reading of what the live pass sized. The
-// pre-floor figure is kept so the log can name both; this pins that it is the
-// unfloored one, which is what the mutation "assign after the raise" breaks.
+// #1747: the divergence log printed kv_max_blocks under "live pass would have said", but
+// kv_max_blocks may already be raised by the min_kv_tokens rescue floor, so a floored start
+// reported a config lower bound as a live-pass reading. Pre-floor figure is kept so the log
+// can name both; mutation "assign after the raise" breaks this.
 TEST(VramBudgetReserve, PreFloorBlocksSurviveTheMinKvTokensRaise) {
     SKIP_IF_NO_CUDA();
 
@@ -744,10 +701,9 @@ TEST(VramBudgetReserve, PreFloorBlocksSurviveTheMinKvTokensRaise) {
     config.kv_cache_dtype = QType::F16;
     config.min_kv_tokens = 16384;  // 1024 blocks at block size 16
 
-    // 8 GiB is chosen, not arbitrary: the sizing lands at 618 blocks there and
-    // the floor raises it to 1024. At 9 GiB and above the floor never fires and
-    // this test would pass while proving nothing, which is why the assertion
-    // below is an ASSERT on the floor having fired at all.
+    // 8 GiB is chosen, not arbitrary: sizing lands at 618 blocks there and the floor raises it
+    // to 1024; at 9 GiB+ the floor never fires and the test would pass proving nothing. Assertion
+    // is that the floor fired at all.
     const size_t tight = 8ull * 1024 * 1024 * 1024;
     VRAMBudget b = compute_vram_budget(m, config, 36, 128, tight);
 
@@ -764,16 +720,10 @@ TEST(VramBudgetReserve, PreFloorBlocksSurviveTheMinKvTokensRaise) {
     EXPECT_NE(b.kv_blocks_pre_floor, b.kv_max_blocks);
 }
 
-// ---------------------------------------------------------------------------
-// IMMA Q8_0 prefill planes (#1899)
-//
-// mmq_q8_imma keeps an s8 + (alpha, beta) copy of every Q8_0 weight it
-// prefills, taken lazily on that weight's first prefill. Nothing charged it, so
-// it grew into whatever the KV pool left free — 5612 MiB on a cold Qwen3-8B-Q8_0
-// start, 7942 MiB with library_reserve_mb=12000, same model, same tree. The
-// budget now charges the exact arithmetic the allocator uses, and the engine
-// caps the allocator at the charge.
-// ---------------------------------------------------------------------------
+// #1899: mmq_q8_imma keeps a lazy s8+(alpha,beta) copy of every Q8_0 weight on its first
+// prefill; nothing charged it, so it grew into whatever the KV pool left free (5612 MiB cold
+// on Qwen3-8B-Q8_0, 7942 MiB with library_reserve_mb=12000, same model/tree). Budget now
+// charges the exact allocator arithmetic and caps the allocator at the charge.
 TEST(VramBudgetReserve, ImmaPlanesAreChargedForQ8Weights) {
     SKIP_IF_NO_CUDA();
 

@@ -10,11 +10,8 @@
 namespace imp {
 namespace {
 
-// Round-trip with HW-layout scales: validates that the offset formula
-// is self-consistent (quant writes scale at offset X, dequant reads the
-// same scale at offset X). If the formula is broken on one side only,
-// error will be catastrophic. Self-consistent means the round-trip
-// works even without a matching MMA.
+// Round-trip with HW-layout scales validates the offset formula is self-consistent (quant
+// writes scale at offset X, dequant reads the same X); works even without a matching MMA.
 class Nvfp4QuantHwTest : public ::testing::Test {
 protected:
     void run_roundtrip(int batch, int heads, int tokens, int head_dim, float sigma) {

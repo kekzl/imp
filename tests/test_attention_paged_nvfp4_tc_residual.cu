@@ -12,27 +12,10 @@
 namespace imp {
 namespace {
 
-// Phase 3b numerical-equivalence test for the residual-FP16 read path.
-//
-// Setup:
-//   - Build a 64-token NVFP4 paged KV cache with controlled, in-range FP4
-//     magnitudes (nibbles ∈ {0,1,2,3,4}) and uniform UE4M3 scale = 1.0
-//     (byte 0x38). Avoids the NaN trap the existing PagedAttentionNvfp4TCTest
-//     comments call out for unconstrained random NVFP4 input.
-//   - Compute the kernel's exact dequant on the host for the last 4 tokens
-//     (FP4 nibble → half via the same E2M1 LUT, multiplied by UE4M3 = 1.0).
-//   - Run the TC kernel two ways:
-//        (A) residual_count=0, K_residual=nullptr → all-paged baseline
-//        (B) residual_count=4 with K/V_residual pointing at the dequant buffer
-//            → kernel clips paged to first 60 tokens, reads last 4 from residual
-//   - Outputs must match within FP16 ulp tolerance because the residual holds
-//     the exact dequant of the paged tail; the only delta is the code path.
-//
-// This guards against:
-//   - paged_end_token / num_paged_blocks miscomputation
-//   - residual slot indexing (slot_base, residual_skip)
-//   - block-softmax merge of the residual contribution into the running m_w/l_w/o_reg
-//   - V WMMA per-lane scatter (LANES_PER_CHUNK_R / my_chunk_r) for the residual pass
+// Phase 3b residual-FP16 path: 64-token NVFP4 cache, in-range nibbles, UE4M3 scale=1.0,
+// avoiding the unconstrained-random-NVFP4 NaN trap.
+// (A) residual_count=0 (all-paged) vs (B) count=4 (paged clips to 60, residual last 4) must
+// match within FP16 ulp: residual holds the exact dequant, so any delta is the code path.
 
 // Host-side E2M1 → float matching `cvt.rn.f16x2.e2m1x2` semantics.
 // Bias = 1, sign | exp(2) | mantissa(1).
@@ -513,13 +496,9 @@ TEST_F(PagedAttentionNvfp4TCResidualTest, ResidualOnlyShortContext_HD64) {
     cudaFree(d_cl);
 }
 
-// Splitk fast-path launch test: allocate splitk scratch, force the launcher
-// onto the splitk + paged_attention_residual_reduce_kernel path (the path
-// the engine uses on real workloads). Verifies the kernel dispatches
-// without CUDA errors — a full numerical equivalence test is blocked by
-// the same synthetic-random-NVFP4-→-NaN limitation called out in
-// PagedAttentionNvfp4TCTest. The non-splitk equivalence test above proves
-// the math; the splitk path reuses the same residual_reduce_kernel.
+// Splitk fast-path launch test only (same NaN-on-synthetic-NVFP4 limitation as
+// PagedAttentionNvfp4TCTest blocks numeric equivalence). The non-splitk test above proves
+// the math; splitk reuses the same residual_reduce_kernel.
 TEST_F(PagedAttentionNvfp4TCResidualTest, SplitKResidualLaunchSucceeds_HD128) {
     constexpr int batch = 1;
     constexpr int n_heads = 8;
@@ -679,20 +658,11 @@ TEST_F(PagedAttentionNvfp4TCResidualTest, SplitKResidualLaunchSucceeds_HD128) {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// #1708: the multi-seq residual KV write must be graph-safe.
-//
-// The path this guards wrote through a device pointer array the HOST built and
-// `cudaMallocAsync`'d per call, per layer, inside the captured region, freeing
-// it right after the launch. A replay then wrote through an address the
-// allocator had handed to someone else - "an illegal memory access", six
-// concurrent sequences, graphs on, silent wrong output before that.
-//
-// The property that broke is not "the kernel computes the right address once".
-// It is "the address it computes follows the ring across a REPLAY". So the test
-// captures a graph, advances the ring on the device without re-capturing, and
-// asserts the second write landed one slot further on.
-// ---------------------------------------------------------------------------
+// #1708: multi-seq residual KV write must be graph-safe against REPLAY, not just first capture.
+// Prior bug: a host-built device pointer array was cudaMallocAsync'd and freed inside the
+// captured region each call; a replay wrote through a freed/reassigned address (illegal
+// access, 6 concurrent sequences). Test captures once, advances the ring on-device, and
+// asserts the second write follows the ring instead of the stale captured index.
 
 TEST(ResidualKvWriteMulti, ReplayFollowsTheRingInsteadOfTheCapturedIndex) {
     int dev = 0;

@@ -78,10 +78,9 @@ TEST(SafeTensorsValidateHeaderSize, RejectsHeaderExceedingFile) {
 }
 
 TEST(SafeTensorsValidateHeaderSize, RejectsUInt64MaxOverflowAttack) {
-    // The bug fixed: prior code computed `8 + header_size > file_size`. With
-    // header_size = UINT64_MAX-4 the addition wrapped to 3, which is NOT
-    // greater than any legitimate file size — the check silently bypassed.
-    // The new overflow-safe check rejects this.
+    // Bug: `8 + header_size > file_size` with header_size = UINT64_MAX-4 wrapped to 3, which is
+    // not greater than any legitimate file size, silently bypassing the check. Overflow-safe
+    // check rejects this.
     std::string err;
     EXPECT_FALSE(safetensors_internal::validate_header_size(
         16, std::numeric_limits<uint64_t>::max(), &err));
@@ -167,10 +166,9 @@ TEST(SafeTensorsValidateTensorOffsets, EndExactlyAtFileBoundary) {
 
 // ---- F5: malformed-tensor-entry warnings ----
 
-// Loads a synthetic blob with one tensor missing 'dtype' and one with malformed
-// 'shape'. load_safetensors returns nullptr (no config.json → cannot build a
-// Model) but the per-shard load must drop both bad tensors with a WARN naming
-// each, AND log an end-of-shard summary. We capture stderr and check.
+// load_safetensors returns nullptr on a synthetic blob with bad tensors (no config.json), but
+// the per-shard load must drop both bad tensors with a WARN naming each, plus an end-of-shard
+// summary; captured via stderr.
 TEST(SafeTensorsMalformedEntryWarnings, MissingDtypeAndShapeWarn) {
     // Two malformed tensors; offsets are valid in case they get past the dtype/shape checks.
     const std::string header =
@@ -213,11 +211,9 @@ TEST(SafeTensorsMalformedEntryWarnings, OffsetByteCountMismatchWarns) {
     EXPECT_NE(captured.find("byte count"), std::string::npos) << captured;
 }
 
-// A tensor with more dims than the engine's kMaxDims used to be DROPPED with a
-// WARN — which silently loses a weight. Qwen3-VL's patch embed is
-// [1024, 3, 2, 16, 16] and vanished exactly that way. It is now flattened to
-// [d0, d1*..*dn] instead: element order is row-major and untouched, so this is
-// a pure reinterpretation, and it is the only shape the GEMM path could consume.
+// A tensor with more dims than kMaxDims used to be DROPPED with a WARN, silently losing a
+// weight (Qwen3-VL's patch embed [1024,3,2,16,16] vanished this way). Now flattened to
+// [d0, d1*...*dn]: row-major order is untouched, the only shape the GEMM path can consume.
 TEST(SafeTensorsHighDimTensors, FlattenedInsteadOfDropped) {
     // [2, 3, 2, 2, 2] F32 = 48 elements = 192 bytes. Flattens to [2, 24].
     const std::string header =
@@ -256,13 +252,9 @@ static std::string load_and_capture(const std::string& path) {
     return out + err;
 }
 
-// ---- #1604: the validated width and the consumed width are one number ----
-//
-// The loader used to keep two private dtype tables: one for the byte count it
-// validated a tensor with, one for the QType its consumer reads it with. For
-// I16 they were 2 and 4. A file that passed every check was then read at twice
-// its own size. This test fails the moment a row is added whose two widths
-// disagree, which is how that defect would come back.
+// #1604: the loader kept two private dtype tables, one for the validated byte count, one for
+// the consumer's QType; I16 was 2 vs 4, so a file passing every check was read at twice its
+// own size. Fails the moment a row's two widths disagree.
 TEST(SafeTensorsDtypeTable, ServableRowsHaveMatchingWidths) {
     const size_t n = safetensors_internal::dtype_table_size();
     ASSERT_GT(n, 0u);
@@ -318,12 +310,10 @@ TEST(SafeTensorsHostileHeader, I16TensorIsDroppedNotRetyped) {
 // ---- #1603: no lenient branch for an unknown dtype ----
 
 TEST(SafeTensorsHostileHeader, UnknownDtypeWithUnboundedOffsetStartIsDropped) {
-    // The reachable half of #1603. offset_start was never validated on the
-    // unknown-dtype branch - validate_tensor_offsets is its only checker and
-    // that branch skipped it - while the branch's own check looked at
-    // offset_end alone. So offset_start went straight into
-    // `mmap_base + tensor_data_offset + offset_start` and the tensor was
-    // emitted, with the pointer 2^63 bytes outside a 16-byte mapping.
+    // Reachable half of #1603: offset_start was never validated on the unknown-dtype branch
+    // (validate_tensor_offsets skipped it; the branch's own check looked only at offset_end), so
+    // it went straight into mmap_base+tensor_data_offset+offset_start with the pointer 2^63 bytes
+    // outside a 16-byte mapping.
     const std::string header =
         "{\"w\": {\"dtype\": \"F8_E8M0\", \"shape\": [4, 4], "
         "\"data_offsets\": [18446744073709551000, 0]}}";
@@ -342,14 +332,11 @@ TEST(SafeTensorsHostileHeader, UnknownDtypeWithUnboundedOffsetStartIsDropped) {
 }
 
 TEST(SafeTensorsHostileHeader, HugeOffsetEndIsRejected) {
-    // NOT a wrap test. data_offsets values are read through JsonValue::as_int(),
-    // which narrows a double to int64_t, so anything above 2^63 lands on
-    // exactly INT64_MIN and reads back as 2^63 - measured, not assumed:
-    //   static_cast<int64_t>(18446744073709551608.0) == INT64_MIN.
-    // tensor_data_offset + offset_end therefore cannot reach 2^64 from this
-    // path, and the wrapping addition the old lenient branch used was never
-    // defeatable through the header. What IS reachable is an offset far past
-    // the file, and that has to be refused on every dtype.
+    // Not a wrap test: data_offsets is read through JsonValue::as_int(), narrowing a double to
+    // int64_t, so anything above 2^63 lands on INT64_MIN and reads back as 2^63 (measured:
+    // static_cast<int64_t>(18446744073709551608.0) == INT64_MIN). tensor_data_offset+offset_end
+    // can't reach 2^64 from this path; what IS reachable is an offset past the file, refused on
+    // every dtype.
     for (const char* dtype : {"F32", "F8_E8M0"}) {
         const std::string header = std::string("{\"w\": {\"dtype\": \"") + dtype +
                                    "\", \"shape\": [4], "

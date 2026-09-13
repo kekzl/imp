@@ -1,7 +1,6 @@
-// Unit tests for tools/imp-server/responses.{h,cpp} — the /v1/responses
-// (OpenAI Responses API) <-> chat-completions transforms. Oracle:
-// hand-written request/response pairs per the published API shapes (what the
-// OpenAI Agents SDK and Codex CLI send/expect) — no imp-vs-imp.
+// /v1/responses <-> chat-completions transforms (tools/imp-server/responses.{h,cpp}).
+// Oracle: hand-written request/response pairs per the published OpenAI Responses API shapes
+// (Agents SDK, Codex CLI), no imp-vs-imp.
 
 #include <gtest/gtest.h>
 #include "responses.h"
@@ -100,12 +99,10 @@ TEST(ResponsesTransform, TextFormatAndKnobs) {
     EXPECT_EQ(oai["response_format"]["json_schema"]["strict"], true);
 }
 
-// `regex` and `grammar` are imp's own response_format extensions and both work
-// on /v1/chat/completions. This transform carried neither, so the SAME request
-// was constrained on one endpoint and free text on the other, at 200 with no
-// reason. Measured on the model-less binary: `{"type":"nonsense_value"}` was 400
-// on /v1/chat/completions (naming the known set) and 503 on /v1/responses, i.e.
-// the chat parser's own check never saw the field the transform had dropped.
+// regex/grammar are imp's own response_format extensions, working on /v1/chat/completions
+// but dropped by this transform, so the same request was constrained on one endpoint and free
+// text on the other at 200. Measured: {"type":"nonsense_value"} was 400 on chat, 503 on
+// responses - the chat parser's own check never saw the dropped field.
 TEST(ResponsesTransform, RegexAndGrammarFormatsReachTheChatBody) {
     json rx = responses_to_openai_body(
         json{{"model", "m"}, {"input", "x"}, {"text", {{"format", {{"type", "regex"}, {"regex", "a+"}}}}}});
@@ -140,11 +137,10 @@ TEST(ResponsesTransform, UnknownTextFormatIsRefused) {
                  std::invalid_argument);
 }
 
-// A tool_choice object the transform cannot map wrote nothing at all, so the
-// chat parser applied its own default "auto". A caller demanding a call -
-// `{"type":"allowed_tools","mode":"required"}`, the shape the Agents SDK emits -
-// got a fluent 200 with no call. `validate_tool_choice` could not catch it: it
-// runs on the transformed body, where the field no longer existed.
+// A tool_choice object the transform can't map wrote nothing, so the chat parser defaulted
+// to "auto": a caller demanding a call ({"type":"allowed_tools","mode":"required"}, the
+// Agents SDK shape) got a fluent 200 with no call; validate_tool_choice runs on the
+// already-transformed body, so it never saw the field.
 TEST(ResponsesTransform, UnmappableToolChoiceIsRefused) {
     auto with = [](const json& tc) {
         return json{{"model", "m"},
@@ -286,10 +282,9 @@ TEST(ResponsesTransform, LengthFinishBecomesIncomplete) {
     EXPECT_EQ(out["incomplete_details"]["reason"], "max_output_tokens");
 }
 
-// Context lost to StreamingLLM eviction must survive the transform. A caller
-// on /v1/responses is exactly as entitled to know its context was truncated
-// mid-generation as a caller on chat-completions, and the field is absent
-// unless it happened — so its presence is the signal, not its value.
+// Context lost to StreamingLLM eviction must survive the transform: a /v1/responses caller
+// is as entitled to know its context was truncated as a chat-completions caller. Field
+// absence IS the signal (present only when eviction happened).
 TEST(ResponsesTransform, EvictedTokensForwarded) {
     json oai = make_oai("hi");
     oai["usage"]["prompt_tokens_details"]["evicted_tokens"] = 384;

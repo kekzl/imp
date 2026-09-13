@@ -1,31 +1,9 @@
-// =============================================================================
-// Vision GPU encoder + projector frozen golden (R9 / issue #583).
-//
-// src/vision/ was the only fully GPU-blind area of the suite: since #564 only
-// the CPU preprocessing (test_vision_preprocess.cpp) was covered; the SigLIP
-// encoder, the gemma4v path (RMSNorm / per-head q/k/v norm / 2D axial RoPE /
-// sandwich post-norms / GeGLU) and the fused-FP32 projector tail (#489) ran
-// only in manual VL runs.
-//
-// This drives the full GPU pipeline directly — committed test image →
-// preprocess → SigLIP/gemma4v encoder → projector tail → image embeddings —
-// without an LM: load_vision_gguf() reads everything (incl. lm_d_model) from
-// the mmproj GGUF, and VisionEncoder needs only the VisionModel + a
-// VRAMAllocator. It compares projector-output spot values against a frozen
-// stability golden (tests/refs/vision_encoder_golden.h) at the f16 class
-// tolerance, and hard-guards against NaN/Inf over the whole embedding.
-//
-// The golden is a REGRESSION LOCK (output stability of a manually-validated
-// build), not an independent oracle — there is no fp64 reference for the
-// encoder. See the golden header + tests/refs/README.md.
-//
-// Skips cleanly when the model/image are absent (CI has no GPU/models):
-//   IMP_TEST_MMPROJ          gemma-3 SigLIP mmproj GGUF
-//   IMP_TEST_MMPROJ_GEMMA4   gemma4v mmproj GGUF (optional)
-//   IMP_VISION_TEST_IMAGE    override the committed fixture path
-//   IMP_VISION_GOLDEN_DUMP=1 print golden arrays for regeneration, assert only
-//                            the NaN/Inf guard.
-// =============================================================================
+// R9/#583: src/vision/ was the only fully GPU-blind area (only CPU preprocessing covered
+// since #564). Drives the full GPU pipeline (image -> preprocess -> SigLIP/gemma4v encoder ->
+// projector tail -> embeddings) without an LM, comparing spot values against a frozen
+// stability golden (tests/refs/vision_encoder_golden.h) at f16 tolerance plus a hard NaN/Inf
+// guard. Regression lock (manually-validated build), not an independent oracle - no fp64
+// reference exists for the encoder. Skips without IMP_TEST_MMPROJ[_GEMMA4]/model.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -81,16 +59,13 @@ bool file_exists(const std::string& p) {
     return true;
 }
 
-// Run the full pipeline for one mmproj GGUF and return the projector-output
-// embeddings on the host ([num_tokens * d_model] row-major). Returns false on
-// any setup failure (caller turns that into a hard test failure, not a skip —
-// skips are decided before we get here, on file presence).
+// Returns false on any setup failure, turned into a hard test failure, not a skip: skips
+// are decided earlier, on file presence.
 bool run_vision_pipeline(const std::string& mmproj_path, const std::string& image_path,
                          std::vector<float>& out, int& num_tokens, int& d_model, std::string& err) {
-    // The tower and the encoder workspace are T2 arena tenants (F-12), so this
-    // harness has to open an arena the way Engine::init does — and size it the
-    // same way, from the probe rather than a literal, so a different mmproj
-    // cannot silently outgrow it.
+    // Tower and encoder workspace are T2 arena tenants (F-12): harness opens/sizes the arena
+    // like Engine::init does, from the probe rather than a literal, so a different mmproj can't
+    // silently outgrow it.
     VisionConfig probe_cfg;
     int probe_lm_d = 0;
     const size_t tower_bytes = vision_gguf_probe(mmproj_path, &probe_cfg, &probe_lm_d);
@@ -137,11 +112,10 @@ bool run_vision_pipeline(const std::string& mmproj_path, const std::string& imag
         return false;
     }
 
-    // Anti-drift, checked on every golden run rather than in a test of its own:
-    // demand_bytes() and the reservation are two expressions of one buffer list,
-    // and a buffer added to init() without updating demand_bytes() under-reserves
-    // the arena — which surfaces on whichever model happens to be tight, not here.
-    // The arena's own `used` covers the tower too, so this pins the probe as well.
+    // Anti-drift, checked on every golden run: demand_bytes() and the reservation are two
+    // expressions of one buffer list; a buffer added to init() without updating demand_bytes()
+    // under-reserves the arena on whichever model is tight, not here. The arena's own `used`
+    // covers the tower too, so this pins the probe as well.
     if (encoder.taken_bytes() != VisionEncoder::demand_bytes(model->config)) {
         err = "encoder demand_bytes != taken_bytes";
         cudaStreamDestroy(stream);

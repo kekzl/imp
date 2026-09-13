@@ -1,9 +1,6 @@
-// What one HTTP request is allowed to cost (#1614, #1615, #1616, #1617, #1618).
-//
-// Every case here is a place where the server counted a request as one unit
-// while the request decided how much work that unit was, or where a limit
-// keyed on something the client writes. The pieces that can be reached without
-// a running server are tested here; the rest is in the API battery.
+// What one HTTP request may cost (#1614-#1618): every case is a place the server counted a
+// request as one unit while the request decided the actual work, or a limit keyed on
+// client-controlled input. Reachable-without-a-server pieces here; the rest in the API battery.
 
 #include "handlers.h"
 #include "rate_limit.h"
@@ -119,10 +116,9 @@ TEST(SanitizeForEcho, TruncatesWithAMarker) {
     EXPECT_EQ(out.substr(128), "...");
 }
 
-// The whole point: the sanitised string survives serialisation. Before the
-// fix the 404 handler called .dump() on the raw path, which throws
-// json::type_error.316 on ill-formed UTF-8 - so a 404 became a 500 with an
-// empty body, which is the shape the envelope exists to prevent.
+// Sanitised string must survive serialisation: before the fix the 404 handler called .dump()
+// on the raw path, throwing json::type_error.316 on ill-formed UTF-8, turning a 404 into a
+// 500 with an empty body - the shape the envelope exists to prevent.
 TEST(SanitizeForEcho, TheResultSerialisesWhereTheRawPathThrows) {
     const std::string bad_path = "/v1/\x80\xff";
 
@@ -293,10 +289,9 @@ TEST(ServableContext, FixedPoolAdvertisesWhatItHolds) {
 // Latency histogram ladders (#1577)
 // ---------------------------------------------------------------------------
 
-// The defect: inter-token latency was observed on the request-duration ladder,
-// whose first bucket is 5 ms. imp decodes at 300-450 tok/s, i.e. 2.2-3.3 ms per
-// token, so every observation fell in bucket 0 and histogram_quantile returned
-// a function of the bounds rather than of the data.
+// Defect: inter-token latency was observed on the request-duration ladder whose first bucket
+// is 5 ms; imp decodes at 300-450 tok/s (2.2-3.3 ms/token), so every observation fell in
+// bucket 0 and histogram_quantile returned a function of the bounds, not the data.
 TEST(LatencyLadder, TheSecondsLadderCannotResolveInterTokenLatency) {
     LatencyHistogram seconds;  // the shared ladder, as ITL used to use it
     for (double tok_per_s : {300.0, 350.0, 400.0, 450.0})

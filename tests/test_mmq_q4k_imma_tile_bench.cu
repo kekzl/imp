@@ -1,7 +1,5 @@
-// Phase 2B correctness test for the INT8 IMMA tile kernel. Verifies that
-// `mmq_q4k_imma_tile(X_s8, x_scale, x_rowsum, W_s8, α, β, out)` reconstructs
-// the same FP32 result (modulo INT8 / FP16 quantisation noise) as a full
-// FP32 reference GEMM over the dequantised inputs.
+// Phase 2B: mmq_q4k_imma_tile(X_s8,x_scale,x_rowsum,W_s8,alpha,beta,out) vs FP32 reference
+// GEMM over dequantized inputs, within INT8/FP16 quantization noise.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -197,16 +195,14 @@ TEST(MmqQ4kImmaTile, CorrectnessFFNLikeShape) {
     run_correctness(/*M=*/128, /*N=*/64, /*K=*/512, /*seed=*/37, /*abs=*/40.0f, /*rel=*/0.02f);
 }
 
-// Bench-only — prints kernel-time and effective TOPS at production-realistic
-// shapes. No perf assertion: this is Phase 2B.1 informational baseline. The
-// 1-warp-per-CTA tile (BLOCK_M=16, BLOCK_N=8) substantially under-utilises
-// each SM; Phase 2B.2 (multi-warp expansion) is the next real perf lever.
+// Phase 2B.1 informational baseline, no perf assertion: prints kernel time and TOPS.
+// 1-warp-per-CTA tile (BLOCK_M=16,BLOCK_N=8) under-utilises each SM; Phase 2B.2 is the
+// next real lever.
 TEST(MmqQ4kImmaTile, BenchSweep) {
     struct Shape { int M, N, K; };
-    // Cover production FFN shapes (Qwen3-32B FFN ~5120, Gemma-3-12B ~3072).
-    // Larger M/N is mandatory for Phase 2B.3's BLOCK_M=64 BLOCK_N=32 tile —
-    // small shapes leave 170 SMs starved (verified empirically: M=512 N=256 →
-    // 64 CTAs ≈ 0.4 CTAs/SM and the kernel regresses vs Phase 2B.2).
+    // Production FFN shapes (Qwen3-32B FFN ~5120, Gemma-3-12B ~3072). Large M/N is mandatory
+    // for Phase 2B.3's BLOCK_M=64/BLOCK_N=32 tile: M=512 N=256 gives 64 CTAs, ~0.4 CTAs/SM,
+    // and regresses vs Phase 2B.2.
     Shape shapes[] = {
         {512,  512,  2048},
         {1024, 512,  2048},

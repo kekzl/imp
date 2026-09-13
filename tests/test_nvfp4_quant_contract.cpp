@@ -1,15 +1,7 @@
-// The checkpoint's quantization contract, on the CPU lane (#1960).
-//
-// `config_groups[*].targets = ["Linear"]` plus `quantization_config.ignore` is a
-// COMPLETE partition of a compressed-tensors checkpoint's Linears. Measured on
-// Qwen3.8-27B-NVFP4-vllm: 496 packed modules, 170 ignore entries, 121 plain 2-D
-// weights all covered, 0 Linears left over. imp parsed the list and read it
-// nowhere, so a Linear whose weight_scale went missing on the way in was
-// indistinguishable from one the author left in BF16 on purpose.
-//
-// The second half covers the fused-projection scale split: which facts the
-// loader may act on, and that the only producer of the provenance flag still
-// produces it.
+// config_groups[*].targets=["Linear"] + quantization_config.ignore is a COMPLETE partition
+// of a compressed-tensors checkpoint's Linears (#1960; measured on Qwen3.8-27B-NVFP4-vllm:
+// 496 packed, 170 ignore, 121 plain, 0 leftover). imp parsed but never read the list, so a
+// Linear missing weight_scale was indistinguishable from an intentional BF16 one.
 
 #include "exec/nvfp4_merged_scale_guard.h"
 #include "model/model.h"
@@ -24,14 +16,10 @@
 #include <vector>
 
 namespace pol = imp::nvfp4_policy;
-// ---- the checkpoint's quantization contract (#1960) --------------------------
-//
-// `config_groups[*].targets = ["Linear"]` plus `quantization_config.ignore` is a
-// COMPLETE partition of a compressed-tensors checkpoint's Linears. Measured on
-// Qwen3.8-27B-NVFP4-vllm: 496 packed modules, 170 ignore entries, 121 plain 2-D
-// weights of which all 121 are listed, 0 left over. imp parsed the list and read
-// it nowhere, so a Linear whose weight_scale went missing on the way in was
-// indistinguishable from one the author left in BF16 on purpose.
+// config_groups[*].targets=["Linear"] + quantization_config.ignore is a COMPLETE partition
+// of a compressed-tensors checkpoint's Linears (#1960; measured on Qwen3.8-27B-NVFP4-vllm:
+// 496 packed, 170 ignore, 121 plain, 0 leftover). imp parsed but never read the list, so a
+// missing weight_scale was indistinguishable from an intentional BF16 Linear.
 
 namespace {
 
@@ -162,12 +150,9 @@ TEST(NvFP4IgnoreList, ModuleNameSurvivesEverySuffixSpelling) {
     }
 }
 
-// ---- merged-scale provenance (#1960) ----------------------------------------
-//
-// The fused-split fix-up used to fire on a predicate that a separate-tensor
-// checkpoint also satisfies whenever a sibling failed to promote for an
-// unrelated reason. On Qwen3.8-27B that aims w_up's micro-scales 17408 * 320 =
-// 5.57 MB past the end of w_gate's plane, logged as a normal split.
+// Merged-scale fix-up used to fire on a predicate a separate-tensor checkpoint also
+// satisfies when a sibling fails to promote for an unrelated reason; on Qwen3.8-27B that
+// aimed w_up's micro-scales 17408*320=5.57 MB past the end of w_gate's plane, logged as normal.
 
 namespace {
 
@@ -185,12 +170,9 @@ imp::FusedSplitRequest gate_up_request() {
 
 }  // namespace
 
-// The WIRING, not the rule: `fused_split_eligible` below is driven with the flag
-// set both ways, but nothing there notices if the only producer of the flag
-// stops producing it. That separation is the #1929 shape, so the producer gets
-// its own test. Geometry from Phi-4-reasoning-plus-NVFP4 (fused `qkv_proj` and
-// `gate_up_proj`), scaled down: q + 2kv rows for the attention tensor, 2 x half
-// for the MLP one.
+// Tests the WIRING, not the rule: fused_split_eligible is driven both ways here, but nothing
+// notices if the flag's only producer stops producing it (#1929 shape); the producer gets
+// its own test. Geometry from Phi-4-reasoning-plus-NVFP4 (qkv_proj, gate_up_proj), scaled down.
 namespace {
 
 struct FusedSplitFixture {
@@ -304,17 +286,10 @@ TEST(NvFP4MergedScaleProvenance, ShapeBeltStopsAnOutOfPlaneSplit) {
 
 namespace {
 
-// Two layouts a fused gate|up group can arrive in.
-//
-// SLICED is what every producer in the tree makes today and what
-// Phi-4-reasoning-plus-NVFP4 loads as: weight_map cuts the `[2*half, K/16]`
-// plane in two and weight_upload gives each half its own allocation, so the
-// siblings share the global scale and nothing else.
-//
-// ONE PLANE is what the loader's fix-up arm makes: sibling pointers are offsets
-// into the base's plane, and only then is a row offset a meaningful assertion.
-// Same geometry as Qwen3.8-27B (17408 rows, 2560 packed cols) scaled down so the
-// pointer arithmetic stays inside a real buffer.
+// SLICED: every producer today, and what Phi-4-reasoning-plus-NVFP4 loads as - weight_map
+// cuts the plane in two, siblings share only the global scale. ONE PLANE: the loader's
+// fix-up arm makes sibling pointers offsets into the base's plane, only then is a row offset
+// meaningful. Geometry matches Qwen3.8-27B (17408 rows, 2560 packed cols), scaled down.
 constexpr int64_t kRows = 8;
 constexpr int64_t kRowBytes = 2560 / 8 / 40;  // 8
 

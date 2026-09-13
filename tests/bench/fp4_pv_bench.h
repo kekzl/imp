@@ -4,37 +4,10 @@
 
 namespace imp {
 
-// =============================================================================
-// fp4_pv_bench.h — Phase 3a FP4 PV microbench
-// =============================================================================
-//
-// Discriminates "MMA-level gain is real on realistic post-softmax data" vs
-// "evaporates" before committing to the multi-week Phase 3b/3c production
-// integration.
-//
-// Two questions answered:
-//
-//   1. ACCURACY — single-level FP4 quant of post-softmax probabilities.
-//      Generates N synthetic attention rows (softmax over Gaussian logits +
-//      spike), quantises each row to FP4 + UE4M3 per-16 scales, and
-//      compares the "FP4 P @ FP4 V" dot product against an FP32 reference.
-//      Reports relative-error percentiles. THIS IS THE KEY DATA POINT —
-//      if single-level FP4 PV has catastrophic relative error (>~50 %),
-//      Phase 3b's two-level accumulator is mandatory; if it's bounded
-//      (<5 %), Phase 3 could ship without the accumulator complexity.
-//
-//   2. THROUGHPUT — raw MMA-pipeline TOPS for mxf4nvf4 m16n8k64 vs the
-//      WMMA m16n16k16 PV reference. The existing mxf4nvf4_mma_bench
-//      compared mxf4nvf4 vs f8f6f4; this adds the missing HMMA reference
-//      that the PV path actually replaces.
-//
-// Both run on the GPU and emit results to stdout. The accuracy half does
-// the quantisation in software (host-side reconstruction matches what the
-// PTX `cvt.rn.satfinite.e2m1x2.f32` + `cvt.rn.satfinite.e4m3.f32` produce
-// modulo IEEE rounding at midpoints; the numerical signal of interest —
-// long-tail truncation in softmax distributions — is independent of the
-// rounding mode).
-// =============================================================================
+// Discriminates whether MMA-level FP4 PV gain survives realistic post-softmax data before
+// committing to Phase 3b/3c integration.
+// Accuracy: >~50% rel error vs an FP32 ref mandates the two-level accumulator; <5% needs none.
+// Throughput: mxf4nvf4 m16n8k64 vs the missing HMMA PV reference.
 
 struct Fp4PvAccuracyResult {
     int n_rows;
@@ -74,33 +47,17 @@ Fp4PvAccuracyResult bench_fp4_pv_accuracy(int n_rows, int K, int head_dim,
 Fp4PvThroughputResult bench_fp4_pv_throughput(int warps, int iterations,
                                               cudaStream_t stream);
 
-// Phase 3b: two-level accumulator simulation.
-//
-// O_2L = P_coarse_fp4 @ V_fp4 + (P - P_coarse_fp4) @ V_fp16
-//      = P_lossy @ V_lossy + P_residual @ V_orig
-//
-// The residual MMA uses FP16 P (the residual) and FP16 V (unquantised).
-// Mathematically equivalent for 2L-A (sparse residual exploiting
-// structural near-zero entries) and 2L-B (full HMMA residual) — they
-// only differ in WALL TIME, not in numerical result. This function
-// answers the accuracy half ("does the residual recover the long tail
-// FP4 truncates?"); throughput is the separate question Phase 3b's gate
-// uses bench_fp4_pv_2level_throughput_estimate for.
-//
-// Returns the same struct as the Phase 3a single-level accuracy bench
-// so percentile-by-percentile A/B is direct.
+// O_2L = P_coarse_fp4@V_fp4 + (P-P_coarse_fp4)@V_fp16 = P_lossy@V_lossy + P_residual@V_orig.
+// 2L-A (sparse residual) and 2L-B (full HMMA residual) are numerically equivalent, differing
+// only in wall time. Answers accuracy; throughput is bench_fp4_pv_2level_throughput_estimate.
 Fp4PvAccuracyResult bench_fp4_pv_accuracy_2level(int n_rows, int K, int head_dim,
                                                  unsigned seed);
 
 struct Fp4PvTwoLevelThroughputEstimate {
     float coarse_ms;         // mxf4nvf4 m16n8k64 alone — same as throughput.blockscale_ms
     float residual_full_ms;  // HMMA m16n8k16 alone — same as throughput.hmma_ms
-    // 2L-A (structural-sparse residual): the SageAttention3 paper claims
-    // ~10 % of full HMMA cost for the sparse path because P_residual is
-    // mostly near-zero after FP4 quant. THIS IS A PAPER PROJECTION, not
-    // a measurement — implementing the sparse residual is itself a real
-    // research item. The microbench reports the projection so Phase 3c
-    // decisions are based on a known number, not a guess.
+    // 2L-A sparse-residual ~10% of full HMMA cost is a SageAttention3 PAPER PROJECTION, not
+    // measured; implementing the sparse residual is itself a research item.
     float estimated_2l_a_ms;
     // 2L-B (full HMMA on residual): the FP4 + HMMA can overlap on
     // independent MMA pipes, so combined wall time ≈ max(coarse, residual),

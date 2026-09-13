@@ -4,18 +4,10 @@
 
 namespace imp {
 
-// Raw-MMA throughput microbench for the INT8 Tensor-Core variants candidate
-// for a future Q4_K_M direct GEMM kernel on sm_120a. Phase 1 of the INT8 IMMA
-// direct-GEMM experiment (outcome: docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
-//
-// Each entry runs a tight per-warp loop of one MMA opcode with all operands
-// alive (so ptxas can't constant-fold the loop body), measures wall-clock,
-// and divides by ops_per_mma * total_mma_calls to get TOPS / TFLOPS.
-//
-// The relative ratio (INT8 IMMA TOPS / FP16 HMMA TFLOPS) is the gate:
-// theoretical sm_120 should show ~2.0×. If the measured ratio is < 1.5×,
-// INT8 is throttled to FP16-peak on consumer Blackwell and the Q4_K_M IMMA
-// project should be DEFERRED.
+// Raw-MMA throughput microbench for INT8 TC candidates for a Q4_K_M direct GEMM kernel
+// (docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
+// Ratio (INT8 IMMA / FP16 HMMA) is the gate: sm_120 theoretical ~2.0x; <1.5x means INT8 is
+// throttled to FP16-peak and the project should be DEFERRED.
 
 struct ImmaBenchResult {
     static constexpr int kMaxEntries = 8;

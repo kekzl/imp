@@ -51,10 +51,10 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     EXPECT_EQ(cfg.kv_cache.block_size, 32);
 }
 
-// AUDIT_arch_2026 E-4: the agent-path SCAN hold was a constant in
-// stream_driver.cpp; it is the whole TTFT of a prose reply on tool requests.
-// AUDIT_arch_2026 A2-9: the LM-head bisect lives under diagnostics now; the
-// old generation.* spelling is an unknown key, which `--set` rejects.
+// AUDIT_arch_2026 E-4: the agent-path SCAN hold was a constant in stream_driver.cpp; it is
+// the whole TTFT of a prose reply on tool requests.
+// AUDIT_arch_2026 A2-9: the LM-head bisect key lives under diagnostics.*; the old
+// generation.* spelling is unknown and --set rejects it.
 TEST(RuntimeConfigTest, LmDequantBisectBindsUnderDiagnosticsOnly) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.diagnostics.lm_dequant_fp16);
@@ -121,12 +121,10 @@ TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GENERIC));
 }
 
-// The NVFP4-KV capacity gate (kv_cache.dtype=auto). Unlike the two FP8 lists,
-// this one is not a ~neutral-quality bar: it is a deliberate trade of ~0.3 % PPL
-// for 2.7x the context, because on a GDN hybrid the KV cache is what bounds
-// max_seq_len (only the attention layers hold one). Measured 2026-08-24 on
-// Qwen3.8-27B-NVFP4 (+0.29..0.35 %) and Qwen3.5-4B mxfp4 (+0.15..0.18 %),
-// alternating arms; see model.cpp.
+// NVFP4-KV capacity gate (kv_cache.dtype=auto): a deliberate trade of ~0.3% PPL for 2.7x
+// context, since on a GDN hybrid only the attention layers hold a KV cache that bounds
+// max_seq_len. Measured on Qwen3.8-27B-NVFP4 (+0.29..0.35%) and Qwen3.5-4B mxfp4
+// (+0.15..0.18%), alternating arms; see model.cpp.
 TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     EXPECT_TRUE(kv_nvfp4_default_safe(ModelArch::QWEN35));
     // The MoE siblings are deliberately OFF: FP8 KV already costs QWEN36_MOE
@@ -147,12 +145,10 @@ TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GENERIC));
 }
 
-// speculative.mtp_tree_width: 1 (the default) must mean EXACTLY the linear
-// MTP path — the multi-candidate machinery keys every branch on width > 1,
-// so a default that drifted above 1 would silently change drafting for every
-// MTP run. The binder must also reach the key (a typo here would measure the
-// default, which is the failure class apply_overrides' error contract exists
-// for).
+// speculative.mtp_tree_width default (1) must mean EXACTLY the linear MTP path - the
+// multi-candidate machinery keys every branch on width>1, so drift above 1 would silently
+// change drafting on every MTP run. Also checks the binder reaches the key (a typo would
+// measure the default instead of failing, apply_overrides' error contract).
 TEST(RuntimeConfigTest, MtpTreeWidthDefaultAndBinding) {
     RuntimeConfig cfg;
     EXPECT_EQ(cfg.speculative.mtp_tree_width, 1);
@@ -172,11 +168,10 @@ TEST(RuntimeConfigTest, MtpTreeMarginDefaultAndBinding) {
     EXPECT_FLOAT_EQ(cfg.speculative.mtp_tree_margin, 3.5f);
 }
 
-// What an EXPLICIT dtype pin costs against the auto default. The pin that
-// motivates this is `IMP_KV_FP8=1`: correct when `auto` meant FP16, and since
-// the NVFP4 default it doubles the bytes per token on QWEN35 (max_model_len
-// 90 528 instead of 126 432) while logging nothing, because --kv-fp8 sets the
-// enum directly and skips the resolver branch that would have said so.
+// Cost of an EXPLICIT dtype pin vs the auto default: IMP_KV_FP8=1 was correct when auto meant
+// FP16, but since the NVFP4 default it doubles bytes/token on QWEN35 (max_model_len 90528 vs
+// 126432) while logging nothing, because --kv-fp8 sets the enum directly and skips the
+// resolver branch that would have said so.
 TEST(RuntimeConfigTest, KvPinContextCostFactor) {
     // On the NVFP4-default family, a wider pin is a context forfeit.
     EXPECT_EQ(2, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::FP8_E4M3));
@@ -223,10 +218,9 @@ TEST(RuntimeConfigTest, KvDtypeIsExplicitPin) {
     EXPECT_FALSE(kv_dtype_is_explicit_pin(QType::F16, "FP8"));
 }
 
-// runtime.max_seq_len binds, and yields to a value --max-seq-len / a C-API
-// embedder already put into EngineConfig (config.h: "a CLI value wins over the
-// file"). The resolver let the key overwrite the flag until AUDIT_arch_2026
-// G-5, with a log line that read like normal resolution.
+// runtime.max_seq_len must yield to a --max-seq-len / C-API EngineConfig value (config.h:
+// "a CLI value wins over the file"). The resolver let the config key overwrite the CLI flag
+// until AUDIT_arch_2026 G-5, logging a line that read like normal resolution.
 TEST(RuntimeConfigTest, MaxSeqLenBindsAndYieldsToTheCliValue) {
     RuntimeConfig cfg;
     EXPECT_EQ(cfg.runtime.max_seq_len, 0);
@@ -243,11 +237,10 @@ TEST(RuntimeConfigTest, MaxSeqLenBindsAndYieldsToTheCliValue) {
     EXPECT_EQ(max_seq_len_operator_value(0, -5), 0);
 }
 
-// The NO-HINT FP8-KV gate (kv_cache.dtype=auto on checkpoints without a
-// kv_cache_quant_algo hint — i.e. every GGUF). Stricter bar than the hint list:
-// the family must gate ~PPL-neutral at 16k context. See model.cpp for the
-// 2026-07-12 evidence and the measured exclusions (QWEN36_MOE: +1.47% real on
-// the NVFP4 variant; LLAMA: gate-corpus baseline broken).
+// NO-HINT FP8-KV gate (kv_cache.dtype=auto, checkpoints without a kv_cache_quant_algo hint -
+// every GGUF): stricter bar than the hint list, must gate ~PPL-neutral at 16k context. See
+// model.cpp for the measured exclusions: QWEN36_MOE +1.47% real on the NVFP4 variant; LLAMA
+// gate-corpus baseline broken.
 TEST(RuntimeConfigTest, KvFp8NoHintDefaultSafeAllowlist) {
     EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3));
     EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3_MOE));
@@ -385,11 +378,9 @@ TEST(RuntimeConfigTest, BoolParsingIsLenient) {
 }
 
 TEST(RuntimeConfigTest, UnknownOverrideIsReportedNotSwallowed) {
-    // An override that binds to nothing comes back named, so `--set` can refuse
-    // instead of running a measurement the flag never configured. This was not
-    // hypothetical: `--set gemm.deterministic=true` (the key is
-    // runtime.deterministic_gemm) sat in the AWQ reproduction harness and did
-    // nothing at all.
+    // An override that binds to nothing comes back named, so --set can refuse instead of running
+    // a measurement the flag never configured: `--set gemm.deterministic=true` (real key
+    // runtime.deterministic_gemm) sat in the AWQ reproduction harness and did nothing.
     RuntimeConfig cfg;
     const std::vector<std::string> rejected =
         cfg.apply_overrides({"runtime.does_not_exist=42", "runtime.warmup=false", "gemm.deterministic=true"});
@@ -428,12 +419,10 @@ TEST(RuntimeConfigTest, MissingFileFallsBackToDefaults) {
 }  // namespace
 }  // namespace imp
 
-// ---- #1627: an unreadable VALUE is rejected, not silently dropped ----
-//
-// `--set` refused an unknown KEY and accepted anything as a value: the three
-// parsers returned the current value for input they could not read, with no
-// warning, so `--set server.prefix_cache=disabled` kept the default and said
-// nothing. 157 of the 185 bound keys go through those three.
+// #1627: an unreadable VALUE is rejected, not silently dropped. --set refused an unknown KEY
+// but accepted any value: the three parsers returned the current value for unparseable input
+// with no warning, so `--set server.prefix_cache=disabled` silently kept the default. 157 of
+// 185 bound keys go through those three parsers.
 
 TEST(ConfigBadValue, BoolKeyRejectsANonBoolean) {
     imp::RuntimeConfig cfg;

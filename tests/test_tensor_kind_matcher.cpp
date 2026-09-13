@@ -35,10 +35,9 @@ TEST(TensorKindMatcher, GDNAndMamba) {
 }
 
 TEST(TensorKindMatcher, GDNGate) {
-    // GDN output-gating projection — check both possible naming conventions.
-    // The matcher should classify whatever name the existing loader uses.
-    // If the test fails, determine the actual name via: grep -n "gdn_gate" src/model/*.cpp
-    // and extend the matcher.
+    // GDN output-gating projection: matcher must classify whichever naming convention the
+    // existing loader uses. If this fails, find the actual name via
+    // grep -n "gdn_gate" src/model/*.cpp and extend the matcher.
     TensorKind k = match_tensor_kind("blk.0.gdn_gate.weight");
     EXPECT_EQ(k, TensorKind::GDN_GATE);
 }

@@ -1,54 +1,18 @@
-// =============================================================================
-// TEST_AUDIT (retired) Re-Audit 2026-06-06 — P1.1 / R1.1 (issue #576).
-// gpt-oss MXFP4 -> NVFP4 expert converter (src/quant/gpt_oss_mxfp4_convert.cu)
-// vs a format-spec-derived, INDEPENDENT fp64 reference.
-//
-// WHY THIS EXISTS (audit §2 "gpt-oss MXFP4 experts": converter = 0 Tests):
-//   gpt_oss_convert_experts_to_nvfp4() rewrites HF-checkpoint MXFP4 experts
-//   (4-bit E2M1 values + one ue8m0 power-of-two scale per 32-block) into imp's
-//   native NVFP4 MoE cache (E2M1 + one e4m3 micro-scale per 16-block + one
-//   FP32 tensor scale per expert). It (a) copies the nibble bytes verbatim,
-//   (b) finds the per-expert max ue8m0 exponent and maps it to e4m3 value 2^8,
-//   (c) re-expresses every block's RELATIVE scale 2^(u - 127 - ts_exp) as an
-//   e4m3 micro-scale, clamping to e4m3's [2^-9, 448] range, and (d) folds an
-//   optional extra_scale (the down-proj 2^-4 residual rescale) into the
-//   per-expert tensor scale. MXFP4 nibble order was a REAL bug in the #560
-//   issue sweep — exactly the class this test must catch.
-//
-// INDEPENDENCE (audit §3 — no tautologies, no transcribed kernel):
-//   * The reference decodes the ORIGINAL MXFP4 values in fp64 straight from
-//     the format definition: v = e2m1_lut[nibble & 7] * (sign) * 2^(u - 127).
-//     This is derived from the MXFP4 spec, NOT from the converter (which never
-//     materializes the original values — it only re-bases the scale).
-//   * The converter's OUTPUT cache is then dequantized by imp's GPU MoE-dequant
-//     kernel and compared back to that original-MXFP4 fp64 reference. The two
-//     code paths share only the published formats, never an implementation.
-//   * Synthetic blocks are built on the BYTE level via an LCG over the raw
-//     nibble bytes + independently chosen ue8m0 exponents — never via a
-//     quantizer round-trip.
-//
-// KEY NUMERICAL FACT (justifies a TIGHT tolerance, not the 1e-1 NVFP4 floor):
-//   ue8m0 scales are exact powers of two; the converter's relative scale
-//   2^(u - 127 - ts_exp) is therefore also a power of two. e4m3 represents
-//   every power of two in [2^-9, 2^8] EXACTLY. So whenever a block's relative
-//   exponent lands in [-9, +8] the whole MXFP4->NVFP4 scale re-basing is
-//   BIT-EXACT (the nibble is copied, the e2m1 LUT is identical, the scale is
-//   reproduced to the bit). The only loss is:
-//     - e4m3 CLAMPING when the relative exponent < -9 (floor to 2^-9) or the
-//       scale > 448 (ceil to 448) — characterized separately, expected.
-//     - the final per-element __float2half store (1 ulp f16).
-//   On in-range data the GPU dequant must therefore match the fp64 original to
-//   f16-rounding only => <= 1e-3 rel (same class & justification as the GGUF
-//   dequant ref). Out-of-range blocks are split out and asserted to match the
-//   CLAMPED reference (the converter's documented contract), not the original.
-//
-// TOLERANCES (tests/refs/README.md policy):
-//   * in-range (exponent spread <= 17 octaves): <= 1e-3 rel (f16 store only).
-//   * clamped blocks: compared against the fp64 reference WITH the same e4m3
-//     clamp applied — still <= 1e-3 rel (the clamp is deterministic & exact).
-//   * extra_scale != 1: folded into the fp64 reference too; same 1e-3.
-//   * hard no-NaN/Inf guard on every expert/block (the decode-corruption assert).
-// =============================================================================
+// TEST_AUDIT(retired) P1.1/R1.1 (#576): gpt-oss MXFP4->NVFP4 expert converter
+// (src/quant/gpt_oss_mxfp4_convert.cu, previously 0 tests) vs a format-spec-derived
+// independent fp64 reference. MXFP4 nibble order was a REAL bug in the #560 sweep - the
+// class this test must catch.
+// Independence: the reference decodes ORIGINAL MXFP4 values in fp64 straight from the format
+// spec (v = e2m1_lut[nibble&7] * sign * 2^(u-127)), never from the converter; the converter's
+// output is dequantized by imp's GPU kernel and compared back to that same original-MXFP4
+// reference. Synthetic blocks are built byte-level via LCG, never via a quantizer round-trip.
+// Key fact: ue8m0 scales are exact powers of two, so the converter's relative scale
+// 2^(u-127-ts_exp) is also a power of two, and e4m3 represents every power of two in
+// [2^-9,2^8] EXACTLY - so in-range blocks are BIT-EXACT modulo the final f16 store. Only loss
+// is e4m3 clamping outside that range (characterized separately) and the f16 store.
+// Tolerances: in-range <= 1e-3 rel; clamped blocks vs the SAME-clamped reference <= 1e-3;
+// extra_scale folded into the reference too, same 1e-3; hard no-NaN/Inf guard on every
+// expert/block.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -65,10 +29,8 @@
 namespace imp {
 namespace {
 
-// -----------------------------------------------------------------------------
-// Deterministic byte-level LCG (Numerical Recipes constants). Independent of
-// imp; fills raw nibble bytes and picks ue8m0 exponents.
-// -----------------------------------------------------------------------------
+// Deterministic byte-level LCG (Numerical Recipes constants), independent of imp; fills raw
+// nibble bytes and picks ue8m0 exponents.
 struct Lcg {
     uint32_t s;
     explicit Lcg(uint32_t seed) : s(seed) {}
@@ -84,10 +46,9 @@ struct Lcg {
 // E2M1 definition (codes 0..7 -> {0,.5,1,1.5,2,3,4,6}).
 constexpr double kE2M1[8] = {0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0};
 
-// fp64 decode of one MXFP4 nibble with its block's ue8m0 exponent u.
-// MXFP4: value = sign * e2m1_mag * 2^(u - 127). Low nibble of byte i -> element
-// 2i, high nibble -> element 2i+1 (linear pair order — the format's nibble
-// layout, the same one the converter copies verbatim and imp's dequant reads).
+// fp64 decode of one MXFP4 nibble at block exponent u: value = sign*e2m1_mag*2^(u-127). Low
+// nibble of byte i -> element 2i, high nibble -> element 2i+1 (the format's nibble layout,
+// same one the converter copies and imp's dequant reads).
 inline double mxfp4_decode(uint8_t nibble, int u) {
     double mag = kE2M1[nibble & 0x7];
     double v = mag * std::ldexp(1.0, u - 127);
@@ -103,13 +64,10 @@ inline double e4m3_roundtrip(double rel) {
 
 inline float f2h2f(double f) { return __half2float(__float2half(static_cast<float>(f))); }
 
-// -----------------------------------------------------------------------------
-// Build one packed MXFP4 projection: blocks [ne, n_rows_total, K/2] nibble
-// bytes + scales [ne, n_rows_total, K/32] ue8m0 exponents. exp_lo/exp_hi bound
-// the random ue8m0 exponent range PER ROW (a constant offset per row makes some
-// rows hot, some cold — stresses the per-expert tensor-scale max). A forced
-// "outlier" exponent can be planted to drive clamping.
-// -----------------------------------------------------------------------------
+// Packed MXFP4 projection: blocks [ne,n_rows_total,K/2] nibbles + scales
+// [ne,n_rows_total,K/32] ue8m0 exponents. exp_lo/exp_hi bound the random exponent range PER
+// ROW (some rows hot, some cold, stressing the per-expert tensor-scale max); a forced
+// outlier exponent can be planted to drive clamping.
 struct MxfpBuf {
     std::vector<uint8_t> blocks;  // [ne * n_rows_total * K/2]
     std::vector<uint8_t> scales;  // [ne * n_rows_total * K/32]
@@ -159,15 +117,10 @@ bool any_nan_inf(const std::vector<half>& v) {
     return false;
 }
 
-// -----------------------------------------------------------------------------
-// fp64 reference of the converted-and-dequantized cache. We replay the converter's
-// ONLY non-trivial decision — the per-expert tensor exponent — from the format
-// (ts_exp = max_u - 127 - 8), because the comparison target is "did the GPU
-// dequant reproduce the ORIGINAL MXFP4 value, modulo the e4m3 scale clamp".
-// We do NOT transcribe the kernel: the original values come straight from the
-// MXFP4 spec; we only apply the SAME deterministic e4m3 clamp the converter is
-// CONTRACTUALLY specified to apply, so that clamped blocks have a defined oracle.
-// -----------------------------------------------------------------------------
+// fp64 reference of the converted-and-dequantized cache: replays the converter's ONLY
+// non-trivial decision (ts_exp = max_u-127-8) from the format, applying the SAME
+// deterministic e4m3 clamp the converter is contractually specified to apply - never
+// transcribing the kernel itself.
 void ref_convert_dequant(const MxfpBuf& b, int ne, int64_t n_rows_total, int64_t K, int row_offset,
                          int row_stride, float extra_scale, std::vector<double>& out,
                          int& clamped_blocks) {
@@ -269,10 +222,9 @@ void run_case(const char* name, int ne, int64_t n_rows_total, int64_t K, int row
     int clamped_blocks = 0;
     ref_convert_dequant(b, ne, n_rows_total, K, row_offset, row_stride, extra_scale, ref, clamped_blocks);
 
-    // Cross-check that the converter chose the tensor scales we replayed: the
-    // host tensor-scale copy must equal 2^(max_u-127-8)*extra_scale per expert.
-    // (Independent confirmation that the per-expert max scan agrees — a wrong
-    // max_u would shift every block's relative scale.)
+    // Cross-checks that the converter chose the tensor scale replayed here: host tensor-scale
+    // copy must equal 2^(max_u-127-8)*extra_scale per expert - independent confirmation the
+    // per-expert max scan agrees (a wrong max_u would shift every block's relative scale).
     const int64_t kb32 = K / 32;
     for (int e = 0; e < ne; e++) {
         int max_u = 0;
@@ -320,11 +272,9 @@ void run_case(const char* name, int ne, int64_t n_rows_total, int64_t K, int row
 
 }  // namespace
 
-// =============================================================================
-// In-range conversion: ue8m0 exponents within ~16 octaves of the per-expert
-// max => every relative scale is e4m3-exact => bit-exact modulo the f16 store.
-// down-proj layout (offset 0, stride 1) and the interleaved gate/up slices.
-// =============================================================================
+// In-range conversion: ue8m0 exponents within ~16 octaves of the per-expert max => every
+// relative scale is e4m3-exact => bit-exact modulo the f16 store. Covers down-proj (offset 0,
+// stride 1) and interleaved gate/up slices.
 TEST(GptOssMxfp4ConvertRef, DownProj_InRange) {
     Lcg g(0xA11CEu);
     // down: full rows, no interleave. K=256 (8 mxfp4 blocks), 6 experts, 24 rows.
@@ -335,10 +285,9 @@ TEST(GptOssMxfp4ConvertRef, DownProj_InRange) {
 
 TEST(GptOssMxfp4ConvertRef, GateSlice_InRange) {
     Lcg g(0xB22DFu);
-    // gate_up interleaved: 12 physical rows -> 6 gate rows (offset 0, stride 2).
-    // Window must keep every block's RELATIVE exponent in [-9,+8]: with the per
-    // row bias (0..4) the effective max_u = exp_hi+4, so (exp_hi+4)-exp_lo <= 17
-    // guarantees no e4m3 floor/ceil clamp. [120,128] => max span 12 < 17.
+    // gate_up interleaved: 12 physical rows -> 6 gate rows (offset 0, stride 2). Window must
+    // keep every block's relative exponent in [-9,+8]: with the per-row bias (0..4), effective
+    // max_u = exp_hi+4, so (exp_hi+4)-exp_lo <= 17 guarantees no clamp; [120,128] gives span 12 < 17.
     run_case("gate/inrange", 4, 12, 256, /*off*/ 0, /*stride*/ 2, /*xs*/ 1.0f, g, 120, 128, -1, 1e-3,
              /*expect_clamp*/ false);
 }
@@ -351,42 +300,31 @@ TEST(GptOssMxfp4ConvertRef, UpSlice_InRange) {
              /*expect_clamp*/ false);
 }
 
-// =============================================================================
-// extra_scale: the down-proj residual 2^-4 rescale folds into the tensor scale.
-// Reference applies the same factor => still bit-exact modulo f16 store.
-// =============================================================================
+// extra_scale: the down-proj residual 2^-4 rescale folds into the tensor scale; the
+// reference applies the same factor, so the result stays bit-exact modulo the f16 store.
 TEST(GptOssMxfp4ConvertRef, DownProj_ExtraScale) {
     Lcg g(0xD44B1u);
     run_case("down/xs=2^-4", 5, 20, 512, /*off*/ 0, /*stride*/ 1, /*xs*/ 0.0625f, g, 122, 128, -1, 1e-3,
              /*expect_clamp*/ false);
 }
 
-// =============================================================================
-// CLAMP path: plant a single very-hot block (u=254) so the per-expert tensor
-// scale is set ~127 octaves above the bulk; every normal block's relative scale
-// underflows the e4m3 2^-9 floor and is clamped. The converter's contract is to
-// clamp+log; the reference applies the SAME clamp, so the result must still
-// match it tightly (the clamp is deterministic). This is the analogue of the
-// Gemma mode-2 scale-collapse class — here it must stay finite and on-oracle.
-// =============================================================================
+// CLAMP path: plants one very-hot block (u=254) so the per-expert tensor scale sits ~127
+// octaves above the bulk, underflowing every normal block's relative scale past the e4m3
+// 2^-9 floor. The converter's contract is clamp+log; the reference applies the SAME clamp,
+// so the result must still match tightly - the Gemma mode-2 scale-collapse analogue, here it
+// must stay finite and on-oracle.
 TEST(GptOssMxfp4ConvertRef, Clamp_HotOutlierBlock) {
     Lcg g(0xE55C2u);
-    // bulk exponents low (100..104); one block forced hot. The hot exponent must
-    // be wide enough that bulk blocks underflow the e4m3 2^-9 floor (clamp) but
-    // NOT so wide that the hot block itself overflows f16: hot value =
-    // mag*2^(u_hot-127) with mag<=6, so u_hot-127+log2(6) < 15 => u_hot <~ 139;
-    // floor clamp of a bulk block at u=100 needs rel-exp = 100-u_hot+8 < -9 =>
-    // u_hot > 117. u_hot=135 sits in the window: bulk rel-exp = 100-135+8 = -27
-    // (clamped to 2^-9), hot value = 6*2^8 = 1536 (finite f16). The reference
-    // applies the SAME deterministic clamp, so the result still matches tightly.
+    // Bulk exponents low (100..104), one block forced hot at u_hot=135: wide enough that bulk
+    // blocks underflow the e4m3 2^-9 floor (rel-exp 100-135+8=-27, clamped) but not wide enough
+    // for the hot block to overflow f16 (6*2^8=1536, finite). The reference applies the same
+    // deterministic clamp, so the result still matches tightly.
     run_case("clamp/floor", 4, 16, 256, /*off*/ 0, /*stride*/ 1, /*xs*/ 1.0f, g, 100, 104, /*outlier_u*/ 135,
              /*rel_tol*/ 1e-3, /*expect_clamp*/ true);
 }
 
-// =============================================================================
-// All-zero MXFP4 (every nibble 0): output must be exactly zero, finite, and the
-// tensor scale must still be well-defined (max_u from the all-equal scales).
-// =============================================================================
+// All-zero MXFP4 (every nibble 0): output must be exactly zero, finite, with the tensor
+// scale still well-defined (max_u from the all-equal scales).
 TEST(GptOssMxfp4ConvertRef, AllZeroNibbles) {
     const int ne = 3;
     const int64_t n_rows = 12, K = 256;

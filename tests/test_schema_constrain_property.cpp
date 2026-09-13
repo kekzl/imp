@@ -1,21 +1,9 @@
-// ===========================================================================
-// Property tests for the json_schema FSM (SchemaConstrainer).
-//
-// Companion to test_json_constrain_property.cpp, which covers the schema-less
-// json_object grammar. This file attacks the schema-driven side, where #761
-// (runaway digit run), #850 (backslash in keys) and #1014 (minItems/maxItems
-// unenforced) shipped — each found by a symptom, none by a test.
-//
-// No external oracle: nlohmann validates JSON syntax but not JSON Schema, so
-// the generator emits a schema and a CONFORMING document together. Conformance
-// is known by construction, which makes both directions testable — accept the
-// conforming document, reject the constructed violations.
-//
-// CPU-only: init_grammar_for_test() installs the grammar without the tokenizer
-// classification and device buffers that only apply_mask needs, so this runs in
-// the `unit` lane. That is the point — CI has no GPU runner, so the GPU-lane
-// batteries next door never guarded these bugs on a pull request.
-// ===========================================================================
+// Property tests for the json_schema FSM (companion to test_json_constrain_property.cpp's
+// schema-less json_object grammar), attacking #761 (runaway digit run), #850 (backslash in
+// keys), #1014 (minItems/maxItems), each originally found by symptom, not a test.
+// No external oracle: the generator emits a schema and a CONFORMING document together, so
+// conformance is known by construction. CPU-only: init_grammar_for_test() skips tokenizer
+// classification/device buffers, running in the unit lane the GPU batteries never guard on a PR.
 
 #include <gtest/gtest.h>
 
@@ -124,10 +112,8 @@ TEST(SchemaConstrainPropertyTest, AcceptsConformingDocument) {
     }
 }
 
-// ===========================================================================
-// P2 — Prefix closure: every prefix of a conforming document must stay legal,
-// since that is the state the model occupies mid-generation.
-// ===========================================================================
+// P2: every prefix of a conforming document must stay legal - that is the state the model
+// occupies mid-generation.
 TEST(SchemaConstrainPropertyTest, AcceptsEveryPrefixOfConformingDocument) {
     std::mt19937 rng(kSeed + 1);
     for (int i = 0; i < 200; i++) {
@@ -142,11 +128,8 @@ TEST(SchemaConstrainPropertyTest, AcceptsEveryPrefixOfConformingDocument) {
     }
 }
 
-// ===========================================================================
-// P3 — required enforcement: closing an object before its required properties
-// are emitted must be refused. `{}` against a schema with required keys is the
-// minimal case (the shape PrematureObjectCloseRejected pins by example).
-// ===========================================================================
+// P3: closing an object before its required properties are emitted must be refused ({} against
+// a schema with required keys is the minimal case).
 TEST(SchemaConstrainPropertyTest, RejectsObjectMissingRequiredProperties) {
     std::mt19937 rng(kSeed + 2);
     int exercised = 0;
@@ -163,10 +146,7 @@ TEST(SchemaConstrainPropertyTest, RejectsObjectMissingRequiredProperties) {
     EXPECT_GT(exercised, 0) << "no object roots generated — test would be vacuous";
 }
 
-// ===========================================================================
-// P4 — minItems enforcement (#1014): closing an array before minItems are
-// emitted must be refused.
-// ===========================================================================
+// P4 (#1014): closing an array before minItems are emitted must be refused.
 TEST(SchemaConstrainPropertyTest, RejectsArrayBelowMinItems) {
     std::mt19937 rng(kSeed + 3);
     int exercised = 0;
@@ -184,11 +164,8 @@ TEST(SchemaConstrainPropertyTest, RejectsArrayBelowMinItems) {
     EXPECT_GT(exercised, 0) << "no array roots generated — test would be vacuous";
 }
 
-// ===========================================================================
-// P5 — no dead ends: from any prefix of a conforming document at least one
-// ASCII continuation must remain legal (release-bar 7: the sampler must always
-// have something valid to emit).
-// ===========================================================================
+// P5: from any prefix of a conforming document at least one ASCII continuation must remain
+// legal (release-bar 7: the sampler must always have something valid to emit).
 TEST(SchemaConstrainPropertyTest, NoDeadEndStates) {
     std::mt19937 rng(kSeed + 4);
     for (int i = 0; i < 150; i++) {
@@ -208,10 +185,7 @@ TEST(SchemaConstrainPropertyTest, NoDeadEndStates) {
     }
 }
 
-// ===========================================================================
-// P6 — enum enforcement: a string value outside the enum must be refused at
-// the point it becomes unambiguous.
-// ===========================================================================
+// P6: a string value outside the enum must be refused at the point it becomes unambiguous.
 TEST(SchemaConstrainPropertyTest, RejectsValueOutsideEnum) {
     auto sc = make_fsm(
         R"({"type":"object","properties":{"c":{"type":"string","enum":["red","green"]}},"required":["c"]})");
@@ -222,13 +196,9 @@ TEST(SchemaConstrainPropertyTest, RejectsValueOutsideEnum) {
     EXPECT_FALSE(sc->token_legal(R"({"c":"redd"})"));  // valid prefix, invalid whole
 }
 
-// ===========================================================================
-// #1104 — the schema FSM carried the same permissive number grammar as
-// JsonConstrainer: '.', 'e', 'E', '+', '-' were accepted unconditionally in
-// NUMBER_VALUE, so "3.5.5.5…" was legal and a degenerating model could not be
-// forced to close the number. Live symptom: the reply ran to max_tokens and
-// came back as truncated, unparseable JSON.
-// ===========================================================================
+// #1104: the schema FSM accepted '.', 'e', 'E', '+', '-' unconditionally in NUMBER_VALUE
+// (same permissive grammar as JsonConstrainer), so "3.5.5.5..." was legal and a degenerating
+// model could not be forced to close the number - live symptom: truncated, unparseable JSON.
 TEST(SchemaConstrainPropertyTest, NumberGrammarMatchesRfc8259) {
     const std::string schema = R"({"type":"object","properties":{"v":{"type":"number"}},)"
                                R"("required":["v"],"additionalProperties":false})";
@@ -253,19 +223,14 @@ TEST(SchemaConstrainPropertyTest, NumberGrammarMatchesRfc8259) {
     }
 }
 
-// ===========================================================================
-// Parser-level cases: what the schema parser does with input it cannot handle.
-//
-// Every one of these used to return a non-null tree. The FSM then enforced
-// something the caller did not ask for, at HTTP 200, which is the outcome
-// docs/API.md excludes ("a constraint imp cannot compile is a 400").
-// ===========================================================================
+// Parser-level cases: input the schema parser cannot handle used to return a non-null tree,
+// so the FSM enforced something the caller never asked for at HTTP 200 - the outcome
+// docs/API.md excludes (an uncompilable constraint must be a 400).
 
-// #1564: parse_bool() returns false WITHOUT consuming when the value is not
-// true/false, so `additionalProperties: {schema}` left pos_ on '{' and every
-// key after it was dropped. With `properties` gone the node is an empty object
-// schema, which constraint_manager.cpp routes to the any-JSON constrainer:
-// the reply is JSON with arbitrary keys and nothing says so.
+// #1564: parse_bool() returns false WITHOUT consuming when the value isn't true/false, so
+// additionalProperties:{schema} left pos_ on '{' and every key after it was dropped; with
+// properties gone the node becomes an empty-object schema, routed to the any-JSON
+// constrainer - the reply is JSON with arbitrary keys and nothing says so.
 TEST(SchemaParserDesync, AdditionalPropertiesAsObjectDoesNotTruncateTheSchema) {
     const std::string schema = R"({"type":"object","additionalProperties":{"type":"number"},)"
                                R"("properties":{"a":{"type":"string"}},"required":["a"]})";
@@ -289,10 +254,9 @@ TEST(SchemaParserDesync, AdditionalPropertiesFalseStillParses) {
     EXPECT_EQ(node->properties.size(), 1u);
 }
 
-// #1564: parse_string() has the same non-consuming default, so {"enum":[1,2,3]}
-// produced enum_values == {""} and constrained the model to the empty string.
-// The FSM emits an enum as quoted string content, so there is no representation
-// for a numeric member: refusing is the only outcome that is not wrong.
+// #1564: parse_string() has the same non-consuming default, so {"enum":[1,2,3]} produced
+// enum_values=={""} and constrained the model to the empty string. The FSM emits enums as
+// quoted string content, so a numeric member has no representation: refusing is correct.
 TEST(SchemaParserDesync, NonStringEnumIsRefused) {
     EXPECT_EQ(parse_json_schema(R"({"type":"integer","enum":[1,2,3]})"), nullptr);
     EXPECT_EQ(parse_json_schema(R"({"enum":[true,false]})"), nullptr);
@@ -315,11 +279,10 @@ TEST(SchemaParserDesync, UnclosedObjectIsAnError) {
     EXPECT_EQ(parse_json_schema(R"({"type":"object","properties":{"a":{"type":"string"})"), nullptr);
 }
 
-// #1563: \uXXXX was skipped and replaced with a literal '?'. That is not an
-// edge case: json.dumps defaults to ensure_ascii=True, so a schema round-tripped
-// through any Python client arrives with every non-ASCII character escaped -
-// and parse_string() reads enum values, property names, `required` entries and
-// `pattern`, so the compiled grammar then forced the model to emit '?'.
+// #1563: \uXXXX was skipped and replaced with a literal '?'. Not an edge case: json.dumps
+// defaults to ensure_ascii=True, so any Python-client-round-tripped schema arrives with every
+// non-ASCII char escaped, and parse_string() reads enum/property/required/pattern values, so
+// the compiled grammar then forced the model to emit '?'.
 TEST(SchemaUnicodeEscape, BmpEscapeBecomesUtf8) {
     // "Berlin, Straße" with the sharp s escaped, as json.dumps writes it.
     auto sc = make_fsm(R"({"type":"object","properties":{"city":{"type":"string",)"
@@ -359,11 +322,10 @@ TEST(SchemaUnicodeEscape, ThreeByteEscapes) {
     EXPECT_TRUE(sc->token_legal("{\"c\": \"\xe4\xb8\xad\xe6\x96\x87\"}"));
 }
 
-// #1540: an unconstrained `integer` had no digit bound. At the server's default
-// temperature the sampler stayed in the digit state and emitted
-// 1020000000000000000000000000000000000000 for a population field - a value no
-// int64 consumer can read back. Measured on Qwen3.8-27B-NVFP4 at temperature
-// 0.6; at temperature 0 the same request answered 13528079.
+// #1540: an unconstrained integer had no digit bound. At the server's default temperature
+// the sampler stayed in the digit state and emitted a 40-digit number for a population field
+// - unreadable by any int64 consumer. Measured on Qwen3.8-27B-NVFP4 at temperature 0.6; at
+// temperature 0 the same request answered 13528079.
 TEST(SchemaIntegerBound, DigitsStopAtInt64Width) {
     auto sc = make_fsm(R"({"type":"object","properties":{"pop":{"type":"integer"}},)"
                        R"("required":["pop"]})");
@@ -467,11 +429,9 @@ TEST(SchemaDepthCap, ModeratelyNestedSchemaStillParses) {
 }
 
 
-// ===========================================================================
-// #1729: additionalProperties was parsed and never read, so the FSM behaved
-// as if every object were additionalProperties:false and a free-form object
-// could only ever be {}. Each case names the document the old FSM rejected.
-// ===========================================================================
+// #1729: additionalProperties was parsed and never read, so the FSM treated every object as
+// additionalProperties:false and a free-form object could only ever be {}. Each case names
+// the document the old FSM rejected.
 
 TEST(SchemaAdditionalProperties, ExplicitTrueAcceptsUndeclaredKey) {
     auto sc = make_fsm(R"({"type":"object","properties":{"a":{"type":"string"}},)"

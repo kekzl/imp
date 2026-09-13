@@ -1,18 +1,7 @@
-// Pre-dequant budget split (#1100): who pays for the NVFP4 decode cache.
-//
-// The cache build runs AFTER the KV pool is allocated, so the KV bytes are
-// already gone from free_vram. On top of that, the NVFP4 decode cache's own
-// reservation is withheld from the early phases (Phase 1 FP16 / Phase 2 FP8),
-// which would otherwise hand out VRAM the not-yet-allocated cache needs.
-//
-// The bug: that reservation was subtracted from the SHARED budget, which is
-// also the budget Phase 3 — the NVFP4 decode cache itself — spends from. The
-// cache paid for itself twice, so every byte the KV pool took came out of it a
-// second time. On Qwen3-14B-Q6_K at the server's full-context default
-// (max_seq_len=40960 → 5.9 GiB KV pool) the cache fell from 278/280 to 100/280
-// tensors and decode dropped 38%, while ~11 GiB of VRAM sat free.
-//
-// CPU-only by construction: split_pre_dequant_budget is pure arithmetic.
+// Pre-dequant budget split (#1100): NVFP4 decode cache builds after the KV pool, and its own
+// reservation was withheld from earlier phases but then subtracted again from the SHARED
+// budget the cache itself spends from, so it paid for KV bytes twice. On Qwen3-14B-Q6_K at
+// max_seq_len=40960 the cache fell 278/280 -> 100/280 tensors, decode -38%, ~11 GiB sat free.
 
 #include <gtest/gtest.h>
 

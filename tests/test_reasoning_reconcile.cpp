@@ -1,9 +1,6 @@
-// Unit tests for reconcile_thinking_with_prompt_tail (reasoning_split.h):
-// the rendered chat-prompt tail is ground truth for whether generation begins
-// inside an open <think> block. Regression cover for #934 — Qwen3.5-4B's
-// template mentions enable_thinking but defaults to a *closed* empty block, so
-// the heuristic's ON default must be overridden to OFF or the whole answer is
-// trapped in reasoning_content.
+// The rendered chat-prompt tail is ground truth for whether generation begins inside an open
+// <think> block. Regression for #934: Qwen3.5-4B's template mentions enable_thinking but
+// defaults to a CLOSED empty block, so the ON heuristic default must flip to OFF.
 
 #include <gtest/gtest.h>
 
@@ -58,14 +55,9 @@ TEST(ThinkingReconcile, StrayCloseWithoutOpenKeepsCurrent) {
                                                     /*think=*/false, /*close=*/true));
 }
 
-// ---------------------------------------------------------------------------
-// strip_think_block edge cases exercised by the shared split_last_think helper.
-// extract_reasoning + the strip_think_block happy path are already covered in
-// test_sse_stream_utils.cpp (issue #557, which also uses extract_reasoning as
-// the oracle for the streaming splitter). These pin the strip-only edge paths
-// that the shared-helper refactor restructured — an unclosed trailing/leading
-// <think> is discarded (the model never finished the block).
-// ---------------------------------------------------------------------------
+// strip_think_block edge cases from the shared split_last_think helper (happy path covered
+// in test_sse_stream_utils.cpp, #557): an unclosed trailing/leading <think> is discarded
+// since the model never finished the block.
 
 TEST(StripThinkBlock, DiscardsUnclosedTrailingThink) {
     std::string text = "<think>reasoning</think><think>unclosed";
@@ -92,11 +84,9 @@ TEST(StripThinkBlock, UnclosedLeadingThinkClears) {
 using imp::server::should_stamp_thinking_off;
 using imp::server::structured_output_excludes_thinking;
 
-// json_schema was the entry MISSING from this list, and its absence returned
-// empty content on any model whose </think> is a multi-token BPE sequence: the
-// gate held the mask open for a reasoning block that never closed in the text
-// the splitter reads. Each flag is pinned separately so a future edit cannot
-// drop one silently.
+// json_schema was missing from this list, returning empty content whenever a model's
+// </think> is a multi-token BPE sequence: the gate held the mask open for a reasoning block
+// that never closed in the text the splitter reads. Each flag pinned separately.
 TEST(StructuredOutputThinking, EveryWholeReplyConstraintExcludesThinking) {
     EXPECT_TRUE(structured_output_excludes_thinking(true, false, false, false, false));   // json_mode
     EXPECT_TRUE(structured_output_excludes_thinking(false, true, false, false, false));   // tools
@@ -109,10 +99,9 @@ TEST(StructuredOutputThinking, AnUnconstrainedRequestMayStillThink) {
     EXPECT_FALSE(structured_output_excludes_thinking(false, false, false, false, false));
 }
 
-// Not stamping is not the same as stamping false: unstamped, a template uses
-// its OWN default, and Qwen3.8's is an open <think>. So a request that does not
-// want thinking must stamp it off even when the budget is non-zero, which is
-// the second half of #1431.
+// Not stamping != stamping false: unstamped, a template uses its own default (Qwen3.8's is
+// an open <think>), so a request that doesn't want thinking must stamp it off even with a
+// non-zero budget (#1431 second half).
 TEST(StructuredOutputThinking, StampsOffWhenThinkingIsUnwantedNotOnlyOnZeroBudget) {
     EXPECT_TRUE(should_stamp_thinking_off(/*is_think_model=*/true, /*enable_thinking=*/false,
                                           /*budget_disabled=*/false, /*want_thinking=*/false));

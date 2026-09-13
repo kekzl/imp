@@ -1,10 +1,6 @@
-// Qwen3-VL vision_config parsing.
-//
-// A wrong geometry here silently mis-shapes every encoder buffer, so the parser
-// refuses rather than half-fills, and these tests pin that: on any rejection the
-// output must be left untouched.
-//
-// Oracle: the `vision_config` of the staged Qwen3-VL-4B-Instruct config.json.
+// A wrong geometry silently mis-shapes every encoder buffer, so the parser refuses rather
+// than half-fills; on any rejection the output must be left untouched. Oracle: the staged
+// Qwen3-VL-4B-Instruct config.json's vision_config.
 
 #include "vision/qwen3vl_vision_config.h"
 

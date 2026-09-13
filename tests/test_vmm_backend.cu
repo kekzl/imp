@@ -1,19 +1,8 @@
-// The growable backend against the real driver.
-//
-// tools/analysis/vmm_wsl2_probe.cu established that the mechanism works on this
-// box; this asserts that imp's use of it does. The properties are the ones the
-// KV pool depends on and cannot check for itself at runtime:
-//
-//   the base address survives growth, because a captured CUDA graph has baked
-//   pointers into the pool and re-instantiating graphs would cost 2-3x decode;
-//
-//   committing one interior range does not disturb another, because the pool
-//   is laid out per layer and grows every layer's region at once;
-//
-//   data written before a growth is still there afterwards.
-//
-// Skips rather than fails where there is no device or no virtual memory
-// management: that is a supported configuration, it just has a fixed pool.
+// Growable VMM backend against the real driver (vmm_wsl2_probe.cu proved the mechanism
+// works here); pins what the KV pool depends on and can't self-check: base address survives
+// growth (captured CUDA graphs bake pointers in; re-instantiating costs 2-3x decode),
+// committing one interior range doesn't disturb another, data written before growth survives.
+// Skips (not fails) where there is no device or VMM: a supported fixed-pool config.
 
 #include "memory/backend.h"
 
@@ -149,10 +138,9 @@ TEST_F(VmmBackendTest, DecommitReturnsMemoryToTheDriver) {
 
 namespace {
 
-// A pool built with a ceiling starts at what it could afford and grows into
-// what it asked for. The scenario is a server started while another process
-// still held the card: it lands on a fraction of its pool and, before this,
-// stayed there for the rest of its life.
+// A pool with a ceiling starts at what it could afford and grows into what it asked for.
+// Scenario: a server starting while another process holds the card lands on a fraction of
+// its pool and, before this, stayed there for its whole life.
 TEST_F(VmmBackendTest, PoolStartsSmallAndGrowsIntoItsCeiling) {
     constexpr int kStart = 64, kCeiling = 512;
     KVCache kv(/*n_layers=*/4, /*n_kv_heads=*/8, /*head_dim=*/128, QType::F16, kStart,
@@ -188,11 +176,9 @@ TEST_F(VmmBackendTest, PoolStartsSmallAndGrowsIntoItsCeiling) {
     EXPECT_EQ(kv.total_blocks(), kCeiling);
 }
 
-// The fixed pool zeroes itself with one big memset at construction, and blocks
-// are handed out on the strength of that. Driver-committed pages make no such
-// promise, so a grown block could arrive with stale bytes in the slots the
-// sequence does not fill — which reads as rare, unreproducible output rather
-// than as an error.
+// The fixed pool zeroes itself with one memset at construction and hands out blocks on that
+// promise; driver-committed pages make no such promise, so a grown block could arrive with
+// stale bytes in unfilled slots, reading as rare unreproducible output rather than an error.
 TEST_F(VmmBackendTest, GrownBlocksArriveZeroed) {
     KVCache kv(/*n_layers=*/2, /*n_kv_heads=*/8, /*head_dim=*/128, QType::F16, /*max_blocks=*/32,
                /*block_size=*/16, /*alloc=*/nullptr, /*ceiling=*/256);
@@ -256,11 +242,9 @@ TEST_F(VmmBackendTest, PerLayerPoolAlsoStartsAtWhatIsCommitted) {
 
 namespace {
 
-// A pool whose layers are half sliding-window costs less to grow, because a
-// windowed layer's region holds only its window. Measured rather than assumed:
-// capping the per-layer commit at that window changes nothing (the same 34 MiB
-// either way), so this asserts the layout property that is real and not a guard
-// that is not.
+// A pool with sliding-window layers costs less to grow, since a windowed layer's region
+// holds only its window. Measured, not assumed: capping the per-layer commit at the window
+// changes nothing (same 34 MiB either way), so this asserts the real layout property.
 TEST_F(VmmBackendTest, WindowedLayersMakeAGrownPoolCheaper) {
     const std::vector<int> nkv(4, 8), hd(4, 128);
     auto grown_bytes = [&](const std::vector<char>& is_swa, int swa_blocks) {

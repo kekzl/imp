@@ -1,17 +1,7 @@
-// tests/test_mla.cpp — MLA config parsing tests (Task 0.1 + 0.2)
-//                      MoE weight-name mapping tests (Task 1.1)
-//
-// Tests that HFConfigLoader::load_config correctly parses DeepSeek-V2/V3
-// Multi-head Latent Attention (MLA) fields from config.json, and that
-// derive_model_profile() selects AttnVariant::MLA for MLA configs.
-//
-// Task 1.1 tests call WeightMap::map_name() directly — a public method —
-// to verify DeepSeek-V2 MoE tensor name routing without loading the 30 GB
-// model. Seam: WeightMap(ModelArch) + map_name(std::string) (weight_map.h).
-//
-// The config tests read only config.json: tests/fixtures/deepseek_v2_lite/ holds
-// DeepSeek-V2-Lite's (HF revision 604d5664, 2024-06-25), and a real checkpoint
-// is used instead when IMP_TEST_MODEL_DEEPSEEK is set.
+// MLA config parsing (Task 0.1/0.2) and MoE weight-name mapping (Task 1.1).
+// map_name() is called directly to check DeepSeek-V2 MoE tensor routing without loading the
+// 30 GB model. Config tests read tests/fixtures/deepseek_v2_lite/; IMP_TEST_MODEL_DEEPSEEK
+// selects a real checkpoint instead.
 
 #include <cmath>
 #include <cstdlib>
@@ -106,13 +96,9 @@ TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
     EXPECT_EQ(cfg.first_k_dense_replace, 1);
 }
 
-// Regression: the RoPE cos/sin mscale for DeepSeek-V2-Lite must be 1.0, NOT
-// yarn_get_mscale(factor, mscale_all_dim)=1.261. HF scales cos/sin by the ratio
-// yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim),
-// which is exactly 1.0 when the two mscales coincide (as in V2-Lite). imp's
-// rope_yarn applies mscale_final = yarn_attn_factor * (1 + 0.1*ln(freq_scale));
-// this must equal the HF ratio. The pre-fix code inflated it to 1.261, which
-// compounded with position and cost ~+24% PPL at 512 tokens.
+// RoPE cos/sin mscale for DeepSeek-V2-Lite must be 1.0: HF scales by
+// yarn_get_mscale(factor,mscale)/yarn_get_mscale(factor,mscale_all_dim), which is 1.0 when
+// the two mscales coincide. Pre-fix code inflated it to 1.261, costing ~+24% PPL at 512 tokens.
 TEST(MLAConfig, YarnRopeMscaleIsUnityForV2Lite) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
     const std::string dir = deepseek_config_dir();
@@ -159,12 +145,8 @@ TEST(MLAConfig, ProfileSelectsMLAVariant) {
     EXPECT_EQ(prof.attn_variant, ModelProfile::AttnVariant::MLA);
 }
 
-// ---------------------------------------------------------------------------
-// Task 1.1: DeepSeek-V2 MoE weight-name mapping (WeightMap::map_name seam)
-//
-// Verifies that map_name() routes all DeepSeek-V2 MoE tensor names to the
-// correct internal slot strings without loading any model weights.
-// ---------------------------------------------------------------------------
+// Task 1.1: map_name() routes DeepSeek-V2 MoE tensor names to internal slots without
+// loading any weights.
 
 TEST(MLAWeightMap, DeepSeekDenseLayers) {
     // Layer 0 is dense (first_k_dense_replace=1): mlp.{gate,up,down}_proj.weight
@@ -210,12 +192,8 @@ TEST(MLAWeightMap, DeepSeekSharedExperts) {
               "layer.1.w_down_shared");
 }
 
-// ---------------------------------------------------------------------------
-// Task 2.2: MLA attention projection name mapping (WeightMap::map_name seam)
-//
-// Verifies that map_name() routes DeepSeek-V2 MLA self_attn tensor names to
-// the correct internal slot strings without loading any model weights.
-// ---------------------------------------------------------------------------
+// Task 2.2: map_name() routes DeepSeek-V2 MLA self_attn tensor names to internal slots
+// without loading any weights.
 
 TEST(MLAWeightMap, MLAAttentionProjectionNames) {
     WeightMap wm(ModelArch::DEEPSEEK);

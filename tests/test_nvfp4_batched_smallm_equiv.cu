@@ -1,30 +1,7 @@
-// tests/test_nvfp4_batched_smallm_equiv.cu
-//
-// Gate for the small-M batched NVFP4 GEMV that speculative verify chunks route
-// into (`gemm_nvfp4_batched`, #998/#1055).
-//
-// It exists because the end-to-end equivalence check for that routing cannot
-// see it. `ctx.spec_verify_small_m` is only true inside a verify chunk, so a
-// no-speculation arm exercises the OLD path by construction and comes back
-// byte-identical whatever the new path computes, while the speculative arms are
-// not reproducible across processes (#1457) and cannot be diffed either. A
-// change that reroutes 48 of 64 layers onto a different kernel family therefore
-// had no gate at all until this file.
-//
-// GPU-ONLY, AND CI NEVER RUNS IT. The `Test` job is skipped on the runners
-// (no GPU), so this file's protection is local-only: it ran once through a
-// pre-commit hook and nothing upstream will run it again. If you touch the
-// small-M verify dispatch, run it yourself before pushing:
-//
-//   docker run --rm --gpus all -v $PWD:/src -w /src imp:toolchain \
-//       ./build-dev/test-quant --gtest_filter='*BatchedSmallM*'
-//
-// Two invariants, both deterministic and both at the shapes a GDN hybrid
-// actually uses:
-//   1. row m of a batched M-row call equals the single-row call for that row,
-//      which is what the MR bucket selection (<1>/<2>/<3>/<4>) must preserve;
-//   2. the result matches a dequantise-then-multiply reference, so "both paths
-//      agree" cannot be satisfied by both being wrong the same way.
+// Gate for small-M batched NVFP4 GEMV in speculative verify chunks (gemm_nvfp4_batched,
+// #998/#1055); the e2e check can't see this path (spec_verify_small_m only fires in a verify
+// chunk) and spec runs aren't cross-process reproducible to diff (#1457).
+// GPU-ONLY, CI NEVER RUNS THIS: run test-quant --gtest_filter='*BatchedSmallM*' manually first.
 
 #include <gtest/gtest.h>
 
@@ -178,12 +155,9 @@ TEST_F(BatchedSmallM, MatchesDequantisedReference) {
 }
 
 
-// The sibling-pair v2 launch (FFN gate|up, GDN in|z: two weights, one
-// quantized activation, one kernel) must be BIT-identical per tensor to the
-// two single v2 launches it replaces — same CTA body, same tile order, so any
-// difference is a selection-prologue bug (wrong weight, wrong n_base, wrong
-// ts, wrong y stride). Shapes are stripes==1 (both Ns >= 5120), which is the
-// only regime the pair entry accepts.
+// Sibling-pair v2 launch (FFN gate|up, GDN in|z) must be BIT-identical per tensor to the
+// two single v2 launches it replaces (same CTA body/tile order); any diff is a
+// selection-prologue bug. Only accepts stripes==1 (both Ns >= 5120).
 TEST(SmallMV2Pair, PairMatchesTwoSingleCallsBitExact) {
     if (!has_sm120())
         GTEST_SKIP() << "sm_120 required";
@@ -262,26 +236,10 @@ TEST(SmallMV2Pair, PairMatchesTwoSingleCallsBitExact) {
     imp::free_nvfp4_result(w2);
 }
 
-// DISABLED by default: a measurement, not an assertion. Run with
-//   ./build-dev/test-quant --gtest_also_run_disabled_tests \
-//       --gtest_filter='*M1PipelineVsGemv*'
-// Question it answers: does the v2 producer/consumer pipeline kernel beat the
-// shipped M=1 decode GEMV (gemv_nvfp4_kpar, W4A16, PDL) on the batch=1 decode
-// shapes? The M=1 GEMV's roofline verdict is 66-70% of HBM with a
-// 4-bit-dequant co-limit; the pipeline reached ~79% of the weight floor at
-// M=32, and it can run M=1 (rows >= M are zero-filled). Method per
-// MarginalRowCost above: >1s warmup, paired ALTERNATING in one process.
-// Caveat the timing cannot see: the GEMV is W4A16, the pipeline is W4A4 — a
-// switch would also change batch=1 numerics and needs a PPL A/B on top.
-//
-// VERDICT (2026-08-27, this harness, L2-defeated with the 4-copy ring): NO.
-// GEMV and v2 sit inside each other's round spread on all six shapes (v2
-// marginally ahead only on gdn-in, marginally behind on gate/up, attn-qkv,
-// down). Without the L2 defeat the same run reads >1792 GB/s — every shape's
-// packed weight fits the 96 MB L2, the exact #1785 trap. In-situ a switch
-// would ADD a per-projection activation quantize and the W4A16->W4A4 numerics
-// change, so the isolated tie is decisive: the M=1 GEMV stands. Recorded in
-// sm120-cuda-expert known-issues.
+// DISABLED: measurement not assertion (run --gtest_also_run_disabled_tests
+// --gtest_filter='*M1PipelineVsGemvBench*'). Does the v2 pipeline beat the shipped M=1
+// gemv_nvfp4_kpar decode GEMV (W4A16, PDL, 66-70% of HBM)? VERDICT NO: GEMV and v2 sit inside
+// each other's round spread; a real switch would also change W4A16->W4A4 numerics.
 TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
     if (!has_sm120())
         GTEST_SKIP() << "sm_120 required";
@@ -358,10 +316,9 @@ TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
     }
 }
 
-// The pair entry must refuse the striped regime rather than compute it with
-// stripes silently forced to 1 (a small-N weight would then be produced by a
-// single K-stripe with no reduce — numerically wrong under split-K rounding
-// AND slower). N=512 has stripes > 1 by the shipped policy.
+// Pair entry must refuse the striped regime rather than silently force stripes=1 (a
+// small-N weight would then reduce over one K-stripe: numerically wrong under split-K
+// rounding, and slower). N=512 has stripes > 1 under the shipped policy.
 TEST(SmallMV2Pair, RefusesStripedShapes) {
     if (!has_sm120())
         GTEST_SKIP() << "sm_120 required";
@@ -374,43 +331,11 @@ TEST(SmallMV2Pair, RefusesStripedShapes) {
                                                    5120, nullptr));
 }
 
-// DISABLED by default: a measurement, not an assertion. Run it with
-//   ./build-dev/test-quant --gtest_also_run_disabled_tests \\
-//       --gtest_filter='*MarginalRowCost*'
-//
-// TWO METHOD REQUIREMENTS ARE BAKED IN HERE BECAUSE GETTING EITHER WRONG
-// PRODUCED CONFIDENT NONSENSE (2026-08-18):
-//
-//  1. Warm up past the clock ramp. With a 20-iteration warmup the SAME
-//     unchanged code path measured 20.59, 15.54 and 8.82 us across three runs,
-//     purely because it was always timed first. Burn a full second.
-//  2. Compare implementations PAIRED AND ALTERNATING INSIDE ONE PROCESS. Across
-//     two builds the same unchanged path read 11.30 and 13.88 us, so any
-//     difference under ~25 % is drift, and a 2-5 us delta on a 10 us kernel is
-//     not resolvable that way.
-//
-// An N-tiled variant of this kernel (one activation read shared across several
-// output rows) was built and measured this way: +0.55, +0.23 and -0.20 us at
-// MR = 2, 3, 4. A wash, so it was not kept. The per-verify marginal row cost of
-// 4.22 ms is real and comes from server measurements, and its cause is NOT the
-// activation re-read.
-//
-// ATTRIBUTED 2026-08-19: register pressure, and the shipped launch bounds are
-// already the best point on that curve. ptxas gives 40 registers at MR=1/2
-// (12 blocks/SM) against 48-53 at MR=3/4 (9-10 blocks/SM), and the weight
-// bandwidth this benchmark prints tracks it exactly: 1444-1508 GB/s at MR=1/2,
-// then 1045 and 885. Both ways of "fixing" it were measured and are worse —
-// dropping __launch_bounds__ clears MR=3's 4-byte spill and buys nothing
-// (12.60 / 12.55 us against 12.72, inside this harness's own drift), and
-// pinning (kKparThreads, 12) forces 40 registers by spilling 40 bytes at MR=4
-// and takes it from 14.5 to 26.8 us. Detail in the sm120-cuda-expert skill's
-// known-issues. Do not re-derive.
-//
-// Third requirement this harness earned on that run: it cannot resolve a 12 %
-// effect. Three consecutive runs of the SAME binary read 11.92 / 8.92 / 8.69 us
-// at MR=1 — a 37 % spread, because the first MR=1 measurement is always the one
-// paying the clock ramp. Compare the LATER rows within one run, never a single
-// row across runs.
+// DISABLED: measurement, not assertion (--gtest_also_run_disabled_tests
+// --gtest_filter='*MarginalRowCost*'). Requires a full-second warmup past the clock ramp and
+// paired/alternating comparison in one process, or drift alone exceeds 25%.
+// Marginal row cost (4.22 ms/verify) is register pressure, not activation re-read; shipped
+// launch bounds are the measured optimum, see sm120-cuda-expert known-issues, do not re-derive.
 TEST_F(BatchedSmallM, DISABLED_MarginalRowCost) {
     std::mt19937 rng(5);
     std::normal_distribution<float> dist(0.0f, 1.0f);

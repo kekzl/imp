@@ -1,24 +1,8 @@
-// Reference numerical test for compressed-tensors NVFP4 dequant.
-//
-// Existing NVFP4 unit tests (test_nvfp4_quant_ref.cu, test_nvfp4_quant_hw.cu,
-// test_nvfp4_gemv_kpar_loop.cu) all roundtrip imp's own quantizer through
-// imp's own dequantizer. They cannot detect a paired sign-flip / nibble-order
-// bug, nor a missing factor (e.g. dropping weight_scale_2), since both sides
-// of the roundtrip would deviate together.
-//
-// This test starts from the on-disk format directly:
-//   - weight_packed: uint8 nibble-packed E2M1 (low nibble = even k, high = odd k)
-//   - weight_scale:  float8_e4m3fn, [N, K/16] one FP8 byte per 16-element micro-block
-//   - weight_scale_2: FP32 scalar (per-tensor)
-//
-// and asserts that imp's gemv_nvfp4_kpar produces the same Y = W·X as a pure-host
-// reference dequant computing val = e2m1_to_f32(nibble) * fp8_e4m3_to_f32(scale)
-// * weight_scale_2 element-wise.
-//
-// Tolerance: max-abs-diff < 1e-2 in FP16 output. FMA-order divergence between
-// the sequential reference and imp's parallel-warp accumulator dominates;
-// 1e-5 is unrealistic for K=128 FP16 dot-product reductions. Smaller than 1e-2
-// would catch bit-exact bugs only for representable values.
+// Reference test for compressed-tensors NVFP4 dequant, starting from the ON-DISK format
+// directly (not imp's own quantizer/dequantizer roundtrip, which can't catch a paired
+// sign-flip/nibble-order bug or a missing weight_scale_2 factor).
+// Tolerance 1e-2 FP16: FMA-order divergence between the sequential ref and imp's
+// parallel-warp accumulator dominates over K=128; 1e-5 is unrealistic.
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -43,10 +27,9 @@ float e2m1_nibble_to_f32_ref(uint8_t nibble) {
     return (nibble & 0x08) ? -mag : mag;
 }
 
-// Pure-host reference FP8 E4M3-fn -> FP32 decode mirroring the device's
-// fp8_e4m3_to_float_fast (in src/quant/fp8_utils.cuh). Independently
-// derived from the spec to avoid the bug-amplifying mistake of testing
-// the device kernel against a rephrased copy of itself.
+// Pure-host FP8 E4M3-fn->FP32 decode, independently derived from the spec (mirrors device's
+// fp8_e4m3_to_float_fast) rather than testing the device kernel against a rephrased copy
+// of itself.
 float fp8_e4m3_to_f32_ref(uint8_t bits) {
     uint32_t sign = (bits >> 7) & 1;
     uint32_t exp = (bits >> 3) & 0x0F;
@@ -205,11 +188,9 @@ TEST_F(NvFP4CompressedTensorsRef, TwoLevelScalingVaryingPerBlock) {
     std::vector<uint8_t> h_scale_e4m3(N * n_mb);
     for (size_t i = 0; i < h_scale_e4m3.size(); ++i)
         h_scale_e4m3[i] = f32_to_fp8_e4m3_bits(scale_values[i % 8]);
-    // An all-zero micro-scale is legal on-wire (a 16-element group whose amax
-    // was 0) and must zero that group's contribution rather than decode as a
-    // subnormal or fall through to the tensor scale. It was untested: every
-    // cycled value above is non-zero, so the zero rung of the E4M3 decoder was
-    // only ever reached through the whole-tensor guard.
+    // An all-zero micro-scale (16-element group with amax=0) is legal on-wire and must zero
+    // that group's contribution, not decode as subnormal or fall through to the tensor scale.
+    // Untested before: every other cycled value is non-zero.
     ASSERT_GE(h_scale_e4m3.size(), 2u * static_cast<size_t>(n_mb));
     h_scale_e4m3[static_cast<size_t>(n_mb)] = 0x00;      // row 1, first group
     h_scale_e4m3[static_cast<size_t>(n_mb) + 1] = 0x00;  // row 1, second group
@@ -256,15 +237,10 @@ TEST_F(NvFP4CompressedTensorsRef, TwoLevelScalingVaryingPerBlock) {
     std::vector<half> h_y(N);
     cudaMemcpy(h_y.data(), d_y, N * sizeof(half), cudaMemcpyDeviceToHost);
 
-    // The zeroed micro-scales, isolated. With the activation supported only on
-    // k < 32, every contribution to row 1 comes from the two groups whose scale
-    // byte is 0x00, so that row must be EXACTLY zero.
-    //
-    // The full-K comparison below cannot do this job. Recomputing row 1 by hand:
-    // a kernel that falls through to the tensor scale (reads 0x00 as 1.0) moves
-    // it by 0.186 and is caught, but reading exp==0 as a normal (0.015625) moves
-    // it by 0.0029 and a subnormal misread by 0.00036 - both under the 1e-2 that
-    // the FP16 output quantum forces on a sum over K=128.
+    // Row 1 (k<32) draws only from the two zero-scale groups, so it must be EXACTLY zero.
+    // Full-K comparison can't catch this: falling through to tensor scale (0x00 as 1.0) moves it
+    // by 0.186 (caught), but exp==0-as-normal moves it 0.0029 and subnormal misread 0.00036,
+    // both under the 1e-2 the FP16 output quantum forces over K=128.
     std::vector<half> h_x_head = h_x;
     for (int k = 32; k < K; ++k)
         h_x_head[k] = __float2half(0.0f);
@@ -488,10 +464,8 @@ TEST(NvFP4ValidateWeightScaleDtype, AcceptsFp8E4m3) {
 }
 
 TEST(NvFP4ValidateWeightScaleDtype, RejectsUInt8MxFP4Crossroute) {
-    // INT8 maps from the wire 'U8' / 'I8' string that MXFP4 / GPTQ ship
-    // weight_scale (UE8M0 power-of-two) bytes in. Cross-misrouting would
-    // happen if the loader/promote step misclassifies an MXFP4 model as
-    // NVFP4 — the weight_scale bytes would be UE8M0 but read as E4M3.
+    // INT8 maps from the wire 'U8'/'I8' string MXFP4/GPTQ ship weight_scale (UE8M0) bytes in.
+    // Cross-misrouting (loader misclassifies MXFP4 as NVFP4) would read UE8M0 bytes as E4M3.
     std::string err;
     EXPECT_FALSE(nvfp4_validate_weight_scale_dtype(QType::INT8, &err));
     EXPECT_FALSE(err.empty());

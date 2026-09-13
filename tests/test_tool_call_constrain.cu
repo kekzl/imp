@@ -9,10 +9,9 @@
 
 #include "test_cuda_skip.h"
 
-// Constrained tool calling (#1002): the TOOL_CALL schema FSM, envelope literals
-// (forced vs strict-optional), $defs hoisting, and parallel_tool_calls re-arm.
-// The core schema-FSM grammar (patterns, $ref, enums, arrays, forced_text) lives
-// in test_schema_constrain.cu; the any-JSON constrainer in test_json_constrain.cu.
+// Constrained tool calling (#1002): TOOL_CALL schema FSM, envelope literals (forced vs
+// strict-optional), $defs hoisting, parallel_tool_calls re-arm. Core schema-FSM grammar lives
+// in test_schema_constrain.cu; any-JSON constrainer in test_json_constrain.cu.
 
 namespace imp {
 namespace {
@@ -33,11 +32,9 @@ static std::vector<bool> schema_allowed(SchemaConstrainer& sc, int n) {
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// TOOL_CALL enforcement (#1002): envelope literals forced, "name" before
-// "arguments", name enum restricted to the tool set, arguments bound to the
-// CHOSEN tool's parameter schema, EOS forced after the close literal.
-// ---------------------------------------------------------------------------
+// #1002 TOOL_CALL enforcement: envelope literals forced, "name" before "arguments", name
+// enum restricted to the tool set, arguments bound to the CHOSEN tool's schema, EOS forced
+// after the close literal.
 TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
     SKIP_IF_NO_CUDA();
     // Single-char vocab over the emission corpus + a negative probe 'x'.
@@ -110,11 +107,9 @@ TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
 }
 
 TEST(SchemaConstrainTest, ToolCallBuilderRejectsUnenforceable) {
-    // Free-form parameters (no properties) BUILD since #1729: such an object
-    // is representable now (free keys, undescribed values), so declining it
-    // would refuse a tool the caller can legitimately offer. The XML dialect
-    // still declines, because it renders parameter keys as tags and a schema
-    // that declares none has no tag to render.
+    // #1729: free-form parameters (no properties) BUILD now - representable (free keys,
+    // undescribed values), so declining would refuse a legitimate tool. XML dialect still
+    // declines: it renders parameter keys as tags and a schema with none has no tag to render.
     EXPECT_TRUE(build_tool_call_schema({{"t", R"({"type":"object"})"}}) != nullptr);
     EXPECT_TRUE(build_xml_tool_call_schema({{"t", R"({"type":"object"})"}}) == nullptr);
     // Unresolvable $ref → parse fails → decline (would enforce a wrong grammar).
@@ -134,10 +129,9 @@ TEST(SchemaConstrainTest, ToolCallBuilderRejectsUnenforceable) {
                            R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})"}}) != nullptr);
 }
 
-// A tool whose parameter schema uses $defs+$ref (the pydantic/zod norm for any
-// nested model) is now enforceable (#1002 stage 2): the nested defs are hoisted
-// into the TOOL_CALL root under a "<tool>/<def>" namespace and the refs rewired,
-// so the chosen tool's arguments constrain down through the nested model.
+// #1002 stage 2: a tool schema using $defs+$ref (pydantic/zod norm for nested models) is now
+// enforceable - nested defs are hoisted into the TOOL_CALL root under a <tool>/<def>
+// namespace and refs rewired, so the chosen tool's arguments constrain through the nested model.
 TEST(SchemaConstrainTest, ToolCallHoistedDefsEnforced) {
     SKIP_IF_NO_CUDA();
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
@@ -197,10 +191,9 @@ TEST(SchemaConstrainTest, ToolCallHoistedDefsEnforced) {
     EXPECT_TRUE(at_done[2]) << "EOS must be allowed after the envelope closes";
 }
 
-// Strict OPTIONAL tool call (#1002, OpenAI strict:true + tool_choice auto): the
-// envelope is NOT forced — the model may emit free text (mask off), but once it
-// opens the tool tag the preamble gate hands off to the body FSM, which enforces
-// the arguments, then forces the close literal + EOS.
+// #1002, OpenAI strict:true + tool_choice auto: the envelope is NOT forced (model may emit
+// free text), but once it opens the tool tag the preamble gate hands off to the body FSM,
+// which enforces arguments then forces the close literal + EOS.
 TEST(SchemaConstrainTest, ToolCallStrictOptionalEnforced) {
     SKIP_IF_NO_CUDA();
     // Single-char body/close vocab, then the opener + a free-text token last so
@@ -405,14 +398,10 @@ TEST(SchemaConstrainTest, Llama3BareArgsForcedEnvelope) {
     EXPECT_TRUE(at_done[2]) << "EOS forced after the envelope closes";
 }
 
-// ---------------------------------------------------------------------------
-// Qwen-Coder XML tool calls (#1002 follow-up): the body is
-//   <function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n...</function>
-// inside the ChatML <tool_call> envelope. Parameter VALUES are raw text
-// (multi-line, unescaped) delimited by "\n</parameter>" — the reason the JSON
-// body FSM must never engage on this dialect (it masked raw newlines and
-// produced single-line code, see the PR).
-// ---------------------------------------------------------------------------
+// #1002 follow-up: Qwen-Coder XML body (<function=NAME><parameter=KEY>VALUE</parameter>...)
+// inside the ChatML <tool_call> envelope; parameter VALUES are raw multi-line unescaped text
+// delimited by \n</parameter>, so the JSON body FSM must never engage on this dialect (it
+// masked raw newlines and produced single-line code).
 
 static std::vector<std::string> xml_test_vocab(std::string& chars) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
@@ -635,11 +624,9 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValue) {
     EXPECT_TRUE(at_done[2]) << "an empty value must be a legal, closable call";
 }
 
-// A model may also close an empty value with a SINGLE newline —
-// '<parameter=k>\n</parameter>' — the forced value-opening newline doubles as
-// the delimiter start (the tracker is seeded). Without that, the close tag is
-// swallowed as value text and the value never closes (EOS stays masked to
-// max_tokens).
+// A model may close an empty value with a SINGLE newline (<parameter=k>\n</parameter>): the
+// forced value-opening newline doubles as the delimiter start (tracker seeded); without it
+// the close tag is swallowed as value text and EOS stays masked to max_tokens.
 TEST(SchemaConstrainTest, XmlToolCallEmptyValueSingleNewline) {
     SKIP_IF_NO_CUDA();
     std::string chars;

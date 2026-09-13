@@ -119,10 +119,8 @@ class TestResponsesNonStream:
                        json={"model": model, "input": "x", "speculative": value})
             assert r.status_code != 400, r.text
 
-    # The other edge: everything the transform can carry must still get through
-    # to the model lookup, which is a 404/503 on a server with no weights.
-    # `regex` and `grammar` are the two this PR added, and they are exactly the
-    # ones /v1/chat/completions already accepted.
+    # regex and grammar (this PR's additions) must reach model lookup (404/503 on a weightless
+    # server), same as /v1/chat/completions already accepts them.
     @pytest.mark.nomodel
     @pytest.mark.parametrize("body", [
         {"text": {"format": {"type": "text"}}},
@@ -175,10 +173,7 @@ class TestResponsesStream:
                 for line in r.iter_lines():
                     if line.startswith("data: "):
                         seqs.append(json.loads(line[6:])["sequence_number"])
-        # Without this the test passes on an EMPTY stream: [] == sorted([]) and
-        # 0 == 0. That is how it "passed" against a model-less server, and it
-        # would pass the same way here if the stream ever came back empty
-        # (#1600).
+        # Assert seqs non-empty first: [] == sorted([]) passes vacuously on an empty SSE stream (#1600).
         assert seqs, "no SSE data frames arrived — nothing to check monotonicity on"
         assert seqs == sorted(seqs)
         assert len(set(seqs)) == len(seqs)

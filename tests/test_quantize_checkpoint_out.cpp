@@ -1,11 +1,7 @@
-// imp-quantize's output-format rules.
-//
-// Every rule covered here fails SILENTLY: the checkpoint is written, loads, and
-// generates. A reciprocal written the wrong way round scales every weight by
-// amax²/36; a fused group that does not share a tensor scale leaves two of
-// three matrices dequantized against the third's; a config.json that ends up
-// with two `quantization_config` keys reads as unquantized because parsers keep
-// the last one.
+// Every rule here fails SILENTLY (checkpoint writes, loads, generates): a reciprocal written
+// backwards scales every weight by amax^2/36; a fused group without a shared tensor scale
+// dequantizes two of three matrices against the third's; a config.json with two
+// quantization_config keys reads as unquantized (parsers keep the last one).
 
 #include "../tools/imp-quantize/checkpoint_out.h"
 
@@ -121,13 +117,9 @@ TEST(QuantizeCheckpointOut, NonWeightsAndBareNamesHaveNoGroup) {
 // ---- scales --------------------------------------------------------------
 
 TEST(QuantizeCheckpointOut, ExportScalePutsLoudestBlockAtOne) {
-    // The micro-scale the kernel computes is local_absmax / (tensor_scale * 6),
-    // so this convention puts the block holding the tensor peak at exactly 1.0
-    // and every other block below it.
-    //
-    // Pinned because the obvious "improvement" — scaling by 448 so the
-    // micro-scales fill FP8's range — measures 31.05 against 29.47 on
-    // Qwen3-0.6B. See checkpoint_out.h.
+    // Micro-scale = local_absmax/(tensor_scale*6), so the block holding the tensor peak sits at
+    // exactly 1.0. Pinned against the obvious "improvement" of scaling by 448 to fill FP8's
+    // range: measures 31.05 vs 29.47 PPL on Qwen3-0.6B (checkpoint_out.h).
     const float absmax = 3.5f;
     const float scale = export_tensor_scale(absmax);
     EXPECT_NEAR(absmax / (scale * 6.0f), 1.0f, 1e-5f);
@@ -248,14 +240,10 @@ TEST(QuantizeCheckpointOut, DoesNotMatchTheKeyInsideANestedObjectOrAString) {
     EXPECT_NE(out.find("\"quantization_config\": {\"q\": 1},"), std::string::npos);
 }
 
-// ---- writer and reader, against each other -------------------------------
-//
-// The rest of this file checks the writer against the format on paper. This one
-// checks it against the loader that has to read it back, which is the pair that
-// was actually broken: imp detected compressed-tensors from recipe.yaml alone,
-// so a checkpoint this tool wrote — correct, but without a recipe — was read as
-// Modelopt and dequantized by the reciprocal of its own scales. Nothing failed;
-// perplexity went from 31.05 to 1.2e47.
+// Checks the writer against the loader that reads it back: imp detected compressed-tensors
+// from recipe.yaml alone, so a checkpoint this tool wrote correctly but without a recipe was
+// read as Modelopt and dequantized by the reciprocal of its own scales - PPL 31.05 -> 1.2e47,
+// nothing failed.
 TEST(QuantizeCheckpointOut, WhatTheWriterDeclaresIsWhatTheLoaderDetects) {
     const std::string dir =
         (std::filesystem::temp_directory_path() / ("ckpt_out_" + std::to_string(::getpid()))).string();
@@ -334,13 +322,10 @@ TEST(QuantizeCheckpointOut, RefusesCompressedTensorsWithoutAConfigJson) {
     std::filesystem::remove_all(dir, ec);
 }
 
-// Measured 2026-08-16: vLLM refuses `lm_head.weight_global_scale` outright,
-// while imp reads a quantized head with byte-identical greedy output — because
-// its own default already quantizes a native head at load (which itself costs
-// +0.99 % perplexity for +10.4 % decode; see docs/quantization.md). So the
-// combination is defensible for an imp-only checkpoint and useless for a
-// portable one, and the caller has to hear that before the conversion, not
-// after it.
+// vLLM refuses lm_head.weight_global_scale outright; imp reads it fine (byte-identical
+// greedy, since its own default already quantizes a native head at load: +0.99% PPL for
+// +10.4% decode, docs/quantization.md). Defensible for an imp-only checkpoint, useless for a
+// portable one; the caller must be warned before conversion, not after.
 TEST(QuantizeCheckpointOut, WarnsOnlyWhenLmHeadMeetsCompressedTensors) {
     EXPECT_NE(portability_warning(OutputFormat::CompressedTensors, /*quantize_lm_head=*/true), nullptr);
     EXPECT_EQ(portability_warning(OutputFormat::CompressedTensors, false), nullptr);
@@ -354,12 +339,9 @@ TEST(QuantizeCheckpointOut, WarnsOnlyWhenLmHeadMeetsCompressedTensors) {
     EXPECT_NE(w.find("modelopt"), std::string::npos);
 }
 
-// ---- the files the checkpoint cannot load without ------------------------
-//
-// A sharded checkpoint is unreadable without an index, and the index cannot be
-// copied from the source: quantizing one weight turns it into three tensors.
-// A wrong one fails at load with the misleading "No .gguf file found in
-// directory", so the writer is worth pinning.
+// A sharded checkpoint is unreadable without an index, and the index can't be copied from
+// the source (quantizing one weight makes three tensors). A wrong index fails at load with
+// the misleading "No .gguf file found in directory".
 
 namespace {
 struct TempDir {

@@ -26,10 +26,7 @@ int sm_major() {
 namespace imp {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Test: single-expert problem must produce bit-exact output vs the reference
-//       quantize_fp16_to_nvfp4 (which uses the same two-level algorithm).
-// ---------------------------------------------------------------------------
+// Single-expert problem must be bit-exact vs quantize_fp16_to_nvfp4 (same two-level algorithm).
 TEST(QuantizeMoeNative, SingleExpertMatchesReference) {
     if (sm_major() < 12)
         GTEST_SKIP() << "SM120 required for HW FP4 conversion";
@@ -103,10 +100,8 @@ TEST(QuantizeMoeNative, SingleExpertMatchesReference) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// Test: two-expert problem — verify both experts produce valid (non-zero) output
-// and that the two experts are independently quantized.
-// ---------------------------------------------------------------------------
+// Two-expert problem: both experts produce valid (non-zero) output and are quantized
+// independently of each other.
 TEST(QuantizeMoeNative, TwoExpertsIndependent) {
     if (sm_major() < 12)
         GTEST_SKIP() << "SM120 required for HW FP4 conversion";
@@ -211,12 +206,9 @@ TEST(QuantizeMoeNative, EmptyExpertNocrash) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// Test: compute_M_per_from_offsets_device — device-side per-expert token count.
-// Replaces the host-side cudaMemcpyAsync(D2H) + sync + loop pattern in MoE
-// prefill dispatch. Required for CUDA-graph capture (Phase 1 of MoE-prefill-
-// graphs lever, plan moe_prefill_graphs_plan_2026_05_10).
-// ---------------------------------------------------------------------------
+// compute_M_per_from_offsets_device: device-side per-expert token count, replacing the
+// host D2H memcpy+sync+loop pattern. Required for CUDA-graph capture (MoE-prefill-graphs
+// Phase 1, plan moe_prefill_graphs_plan_2026_05_10).
 TEST(QuantizeMoeNative, ComputeMPerFromOffsetsDevice) {
     const int ne = 4;
     // Offsets: [0, 3, 3, 7, 10] → M_per: [3, 0, 4, 3]
@@ -254,10 +246,8 @@ TEST(QuantizeMoeNative, ComputeMPerFromOffsetsDeviceEmpty) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// Test: compact_alpha_active — order-preserving stream compaction of d_alpha
-// to active-only experts. Phase 2 of moe_prefill_graphs_plan_2026_05_10.
-// ---------------------------------------------------------------------------
+// compact_alpha_active: order-preserving stream compaction of d_alpha to active-only experts
+// (MoE-prefill-graphs Phase 2, plan moe_prefill_graphs_plan_2026_05_10).
 TEST(QuantizeMoeNative, CompactAlphaActiveBasic) {
     const int ne = 4;
     const float    h_alpha[ne]   = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -361,11 +351,8 @@ TEST(QuantizeMoeNative, CompactAlphaActiveNoneActive) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// Test: compute_sfa_offsets_device — exclusive prefix sum of SfAtom-padded SFA
-// byte sizes must match host cutlass_nvfp4_sf_size formula. Phase 3a of
-// moe_prefill_graphs_plan_2026_05_10.
-// ---------------------------------------------------------------------------
+// compute_sfa_offsets_device: exclusive prefix sum of SfAtom-padded SFA byte sizes must match
+// the host cutlass_nvfp4_sf_size formula (MoE-prefill-graphs Phase 3a).
 TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceMatchesHost) {
     // Mixed M values exercise the ceil(M/128) padding edge: 0, exactly 128,
     // just-under-tile (127), small (1), and a couple of multi-tile values.

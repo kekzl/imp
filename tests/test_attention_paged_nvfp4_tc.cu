@@ -9,27 +9,11 @@
 namespace imp {
 namespace {
 
-// Phase 1 of the BitDecoding port: launch-success test for the TC variant.
-//
-// A full numerical-equivalence test against the scalar reference is deferred
-// because synthetic NVFP4 input (random-byte K/V + uniform UE4M3 scales) drives
-// the existing scalar `paged_attention_decode_nvfp4` to NaN output even before
-// our TC variant runs — the test would compare NaN-to-NaN. Verified via the
-// `paged_attention_decode_nvfp4` baseline alone (DIAG O: 4096/4096 NaN). The
-// scalar kernel works on real model KV (calibrated FP4 magnitudes + scaled
-// attention) but synthetic input is not in its working set.
-//
-// Equivalence on REAL input is covered by:
-// 1. Phase-0 microbench (`tools/analysis/bench_nvfp4_qk_tc_vs_scalar.sh`):
-//    isolated Q.K dot, max_abs_err 9.15e-05 rel 1.10e-04 vs scalar reference.
-// 2. End-to-end smoke (Qwen3-8B Q8_0 + --kv-nvfp4 + kv_cache.bitdecoding_qk=true):
-//    both paths produce "The capital of France is Paris" coherent.
-// 3. SASS audit: TC kernel emits 24 HMMA per template instantiation; scalar
-//    kernel remains 0 HMMA / 346 scalar (default path unchanged).
-//
-// This test verifies the TC kernel launches without CUDA errors at the typical
-// production decode shape — guards against silent build-time/dispatch-time
-// regressions during Phase 2+ refactors.
+// Phase 1 BitDecoding port: launch-success test only. Synthetic random-byte NVFP4 input
+// drives the existing scalar paged_attention_decode_nvfp4 to NaN even before the TC variant
+// runs, so a synthetic numeric-equivalence test would compare NaN-to-NaN.
+// Real-input equivalence: bench_nvfp4_qk_tc_vs_scalar.sh (rel err 1.10e-04), a Qwen3-8B e2e
+// smoke, and a SASS audit (TC: 24 HMMA/instantiation; scalar: 0 HMMA/346 scalar, unchanged).
 
 class PagedAttentionNvfp4TCTest : public ::testing::Test {
 protected:
@@ -112,15 +96,10 @@ TEST_F(PagedAttentionNvfp4TCTest, LaunchSucceeds_HD128) {
     cudaFree(d_cl);
 }
 
-// A -1 in the block table is what StreamingLLM eviction leaves behind, and a
-// negative physical block turns into a read BEFORE the KV pool. The FP16 twin
-// has skipped those since #963; the quantised kernels dereferenced them
-// unguarded (#1678).
-//
-// The failure this pins is not a wrong number - it is an illegal access, which
-// is sticky: one fault takes every later test in the process down with it
-// (#1699 was 73 failures from one). So the assertion is "no CUDA error and no
-// NaN", and it has to run in a process that has not already faulted.
+// -1 block-table entry (StreamingLLM eviction sentinel) turns into a read before the KV
+// pool; the FP16 kernel skips it since #963, quantised kernels dereferenced it unguarded
+// (#1678). Illegal access is sticky (#1699: one fault took 73 later tests down), so assert
+// no CUDA error/NaN in a process that has not already faulted.
 TEST_F(PagedAttentionNvfp4TCTest, EvictedBlockSentinelIsSkipped) {
     constexpr int batch = 1;
     constexpr int n_heads = 32;
@@ -161,16 +140,9 @@ TEST_F(PagedAttentionNvfp4TCTest, EvictedBlockSentinelIsSkipped) {
     cudaMemcpy(d_Ks, h_Ks.data(), sc_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_Vs, h_Vs.data(), sc_bytes, cudaMemcpyHostToDevice);
 
-    // Two evicted blocks, both still inside ctx_len - which is the point: a
-    // block past the context would never be read at all.
-    //
-    // -1 is the sentinel the eviction path actually writes. It alone does not
-    // make a good test: the read it produces lands one block BEFORE the pool,
-    // which is still mapped, so the kernel returns quiet garbage rather than
-    // faulting and the assertions below pass either way (measured: this test
-    // was green against the unguarded kernel when -1 was the only entry). The
-    // second entry is far enough out to leave the mapping, so "no negative
-    // block is dereferenced" becomes observable. One guard covers both.
+    // -1 alone reads one block before the pool (still mapped -> quiet garbage, passes either
+    // way); a second entry far enough out leaves the mapping so an unguarded negative-block
+    // read becomes observable. Both entries stay inside ctx_len.
     std::vector<int> bt(n_blocks);
     for (int i = 0; i < n_blocks; i++)
         bt[i] = i;

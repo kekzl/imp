@@ -1,14 +1,7 @@
-// Scheduler tests, split out of test_continuous_batching.cpp when that file
-// crossed the 800-line hard threshold (tools/check_filesize.py).
-//
-// The split is by suite, not by size: BatchBuilderTest builds GPU batches,
-// GPUBatchTest owns their device memory, and SchedulerTest decides which
-// requests exist at all. They shared a file because they share a subject, not
-// because they are one unit.
-//
-// Both files stay in test-e2e, and both are covered by the unit lane's
-// gtest_filter, so scripts/check_e2e_lane_split.sh needs no change: it lists
-// test NAMES, not files.
+// Split out of test_continuous_batching.cpp at the 800-line hard threshold
+// (tools/check_filesize.py), by suite not size: BatchBuilderTest/GPUBatchTest/SchedulerTest
+// share a subject, not a unit. Both files stay in test-e2e and the unit lane's gtest_filter,
+// so scripts/check_e2e_lane_split.sh (lists test NAMES) needs no change.
 
 #include <gtest/gtest.h>
 
@@ -134,13 +127,10 @@ TEST(SchedulerTest, RemovesFinishedRequests) {
 }
 // 10. Memory-aware scheduling
 TEST(SchedulerTest, MemoryAwareScheduling) {
-    // Admission is bookkeeping, so the memory-aware tests build an accounting
-    // cache (block ids and counts, no VRAM) and run in the CI lane. Only the
-    // growable-pool test below still needs a device.
-    //
-    // Pool of 8 blocks = 128 tokens. Each request is a 32-token prompt
-    // (2 blocks) plus max_tokens=16 (1 block + the partial-block spare), so
-    // one reservation is 4 blocks and exactly two fit.
+    // Admission is bookkeeping: memory-aware tests build an accounting cache (block ids/counts,
+    // no VRAM) and run in the CI lane; only the growable-pool test needs a device. Pool of 8
+    // blocks=128 tokens; each request (32-token prompt=2 blocks + max_tokens=16=1 block+spare)
+    // reserves 4 blocks, so exactly two fit.
     auto cache = KVCache::for_accounting(
         /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8);
 
@@ -164,22 +154,14 @@ TEST(SchedulerTest, MemoryAwareScheduling) {
     EXPECT_TRUE(sched.has_pending());
 }
 
-// 10b. Admission reserves the generation, not just the prompt (#1635).
-//
-// Before the fix this admitted both requests: the test is `prompt fits`, and
-// four 2-block prompts fit an 8-block pool. The generation then ran the pool
-// dry and the loser was cancelled mid-stream, after the client had already
-// received part of the answer.
+// #1635: admission must reserve the generation, not just the prompt. Before the fix, four
+// 2-block prompts admitted into an 8-block pool (all fit), then generation ran the pool dry
+// and the loser was cancelled mid-stream after the client had already received part of the answer.
 TEST(SchedulerTest, AdmissionReservesGeneration) {
-    // 16 blocks = 256 tokens. Each request: 32-token prompt (2 blocks) +
-    // max_tokens=64 (4 blocks + 1 spare) = 7 blocks reserved, so two fit and
-    // the third must queue.
-    //
-    // Three requests, not two: with two, the first request's reservation
-    // alone already starves the second, and the test would pass with the
-    // admission quantity mutated back to the prompt. The third is what the
-    // admission test has to see - free blocks say yes (10 left), the
-    // outstanding reservations say no.
+    // 16 blocks=256 tokens; each request (32-token prompt=2 blocks + max_tokens=64=4 blocks+1
+    // spare)=7 blocks, so two fit and the third queues. Three requests, not two: with two, the
+    // first reservation alone already starves the second, so a mutated (prompt-only) admission
+    // quantity would still pass.
     auto cache = KVCache::for_accounting(
         /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/16);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
@@ -217,11 +199,9 @@ TEST(SchedulerTest, AdmissionReservesGeneration) {
     EXPECT_EQ(mgr->outstanding_reserved_blocks(), 5);
 
     sched.schedule(prefill, decode);
-    // Two, not one: the third is admitted now, and reqs[1] is still PREFILLING
-    // at offset 0 (nothing stepped it here) so it is re-queued with it. Before
-    // #1643 the refill required `prefill_offset > 0` and dropped it - in the
-    // engine that never showed, because every promoted request was served in
-    // the same tick it was promoted.
+    // Two, not one admitted: the third fits, reqs[1] is still PREFILLING at offset 0 and gets
+    // re-queued with it. Before #1643 the refill required prefill_offset > 0 and dropped it - never
+    // visible in the engine since every promoted request was served the same tick it was promoted.
     EXPECT_EQ(prefill.size(), 2u);
     EXPECT_NE(std::find(prefill.begin(), prefill.end(), reqs[1]), prefill.end())
         << "an admitted request that has not been stepped yet must stay schedulable";
@@ -229,10 +209,9 @@ TEST(SchedulerTest, AdmissionReservesGeneration) {
     EXPECT_FALSE(sched.has_pending());
 }
 
-// 10d. Aggregate admission pressure grows a growable pool toward its ceiling
-// (2026-08-27). Before the trigger, requests that each fit queued while the
-// pool sat at its initial commit: 32 x 8k concurrent served effectively
-// ~8-wide with 4437 of 6483 ceiling blocks never committed.
+// Aggregate admission pressure must grow a growable pool toward its ceiling: before this,
+// fitting requests queued while the pool sat at its initial commit (32x8k concurrent served
+// effectively ~8-wide, 4437 of 6483 ceiling blocks never committed).
 TEST(SchedulerGpuTest, GrowsPoolUnderAggregatePressure) {
     SKIP_IF_NO_CUDA();
 
@@ -343,12 +322,9 @@ TEST(SchedulerTest, HandlesCancel) {
     sched.schedule(prefill, decode);
     EXPECT_EQ(sched.active_count(), 1);
 }
-// A request cancelled while it is still QUEUED must not be promoted (#1633).
-//
-// HandlesCancel above covers the other half: cancelled while already active.
-// That one passed throughout, because `active_` was filtered and `pending_`
-// was not - so the server's own disconnect path, which cancels before the
-// request is ever scheduled, ran a full generation for a client that was gone.
+// #1633: a request cancelled while still QUEUED must not be promoted. HandlesCancel covers
+// the active-cancel half only, because active_ was filtered and pending_ was not - the
+// server's own disconnect path (cancels before scheduling) ran a full generation for a gone client.
 TEST(SchedulerTest, DoesNotPromoteARequestCancelledWhileQueued) {
     Scheduler sched(4);
 
@@ -655,10 +631,8 @@ TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
     std::vector<std::shared_ptr<Request>> prefill, decode;
     sched.schedule(prefill, decode);
 
-    // Small admitted; large is infeasible (exceeds total cache capacity) so the
-    // scheduler cancels it up-front rather than leaving it pending — leaving
-    // a never-admittable request in pending_ would busy-loop the worker
-    // (Nemotron-H regression that prompted the cancel-on-infeasible path).
+    // A request exceeding total cache capacity is cancelled up-front rather than left pending:
+    // a never-admittable request in pending_ would busy-loop the worker (Nemotron-H regression).
     ASSERT_EQ(prefill.size(), 1u);
     EXPECT_EQ(prefill[0]->id, 2);
     EXPECT_EQ(large->status, RequestStatus::CANCELLED);
@@ -824,11 +798,9 @@ TEST(SchedulerTest, MaxBatchSize) {
     EXPECT_EQ(total_admitted, 20);
 }
 
-// A long prompt must not be passed over forever (#1634).
-//
-// Shortest-first is the policy and stays. What it lacked was a bound: the
-// queue is re-sorted on every arrival, so under sustained short traffic a long
-// prompt is overtaken every round, with nothing that ever makes it its turn.
+// #1634: shortest-first has no bound - the queue re-sorts on every arrival, so under
+// sustained short traffic a long prompt is overtaken every round and never gets its turn.
+// Aging fixes that.
 TEST(SchedulerTest, AgingStopsALongPromptFromStarving) {
     Scheduler sched(1);  // one slot, so every round admits exactly one
 
@@ -915,10 +887,9 @@ TEST(SchedulerTest, EqualPriorityFallsBackToShortestFirst) {
     EXPECT_EQ(prefill[0], short_req);
 }
 
-// Strict dominance: aging never lifts a request over a higher-priority
-// class. The starved low-priority request is admitted only once no
-// higher-priority work is pending - that contract is the caller's to manage
-// (documented in scheduler.cpp).
+// Strict dominance: aging never lifts a request over a higher-priority class; a starved
+// low-priority request is admitted only once no higher-priority work is pending (caller's
+// contract, documented in scheduler.cpp).
 TEST(SchedulerTest, AgingDoesNotCrossPriorityClasses) {
     Scheduler sched(1);
 
@@ -975,13 +946,11 @@ TEST(SchedulerTest, AgingStillBoundsStarvationWithinAClass) {
     EXPECT_TRUE(long_admitted);
 }
 
-// AUDIT_arch_2026 C-2: aging fixed the sort order, not the allocator. A
-// 4-block pool holds one decoding request (1 block + 1 reserved); a 48-token
-// request needs 4 and cannot fit while it runs, a 16-token one needs 2 and
-// can. A fresh short request every round kept the long one waiting for as
-// long as the traffic lasted. Once aged, the long one holds the queue: no
-// short request is admitted past it, and it goes first when the blocks come
-// back.
+// AUDIT_arch_2026 C-2: aging fixed sort order, not the allocator. A 4-block pool holds one
+// decoder (1+1 reserved); a 48-token request needs 4 and can't fit while it runs, a 16-token
+// one needs 2 and can - a fresh short request every round starved the long one indefinitely.
+// Once aged, the long request holds the queue: no short request passes it, it goes first
+// when blocks free up.
 TEST(SchedulerTest, AnAgedRequestHoldsTheQueueUntilItsBlocksAreFree) {
     auto cache = KVCache::for_accounting(
         /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);

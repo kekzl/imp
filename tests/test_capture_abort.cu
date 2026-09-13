@@ -1,11 +1,6 @@
-// #874: an exception thrown by the forward fn while CudaGraphRunner is
-// capturing must not leave the stream in capture state. Before the fix,
-// decode_fn_ throwing mid-capture skipped cudaStreamEndCapture entirely;
-// every subsequent async op on the stream then failed with "operation
-// failed due to a previous error during capture" until process restart,
-// while /health kept reporting ok (observed with Ornith-1.0-35B Q4_K_M:
-// legacy MoE host-args prefill guard throws under the prefill-chunk
-// capture).
+// #874: an exception thrown mid-CudaGraphRunner-capture must not leave the stream in capture
+// state. Before the fix, decode_fn_ throwing skipped cudaStreamEndCapture, so every later
+// async op on the stream failed until process restart while /health kept reporting ok.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -70,13 +65,10 @@ TEST(CaptureAbort, ThrowDuringCaptureLeavesStreamUsable) {
     cudaStreamDestroy(stream);
 }
 
-// A capture records launches without executing them, so the replay that follows
-// it IS that step's execution. When that first replay fails, the step has run
-// nothing — and the path used to `return false` without re-running decode_fn_.
-// Four of the five execute() call sites ignore the return value; the batched
-// decode one (engine_scheduler.cpp) then sees logits_out.data == nullptr and
-// falls back to get_logits_view(), which still holds the PREVIOUS step's logits,
-// so greedy decoding repeats the token instead of failing.
+// A capture only records launches; the first replay after it IS that step's execution. If
+// that replay fails the step ran nothing, but execute() used to `return false` without
+// re-running decode_fn_. 4 of 5 call sites ignore the return value; the batched-decode one
+// (engine_scheduler.cpp) then falls back to the PREVIOUS step's logits, repeating a token.
 TEST(CaptureAbort, FirstReplayFailureStillExecutesTheStep) {
     SKIP_IF_NO_CUDA();
     cudaStream_t stream;

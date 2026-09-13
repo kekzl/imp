@@ -1,15 +1,7 @@
-// A dropped modality must be nameable, not folded into a total.
-//
-// `WeightMap::apply_weights` counted every unassigned tensor into one `skipped`
-// integer. On Gemma-4-12B-NVFP4 that number was 11: one
-// `model.embed_audio.embedding_projection.weight` (4.69 MiB) and ten
-// `model.embed_vision.*` (95.22 MiB). The audio half is the one nothing in imp
-// owns - no encoder, no input type, no tokenizer route - so the checkpoint
-// loaded as a text model and said so nowhere (roadmap Open 8).
-//
-// These tests pin the breakdown, and pin that a text-only load still counts
-// nothing. Tensor names are the checkpoint's own spelling, read from
-// Gemma-4-12B-NVFP4's shard index.
+// WeightMap::apply_weights folded every unassigned tensor into one `skipped` integer; on
+// Gemma-4-12B-NVFP4 that was 11 tensors (1 audio embed_audio, 10 embed_vision), and the audio
+// half is owned by nothing in imp (no encoder/input type/tokenizer route), so the checkpoint
+// silently loaded as text-only. Pins the breakdown and that a text-only load counts nothing.
 
 #include "model/model.h"
 #include "model/weight_map.h"

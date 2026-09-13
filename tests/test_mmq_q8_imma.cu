@@ -1,16 +1,7 @@
-// Reference-parity test for mmq_q8_imma_gemm — the Q8_0 INT8 IMMA prefill
-// GEMM. Two-level verification:
-//   1. EXACT-MODEL reference: the CPU reference reproduces the device math
-//      at the algorithm level (same activation quantize — per-32-block
-//      amax/127, rn-round, ±127 clamp — and the same per-block d_a·d_w·s32
-//      fixup in double). NOT bit-exact: the Release build compiles the
-//      device quantizer's 127/amax with --use_fast_math (div.approx.f32),
-//      so a near-tie activation element can quantize ±1 LSB differently
-//      from the CPU model — worth up to ~|xscale·dw·127| ≈ 1% of one
-//      output. Tolerance covers that plus fp32 accumulation order.
-//   2. UNQUANTIZED sanity: against the plain dequant GEMM (no activation
-//      quant) with a loose tolerance — bounds the activation-quant error
-//      the path introduces end-to-end.
+// mmq_q8_imma_gemm (Q8_0 INT8 IMMA prefill GEMM): two-level check against CPU reference.
+// Exact-model mirrors device math (per-32-block amax/127, rn-round, +-127 clamp) but is not
+// bit-exact: Release --use_fast_math can flip a near-tie LSB; unquantized sanity bounds
+// end-to-end activation-quant error.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -102,11 +93,9 @@ void run_case(int M, int N, int K, unsigned seed, float tol_exact, float tol_unq
     quant_act_cpu(x, M, K, xs8, xscale);
     const int subs = K / kBlk;
 
-    // Exact-model check: per-output relative error (denominator floored at
-    // the output RMS so near-zero outputs don't divide by ~0). Unquantized
-    // check: NORMALIZED RMS error — activation-quant noise on individual
-    // small outputs has heavy tails (cancellation), the energy ratio is the
-    // meaningful end-to-end bound.
+    // Exact-model: per-output relative error, denominator floored at output RMS to avoid
+    // dividing near-zero outputs. Unquantized: normalized RMS (energy ratio), since
+    // activation-quant noise on small outputs has heavy cancellation tails.
     double err2_exact = 0.0, err2_unq = 0.0, ref2 = 0.0, max_rel_exact = 0.0;
     std::vector<double> exact_buf, unq_buf, got_buf;
     std::mt19937 pick(seed * 13 + 5);

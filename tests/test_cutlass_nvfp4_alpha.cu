@@ -1,15 +1,9 @@
-// Tests for the CUTLASS sm_120 NVFP4×NVFP4 prefill path and the FP8 E4M3
-// encoder it depends on. These guard the bug bisected on 2026-05-02:
-//
-//   `float_to_fp8_e4m3` was clamping to (e=14, m=7) → bits 0x77, decode
-//   240, instead of the correct E4M3-fn max 448 = (e=15, m=6) → 0x7E.
-//   Any input value > 240 that fell into the e=15 exponent slot was
-//   squashed to 240, breaking compressed-tensors NVFP4 prequant
-//   (where outlier-block scales near 448 are routine).
-//
-// The `Boundary` test pins the encoder semantics. The two GEMM tests
-// guard the CUTLASS prefill path against a return of the precision
-// cliff that fix removed.
+// CUTLASS sm_120 NVFP4xNVFP4 prefill and its FP8 E4M3 encoder: guards the bisected bug where
+// float_to_fp8_e4m3 clamped to (e=14,m=7)=0x77 (decode 240) instead of the correct E4M3-fn
+// max 448=(e=15,m=6)=0x7E, squashing any value >240 in the e=15 slot - breaking
+// compressed-tensors NVFP4 prequant, where outlier scales near 448 are routine.
+// Boundary test pins the encoder; the two GEMM tests guard the prefill path against the
+// precision cliff returning.
 
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -216,18 +210,10 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
     cudaFree(d_y_b);
 }
 
-// Mistral-3.2-NVFP4 L0 q_proj-shaped reproducer.
-//
-// Synthesises the conditions the stress-test memo observed in the wild:
-//   K = 5120  (Mistral hidden)
-//   N = 4096  (q_proj out for 32 heads × 128 head_dim)
-//   max(|W|) ≈ 4.36  → global_scale = 2688/4.36 ≈ 616
-//                    → tensor_scale (post-flip) ≈ 0.00162
-//   activation RMS ≈ 1  (RMSNorm output)
-//
-// If CUTLASS produces saturated FP16 (Inf / 65504) on this — that's the
-// in-the-wild bug isolated. If it produces sane sub-1.0 outputs — the
-// bug is upstream of the GEMM (loader, dequant, byte layout, etc.).
+// Mistral-3.2-NVFP4 L0 q_proj-shaped reproducer of the stress-test memo's observed
+// conditions: K=5120, N=4096, max(|W|)~4.36 -> global_scale~616 -> tensor_scale~0.00162,
+// activation RMS~1. Saturated FP16 (Inf/65504) output isolates the bug to CUTLASS; sane
+// sub-1.0 output means it's upstream (loader, dequant, byte layout).
 TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     if (!cutlass_sm120_nvfp4_available()) {
         GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
@@ -377,23 +363,12 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     cudaFree(d_y_ref);
 }
 
-// Reproduce the EXACT byte layout of compressed-tensors / llm-compressor
-// prequant NVFP4. The two distinguishing properties vs imp's auto-quant
-// (used by the test above) are:
-//
-//   1. Per-block FP8 E4M3 micro-scales encoded in the W'-domain
-//      (i.e. scale_stored = local_scale * global_scale, where
-//      global_scale = FP8_max * FP4_max / max(|W|) = 2688/max(|W|)).
-//      These bytes range up to ~448 for outlier blocks.
-//
-//   2. tensor_scale (alpha for CUTLASS) = 1/global_scale = max(|W|)/2688
-//      — a small number, typically ~0.00162 for Mistral.
-//
-// imp's auto-quant uses tensor_scale = max(|W|)/6 (large, ~0.73) and
-// micro-scales in W-domain (small, range ~0..1). Mathematically the two
-// are identical, but the bit-level FP8 encoding of the micro-scales may
-// hit precision pathologies under one convention and not the other —
-// which is exactly the symptom the stress-test memo described.
+// Reproduces compressed-tensors/llm-compressor prequant NVFP4's exact byte layout, distinct
+// from imp's auto-quant: (1) micro-scales in W'-domain (scale_stored = local*global,
+// global_scale = 2688/max(|W|), bytes up to ~448); (2) tensor_scale = 1/global_scale
+// (~0.00162 for Mistral) vs imp's max(|W|)/6 (~0.73) with micro-scales in W-domain.
+// Mathematically identical, but the FP8 bit-level encoding may hit precision pathologies
+// under one convention and not the other - the stress-test memo's exact symptom.
 TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     if (!cutlass_sm120_nvfp4_available()) {
         GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
@@ -636,23 +611,13 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     cudaFree(d_y_ref);
 }
 
-// ---------------------------------------------------------------------------
-// The contract that let A7 step 8 delete the lazy CUTLASS workspace growth.
-//
-// The GEMM used to cudaFree+cudaMalloc a file-scope workspace at GEMM time
-// whenever the caller's buffer was too small — on a path reachable under
-// CUDA-graph capture, where cudaMalloc is illegal. It now refuses instead, and
-// the caller falls back to the dequant path. That is only a non-event if no
-// call can actually need more than its caller reserved.
-//
-// Two of the three callers ask ..._workspace() for the EXACT shape they then
-// pass, so they are safe by construction. The third — allocate_auxiliary_buffers
-// in exec/executor_workspace_buffers.cu — sizes ONCE at (max_tokens, max_n,
-// max_k) and reuses that for every smaller call, which needs the property below.
-// It is not obviously true: the NVFP4 entry point switches KERNEL at N <= 2048
-// (small-N pingpong vs cooperative), so a smaller N is a different kernel and
-// not merely a smaller problem.
-// ---------------------------------------------------------------------------
+// Contract that let A7 step 8 delete lazy CUTLASS workspace growth: the GEMM used to
+// cudaFree+cudaMalloc a file-scope workspace when the caller's buffer was too small, illegal
+// under CUDA-graph capture. It now refuses and falls back to dequant instead - safe only if
+// no call needs more than its caller reserved.
+// Two of three callers request the EXACT shape they pass; the third
+// (allocate_auxiliary_buffers) sizes ONCE at (max_tokens,max_n,max_k) and reuses it, which
+// needs max-shape-covers-every-smaller-call - not obvious since NVFP4 switches KERNEL at N<=2048.
 TEST(CutlassWorkspaceContract, MaxShapeSizingCoversEverySmallerCall) {
     // A generous stand-in for the executor's max shape: 4096 tokens is the
     // max_tokens cap, and N/K above any hero model's projections.
@@ -677,14 +642,10 @@ TEST(CutlassWorkspaceContract, MaxShapeSizingCoversEverySmallerCall) {
     fprintf(stderr, "[WS] nvfp4 max-shape workspace=%zu B, mxfp4=%zu B\n", nv_at_max, mx_at_max);
 }
 
-// The FP32 LM-head variant has NO caller-supplied workspace at all: both
-// executor_forward.cu and executor_perplexity.cu call
-// gemm_nvfp4_cutlass_sm120_fp32(..., /*workspace=*/nullptr, /*size=*/0, ...).
-// Before A7 step 8 that was served by the static grow path; with the grow path
-// deleted, a non-zero requirement would make the LM head refuse on EVERY decode
-// step and silently drop to the batched GEMV — correct output, worse decode.
-// So this variant does not merely need to be covered by a max shape, it needs
-// to be exactly zero.
+// FP32 LM-head variant (executor_forward.cu, executor_perplexity.cu) passes
+// workspace=nullptr, size=0: with the static grow path deleted, any non-zero requirement
+// would make the LM head refuse on EVERY decode step and silently drop to the batched GEMV
+// (correct output, worse decode) - so this variant's requirement must be exactly zero.
 TEST(CutlassWorkspaceContract, Fp32LmHeadVariantNeedsNoWorkspaceAtAll) {
     for (int m : {1, 4, 8, 65, 512, 4096}) {
         for (int vocab : {32000, 151936, 262144}) {

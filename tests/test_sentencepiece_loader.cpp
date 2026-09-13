@@ -1,12 +1,7 @@
-// Unit tests for the native SentencePiece (.model protobuf) parser.
-// Closes audit followups item AU2.
-//
-// Strategy: synthesize valid protobuf blobs in-memory matching the
-// sentencepiece.ModelProto schema, then verify parse_sentencepiece_model
-// extracts the expected vocabulary, scores, types, and trainer ids. Plus
-// one optional integration test that runs against a real spiece.model
-// file from the user's HF cache when available — gracefully skips
-// otherwise so the unit suite stays GPU-runner-agnostic.
+// Native SentencePiece (.model protobuf) parser (audit followup AU2). Synthesizes valid
+// protobuf blobs matching sentencepiece.ModelProto in-memory to verify parse_sentencepiece_model
+// extracts vocabulary/scores/types/trainer ids; optional integration test against a real
+// spiece.model from the HF cache, skips gracefully otherwise.
 
 #include "model/sentencepiece_loader.h"
 
@@ -204,10 +199,9 @@ TEST(SentencePieceLoader, RejectsLengthDelimPastEnd) {
 }
 
 TEST(SentencePieceLoader, RejectsLengthDelimThatWrapsThePointer) {
-    // Field 1, wire 2, claimed length 2^64 - 100 over 8 real bytes. The old
-    // guard computed `data_ + len`, which wraps to a pointer below `end_`,
-    // passed, and left the cursor before the buffer: the field loop then
-    // never reached the end (AUDIT_arch_2026 F1-8).
+    // AUDIT_arch_2026 F1-8: field 1, wire 2, claimed length 2^64-100 over 8 real bytes. Old
+    // guard computed data_+len, which wraps to a pointer below end_, passes, and leaves the
+    // cursor before the buffer, so the field loop never reaches the end.
     std::vector<uint8_t> blob;
     put_tag(blob, 1, 2);
     put_varint(blob, uint64_t{0} - 100);

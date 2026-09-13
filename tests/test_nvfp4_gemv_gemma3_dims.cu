@@ -1,16 +1,8 @@
-// Standalone repro for the gemma-3-12b GGUF decode IMA (known issue): decode
-// on the NVFP4 cache poisons the CUDA context asynchronously right after the
-// first decode step (sticky 700 surfaces at sample_single_from_logits;
-// bisected: NVFP4 decode cache ON + per-layer GEMVs — LM head exonerated via
-// diagnostics.lm_dequant_fp16, graphs exonerated via --no-cuda-graphs, and
-// diagnostics.no_nvfp4_decode_cache makes the model fully coherent).
-//
-// Exercises every NVFP4 decode-GEMV entry the engine dispatches for a
-// gemma-3-12b layer at its real dims (d_model=3840, q=4096, kv=2048,
-// d_ff=15360, GeGLU): kpar per projection, the QKV fusion, the gate+up
-// fusion, and the GeGLU-residual down projection (gemma-3 is the only GeGLU
-// user — the least-exercised path). Checks NaN/Inf + a post-call device
-// health probe; run under compute-sanitizer to pin an out-of-bounds access.
+// gemma-3-12b GGUF decode IMA: NVFP4 decode cache poisons the CUDA context asynchronously
+// right after the first decode step (sticky 700). Bisected to NVFP4 decode cache ON +
+// per-layer GEMVs (LM head/graphs exonerated separately; disabling the cache is coherent).
+// Exercises every NVFP4 decode-GEMV entry at real gemma-3-12b dims; run under
+// compute-sanitizer to pin the out-of-bounds access.
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"

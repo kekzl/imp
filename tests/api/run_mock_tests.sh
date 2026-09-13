@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Run API tests against the mock server (no GPU, no model required).
-# Usage: ./run_mock_tests.sh
-#
-# Environment:
-#   IMP_MOCK_PORT  - mock server port (default: 9099)
-#
-# Exit code: 0 if all tests pass, 1 otherwise.
+# Usage: ./run_mock_tests.sh. Env: IMP_MOCK_PORT (default 9099).
+# Exit 0 if all tests pass, 1 otherwise.
 
 set -euo pipefail
 cd "$(dirname "$0")"

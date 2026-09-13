@@ -204,24 +204,9 @@ TEST(MoEExecutorTest, Deterministic) {
     tm.cleanup();
 }
 
-// ============================================================================
-// Test 4b: MoE run-to-run LOGIT drift is bounded (TEST_AUDIT (retired) §7 Tier-1).
-//
-// The existing Deterministic test asserts the sampled TOKEN is identical across
-// two forwards — but token equality hides logit drift below the argmax margin.
-// The known MoE nondeterminism source is the grouped-GEMM expert-scatter using
-// float atomics (accumulation order is not fixed → the NVFP4 MoE greedy A/B flip
-// on Qwen3-30B-A3B, MEMORY ModelProfile D1). This test MEASURES the per-logit
-// drift across K repeated forwards and asserts it stays under a documented
-// epsilon, so a regression that injects nondeterminism here is caught and
-// BOUNDED rather than silently tolerated.
-//
-// NOTE: the synthetic FP16 test model exercises the scatter path but is expected
-// to be deterministic (drift ~0); the genuinely non-deterministic case is the
-// NVFP4 atomic-scatter on a real MoE model, which is a model-level property
-// (gated, e2e) not reproducible in this unit. This test locks the unit path and
-// records the measured envelope.
-// ============================================================================
+// Token-equality hides logit drift below the argmax margin. MoE grouped-GEMM expert-scatter
+// float atomics cause nondeterminism (NVFP4 greedy A/B flip on Qwen3-30B-A3B, ModelProfile D1);
+// measures per-logit drift over K forwards and bounds it; genuine case is model-level, gated e2e.
 TEST(MoEExecutorTest, LogitDriftBounded) {
     SKIP_IF_NO_CUDA();
 

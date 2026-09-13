@@ -1,19 +1,9 @@
-// qknorm_rope_fused (#1957) against the two kernels it replaces.
-//
-// The fused kernel shipped with zero test references: nothing in the tree
-// named it, so the only thing standing behind "one CTA per (head, token)
-// applies RMSNorm then RoPE" was an end-to-end throughput number. A fused
-// kernel that gets the norm epsilon, the pair layout or the per-head stride
-// wrong still produces plausible activations, and the batched-decode rows it
-// serves (n <= 64) are exactly the ones a greedy lock at batch 1 never enters.
-//
-// Reference: host RMSNorm per head, then the STANDALONE rope_forward kernel.
-// Both halves are covered elsewhere (test_layernorm.cu, test_rope.cu), so a
-// disagreement here is the fusion, not the arithmetic.
-//
-// Shape: Qwen3.8-27B (head_dim 256, rope_dim 64, NeoX pairs, GQA 16/2), which
-// is the model the kernel was measured on, at the row counts the dispatch
-// actually hands it: 1 (plain decode), 32 (batched decode), 64 (the cap).
+// qknorm_rope_fused (#1957) shipped with zero test references, backed only by an e2e
+// throughput number; a wrong norm epsilon, pair layout or per-head stride still produces
+// plausible activations, and its rows (n<=64) are exactly what a batch-1 greedy lock never
+// enters. Reference: host RMSNorm + standalone rope_forward (each covered elsewhere), so a
+// disagreement here is the fusion. Shape: Qwen3.8-27B (head_dim 256, rope 64, GQA 16/2) at
+// real dispatch rows 1/32/64.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -184,10 +174,9 @@ TEST_P(QkNormRopeFusedTest, MatchesNormThenStandaloneRope) {
     for (size_t i = 0; i < k_count; ++i)
         ASSERT_NEAR(kb_a[i], kb_b[i], tol) << "K mismatch at " << i << " (n_tokens=" << n_tokens << ")";
 
-    // Dims past rope_dim are normed but NOT rotated. Asserting they moved at
-    // all is what separates "the fusion works" from "the fused kernel wrote
-    // the input back": with rope_dim 64 of 256, three quarters of every head
-    // would survive a no-op RoPE unnoticed.
+    // Dims past rope_dim are normed but not rotated; asserting they moved at all separates "the
+    // fusion works" from "the kernel wrote the input back unchanged" (rope_dim 64 of 256 means
+    // 3/4 of each head would survive a no-op RoPE unnoticed).
     bool tail_changed = false;
     for (size_t t = 0; t < static_cast<size_t>(n_tokens) && !tail_changed; ++t) {
         const size_t base = t * n_heads * head_dim;

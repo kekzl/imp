@@ -6,17 +6,9 @@
 namespace imp {
 namespace {
 
-// Saturated TC peak calibration (issues #595/#596). Logs the measured
-// ceilings and asserts the two structural facts the roofline calibration
-// (tools/roofline/config.json flop_per_cycle) depends on:
-//   1. f32 accumulate runs at a fraction (~1/4) of the f16-accumulate rate
-//      on GeForce sm_120 — if a driver/HW change ever lifts this, the
-//      *_f32acc peaks (and the gemm.cublas_fp16_acc tradeoff) must be
-//      re-evaluated.
-//   2. The FP4 block-scale path lands far closer to half the 3354-TOPS
-//      datasheet number than to the full one.
-// Thresholds are deliberately loose (clock/host variance); this is a
-// calibration tripwire, not a perf gate.
+// Saturated TC peak calibration (#595/#596): pins that f32-accumulate runs at ~1/4 the
+// f16-accumulate rate on sm_120, and the FP4 block-scale path lands nearer half the
+// 3354-TOPS datasheet number than the full one. Loose thresholds: tripwire, not a perf gate.
 TEST(MmaPeakSaturatedTest, CalibrationInvariants) {
     cudaStream_t stream;
     ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);

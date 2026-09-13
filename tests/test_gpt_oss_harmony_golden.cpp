@@ -1,30 +1,14 @@
-// test(P2.7): gpt-oss Harmony chat-template golden parity vs HF.
-//
-// gpt-oss-20b ships a Harmony chat_template.jinja. imp renders it through its
-// own jinja engine (src/model/jinja.cpp) in production (init() sets
-// use_jinja_ for any parseable template). Until now only a token-level
-// template SMOKE existed (test_chat_template.cpp) — no string-level parity
-// against the REAL HF tokenizer output.
-//
-// This test renders the COMMITTED chat_template.jinja (embedded verbatim in
-// tests/refs/harmony_template_jinja.h, copied from
-// tests/fixtures/gpt_oss_chat_template.jinja) through imp's jinja engine,
-// building the context exactly as ChatTemplate::apply_jinja does, and
-// compares the rendered string against goldens produced by the HF reference
-// (transformers AutoTokenizer.apply_chat_template; see
-// tests/refs/gen_harmony_golden.py + tests/refs/harmony_golden.h).
-//
-// Channel markers (<|start|>, <|channel|>, <|message|>, <|end|>), the system
-// preamble, the developer-role mapping for user system messages, and the
-// assistant-history `final` channel are all asserted by EXACT string compare.
-//
-// DOCUMENTED, INTENTIONAL normalization: the Harmony template injects
-// `Current date: <today>` via strftime_now (line 202). That is inherently
-// non-deterministic, so BOTH the golden and the imp render have that one line
-// normalized to a placeholder before comparison. Everything else — every
-// channel marker and structural byte — is compared exactly. If imp's render
-// diverges anywhere else, the test fails loudly (and any such divergence is a
-// real jinja-engine / parity bug to report, not to fudge).
+// gpt-oss Harmony chat-template golden parity vs HF (P2.7): only a token-level smoke existed
+// before this (test_chat_template.cpp), no string-level parity against real HF tokenizer
+// output.
+// Renders the COMMITTED chat_template.jinja (tests/refs/harmony_template_jinja.h) through
+// imp's jinja engine, building context exactly as ChatTemplate::apply_jinja does, compared
+// against HF-generated goldens (tests/refs/gen_harmony_golden.py). Channel markers, system
+// preamble, developer-role mapping, and the assistant-history final channel are EXACT string
+// compares.
+// The template's strftime_now "Current date" line is inherently nondeterministic, so both
+// golden and render normalize that one line to a placeholder; everything else compares
+// exactly, and any other divergence is a real jinja/parity bug.
 
 #include "model/jinja.h"
 #include "refs/harmony_golden.h"
@@ -44,10 +28,9 @@ std::string normalize_date(const std::string& s) {
                               "Current date: <DATE>");
 }
 
-// Build the jinja context exactly as ChatTemplate::apply_jinja does for a
-// messages-only conversation (add_generation_prompt=true, enable_thinking
-// left undefined). bos/eos are empty: the Harmony template does not consume
-// them, and the HF golden has no BOS prefix.
+// Builds the jinja context exactly as ChatTemplate::apply_jinja does (messages-only,
+// add_generation_prompt=true, enable_thinking undefined). bos/eos empty: Harmony doesn't
+// consume them and the HF golden has no BOS prefix.
 jinja::Value::Array make_messages(const std::vector<std::pair<std::string, std::string>>& msgs) {
     jinja::Value::Array arr;
     for (const auto& m : msgs)

@@ -135,12 +135,9 @@ TEST(SSMConv1dTest, DecodeShiftAndConvolve) {
 }
 
 
-// ===========================================================================
-// Decode kernel, vectorised path (kernel_size == 4): float4 state, uint2
-// weights, explicit fmaf chain. Bit-exact against a CPU reference that runs
-// the same fmaf order on the same half-rounded operands, at a real channel
-// count and with a real (non-uniform) state.
-// ===========================================================================
+// Decode kernel, vectorised path (kernel_size==4): float4 state, uint2 weights, explicit
+// fmaf chain. Bit-exact against a CPU reference running the same fmaf order on the same
+// half-rounded operands, at a real channel count and non-uniform state.
 TEST(SSMConv1dTest, DecodeVectorisedBitExact) {
     SKIP_IF_NO_CUDA();
     constexpr int channels = 6144;
@@ -357,12 +354,9 @@ TEST(SSMConv1dTest, FP32SiLUFused) {
     free_tensor(d_w);
 }
 
-// ===========================================================================
-// Test: Chunked prefill equivalence — splitting a sequence across two
-// ssm_conv1d_prefill calls (with conv_state threaded between them) must
-// produce identical output to a single full-sequence call. Catches the
-// zero-pad-instead-of-conv_state-read bug at chunk boundary.
-// ===========================================================================
+// Splitting a sequence across two ssm_conv1d_prefill calls (conv_state threaded between
+// them) must match a single full-sequence call. Catches the zero-pad-instead-of-conv_state
+// -read bug at the chunk boundary.
 TEST(SSMConv1dTest, ChunkedPrefillEquivalence) {
     SKIP_IF_NO_CUDA();
 
@@ -452,12 +446,9 @@ TEST(SSMConv1dTest, ChunkedPrefillEquivalence) {
     free_tensor(d_out_b);
 }
 
-// ===========================================================================
-// Test: Chunk shorter than kernel_size — the conv_state tail must shift the
-// missing leading values in from the previous chunk's state instead of
-// zero-padding. This is the hybrid verify partial-accept replay shape
-// (matched+1 tokens, often < conv_kernel).
-// ===========================================================================
+// Chunk shorter than kernel_size: the conv_state tail must shift the missing leading values
+// in from the previous chunk's state, not zero-pad. This is the hybrid verify partial-accept
+// replay shape (matched+1 tokens, often < conv_kernel).
 TEST(SSMConv1dTest, ChunkedPrefillShortChunkEquivalence) {
     SKIP_IF_NO_CUDA();
 
@@ -526,12 +517,9 @@ TEST(SSMConv1dTest, ChunkedPrefillShortChunkEquivalence) {
     free_tensor(d_out_b);
 }
 
-// ===========================================================================
-// Test: Padded verify chunk (#847) — with d_real_n set, the conv_state tail
-// must come from the real last rows; pad rows only produce (discarded)
-// outputs. Both prefill variants share the tail logic; the fused f32+SiLU
-// variant is covered by FP32SiLUFused for the output math.
-// ===========================================================================
+// #847: with d_real_n set, the conv_state tail must come from the real last rows; pad rows
+// only produce discarded outputs. Both prefill variants share the tail logic; the fused
+// f32+SiLU variant's output math is covered by FP32SiLUFused.
 TEST(SSMConv1dTest, PrefillPaddedChunkDeviceLength) {
     SKIP_IF_NO_CUDA();
 
@@ -597,11 +585,8 @@ TEST(SSMConv1dTest, PrefillPaddedChunkDeviceLength) {
     free_tensor(d_out_pad);
 }
 
-// ===========================================================================
-// Test: Padded verify chunk (#847), Mamba2 scan — with d_real_n set, y is
-// produced for every row but h_state must stop advancing after the real
-// last row (bit-equal to a plain run over the real rows).
-// ===========================================================================
+// #847, Mamba2 scan: with d_real_n set, y is produced for every row but h_state must stop
+// advancing after the real last row, bit-equal to a plain run over the real rows.
 TEST(SSMScanTest, PrefillPaddedChunkDeviceLength) {
     SKIP_IF_NO_CUDA();
 
@@ -688,16 +673,10 @@ TEST(SSMScanTest, PrefillPaddedChunkDeviceLength) {
     cudaFree(d_dtb);
 }
 
-// ===========================================================================
-// Speculative-verify snapshots (#847 contract, Mamba2 side).
-//
-// A fully rejected draft chunk commits the state as of the chunk's FIRST row.
-// engine_spec_ngram.cpp adopts spec_snap_slab wholesale for that case, so both
-// halves of the slab — conv window and h_state — have to be written by the
-// chunk forward. The GDN path has done this since #847; these two lock the
-// Mamba2 path to the same contract. Both poison the snapshot buffer first, so
-// "never written" fails instead of passing on a zeroed buffer.
-// ===========================================================================
+// #847 contract, Mamba2 side: a fully rejected draft chunk commits state as of the chunk's
+// FIRST row; engine_spec_ngram.cpp adopts spec_snap_slab wholesale, so BOTH conv window and
+// h_state must be written by the chunk forward (GDN has done this since #847). Snapshot
+// buffer is poisoned first so "never written" fails instead of passing on zeros.
 
 TEST(SSMScanTest, PrefillSnapshotIsStateAtSnapRow) {
     SKIP_IF_NO_CUDA();
@@ -890,11 +869,10 @@ TEST(SSMConv1dTest, PrefillSnapshotIsConvStateAtSnapRow) {
     free_tensor(d_b);
 }
 
-// The prefill kernel commits the new conv window from the block of the last
-// row while the blocks of rows 0..K-2 read the PREVIOUS window from the same
-// buffer; nothing orders the two blocks. Rows 0..K-2 are checked bit-for-bit
-// against the CPU form over many launches (the window is the model's
-// geometry: Qwen3.8 GDN, 10240 channels, K=4, a 160-token prompt).
+// Prefill kernel commits the new conv window from the last row's block while rows 0..K-2
+// read the PREVIOUS window from the same buffer, unordered between the two. Checked bit-for
+// -bit against CPU over many launches at real geometry (Qwen3.8 GDN, 10240 channels, K=4,
+// 160-token prompt).
 TEST(SSMConv1dTest, PrefillFirstRowsReadThePreviousWindowNotTheCommit) {
     const int channels = 10240, K = 4, n_tokens = 160, launches = 300;
     std::mt19937 rng(7);
@@ -956,11 +934,9 @@ TEST(SSMConv1dTest, PrefillFirstRowsReadThePreviousWindowNotTheCommit) {
 }
 
 
-// The factored conv window (compute/ssm_conv_tap.cu). The verify's spare slot
-// carried the window after BOTH rows; the drafted row only shifts that window
-// by one, so what has to survive is the single new tap. The reference here is
-// the window definition itself, not the commit kernel, so a change to either
-// side has to agree with the contract rather than with the other side.
+// Factored conv window (ssm_conv_tap.cu): the verify spare slot carried the window after
+// BOTH rows, but the drafted row only shifts it by one tap. Reference is the window
+// definition itself, not the commit kernel, so either side must agree with the contract.
 TEST(SsmConvTapTest, StashedTapAdvancesTheWindowLikeTheTwoRowCommit) {
     constexpr int channels = 320, kernel_size = 4, n_seq = 3, n_tokens = 2, n_slots = 5;
     const std::vector<int> slots{3, 0, 4};

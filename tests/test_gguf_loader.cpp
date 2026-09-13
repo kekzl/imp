@@ -152,11 +152,9 @@ TEST(GgufLoaderTest, LargeMetadataCount) {
 }
 
 
-// ---------------------------------------------------------------------------
-// #818: encoder-only architectures must be rejected at load, not fall through
-// to the generic-decoder path (which "loads", reports healthy, and IMAs on the
-// first /v1/embeddings request, poisoning the CUDA context).
-// ---------------------------------------------------------------------------
+// #818: encoder-only architectures must be rejected at load, not fall through to the
+// generic-decoder path (which "loads", reports healthy, and IMAs on the first
+// /v1/embeddings request, poisoning the CUDA context).
 
 TEST(GgufLoaderTest, EncoderOnlyArchDetection) {
     // llama.cpp GGUF arch ids for the BERT-family encoders.
@@ -194,11 +192,9 @@ TEST(GgufLoaderTest, EncoderOnlyArchDetection) {
 }
 
 TEST(GgufLoaderTest, EncoderArchGgufRejectedAtLoad) {
-    // Minimal valid GGUF v3 with general.architecture = "bert" and no
-    // tensors. Encoder archs WITHOUT a dedicated path (classic BERT/bge/e5:
-    // learned positions, CLS pooling) must still throw a clear error instead
-    // of mapping to the generic decoder. nomic-bert is admitted since #836
-    // (dedicated encoder forward — e2e covered by EncoderEmbedTest).
+    // Encoder archs WITHOUT a dedicated path (classic BERT/bge/e5: learned positions, CLS
+    // pooling) must throw a clear error instead of mapping to the generic decoder. nomic-bert is
+    // admitted since #836 (dedicated encoder forward, e2e covered by EncoderEmbedTest).
     auto append_str = [](std::vector<uint8_t>& buf, const std::string& s) {
         uint64_t len = s.size();
         const uint8_t* lp = reinterpret_cast<const uint8_t*>(&len);

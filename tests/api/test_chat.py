@@ -149,11 +149,9 @@ class TestPredictedOutputs:
         assert r_plain.status_code == 200 and r_pred.status_code == 200
         plain = r_plain.json()
         pred = r_pred.json()
-        # The prediction must not change WHAT is generated — but strict byte
-        # equality is too strong: the verify forward (chunked-prefill path)
-        # has different fp16 numerics than the decode loop, so a near-tie
-        # argmax can legitimately flip when a draft covers it. Require high
-        # similarity to catch real corruption (garbage/repetition) instead.
+        # Byte equality is too strict: the verify forward (chunked-prefill) has different fp16
+        # numerics than decode, so a near-tie argmax may legitimately flip when a draft covers it.
+        # Require high similarity to catch real corruption instead.
         import difflib
         cp = plain["choices"][0]["message"]["content"]
         cq = pred["choices"][0]["message"]["content"]
@@ -205,11 +203,8 @@ class TestSpeculativeDecoding:
     word n-gram at all. The counter removes the guesswork.
     """
 
-    # Only prompts whose repetition the guard below can actually see. A
-    # "count from 1 to 60" prompt drafts well (its token pattern repeats) but
-    # has no repeated word 8-gram at all, so the guard would reject a fixture
-    # that works. A guard with false negatives is worse than none, so that
-    # prompt is deliberately not here.
+    # Only prompts whose repetition the word-8-gram guard can see; "count 1 to 60" drafts well
+    # but has no repeated 8-gram, so is deliberately excluded (false negatives worse than none).
     REPETITIVE = [
         "Repeat this line exactly twenty times:\nthe quick brown fox jumps over the lazy dog",
         "Output the word STATUS: OK exactly fifteen times, one per line.",
@@ -229,10 +224,8 @@ class TestSpeculativeDecoding:
     @pytest.mark.parametrize("prompt", REPETITIVE)
     def test_speculative_on_matches_off(self, client, model, is_mock, prompt):
         if is_mock:
-            # Not silencing a failure: mock_server.py has no tokenizer and no
-            # drafter, so there is nothing here for it to be right or wrong
-            # about. Skipping with a reason keeps that visible instead of
-            # letting the test pass vacuously, which is the #1302 pattern.
+            # mock_server has no tokenizer or drafter: speculative decoding cannot be exercised against it.
+            # Skip with a reason instead of passing vacuously (#1302 pattern).
             pytest.skip("speculative decoding cannot be exercised against the mock (#1302)")
         body = {
             "model": model,

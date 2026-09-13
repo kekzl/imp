@@ -1,13 +1,9 @@
-// Tests for the FP8 E4M3 FMHA kernel (QK^T in FP8, PV in FP16).
-// Verifies correctness against a CPU reference for various configs.
-//
-// NOTE (#511): these parity cases use small synthetic values (±0.12) where
-// e4m3 quantization error is invisible. On real model activations the raw
-// (unscaled) Q/K→e4m3 conversion compounds per-layer score error into
-// garbage (teacher-forced PPL gemma-3-12b 16.6→549, Qwen3-8B 40.5→4506) —
-// which is why the kernel is opt-in (attention.fp8_fmha = "on") and NOT in
-// the default dispatch chain. These tests pin indexing/masking only, not
-// production quality.
+// FP8 E4M3 FMHA (QK^T in FP8, PV in FP16) vs a CPU reference. #511: these parity cases use
+// small synthetic values (+-0.12) where e4m3 quant error is invisible; on real activations
+// the unscaled Q/K->e4m3 conversion compounds into garbage (teacher-forced PPL gemma-3-12b
+// 16.6->549, Qwen3-8B 40.5->4506), which is why the kernel is opt-in
+// (attention.fp8_fmha="on") and not in the default dispatch. These tests pin
+// indexing/masking only, not production quality.
 
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
@@ -84,11 +80,10 @@ protected:
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
-        // NOTE: the int cast before the -6 is load-bearing. `(i*7+3)%13 - 6`
-        // with size_t i underflows unsigned whenever %13 < 6, producing
-        // ±3.7e17 (→ ±inf as half) at ~46% of positions. The e4m3 satfinite
-        // convert masked that in the fp8 kernel, and the NaN-poisoned CPU
-        // reference made std::max() drop every comparison → vacuous pass.
+        // int cast before -6 is load-bearing: (i*7+3)%13-6 with size_t i underflows unsigned at ~46%
+        // of positions (+-3.7e17 -> +-inf as half); the e4m3 satfinite convert masked that in the fp8
+        // kernel while the NaN-poisoned CPU reference's std::max() dropped every comparison, passing
+        // vacuously.
         for (size_t i = 0; i < q_elems; i++)
             Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
@@ -191,11 +186,9 @@ TEST_F(FmhaFP8Test, HD64) { run_test(1, 32, 32, 4, 4, 64, true); }
 
 TEST_F(FmhaFP8Test, HD256) { run_test(1, 32, 32, 4, 4, 256, true); }
 
-// --- #566 residue: fp8 kernel at hd=256, production-like long sizes ---
-// gemma-3-12b (hd=256) prefill routes through THIS kernel once n crosses the
-// FMHA threshold (head_dim % 32 gate — not the FP16 WMMA as assumed). The
-// pre-#569 catastrophic window readings and the no-window PPL 10.5 came
-// through here; pin the kernel against the fp64-style oracle at those shapes.
+// #566 residue: gemma-3-12b (hd=256) prefill routes through THIS kernel once n crosses the
+// FMHA threshold (a head_dim%32 gate, not the assumed FP16 WMMA); the pre-#569 catastrophic
+// window readings and no-window PPL 10.5 came through here.
 TEST_F(FmhaFP8Test, HD256_LongSeq) { run_test(1, 1536, 1536, 16, 8, 256, true); }
 TEST_F(FmhaFP8Test, HD256_LongSeq_SlidingWindow1024) {
     run_test(1, 1536, 1536, 16, 8, 256, true, /*sw=*/1024);
@@ -204,18 +197,14 @@ TEST_F(FmhaFP8Test, HD128_LongSeq_SlidingWindow1024) {
     run_test(1, 1536, 1536, 16, 8, 128, true, /*sw=*/1024);
 }
 
-// Mimic Qwen3.5-4B attention prefill shape: 16 Q heads, 4 KV heads (GQA 4:1),
-// head_dim=256, 128-token sequence. Multi-tile on both axes with non-zero V
-// throughout — catches the S_tile smem overlap bug that the HD256 test
-// (Sq=Skv=32, zero-padded V) masked by having the reference also near zero.
+// Mimics Qwen3.5-4B prefill shape (16Q/4KV heads, hd=256, 128 tokens): multi-tile on both
+// axes with non-zero V throughout catches the S_tile smem overlap bug that the HD256 test
+// (zero-padded V) masked by keeping its reference near zero too.
 TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 16, 4, 256, true); }
 
-// ---------------------------------------------------------------------------
-// FA2 register-resident kernel: same oracle, but exercises fmha_sm120_fa2_prefill.
-// Unlike the fp8 fixture (which SKIPs on unsupported configs), this fixture
-// ASSERTs the fa2 path actually ran — a perf rewrite must not silently fall
-// through. Target config: head_dim=128.
-// ---------------------------------------------------------------------------
+// FA2 register-resident kernel (fmha_sm120_fa2_prefill): unlike the fp8 fixture (which SKIPs
+// on unsupported configs), this fixture ASSERTs the FA2 path actually ran - a perf rewrite
+// must not silently fall through. Target: head_dim=128.
 class FmhaFA2Test : public FmhaFP8Test {
 protected:
     void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
@@ -297,10 +286,8 @@ protected:
         cudaFree(d_o);
         EXPECT_EQ(ref_nan_count, 0) << "CPU reference is NaN/inf — test data is broken";
         EXPECT_EQ(nan_count, 0) << "NaN values in FA2 FMHA output";
-        // fp16 QK has no e4m3 score quantization — hold it to a 1% bound
-        // (inputs are half-rounded vs the float reference; ~2^-11 per element
-        // over a 128-dot + f16 P/V rounding in PV). fp8 QK keeps the
-        // historical 5%.
+        // fp16 QK has no e4m3 score quantization: held to 1% (half-rounded inputs vs float
+        // reference, ~2^-11/elem over a 128-dot + f16 P/V rounding). fp8 QK keeps the historical 5%.
         const float tol = (tol_override > 0.0f) ? tol_override : (fp16_qk ? 0.01f : 0.05f);
         EXPECT_LT(max_err, tol) << "Max relative error too high: " << max_err;
     }
@@ -308,23 +295,21 @@ protected:
 
 TEST_F(FmhaFA2Test, CausalHD128) { run_fa2(1, 64, 64, 4, 4, 128, true); }
 
-// Engine-realistic SHORT prefill shapes. Since the executor prefers FA2 for
-// hd=128 at every length (executor_attention.cu fa2_capable), short chat
-// prompts hit this kernel too — production corruption (prompt-blind models,
-// degenerate output) appeared exactly there. Qwen3-8B GQA is 32 Q / 8 KV.
+// Engine-realistic SHORT prefill shapes: the executor prefers FA2 for hd=128 at every length
+// (executor_attention.cu fa2_capable), so short chat prompts hit this kernel too -
+// production corruption (prompt-blind models, degenerate output) appeared exactly there.
+// Qwen3-8B GQA is 32Q/8KV.
 TEST_F(FmhaFA2Test, CausalShortSeq24_GQA32_8) { run_fa2(1, 24, 24, 32, 8, 128, true); }
 TEST_F(FmhaFA2Test, CausalSeq32_GQA32_8) { run_fa2(1, 32, 32, 32, 8, 128, true); }
 TEST_F(FmhaFA2Test, CausalShortSeq24) { run_fa2(1, 24, 24, 4, 4, 128, true); }
 TEST_F(FmhaFA2Test, CausalOddSeq136_GQA32_8) { run_fa2(1, 136, 136, 32, 8, 128, true); }
 TEST_F(FmhaFA2Test, CausalOddSeq51) { run_fa2(1, 51, 51, 4, 4, 128, true); }
 
-// Realistic Q/K magnitudes. QK-normed models (Qwen3 family) produce Q/K values
-// far beyond the ±0.12 of the synthetic fill above; the FA2 kernel converts
-// Q and K to FP8 e4m3 WITHOUT a scale factor, so large inputs lose precision
-// or saturate (e4m3 max ±448) — production symptom: prompt-blind models on
-// every hd=128 architecture while the FP16 cuBLAS path stays correct.
-// amplitude=80 → |Q|,|K| up to ~9.6, QK dots up to ~118 pre-scale (still
-// within e4m3 range per element, but only ~2 mantissa bits at that scale).
+// QK-normed models (Qwen3 family) produce Q/K far beyond the +-0.12 synthetic fill; FA2
+// converts Q/K to FP8 e4m3 WITHOUT a scale factor, so large inputs lose precision or
+// saturate (e4m3 max +-448) - production symptom: prompt-blind models on every hd=128 arch
+// while FP16 cuBLAS stays correct. amplitude=80 gives |Q|,|K|~9.6, QK dots up to ~118
+// pre-scale (in e4m3 range but only ~2 mantissa bits at that scale).
 TEST_F(FmhaFA2Test, RealisticMagnitude_Seq24) {
     run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
 }
@@ -338,13 +323,10 @@ TEST_F(FmhaFA2Test, LongCtx_HD128) { run_fa2(1, 256, 256, 8, 2, 128, true); }
 TEST_F(FmhaFA2Test, SlidingWindow_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true, 64); }
 TEST_F(FmhaFA2Test, Softcap_HD128) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f); }
 
-// ---------------------------------------------------------------------------
-// FP16-QK variant (mma.m16n8k16.f16): the short-prefill replacement for the
-// materialized cuBLAS path. No e4m3 quantization anywhere in QK → verified
-// at 1% tolerance (5x tighter than the fp8 tests). The realistic-magnitude
-// cases are the exact regime where the fp8 QK loses mantissa bits (#511) —
-// fp16 must hold the tight bound there too.
-// ---------------------------------------------------------------------------
+// FP16-QK variant (mma.m16n8k16.f16): the short-prefill replacement for materialized cuBLAS.
+// No e4m3 quantization in QK, so verified at 1% (5x tighter than fp8); the
+// realistic-magnitude cases are exactly where fp8 QK loses mantissa bits (#511) - fp16 must
+// hold the tight bound there too.
 TEST_F(FmhaFA2Test, FP16QK_CausalShortSeq24_GQA32_8) {
     run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
 }
@@ -366,15 +348,11 @@ TEST_F(FmhaFA2Test, FP16QK_LongCtx) { run_fa2(1, 256, 256, 8, 2, 128, true, 0, 0
 TEST_F(FmhaFA2Test, FP16QK_SlidingWindow) { run_fa2(1, 128, 128, 4, 4, 128, true, 64, 0.0f, 1.0f, true); }
 TEST_F(FmhaFA2Test, FP16QK_Softcap) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f, 1.0f, true); }
 
-// --- Chunk continuation (q_offset > 0) — issue #548 ---
-// PR #553 measured wrong attention on Llama-3.2-3B chunk continuations
-// (teacher-forced NLL 0.29 → 7.13 at chunk=64) while Qwen3-4B was bit-exact
-// through the same kernel, and declined the fast path as a mitigation. These
-// cases reproduce the failing production shapes at the kernel level:
-// Llama-3.2-3B is GQA 24Q/8KV (ratio 3) vs Qwen3's 32/8 (ratio 4), prompts
-// end on arbitrary (non-tile-multiple) KV lengths, and offsets are not
-// Bq/Bkv multiples. seq_kv = q_offset + Sq exactly as the chunked gather
-// produces it.
+// Chunk continuation (q_offset>0), #548: PR #553 measured wrong attention on Llama-3.2-3B
+// chunk continuations (teacher-forced NLL 0.29->7.13 at chunk=64) while Qwen3-4B was
+// bit-exact through the same kernel; the fast path was declined as a mitigation. Reproduces
+// the failing shapes at kernel level: Llama's GQA ratio 3 (24Q/8KV) vs Qwen3's 4 (32/8),
+// non-tile-multiple KV lengths, offsets not Bq/Bkv multiples.
 TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA4) {
     run_fa2(1, 64, 512, 32, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/448);
 }
@@ -397,12 +375,9 @@ TEST_F(FmhaFA2Test, FP8_Chunked_GQA3) {
     run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, false, /*q_offset=*/448);
 }
 
-// --- Bq=64/Bkv=32 occupancy band (#597) ---
-// blocks_128 = ceil(Sq/128) × NH must land in [sm_count/2, sm_count) to select
-// the 2-CTA/SM Bkv=32 kernel — these shapes give 96 on the 170-SM RTX 5090
-// (GPU tests are local-only on that chip). Covers the halved KV tile against
-// the same CPU oracle: multi-tile causal, partial last KV tile at Bkv=32
-// granularity, chunk continuation, and sliding-window tile bounds.
+// Bq=64/Bkv=32 occupancy band (#597): blocks_128 = ceil(Sq/128)*NH must land in
+// [sm_count/2, sm_count) to select the 2-CTA/SM Bkv=32 kernel - 96 on the 170-SM RTX 5090.
+// Covers multi-tile causal, partial last KV tile, chunk continuation, sliding-window bounds.
 TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_CausalMultiTile) {
     run_fa2(1, 384, 384, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
 }
@@ -416,12 +391,9 @@ TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_SlidingWindow) {
     run_fa2(1, 384, 384, 32, 8, 128, true, /*sw=*/64, 0.0f, 1.0f, true);
 }
 
-// --- PV f16-accumulate (attention.fa2_pv_f16acc, #667 follow-up) ---
-// Same oracle; the dispatch reads the process-diag knobs, so the fixture
-// toggles them around each case (and restores the pristine defaults).
-// Tolerance is widened to 2%: O accumulates in f16 across KV tiles (the
-// rescale-and-add rounding is exactly what this knob trades for full-rate
-// HMMA); the production gate is teacher-forced PPL, this pins math/layout.
+// PV f16-accumulate (attention.fa2_pv_f16acc, #667 follow-up): tolerance widened to 2% since
+// O accumulates in f16 across KV tiles (the rescale-and-add rounding this knob trades for
+// full-rate HMMA); production gate is teacher-forced PPL, this pins math/layout only.
 class FmhaFA2PvF16Test : public FmhaFA2Test {
 protected:
     void run_pv(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
@@ -456,11 +428,10 @@ TEST_F(FmhaFA2Dense2CtaTest, Chunked) {
     run_pv(1, 1024, 2048, 24, 4, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/1024);
 }
 TEST_F(FmhaFA2Dense2CtaTest, RealisticMagnitude) { run_pv(1, 1024, 1024, 24, 4, 128, true, 0, 0.0f, 80.0f); }
-// attention.fa2_heavy_first: the causal CTA order is a scheduling choice and
-// nothing else - every q-tile's rows are computed by exactly one CTA either
-// way - so the two orders must produce byte-identical output. 2048 rows x 24
-// heads is the Bq=128 (2-CTA) band, q-tiles of 2..32 KV tiles; the chunked
-// case covers q_offset. A reversal off by one leaves a tile's rows unwritten.
+// attention.fa2_heavy_first: the causal CTA order is only a scheduling choice, every
+// q-tile's rows are computed by exactly one CTA either way, so both orders must produce
+// byte-identical output. 2048 rows x 24 heads (Bq=128, 2-CTA band); a reversal off-by-one
+// leaves a tile's rows unwritten.
 class FmhaFA2HeavyFirstTest : public FmhaFA2Test {
 protected:
     void run_identity(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int q_offset = 0) {
@@ -562,11 +533,9 @@ TEST_F(FmhaFA2Fp8ScaledTest, RealisticMagnitude_GQA) {
 }
 TEST_F(FmhaFA2Fp8ScaledTest, Chunked) { run_scaled(1, 64, 512, 24, 8, 128, true, 80.0f, 448); }
 
-// --- Stage-1 HD=256 FA2 port (attention.fa2_hd256) ---
-// The register-resident FA2 kernel instanced at HD=256 (fp16-qk only,
-// Bq=64/Bkv=64/TWOSLOT). Shapes mirror the Qwen3.6 hybrid geometry
-// (head_dim=256, kv_heads=2, GQA 4:1) plus the usual edge cases. The pv-f16
-// variant is the production candidate; the f32/f16-acc variants are pinned
+// Stage-1 HD=256 FA2 port (attention.fa2_hd256): register-resident kernel at HD=256
+// (fp16-qk only, Bq=64/Bkv=64/TWOSLOT), shapes mirroring Qwen3.6 hybrid geometry (hd=256,
+// kv_heads=2, GQA 4:1). pv-f16 is the production candidate; f32/f16-acc variants are pinned
 // for correctness even where they spill registers.
 class FmhaFA2Hd256Test : public FmhaFA2Test {
 protected:
@@ -678,10 +647,9 @@ TEST_F(FmhaFA2Hd256Test, Fp8QkStillDeclines) {
     cudaFree(d);
 }
 
-// Micro-benchmark: FA2 HD=256 (pv-f16) vs the SMEM-tiled WMMA FMHA on the
-// Qwen3.6-35B prefill shape (8 Q heads / 2 KV heads, hd=256, 2048 tokens).
-// Reports per-kernel ms + cross-path max relative error. Not a perf gate —
-// the stage-1 decision data (see PR body).
+// Micro-benchmark: FA2 HD=256 (pv-f16) vs SMEM-tiled WMMA FMHA on the Qwen3.6-35B prefill
+// shape (8Q/2KV heads, hd=256, 2048 tokens). Reports per-kernel ms + cross-path max rel
+// error; stage-1 decision data, not a perf gate.
 static void hd256_bench_vs_wmma(cudaStream_t stream_, int NH, int NKV, const char* tag, bool pv_f16 = true) {
     for (int sweep_sq : {512, 1024, 2048, 4096}) {
     const int B = 1, Sq = sweep_sq, Skv = sweep_sq, HD = 256;

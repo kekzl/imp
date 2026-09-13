@@ -1,41 +1,12 @@
-// Paged decode attention quant variants vs fp64 reference — TEST_AUDIT (retired)
-// risk #6 (the decode twin of risk #1 / the cross-path test).
-//
-// The decode hot path has SIX paged-attention implementations, one per KV
-// dtype (kv_cache.dtype in src/runtime/config.h): F16, FP8-E4M3, INT8, INT4,
-// NVFP4 (scalar), NVFP4-TC (tensor-core Q.K). Each serves EVERY decoded token
-// when its KV mode is active, yet the only prior numeric oracle was
-// test_paged_attention.cu, whose quant tests (INT4) build their CPU reference
-// FROM THE DEQUANTIZED values — i.e. imp-vs-imp on the quant grid (class B
-// tautology: it cannot see a quant kernel that is wrong, only one that is
-// inconsistent with its own dequant). And those used benign sin/cos fills.
-//
-// This test fixes both:
-//   * Ground truth is an fp64 single-query attention computed FROM THE ORIGINAL
-//     f16 K/V (the bits the F16 kernel sees), NOT from the quantized grid.
-//   * For the quant paths the K/V are host-quantized into each kernel's EXACT
-//     cache layout, then run; their deviation from the original-f16 fp64
-//     reference IS the quantization error, which we CHARACTERIZE (measured
-//     envelope + printed stats), never bless at an unmeetable tolerance. Only
-//     the F16 path is held strict (no score/value quantization at all).
-//   * Data is the realistic heavy-tailed LCG regime (tests/refs/README.md §3,
-//     amp=2 K/Q "mild" class, amp=1 V), the same recipe as the cross-path
-//     golden — multiply-only f32 transforms so it is reproducible and free of
-//     the periodic-%13 / size_t-underflow vacuity (#525).
-//   * kv_len sweep {16, 64, 333, 1024}: 333 is deliberately NOT block-aligned
-//     (block_size=16) to exercise the partial-tail block; 16/64 are the short
-//     rows where quant score noise has no averaging to hide behind (#512),
-//     1024 is the long-context dilution case.
-//   * Hard no-NaN/Inf guard on EVERY path (the actual decode-corruption assert;
-//     the existing NVFP4-TC test documents that synthetic random-byte NVFP4
-//     input drives the scalar kernel to all-NaN — so a CORRECT host quantize
-//     is mandatory, and we assert it stays finite).
-//
-// Tolerances (tests/refs/README.md §2): F16 ≤ 1e-2 rel vs fp64 (f16-rounded
-// inputs over a hd-term dot + f16 P/V). Quant paths: characterized envelopes,
-// measured on first run and frozen below with ~50% margin (dated). NVFP4's
-// 1e-1 single-op class is a floor expectation, not the envelope — paged KV
-// quant on short uncorrelated rows is looser, exactly the risk-#6 finding.
+// Decode paged-attention oracle (TEST_AUDIT(retired) risk #6): fp64 ground truth is computed
+// from the ORIGINAL f16 K/V, never from the quantized grid (the prior INT4 test built its ref
+// FROM the dequantized values, an imp-vs-imp tautology blind to a wrong-but-self-consistent
+// quant kernel).
+// Six KV dtypes (F16/FP8/INT8/INT4/NVFP4/NVFP4-TC) are host-quantized into each kernel's
+// exact layout; deviation from the f16-fp64 ref is CHARACTERIZED, never blessed at an
+// unmeetable tolerance - only F16 (no quant) is held strict.
+// kv_len {16,64,333,1024}: 333 is not block-aligned (block_size=16, partial-tail block);
+// 16/64 have no averaging to hide quant score noise (#512); hard no-NaN/Inf guard everywhere.
 
 #include <gtest/gtest.h>
 #include "compute/attention_paged.h"
@@ -57,15 +28,8 @@ namespace {
 
 static constexpr int BLOCK_SIZE = 16;  // kKVBlockSize
 
-// ---------------------------------------------------------------------------
-// LCG fill — bit-exact mirror of tests/refs/gen_attention_crosspath_golden.py
-// ::lcg_fill (f32 multiply-only, no libm). Heavy-tailed cubed-uniform, amp
-// scales the envelope, 1/256 outliers at 2x. Produces identical f16 bits in
-// any language; here it only needs to be self-consistent (the fp64 ref is
-// computed from the same f16 values), so no committed golden is required —
-// the independence comes from the fp64-vs-quant-grid separation, not from a
-// numpy cross-check.
-// ---------------------------------------------------------------------------
+// LCG fill bit-exact mirror of tests/refs/gen_attention_crosspath_golden.py::lcg_fill (f32
+// multiply-only, no libm): heavy-tailed cubed-uniform, amp scales envelope, 1/256 outliers at 2x.
 void lcg_fill(std::vector<half>& out, uint32_t seed, float amp) {
     uint32_t x = seed;
     for (auto& h : out) {
@@ -79,11 +43,8 @@ void lcg_fill(std::vector<half>& out, uint32_t seed, float amp) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// fp64 single-query attention reference, computed from the ORIGINAL f16 K/V.
-// Q: [n_heads, head_dim]; K/V flat per kv_head: [kv_len, n_kv_heads, head_dim].
-// O: [n_heads, head_dim]. GQA mapping kvh = h / (n_heads/n_kv_heads).
-// ---------------------------------------------------------------------------
+// fp64 single-query attention reference from ORIGINAL f16 K/V. Q:[n_heads,head_dim];
+// K/V:[kv_len,n_kv_heads,head_dim] per kv_head; GQA mapping kvh = h/(n_heads/n_kv_heads).
 void ref_decode_f64(const std::vector<half>& Qh, const std::vector<half>& Kh, const std::vector<half>& Vh,
                     std::vector<double>& O, int kv_len, int n_heads, int n_kv_heads, int head_dim,
                     float scale) {
@@ -117,11 +78,8 @@ void ref_decode_f64(const std::vector<half>& Qh, const std::vector<half>& Kh, co
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error statistics vs the fp64 reference. denom floored at 1 (outputs are
-// O(1)-bounded softmax-weighted V averages, so absolute≈relative on the bulk
-// and tiny refs don't explode the metric).
-// ---------------------------------------------------------------------------
+// Error stats vs the fp64 ref; denom floored at 1 since outputs are O(1)-bounded softmax-
+// weighted V averages, so absolute~relative on the bulk and tiny refs don't explode the metric.
 struct ErrStats {
     float max_rel = 0.0f;
     float p999 = 0.0f;
@@ -155,10 +113,8 @@ ErrStats err_stats(const std::vector<float>& got, const std::vector<double>& ref
     return s;
 }
 
-// ---------------------------------------------------------------------------
-// Quantizer helpers — each mirrors its kernel's dequant exactly, so the only
-// error injected is the quantization itself (the thing being characterized).
-// ---------------------------------------------------------------------------
+// Quantizer helpers mirror each kernel's dequant exactly, so quantization itself is the
+// only injected error (the thing being characterized).
 
 // E2M1 (FP4) magnitude LUT + sign bit, matching cvt.rn.f16x2.e2m1x2.
 constexpr float kE2M1[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
@@ -206,10 +162,8 @@ uint8_t f_to_ue8m0(float s) {
 }
 float ue8m0_to_f(uint8_t b) { return std::ldexp(1.0f, (int)b - 127); }
 
-// ---------------------------------------------------------------------------
-// Build the F16 paged cache: [num_blocks, block_size, n_kv_heads, head_dim].
-// Identity block table. Returns flat half buffer.
-// ---------------------------------------------------------------------------
+// Builds the F16 paged cache [num_blocks, block_size, n_kv_heads, head_dim] with an
+// identity block table.
 std::vector<half> build_f16_cache(const std::vector<half>& kv, int kv_len, int n_kv_heads, int head_dim,
                                   int num_blocks) {
     std::vector<half> cache((size_t)num_blocks * BLOCK_SIZE * n_kv_heads * head_dim, __float2half(0.0f));
@@ -270,13 +224,9 @@ std::vector<float> read_o(void* d_o, size_t elems) {
     return o;
 }
 
-// ===========================================================================
-// Shared decode-path harness. Inputs, fp64 reference, block table, Q/O buffers
-// are built ONCE per (shape, kv_len); each KV-dtype "policy" then quantizes K/V
-// into its own cache layout, launches its kernel, and reports an ErrStats vs
-// the shared reference. This is the parametrization seam (R8): the skeleton
-// (reference + characterize) is shared, only the per-dtype quant+launch differs.
-// ===========================================================================
+// Shared decode-path harness (R8 parametrization seam): inputs/fp64 ref/block table built
+// ONCE per (shape, kv_len); each KV-dtype policy quantizes into its own layout, launches, and
+// reports ErrStats vs the shared reference.
 struct PathCtx {
     cudaStream_t stream;
     int kv_len, n_heads, n_kv_heads, head_dim, num_blocks;
@@ -293,15 +243,10 @@ struct PathCtx {
     Tensor O() const { return f16_tensor(d_o, {1, 1, n_heads, head_dim}); }
 };
 
-// ---------------------------------------------------------------------------
-// KV-dtype policies. Each exposes name(), envelope(), strict(), and run(ctx):
-// run() quantizes K/V into the kernel's exact layout, launches it, returns the
-// max_rel vs the shared fp64 reference (and asserts launch success + finiteness
-// inside, since those are dtype-agnostic guards). TYPED_TEST iterates them.
-// NOTE: launch failures use EXPECT (not ASSERT) because run() returns ErrStats;
-// a failed launch flags the EXPECT and then also blows the envelope check, so
-// it cannot pass silently — it just doesn't abort the case early.
-// ---------------------------------------------------------------------------
+// KV-dtype policies expose name()/envelope()/strict()/run(ctx); run() quantizes into the
+// kernel's layout, launches, returns max_rel vs the shared fp64 ref (asserts launch success
+// and finiteness internally). run() uses EXPECT not ASSERT so a failed launch still flags
+// and falls through to the envelope check instead of aborting the case silently.
 struct PathF16 {
     static const char* name() { return "F16"; }
     static bool strict() { return true; }
@@ -485,13 +430,9 @@ struct PathINT4 {
     }
 };
 
-// Shared NVFP4 host quantize (scalar + TC use the same cache). per-(token,
-// kv_head, group-of-16) UE4M3 micro-scale + E2M1 nibble [head_dim/2]. A CORRECT
-// host quantize is mandatory — random-byte NVFP4 drives the scalar kernel NaN.
-// `ue8m0` switches the group-scale byte from UE4M3 (NVFP4) to UE8M0 (MXFP4-KV).
-// Everything else — group of 16, E2M1 nibble pairs, buffer layout — is shared;
-// per attention_paged.h the two caches are structurally identical and differ
-// only in scale-byte semantics.
+// Shared NVFP4 host quantize (scalar + TC use the same cache): per-(token, kv_head,
+// group-of-16) UE4M3 micro-scale + E2M1 nibble. A CORRECT quantize is mandatory - random-byte
+// NVFP4 NaNs the scalar kernel. `ue8m0` switches the scale byte to UE8M0 for MXFP4-KV.
 static std::vector<uint8_t> nvfp4_quant_kv(const PathCtx& c, const std::vector<half>& kv,
                                            std::vector<uint8_t>& scales, bool ue8m0 = false) {
     const int half_hd = c.head_dim / 2;
@@ -589,13 +530,9 @@ struct PathNVFP4TC {
     }
 };
 
-// MXFP4-KV: reachable from both binaries via --kv-mxfp4 and kv_cache.dtype=mxfp4,
-// dispatched at exec/executor_attention_decode.cu, and until now the only
-// user-selectable KV dtype with no correctness oracle (audit finding F-8).
-//
-// The envelope is looser than NVFP4's on purpose: UE8M0 carries no mantissa, so
-// the group scale is rounded up to a power of two and up to half the E2M1 range
-// can go unused. That is a property of the format, not of the kernel.
+// MXFP4-KV (--kv-mxfp4, kv_cache.dtype=mxfp4, exec/executor_attention_decode.cu) had no
+// correctness oracle before this (audit finding F-8). Looser envelope than NVFP4 is the
+// FORMAT: UE8M0 has no mantissa, so the group scale rounds up to a power of two.
 struct PathMXFP4KV {
     static const char* name() { return "MXFP4-KV"; }
     static bool strict() { return false; }
@@ -627,14 +564,9 @@ struct PathMXFP4KV {
     }
 };
 
-// ===========================================================================
-// TYPED_TEST over KV dtypes (R8 / audit Phase-2 R8: "TYPED_TEST over KV dtypes
-// in the paged oracle"). One typed fixture, one body; each KV dtype is a policy
-// type. The two production decode shapes (GQA 32x8 and MHA 8x8 at hd=128) and
-// the kv_len sweep {16, 64, 333, 1024} run inside the body. 333 is deliberately
-// NOT block-aligned (partial-tail block); 16/64 are the short rows where quant
-// score-noise has no averaging (#512); 1024 is the long-context dilution case.
-// ===========================================================================
+// TYPED_TEST over KV dtypes (R8): one fixture, each dtype a policy type. Covers GQA 32x8 and
+// MHA 8x8 at hd=128, kv_len {16,64,333,1024} (333 non-block-aligned partial-tail; 16/64 no
+// averaging to hide quant noise #512; 1024 long-context dilution).
 template <typename Path>
 class PagedOracle : public ::testing::Test {
 protected:
@@ -697,44 +629,10 @@ using KVDtypes =
     ::testing::Types<PathF16, PathFP8, PathINT8, PathINT4, PathNVFP4, PathNVFP4TC, PathMXFP4KV>;
 TYPED_TEST_SUITE(PagedOracle, KVDtypes);
 
-// ===========================================================================
-// Measured characterization envelopes — MEASURED 2026-06-04 on RTX 5090
-// (sm_120a), first run of this suite (its birth certificate), re-confirmed
-// 2026-06-06 under the typed restructure (identical numbers — same quantizers
-// and kernels, only the dispatch changed). All numbers are max_rel vs the
-// original-f16 fp64 reference, denom max(1,|ref|), worst across both GQA32x8
-// and MHA8x8 configs at each kv_len. Ceilings (Path::envelope()) = worst
-// observed + ~50% margin.
-//
-//   kv_len:        16        64       333      1024     ceiling (frozen)
-//   F16        2.43e-4   2.29e-4   1.70e-4   6.08e-5   1e-2 (STRICT, no quant)
-//   FP8        0.0216    0.0073    0.0051    0.0028    0.035
-//   INT8       0.0039    0.0017    0.0007    0.0005    0.007
-//   INT4       0.0609    0.0474    0.0193    0.0096    0.10
-//   NVFP4      0.0670    0.0251    0.0134    0.0072    0.11
-//   NVFP4-TC   0.0670    0.0251    0.0133    0.0072    0.11  (tracks scalar)
-//   MXFP4-KV   0.0801    0.0362    0.0251    0.0163    0.12  (MEASURED 2026-08-03)
-//
-// Findings (real):
-//   * Monotone improvement with kv_len — confirms the #512 mechanism in the
-//     DECODE direction: per-key quant score-noise is worst when the softmax
-//     averages over few keys (16) and dilutes as context grows (1024). The
-//     short-row band is exactly where the cross-path prefill failure also bit.
-//   * Quant ranking at hd=128: INT8 (per-token per-elem) << FP8 (per-tensor,
-//     more mantissa/elem) < INT4 ≈ NVFP4 (4-bit nibbles). All stay well within
-//     NVFP4's 1e-1 single-op class here — but only because the host quantize
-//     is CORRECT; random-byte NVFP4 NaNs the scalar kernel (the TC test's
-//     documented trap). The no-NaN guard is the load-bearing decode assert.
-//   * NVFP4 scalar and NVFP4-TC agree to <2e-4 — the tensor-core Q.K dot is
-//     numerically equivalent to the scalar dot on this data.
-//   * MXFP4-KV sits ~20% above NVFP4 at every kv_len (0.0801 vs 0.0670 at 16)
-//     and follows the same monotone dilution. That gap is the format, not the
-//     kernel: UE8M0 has no mantissa, so the group scale rounds up to a power of
-//     two and up to half of E2M1's range can go unused. Same layout, same
-//     kernel structure, one coarser scale byte.
-//   * F16 paged tracks fp64 at <2.5e-4, four orders under its 1e-2 budget —
-//     the decode F16 path has no hidden score-precision tax.
-// ===========================================================================
+// Ceilings (Path::envelope()) = worst measured max_rel vs fp64 ref + ~50% margin, frozen:
+// F16 1e-2 (strict, no quant); FP8 0.035; INT8 0.007; INT4 0.10; NVFP4 0.11; NVFP4-TC 0.11;
+// MXFP4-KV 0.12 (~20% above NVFP4: UE8M0 has no mantissa, coarser scale, not a kernel bug).
+// Error is monotone in kv_len (#512: short rows have no averaging to dilute quant noise).
 
 TYPED_TEST(PagedOracle, HD128_Sweep) {
     for (int kv_len : {16, 64, 333, 1024}) {
@@ -745,25 +643,11 @@ TYPED_TEST(PagedOracle, HD128_Sweep) {
     }
 }
 
-// head_dim 256 was uncovered until 2026-08-30 while being the shipped shape of
-// the Qwen3.5/3.8 GDN family (24q/4kv), and the lane byte count HEAD_DIM/64
-// selects a different load path per head_dim in the quantised kernels: HD128
-// exercises none of what HD256 runs. Envelopes are shared with HD128_Sweep;
-// every HD256 max_rel stays under the ceiling frozen from HD128, so no new
-// envelope is introduced. MEASURED 2026-08-30, worst of the two configs:
-//
-//   kv_len:        16       333      1024     ceiling (shared)
-//   F16        2.43e-4   2.07e-4   5.25e-5   1e-2 (STRICT, no quant)
-//   FP8         0.0135    0.0038    0.0025   0.035
-//   INT8        0.0032    0.0010    0.0004   0.007
-//   INT4        0.0530    0.0195    0.0099   0.10
-//   NVFP4       0.0577    0.0114    0.0088   0.11
-//   NVFP4-TC    0.0574    0.0114    0.0088   0.11
-//   MXFP4-KV    0.0862    0.0201    0.0167   0.12
-//
-// Scalar NVFP4 and NVFP4-TC agree to 4 digits at kv_len=1024 (0.008828 both),
-// which is what makes this suite a check on the scalar kernel's load path: the
-// TC kernel reads the same bytes through unrelated code.
+// HD=256 (Qwen3.5/3.8 GDN family, 24q/4kv) had no coverage: HEAD_DIM/64 selects a different
+// lane byte count per head_dim in quantised kernels, so HD128 exercises none of what HD256 runs.
+// Ceilings shared with HD128_Sweep (no new envelope needed).
+// Scalar NVFP4 and NVFP4-TC agree to 4 digits at kv_len=1024 - also a check on the scalar
+// kernel's load path since TC reads the same bytes through unrelated code.
 TYPED_TEST(PagedOracle, HD256_Sweep) {
     for (int kv_len : {16, 333, 1024}) {
         // GQA 24q/4kv, the Qwen3.8-27B decode shape.
@@ -772,16 +656,10 @@ TYPED_TEST(PagedOracle, HD256_Sweep) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Split-K → single-split fallback (the F1 robustness fix). When the split-K
-// Phase-1 launch fails (a kernel whose dynamic smem exceeds the 48 KiB default
-// without an opt-in, or device state left by another model in-process), the
-// decode falls back to the single-split GQA/MHA path instead of running the
-// reduce over never-written partials → garbage. The real trigger is config- and
-// head-dim-specific, so a test hook forces the fallback on a clean launch; the
-// forced path must match BOTH the fp64 reference and the normal split-K result
-// at a long context where split-K is active.
-// ---------------------------------------------------------------------------
+// F1 robustness: when the split-K Phase-1 launch fails (smem > 48KiB default without opt-in,
+// or stale device state from another in-process model), decode must fall back to
+// single-split, not run the reduce over never-written partials. The forced-fallback path
+// must match both the fp64 reference and the normal split-K result at a long context.
 TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -842,14 +720,9 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
 }
 
 }  // namespace
-// ---------------------------------------------------------------------------
-// The multitok FP8 decode kernel (attention.paged_fp8_multitok=4) against the
-// same fp64 reference as the FP8 oracle above. The oracle's batch-1 shapes
-// take the split-K route (32 CTAs), so the single-split kernels only run
-// with the fallback forced; both the plain and the multitok kernel must stay
-// inside the FP8 envelope on the same four kv_len rows, including the
-// non-block-aligned 333 (partial tail group of 333 % 4 = 1 token).
-// ---------------------------------------------------------------------------
+// Multitok FP8 decode (attention.paged_fp8_multitok=4) vs the FP8 oracle's fp64 reference;
+// the oracle's batch-1 shapes take split-K (32 CTAs) so single-split only runs with fallback
+// forced. Covers the non-block-aligned 333 (partial tail of 1 token).
 TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -921,12 +794,9 @@ TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// The four-token NVFP4 kernels (attention.paged_nvfp4_multitok=4), plain and
-// split-K, against the fp64 reference: kv_len 16/64/333/1024 x {split-K
-// scratch registered (batch-1 shapes take split-K then), fallback forced}.
-// Both must stay inside the NVFP4 envelope with the scalar kernels' error.
-// ---------------------------------------------------------------------------
+// Four-token NVFP4 kernels (attention.paged_nvfp4_multitok=4), plain and split-K, vs fp64
+// ref across kv_len {16,64,333,1024} x {split-K registered, fallback forced}; both routes
+// must stay inside the NVFP4 envelope.
 TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -995,10 +865,8 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// F16 multitok kernel (attention.paged_f16_multitok) against the fp64
-// reference, both routes (split-K on the batch-1 shapes, forced single-split
-// = the kernel under test) and every heads-per-CTA instance the ratio allows.
+// F16 multitok kernel (attention.paged_f16_multitok) vs fp64 ref, both routes (split-K on
+// batch-1 shapes, forced single-split) and every heads-per-CTA instance the ratio allows.
 TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -1069,12 +937,9 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// F16 paged decode microbench (the default KV dtype of Q8_0 GGUFs and of
-// checkpoints that declare no KV quant): IMP_F16_BENCH_BATCH (32),
-// IMP_F16_BENCH_CTX (1100), IMP_F16_BENCH_HEADS (32), IMP_F16_BENCH_KV_HEADS
-// (8), HD=128. Split-K scratch registered like the engine. Timing only.
-// ---------------------------------------------------------------------------
+// F16 paged decode microbench (default KV dtype for Q8_0 GGUFs / unquantized checkpoints):
+// IMP_F16_BENCH_{BATCH=32,CTX=1100,HEADS=32,KV_HEADS=8}, HD=128. Split-K scratch registered
+// like the engine. Timing only.
 TEST(PagedF16Decode, ServingShapeMicrobench) {
     auto env_int = [](const char* k, int d) {
         const char* v = std::getenv(k);
@@ -1169,13 +1034,9 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// NVFP4-TC paged decode microbench (the hybrid's default decode attention):
-// IMP_NVFP4_BENCH_BATCH (1), IMP_NVFP4_BENCH_CTX (77000), IMP_NVFP4_BENCH_HEADS
-// (24), IMP_NVFP4_BENCH_KV_HEADS (4), IMP_NVFP4_BENCH_HD (256). Random packed
-// nibbles and UE4M3 scale bytes masked to finite small codes; prints us/launch
-// and the KV + scale bytes it moves per second. Finite-output check only.
-// ---------------------------------------------------------------------------
+// NVFP4-TC paged decode microbench (hybrid's default decode attention): IMP_NVFP4_BENCH_
+// {BATCH=1,CTX=77000,HEADS=24,KV_HEADS=4,HD=256}. Random packed nibbles + finite UE4M3 scale
+// bytes; prints us/launch and bytes/sec. Finite-output check only.
 TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     auto env_int = [](const char* k, int d) {
         const char* v = std::getenv(k);
@@ -1299,16 +1160,10 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     cudaStreamDestroy(stream);
 }
 
-// ---------------------------------------------------------------------------
-// Serving-shape microbench of the FP8 paged decode kernel (2026-09-03): the
-// dense Qwen3-14B profile at 32 streams x ~1.1k context read this kernel at
-// 33.4% of kernel time (41800 launches x 190 us, ~25% of DRAM bandwidth), so
-// the serving shape gets a cudaEvent number here. Shape from the env:
-// IMP_ATTN_BENCH_BATCH (32), IMP_ATTN_BENCH_CTX (1100), IMP_ATTN_BENCH_HEADS
-// (40), IMP_ATTN_BENCH_KV_HEADS (8). Prints us/launch and the KV bytes it
-// moves per second; asserts finite output only (no reference: the timing is
-// the point, the numerics are covered by the oracle above).
-// ---------------------------------------------------------------------------
+// Serving-shape microbench for FP8 paged decode: on the dense Qwen3-14B profile at 32
+// streams x ~1.1k context this kernel was 33.4% of kernel time (41800 launches x 190us, ~25%
+// DRAM bandwidth). IMP_ATTN_BENCH_{BATCH=32,CTX=1100,HEADS=40,KV_HEADS=8}; asserts finite
+// output only, numerics covered by the oracle above.
 TEST(PagedFp8Decode, ServingShapeMicrobench) {
     auto env_int = [](const char* k, int d) {
         const char* v = std::getenv(k);

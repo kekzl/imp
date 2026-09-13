@@ -1,20 +1,7 @@
-// The slot layout that lets host-resident NVFP4 experts reach the fused decode
-// kernels unchanged (2026-08-13).
-//
-// The GGUF host path (#1370) works because one expert is one contiguous byte
-// range, so the LRU cache's fixed-stride pool IS the array the kernels index.
-// An NVFP4 expert is TWO ranges — packed FP4 weights and FP8 micro-scales — and
-// the trick still works only because the kernels take separate bases and
-// separate strides for them.
-//
-// That makes the arithmetic load-bearing in a way a comment cannot pin: the
-// cache WRITES a slot at one address and the kernel READS it at another,
-// computed independently. If those two ever disagree the kernel reads a
-// neighbouring expert's scales, which is coherent-looking and wrong — the
-// failure mode #1403 measured ("the capital of France is the city of the same
-// name"), not a crash. So the central test here is that the two agree.
-//
-// CPU-only: the layout is pure arithmetic and takes its inputs as data.
+// Host-resident NVFP4 expert slot layout: an expert is TWO ranges (packed FP4 weights, FP8
+// micro-scales) with independently-computed base/stride, unlike the one-range GGUF path
+// (#1370). If cache-write and kernel-read addresses ever disagree, a kernel reads a
+// neighboring expert's scales: coherent-looking and wrong (#1403), not a crash.
 
 #include <gtest/gtest.h>
 
@@ -39,13 +26,9 @@ TEST(NvFP4SlotLayout, HoldsBothRangesOfOneExpert) {
     EXPECT_GE(l.slot_bytes(), l.packed_bytes + l.ms_bytes);
 }
 
-// The kernels load packed weights through uint2 (gemv_nvfp4_row), so every
-// slot's packed block must start 8-byte aligned. Both the stride and the
-// micro-scale offset feed that address, so both have to hold.
-//
-// The 8 is written out rather than taken from kNvFP4SlotAlign on purpose: it
-// is the KERNEL's requirement, and a test that reads the layout's own constant
-// passes unchanged if that constant is set to 1.
+// gemv_nvfp4_row loads packed weights via uint2, so every slot's packed block must start
+// 8-byte aligned (both stride and micro-scale offset feed that address). The 8 is hardcoded,
+// not kNvFP4SlotAlign, so the test can't pass vacuously if that constant becomes 1.
 TEST(NvFP4SlotLayout, EverySlotStartsWhereAUint2LoadCanReadIt) {
     constexpr size_t kUint2Align = 8;  // sizeof(uint2), from gemv_nvfp4_row
     for (const auto [N, K] : std::vector<std::pair<int64_t, int64_t>>{
@@ -59,19 +42,9 @@ TEST(NvFP4SlotLayout, EverySlotStartsWhereAUint2LoadCanReadIt) {
     }
 }
 
-// THE property the whole path rests on: the kernel reads a slot's micro-scales
-// from `micro_scales + idx * expert_stride_ms`, and that has to land INSIDE
-// slot idx — the same slot whose packed weights it is decoding.
-//
-// This is not automatic. The natural stride for a scale array is its own size
-// (`ms_bytes`), which is what a contiguous per-expert scale buffer uses and
-// what the resident path passes. Using it here would walk the scale base
-// forward far slower than the slot stride, so slot 1's weights would be decoded
-// with scales from inside slot 0 — coherent-looking, wrong output. Passing the
-// SLOT stride for both is what makes the two halves stay together.
-//
-// The assertion below fails for `expert_stride_ms = ms_bytes` and for any other
-// stride that is not the slot stride.
+// micro_scales + idx*expert_stride_ms must land inside slot idx's own packed weights. The
+// natural per-scale-buffer stride (ms_bytes) walks slower than the slot stride, so slot 1
+// would decode with slot 0's scales: coherent-looking, wrong. Both must use the SLOT stride.
 TEST(NvFP4SlotLayout, ScaleAddressStaysInsideItsOwnSlot) {
     for (const auto [N, K] : std::vector<std::pair<int64_t, int64_t>>{{kGateN, kGateK},
                                                                      {kDownN, kDownK}}) {

@@ -1,7 +1,5 @@
-// Test for MXFP4 Flash Attention (sm_120): tiled FP4 E2M1 Q·K^T with online softmax.
-//
-// Compares the fused flash attention kernel output against the FP16 Blackwell
-// reference kernel. FP4 quantization introduces ~1-2 bits of error.
+// MXFP4 flash attention (sm_120): tiled FP4 E2M1 QK^T with online softmax vs an FP16
+// Blackwell reference; FP4 quant introduces ~1-2 bits of error.
 
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_mxfp4_sm120.h"
@@ -121,15 +119,9 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool caus
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
         ASSERT_GE(sm, 120) << "imp targets sm_120 only";
-        // `flash_attention_blackwell` cannot serve head_dim=256 on sm_120: Br=64
-        // needs ~176 KiB of shared memory against a 99 KiB opt-in limit, so it
-        // declines by design (attention_blackwell.cu). That, and not the MXFP4
-        // kernel, is why the HD=256 case sat DISABLED_ — the comparison had no
-        // reference, while the kernel under test ran fine (Bq=32 fits).
-        // Production has no such gap: the FA2 tier serves hd=256 and sits AHEAD
-        // of the Blackwell tier in attention_prefill_dispatch. So fall back to
-        // it, and keep Blackwell wherever it already ran, so every case that
-        // passed before still compares against exactly what it did before.
+        // flash_attention_blackwell declines head_dim=256 on sm_120 (Br=64 needs ~176KiB smem vs a
+        // 99KiB opt-in limit); FA2 serves hd=256 in production and sits ahead of Blackwell in
+        // attention_prefill_dispatch, so fall back to it for the HD=256 reference only.
         bool ref_ok = flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
                                                 recipe.q_offset);
         if (!ref_ok)
@@ -245,14 +237,9 @@ TEST_F(FhmaMxFP4Test, HD64_LongSeq) {
     run_compare_test(1, 1024, 1024, 4, 2, 64, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
-// Compare legacy vs blockscale paths. Both paths share the same Q/K quant
-// and post-MMA scale application; only the MMA instruction differs.
-// kind::mxf4nvf4.m16n8k64 internally sums 64 FP4 products per issue in FP32,
-// whereas legacy f8f6f4.m16n8k32 sums 32 products per issue and then adds
-// the partials. FP32 is not associative, so per-element differences at the
-// ULP × sqrt(K) level are expected. After the softmax+PV pipeline, those
-// tiny score deltas can propagate into a few-percent output outliers
-// (max_err ~0.1), while mean_err stays at noise level (~1e-3).
+// legacy f8f6f4.m16n8k32 sums 32 products/issue then adds partials; mxf4nvf4.m16n8k64 sums
+// 64 in FP32 per issue. FP32 non-associativity gives ULPxsqrt(K)-level per-element diffs that
+// can reach max_err~0.1 after softmax+PV while mean_err stays ~1e-3.
 static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool causal,
                                    int sliding_window, float softcap, float max_err_limit,
                                    float mean_err_limit, cudaStream_t stream, int sm) {
@@ -479,10 +466,8 @@ TEST_F(FhmaMxFP4Test, FullRecipeQOffsetChunk) {
 // #846 ThriftAttention outlier promotion (mxfp4_promote_budget)
 // ============================================================================
 
-// budget=1.0 → every visited KV tile is promoted → the kernel runs exact FP32
-// scores + FP16 WMMA PV everywhere. Output must be near-FP16-tight against
-// the reference (validates the exact path, masking, and softmax merge — no
-// FP4 error budget left to hide behind).
+// budget=1.0: every KV tile promoted, kernel runs exact FP32 scores + FP16 WMMA PV
+// everywhere; validates masking/softmax-merge with no FP4 error budget to hide behind.
 TEST_F(FhmaMxFP4Test, PromoteAllMatchesFP16) {
     if (!can_run())
         GTEST_SKIP() << "Requires sm_120+";

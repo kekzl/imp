@@ -1,15 +1,6 @@
-// =============================================================================
-// test_mtp_forward.cpp — Phase 2.2 MoE-block integration test
-// =============================================================================
-//
-// Exercises mtp_draft_step() end-to-end against the real Qwen3.6-NVFP4 model:
-//   1. Load main model + MTP head (BF16 → FP16, 1.57 GiB)
-//   2. Allocate MTP workspace with full MoE config (256/top-8/512/512)
-//   3. Run mtp_draft_step with a synthetic d_h_prev + token id
-//   4. Assert it does NOT crash and out_token_id is in [0, vocab_size)
-//
-// GTEST_SKIPs if the model is absent so CI on bare hosts still passes.
-// =============================================================================
+// mtp_draft_step() end-to-end against real Qwen3.6-NVFP4: loads main model + MTP head
+// (BF16->FP16, 1.57 GiB), full MoE config (256/top-8/512/512), asserts no crash and
+// out_token_id in [0, vocab_size). GTEST_SKIPs if the model is absent.
 
 #include "model/model.h"
 #include "model/safetensors_loader.h"
@@ -38,18 +29,9 @@ bool model_available() {
     return fs::exists(std::string(kQwen36ModelDir) + "/model_mtp.safetensors");
 }
 
-// This checkpoint takes ~23.7 GiB of a 32 GiB card, so whether it fits depends
-// on what ran before it in the same process — and running it without the room
-// does not fail cleanly. Measured: the upload OOMs part-way, and from that point
-// NO free works, async or synchronous. 62537 of 62537 cudaFreeAsync calls return
-// "out of memory" with the error state cleared before each one, and a
-// synchronous cudaFree fallback succeeds 0 times out of those 62537. The memory
-// comes back at process exit and not before, so every later test in the binary
-// runs on a full card — 33 of them, in the run that surfaced this.
-//
-// So the guard has to sit BEFORE the load. A checkpoint that cannot fit is a
-// skip with the numbers in it, not a failure: the test says nothing about the
-// code in that state.
+// ~23.7 GiB checkpoint on a 32 GiB card: fit depends on prior state in-process, and running
+// without room does not fail cleanly (upload OOMs mid-way, then cudaFreeAsync and the sync
+// cudaFree fallback fail until process exit). Guard sits BEFORE load: unfit is a skip, not a failure.
 constexpr size_t kNeededMiB = 25000;  // 23.7 GiB upload + headroom for the MTP head
 
 size_t device_free_mib() {
@@ -83,10 +65,8 @@ TEST(MtpForwardTest, DraftStepProducesValidToken) {
     ASSERT_TRUE(model->upload_weights_gpu(imp::QType::F16, nullptr, 1ULL << 30));
     ASSERT_TRUE(model->mtp_->loaded);
 
-    // Build a synthetic d_h_prev (random FP16). The MTP forward should still
-    // produce a valid token id even with non-realistic hidden state — we just
-    // want to confirm the MoE block runs without crashing or producing OOB
-    // tokens.
+    // Synthetic random FP16 d_h_prev: only confirms the MoE block runs without crashing or
+    // producing an out-of-bounds token, not realistic hidden-state behavior.
     const int hidden_dim   = model->config_.d_model;
     const int vocab_size   = model->config_.vocab_size;
     const int n_experts    = model->config_.n_experts;
@@ -158,10 +138,8 @@ TEST(MtpForwardTest, DraftStepProducesValidToken) {
     EXPECT_GE(out_token_id, 0);
     EXPECT_LT(out_token_id, vocab_size);
 
-    // NVFP4 chain lm_head (#847 lever 3): quantize the FP16 lm_head the same
-    // way the decode cache does, then draft through the NVFP4 GEMV + FP32
-    // argmax path. Same synthetic inputs — assert a valid token and that the
-    // NVFP4 path is deterministic against itself.
+    // NVFP4 chain lm_head (#847 lever 3): quantize FP16 lm_head like the decode cache, draft
+    // through NVFP4 GEMV + FP32 argmax. Asserts a valid token and self-determinism.
     imp::NvFP4QuantResult lm4{};
     imp::quantize_fp16_to_nvfp4(model->out_proj_, lm4, /*stream=*/nullptr);
     ASSERT_NE(lm4.packed_data, nullptr);

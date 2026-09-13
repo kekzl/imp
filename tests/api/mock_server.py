@@ -264,10 +264,8 @@ class MockHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError) as e:
             self._send_error(400, f"Invalid JSON: {e}")
             return None
-        # A well-formed JSON body that is not an object used to fall through and
-        # raise inside the handler thread, so the client saw a dropped
-        # connection instead of a status. imp-server answers 400 (nlohmann
-        # type_error.306) — match the status, not the wording.
+        # Non-dict JSON body must return 400 (nlohmann type_error.306), not a dropped connection.
+        # Match status only, not wording.
         if not isinstance(body, dict):
             self._send_error(400, "request body must be a JSON object")
             return None
@@ -295,12 +293,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 return False
         if "n" in body:
             n = body["n"]
-            # imp-server accepts n in [1,4] on /v1/chat/completions and runs that
-            # many independent generations (handlers.cpp validate_sampling_params
-            # + handlers_chat_core.cpp). This used to reject everything but n=1,
-            # and the suite asserted that — a contract the shipping server never
-            # had. /v1/completions still refuses n>1; that check lives in its own
-            # handler, as it does in the server.
+            # /v1/chat/completions accepts n in [1,4] (independent generations); /v1/completions still
+            # rejects n>1 in its own handler. See handlers.cpp validate_sampling_params,
+            # handlers_chat_core.cpp.
             if not isinstance(n, int) or n < 1 or n > 4:
                 self._send_error(400, '"n" must be between 1 and 4.')
                 return False
@@ -422,13 +417,9 @@ class MockHandler(BaseHTTPRequestHandler):
 
         tokens = self._generate_tokens(seed, max_tokens)
         completion_tokens = len(tokens)
-        # Reasoning contract (handlers_chat_core.cpp / handlers_chat_stream.cpp):
-        # a request that asks for reasoning gets a reasoning channel, the token
-        # count for it in usage.completion_tokens_details.reasoning_tokens, and
-        # - when the budget left nothing for the answer - the exhaustion signal
-        # imp_finish_detail beside finish_reason. A tiny max_tokens is the
-        # server's real exhaustion case: everything generated stayed inside the
-        # think block, so content is empty and reasoning is not.
+        # Reasoning request must produce a reasoning channel, reasoning_tokens in usage, and
+        # imp_finish_detail when budget exhausts before an answer (handlers_chat_core.cpp).
+        # Tiny max_tokens is the real exhaustion case: content empty, reasoning non-empty.
         reasoning_tokens: list[str] = []
         if body.get("reasoning_effort"):
             n_reason = len(tokens) if max_tokens <= 8 else len(tokens) // 2

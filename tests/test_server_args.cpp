@@ -1,11 +1,6 @@
-// =============================================================================
-// Unit tests for imp-server CLI flag parsing (parse_server_args) — closes the
-// "--vram-budget flag parse and the server-limit flags are untested" gap from
-// issue #896. The planner logic behind --vram-budget is well covered elsewhere
-// (test_vram_budget_reserve / test_weight_registry_preservation); this asserts
-// the literal CLI parse that feeds it, on the CPU, in CI (the real server main
-// never runs there).
-// =============================================================================
+// imp-server CLI flag parsing (#896): --vram-budget's planner logic is covered elsewhere
+// (test_vram_budget_reserve / test_weight_registry_preservation); this pins the literal CLI
+// parse feeding it, on the CPU in CI (the real server main never runs there).
 
 #include <gtest/gtest.h>
 #include "args.h"
@@ -74,13 +69,9 @@ TEST(ServerArgs, UnrelatedFlagsLeaveLimitsAtDefault) {
     EXPECT_EQ(a.max_input_tokens, 0);
 }
 
-// ---------------------------------------------------------------------------
-// resolve_calibration_out - `[calibration] out_path` was parsed, documented in
-// config.h and offered in imp.conf.example, and read by nothing: setting it
-// produced no file and no warning, because imp_calibration_write() takes the
-// path as an argument and imp-cli passed --calibrate straight through.
-// Debt ledger item 7.
-// ---------------------------------------------------------------------------
+// [calibration] out_path was parsed, documented, and offered in imp.conf.example, but read
+// by nothing: imp_calibration_write() takes the path as an argument and imp-cli passed
+// --calibrate straight through, so setting it produced no file and no warning. Debt ledger item 7.
 
 TEST(CalibrationOutPath, TheFlagWins) {
     EXPECT_EQ(resolve_calibration_out("/from/flag.json", "/from/conf.json"), "/from/flag.json");

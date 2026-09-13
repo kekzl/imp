@@ -1,7 +1,6 @@
-// Unit tests for the suspend-to-RAM weight snapshot plumbing (CPU-only):
-// key canonicalization, /proc/meminfo parsing, WeightUploadLog record/evict
-// semantics, and the pending-arm slot. The D2H capture + warm restore paths
-// need a GPU + real model and live in tests/test_suspend_resume.cu.
+// Suspend-to-RAM weight snapshot plumbing, CPU-only: key canonicalization, /proc/meminfo
+// parsing, WeightUploadLog record/evict semantics, pending-arm slot. D2H capture + warm
+// restore need a GPU + real model (test_suspend_resume.cu).
 
 #include <gtest/gtest.h>
 

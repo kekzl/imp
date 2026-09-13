@@ -1,21 +1,10 @@
-// ===========================================================================
-// StreamReasoningSplitter: the streaming half of the think/content demux.
-//
-// WHY THIS EXISTS: the non-streaming path splits reasoning offline, where the
-// whole text is available and a `</think>` anywhere proves the prefix was
-// reasoning. Streaming has to decide per token, and the two paths disagreeing
-// is a bug the caller sees directly — the same request returns the chain of
-// thought in `reasoning_content` without `stream:true` and as the visible
-// answer with it.
-//
-// The case that matters in practice (found by running Claude Code against
-// imp-server): a tool request suppresses thinking, the chat template renders a
-// PRE-CLOSED think block, and the model reasons anyway. Its output then carries
-// no `<think>` opener — only the closer — so scanning for an opener can never
-// succeed, and the reasoning is streamed to the user as the answer.
-//
-// Header-only dependency, so this runs in the CPU lane.
-// ===========================================================================
+// Streaming half of the think/content demux: non-streaming splits reasoning offline (a
+// </think> anywhere proves the prefix was reasoning); streaming decides per token, and the
+// two paths disagreeing is user-visible (same request returns chain-of-thought in
+// reasoning_content without stream:true, as the visible answer with it).
+// Real case (found via Claude Code against imp-server): a tool request suppresses thinking, a
+// PRE-CLOSED think block renders, the model reasons anyway - output carries no opener, only
+// the closer, so scanning for an opener never succeeds and reasoning streams as the answer.
 
 #include <gtest/gtest.h>
 
@@ -84,14 +73,10 @@ TEST(StreamReasoningSplit, PromptOpenedBlockStartsInReasoning) {
     EXPECT_EQ(r.content, "the answer");
 }
 
-// THE REGRESSION. Suppressed thinking on a model that reasons anyway: no
-// opener, a long chain of thought, then the closer. Everything before the
-// closer is reasoning — scanning for an opener that will never come must not
-// dump it into the user-visible channel.
-//
-// kAgentScan is the budget the stream driver uses when the request carries
-// tools: the hold has to outlast a real chain of thought, or the closer that
-// proves what the prefix was arrives after the leak.
+// Suppressed thinking on a model that reasons anyway: no opener, a long chain of thought,
+// then the closer. Everything before the closer is reasoning; scanning for an opener that
+// never comes must not dump it into the visible channel. kAgentScan (the tool-request budget)
+// must outlast a real chain of thought, or the closer arrives after the leak.
 TEST(StreamReasoningSplit, CloserWithoutOpenerReclassifiesTheWholePrefix) {
     StreamReasoningSplitter s(ThinkPhase::SCAN, -1, -1, kAgentScan);
     auto pieces = long_cot();
@@ -139,10 +124,9 @@ TEST(StreamReasoningSplit, ContentPhaseIsPassThrough) {
     EXPECT_NE(r.content.find("plain"), std::string::npos);
 }
 
-// The hold must not swallow a tool call. Releasing it early is the caller's
-// job (the splitter knows nothing about tool tags), so it needs the buffer and
-// a way to give it up — without that, the fix for the leak above breaks
-// streamed tool-call argument deltas, which is how it was caught.
+// The hold must not swallow a tool call: releasing it early is the caller's job (the
+// splitter knows nothing about tool tags), so it needs a way to give up the buffer - without
+// it, the fix for the leak above breaks streamed tool-call argument deltas.
 TEST(StreamReasoningSplit, FlushScanReleasesTheHeldBufferAsContent) {
     StreamReasoningSplitter s(ThinkPhase::SCAN, -1, -1, kAgentScan);
     for (const char* p : {"Sure", ", ", "<tool_", "call>"})

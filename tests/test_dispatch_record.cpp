@@ -1,19 +1,8 @@
-// Resolved-dispatch recording (#1205).
-//
-// The recorder in compute/dispatch_record.h is what makes "which kernels did
-// this model actually run" answerable. Two properties keep it honest and both
-// are checked here:
-//
-//   1. Every enumerator has a name. The summary is built by concatenating
-//      *_name() results, so a tier added to compute/dispatch_paths.h without a
-//      matching switch arm would silently print "?" in production — the exact
-//      class of silent gap the recorder exists to close.
-//   2. has_prefill()/has_decode() only go true once a branch has actually
-//      recorded. Engine::log_resolved_dispatch_once_() gates the one-shot dump
-//      on them, so a false positive there would emit a summary full of
-//      "unset" on the very first step.
-//
-// CPU-only: the recorder is plain thread_local POD with no CUDA in it.
+// Resolved-dispatch recording (#1205) answers "which kernels did this model actually run".
+// Two properties checked: (1) every dispatch_paths.h enumerator has a *_name(), so a tier
+// added without a matching switch arm would silently print "?" in production; (2)
+// has_prefill()/has_decode() only go true once a branch actually recorded, so a false
+// positive would emit an "unset" summary on the first step. CPU-only: plain thread_local POD.
 
 #include "compute/dispatch_paths.h"
 #include "compute/dispatch_record.h"

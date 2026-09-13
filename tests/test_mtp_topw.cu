@@ -1,14 +1,6 @@
-// test_mtp_topw.cu — the two-pass serving top-W kernel against the probe's
-// single-CTA reference on the same logits.
-//
-// Why it exists: mtp_topw_fast replaces a 713 us measurement-grade scan in the
-// multi-candidate draft path (speculative.mtp_tree_width > 1). A wrong top-W
-// cannot corrupt output — the verify accept is lossless — but it silently
-// turns the branch candidates into noise, which reads as "the tree does not
-// pay" instead of "the kernel is broken". The top-W values are drawn DISTINCT
-// (see distinct_values): both kernels break exact-value ties by scan order,
-// and the fast kernel's slice structure orders equal values differently, so
-// only a unique top-W is a meaningful contract.
+// mtp_topw_fast replaces a 713 us measurement-grade scan (speculative.mtp_tree_width > 1).
+// A wrong top-W cannot corrupt output (verify accept is lossless) but turns branch candidates
+// to noise, reading as "the tree doesn't pay" instead of "the kernel is broken".
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -32,13 +24,9 @@ class MtpTopWTest : public ::testing::Test {
     }
 };
 
-// Logits with a well-defined ordered top-W. FP32: a strictly increasing grid,
-// shuffled - every value distinct. FP16 cannot do that (there are ~63k finite
-// half values, a 248k vocab must tie), so the FP16 arm draws the bulk from a
-// coarse half-exact grid below -50 (ties allowed, none of them can win) and
-// plants top_w distinct half-exact values above it at random positions: the
-// ordered top-W is unique, everything below it is noise the kernels may
-// order however they like.
+// Top-W values must be DISTINCT: both kernels break exact-value ties by scan order, and the
+// fast kernel's slice structure orders ties differently, so only a unique top-W is a
+// meaningful contract. FP16 ties are unavoidable below -50; distinct values sit above it.
 std::vector<float> distinct_values(int vocab, int top_w, bool fp32, unsigned seed) {
     std::vector<float> v(vocab);
     std::mt19937 rng(seed);

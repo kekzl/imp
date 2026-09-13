@@ -1,18 +1,10 @@
-// The GGUF loader's half of "say what you dropped".
-//
-// `src/model/CLAUDE.md` states the failure this file guards: "A silently
-// skipped tensor is the failure mode here", and "IMP_LOG_DEBUG is invisible at
-// the default log level. A skip reported only there is not reported." The
-// SafeTensors side got its per-class breakdown in #1929; these are the two
-// places on the GGUF path that still did it the old way.
-//
-// Both are LATENT, not live on any checkpoint present. A GGUF header parse over
-// all 15 local models finds zero unassigned tensors in every text model and
-// exactly one in the reranker (`cls.output.weight`), which imp is right to
-// ignore: /v1/rerank scores from the yes/no token logits and never reads a
-// classification head. And no local GGUF ships a dense `ffn_*.bias`. They are
-// pinned anyway, because the cost when they do fire is a clobbered weight and a
-// wrong answer at exit code 0.
+// GGUF loader's half of "say what you dropped" (src/model/CLAUDE.md: a silently skipped
+// tensor is the failure mode; IMP_LOG_DEBUG-only reporting is not reporting). SafeTensors got
+// its per-class breakdown in #1929; these are the two remaining GGUF-path spots.
+// Both LATENT, not live on any local checkpoint (a header parse over all 15 local models
+// finds zero unassigned tensors except the reranker's cls.output.weight, which imp is right
+// to ignore). Pinned anyway: the cost when they fire is a clobbered weight and a wrong
+// answer at exit code 0.
 
 #include "model/gguf_loader_internal.h"
 #include "model/model.h"
@@ -35,11 +27,10 @@ Tensor fake_weight(void* backing, int64_t n, int64_t k) {
     return t;
 }
 
-// A dense FFN bias would have been assign_quant'd straight into the weight
-// slot, and assign_quant is a plain assignment (`loader_assign.h`), so the
-// weight was gone. The neighbouring `attn_*` arms and the `_exps` arms below
-// both test the suffix; these three did not. imp carries no dense FFN bias, so
-// the right answer is to leave it unassigned and let the loader report it.
+// A dense FFN bias would be assign_quant'd straight into the weight slot (assign_quant is a
+// plain assignment, loader_assign.h), silently losing the weight. The neighbouring attn_*
+// and _exps arms test the suffix; these three didn't. imp carries no dense FFN bias, so the
+// right answer is to leave it unassigned and let the loader report it.
 TEST(GgufSilentDrops, DenseFfnBiasDoesNotClobberTheWeight) {
     std::vector<uint16_t> backing(1024, 0);
     Model model;

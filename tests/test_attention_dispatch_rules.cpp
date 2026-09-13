@@ -1,12 +1,6 @@
-// Which attention family serves which head_dim, asked in one place.
-//
-// The prefill dispatch picks the kernel; max_safe_prefill_chunk decides how big
-// a chunk it may hand it. When the second assumes a family that the first
-// cannot use, nothing clamps the chunk and the cuBLAS fallback runs past its
-// S-matrix. That happened: the clamp trusted `fmha_prefill_threshold` without
-// asking whether FMHA serves the head_dim, and a perplexity run on
-// DeepSeek-V2-Lite (MLA, head_dim 192) aborted the process with
-// "engine should have prevented this".
+// max_safe_prefill_chunk must agree with prefill dispatch on which attention family serves a
+// head_dim; unclamped, the cuBLAS fallback overran its S-matrix on DeepSeek-V2-Lite (MLA,
+// hd=192), aborting the process.
 
 #include "exec/attention_dispatch_rules.h"
 #include "compute/attention_paged.h"  // paged_attention_serves_head_dim
@@ -44,10 +38,9 @@ TEST(AttentionDispatchRules, OnlyUnservedHeadDimsNeedTheSmatrix) {
         EXPECT_FALSE(o_n_attention_serves_head_dim(hd, true)) << "hd=" << hd;
 }
 
-// A dtype outside paged_attention_serves_head_dim's switch defeated the #1674
-// guard: kv_cache.dtype=mxfp4 on a head_dim-96 model passed init and threw at
-// the first decode step (AUDIT_arch_2026 A1-5). The MXFP4_KV launcher shares
-// the NVFP4 template set: 64/128/256/512, no 96.
+// A dtype outside paged_attention_serves_head_dim's switch defeated the #1674 guard:
+// kv_cache.dtype=mxfp4 at head_dim=96 passed init and threw at first decode (AUDIT_arch_2026
+// A1-5). MXFP4_KV shares NVFP4's template set (64/128/256/512), no 96.
 TEST(AttentionDispatchRules, PagedDecodeRefusesMxfp4KvAtHeadDim96) {
     EXPECT_FALSE(paged_attention_serves_head_dim(QType::MXFP4_KV, 96));
     for (int hd : {64, 128, 256, 512})

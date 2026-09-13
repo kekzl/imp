@@ -1,20 +1,12 @@
-// GGUF loader fault-injection tests — TEST_AUDIT (retired) Phase 2, risk #10.
-//
-// Charter (risk #10): "header fault injection → clean error". The contract
-// under test is NOT that a malformed file loads correctly — it is that the
-// loader NEVER crashes, hangs, or allocates unbounded memory on adversarial
-// input. Internal errors may throw or return nullptr (both are "clean"); UB,
-// OOM, and infinite loops are the failures we hunt.
-//
-// Method: build a minimal VALID GGUF v3 byte buffer in-memory (one F32 tensor,
-// minimal llama metadata) that load_gguf() accepts, then inject ONE targeted
-// corruption per test and assert the loader rejects it gracefully. Each case
-// states, by hand, why the expected outcome is what it is. We compare against
-// the real loader, not a mock (audit §4).
-//
-// Several of these tests are REGRESSION tests for real weaknesses found while
-// writing them (length/count overflow, unknown-array-type spin, unbounded
-// reserve, unchecked tensor offsets). See the commit message / report.
+// GGUF loader fault-injection (TEST_AUDIT(retired) risk #10): the contract is NOT that a
+// malformed file loads correctly, only that the loader never crashes, hangs, or allocates
+// unbounded memory on adversarial input (throw or nullptr are both clean; UB/OOM/infinite
+// loops are the hunted failures).
+// Method: build a minimal VALID GGUF v3 buffer load_gguf() accepts, inject ONE targeted
+// corruption per test, assert graceful rejection against the real loader, not a mock.
+// Several cases are regression tests for real weaknesses found while writing them
+// (length/count overflow, unknown-array-type spin, unbounded reserve, unchecked tensor
+// offsets).
 
 #include <gtest/gtest.h>
 #include "model/gguf_loader.h"
@@ -30,10 +22,8 @@
 namespace imp {
 namespace {
 
-// ---- Minimal GGUF byte-buffer builder ----
-//
-// Produces a valid single-tensor GGUF v3 file. Field offsets of interest are
-// recorded so a test can patch exactly one value without rebuilding the rest.
+// Minimal valid single-tensor GGUF v3 builder; field offsets are recorded so a test can
+// patch exactly one value without rebuilding the rest.
 
 struct GgufBytes {
     std::vector<uint8_t> buf;
@@ -142,10 +132,8 @@ std::string write_temp(const std::vector<uint8_t>& data) {
     return std::string(path);
 }
 
-// Run load_gguf on a buffer and return whether it crashed-free. Wraps the
-// throw→nullptr ambiguity: a clean error is EITHER nullptr OR a thrown
-// exception we catch here. The only failure is a crash/hang (which GTest would
-// surface as a SIGSEGV/timeout, not a returned value).
+// load_is_clean wraps the throw-vs-nullptr ambiguity: a clean error is EITHER nullptr or a
+// caught exception. The only failure is a crash/hang, which GTest surfaces as SIGSEGV/timeout.
 bool load_is_clean(const std::vector<uint8_t>& data) {
     std::string path = write_temp(data);
     if (path.empty())
@@ -167,11 +155,10 @@ bool load_is_clean(const std::vector<uint8_t>& data) {
     return clean;
 }
 
-// Load a buffer and return the model (may be nullptr). Used by the bounds
-// tests to assert the OBSERVABLE consequence of the fix: a tensor whose data
-// window escapes the file is SKIPPED, so token_embedding().data stays null —
-// the unfixed loader instead assigns a wild pointer (non-null). This is the
-// non-tautological discriminator between fixed and unfixed.
+// load_buf returns the model (may be nullptr); bounds tests assert the OBSERVABLE
+// consequence of the fix: a tensor whose data window escapes the file is SKIPPED so
+// token_embedding().data stays null - the unfixed loader instead assigns a wild non-null
+// pointer. This is the non-tautological fixed-vs-unfixed discriminator.
 std::unique_ptr<Model> load_buf(const std::vector<uint8_t>& data) {
     std::string path = write_temp(data);
     if (path.empty())
@@ -206,18 +193,12 @@ TEST(GgufFaultInjection, ValidBaselineLoads) {
     unlink(path.c_str());
 }
 
-// ---- Config vs tensors ----
-//
-// A GGUF whose metadata declares N transformer blocks but ships no layer tensor
-// must not load. Before #1312 it did: load_gguf returned a Model reporting
-// n_layers == N with every layer weight null, and the only log line was an
-// unrelated tokenizer warning, so a truncated download was indistinguishable
-// from a complete file at the API boundary.
-//
-// The check is deliberately weak per layer — attention, GDN and SSM blocks mix
-// freely across the architectures here, so no single tensor is universally
-// required — and rejects only a block that carries none of them and no FFN
-// either, which cannot be executed under any architecture.
+// A GGUF declaring N transformer blocks but shipping no layer tensor must not load: before
+// #1312 it did, reporting n_layers==N with every layer weight null and only an unrelated
+// tokenizer warning, so a truncated download was indistinguishable from a complete file.
+// The check is deliberately weak per layer (attention/GDN/SSM tensors mix freely across
+// architectures, none universally required); it rejects only a block carrying none of them
+// and no FFN either, which no architecture could execute.
 TEST(GgufFaultInjection, DeclaredLayersWithoutTensorsAreRejected) {
     GgufBytes g = build_valid_gguf();
     patch_u32(g.buf, g.off_block_count, 2);
@@ -225,9 +206,8 @@ TEST(GgufFaultInjection, DeclaredLayersWithoutTensorsAreRejected) {
         << "a GGUF declaring layers it has no tensors for must not load";
 }
 
-// The zero-layer baseline must keep loading: block_count=0 has no block to be
-// empty, so the check above must not fire on it. Without this, tightening the
-// rule to "every declared layer needs weights" could silently start rejecting
+// block_count=0 has no block to be empty, so the declared-layers check above must not fire
+// on it - tightening to "every declared layer needs weights" must not silently reject
 // embedding-only models.
 TEST(GgufFaultInjection, ZeroDeclaredLayersStillLoads) {
     GgufBytes g = build_valid_gguf();  // block_count = 0
@@ -292,10 +272,9 @@ TEST(GgufFaultInjection, TruncatedMidMetadata) {
 }
 
 TEST(GgufFaultInjection, TruncatedMidTensorData) {
-    // Header + metadata + tensor-info intact, but the tensor's data bytes are
-    // cut short. The tensor claims 64 bytes; we leave only 8. The bounds check
-    // must reject the tensor (offset+size escapes the mapped region) instead
-    // of handing weight_upload a pointer that reads off the end of the file.
+    // Tensor data bytes cut short (claims 64 bytes, file has 8): the bounds check must reject
+    // it (offset+size escapes the mapped region) instead of handing weight_upload a pointer that
+    // reads off the end of the file.
     GgufBytes g = build_valid_gguf();
     // Keep everything up to ~16 bytes into the data section, drop the rest.
     size_t keep = g.off_tensor_data_offset + 8 + 16;  // through offset field + a little data
@@ -307,10 +286,9 @@ TEST(GgufFaultInjection, TruncatedMidTensorData) {
 // ---- Absurd counts (must not allocate-to-OOM) ----
 
 TEST(GgufFaultInjection, HugeKvCount) {
-    // kv_count = 2^60 with a tiny file. Pre-fix, metadata.reserve(2^60) would
-    // attempt to allocate petabytes → bad_alloc / OOM-kill before any read.
-    // Post-fix the reserve is clamped to remaining()/12 and the first KV read
-    // fails on EOF → clean nullptr.
+    // kv_count=2^60 with a tiny file: pre-fix, metadata.reserve(2^60) would attempt to allocate
+    // petabytes (bad_alloc/OOM-kill) before any read. Post-fix the reserve clamps to
+    // remaining()/12 and the first KV read fails on EOF -> clean nullptr.
     GgufBytes g = build_valid_gguf();
     patch_u64(g.buf, g.off_kv_count, (uint64_t{1} << 60));
     EXPECT_TRUE(load_is_clean(g.buf));
@@ -367,11 +345,10 @@ TEST(GgufFaultInjection, StringLengthOverflow) {
 // ---- Unknown array element type (infinite-loop guard) ----
 
 TEST(GgufFaultInjection, UnknownArrayElementTypeHugeCount) {
-    // Build a file whose single KV value is an ARRAY whose element type is an
-    // unknown/unsupported enum (99) with count = 2^60. read_gguf_value's switch
-    // has no default → it consumes 0 bytes per element. Pre-fix the loop would
-    // spin 2^60 times (~forever). Post-fix the unknown element type fails the
-    // reader immediately. We assert it returns within a generous time bound.
+    // A KV array value with an unknown/unsupported element type (99) and count=2^60:
+    // read_gguf_value's switch has no default, so it consumed 0 bytes/element and pre-fix the
+    // loop spun 2^60 times (~forever). Post-fix the unknown type fails the reader immediately;
+    // asserted to return within a generous time bound.
     constexpr uint32_t T_ARRAY = 9;
     GgufBytes g;
     Writer w(g.buf);
@@ -399,10 +376,9 @@ TEST(GgufFaultInjection, UnknownArrayElementTypeHugeCount) {
 // ---- Tensor offset / dim corruption ----
 
 TEST(GgufFaultInjection, TensorOffsetPastEof) {
-    // Set token_embd.weight's data offset far beyond the file. data_base+offset
-    // would point past the mmap. The bounds check must SKIP the tensor — the
-    // unfixed loader instead hands weight_upload a wild pointer (an OOB read /
-    // GPU fault on a real model). Observable here: the embedding stays unset.
+    // token_embd.weight's data offset set far beyond the file (would point past the mmap): the
+    // bounds check must SKIP the tensor - the unfixed loader instead hands weight_upload a wild
+    // pointer. Observable here: the embedding stays unset.
     GgufBytes g = build_valid_gguf();
     patch_u64(g.buf, g.off_tensor_data_offset, 1'000'000'000ULL);
     auto m = load_buf(g.buf);
@@ -421,10 +397,9 @@ TEST(GgufFaultInjection, TensorOffsetMaxU64) {
 }
 
 TEST(GgufFaultInjection, TensorDimOverflow) {
-    // ne[0] = 2^40 and ne[1] = 2^40 → element count overflows int64 and the
-    // byte size overflows size_t. The saturating size computation must return
-    // SIZE_MAX and the tensor must be rejected (not wrap to a small "valid"
-    // size that then passes the bounds check and yields a wild pointer).
+    // ne[0]=2^40, ne[1]=2^40: element count overflows int64 and byte size overflows size_t. The
+    // saturating size computation must return SIZE_MAX and reject the tensor, not wrap to a
+    // small "valid" size that passes bounds checking and yields a wild pointer.
     GgufBytes g = build_valid_gguf();
     patch_u64(g.buf, g.off_tensor_dim0, uint64_t{1} << 40);
     patch_u64(g.buf, g.off_tensor_dim0 + 8, uint64_t{1} << 40);
@@ -457,10 +432,8 @@ TEST(GgufFaultInjection, NonexistentTensorType) {
 // ---- Alignment abuse ----
 
 TEST(GgufFaultInjection, ZeroAlignmentMetadata) {
-    // general.alignment = 0 would make `pos_ % 0` a divide-by-zero in the
-    // reader's align(). The loader guards alignment==0 → falls back to the
-    // default. We inject it by appending a KV; simplest is to rebuild with an
-    // alignment KV. Here we assert the guard via a from-scratch buffer.
+    // general.alignment=0 would make pos_ % 0 a divide-by-zero in the reader's align(); the
+    // loader must guard alignment==0 and fall back to the default.
     constexpr uint32_t T_U32 = 4;
     GgufBytes g;
     Writer w(g.buf);
@@ -490,22 +463,20 @@ TEST(GgufFaultInjection, NDimsAboveFourIsRefused) {
     EXPECT_EQ(load_buf(g.buf), nullptr) << "a tensor with n_dims > 4 must refuse the file";
 }
 
-// Wire type 9 = Q8_1, llama.cpp's activation format. No dequant, no kernel and
-// no registry entry exist for it, and the 1:1 map to QType::Q8_1 let such a
-// tensor load and reach dispatch with no path (AUDIT_arch_2026 G-8). An unknown
-// type (9999, above) is SKIPPED because its size is unknown; Q8_1 has a size,
-// so it must be REFUSED, not skipped.
+// Wire type 9 = Q8_1 (llama.cpp's activation format): no dequant, kernel, or registry entry
+// exists for it, and the 1:1 map to QType::Q8_1 let such a tensor load and reach dispatch
+// with no path (AUDIT_arch_2026 G-8). An unknown type is SKIPPED (unknown size); Q8_1 has a
+// known size, so it must be REFUSED instead.
 TEST(GgufFaultInjection, Q8_1WeightTypeIsRefusedAtParse) {
     GgufBytes g = build_valid_gguf();
     patch_u32(g.buf, g.off_tensor_type, 9);
     EXPECT_EQ(load_buf(g.buf), nullptr) << "a Q8_1 weight tensor must refuse the file";
 }
 
-// The well-formed variant: n_dims = 5 WITH five dim words [4,4,1,1,1]. The
-// unfixed parser read the first four, skipped the fifth, passed the bounds
-// check (16 floats), and the loader's shape loop then wrote shape[4] and read
-// dims[4] - one stack slot and one struct field past the end - before the
-// Tensor constructor's IMP_CHECK aborted the process. Fixed: refused at parse.
+// n_dims=5 with five dim words: the unfixed parser read the first four, skipped the fifth,
+// passed the bounds check (16 floats), and the loader's shape loop then wrote shape[4] and
+// read dims[4] - one stack slot and one struct field past the end - before the Tensor
+// constructor's IMP_CHECK aborted the process. Fixed: refused at parse.
 TEST(GgufFaultInjection, FiveDimWordsAreRefusedAtParse) {
     GgufBytes g;
     Writer w(g.buf);
@@ -531,10 +502,10 @@ TEST(GgufFaultInjection, FiveDimWordsAreRefusedAtParse) {
     EXPECT_EQ(load_buf(g.buf), nullptr) << "five dim words must refuse the file at parse";
 }
 
-// A gemma4 file that supplies its own sliding_window_pattern: swa_layers gets
-// the ARRAY's length, and the per-layer head_dim loop indexed it with
-// block_count (F1-5). The same builder with block_count past the cap exercises
-// the check that used to run 300 lines after the per-layer resizes.
+// A gemma4 file supplying its own sliding_window_pattern: swa_layers gets the ARRAY's
+// length, and the per-layer head_dim loop indexed it with block_count (F1-5). The same
+// builder with block_count past the cap exercises the check that used to run 300 lines after
+// the per-layer resizes.
 GgufBytes build_gemma4_gguf(uint32_t block_count, const std::vector<uint32_t>& pattern) {
     GgufBytes g;
     Writer w(g.buf);

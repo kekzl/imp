@@ -168,15 +168,10 @@ TEST_F(WeightDispatchTest, FP16_GemvMatchesDirect) {
 // FP8 tier
 // ===========================================================================
 
-// gemm_dispatch FP8 tier: pre-quantize BOTH weights and activation to FP8,
-// build handle, verify dispatch produces the same result as calling
-// gemm_cublaslt directly.
-//
-// cuBLASLt on sm_120 requires FP8×FP8 (both operands FP8); FP16×FP8 mixed is
-// NOT supported (CUBLAS_STATUS_NOT_SUPPORTED=15).  So both x (activation) and
-// the weight must be FP8_E4M3.  gemm_dispatch passes x through unchanged to
-// gemm_cublaslt, so if the caller provides a FP8 activation tensor, the call
-// is byte-for-byte identical.
+// gemm_dispatch FP8 tier: cuBLASLt on sm_120 requires FP8xFP8 for both operands (FP16xFP8
+// mixed is CUBLAS_STATUS_NOT_SUPPORTED); gemm_dispatch passes activation through unchanged,
+// so a caller-provided FP8 activation makes dispatch byte-for-byte identical to direct
+// gemm_cublaslt.
 TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     const int M = 16, N = 32, K = 64;
 
@@ -232,10 +227,8 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     h.payload.fp8.data = reinterpret_cast<__nv_fp8_e4m3*>(d_w_fp8);
     h.payload.fp8.d_scale = d_w_scale;
 
-    // gemm_dispatch FP8: calls gemm_cublaslt(x, fp8_w, y, alpha, beta, nullptr, d_scale)
-    // For byte-identity, we pass null aScale in dispatch (same as direct when aScale ignored)
-    // and use the same x tensor. But the direct call uses d_x_scale as aScale.
-    // To make them identical: direct call also with nullptr aScale.
+    // For byte-identity both dispatch and the direct call must use nullptr aScale (dispatch
+    // passes null; the direct call otherwise uses d_x_scale).
     cudaMemset(d_y_direct, 0, M * N * sizeof(half));
     gemm_cublaslt(x_fp8_t, w_fp8_t, y_direct, 1.0f, 0.0f, nullptr, d_w_scale, stream_);
     cudaStreamSynchronize(stream_);
@@ -331,24 +324,14 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
 // NVFP4 tier
 // ===========================================================================
 
-// gemm_dispatch NVFP4 tier (M>1): quantize FP16 weight → NVFP4, build handle,
-// call dispatch.  Compare vs gemm_nvfp4 direct call.
-//
-// Dispatch reconstructs NvFP4QuantResult with tensor_scale=1.0f (phase-2 shim
-// limitation: payload has null device ptr for tensor_scale).  Direct call also
-// uses tensor_scale=1.0f since we force it after quantization.
-// If tensors are zero-weight the test trivially passes; use non-zero values.
+// gemm_dispatch NVFP4 tier (M>1) vs direct gemm_nvfp4: dispatch reconstructs
+// NvFP4QuantResult with tensor_scale=1.0f (phase-2 shim limitation, payload has a null device
+// ptr for tensor_scale); direct call matches by forcing the same value post-quantization.
 TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
-    // gemm_nvfp4 convention (matches PyTorch nn.Linear):
-    //   A (weight, NVFP4): [N_out, K_in]
-    //   B (input,  FP16):  [M_batch, K_in]
-    //   C (output, FP16):  [M_batch, N_out]
-    // The fallback path computes  C = B @ A_fp16^T  via standard cuBLAS GEMM,
-    // so the output's first dim is the input's batch dim, not the weight's
-    // output-feature dim. (Earlier test code mixed up M and N → shape error
-    // at gemm_nvfp4:1251.)
-    //
-    // K must be multiple of 16 (NVFP4 micro-block size).
+    // gemm_nvfp4 convention (matches PyTorch nn.Linear): weight A [N_out,K_in], input B
+    // [M_batch,K_in], output C [M_batch,N_out]; fallback computes C = B @ A_fp16^T, so output's
+    // first dim is the batch dim, not the weight's output-feature dim (earlier test code mixed up
+    // M/N -> shape error at gemm_nvfp4:1251). K must be a multiple of 16 (NVFP4 micro-block).
     const int N_OUT = 16, M_BATCH = 8, K = 64;
 
     std::vector<half> h_w(N_OUT * K), h_x(M_BATCH * K);
@@ -418,14 +401,11 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     cudaFree(d_y_disp);
 }
 
-// Regression: prequant-loaded NVFP4 weight handles carry the PACKED K/2 in
-// shape[1] (two FP4 nibbles per byte), NOT the logical K — an inconsistent
-// convention vs the handles built above (which use logical K). The phase-2 shim
-// must derive K from the activation, never from the handle, or the M>1 dequant
-// GEMM fallback aborts "B.shape[1]=<K> must equal weight K=<K/2>". This is the
-// native-NVFP4 server crash that surfaced when a large KV budget starved the
-// CUTLASS prefill workspace and forced the dequant fallback. Identical to
-// NVFP4_GemmMatchesDirect except h.shape[1] holds the PACKED dimension.
+// Prequant-loaded NVFP4 weight handles carry PACKED K/2 in shape[1] (two nibbles/byte), not
+// logical K, inconsistent with handles built elsewhere (logical K). The phase-2 shim must
+// derive K from the activation, never the handle, or the M>1 dequant fallback aborts - the
+// native-NVFP4 server crash that surfaced when a large KV budget starved the CUTLASS prefill
+// workspace and forced the dequant fallback.
 TEST_F(WeightDispatchTest, NVFP4_GemmPackedShapeMatchesDirect) {
     const int N_OUT = 16, M_BATCH = 8, K = 64;
 
@@ -558,15 +538,9 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
 // CUTLASS_NVFP4 tier
 // ===========================================================================
 
-// gemm_dispatch CUTLASS_NVFP4 tier (M>1): quantize FP16 → NVFP4 → CUTLASS
-// weight format, build handle, call dispatch.
-//
-// Dispatch reconstructs CutlassNvFP4Weight from payload, quantizes the FP16
-// activation using workspace, and calls gemm_nvfp4_cutlass_sm120.
-// Direct call does the same manually.
-//
-// If CUTLASS kernel is unavailable (cutlass_sm120_nvfp4_available()==false),
-// skip the test.
+// gemm_dispatch CUTLASS_NVFP4 tier (M>1): dispatch reconstructs CutlassNvFP4Weight from the
+// payload and calls gemm_nvfp4_cutlass_sm120, same as the direct call. Skips if the CUTLASS
+// kernel is unavailable.
 TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     if (!cutlass_sm120_nvfp4_available()) {
         GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not compiled/available on this device";
@@ -667,18 +641,11 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     cudaFree(d_y_disp);
 }
 
-// gemv_dispatch CUTLASS_NVFP4 (M=1): CUTLASS_NVFP4 is a prefill-only tier and
-// the consumer decode path uses the NVFP4 tier directly, so reaching this case
-// is a routing bug in the caller.
-//
-// This test used to assert the opposite. It was named `CUTLASS_NVFP4_GemvIsStub`
-// and asserted EXPECT_NO_THROW with the comment "output buffer is unchanged
-// (stub returns early)" - i.e. it pinned a branch that answered with whatever
-// the output buffer already held, behind one ERROR line, and it pinned it as
-// the expected behaviour. That is the shape #654 removed from
-// attention_prefill_dispatch: "no tier accepted" is an error, not a degraded
-// answer (SETTLED.md S-22). The routing check the test was written for is kept;
-// what changed is what counts as correct routing behaviour.
+// CUTLASS_NVFP4 is prefill-only; the decode path uses the NVFP4 tier directly, so reaching
+// this case in gemv_dispatch is a routing bug in the caller. Used to assert the OPPOSITE
+// (EXPECT_NO_THROW, stub returns early leaving stale output) - the #654 shape SETTLED S-22
+// removed from attention_prefill_dispatch: "no tier accepted" must be an error, not a
+// degraded answer. Routing check kept; what counts as correct behavior changed.
 TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleMemory) {
     const int M = 8, K = 32;
 
@@ -731,11 +698,8 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleM
 // MXFP4 tier
 // ===========================================================================
 
-// gemm_dispatch MXFP4 tier (M>1): quantize FP16 weight → NVFP4 → convert to
-// MXFP4 CUTLASS format, build handle, call dispatch.
-//
-// Dispatch reconstructs CutlassMxFP4Weight and calls gemm_mxfp4_cutlass_sm120.
-// K must be multiple of 32 (UE8M0 SFVecSize=32).
+// gemm_dispatch MXFP4 tier (M>1): dispatch reconstructs CutlassMxFP4Weight and calls
+// gemm_mxfp4_cutlass_sm120. K must be a multiple of 32 (UE8M0 SFVecSize).
 TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     if (!cutlass_sm120_mxfp4_available()) {
         GTEST_SKIP() << "CUTLASS sm_120 MXFP4 not compiled/available on this device";

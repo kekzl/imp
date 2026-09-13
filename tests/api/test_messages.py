@@ -117,10 +117,8 @@ class TestMessagesValidation:
         _assert_anthropic_error(r, 400)
         assert "model" in r.json()["error"]["message"]
 
-    # The imp `speculative` extension is passed through verbatim by the shim and
-    # validated once, by the shared OpenAI parser. What the Anthropic surface
-    # owns is the ENVELOPE: a refusal here must be the Anthropic error shape,
-    # not the OpenAI one.
+    # imp `speculative` extension passes through verbatim, validated once by the shared OpenAI
+    # parser; the Anthropic surface only owns the error ENVELOPE shape, not the validation.
     @pytest.mark.parametrize("value", ["yes", 1, {"mtp_k": -1}, {"mtp_k": 99}, {"mtp_k": "2"}])
     def test_speculative_field_rejected_in_the_anthropic_envelope(self, client, model, value):
         r = client.post("/v1/messages", json=_msg(model=model, speculative=value))
@@ -166,12 +164,9 @@ class TestMessagesValidation:
         r = client.post("/v1/messages/nope", json={})
         _assert_anthropic_error(r, 404, err_type="not_found_error")
 
-    # A content block this server cannot read used to reach generation on this
-    # endpoint alone. `anthropic_to_openai_body` runs first and its block loop
-    # has no `else`, so the block was deleted and the OpenAI-side check found a
-    # clean body: the gate stood in front of the check. Measured against the
-    # model-less binary, `input_audio` was 400 on /v1/chat/completions and
-    # /v1/responses and fell through here.
+    # anthropic_to_openai_body's block loop has no `else`: an unreadable content block (e.g.
+    # input_audio) was silently dropped and the OpenAI-side check saw a clean body, reaching
+    # generation instead of the expected 400.
     @pytest.mark.parametrize("block", [
         {"type": "input_audio", "input_audio": {"data": "AA", "format": "wav"}},
         {"type": "video_url", "video_url": {"url": "x"}},
@@ -364,8 +359,6 @@ class TestMessagesGeneration:
         n_short = short.json()["input_tokens"]
         n_long = long.json()["input_tokens"]
         assert n_short > 0
-        # Compared against each other, not a magic number: the absolute count is
-        # tokenizer- and template-specific, but 200 repetitions of a word have to
-        # add at least ~150 tokens on any tokenizer. A ratio would break on a
-        # model whose chat template inflates the short baseline.
+        # Compare against a baseline count, not an absolute: tokenizer/template-specific, but 200
+        # word repetitions must add >=150 tokens on any tokenizer. A ratio breaks on template inflation.
         assert n_long > n_short + 150, (n_short, n_long)

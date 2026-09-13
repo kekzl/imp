@@ -379,10 +379,8 @@ TEST(ActivationTest, GeluInfInput) {
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
-    // GELU with extreme inputs: verify no crash. tanhf(±inf) behavior is
-    // implementation-defined on GPU, so we just check finite or expected inf.
-    // gelu(+inf) should be +inf or very large, gelu(-inf) should be ~0 or NaN
-    // (both are acceptable — the key property is no CUDA error/crash).
+    // GELU with +-inf inputs: tanhf(+-inf) is implementation-defined on GPU; only check
+    // finite-or-expected-inf and no CUDA error/crash.
     EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "GELU kernel error with Inf inputs";
 
     free_gpu_tensor(d_x);
@@ -461,10 +459,8 @@ TEST(SoftmaxTest, NumericalStability) {
     free_gpu_tensor(d_out);
 }
 
-// NOTE: SoftmaxTest.SingleElement lives in test_softmax.cu — the copy that was
-// here collided with it (same suite.test name in the same test-compute binary)
-// and asserted the identical single-element→1.0 property. Removed to keep one
-// registration.
+// SoftmaxTest.SingleElement lives in test_softmax.cu, not here (same suite.test name would
+// collide in this binary).
 
 TEST(SoftmaxTest, FP16) {
     constexpr int rows = 1;
@@ -518,13 +514,9 @@ TEST(SoftmaxTest, LargeRow) {
     free_gpu_tensor(d_out);
 }
 
-// ===========================================================================
-// SwigluNvfp4ProducerBitIdentity -- the fused swiglu + NVFP4 quantize
-// producer kernel must emit (a) the same FP16 bytes as swiglu() and (b) the
-// same packed nibbles + FP8 micro-scales as quantize_fp16_to_nvfp4_into()
-// run on that FP16 output. Inputs include near-zero and +/-1000-range
-// micro-blocks to exercise both scale clamps.
-// ===========================================================================
+// SwigluNvfp4ProducerBitIdentity: fused swiglu+NVFP4 quantize producer must emit the same
+// FP16 bytes as swiglu() and the same packed nibbles/FP8 micro-scales as
+// quantize_fp16_to_nvfp4_into() on that output; inputs include near-zero and +-1000 range.
 TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
     const int shapes[][2] = {{3, 4096}, {32, 17408}};
     for (auto& sh : shapes) {

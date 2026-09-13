@@ -1,10 +1,6 @@
-// Reading an FP8 checkpoint as a quantization source.
-//
-// The two things here that cannot be checked by looking at a converted
-// checkpoint: the E4M3 bit layout, and the block-scale stride. Both produce
-// numbers of a plausible magnitude when wrong, so a model built on a wrong
-// exponent bias or a transposed scale grid loads, generates, and is simply a
-// worse model than it should be.
+// Two things a converted checkpoint alone can't reveal: the E4M3 bit layout and the
+// block-scale stride. Both produce plausible-magnitude numbers when wrong, so a wrong
+// exponent bias or transposed scale grid loads and generates, just worse.
 
 #include "../tools/imp-quantize/fp8_source.h"
 

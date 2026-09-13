@@ -1,15 +1,7 @@
-// =============================================================================
-// test_penalty_hist_append.cu — the batched penalty-history append kernel
-// =============================================================================
-//
-// One launch appends row i's sampled token (strided sample slots) into
-// hist[slots[i] * cap + offs[i]]; offs[i] < 0 skips the row, offs >= cap is
-// refused. This is the device half of the n>1 decode loop's per-request
-// penalty histories (engine_scheduler.cpp sample_per_request), which replaced
-// the per-row pageable re-upload of the whole output history.
-//
-// GPU required — skips cleanly without one.
-// =============================================================================
+// Batched penalty-history append: one launch appends row i's token into
+// hist[slots[i]*cap+offs[i]] (offs<0 skips, offs>=cap refused). Device half of the n>1 decode
+// loop's per-request penalty histories (engine_scheduler.cpp sample_per_request), replacing
+// per-row pageable re-upload of the whole history.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

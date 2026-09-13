@@ -359,10 +359,8 @@ TEST(ExecutorKernelsTest, ResidualAddRMSNorm) {
     residual_add_rmsnorm(hidden, residual, weight, output, 1e-5f, nullptr);
     cudaDeviceSynchronize();
 
-    // After: hidden = 1.0 + 1.0 = 2.0 for all elements
-    // RMSNorm(2.0, 2.0, ...) with weight=1.0:
-    //   rms = sqrt(mean(4.0)) = 2.0
-    //   output = 2.0 / 2.0 * 1.0 = 1.0
+    // hidden=1.0+1.0=2.0 for every element; RMSNorm(2.0,...) with weight=1.0:
+    // rms=sqrt(mean(4.0))=2.0, output=2.0/2.0*1.0=1.0.
     auto result = read_fp16(output);
     for (int i = 0; i < d; i++) {
         EXPECT_NEAR(result[i], 1.0f, 0.01f) << "norm mismatch at " << i;
@@ -438,11 +436,9 @@ TEST(ExecutorKernelsTest, RMSNormAddResidual) {
     free_tensor(output);
 }
 
-// =========================================================================
-// decode_pipeline_advance: chained-step state advance for the pipelined
-// batched decode — slot tokens → token_ids, positions/context_lens += 1,
-// block-table scatter from mapped pinned patch arrays.
-// =========================================================================
+// decode_pipeline_advance: chained-step state advance for pipelined batched decode - slot
+// tokens -> token_ids, positions/context_lens += 1, block-table scatter from mapped pinned
+// patch arrays.
 
 TEST(ExecutorKernelsTest, DecodePipelineAdvance) {
     constexpr int n = 3;

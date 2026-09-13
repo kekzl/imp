@@ -1,13 +1,8 @@
-// Destination classification for remote `image_url` fetching (#1610).
-//
-// The fetch was an SSRF primitive: host taken verbatim from an unauthenticated
-// request body, redirects followed, no allowlist, no body cap, no read timeout.
-// The default is now off, and this file pins the part that decides where the
-// server is allowed to connect when it is on.
-//
-// CPU lane on purpose. Everything here is address arithmetic plus getaddrinfo
-// on literals; nothing opens a socket, so CI - which has no GPU and no network
-// guarantee - runs it on every pull request.
+// Destination classification for remote image_url fetching (#1610): the fetch was an SSRF
+// primitive (host taken verbatim from an unauthenticated body, redirects followed, no
+// allowlist, no body cap, no read timeout). Default is now off; this pins where the server
+// may connect when it is on. CPU lane: pure address arithmetic + getaddrinfo on literals, no
+// socket opened.
 
 #include <gtest/gtest.h>
 

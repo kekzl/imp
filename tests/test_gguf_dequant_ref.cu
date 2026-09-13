@@ -1,40 +1,14 @@
-// =============================================================================
-// TEST_AUDIT (retired) Phase 2.6 — Risk #8
-// Every GGUF dequant kernel, and the dp4a/MMVQ GEMVs on top of them, against
-// the format-derived fp64 reference in `gguf_format_ref.h`.
-//
-// WHY THIS EXISTS (audit §3 risk #8, §2 class-B critique):
-//   The existing tests/test_mmvq.cu compares imp's MMVQ kernel against imp's
-//   dp4a kernel (imp-vs-imp == class B tautology). All of GGUF serving
-//   consumes these dequant + GEMV kernels, yet only INT4/INT8 toy refs
-//   existed. This file is the class-A anchor: `gguf_format_ref.h` re-derives
-//   each block format's byte layout and dequant ARITHMETIC from the ggml
-//   definition, and this file launches imp's kernels against it. Six formats
-//   had no reference at all until AUDIT_arch_2026 D-5, and Q3_K turned out to
-//   be reading the wrong high-bit plane in both of its kernels.
-//
-// INDEPENDENCE (audit §4 — no tautologies): stated in `gguf_format_ref.h`,
-//   which owns both halves. Edge cases (d = 0, all-63 / all-0 6-bit scales,
-//   max-magnitude scale halfs, a NaN d-half) come from its ScaleMode set and
-//   are exercised here with a hard no-NaN/Inf guard.
-//
-// TOLERANCES (audit §4 tolerance policy — derived per path):
-//   * Dequant kernel (pure decode, half-rounding only): the kernel computes
-//     d*sc*q in fp32 then rounds to f16 once. The fp64 reference rounds the
-//     same product to f16. Both see identical input bits, so the only spread
-//     is fp32-vs-fp64 accumulation of a 2-3 factor product => <= 1e-3 rel
-//     (1 ulp of f16 ~= 2^-11 ~= 4.9e-4; we measure and assert 1e-3).
-//   * fp16-dequant GEMV (gemv_q8_0 / gemv_q6k): dequant in fp32, dot in fp32,
-//     output rounded to f16. Reference: dequant in fp64, dot the ORIGINAL f16
-//     x in fp64. Error = fp32-vs-fp64 dot over K terms + one f16 output round.
-//     fp16-class => <= 1e-2 rel (justified per audit §4, measured).
-//   * dp4a / MMVQ GEMV (gemv_*_q8_1, ggml_mmvq_*): these ALSO quantize the
-//     activations x to Q8_1 (amax/127 per 32-block, ggml-standard). That adds
-//     ~0.4% RMS per-element activation noise on top of the f16 dot. Over a
-//     K-term dot this does NOT fully average out (correlated within a block),
-//     so we derive ~1-2% and MEASURE the real envelope, asserting 2.5e-2 rel
-//     with the per-test printed stats as the characterization record.
-// =============================================================================
+// TEST_AUDIT(retired) Phase 2.6 risk #8: every GGUF dequant kernel + dp4a/MMVQ GEMVs vs the
+// format-derived fp64 reference in gguf_format_ref.h - the class-A anchor (test_mmvq.cu
+// compares imp's MMVQ against imp's dp4a, a class-B tautology). Six formats had no reference
+// until AUDIT_arch_2026 D-5; Q3_K turned out to read the wrong high-bit plane in both kernels.
+// Independence: gguf_format_ref.h owns both halves; edge cases (d=0, all-63/all-0 6-bit
+// scales, max-magnitude scale halfs, NaN d-half) come from its ScaleMode set, hard no-NaN/Inf
+// guard.
+// Tolerances (per path, audit SS4 policy): dequant kernel (fp32 compute, one f16 round) <=
+// 1e-3 rel; fp16-dequant GEMV (fp32 dot, fp64-vs-fp32 error + f16 round) <= 1e-2 rel; dp4a/
+// MMVQ GEMV (also Q8_1-quantizes activations, ~0.4% RMS/elem, does not fully average) <=
+// 2.5e-2 rel, measured and printed per test.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -105,12 +79,10 @@ void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, dou
     std::vector<double> ref;
     ref_dequant_all(buf, N, K, qt, ref);
 
-    // No-NaN/Inf guard (the real Gemma-class assert). NORMAL/ZERO_D weights can
-    // never overflow f16, so the GPU must be all-finite. MAXMAG (d=65504 * full
-    // quant range) DELIBERATELY overflows f16 — there a finite output would be
-    // WRONG; the independent check is "GPU is non-finite exactly where the
-    // f16-rounded fp64 reference is non-finite" (verified in the loop below).
-    // NAN_D injects a NaN scale half: only assert no crash / no UB (no compare).
+    // No-NaN/Inf guard: NORMAL/ZERO_D weights can never overflow f16, so GPU output must be
+    // all-finite. MAXMAG (d=65504 * full quant range) DELIBERATELY overflows f16 - there a finite
+    // output would be WRONG; checks GPU is non-finite exactly where the fp64 reference is.
+    // NAN_D injects a NaN scale half: only asserts no crash/UB, no compare.
     if (mode == NORMAL || mode == ZERO_D) {
         ASSERT_FALSE(any_nan_inf(hOut)) << name << ": dequant produced NaN/Inf on finite weights";
     }
@@ -180,13 +152,10 @@ struct GemvStats {
     int worst;
 };
 
-// Compare GEMV output to the fp64 reference. Per-element relative error is the
-// WRONG metric for a dot product: genuine sign cancellation drives some ref
-// outputs to ~0, where any absolute noise explodes the per-element ratio
-// (measured 5x-30x on the q8_1 path). The honest column-vector metric is the
-// error normalized by the TYPICAL output magnitude rms(ref): it answers "how
-// large is the noise relative to a representative logit", which is exactly what
-// matters for argmax/softmax downstream.
+// Per-element relative error is the wrong metric for a dot product: sign cancellation drives
+// some ref outputs near 0, where absolute noise explodes the ratio (measured 5x-30x on the
+// q8_1 path). Normalize by rms(ref) instead - error relative to a typical output magnitude,
+// which is what matters for argmax/softmax downstream.
 GemvStats gemv_eval(const std::vector<half>& gpu, const std::vector<double>& ref) {
     GemvStats s{};
     double sum_sq = 0.0, sum_err_sq = 0.0;
@@ -212,17 +181,9 @@ GemvStats gemv_eval(const std::vector<half>& gpu, const std::vector<double>& ref
 
 }  // namespace
 
-// =============================================================================
-// DEQUANT-KERNEL TESTS (path: src/quant/dequant_gpu.cu)
-//
-// TYPED_TEST over the GGUF block formats (R8 / audit §Phase-2 R8: "parametrize
-// where it's cheap and real"). The dequant test body is one shared skeleton —
-// build synthetic blocks, run dequant_gpu, compare to the fp64 reference over
-// the 4 scale modes — that already dispatches on QType (build_* + ref_dequant_all
-// switch). The heterogeneous part is the per-format fp64 reference, which stays
-// in its own function; only the launch+compare driver is parametrized. Each
-// format is a compile-time tag carrying its QType + name; the body is identical.
-// =============================================================================
+// TYPED_TEST over GGUF block formats (R8): one shared skeleton (build synthetic blocks, run
+// dequant_gpu, compare to fp64 ref over 4 scale modes) dispatches on QType; only the
+// per-format fp64 reference differs and stays in its own function.
 template <QType QT>
 struct QTypeTag {
     static constexpr QType value = QT;
@@ -231,10 +192,9 @@ struct QTypeTag {
 template <typename T>
 class GgufDequant : public ::testing::Test {};
 
-// Every QType `dequant_gpu_supported()` accepts. Six of them (Q4_1, Q5_0,
-// Q5_1, Q2_K, Q3_K, Q8_K) shipped a decode path with no numerical check at any
-// level until AUDIT_arch_2026 D-5; `DequantSupportedFormatsAllHaveAReference`
-// below fails if the loader ever accepts a seventh without one.
+// Every QType dequant_gpu_supported() accepts; six (Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K)
+// shipped with no numerical check at any level until AUDIT_arch_2026 D-5.
+// DequantSupportedFormatsAllHaveAReference fails if a seventh is ever accepted with none.
 using GgufDequantFormats = ::testing::Types<
     QTypeTag<QType::Q8_0>, QTypeTag<QType::Q4_0>, QTypeTag<QType::Q4_1>, QTypeTag<QType::Q5_0>,
     QTypeTag<QType::Q5_1>, QTypeTag<QType::Q2_K>, QTypeTag<QType::Q3_K>, QTypeTag<QType::Q4_K>,
@@ -257,10 +217,9 @@ TYPED_TEST(GgufDequant, AllScaleModes) {
     check_dequant(name, qt, 8, 256, NAN_D, 1e-3);  // no-crash / UB guard
 }
 
-// Two-way: the typed suite above covers exactly the formats `dequant_gpu`
-// serves. Accepting a format with no reference is how six of them shipped
-// unchecked (D-5); carrying a reference for a format the loader no longer
-// accepts is dead test weight. Both directions fail here.
+// Two-way: the typed suite covers exactly the formats dequant_gpu serves. A format with no
+// reference is how six shipped unchecked (D-5); a reference for a format the loader no
+// longer accepts is dead test weight. Both directions fail here.
 TEST(GgufDequantCoverage, EverySupportedFormatHasAReference) {
     // Every wire-stable QType, whether or not imp dequantizes it.
     const QType kAllWireTypes[] = {QType::F32,    QType::F16,  QType::Q4_0, QType::Q4_1, QType::Q5_0,
@@ -280,10 +239,8 @@ TEST(GgufDequantCoverage, EverySupportedFormatHasAReference) {
     }
 }
 
-// =============================================================================
-// fp16-DEQUANT GEMV TESTS (gemv_q8_0 / gemv_q6k — fp32 dot, no q8_1 act quant)
-// Tolerance: fp16-class 1e-2 rel.
-// =============================================================================
+// fp16-dequant GEMV (gemv_q8_0/gemv_q6k: fp32 dot, no q8_1 act quant). Tolerance: fp16-class
+// 1e-2 rel.
 TEST(GgufRef, Q8_0_GemvFp16) {
     const int N = 256, K = 1024;
     Lcg g(0x5151u);
@@ -344,10 +301,8 @@ TEST(GgufRef, Q6_K_GemvFp16) {
     cudaFree(dy);
 }
 
-// =============================================================================
-// dp4a / MMVQ GEMV TESTS — these quantize activations to Q8_1 (amax/127).
-// Tolerance: q8_1-activation band ~1-2%, asserted at 2.5e-2, MEASURED below.
-// =============================================================================
+// dp4a/MMVQ GEMV: quantizes activations to Q8_1 (amax/127). Tolerance: q8_1-activation band
+// ~1-2%, asserted at 2.5e-2, MEASURED below.
 namespace {
 
 using namespace gguf_ref;  // Lcg, ScaleMode, ref_dequant_*, build_*, kFormats, format_spec
@@ -386,10 +341,9 @@ void run_dp4a_gemv(const char* name, QType qt, int N, int K,
            "gpu=%.4f ref=%.4f)\n",
            name, N, K, s.max_rel_scaled, s.rms_rel, s.max_abs, s.ref_rms, s.worst,
            __half2float(hy[s.worst]), yref[s.worst]);
-    // q8_1 activation quant (amax/127 per 32-block) adds ~0.4% RMS per element.
-    // Over a K-dot that does not fully cancel (correlated within a block), so we
-    // bound the typical-magnitude-normalized RMS at 1.5% and the single worst
-    // element at 5% (cancellation tail). Both MEASURED — see printed stats.
+    // q8_1 activation quant (amax/127 per 32-block) adds ~0.4% RMS/element; over a K-dot it does
+    // not fully cancel (correlated within a block), so typical-magnitude-normalized RMS is
+    // bounded at 1.5% and the single worst element at 5% (cancellation tail), both MEASURED.
     EXPECT_LT(s.rms_rel, 1.5e-2) << name << ": dp4a gemv RMS outside q8_1-activation band";
     EXPECT_LT(s.max_rel_scaled, 5e-2) << name << ": dp4a gemv worst element outside band";
 
@@ -445,11 +399,10 @@ void run_mmvq_gemv(const char* name, QType qt, int N, int K,
 }  // namespace
 
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
-// Q4_0 dp4a-GEMV vs the fp64 reference. This oracle surfaced AUDIT.md F1:
-// Q4_0_Traits::dp4a_block read nibbles INTERLEAVED (2k = qs[k] low, 2k+1 = qs[k]
-// high) while standard ggml Q4_0 is SPLIT (element e = qs[e] low, e+16 = qs[e]
-// high), mispairing weights with the natural-order Q8_1 activations (~6x off).
-// Fixed to the split extraction the Q4_K path already uses; now asserted.
+// Q4_0 dp4a-GEMV vs fp64 reference surfaced AUDIT.md F1: Q4_0_Traits::dp4a_block read
+// nibbles INTERLEAVED (2k=low,2k+1=high) while standard ggml Q4_0 is SPLIT (e=low,e+16=high),
+// mispairing weights with natural-order Q8_1 activations (~6x off). Fixed to the split
+// extraction the Q4_K path already uses.
 TEST(GgufRef, Q4_0_GemvDp4a) { run_dp4a_gemv("Q4_0", QType::Q4_0, 256, 1024, gemv_q4_0_q8_1); }
 TEST(GgufRef, Q6_K_GemvDp4a) { run_dp4a_gemv("Q6_K", QType::Q6_K, 256, 1024, gemv_q6k_q8_1); }
 TEST(GgufRef, Q4_K_GemvDp4a) { run_dp4a_gemv("Q4_K", QType::Q4_K, 256, 1024, gemv_q4_k_q8_1); }

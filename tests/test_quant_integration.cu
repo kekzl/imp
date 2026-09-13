@@ -115,10 +115,6 @@ static std::unique_ptr<Model> make_test_model(int d_model, int d_ff, int n_heads
 
     int head_dim = d_model / n_heads;
 
-    // Allocate host-side buffers that will persist for the model's lifetime.
-    // Store them in static vectors so they outlive the test (cleared in each test).
-    // Actually, we'll use the model's mmap trick: allocate a big buffer as mmap_base_.
-    // For simplicity, use malloc and set mmap_base_ = nullptr (no mmap cleanup needed).
 
     // Helper: create an FP16 weight tensor on host filled with small random values.
     auto make_fp16_weight = [](int rows, int cols, std::mt19937& rng) -> std::pair<void*, Tensor> {
@@ -162,12 +158,6 @@ static std::unique_ptr<Model> make_test_model(int d_model, int d_ff, int n_heads
         return {buf, t};
     };
 
-    // Track all host allocations for cleanup.
-    // We'll use a shared vector stored as the model's "fake mmap" data.
-    // For test cleanup, the caller should delete the model.
-    // We store raw pointers in a static thread_local vector and clean up per-model.
-    // Actually, simplest: just leak in tests (GTest cleans up process anyway) or
-    // we can track via a helper class.
 
     // For this test, allocate everything and track in a vector we'll attach
     // to the model via a small wrapper. Since Model has no host_alloc tracking,
@@ -1145,10 +1135,8 @@ static std::vector<uint8_t> make_q4_k_block(float d_scale, float d_min, uint8_t 
     uint16_t dmin_bits = float_to_fp16(d_min);
     std::memcpy(block.data() + 2, &dmin_bits, 2);
 
-    // scales[12]: packed 6-bit scales and mins for 8 sub-blocks
-    // Sub-blocks 0-3: sc[sub] low 6 bits = sub_scale, sc[sub+4] low 6 bits = sub_min
-    // Sub-blocks 4-7: more complex packing with top bits
-    // For simplicity, use values < 16 so they fit in 4 bits for the upper packing.
+    // scales[12]: packed 6-bit scale+min for 8 sub-blocks. Sub-blocks 0-3: sc[sub] low 6 bits =
+    // scale, sc[sub+4] low 6 bits = min. Sub-blocks 4-7 use more complex top-bit packing.
     uint8_t sc_clamped = sub_scale & 63;  // 6-bit scale
     uint8_t mn_clamped = sub_min & 63;    // 6-bit min
     uint8_t* sc = block.data() + 4;
@@ -1157,10 +1145,8 @@ static std::vector<uint8_t> make_q4_k_block(float d_scale, float d_min, uint8_t 
         sc[s] = sc_clamped;      // low 6 = scale, top 2 = 0
         sc[s + 4] = mn_clamped;  // low 6 = min,   top 2 = 0
     }
-    // Sub-blocks 4-7: sc[8..11] packs remaining scales
-    // sc_val  = (sc[sub+4] & 0xF) | ((sc[sub-4] >> 6) << 4) → low 4 of sc[8+s-4]
-    // Since we set top 2 of sc[0..3] = 0, the upper nibble comes from that.
-    // For uniform values, just set low nibble = scale, high nibble = min.
+    // Sub-blocks 4-7: sc_val = (sc[sub+4]&0xF) | ((sc[sub-4]>>6)<<4); low nibble = scale, high
+    // nibble = min for uniform test values.
     for (int s = 0; s < 4; ++s) {
         sc[8 + s] = static_cast<uint8_t>((mn_clamped & 0xF) << 4 | (sc_clamped & 0xF));
     }
@@ -1920,11 +1906,8 @@ TEST(QuantIntegrationTest, Q5_KDp4aDenseGemm) {
         EXPECT_FALSE(std::isinf(v)) << "Q5_K dp4a dense Inf at " << i;
     }
 
-    // Reference: each output element is dot(weight_row, activation_row).
-    // Weight row: 256 × (d * sc * q5 - dmin * min) = 256 × (0.01*2*5 - 0.001*1) = 256 × 0.099 = 25.344
-    // Activation row: 256 × 1.0
-    // Expected dot product ≈ 256 × 0.099 × 1.0 ≈ 25.344
-    // Allow wide tolerance since Q8_1 quantization adds error
+    // Reference: dot(weight_row, activation_row) = 256*(0.01*2*5 - 0.001*1) ~= 25.344 (act row
+    // = 256*1.0). Wide tolerance since Q8_1 quantization adds error.
     for (int i = 0; i < M * N; ++i) {
         float v = fp16_to_float(h_out[i]);
         EXPECT_NEAR(v, 25.344f, 2.0f) << "Q5_K dp4a dense value mismatch at " << i
@@ -1999,19 +1982,10 @@ TEST(DualPathQuant, WeightCachesFlag) {
     EXPECT_TRUE(wcache.dual_path_quant);
 }
 
-// ===========================================================================
-// Model teardown must trim the async mempool (issue: EncoderEmbed OOM)
-// ---------------------------------------------------------------------------
-// The default cudaMallocAsync pool runs with an unbounded release threshold,
-// so freeing a model's weights (cudaFreeAsync) parks weights-sized memory in
-// the pool instead of returning it to the driver. A later plain cudaMalloc
-// (the next model's token-embedding upload) then OOMs even though the memory
-// is "free". The trim used to run only at the C-API teardown boundary; the
-// direct-C++ path (tests, embedders) leaked the reservation and, in the full
-// aggregate suite, starved EncoderEmbedTest after the heavy MoE MtpForwardTest.
-// After the fix, ~Model() trims, so destroying a model leaves ~no trimmable
-// slack in the pool.
-// ===========================================================================
+// Default cudaMallocAsync pool has an unbounded release threshold, so freeing a model's
+// weights parks memory instead of returning it to the driver; a later plain cudaMalloc then
+// OOMs despite "free" memory. Trim used to run only at C-API teardown, so the direct-C++
+// path leaked and starved EncoderEmbedTest after the MoE MtpForwardTest. Fixed: ~Model() trims.
 namespace {
 double mempool_trimmable_mib() {
     cudaDeviceSynchronize();
@@ -2029,10 +2003,9 @@ double mempool_trimmable_mib() {
 
 TEST(QuantIntegrationTest, ModelTeardownTrimsAsyncPool) {
     SKIP_IF_NO_CUDA();
-    // Reproduce the real condition: engine init raises the default async pool's
-    // release threshold to UINT64_MAX, so freed blocks are NOT auto-returned on
-    // sync — only an explicit trim reclaims them. Set it here (save/restore so
-    // other tests in the binary are unaffected).
+    // Reproduces the real condition: engine init raises the async pool's release threshold to
+    // UINT64_MAX, so freed blocks are not auto-returned on sync, only an explicit trim reclaims
+    // them. Saved/restored so other tests in the binary are unaffected.
     cudaMemPool_t pool = nullptr;
     int dev = 0;
     ASSERT_EQ(cudaGetDevice(&dev), cudaSuccess);

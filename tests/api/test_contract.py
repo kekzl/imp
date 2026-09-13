@@ -305,17 +305,9 @@ class TestMetricsEndpoint:
             assert name in text, name
 
     def test_metrics_split_speculation_by_draft_source(self, client):
-        # The four aggregate imp_spec_* counters cannot price the MTP head: the
-        # n-gram matcher, the prompt prediction and token recycling fill the
-        # same verify chunk and land in the same totals, so a server running
-        # the documented MTP pair (mtp_k=2, ngram=false) reports the same
-        # numbers as one the matcher carried. The per-source series answer
-        # "what is the head's acceptance rate" and "what did its verify cost".
-        #
-        # Keyed on the AGGREGATE series, not on a lane fixture: both blocks sit
-        # behind the same "an engine exists" guard in metrics_memory.cpp, so a
-        # server that publishes one and not the other is the defect this
-        # asserts, and a model-less server publishes neither.
+        # Aggregate imp_spec_* counters cannot isolate the MTP head's rate from n-gram/prompt/recycling.
+        # Per-source series report head acceptance rate and verify cost instead.
+        # Both gated behind one guard in metrics_memory.cpp; publishing only one is the defect caught.
         text = client.get("/metrics").text
         if "imp_spec_drafted_total" not in text:
             pytest.skip("no engine: this server publishes no speculation counters at all")
@@ -360,10 +352,8 @@ class TestReasoningBudgetContract:
         assert isinstance(details.get("reasoning_tokens"), int)
         assert details["reasoning_tokens"] > 0
         assert details["reasoning_tokens"] <= body["usage"]["completion_tokens"]
-        # THE negative half of "exactly then": this budget reached the answer,
-        # so the exhaustion detail must be absent. Without this, a server that
-        # emits it unconditionally tells every well-served client its reply was
-        # truncated, and no test anywhere notices.
+        # When budget reached the answer, imp_finish_detail must be absent - unconditional emission
+        # would mislead every well-served client into thinking its reply was truncated.
         if choice["message"].get("content"):
             assert "imp_finish_detail" not in choice
 

@@ -1,25 +1,6 @@
-// =============================================================================
-// mma_peak_saturated.cu -- Saturated tensor-core peak microbench (sm_120a)
-// =============================================================================
-//
-// Measures the TRUE achievable mma.sync throughput per dtype: 8 warps/SM
-// with 4 independent accumulator chains per warp (ILP hides the MMA
-// pipeline latency). The older mxf4nvf4_mma_bench runs 1 warp/SM with a
-// serial accumulator dependency — that measures issue LATENCY, not peak
-// (it reads ~273 TOPS where saturation reaches ~2019).
-//
-// Calibration results (2026-06-07, RTX 5090 @ ~2.85 GHz boost under load):
-//   FP4  mxf4nvf4 block_scale : ~2019 TOPS  (datasheet 3354 — mma.sync
-//                               delivers HALF; 4096 ops/SM/clk, not 8192)
-//   FP16 f16acc               : ~1956 TFLOPS (= datasheet 838 * 2.85/2.407 —
-//                               methodology check, full rate confirmed)
-//   FP16 f32acc               : ~253 TFLOPS  (1/4 rate on GeForce)
-//   FP8  e4m3 f32acc          : ~496 TOPS    (1/4 rate on GeForce)
-//
-// These numbers feed tools/roofline/config.json flop_per_cycle (issues
-// #595/#596): roofline %s against the 3354/838 datasheet values understate
-// kernel quality by 2-4x for f32-accumulate / FP4 kernels.
-// =============================================================================
+// Measures TRUE saturated mma.sync throughput (8 warps/SM x 4 indep accumulator chains,
+// ILP-hidden latency) vs mxf4nvf4_mma_bench's 1 warp/SM serial-chain latency-only measurement.
+// Feeds tools/roofline/config.json flop_per_cycle calibration (#595/#596).
 
 #include "bench/mma_peak_saturated.h"
 #include <cuda_runtime.h>

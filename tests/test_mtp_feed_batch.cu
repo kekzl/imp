@@ -1,16 +1,6 @@
-// =============================================================================
-// test_mtp_feed_batch.cu — batched MTP prefill feed vs. the per-pair loop
-// =============================================================================
-//
-// mtp_feed_batch() must leave the workspace in the same state as n feed-only
-// mtp_draft_step() calls: identical mtp_pos, numerically matching KV cache
-// rows and h_final. A synthetic dense head (the Qwen3.8/3.6-27B layout:
-// gated attention + partial RoPE + plain SwiGLU MLP) keeps the test
-// model-free; tolerances are RMS-relative because M=1 GEMV and M=n GEMM
-// reduce in different orders.
-//
-// GPU required — the suite skips cleanly on hosts without one.
-// =============================================================================
+// mtp_feed_batch() must match n feed-only mtp_draft_step() calls: identical mtp_pos, matching
+// KV cache rows and h_final. Synthetic dense head (Qwen3.8/3.6-27B layout) keeps it model-free;
+// RMS-relative tolerance since M=1 GEMV and M=n GEMM reduce in different orders. GPU required.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -183,10 +173,9 @@ TEST_F(MtpFeedBatchTest, BatchedFeedMatchesPerPairLoop) {
     imp::mtp_workspace_free(ws_bat);
 }
 
-// Ragged multi-slot feed (batched verify): rows for three KV slots, one or
-// two consecutive pairs per slot, interleaved in one launch. Reference: the
-// single-slot batched feed per slot in order (mtp_select_slot). Slot KV rows
-// and every row's final_norm must match; a slot nothing fed stays untouched.
+// Ragged multi-slot feed (batched verify): interleaved rows across three KV slots, one or two
+// pairs each. Reference: single-slot batched feed per slot in order (mtp_select_slot).
+// Slot KV rows and final_norm must match; an unfed slot stays untouched.
 TEST_F(MtpFeedBatchTest, MultiSlotFeedMatchesPerSlotBatches) {
     SyntheticHead s;
     s.build(/*seed=*/23);

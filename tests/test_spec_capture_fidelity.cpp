@@ -1,25 +1,11 @@
-// =============================================================================
-// test_spec_capture_fidelity.cpp — two gates for the speculative verify chunk
-// =============================================================================
-//
-// 1. CachedGraphMatchesEagerForward
-//    A cached verify-chunk graph must compute what an eager forward of the same
-//    state computes. diagnostics.spec_capture_fidelity turns every replay into
-//    that comparison; the test asserts it ran and never disagreed. Measured
-//    2026-08-20: 0/400 differing on Qwen3.8-27B-NVFP4 and Qwen3.6-35B-A3B-NVFP4,
-//    45/400 on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 — so this fails on
-//    the nemotron_h class and passes on the classes MTP is released for.
-//
-// 2. HybridSpeculationDoesNotCollapse
-//    The 8a7f2763 regression: on a Mamba2 hybrid a fully rejected draft chunk
-//    adopted a recurrent snapshot nothing had written, and generation collapsed
-//    to one repeated character ("Here's" then 300 x "0"). A collapse of that
-//    shape leaves almost no distinct whitespace-separated words, which is what
-//    this asserts — repetition_ratio in test_degeneration.cpp does not catch it,
-//    because the collapse is one long token with no spaces in it.
-//
-// Both skip when their checkpoint is absent, like the other SafeTensors suites.
-// =============================================================================
+// Two gates for the speculative verify chunk: (1) CachedGraphMatchesEagerForward -
+// diagnostics.spec_capture_fidelity compares every replay to an eager forward of the same
+// state; measured 0/400 differing on Qwen3.8-27B/Qwen3.6-35B-NVFP4, 45/400 on
+// Nemotron-3.5-Lightning (fails on nemotron_h, passes on classes MTP ships for).
+// (2) HybridSpeculationDoesNotCollapse: the 8a7f2763 regression where a fully rejected draft
+// chunk on a Mamba2 hybrid adopted an unwritten recurrent snapshot and collapsed to one
+// repeated character; repetition_ratio in test_degeneration.cpp misses it (one long token,
+// no spaces).
 
 #include "imp/imp.h"
 #include "api/imp_internal.h"
@@ -133,11 +119,9 @@ TEST(SpecCaptureFidelityTest, CachedGraphMatchesEagerForward) {
     // drafter is turned on through the API, the way imp-cli and imp-server do.
     ASSERT_EQ(imp_enable_mtp_spec_decode(ctx, 1), IMP_SUCCESS);
 
-    // Several requests, not one. The graph is captured during the first; the
-    // later ones replay it against a state it was never captured for, which is
-    // the whole point — a single request only ever replays near its own capture
-    // position and passes on a build where the defect is present (measured: 0
-    // differing over 209 replays inside one request, 141 of 861 across four).
+    // Several requests, not one: the graph is captured during the first, later ones replay it
+    // against a state never captured for - a single request only replays near its own capture
+    // position (measured: 0/209 differing within one request, 141/861 across four).
     size_t produced = 0;
     for (const char* prompt :
          {"Explain how a paged KV cache works in an LLM inference engine, and why block size matters.",
@@ -160,14 +144,10 @@ TEST(SpecCaptureFidelityTest, CachedGraphMatchesEagerForward) {
         << "only " << fid.checked
         << " cached verify-chunk replays were compared, which is too few to judge. Speculation may "
            "not have engaged for this model (check speculative.hybrid / .moe and the MTP head).";
-    // The threshold is not zero, and the floor is measured rather than assumed.
-    // Capture is not bit-exact with eager for every step even on a healthy model
-    // — cuBLASLt picks its algorithm at capture time — so a small residue is
-    // expected. Measured 2026-08-20 over ~1000 replays each:
-    //   Qwen3.8-27B-NVFP4          1 / 1033 = 0.10 %
-    //   Qwen3.6-35B-A3B-NVFP4      2 / 1013 = 0.20 %
-    //   Nemotron-3.5-Lightning   183 / 1331 = 13.7 %
-    // 2 % sits 10x above the worst healthy reading and 7x below the defect.
+    // Threshold is measured, not assumed: capture isn't bit-exact with eager even on a healthy
+    // model (cuBLASLt reselects its algorithm at capture time). Measured over ~1000 replays:
+    // Qwen3.8-27B 0.10%, Qwen3.6-35B 0.20%, Nemotron-3.5-Lightning 13.7%. 2% sits 10x above the
+    // worst healthy reading and 7x below the defect.
     const double rate = 100.0 * static_cast<double>(fid.differing) / static_cast<double>(fid.checked);
     EXPECT_LT(rate, 2.0) << fid.differing << " of " << fid.checked << " cached-graph replays (" << rate
                          << " %) disagreed with an eager forward of the same state, max|dlogit|="

@@ -1,27 +1,9 @@
 #pragma once
-// =============================================================================
-// GGUF block formats, twice over, with no imp in either half.
-//
-// This header is the class-A anchor `tests/test_gguf_dequant_ref.cu` compares
-// imp's dequant and GEMV kernels against. For every quant format the GGUF
-// loader accepts it holds two independent pieces:
-//
-//   * a BYTE-LEVEL BUILDER that fills raw block bytes from a deterministic LCG
-//     and picks the scale halfs separately — never imp's quantizer, so no
-//     quantize->dequant round trip can make a wrong layout look right;
-//   * an fp64 REFERENCE DEQUANT reconstructed from the ggml format definition
-//     (`ggml-common.h` block structs for the layout, `ggml-quants.c`
-//     `dequantize_row_*` for the arithmetic), justified per format in the
-//     comments and never a call into imp.
-//
-// `kFormats` ties the two together per QType and is what makes the coverage
-// gate two-way: a format `dequant_gpu_supported()` accepts with no row here is
-// a numerics path nobody checks, and that is how Q3_K shipped with its high-bit
-// plane read wrong in both of its kernels (AUDIT_arch_2026 D-5).
-//
-// It is a header because the builders and references are the reusable half; the
-// GPU launches, tolerances and test bodies live in the .cu that includes it.
-// =============================================================================
+// GGUF block formats reference, independent of imp, that tests/test_gguf_dequant_ref.cu
+// checks every format against. Per format: a byte-level LCG builder (never imp's quantizer)
+// and an fp64 reference dequant from ggml-common.h/ggml-quants.c (never imp).
+// kFormats ties both per QType; a format with no row here is an untested numerics path
+// (how Q3_K's high-bit-plane bug shipped, AUDIT_arch_2026 D-5).
 
 #include <cuda_fp16.h>
 
@@ -36,10 +18,8 @@
 namespace imp {
 namespace gguf_ref {
 
-// -----------------------------------------------------------------------------
-// Deterministic byte-level LCG (Numerical Recipes constants). Independent of
-// imp; used to fill raw quant bytes and to pick scale halfs.
-// -----------------------------------------------------------------------------
+// Deterministic byte-level LCG (Numerical Recipes constants), independent of imp; fills
+// raw quant bytes and picks scale halfs.
 struct Lcg {
     uint32_t s;
     explicit Lcg(uint32_t seed) : s(seed) {}
@@ -69,10 +49,8 @@ inline double f16_to_f64(half h) { return static_cast<double>(__half2float(h)); 
 // to ±Inf on overflow, matching __float2half on values > 65504.
 inline float __float2half_then_float(float f) { return __half2float(__float2half(f)); }
 
-// -----------------------------------------------------------------------------
-// fp64 REFERENCE DEQUANT — derived from the ggml format definition.
-// Layouts mirror imp's headers (= the format), arithmetic is reconstructed.
-// -----------------------------------------------------------------------------
+// fp64 REFERENCE DEQUANT derived from the ggml format definition; layout mirrors imp's
+// headers, arithmetic is reconstructed independently.
 
 // Q8_0: 34 bytes / 32 elems. [ d:f16 | qs:int8[32] ]. val = d * q.
 // (ggml dequantize_row_q8_0: y = d * qs[j].)
@@ -226,12 +204,8 @@ inline void ref_dequant_iq4_xs(const uint8_t* blk, double* out) {
     }
 }
 
-// =============================================================================
-// AUDIT_arch_2026 D-5: the six GGUF formats imp dequantizes with no reference.
-// Same independence rule as above — layout from the format definition
-// (ggml-common.h block structs), arithmetic reconstructed from
-// ggml-quants.c dequantize_row_*, never a call into imp.
-// =============================================================================
+// AUDIT_arch_2026 D-5: six more GGUF formats with no independent reference before this;
+// same independence rule as above (layout from ggml-common.h, arithmetic from ggml-quants.c).
 
 // Q4_1: 20 bytes / 32 elems. [ d:f16 | m:f16 | qs:u8[16] ]. Asymmetric 4-bit:
 // no offset on the quant, an additive per-block minimum instead.
@@ -653,12 +627,9 @@ inline void build_q8_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMod
                 bp[260 + i] = g.byte();  // bsums — dequant must ignore these
         }
 }
-// -----------------------------------------------------------------------------
-// The format table: block geometry + the two independent halves (byte builder,
-// fp64 reference) per QType. One row per format the GGUF loader accepts, so a
-// format added to `dequant_gpu` with no row here is visible as a missing row
-// rather than as a silently untested kernel (AUDIT_arch_2026 D-5).
-// -----------------------------------------------------------------------------
+// FormatSpec: block geometry + byte builder + fp64 reference, one row per QType the GGUF
+// loader accepts. A format added to dequant_gpu with no row here is an untested kernel
+// rather than a visible gap (AUDIT_arch_2026 D-5).
 struct FormatSpec {
     QType qt;
     const char* name;

@@ -77,11 +77,9 @@ TEST_F(PrimaryModelTest, GenerateCoherentOutput) {
     EXPECT_NE(text.find("Paris"), std::string::npos) << "Expected 'Paris' in output: " << text;
 }
 
-// Helper: drop <think>...</think> blocks so this test works against both
-// non-thinking baselines (Qwen3-4B-Instruct, Llama-3.2-3B) and thinking
-// models (Qwen3-8B, DeepSeek-R1-Distill). Open `<think>` with no close —
-// model exhausted the token budget mid-reasoning — drops everything from
-// `<think>` to end so the post-reasoning substring check fails clean.
+// Strips <think>...</think> blocks so this works against both non-thinking baselines and
+// thinking models. An open <think> with no close (budget exhausted mid-reasoning) drops
+// everything from <think> to end, so the post-reasoning substring check fails clean.
 static std::string strip_think_blocks_for_test_(std::string s) {
     while (true) {
         size_t open = s.find("<think>");
@@ -216,10 +214,9 @@ TEST_F(GDNModelTest, GenerateCoherentOutput) {
     std::string text(output, len);
     EXPECT_GT(text.size(), 5u) << "Output too short: " << text;
 
-    // Recurrent-state collapse detector: split on whitespace, count unique
-    // words. A degenerate output like " my my my my my..." has many tokens
-    // but very few unique words. This catches the 2026-04-24 GDN regression
-    // that the length-only check above missed.
+    // Recurrent-state collapse detector: unique-word count on whitespace-split output. Catches
+    // low-unique-word degeneration (" my my my ...") that a length-only check misses - the
+    // 2026-04-24 GDN regression class.
     std::vector<std::string> words;
     {
         std::string cur;
@@ -279,14 +276,9 @@ TEST_F(GDNModelTest, MultiTurnGDNState) {
     EXPECT_GT(text2.size(), 1u) << "Output too short after reset: " << text2;
 }
 
-// ---------------------------------------------------------------------------
-// Gemma-4 model tests (26B-A4B MoE hybrid: per-layer SWA/global, 128 experts
-// top-8, shared dense FFN alongside each MoE block, custom router, GEGLU)
-//
-// Primary regression test — Gemma-4 forward pass has historically been
-// fragile (see memory/gemma4_working_2026_04_14.md). This test locks in
-// correct output on the Q4_K_M model.
-// ---------------------------------------------------------------------------
+// Gemma-4 (26B-A4B MoE hybrid: per-layer SWA/global, 128 experts top-8, shared dense FFN,
+// custom router, GEGLU) primary regression test: locks in correct output on the Q4_K_M
+// model. Forward pass has historically been fragile (memory/gemma4_working_2026_04_14.md).
 
 class Gemma4ModelTest : public ::testing::Test {
 protected:
@@ -337,12 +329,10 @@ TEST_F(Gemma4ModelTest, AnswersCapitalOfFrance) {
 }
 
 TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
-    // Raw (no-chat-template) path: instruct-tuned Gemma-4 without its chat
-    // template produces structurally different output than with the template
-    // (e.g. it emits <|channel>thought tokens as if the turn had started).
-    // We don't assert exact content — just that the forward pass completes
-    // successfully and returns non-empty non-degenerate text. The chat-template
-    // test above already covers semantic correctness.
+    // Raw (no-chat-template) path: instruct-tuned Gemma-4 without its template produces
+    // structurally different output (e.g. emits <|channel>thought tokens as if mid-turn). Only
+    // asserts the forward pass completes and returns non-empty non-degenerate text; the
+    // chat-template test above covers semantic correctness.
     ImpGenerateParams params = imp_generate_params_default();
     params.max_tokens = 12;
     params.temperature = 0.0f;
@@ -356,15 +346,12 @@ TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
 }
 
 TEST_F(Gemma4ModelTest, PrefillFusesSwaLayers_Hd512StaysCublas) {
-    // Executed-kernel gate (FA2-coverage dispatch): Gemma-4 has a 5:1 SWA:global
-    // layer pattern — ~24 hd=256 SWA layers + ~6 hd=512 global layers (30 total).
-    // After this dispatch the hd=256 SWA layers route to FA2 f16-QK per-layer
-    // (the win — previously the coarse model-level force_cublas gate sent EVERY
-    // layer to cuBLAS). The hd=512 global layers deliberately STAY on the
-    // materialized cuBLAS path: the SMEM-capped fused hd=512 kernel is 2.8-4.6x
-    // slower (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md), so fusing them would regress. So a short prefill must
-    // execute cuBLAS for ONLY the handful of hd=512 layers, not all 30. Checks
-    // the executed kernel (a launch counter), not just the dispatch branch.
+    // Executed-kernel gate: Gemma-4's 5:1 SWA:global layer pattern (~24 hd=256 SWA + ~6 hd=512
+    // global of 30) must route hd=256 SWA layers to FA2 f16-QK per-layer (previously a
+    // model-level force_cublas gate sent EVERY layer to cuBLAS); hd=512 global layers must STAY
+    // on materialized cuBLAS since the SMEM-capped fused hd=512 kernel is 2.8-4.6x slower
+    // (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). Checks the executed kernel (a
+    // launch counter), not just the dispatch branch.
     imp::attention_cublas_prefill_reset_count();
 
     int32_t tokens[128];
@@ -416,17 +403,11 @@ TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
                                         << " chars in output of " << text.size() << "): " << text;
 }
 
-// ---------------------------------------------------------------------------
-// Gemma-4 with CUDA graphs enabled — regression guard for the graph path.
-//
-// History: the AsyncGraphLoop captured forward_decode_async() — a parallel
-// reimplementation that diverged on Gemma-4 Q4_K_M (sampled <eos> at step 0
-// of the WHILE body, terminating after ~3 tokens with garbage). Fixed by
-// unifying forward_decode_async() with forward_logits() (the canonical
-// path). Locks in: graphs MUST produce identical output to the no-graph
-// path, both in the short (single-token capture) and long (async WHILE)
-// regimes.
-// ---------------------------------------------------------------------------
+// Gemma-4 + CUDA graphs regression guard: AsyncGraphLoop's forward_decode_async() was a
+// parallel reimplementation that diverged on Gemma-4 Q4_K_M (sampled <eos> at step 0,
+// terminating after ~3 tokens with garbage). Fixed by unifying it with forward_logits() (the
+// canonical path). Locks graphs-on == no-graph output, both single-token-capture and
+// async-WHILE regimes.
 
 class Gemma4GraphsTest : public ::testing::Test {
 protected:
@@ -508,19 +489,13 @@ TEST_F(Gemma4GraphsTest, LongDecodeStaysCoherent) {
 
 }  // anonymous namespace
 
-// ---------------------------------------------------------------------------
-// #948 regression: decode-graph launch-topology re-derivation on ctx growth.
-//
-// The per-step decode graph bakes launch topology derived from the HOST
-// max_context_len (split-K num_splits / GQA-vs-split-K kernel choice). The
-// intended re-capture trigger — the pow2 max_blocks bucket — never fires
-// because the decode batch pool pads max_blocks_per_seq to the pool stride.
-// Pre-fix, a graph captured during a SHORT request replayed with a stale
-// topology for the next LONG-prompt request (> prefill_chunk_size) and hit an
-// illegal memory access at its first decode step, wedging the engine for the
-// rest of the process. This test is the minimal HTTP repro as a C-API test:
-// short request → >2048-token prompt → another short request.
-// ---------------------------------------------------------------------------
+// #948: the per-step decode graph bakes launch topology (split-K num_splits, GQA-vs-split-K
+// choice) from the HOST max_context_len; the intended re-capture trigger (pow2 max_blocks
+// bucket) never fires because the decode batch pool pads max_blocks_per_seq to the pool
+// stride. A graph captured during a SHORT request then replayed stale topology for a
+// LONG-prompt request, hitting an illegal memory access at its first decode step and
+// wedging the engine. This is the minimal repro: short request -> >2048-token prompt ->
+// short request.
 TEST(DecodeGraphCtxGrowthTest, LongPromptAfterShortRequestStaysAlive) {
     const char* path = primary_model();
     if (!path)

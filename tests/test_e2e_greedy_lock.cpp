@@ -1,30 +1,14 @@
-// E2E greedy regression locks — TEST_AUDIT (retired) risk #3 (Phase 2.4).
-//
-// The single highest-leverage test class in the audit: a fixed prompt run
-// greedy (temp=0, top_k=1) through the FULL stack (tokenize → prefill →
-// decode loop, CUDA graphs ON = the production path) must reproduce a
-// frozen token sequence exactly. Locks would have caught: Nemotron NoPE
-// (positionally blind since integration), Phi-4 RoPE-NeoX (#503), the FA2
-// short-prefill regression (#512), and the gemma mode-2 NaN collapse
-// (#514/#516) — all of which shipped while per-kernel parity suites were
-// green.
-//
-// Lock lifecycle (tests/refs/e2e_greedy_locks.h):
-//   1. Generate candidates: IMP_LOCK_PRINT=1 prints ready-to-paste lock
-//      entries for the loaded model.
-//   2. Verify EXTERNALLY before committing: GGUF locks are checked against
-//      llama.cpp greedy output on the same raw prompt (semantic agreement —
-//      bit-identical tokens across engines is not expected; coherent,
-//      prompt-grounded continuation is). SafeTensors/NVFP4 models have no
-//      external engine that loads them; their locks are verified by human
-//      review + degen_suite and marked "internal" in the table.
-//   3. Commit the entry. From then on ANY token drift fails loudly.
-//
-// A lock failure means: forward pass / tokenizer / sampler behavior changed.
-// That is sometimes intentional (kernel rework with quality-neutral PPL) —
-// regenerate via step 1+2 and say so in the PR; it is never noise: this test
-// also asserts determinism (two fresh-context runs must match), so a flaky
-// lock is itself a finding (atomics in the forward pass of a dense model).
+// E2E greedy regression locks (TEST_AUDIT(retired) risk #3): a fixed prompt run greedy
+// through the FULL stack (CUDA graphs ON, production path) must reproduce a frozen token
+// sequence exactly. Would have caught Nemotron NoPE, Phi-4 RoPE-NeoX (#503), the FA2
+// short-prefill regression (#512), and the gemma mode-2 NaN collapse (#514/#516) - all
+// shipped while per-kernel parity suites were green.
+// Lifecycle (tests/refs/e2e_greedy_locks.h): generate with IMP_LOCK_PRINT=1, verify
+// externally (GGUF vs llama.cpp semantic agreement; SafeTensors/NVFP4 by human review +
+// degen_suite, marked "internal"), then commit - any drift after that fails loudly.
+// A lock failure means forward pass/tokenizer/sampler behavior changed; regenerate and say
+// so in the PR if intentional. Also asserts determinism (two fresh-context runs must match),
+// so a flaky lock is itself a finding.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -63,14 +47,10 @@ protected:
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
         path_ = path;
 
-        // Pin every drafter OFF before the load. A lock freezes a token
-        // sequence; speculation is the one thing in this engine that makes the
-        // sequence depend on what the PROCESS served before, because the n-gram
-        // corpus and the MTP head's KV cache both carry across requests
-        // (docs/LIMITATIONS.md: "Golden tests must pin speculative.ngram and
-        // speculative.mtp_k"). Without this the lock recorded under one drafter
-        // configuration is re-run under whatever the defaults happen to be, and
-        // a drift reads as a forward-pass regression.
+        // Every drafter must be pinned OFF before a lock's load: speculation is the one thing that
+        // makes the sequence depend on what the PROCESS served before (n-gram corpus and MTP head's
+        // KV cache both carry across requests, docs/LIMITATIONS.md). Without this a lock recorded
+        // under one drafter config re-runs under whatever the defaults happen to be.
         imp::RuntimeConfig rc;
         rc.speculative.ngram = false;
         rc.speculative.suffix = false;
@@ -135,10 +115,9 @@ protected:
     ImpContext ctx_ = nullptr;
 };
 
-// Candidate prompts for NEW locks (IMP_LOCK_PRINT=1). Raw completion
-// prompts, no chat template: template churn must not invalidate locks.
-// One factual cloze, one arithmetic (the prompt-blindness detector — Nemotron
-// NoPE and the FA2 regression scrambled exactly this), one multi-sentence.
+// Candidate prompts for IMP_LOCK_PRINT=1: raw completion, no chat template (template churn
+// must not invalidate locks). One factual cloze, one arithmetic (the prompt-blindness
+// detector that caught Nemotron NoPE and the FA2 regression), one multi-sentence.
 constexpr const char* kCandidatePrompts[] = {
     "The capital of France is",
     "Q: What is 17 + 25?\nA:",
@@ -175,10 +154,9 @@ TEST_F(GreedyLockTest, FrozenSequences) {
         n_locks++;
         SCOPED_TRACE(std::string(lock.model_basename) + " :: " + lock.prompt);
 
-        // ALWAYS request kLockLen (same as lock generation): the engine
-        // yields requested-1 tokens (prefill samples token 1, the graph loop
-        // plans max_tokens-1 decode steps), so requesting lock.n_tokens
-        // would generate one token short of the lock.
+        // Always request kLockLen, same as lock generation: the engine yields requested-1 tokens
+        // (prefill samples token 1, the graph loop plans max_tokens-1 decode steps), so requesting
+        // lock.n_tokens would generate one token short.
         std::vector<int32_t> run1 = generate_greedy(lock.prompt, kLockLen);
 
         // Determinism probe: a dense model MUST reproduce itself exactly on a

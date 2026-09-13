@@ -1,18 +1,8 @@
-// =============================================================================
-// test_smallm_dense_bench.cu — gemm_grouped_nvfp4_smallM as a DENSE small-M GEMM
-// =============================================================================
-//
-// The hand-rolled mxf4nvf4 grouped GEMM (M-tiles 16/32/64/128, plain row-major
-// UE4M3 scales) ships as an MoE-prefill opt-in. Batched decode at n_seq<=32
-// runs the same shapes through the CUTLASS 128x128 cooperative tile, measured
-// at 41.4 us on M=32 N=5120 K=5120 — 19% of the weight floor (grid 40 CTAs).
-// With n_experts=1 the grouped kernel IS a dense small-M GEMM; this test
-// checks correctness against a host dequant walk and benches that shape —
-// the bench documents WHY it is not wired (92.3 us vs CUTLASS 41.4: the
-// persistent grouped design has the same N-limited parallelism).
-//
-// GPU required — skips cleanly without one.
-// =============================================================================
+// gemm_grouped_nvfp4_smallM as a DENSE small-M GEMM (n_experts=1): the hand-rolled grouped
+// GEMM ships as MoE-prefill opt-in, while batched decode (n_seq<=32) runs the CUTLASS
+// 128x128 tile (measured 41.4us/19% of weight floor at M=32 N=K=5120). Checks correctness
+// vs a host dequant walk and benches WHY it is not wired for dense (92.3us vs 41.4: same
+// N-limited parallelism).
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -160,14 +150,9 @@ TEST_F(SmallMDenseTest, BenchDecodeShape) {
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0); cudaEventCreate(&t1);
     const int iters = 300;
-    // Best of 8 windows, not one. A single window is a clock-and-scheduler
-    // reading as much as a kernel one: measured 2026-09-10 in one test-quant
-    // run, the eight windows read 46.12, 167.07, 200.82, 43.88, 48.67, 103.49,
-    // 51.95, 53.42 us. The dropouts are per window, not a phase the test sits
-    // in, and interference can only slow a window down, so the minimum is the
-    // reading an anchor can hold: 40.99 and 43.88 across two runs. One window
-    // put this test over the bar twice in three full-suite runs (122.73, 53.41,
-    // 196.96) while three isolated runs read 67.25, 44.63, 70.27.
+    // Best of 8 windows, not one: a single window reads the clock/scheduler as much as the
+    // kernel (measured spread 43.88-200.82us across 8 windows in one run). Dropouts are per
+    // window and only slow it down, so the minimum is the reading an anchor can hold.
     double us = 1e30, worst = 0.0;
     for (int w = 0; w < 8; ++w) {
         cudaEventRecord(t0);
@@ -185,12 +170,10 @@ TEST_F(SmallMDenseTest, BenchDecodeShape) {
     printf("grouped-smallM dense M=%d N=%d K=%d: %.2f us/GEMM (best of 8, worst %.2f), "
            "%.0f GB/s weight read (floor 8.23 us; CUTLASS 128x128 cooperative measured 41.4 us)\n",
            M, N, K, us, worst, bytes / (us * 1e-6) / 1e9);
-    // MEASURED 2026-08-25: 92.3 us — the persistent grouped design also
-    // bottoms out on this dense shape (its parallelism is N/N-tile work
-    // items, the same ~40 units that starve CUTLASS), so it is NOT wired
-    // into the dense batch path. Fifth refutation for the M=32 lever; see
-    // docs/plans/2026-08-24-qwen38-port.md. The bar below is a regression
-    // anchor on the measurement, not a target.
+    // Measured: 92.3us - the persistent grouped design also bottoms out on this dense shape
+    // (parallelism is N/N-tile work items, same ~40 units that starve CUTLASS), so it is NOT
+    // wired into the dense batch path (fifth refutation for the M=32 lever, plans/qwen38-port.md).
+    // Bar is a regression anchor on the measurement, not a target.
     EXPECT_LT(us, 140.0);
 
     cudaFree(d_y); cudaFree(d_alpha);

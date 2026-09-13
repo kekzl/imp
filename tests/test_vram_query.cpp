@@ -1,12 +1,6 @@
-// vram_query — the budget-aware cudaMemGetInfo view behind
-// EngineConfig.vram_budget_mb ("pretend the GPU is only X MiB").
-//
-// Semantics under test:
-//   my_used = free_at_install − free_now   (baseline delta)
-//   free'   = min(free_now, budget − my_used)
-//   total'  = budget
-// so a co-tenant's pre-existing usage never counts against this process,
-// while this process's own allocations shrink the budgeted view 1:1.
+// vram_query (behind EngineConfig.vram_budget_mb): my_used = free_at_install - free_now;
+// free' = min(free_now, budget - my_used); total' = budget. A co-tenant's pre-existing usage
+// never counts against this process; this process's own allocations shrink the budgeted view 1:1.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

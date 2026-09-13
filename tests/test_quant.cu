@@ -102,10 +102,7 @@ void cpu_dequant_int8(const int8_t* input, float* output, const float* scales, i
     }
 }
 
-// ---------------------------------------------------------------------------
-// CPU reference: matmul  C[M,N] = A[M,K] @ B_T[N,K]^T
-// (B_T is stored in [N,K] layout, so C[m,n] = sum_k A[m,k] * B_T[n,k])
-// ---------------------------------------------------------------------------
+// CPU reference matmul: C[M,N] = A[M,K] @ B_T[N,K]^T (B_T stored [N,K]).
 void cpu_matmul(const float* A, const float* B_T, float* C, int M, int N, int K) {
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
@@ -214,11 +211,7 @@ TEST(QuantTest, DequantINT4GroupSize) {
     std::vector<float> h_ref(n);
     cpu_dequant_int4(h_packed.data(), h_ref.data(), h_scales.data(), n, group_size);
 
-    // Verify CPU reference makes sense
-    // Group 0 (indices 0..7):  (5-8)*1.0 = -3.0
-    // Group 1 (indices 8..15): (5-8)*2.0 = -6.0
-    // Group 2 (indices 16..23): (5-8)*0.5 = -1.5
-    // Group 3 (indices 24..31): (5-8)*4.0 = -12.0
+    // Group g expected: (5-8)*scale_g, scales 1.0/2.0/0.5/4.0 -> -3.0/-6.0/-1.5/-12.0.
     ASSERT_NEAR(h_ref[0], -3.0f, 1e-6f);
     ASSERT_NEAR(h_ref[8], -6.0f, 1e-6f);
     ASSERT_NEAR(h_ref[16], -1.5f, 1e-6f);
@@ -320,11 +313,8 @@ TEST(QuantTest, DequantINT8Basic) {
 // Test 5: FP8RoundTrip -- cast FP16 -> FP8 E4M3 -> FP16, check round-trip
 // ===========================================================================
 TEST(QuantTest, FP8RoundTrip) {
-    // Test values within E4M3 representable range.
-    // E4M3 normal range: ~2^-6 to 240 (e=14,m=7 = 2^7 * 1.875 = 240).
-    // E4M3 min subnormal: 2^-9 = ~0.00195.
-    // Note: e=15 encodes NaN in NVIDIA's E4M3 spec, so max safe normal = 240.
-    // Values above 240 may saturate to 240 or become NaN depending on impl.
+    // E4M3 normal range ~2^-6..240 (e=15 encodes NaN in NVIDIA's spec, so max safe normal is
+    // 240); min subnormal 2^-9. Values above 240 may saturate to 240 or become NaN, impl-dependent.
     std::vector<float> test_values = {0.0f,   1.0f,    -1.0f,  0.5f,    2.0f,  0.001953125f, -0.5f,
                                       -2.0f,  4.0f,    8.0f,   16.0f,   64.0f, 128.0f,       0.25f,
                                       0.125f, 0.0625f, 240.0f, -240.0f, 32.0f, -32.0f};
@@ -386,18 +376,11 @@ TEST(QuantTest, FP8RoundTrip) {
     cudaFree(d_fp16_out);
 }
 
-// ===========================================================================
-// Test 5b: FP8 E4M3 DECODE vs an INDEPENDENT host LUT.
-//
-// WHY: FP8RoundTrip above is imp-vs-imp (cast both ways) — it cannot catch a
-// systematically wrong decode that the matching encode hides. This decodes
-// cast_fp8_to_fp16 against a from-scratch OCP E4M3 reference (sign|exp4(bias7)|
-// mant3): e=0 subnormal (2^-6), e=15&m=7 NaN, else (1+m/8)*2^(e-7). Every E4M3
-// value is exactly representable in f16, so the EXACT comparison is justified
-// (atol 0) for the spec-unambiguous range. The e=15 region (256..448 in OCP,
-// but some impls treat it as NaN) is checked as a no-silent-corruption guard:
-// the decode must be EITHER the OCP value OR NaN, never a wrong finite number.
-// ===========================================================================
+// FP8RoundTrip (imp-vs-imp) can't catch a decode bug the matching encode hides; this checks
+// cast_fp8_to_fp16 against a from-scratch OCP E4M3 reference (sign|exp4(bias7)|mant3).
+// Every E4M3 value is exactly representable in f16, so exact comparison (atol 0) is valid;
+// the e=15 region (NaN-or-extended, impl-dependent) is checked as no-silent-corruption: must
+// be the OCP value OR NaN, never a wrong finite number.
 namespace {
 double ref_e4m3_decode(uint8_t b, bool& is_nan) {
     is_nan = false;
@@ -472,11 +455,8 @@ TEST(QuantTest, FP8_E4M3_DecodeMatchesIndependentLUT) {
 // Test 6: FP8Saturation -- values > 448 saturate; tiny values flush to zero
 // ===========================================================================
 TEST(QuantTest, FP8Saturation) {
-    // Test that overflow values saturate to E4M3 max (240) or become NaN,
-    // and that tiny values flush to zero.
-    // E4M3 max normal: e=14, m=7 -> 2^7 * 1.875 = 240.
-    // (NVIDIA spec: e=15,m=7 = NaN; e=15,m=0..6 may be NaN or extended normals.)
-    // Different CUDA versions may saturate to 240 or produce NaN for overflow.
+    // E4M3 max normal 240 (e=14,m=7); overflow saturates to 240 or NaN (impl-dependent per CUDA
+    // version, NVIDIA spec e=15 region ambiguous); tiny values flush to zero.
 
     // Flush-to-zero test values
     std::vector<float> small_values = {
@@ -526,15 +506,8 @@ TEST(QuantTest, FP8Saturation) {
     cudaFree(d_fp16_out);
 }
 
-// ===========================================================================
-// Test 7: QuantGemmINT4Basic -- small fused INT4 dequant + GEMM
-//
-//   C[M,N] = A[M,K] @ dequant(B_quant[N,K/2], scales[N, K/group_size])
-//
-//   M=4, K=8, N=4, group_size=8 -> num_groups=1
-//   B_quant shape: [4, 4] (4 output channels, 8 weights packed into 4 bytes)
-//   scales shape:  [4, 1] (one group per channel)
-// ===========================================================================
+// Fused INT4 dequant+GEMM: C[M,N]=A[M,K]@dequant(B_quant[N,K/2],scales[N,K/group_size]).
+// M=4,K=8,N=4,group_size=8 -> num_groups=1, B_quant [4,4] packed, scales [4,1].
 TEST(QuantTest, QuantGemmINT4Basic) {
     constexpr int M = 4;
     constexpr int K = 8;
@@ -552,15 +525,9 @@ TEST(QuantTest, QuantGemmINT4Basic) {
         0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,  // row 3
     };
 
-    // --- Prepare B_quant[N, K/2] = [4, 4] packed bytes ---
-    // For each output channel n, we have K=8 nibbles packed into 4 bytes.
-    // Let's use nibble value 10 for all weights.
-    // dequant = (10 - 8) * scale = 2 * scale
-    //
-    // Channel 0: all nibbles = 10, scale = 1.0 -> dequant weights = 2.0 each
-    // Channel 1: all nibbles = 6,  scale = 2.0 -> dequant weights = (6-8)*2 = -4.0
-    // Channel 2: all nibbles = 12, scale = 0.5 -> dequant weights = (12-8)*0.5 = 2.0
-    // Channel 3: all nibbles = 8,  scale = 3.0 -> dequant weights = (8-8)*3 = 0.0
+    // Nibble 10 packed for all weights; dequant=(nibble-8)*scale. Channel 0: scale 1.0 -> 2.0;
+    // channel 1: nibble 6, scale 2.0 -> -4.0; channel 2: nibble 12, scale 0.5 -> 2.0;
+    // channel 3: nibble 8, scale 3.0 -> 0.0.
 
     std::vector<uint8_t> h_B_quant(N * half_K);
 

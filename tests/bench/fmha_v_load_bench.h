@@ -1,18 +1,7 @@
 #pragma once
-// =============================================================================
-// fmha_v_load_bench.h — cp.async vs TMA bulk microbench for FMHA V-tile loads
-// =============================================================================
-//
-// Empirically validates whether TMA bulk (`cp.async.bulk.tensor.2d`) beats
-// per-thread cp.async (`cp.async.ca.shared.global`) for the FMHA V-prefetch
-// load pattern (Bkv × head_dim FP16 tile). Phase 1 gate for the Tier-2 lever
-// "LDGSTS → TMA migration for hand-rolled attention kernels" documented in
-// memory file `hw_capability_audit_complete_2026_05_10` (expected 5-15%
-// kernel speed, 3-5% E2E decode).
-//
-// Output: prints per-variant bandwidth (GB/s) and speedup ratio. Returns
-// `true` on success, `false` if TMA descriptor build failed.
-// =============================================================================
+// Validates whether TMA bulk beats per-thread cp.async for the FMHA V-prefetch load pattern
+// (Bkv x head_dim FP16 tile). Phase 1 gate for the LDGSTS->TMA lever (memory file
+// hw_capability_audit_complete_2026_05_10), expected 5-15% kernel / 3-5% E2E decode.
 
 namespace imp {
 

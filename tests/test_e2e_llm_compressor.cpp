@@ -43,26 +43,13 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsWithoutIMA) {
     imp_model_free(model);
 }
 
-// Gemma-4 MoE coherence gate. Greedy "What is the capital of France?" with
-// the model's own chat template applied must produce text containing "Paris".
-//
-// Why chat-template instead of base completion: Gemma-4-it is heavily
-// instruction-tuned and degenerates into a repetition loop on raw
-// completion prompts (e.g. "The capital of France is " →
-// " the most of the most of the most..."). The Mistral test uses base
-// completion because Mistral-Small-3.2 holds together on raw prompts; for
-// Gemma-4-it we need the chat-template wrap to land on a sane decoding
-// trajectory. The model dir ships a chat_template.jinja that imp picks up
-// automatically when apply_chat_template=1.
-//
-// Coherence path landed in two pieces, both on main:
-//   - PR #65 routes the 90 Gemma-4 extras (layer_scalar, router.scale,
-//     router.per_expert_scale) through translate_name → weight_map →
-//     existing GGUF Gemma-4 forward path (no new kernels).
-//   - The same PR's MoE per-expert NVFP4 prefill bypass in
-//     executor_forward_moe.cu (M>1 → gemm_nvfp4 dequant→cuBLAS instead of
-//     per-row gemv_nvfp4_kpar) eliminated the corruption that produced
-//     "way world ات set" pre-fix.
+// Gemma-4 MoE coherence gate: chat-template "capital of France?" must answer "Paris".
+// Chat-template (not base completion) because Gemma-4-it degenerates into a repetition loop
+// on raw completion prompts; Mistral-Small-3.2 holds together on raw prompts so its test
+// uses that.
+// Landed via PR #65 (90 Gemma-4 extras through translate_name->weight_map->existing GGUF
+// forward path) plus the same PR's MoE per-expert NVFP4 prefill bypass in
+// executor_forward_moe.cu (M>1 -> gemm_nvfp4 dequant->cuBLAS), which eliminated garbage output.
 TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
     if (!dir_exists(kGemma4Dir)) {
         GTEST_SKIP() << "Model not present at " << kGemma4Dir;
@@ -96,17 +83,12 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
     imp_model_free(model);
 }
 
-// Mistral3 dense coherence gate. Mistral-Small-3.2 is multimodal
-// (Mistral3ForConditionalGeneration), but with vision_tower / multi_modal_projector
-// tensors skipped at load time the language model alone runs as a standard
-// dense LLM. Phase 2 added two pieces to make this work:
-//   1. translate_name() now strips the Mistral3-style `language_model.` prefix
-//      (`language_model.model.layers.0.q.weight_packed` →
-//       `model.layers.0.q.weight_packed`), and skips raw `vision_tower.*` /
-//      `multi_modal_projector.*` (no `model.` wrapper) at the top level.
-//   2. parse_recipe_yaml() recognizes the elaborate
-//      `config_groups: group_0: weights: {num_bits: 4, type: float}` schema as
-//      NVFP4, and handles the multi-line bracket-array `ignore: [...]` form.
+// Mistral3 dense coherence gate: Mistral-Small-3.2 is multimodal, but with
+// vision_tower/multi_modal_projector tensors skipped at load the language model alone runs
+// as a standard dense LLM. Needed: (1) translate_name() strips the language_model. prefix
+// and skips raw vision_tower.*/multi_modal_projector.* at the top level; (2)
+// parse_recipe_yaml() recognizes the config_groups: group_0: weights schema as NVFP4,
+// including the multi-line bracket-array ignore: [...] form.
 TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelMistral));
     const std::string mistral = mistral_dir();
@@ -136,10 +118,9 @@ TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
     imp_model_free(model);
 }
 
-// Modelopt regression: the existing NVFP4 path (NVIDIA Model Optimizer
-// SafeTensors with hf_quant_config.json) must keep working bit-identically
-// after the Phase 1 dispatch reshuffle in load_nvfp4_config(). Loads
-// Qwen3-Coder-30B-A3B-FP4 and verifies generation completes coherently.
+// Modelopt NVFP4 (NVIDIA Model Optimizer SafeTensors + hf_quant_config.json) must keep
+// working bit-identically after the Phase 1 dispatch reshuffle in load_nvfp4_config(). Loads
+// Qwen3-Coder-30B-A3B-FP4 and checks coherent generation.
 TEST_F(LlmCompressorE2E, Modelopt_QwenCoder30B_StillWorks) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelModeloptCoder));
     const std::string coder = modelopt_coder_dir();

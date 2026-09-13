@@ -1,10 +1,6 @@
-// (t, h, w) positions for a prompt containing images.
-//
-// The failure mode is not a crash: wrong positions mean the model reads the
-// image as if its tokens sat somewhere else on the grid, and describes a
-// different picture. The oracle is `Qwen3VLModel.get_rope_index` /
-// `get_vision_position_ids`, reimplemented here as explicit expectations rather
-// than as a second copy of the loop.
+// Wrong (t,h,w) positions make the model read an image as if positioned elsewhere on the
+// grid and describe a different picture (not a crash). Oracle: Qwen3VLModel.get_rope_index /
+// get_vision_position_ids, reimplemented as explicit expectations, not a copy of the loop.
 
 #include "model/mrope_positions.h"
 

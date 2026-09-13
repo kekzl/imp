@@ -1,20 +1,6 @@
-// M-RoPE: three position axes instead of one.
-//
-// This touches the rotary path of EVERY model, so the first thing it has to
-// prove is that it changes nothing. Two invariants carry that:
-//
-//   1. With M-RoPE off (null pointer) the output must be bit-identical to the
-//      pre-change kernel — which is testable as "identical to the same call
-//      with the parameter defaulted", since that is the only path text-only
-//      models take.
-//   2. With M-RoPE on but all three axes carrying the SAME position — what a
-//      text-only prompt on a VL model looks like — the output must be
-//      bit-identical to the single-axis path. Not merely close: the angles are
-//      the same number, so every bit must match.
-//
-// Only then does the three-axis behaviour itself get checked, against a CPU
-// reference of the interleaved layout read off `Qwen3VLTextRotaryEmbedding.
-// apply_interleaved_mrope`.
+// M-RoPE: with all axes off (null), output must be bit-identical to the pre-change
+// single-axis kernel; with all three axes equal, output must be bit-identical to the
+// single-axis path. Three-axis case checked against a CPU ref of the interleaved layout.
 
 #include "compute/rope.h"
 

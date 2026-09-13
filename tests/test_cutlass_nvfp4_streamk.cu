@@ -1,9 +1,7 @@
-// Stream-K variant of the CUTLASS sm_120 NVFP4 prefill GEMM
-// (gemm.nvfp4_cutlass_streamk): correctness against the data-parallel tile
-// and an isolated bench on the Qwen3-14B pp512 shapes, where the 128x128
-// grid quantises to 0.94 waves (N=5120: 160 CTAs on 170 SMs). The weight
-// ring rotates 256 MB of copies to defeat the 96 MB L2, so the numbers read
-// DRAM like the real prefill does. GPU required - skips without one.
+// Stream-K CUTLASS sm_120 NVFP4 prefill GEMM (gemm.nvfp4_cutlass_streamk): correctness vs
+// the data-parallel tile, plus an isolated bench on Qwen3-14B pp512 shapes where the 128x128
+// grid quantises to 0.94 waves (N=5120: 160 CTAs/170 SMs). Weight ring rotates 256MB to
+// defeat the 96MB L2 so the numbers read DRAM like real prefill. GPU required, skips without one.
 
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"

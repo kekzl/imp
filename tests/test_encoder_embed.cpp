@@ -1,15 +1,8 @@
-// =============================================================================
-// test_encoder_embed.cpp — encoder-only embedder e2e (#836, nomic-bert)
-// =============================================================================
-// Loads the real nomic-embed-text-v1.5 Q8_0 GGUF through the full engine path
-// (encoder branch: upload + workspace, no KV/warmup/executor) and checks:
-//   1. WordPiece tokenization matches the HF reference ids for a fixed string.
-//   2. encoder_embed returns a unit-norm vector of d_model floats.
-//   3. Semantic structure: cos(paraphrase pair) >> cos(unrelated pair), with
-//      the HF-oracle-verified reference values as loose anchors
-//      (imp 0.903 / 0.395; oracle cos(imp, hf) >= 0.999 on 2026-07-04).
-// GTEST_SKIPs when the model file is absent.
-// =============================================================================
+// Encoder-only embedder e2e (#836, nomic-bert): loads nomic-embed-text-v1.5 Q8_0 through the
+// encoder branch (upload+workspace, no KV/warmup/executor) and checks WordPiece tokenization
+// vs HF reference ids, unit-norm output, and semantic structure (cos(paraphrase) >>
+// cos(unrelated), HF-oracle-verified anchors imp 0.903/0.395, oracle agreement >=0.999).
+// SKIPs when the model file is absent.
 
 #include "model/gguf_loader.h"
 #include "model/model.h"

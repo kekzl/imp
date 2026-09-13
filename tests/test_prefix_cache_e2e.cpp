@@ -1,25 +1,8 @@
-// Prefix-cache E2E equivalence — TEST_AUDIT (retired) risk #7 (Phase 2.6).
-//
-// The unit tests (tests/test_prefix_cache_equiv.cpp) prove the KVCacheManager
-// hands back the same physical block with intact KV bytes. This file closes
-// the loop end-to-end through the REAL engine + a REAL model: with prefix
-// caching ON, a fresh-prefill generation and a prefix-cache-HIT generation of
-// the same greedy request must produce the SAME tokens. That equivalence is
-// the property that ships the feature; risk #7 calls the test "the enabler".
-//
-// Engine seam (verified in src/api/imp_api.cpp + src/runtime/engine*.cpp):
-//   The prefix cache is only populated when a request FINISHES naturally
-//   (engine step() → finish_request() → register_block_hashes() + cache the
-//   blocks). The manual token-level path (imp_prefill_with_params +
-//   imp_decode_step) never registers hashes, AND imp_context_reset() evicts
-//   ALL cached blocks - but only while it still sees ctx->active_request, so
-//   a test that drives the engine directly gets a no-op. So the cache engages
-//   ONLY across
-//   two consecutive imp_generate() calls on the SAME context with NO reset
-//   between them: call 1 finishes and caches its prefix; call 2 hits it.
-//   We therefore drive imp_generate twice and rely on greedy determinism.
-//
-// Skipped without IMP_TEST_MODEL (no GPU model in CI).
+// Prefix-cache E2E equivalence (TEST_AUDIT retired risk #7): with caching ON, a fresh-prefill
+// and a prefix-cache-HIT generation of the same greedy request must produce the SAME tokens.
+// Cache engages only across two consecutive imp_generate() calls on the SAME context with NO
+// reset between them (finish_request registers hashes; imp_context_reset evicts only with an
+// active_request). Skipped without IMP_TEST_MODEL.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -109,12 +92,9 @@ constexpr const char* kPrompt =
 
 constexpr int kGen = 24;
 
-// 0. CONTROL: with caching OFF, two consecutive greedy imp_generate calls on
-//    the same context must already be identical. If THIS fails, back-to-back
-//    divergence is a cross-request engine property (sampler state, KV reuse,
-//    allocator layout ...) and tests 1-3 cannot attribute anything to the
-//    prefix cache. Discriminates "cache corrupts KV" from "second request
-//    differs regardless".
+// CONTROL: with caching OFF, two consecutive greedy imp_generate calls on the same context
+// must already be identical, or divergence is a cross-request engine property (sampler state,
+// KV reuse, allocator layout), not attributable to the prefix cache.
 TEST_F(PrefixCacheE2ETest, ControlNoCacheBackToBackIsDeterministic) {
     MakeContext(/*prefix_cache=*/false);
 
@@ -129,57 +109,12 @@ TEST_F(PrefixCacheE2ETest, ControlNoCacheBackToBackIsDeterministic) {
         << first << "\n  run2: " << second;
 }
 
-// =============================================================================
-// History: tests 1-3 initially FAILED (issue #536) — the prefix-cache HIT
-// diverged from the fresh prefill under greedy decoding. Root cause was NOT
-// the cache or FP rounding: GPUBatchPool::upload_into_pool skipped the
-// block-table re-upload based on a (count + first-block-ID) proxy, which a
-// prefix hit defeats (same first reused block, same count, different middle
-// after reuse+eviction, e.g. [0,1,4,3,2]) — the first eager decode step then
-// ran on the PREVIOUS request's table, writing the new token's KV into the
-// wrong physical block while the async graph read garbage at the self-token
-// position. Fixed by content-comparing the table (batch.cpp). These tests
-// are the feature's ship gate (TEST_AUDIT (retired) risk #7: "the test IS the
-// enabler") — they must stay green for prefix caching to be enabled.
-// =============================================================================
-// 1. Fresh-prefill vs prefix-cache-HIT must be token-identical.
-//    Same context, prefix caching ON, NO reset between calls: call 1 prefills
-//    fresh and caches its prefix on finish; call 2 hits the cached prefix.
-//
-//    The two are NOT byte-identical, and asserting that they are was wrong. A
-//    hit skips the cached prefix, so it computes over a different chunk split
-//    than the fresh prefill: measured on this test, "PrefixCache: seq 3 reused
-//    3/4 blocks (48 tokens skippable)". Different split, different accumulation
-//    order, and in FP16 that moves a logit.
-//
-//    Measured at the position where the two first differ, both paths dumping
-//    their raw top-2 (throwaway probe in build_logprob_info, 2026-08-19):
-//
-//      fresh : top1=55486(38.242889)  top2=279(38.081467)   gap 0.161422
-//      cached: top1=  279(38.253368)  top2=55486(38.188511) gap 0.064857
-//
-//    Same two tokens, order flipped. The gap between them is 0.42 % of the
-//    logit, and the shift the two paths produce on the same token is 0.172,
-//    i.e. LARGER than the gap. That is a tie decided by rounding, not a wrong
-//    KV block: a wrong block does not return the same two candidates within
-//    0.4 % of each other.
-//
-//    So the assertion is a common prefix, not equality. The bar comes from a
-//    distribution, not a single run: ten consecutive runs of both tests gave a
-//    common prefix of 103 characters every time, out of 161 and 153. The
-//    divergence point is not itself a coin flip, it is a fixed position where a
-//    fixed near-tie falls the other way, so 103 is a floor and not a sample
-//    mean. kMinCommonChars sits at 64, about 62 % of that.
-//
-//    Counted in CHARACTERS, deliberately: a token-based bar would need a
-//    chars-per-token factor, which is wrong for non-ASCII output and would make
-//    the bar depend on the language of the answer. Bytes are what both strings
-//    are made of.
-//
-//    What the bar has to keep catching is #536: there the hit diverged within
-//    the first tokens and continued differently, i.e. a common prefix near
-//    zero. Rounding diverges at 103. Any bar between those two separates them,
-//    and 64 is far from both.
+// #536 root cause: GPUBatchPool::upload_into_pool skipped block-table re-upload based on a
+// (count+first-block-ID) proxy a prefix hit defeats, writing a token's KV into the wrong
+// physical block; fixed by content-comparing the table. Ship gate for prefix caching (risk #7).
+// Hit vs fresh differ by chunk-split accumulation order (near-tie, not a wrong block), so the
+// assertion is a COMMON PREFIX (measured floor 103 chars/10 runs), not equality;
+// kMinCommonChars=64 sits clear of both the #536 near-zero failure and the 103-char floor.
 TEST_F(PrefixCacheE2ETest, FreshVsPrefixHitTokenEqual) {
     MakeContext(/*prefix_cache=*/true);
 
@@ -203,12 +138,9 @@ TEST_F(PrefixCacheE2ETest, FreshVsPrefixHitTokenEqual) {
 //    output for the same greedy request. This pins the cache path to the
 //    canonical fresh-prefill result, not merely to "self-consistent".
 TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
-    // Hybrid (SSM/GDN) models: with caching ON, prefill ends a chunk at the
-    // recurrent-snapshot boundary; with caching OFF it does not. Different
-    // chunk boundaries change accumulation order, so cross-CONFIG bitwise
-    // equality is unattainable by design (chunked-vs-unchunked prefill was
-    // never bit-equal). The hit==fresh guarantee for hybrids is tests 1+3,
-    // where both runs share the same boundary.
+    // Hybrid (SSM/GDN): caching ON ends a chunk at the recurrent-snapshot boundary, OFF does not,
+    // so cross-CONFIG bitwise equality is unattainable by design. The hit==fresh guarantee for
+    // hybrids is tests 1+3, where both runs share the same boundary.
     if (model_ && model_->model && model_->model->config().ssm_inner_size > 0)
         GTEST_SKIP() << "recurrent model: snapshot chunk boundary makes cache-on/off "
                         "prefill chunking differ — bitwise cross-config equality N/A";
@@ -225,11 +157,8 @@ TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
     std::string cached = gen(kPrompt, kGen);  // prefix-cache hit
 
     ASSERT_FALSE(baseline.empty());
-    // Same reasoning as test 1, and the comment above already had it for
-    // hybrids: a cache hit skips the cached prefix, so it chunks differently
-    // than the no-cache run and accumulates in a different order. That holds
-    // for a dense model too, it was simply never drawn. Common prefix, with
-    // the bar set the same way.
+    // Same reasoning as test 1: a cache hit skips the cached prefix and chunks differently,
+    // accumulating in a different order - true for dense models too. Common prefix, same bar.
     size_t common = 0;
     while (common < baseline.size() && common < cached.size() && baseline[common] == cached[common])
         common++;
@@ -240,11 +169,9 @@ TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
         << " chars, want >= " << kMinCommonChars;
 }
 
-// 3. Shared prefix, different suffix: a cache hit on the common prefix must not
-//    corrupt the continuation. We warm the cache with kPrompt, then issue a
-//    request that shares the long kPrompt prefix but appends a distinct suffix.
-//    The result must be (a) non-empty/coherent and (b) reproducible 2× — proving
-//    the partial prefix hit feeds a correct, deterministic continuation.
+// Shared prefix, different suffix: a cache hit on the common prefix must not corrupt the
+// continuation. Warm cache with kPrompt, then a request sharing the prefix with a distinct
+// suffix; result must be non-empty/coherent and reproducible 2x.
 TEST_F(PrefixCacheE2ETest, SharedPrefixDifferentSuffixStable) {
     MakeContext(/*prefix_cache=*/true);
     (void)gen(kPrompt, kGen);  // warm: cache kPrompt's blocks
@@ -261,25 +188,12 @@ TEST_F(PrefixCacheE2ETest, SharedPrefixDifferentSuffixStable) {
         << "  run a: " << a << "\n  run b: " << b;
 }
 
-// =============================================================================
-// 4. HYBRID (SSM/GDN): the recurrent-snapshot restore path.
-//
-// WHY THE TESTS ABOVE DO NOT COVER IT. kPrompt is 273 characters, ~68 tokens.
-// `snapshot_boundary(68, 16, server.snapshot_min_prompt_tokens = 256)` is 0, so
-// on a hybrid NO snapshot is ever saved by tests 0-3 and the restore branch in
-// prepare_recurrent_state_ (engine_sampling_stop.cpp) is never entered. Test 1
-// passes on a hybrid by reusing ZERO blocks: hybrid_prefix_reuse_limit_ caps
-// reuse at the snapshot boundary, and the boundary is 0. Three prefix-cache E2E
-// tests, and the hybrid half of the feature had no coverage at all.
-//
-// So this arm builds prompts past 512 tokens, which is what makes
-// snapshot_boundary non-zero, and asserts the thing that actually ships:
-// a warm (restored) run equals the cold (fresh) run, and `cached_tokens` lands
-// exactly on the snapshot boundary rather than on the longer KV match.
-//
-// Driven through Engine::add_request/step rather than imp_generate, because
-// `cached_tokens` is a Request field and the C API does not surface it.
-// =============================================================================
+// Hybrid (SSM/GDN) recurrent-snapshot restore path: tests 0-3 never trigger it
+// (snapshot_boundary(68,16,256)=0 for a 68-token kPrompt, so no snapshot saves and test 1
+// passes on a hybrid by reusing ZERO blocks). This arm uses prompts past 512 tokens so the
+// boundary is non-zero, and asserts warm(restored)==cold(fresh) with cached_tokens landing on
+// the snapshot boundary. Driven via Engine::add_request/step since cached_tokens is not
+// C-API-visible.
 
 // ~700 words of ordinary prose. Tokenizes past 512 tokens on every BPE vocab
 // this repo tests against, and is not repetitive (a repeating prompt would
@@ -378,12 +292,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
         return req->output_tokens;
     };
 
-    // Drop every cached block and every recurrent snapshot. NOT
-    // imp_context_reset(): that only evicts when ctx->active_request is set,
-    // which the C API sets and this test does not (it drives the engine
-    // directly through add_request/step). Every "cold" arm below used to run
-    // against a fully populated cache and compared one restore against
-    // another instead of against a fresh prefill (found 2026-09-09).
+    // Drops every cached block and recurrent snapshot; NOT imp_context_reset() (that only evicts
+    // with ctx->active_request set, which this engine-direct test never sets). Every "cold" arm
+    // used to run against a fully populated cache and compare one restore to another, not to a
+    // fresh prefill.
     auto go_cold = [&]() {
         ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);  // graphs, batch pool, device sync
         while (engine->kv_manager()->evict_cached_block()) {
@@ -393,13 +305,9 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
 
     constexpr int kTokens = 16;
 
-    // ── arm A: block-aligned prompt ──────────────────────────────────────
-    // The prefix cache pins at most a quarter of the pool (128 blocks at this
-    // max_seq_len -> 32 blocks = 512 tokens). A prompt past the pin budget is
-    // cached only up to the budget, its snapshot sits at the prompt's own
-    // boundary beyond it, and the downward scan finds no snapshot at or below
-    // the KV match: cached_tokens 0 (measured with the 592-token prompt).
-    // Keep the warm prompt inside the budget so the restore path is reached.
+    // Prefix cache pins at most a quarter of the pool (128 blocks at this max_seq_len -> 32
+    // blocks = 512 tokens). A prompt past the pin budget caches only up to the budget and its
+    // snapshot sits beyond it, so cached_tokens is 0; keep the warm prompt inside the budget.
     constexpr int kPinBudgetBlocks = 32;
     const int aligned_len = std::min((n_full / kv_bs) * kv_bs, kPinBudgetBlocks * kv_bs);
     std::vector<int32_t> aligned(full.begin(), full.begin() + aligned_len);
@@ -416,13 +324,9 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
         << "restored recurrent state diverged from the fresh forward at the SAME chunk boundary; "
            "both runs split the prefill at the snapshot, so this is state, not rounding";
 
-    // ── arm B: unaligned prompt (len % kv_bs != 0) ───────────────────────
-    // The boundary rounds DOWN, so the tail tokens are always forwarded. A
-    // restore that ignored the remainder would show up here and nowhere else.
-    // A second engine cannot be built on this model handle (the weight caches
-    // consumed the source tensors), so cold means dropping the cache in place:
-    // go_cold() evicts every cached block and every snapshot, and without
-    // cached KV no snapshot can be matched.
+    // Snapshot boundary rounds DOWN, so tail tokens are always forwarded; a restore ignoring the
+    // remainder would show up only here. A second engine can't be built on this model handle
+    // (weight caches consumed the source tensors), so cold means go_cold() in place.
     go_cold();
     const int unaligned_len = aligned_len - (kv_bs / 2 > 0 ? kv_bs / 2 : 1) - 1;
     ASSERT_NE(unaligned_len % kv_bs, 0);
@@ -432,21 +336,14 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     EXPECT_EQ(warm_cached, imp::snapshot_boundary(unaligned_len, kv_bs, min_snap));
     EXPECT_EQ(warm_b, cold_b) << "unaligned prompt: restored state != fresh state";
 
-    // ── arm C: warm prompt + 100 new tokens ───────────────────────────────
-    // The KV match is longer than the snapshot: the cache holds every block of
-    // the warm prefix, but the snapshot sits at the warm prompt's own boundary.
-    // cached_tokens must follow the SNAPSHOT, or the continuation decodes from
-    // a state that never saw the tokens whose KV it is reading.
-    // A second engine cannot be built on this model handle (the weight caches
-    // consumed the source tensors), so cold means dropping the cache in place:
-    // go_cold() evicts every cached block and every snapshot, and without
-    // cached KV no snapshot can be matched.
+    // KV match is longer than the snapshot: cached_tokens must follow the SNAPSHOT, not the
+    // longer KV match, or the continuation decodes from a state that never saw those tokens' KV.
+    // Cold means go_cold() in place (a second engine can't share this model handle).
     go_cold();
     // 100, not 40: a continuation past one chunk of the chunk-parallel GDN scan
-    // (gdn.chunkpar_scan, 64-token chunks) takes a different prefill route
-    // from the restored state than a short tail does. Measured 2026-09-09 on
-    // Qwen3.8-27B-NVFP4: a 13-token continuation after a restore answered, a
-    // 93-token continuation regurgitated an earlier user turn.
+    // (gdn.chunkpar_scan, 64-token chunks) takes a different prefill route than a short tail.
+    // Measured on Qwen3.8-27B-NVFP4: a 13-token continuation answered, a 93-token one
+    // regurgitated an earlier turn.
     ASSERT_GE(n_full, aligned_len + 100) << "need 100 tokens past the warm prompt";
     std::vector<int32_t> extended(full.begin(), full.begin() + aligned_len);
     (void)run(extended, kTokens, nullptr);  // warm: saves the snapshot at its boundary
@@ -458,23 +355,12 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
         << "reuse ran past the snapshot boundary (" << ext_cached << " > " << expect_c << ")";
     EXPECT_GT(ext_cached, 0) << "the extended prompt shares a snapshot-backed prefix";
 
-    // The cold reference has to split its prefill where the warm one restored,
-    // or it is not the same computation. A restore at B forwards [B, snap) and
-    // [snap, end); a default cold prefill takes [0, snap) and [snap, end), so
-    // the two differ by one chunk boundary at B - and on a GDN model that is
-    // not a rounding difference. Measured 2026-09-09 on Qwen3.8-27B-NVFP4 with
-    // the prefix cache OFF, changing nothing but the chunk size: one extra
-    // boundary in a 3299-token prompt (chunk 2048 -> 1024) moves the recurrent
-    // state by 0.34 relative L2 per layer and flips the greedy continuation,
-    // and the drift then stays flat down to chunk 32 rather than growing with
-    // the count (docs/audit/SETTLED.md, tests/test_hybrid_restore_chain.cu).
-    // Pinning runtime.prefill_chunk_size to the restore point gives the cold
-    // arm the SAME boundaries, which is what makes the equality a statement
-    // about the restored state instead of about the chunk shape.
-    // A second engine cannot be built on this model handle (the weight caches
-    // consumed the source tensors), so cold means dropping the cache in place:
-    // go_cold() evicts every cached block and every snapshot, and without
-    // cached KV no snapshot can be matched.
+    // Cold reference must split its prefill at the boundary the warm run restored at, or it is a
+    // different computation (restore forwards [B,snap)+[snap,end), cold takes [0,snap)+[snap,end)).
+    // On a GDN model this is not rounding: one extra chunk boundary in a 3299-token prompt moved
+    // recurrent state 0.34 relative L2/layer and flipped the greedy continuation (SETTLED.md,
+    // test_hybrid_restore_chain.cu). Pinning runtime.prefill_chunk_size to the restore point gives
+    // the cold arm the SAME boundaries.
     go_cold();
     ASSERT_GT(ext_cached, 0);
     const int saved_chunk = engine->mutable_runtime_config().runtime.prefill_chunk_size;

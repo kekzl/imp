@@ -62,10 +62,8 @@ constexpr int kPromptLen = 24;    // tokens prefilled before the measured window
 constexpr int kDecodeSteps = 64;  // teacher-forced decode steps per arm
 constexpr size_t kNeededMiB = 14000;
 
-// ~1.5 kB of ordinary English prose: long enough to tokenize past
-// kPromptLen + kDecodeSteps + kBatchRows offsets on any BPE vocabulary, and
-// ordinary enough that the model is not in a degenerate low-entropy regime
-// (a repetitive prompt would drive every logprob to ~0 and hide the effect).
+// ~1.5KB ordinary English: tokenizes past kPromptLen+kDecodeSteps+kBatchRows offsets on any
+// BPE vocab; not repetitive, so logprobs aren't driven to ~0 (would hide the batch effect).
 constexpr const char* kCorpus =
     "The bandwidth of a memory system is not the same thing as its latency, and confusing the two "
     "leads to designs that look fast on paper and stall in practice. A decode step reads every "
@@ -85,12 +83,9 @@ constexpr const char* kCorpus =
     "and not one that can be settled by inspecting the kernel source, which is why this file "
     "measures it against a real checkpoint instead of arguing about it.";
 
-// -----------------------------------------------------------------------------
-// One decode step, driven straight at the executor so the fed token is OURS.
-// The engine's own loop samples; teacher forcing needs the opposite. Buffers
-// are allocated once and reused — 3 arms x 64 steps of cudaMalloc/cudaFree
-// would dominate the runtime and add allocator noise to the measurement.
-// -----------------------------------------------------------------------------
+// Drives one decode step straight at the executor with OUR fed token (engine's own loop
+// samples, teacher forcing needs the opposite). Buffers allocated once and reused: 3 arms x
+// 64 steps of cudaMalloc/cudaFree would dominate runtime and add allocator noise.
 class TeacherForcedDriver {
 public:
     TeacherForcedDriver(GraphExecutor& ex, KVCache& kv, int max_rows, int max_blocks_per_seq, int vocab)
@@ -150,10 +145,9 @@ public:
     const std::vector<float>& step(const std::vector<int32_t>& tokens, const std::vector<int>& positions,
                                    const std::vector<int>& ctx_lens, const std::vector<int>& block_tables) {
         const int n = static_cast<int>(tokens.size());
-        // Same slot rule the engine applies per step (engine_scheduler.cpp):
-        // one row on the dedicated decode workspace, more rows on slot 0 sized
-        // to the batch. Getting this wrong would silently change which kernel
-        // the arm runs, which is the very thing being compared.
+        // Mirrors engine_scheduler.cpp's per-step slot rule: n==1 uses the dedicated decode
+        // workspace, else slot 0 sized to the batch - getting this wrong would silently change which
+        // kernel the arm runs, the thing under comparison.
         if (n == 1 && ex_.has_decode_workspace()) {
             ex_.use_workspace(1);
         } else {
@@ -352,10 +346,9 @@ ArmResult run_arm(TeacherForcedDriver& drv, const std::vector<int32_t>& toks, in
 
 }  // namespace
 
-// The instrument. One checkpoint, three arms, two comparisons:
-//   control  M=1 vs M=1  — must be identically zero under IMP_DETERMINISTIC=1,
-//                          otherwise the M=32 number is run-to-run noise.
-//   measured M=1 vs M=32 — the W4A16 -> W4A4 activation step, priced.
+// One checkpoint, three arms: control M=1 vs M=1 must read exactly zero under
+// IMP_DETERMINISTIC=1 (else the M=32 number is noise); measured M=1 vs M=32 prices the
+// W4A16->W4A4 activation-quant step.
 TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
     const std::string path = model_path();
     if (!fs::exists(path + "/config.json"))
@@ -415,12 +408,9 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         print_comparison("W4A4 M=1/M=32", solo_a4, batched_a4, measured_a4);
     }
 
-    // ---- Arm set 2: a SECOND engine on the same config --------------------
-    // The cross-engine baseline. A fresh engine re-plans its arena and can pick
-    // different split-K / cache geometry, so M=1 is not bit-stable across inits
-    // (the documented "NON-DETERMINISTIC across fresh contexts" boundary,
-    // tests/refs/e2e_greedy_locks.h). Without this number, arm set 3's M=1
-    // difference would be misread as an effect of the switch it flips.
+    // Cross-engine baseline: a fresh engine re-plans its arena and may pick different split-K/
+    // cache geometry, so M=1 is not bit-stable across inits (tests/refs/e2e_greedy_locks.h).
+    // Without this arm, set 3's M=1 difference would be misread as the switch's effect.
     Comparison reinit{};
     {
         RuntimeConfig rc;
@@ -437,10 +427,8 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         print_comparison("re-init M=1/M=1", solo_a4, solo, reinit);
     }
 
-    // ---- Arm set 3: the same batch WITHOUT activation quantization --------
-    // `gemm.nvfp4_smallm=false` routes 2..32 rows to the dequant/CUTLASS GEMM,
-    // i.e. W4A16 at every M. It is the switch an operator would flip, and it
-    // is the only way to tell "batching changed the GEMM shape" from "batching
+    // gemm.nvfp4_smallm=false routes 2..32 rows to dequant/CUTLASS GEMM (W4A16 at every M) - the
+    // operator-facing switch. Isolates "batching changed the GEMM shape" from "batching
     // quantized the activations": both arms below share the shape.
     ArmResult batched_w4a16;
     Comparison measured_w4a16{}, solo_vs_solo_cfg{};
@@ -470,23 +458,18 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
                                         "holding, so the M=32 deltas are unattributable";
     EXPECT_LT(control.max_abs_lp, 1e-9) << "M=1 vs M=1 logprobs differ by " << control.max_abs_lp;
 
-    // Second calibration, and a boundary worth knowing: re-initializing the
-    // SAME configuration reproduces M=1 bit for bit (the arm above prints
-    // zero), but turning smallM off — which removes a tenant from the engine
-    // arena and touches no M=1 kernel — moves M=1 anyway. That is the
-    // address/alignment boundary, measured, and it is why every batched
-    // comparison here is taken WITHIN one engine. It must stay smaller than
-    // the batch effect itself, or the arms below are comparing the wrong thing.
+    // Re-initializing the SAME config reproduces M=1 bit-for-bit, but toggling smallM off (which
+    // removes an arena tenant, touches no M=1 kernel) still moves M=1 - an address/alignment
+    // boundary. Every batched comparison here stays WITHIN one engine so this boundary noise
+    // can't dominate the measured batch effect.
     EXPECT_LT(solo_vs_solo_cfg.mean_abs_lp, measured_a4.mean_abs_lp)
         << "flipping an unrelated config knob moved M=1 by " << solo_vs_solo_cfg.mean_abs_lp
         << ", as much as batching itself (" << measured_a4.mean_abs_lp
         << "): the solo baseline is too unstable for the batched numbers to mean anything";
 
-    // Regression fences around the numbers this test printed on
-    // Qwen3-14B-NVFP4 (docs/PERF.md "Batch invariance"). They are NOT an
-    // invariance claim — imp guarantees none (docs/determinism.md) — they fail
-    // if the gap grows by an order of magnitude, which is what a broken
-    // activation-quantization step or a wrong smallM tile would do.
+    // Regression fence on NLL delta (docs/PERF.md "Batch invariance"), not an invariance claim
+    // (imp guarantees none, docs/determinism.md): fails only if the gap grows by an order of
+    // magnitude, the signature of a broken activation-quant step or wrong smallM tile.
     EXPECT_LT(std::fabs(measured_a4.nll_delta), 0.15)
         << "mean NLL moved by " << measured_a4.nll_delta << " between M=1 and M=32";
     EXPECT_GT(measured_a4.top1_agreement, 0.75)
@@ -494,21 +477,17 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
     EXPECT_LT(measured_a4.mean_abs_lp, 0.6)
         << "mean |delta logprob| between M=1 and M=32 is " << measured_a4.mean_abs_lp;
 
-    // Same fence on the W4A16 batched arm. Deliberately NOT an ordering
-    // assertion between the two: on the checkpoint measured here the two are
-    // the same size, i.e. the batch effect is the batch SHAPE and not the
-    // activation format (docs/PERF.md). Pinning an order would freeze that
-    // reading of one model into a gate.
+    // Same fence on the W4A16 batched arm; deliberately not an ordering assertion between the
+    // two arms - on the measured checkpoint they're the same size, so the batch effect is the
+    // GEMM shape, not the activation format (docs/PERF.md).
     EXPECT_LT(measured_w4a16.mean_abs_lp, 0.6)
         << "mean |delta logprob| between M=1 and M=32 without smallM is " << measured_w4a16.mean_abs_lp;
 
-    // Absolute anchor, and the reason it is here: every assertion above is a
-    // DIFFERENCE, so an error that hits both arms equally cancels. A planted
-    // 2 % output-scale error in the smallM A4 kernel did exactly that — all
-    // five deltas stayed inside their fences while every absolute NLL moved by
-    // 0.028. Only a pinned NLL catches that class, and only on the pinned
-    // checkpoint, so the anchor is skipped when the model is overridden.
-    // Re-pin deliberately when a kernel change is meant to move numerics.
+    // Absolute NLL anchor: every assertion above is a DIFFERENCE, so an error hitting both arms
+    // equally cancels. A planted 2% smallM-A4 output-scale error left all five deltas inside
+    // their fences while every absolute NLL moved 0.028 - only this anchor catches that class.
+    // Pinned to the default checkpoint only; re-pin deliberately when a kernel change should
+    // move numerics.
     if (path == kDefaultModel) {
         EXPECT_NEAR(solo_a4.mean_nll(), 3.4403, 0.02)
             << "teacher-forced M=1 NLL on " << kDefaultModel << " moved to " << solo_a4.mean_nll()

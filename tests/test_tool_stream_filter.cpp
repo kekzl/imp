@@ -1,19 +1,8 @@
-// =============================================================================
-// Unit tests for tools/imp-server/tool_stream_filter.h + the streaming tag
-// scanner/body parser in tool_call.cpp (scan_tool_tag, parse_stream_tool_body).
-//
-// WHY THIS EXISTS: the streaming tool-call state machines previously lived
-// inline in run_chat_stream_ / run_anthropic_stream_ and only recognized
-// ChatML <tool_call> and Llama3 <function=. Real agents stream (stream:true),
-// so on Gemma-4 the raw <|tool_call> markers leaked as visible text and
-// Qwen3.6 XML bodies were silently swallowed by a catch(...). The machinery
-// is now the shared StreamToolCallFilter; these tests pin its contract across
-// arbitrary token boundaries (char-by-char and random chunk sizes) — token
-// pieces split markers at any byte.
-//
-// ORACLE: hand-constructed inputs per documented wire format with the expected
-// (content, calls) spelled out — no imp-vs-imp.
-// =============================================================================
+// Streaming tool-call state machines used to live inline in run_chat_stream_/
+// run_anthropic_stream_, recognizing only ChatML <tool_call> and Llama3 <function=; Gemma-4's
+// raw <|tool_call> markers leaked as visible text and Qwen3.6 XML bodies were silently
+// swallowed by a catch(...). Now the shared StreamToolCallFilter; pinned across arbitrary
+// token boundaries (char-by-char, random chunk sizes). Oracle: hand-built wire-format inputs.
 
 #include <gtest/gtest.h>
 #include "tool_call.h"
@@ -177,11 +166,8 @@ TEST(ToolStreamFilterChatML, JsonBodyChunked) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Incremental argument streaming (the 20-60s zero-bytes fix): the arguments
-// of a JSON-layout call must flow out WHILE the body arrives, not after the
-// close tag.
-// ---------------------------------------------------------------------------
+// Incremental argument streaming (the 20-60s zero-bytes fix): a JSON-layout call's arguments
+// must flow out WHILE the body arrives, not after the close tag.
 
 TEST(ToolStreamFilterChatML, ArgsStreamBeforeCloseTag) {
     // Feed everything except the close tag: the name and (most of) the
@@ -435,18 +421,12 @@ TEST(ParseGemmaToolCallBody, RejectsMalformed) {
     EXPECT_EQ(tc.arguments, "{}");
 }
 
-// ---- #1554: an argument delta never ends mid-codepoint ----
-//
-// The emit loop pulls `limit` back by close_tag_.size() - 1 BYTES so a
-// partially arrived close tag cannot leak into the arguments. That cut lands
-// inside a multi-byte character whenever one sits at the boundary, and each
-// half is JSON-encoded into its own SSE delta, where dump_safe turns it into
-// U+FFFD. Measured on Qwen3-8B-Q8_0 with a forced tool_choice: ten replacement
-// characters in one argument string, and the non-streaming control clean.
-//
-// The first attempt at this issue hardened the BUFFERED 48-byte chunker
-// instead. That path is real but is not the one a shipped model takes here, so
-// the defect survived the fix. These tests drive the streaming path.
+// #1554: the emit loop pulls limit back by close_tag_.size()-1 bytes so a partial close tag
+// can't leak into args; that cut can land inside a multi-byte char at the boundary, and each
+// half JSON-encodes into its own SSE delta where dump_safe turns it into U+FFFD (measured on
+// Qwen3-8B-Q8_0: ten replacement chars in one argument string). The first fix hardened the
+// BUFFERED 48-byte chunker, the wrong path for a shipped model; these tests drive the
+// streaming path instead.
 
 // Every emitted delta must be valid UTF-8 on its own, because each one is
 // JSON-encoded separately.

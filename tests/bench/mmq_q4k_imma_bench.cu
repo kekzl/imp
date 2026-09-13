@@ -1,41 +1,7 @@
-// =============================================================================
-// mmq_q4k_imma_bench.cu — Phase 1 INT8 IMMA throughput microbench
-// =============================================================================
-//
-// Phase 1 of the INT8 IMMA direct-GEMM experiment (outcome:
-// docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
-//
-// Each kernel is a tight per-warp loop of one MMA opcode with all operands
-// alive — same harness pattern as tests/bench/mxf4nvf4_mma_variants_bench.cu.
-// We measure raw issue-rate of:
-//
-//   imma_s32_s8_s8_k32   : m16n8k32 .row.col.s32.s8.s8.s32      (Q4_K IMMA target)
-//   imma_s32_u8_s8_k32   : m16n8k32 .row.col.s32.u8.s8.s32      (mixed-sign variant)
-//   imma_s32_u8_u8_k32   : m16n8k32 .row.col.s32.u8.u8.s32      (unsigned variant)
-//   hmma_f32_f16_f16_k16 : m16n8k16 .row.col.f32.f16.f16.f32    (FP16 HMMA baseline)
-//
-// Ops per MMA:  2 × M × N × K  (FMA counts as 2 ops).
-//   IMMA m16n8k32 = 2 × 16 × 8 × 32 = 8192
-//   HMMA m16n8k16 = 2 × 16 × 8 × 16 = 4096
-//
-// Theoretical sm_120a peaks:
-//   INT8 IMMA: ~838 TOPS
-//   FP16 HMMA: ~419 TFLOPS
-//   ⇒ Raw-MMA IMMA / HMMA TOPS ratio ≈ 2.0×
-//
-// Decision gate (cf. design memo §7):
-//   ratio ≥ 1.8×  ⇒  hardware ceiling is real ⇒ PROCEED to Phase 2 production
-//                    kernel (cp.async pipelining + ldmatrix + Q4-symmetric s8
-//                    reordering); multi-week port.
-//   ratio < 1.5×  ⇒  hardware throttled to FP16-peak on consumer Blackwell
-//                    (same fate as the SM100-only tcgen05 family) ⇒ DEFER
-//                    indefinitely.
-//
-// Note: this bench measures *raw* MMA-pipe throughput in isolation. It tells us
-// whether the hardware is *willing* to dispatch INT8 TC at the advertised
-// peak. It does NOT tell us whether a realistic tiled kernel (memory-bound on
-// weight reads, cp.async-latency-bound, ldmatrix-bound) can approach that
-// ceiling — Phase 2 work measures that.
+// Phase 1 INT8 IMMA throughput microbench (docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
+// Ops/MMA: IMMA m16n8k32=8192, HMMA m16n8k16=4096; sm_120a theoretical ratio ~2.0x.
+// Gate: ratio >=1.8x proceeds to Phase 2 production kernel; <1.5x defers (FP16-throttled).
+// Measures raw MMA-pipe throughput only, not a realistic tiled kernel's achievable rate.
 
 #include "bench/mmq_q4k_imma_bench.h"
 #include <cuda_runtime.h>

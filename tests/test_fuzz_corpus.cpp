@@ -1,29 +1,14 @@
-// The fuzz targets, driven in the CPU lane (#1620).
-//
-// `docs/audit/SETTLED.md` S-28 recorded that the parser surfaces are "fuzzed,
-// in CI". They were not: two of the four files it named are hand-written
-// fault-injection batteries with no randomness at all, and the other two are
-// seeded property tests whose generator's output is asserted VALID before use.
-// Nothing mutated anything, and no fuzz target existed anywhere in the tree.
-//
-// This file closes the gap from the cheap end. It drives the same
-// `imp_fuzz_*` entry points libFuzzer drives (fuzz/), over:
-//
-//   1. a committed corpus of the inputs that actually broke something, so a
-//      re-introduction is a named test failure rather than a fuzzing session
-//      someone has to remember to run;
-//   2. a deterministic mutator over that corpus, fixed seed, so a failure
-//      reproduces from the test name alone.
-//
-// It is NOT a substitute for a real fuzzing run: no coverage feedback, no
-// corpus growth, a few thousand executions instead of billions. It is the part
-// that runs on every pull request. `cmake -DIMP_FUZZERS=ON` with clang builds
-// the libFuzzer binaries for the long runs.
-//
-// Budget: this has to stay inside the CPU lane's seconds. Keep the per-target
-// iteration counts small enough that the whole file is well under a second,
-// and put depth/size bombs in the corpus rather than hoping the mutator finds
-// them.
+// Fuzz targets driven in the CPU lane (#1620): docs/audit/SETTLED.md S-28 claimed the parser
+// surfaces were "fuzzed, in CI" but two of the four named files were hand-written
+// fault-injection batteries with no randomness, the other two seeded property tests whose
+// generator output was asserted valid before use - no fuzz target existed anywhere.
+// Drives the same imp_fuzz_* entry points libFuzzer drives (fuzz/) over a committed corpus
+// of inputs that broke something (a regression is a named test failure, reproducible from
+// the name) plus a deterministic mutator, fixed seed.
+// Not a substitute for real fuzzing (no coverage feedback, no corpus growth, thousands not
+// billions of execs) - it's the part that runs on every PR. cmake -DIMP_FUZZERS=ON with
+// clang builds the libFuzzer binaries for long runs.
+// Budget: whole file well under a second; put depth/size bombs in the corpus, not the mutator.
 
 #include <gtest/gtest.h>
 
@@ -58,10 +43,9 @@ struct Rng {
     size_t below(size_t n) { return n ? static_cast<size_t>(next() % n) : 0; }
 };
 
-// Four mutations, chosen because they are the ones that produced the shipped
-// defects: a flipped byte (a dtype string one character off), a truncation (a
-// header cut mid-value), an insertion (a nesting level too many), and a splice
-// of two corpus entries (a valid prefix with a hostile tail).
+// Four mutation types, chosen because they produced the shipped defects: a flipped byte (a
+// dtype string one char off), a truncation (header cut mid-value), an insertion (one nesting
+// level too many), and a splice of two corpus entries (valid prefix, hostile tail).
 std::string mutate(const std::string& in, const std::string& other, Rng& rng) {
     std::string s = in;
     switch (rng.below(5)) {
@@ -110,11 +94,8 @@ void run_target(const TargetSpec& spec, int iterations, uint64_t seed) {
     }
 }
 
-// ---- corpora ----
-//
-// Rule for adding to these: an entry earns its place by having broken
-// something, or by reaching a branch nothing else reaches. A generic "valid
-// input" belongs in a unit test, not here.
+// Rule for adding a corpus entry: it must have broken something, or reach a branch nothing
+// else reaches. A generic "valid input" belongs in a unit test, not here.
 
 std::vector<std::string> schema_corpus() {
     return {
@@ -128,12 +109,9 @@ std::vector<std::string> schema_corpus() {
         // #1567: accepted and silently dropped.
         R"({"type":"integer","minimum":1,"maximum":5})",
         R"({"allOf":[{"type":"string"}],"not":{"type":"number"}})",
-        // #1609: one stack frame per level. Two things had to be measured
-        // against the reverted fix to get this entry right: the parser
-        // recurses on '{' (a run of '[' is rejected at the first character and
-        // reaches nothing), and 200 levels is not enough to overflow a worker
-        // stack. This shape is the one from the issue, at a depth that
-        // actually takes the process down.
+        // #1609: one stack frame per nesting level. Verified against the reverted fix: the parser
+        // recurses on '{' only (a run of '[' is rejected at the first char), and 200 levels is not
+        // enough to overflow a worker stack - this entry's depth is the one that actually does.
         [] {
             std::string d;
             for (int i = 0; i < 20000; i++)

@@ -249,10 +249,9 @@ def main():
                 jb({"model": M, "messages": [{"role": "user", "content": "x"}], "max_tokens": big}))
 
     print("\n[4b] context overflow — over-long prompt must 4xx, never crash (SIGSEGV/abort):")
-    # ~20k tokens: longer than any allocated context AND any single-pass hidden
-    # buffer. Must be rejected cleanly on chat (KV/position buffers) and on
-    # embeddings (the mean-pool hidden buffer). Regression for the 14B-4096-ctx
-    # SIGSEGV and the embeddings view_hidden() abort.
+    # ~50k tokens: longer than any allocated context AND any single-pass hidden buffer. Must be
+    # rejected cleanly on chat (KV/position buffers) and embeddings (mean-pool hidden buffer).
+    # Regression for the 14B-4096-ctx SIGSEGV and the embeddings view_hidden() abort.
     overlong = "word " * 50000  # ~50k tokens: beyond any context / single-pass buffer
     check_bad("/v1/chat/completions  over-long prompt", "/v1/chat/completions",
               jb({"model": M, "messages": [{"role": "user", "content": overlong}], "max_tokens": 8}))

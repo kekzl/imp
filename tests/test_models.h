@@ -1,37 +1,6 @@
-// Central model-env registry for the test suite (TEST_AUDIT (retired) R6 / #581).
-//
-// Model-dependent tests are gated on a small set of IMP_TEST_MODEL* env vars.
-// Before this header that gating was copy-pasted across ~25 files: each file
-// re-spelled the env-var name, the std::getenv() call, and (for the GGUF
-// suites) the /models/... container-fallback path. A typo in any copy silently
-// disabled a test. This header is the single source of truth for:
-//
-//   * the env-var names (kEnv* constants), and
-//   * how a path is resolved from them (env_path / env_path_or).
-//
-// The actual GTEST_SKIP() stays at the call site on purpose: GTEST_SKIP()
-// expands to a `return` from the *enclosing* function, so it cannot be hidden
-// inside a helper without skipping the helper instead of the test. Call sites
-// therefore read:
-//
-//   const std::string path = imp_test::env_path(imp_test::kEnvModel);
-//   if (path.empty())
-//       GTEST_SKIP() << "Set " << imp_test::kEnvModel << " to run ...";
-//
-// or, for the GGUF suites that fall back to the Docker bind-mount and then
-// skip-on-missing-file:
-//
-//   const std::string path = imp_test::env_path_or(imp_test::kEnvModel,
-//                                                   "/models/Qwen3-8B-Q8_0.gguf");
-//
-// The hardcoded /models/... fallbacks match the Makefile container mount, which
-// is `-v $(HOME)/models:/models`. It used to be `$(PWD)/models`, and the repo's
-// models/ entries are absolute symlinks into $HOME/models, so under that mount
-// every path missed, every model test skipped, and the battery reported green
-// having loaded nothing. Skipping is only correct for an UNSET var - see
-// require_readable() below. The fallbacks are passed by the caller so the
-// model<->test mapping stays visible at the call site; this header only owns
-// the env-var names and the getenv mechanics.
+// Central IMP_TEST_MODEL* env registry: single source of truth for env names and path
+// resolution, replacing copy-pasted getenv gating that silently disabled tests on a typo.
+// GTEST_SKIP() stays at call sites: it returns from the enclosing function, not a helper.
 
 #ifndef IMP_TESTS_TEST_MODELS_H
 #define IMP_TESTS_TEST_MODELS_H
@@ -45,11 +14,8 @@
 
 namespace imp_test {
 
-// --- Model env-var names (single source of truth) -------------------------
-//
-// Generic primary model. Suite runs point this at whatever model is under test
-// (Qwen3-8B Q8_0 for the greedy-lock / prefix-cache gates, a SafeTensors dir
-// for NVFP4 locks, ...). GGUF vs SafeTensors is sniffed from the path.
+// Primary model env var (IMP_TEST_MODEL); GGUF vs SafeTensors is sniffed from the path,
+// target model set per suite (e.g. Qwen3-8B Q8_0 for greedy-lock/prefix-cache gates).
 inline constexpr const char* kEnvModel = "IMP_TEST_MODEL";
 
 // Generic GGUF model for loader/tensor-kind coverage.
@@ -74,17 +40,14 @@ inline constexpr const char* kEnvMoeModel = "IMP_TEST_MOE_MODEL";
 inline constexpr const char* kEnvMmproj = "IMP_TEST_MMPROJ";
 inline constexpr const char* kEnvMmprojGemma4 = "IMP_TEST_MMPROJ_GEMMA4";
 
-// LLM-Compressor / ModelOpt export directories for the loader E2E gate. They
-// were hardcoded in the test, and one of the two defaults named a directory
-// that does not exist on this machine (`Qwen3-Coder-30B-A3B-FP4` against the
-// `-Instruct-FP4` that is actually there), so the case skipped for a reason
-// nobody could see from the test output.
+// LLM-Compressor/ModelOpt loader E2E export dirs. Previously hardcoded with one default
+// naming a nonexistent dir (Qwen3-Coder-30B-A3B-FP4 vs the actual -Instruct-FP4), which
+// skipped silently.
 inline constexpr const char* kEnvModelModeloptCoder = "IMP_TEST_MODEL_MODELOPT_CODER";
 inline constexpr const char* kEnvModelMistral = "IMP_TEST_MODEL_MISTRAL";
 
-// Dense native-NVFP4 checkpoint for the batch-invariance instrument
-// (AUDIT_arch_2026 D-2). Dense on purpose: MoE routing flips would sit on top
-// of the solo/batched numerics the test is there to price.
+// Dense native-NVFP4 checkpoint for the batch-invariance instrument (AUDIT_arch_2026 D-2).
+// Dense on purpose: MoE routing flips would sit on top of the numerics under test.
 // Default: /models/Qwen3-14B-NVFP4.
 inline constexpr const char* kEnvModelNvfp4 = "IMP_TEST_MODEL_NVFP4";
 
@@ -110,11 +73,8 @@ inline std::string env_path_or(const char* name, const char* fallback) {
     return v ? std::string(v) : std::string(fallback);
 }
 
-// const char* variant for the suites that pass the result straight to
-// fopen()/the C API. Both the getenv pointer and the literal `fallback` have
-// static lifetime, so the returned pointer is safe to hold. The `fallback`
-// stays at the call site (model<->test mapping visible); only the
-// getenv-or-default mechanic is shared.
+// const char* variant for callers passing straight to fopen()/the C API; getenv pointer and
+// literal fallback both have static lifetime, so the returned pointer stays valid.
 inline const char* env_cstr_or(const char* name, const char* fallback) {
     const char* v = std::getenv(name);
     return v ? v : fallback;
@@ -122,26 +82,9 @@ inline const char* env_cstr_or(const char* name, const char* fallback) {
 
 // --- Guards ---------------------------------------------------------------
 
-// A var that is UNSET means "nobody asked for this model" and skipping is
-// right. A var that is SET but names a path that is not there is a
-// CONFIGURATION error, and skipping it is the trap this suite fell into:
-// `make test-e2e` mounted the repo's models/ directory, whose entries are
-// absolute symlinks into $HOME/models and therefore dangle inside the
-// container, so every model path missed, every model test skipped, and the
-// whole battery reported green without loading a single checkpoint.
-//
-// Letting the bad path fall through to imp_model_load() is not the fix either:
-// that reports a bare IMP_ERROR against a coherence assertion and never names
-// the path, so a wrong mount reads as a product failure.
-//
-// It has to be a void helper invoked through ASSERT_NO_FATAL_FAILURE, for the
-// same reason GTEST_SKIP() stays at the call site above: ASSERT_* returns from
-// its *enclosing* function.
-//
-//   ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
-//
-// stat() rather than ifstream, because half these vars name a SafeTensors
-// directory and the other half a .gguf file, and both must pass.
+// Unset var: skip is right. A set var naming an unreadable path is a config error, not a
+// skip (a wrong Docker mount with dangling models/ symlinks once made every model test skip
+// silently). Void helper + ASSERT_NO_FATAL_FAILURE: ASSERT_* returns from the enclosing function.
 inline void require_readable(const char* path, const char* var) {
     ASSERT_NE(path, nullptr) << var << " is unset";
     struct stat st {};
@@ -154,11 +97,8 @@ inline void require_readable(const std::string& path, const char* var) {
     ASSERT_NO_FATAL_FAILURE(require_readable(path.c_str(), var));
 }
 
-// The env_path_or() form, where an unset var falls back to the documented
-// /models/... path. Here a missing path is genuinely ambiguous: the default is
-// a convenience, so "not installed" must stay a skip. Only an EXPLICITLY set
-// var is a promise that the checkpoint is there, so only that is enforced.
-// Call this before the exists()-check that skips.
+// env_path_or()'s fallback to /models/... is a convenience, so an unset var stays a skip.
+// Only an explicitly set var promises the checkpoint exists; call before the exists()-skip check.
 inline void require_readable_if_set(const char* var) {
     const char* v = std::getenv(var);
     if (!v || !*v)

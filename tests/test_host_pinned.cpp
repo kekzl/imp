@@ -1,11 +1,7 @@
-// PinnedBuffer — the owner for T5's engine-persistent half
-// (docs/internals/MEMORY.md §A2, memory/host_pinned.h).
-//
-// CPU lane on purpose, and it is the whole reason HostPinnedAllocator is an
-// interface: the 26 call sites this type exists for are pinned-host buffers in
-// the decode path, and the property that has to hold — freed exactly once, never
-// after a move — is an ownership property, not a CUDA one. A GPU-lane test would
-// never run in CI (no GPU runner) and would prove less.
+// PinnedBuffer, T5's engine-persistent half owner (docs/internals/MEMORY.md SSA2,
+// memory/host_pinned.h). CPU lane on purpose: HostPinnedAllocator is an interface because the
+// property under test (freed exactly once, never after a move) is an ownership property, not
+// a CUDA one - a GPU-lane test would never run in CI (no GPU runner) and would prove less.
 
 #include <gtest/gtest.h>
 
@@ -104,10 +100,10 @@ TEST(PinnedBuffer, FailedAcquireIsAnEmptyBufferNotAThrow) {
     EXPECT_EQ(a.frees(), 0) << "a failed acquire owns nothing and must free nothing";
 }
 
-// The fake would happily hand back a 1-byte block for a 0-byte request, so this
-// pins the OWNER's behaviour rather than the allocator's: a zero-size request is
-// a caller bug, and a buffer whose bytes() disagrees with its allocation is how
-// an overrun gets through.
+// A zero-size request is a caller bug: pins the OWNER's behaviour (refuse without asking the
+// allocator), since a fake allocator would happily hand back a 1-byte block for a 0-byte
+// request, and a buffer whose bytes() disagrees with its allocation is how an overrun gets
+// through.
 TEST(PinnedBuffer, ZeroBytesIsRefusedWithoutAskingTheAllocator) {
     CountingHostPinned a;
     PinnedBuffer b = PinnedBuffer::acquire(a, 0);
@@ -201,18 +197,15 @@ TEST(PinnedBuffer, DefaultKindIsPlain) {
     EXPECT_EQ(a.last_kind(), HostPinnedKind::Plain);
 }
 
-// ── HostRegistration ─────────────────────────────────────────────────
-// Pinning memory imp does not own. The registrar is substitutable for a reason
-// found by mutation testing: with the real one, a device-less machine fails every
-// registration, so every path collapses to "empty" and a reset() that forgot to
-// clear its pointer passed. Against the fake below the ownership is actually
-// pinned. The leak this type prevents is the asymmetric one — a page-locked
-// region left behind by an early return does not show up as missing bytes.
+// HostRegistration: the registrar is substitutable because a device-less machine fails
+// every real registration, collapsing every path to "empty" and letting a reset() that
+// forgot to clear its pointer pass. Against the fake, ownership is actually pinned. The leak
+// this type prevents is asymmetric: a page-locked region left by an early return doesn't show
+// up as missing bytes.
 
-// Host-heap stand-in for cudaHostRegister: it never touches the driver, so the
-// ownership paths below are reachable on a machine with no GPU. Without this the
-// CPU lane proves nothing here — mutation testing confirmed a reset() that
-// forgot to clear its pointer and a dropped null guard both survived.
+// Host-heap stand-in for cudaHostRegister: never touches the driver, so ownership paths are
+// reachable without a GPU. Mutation testing confirmed a reset() that forgot to clear its
+// pointer and a dropped null guard both survived without this fake.
 class FakeRegistrar final : public HostRegistrar {
 public:
     bool register_read_only(void* ptr, size_t bytes) override {
@@ -339,18 +332,12 @@ TEST(HostRegistration, EitherRegistersOrStaysEmptyAndSurvivesRelease) {
     EXPECT_TRUE(r.empty());
 }
 
-// The tests above substitute the allocator, so none of them exercises the real
-// one at all. This one does, and what it can prove is bounded — stated here
-// rather than left to be assumed:
-//
-//   - CPU-only lane (what CI runs): cudaHostAlloc fails without a device, and the
-//     contract is "empty buffer, no crash" (I6). That is the assertion.
-//   - GPU box: a Mapped buffer carries a device view and a Plain one does not.
-//
-// What NO lane here catches, verified by mutation: a build that passes
-// cudaHostAllocMapped for BOTH kinds. PinnedBuffer only ever exposes a device
-// view for Mapped, and under UVA the underlying query succeeds either way — see
-// the HostPinnedKind comment in host_pinned.h.
+// The tests above substitute the allocator; this one exercises the real one, bounded:
+// CPU-only lane (what CI runs) asserts cudaHostAlloc fails without a device -> empty buffer,
+// no crash (I6). GPU box: a Mapped buffer carries a device view, Plain does not.
+// What NO lane here catches (verified by mutation): a build passing cudaHostAllocMapped for
+// BOTH kinds - PinnedBuffer only exposes a device view for Mapped, and under UVA the query
+// succeeds either way (see the HostPinnedKind comment in host_pinned.h).
 TEST(PinnedBuffer, RealAllocatorEitherFailsCleanlyOrMapsOnlyWhenAsked) {
     HostPinnedAllocator& a = cuda_host_pinned_allocator();
 

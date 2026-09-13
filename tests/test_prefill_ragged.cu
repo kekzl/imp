@@ -1,26 +1,8 @@
-// Cross-sequence ragged prefill (runtime.prefill_batch, roadmap 0(d)).
-//
-// A burst of prompts used to prefill one sequence per forward; the ragged path
-// concatenates the chunks of several requests into one forward (attention and
-// the GDN conv loop per sequence inside the executor). These tests drive the
-// full engine on the synthetic dense model:
-//
-//   - MatchesSerialDense: the same four greedy requests, batched vs serial,
-//     produce the same tokens under runtime.deterministic. The GEMM M-shape
-//     differs between the arms (concatenated rows vs per-request rows), so
-//     this asserts that the low-bit accumulation-order difference does not
-//     reach the argmax on this model — the property the serving path relies
-//     on. If a toolchain bump ever flips a single near-tie token here, the
-//     right fix is a looser comparison, not disabling the path.
-//   - RepeatBatchIdentical: two identical ragged rounds on one engine match
-//     byte for byte (recurrent/KV state does not leak between rounds).
-//   - ChunkedRagged: prompts longer than prefill_chunk_size run the ragged
-//     path with q_offset > 0 (chunked continuation per sequence) and still
-//     match the serial arm.
-//
-// GDN-model coverage: the ragged scan itself is bit-tested in test_gdn.cu
-// (seq_row_offsets); the engine-level GDN validation runs against the real
-// checkpoint (docs/plans/2026-08-24-qwen38-port.md, phase-1 measurement).
+// Cross-sequence ragged prefill (runtime.prefill_batch, roadmap 0(d)): concatenates chunks of
+// several requests into one forward instead of one sequence per forward.
+// MatchesSerialDense: batched vs serial greedy (runtime.deterministic) must agree despite
+// different GEMM M-shape accumulation order; RepeatBatchIdentical: no state leak between
+// rounds; ChunkedRagged: chunked continuation (q_offset>0) still matches serial.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -192,10 +174,9 @@ TEST_F(RaggedPrefillTest, ChunkedRagged) {
         EXPECT_EQ(ragged_out[i], serial_out[i]) << "request " << i << " diverged (chunked ragged)";
 }
 
-// Staggered arrival: two prompts decode while two more prefill, so the
-// ragged forward of the late pair carries the early pair as one-row riders
-// (runtime.prefill_mixed_decode). Same tokens as the separate-step arm, and
-// the engine must report that mixed steps actually ran.
+// Staggered arrival: two prompts decode while two more prefill, so the late pair's ragged
+// forward carries the early pair as one-row riders (runtime.prefill_mixed_decode). Must match
+// the separate-step arm's tokens, and the engine must report mixed steps actually ran.
 static std::vector<std::vector<int32_t>> run_staggered(Engine& engine,
                                                        const std::vector<std::vector<int32_t>>& prompts,
                                                        int max_tokens) {

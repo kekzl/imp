@@ -1,19 +1,8 @@
-// Image tokens under CHUNKED prefill.
-//
-// Both vision kernels are handed one chunk at a time and locate "the k-th
-// placeholder" by scanning the token ids they were given. That span is the
-// chunk, not the prompt, so on its own the k-th placeholder of a second chunk
-// looks like the k-th placeholder of the image. It is not — and taking the
-// image's first embeddings again is the wrong region of the picture, produced
-// silently: no error, no crash, a model that still answers.
-//
-// Chunked prefill is reachable with defaults here (chunk size 2048, and
-// `supports_chunked_prefill_` admits Qwen3 with FP8 KV, which is the default KV
-// dtype for that family), so a prompt with enough text before its image puts an
-// image run across a boundary.
-//
-// The guard is `emb_offset`: how many image tokens earlier chunks consumed.
-// Both kernels have to agree on it, which is why they are tested together.
+// Both vision kernels locate "the k-th placeholder" by scanning the ids of the chunk they
+// were handed, not the prompt, so a second chunk's k-th placeholder looks like the image's
+// k-th placeholder and silently re-reads the wrong region (no error, still answers).
+// Reachable with defaults (chunk 2048, FP8 KV admits Qwen3 chunked prefill). Guard: emb_offset
+// (image tokens earlier chunks consumed), which both kernels must agree on.
 
 #include "vision/deepstack_inject.h"
 

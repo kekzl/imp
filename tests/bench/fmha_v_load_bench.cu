@@ -1,25 +1,6 @@
-// =============================================================================
-// fmha_v_load_bench.cu — cp.async vs TMA bulk for FMHA V-tile loads (SM120)
-// =============================================================================
-//
-// Microbench. See header for context.
-//
-// Bench shape mirrors the FMHA-MXFP4 V-prefetch path in
-// attention_fmha_mxfp4_sm120.cu lines 755-772:
-//   - V tile geometry: Bkv rows × head_dim halves, contiguous gmem (row-major)
-//   - 1 tile per kernel iteration
-//   - SMEM destination is the KV_fp16 buffer (head_dim halves per row)
-//
-// Two variants:
-//   A. cp.async (current): 128-thread CTA, each thread issues
-//      `cp.async.ca.shared.global [%0],[%1],16;` for an 8-halves chunk.
-//      Loop until tile is loaded. Single cp_async_commit + wait_group.
-//   B. TMA bulk (proposed): single `cp.async.bulk.tensor.2d` issued by thread 0,
-//      mbarrier coordinates completion across the CTA.
-//
-// Bandwidth is per-CTA. We launch on every SM (170 on RTX 5090) to saturate
-// memory engines, the same way the FMHA kernel does in practice.
-// =============================================================================
+// Microbench: cp.async vs TMA bulk for FMHA V-tile loads (SM120).
+// Mirrors the FMHA-MXFP4 V-prefetch shape in attention_fmha_mxfp4_sm120.cu:755-772.
+// Launches on all 170 SMs (RTX 5090) to saturate memory engines like the real kernel.
 
 #include "bench/fmha_v_load_bench.h"
 #include <cuda.h>
@@ -97,12 +78,7 @@ __device__ __forceinline__ void bench_cp_async_bulk_tensor_2d(
         : "memory");
 }
 
-// ---------------------------------------------------------------------------
-// Variant A: cp.async (current FMHA path)
-//
-// 1 tile per iter. 128 threads. Each thread loads an 8-halves chunk per
-// position in the tile. CHUNK_HALVES=8 (16 bytes) matches FMHA-MXFP4.
-// ---------------------------------------------------------------------------
+// Variant A: cp.async, current FMHA path. 128 threads, CHUNK_HALVES=8 (16B) matches FMHA-MXFP4.
 __global__ void __launch_bounds__(kThreads) bench_cp_async_v_load(
     int iters, int Bkv, int head_dim,
     const __half* __restrict__ src,
@@ -139,13 +115,8 @@ __global__ void __launch_bounds__(kThreads) bench_cp_async_v_load(
     if (tid == 0 && blockIdx.x == 0) *sink = acc;
 }
 
-// ---------------------------------------------------------------------------
-// Variant B: TMA bulk
-//
-// Single thread issues cp.async.bulk.tensor.2d for the whole tile. mbarrier
-// coordinates completion. Tile box: Bkv × head_dim halves (innermost = halves,
-// outermost = rows).
-// ---------------------------------------------------------------------------
+// Variant B: TMA bulk. Single thread issues cp.async.bulk.tensor.2d for the whole tile,
+// mbarrier coordinates completion. Tile: Bkv x head_dim halves.
 __global__ void __launch_bounds__(kThreads) bench_tma_v_load(
     int iters, int Bkv, int head_dim,
     const __grid_constant__ CUtensorMap desc,

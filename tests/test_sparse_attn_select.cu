@@ -1,11 +1,7 @@
-// Sparse decode attention (attention.sparse_topk_tokens) unit tests:
-//   * key min/max metadata maintenance (decode single-token, prefill spans,
-//     partial-block continuation merge, block-reuse re-init, FP8 raw dequant)
-//   * top-k selection: identity pass-through, forced sink/recent blocks,
-//     ascending order, deterministic ties, compacted context length
-//   * end-to-end: paged_attention_decode over the identity-compacted table is
-//     bit-identical to the dense table
-// Kernels under test: src/exec/sparse_attn_select.cu.
+// Sparse decode attention (attention.sparse_topk_tokens): key min/max metadata maintenance
+// (decode, prefill spans, partial-block merge, block-reuse re-init, FP8 raw dequant), top-k
+// selection (identity pass-through, forced sink/recent, ascending order, deterministic ties,
+// compacted length), and e2e bit-identity vs the dense table. Kernels: sparse_attn_select.cu.
 
 #include <gtest/gtest.h>
 #include "exec/sparse_attn_select.h"
@@ -216,10 +212,9 @@ TEST_F(SparseMinMaxTest, PrefillSpanThenDecodeMerge) {
 }
 
 TEST_F(SparseMinMaxTest, MeanStdMergesAcrossSpanAndDecodeSteps) {
-    // min/max merges idempotently; mean/std does not - the stored half has to
-    // be weighted by the slot count it already covers, and `slot` is that
-    // count. One 24-token prefill span, then two single-token decode merges
-    // into the same block: a restart or a double-weight shows up immediately.
+    // min/max merges idempotently; mean/std does not - the stored half must be weighted by the
+    // slot count already covered ("slot"). A 24-token prefill span then two single-token decode
+    // merges into the same block exposes a restart or double-weight immediately.
     std::vector<int> bt_h = {0, 1, 2};
     int* d_bt = dmalloc<int>(bt_h.size());
     dcopy(d_bt, bt_h);
@@ -319,10 +314,9 @@ TEST_F(SparseMinMaxTest, RepeatedPositionPadRows) {
 }
 
 TEST_F(SparseMinMaxTest, RaggedSeqOffsetsMapping) {
-    // Ragged prefill shape: one launch over the CONCATENATED rows of two
-    // sequences; seq_offsets maps token -> block-table ROW (token_idx does
-    // not equal seq). Seq 0: 20 tokens from pos 0 (blocks 0,1 of row 0);
-    // seq 1: 5 tokens from pos 16 (block 3 of row 1, slot 0 -> init).
+    // Ragged prefill: one launch over the CONCATENATED rows of two sequences; seq_offsets maps
+    // token -> block-table ROW (token_idx != seq). Seq 0: 20 tokens from pos 0 (blocks 0,1, row 0);
+    // seq 1: 5 tokens from pos 16 (block 3, row 1, slot 0 -> init).
     std::vector<int> bt_h = {0, 1, /*row1:*/ 2, 3};  // [2, mbps=2]
     int* d_bt = dmalloc<int>(bt_h.size());
     dcopy(d_bt, bt_h);
@@ -384,11 +378,9 @@ TEST_F(SparseMinMaxTest, Fp8RawScaleOneDequant) {
     cudaFree(d_pos);
 }
 
-// NVFP4 metadata: the packed nibbles alone do not define a key value, so this
-// is the one dtype where the bound depends on a second region. The reference
-// below quantizes on the host and dequantizes independently of the kernel, so
-// a wrong nibble order, a wrong group stride or a dropped scale all show up as
-// a wrong bound rather than as a plausible one.
+// NVFP4 metadata: packed nibbles alone don't define a key value, the bound depends on a
+// second region (scales). Reference quantizes/dequantizes independently of the kernel, so a
+// wrong nibble order, group stride, or dropped scale shows as a wrong bound, not a plausible one.
 TEST_F(SparseMinMaxTest, Nvfp4NibblesAndGroupScales) {
     static constexpr int kGroup = 16;
     ASSERT_EQ(row_elems % kGroup, 0);
@@ -465,10 +457,9 @@ protected:
     static constexpr int hd = 64;
     static constexpr int row_elems = nkv * hd;
 
-    // Build metadata where block b's bound for every head is `weight[b]`:
-    // min = max = weight[b] on dim 0 of each kv head, 0 elsewhere, and
-    // q = 1 on dim 0 of each head -> score(b) == weight[b] exactly.
-    // engage_blocks defaults to budget_blocks (sparse_min_ctx off).
+    // Metadata built so block b's bound equals weight[b] on every head (min=max=weight[b] on
+    // dim 0, 0 elsewhere; q=1 on dim 0), giving score(b)==weight[b] exactly. engage_blocks
+    // defaults to budget_blocks (sparse_min_ctx off).
     void run_select(const std::vector<float>& weight, int ctx_len, int budget_blocks, int sink_blocks,
                     int recent_blocks, std::vector<int>& out_bt, int& out_ctx, int engage_blocks = 0,
                     bool meanstd = false, float std_coef = 1.0f) {
@@ -547,10 +538,8 @@ TEST_F(SparseSelectTest, EngageThresholdKeepsIdentity) {
 }
 
 TEST_F(SparseSelectTest, TopKForcedAscendingDeterministic) {
-    // 12 blocks (ctx 190, tail block 11 holds 14 tokens), budget 6 = 1 sink +
-    // 2 recent + 3 middle picks. Middle candidates are blocks 1..9.
-    // weights: block 5 and 7 clearly highest; blocks 2 and 3 TIE for third -
-    // the lower index (2) must win, deterministically.
+    // 12 blocks (ctx 190), budget 6 = 1 sink + 2 recent + 3 middle. Blocks 2 and 3 tie for third
+    // highest weight; the lower index (2) must win, deterministically.
     std::vector<float> w = {0.f, 1.f, 5.f, 5.f, 0.5f, 9.f, 0.25f, 8.f, 0.75f, 1.5f, 0.f, 0.f};
     std::vector<int> out;
     int ctx = 0;
@@ -636,19 +625,10 @@ TEST_F(SparseSelectTest, ChunkRowsSharedTablePerRowCtx) {
     cudaFree(d_sctx);
 }
 
-// ---------------------------------------------------------------------------
-// End-to-end: attention over an identity-compacted table is bit-identical.
-// ---------------------------------------------------------------------------
-// The two scores disagree exactly where the corner bound is loose: a page
-// whose per-dimension extremes come from DIFFERENT tokens. Page A holds one
-// +3.75 per dimension, rotated so every token carries the spike in a different
-// quarter of the dimensions, and -0.25 everywhere else; page B holds a flat
-// 1.25 in every dimension of every token. Against an all-ones query:
-//   true best dot   A: 4*3.75 + 60*(-0.25) = 0        B: 64*1.25 = 80
-//   corner bound    A: 64*3.75        = 240           B: 64*1.25 = 80   -> A
-//   mean + 1.0*std  A: 64*(0 + 0.968) = 61.9          B: 64*1.25 = 80   -> B
-// so the corner bound spends the one free budget slot on the page that has
-// nothing to offer, and mean/std does not. All values are exact in fp16.
+// Corner bound and mean+std disagree exactly where per-dimension extremes come from
+// DIFFERENT tokens: an outlier page (one +3.75 spike rotated per token, -0.25 elsewhere) has
+// true best dot 0 but corner bound 240 (wins budget); a consistent page (flat 1.25) has true
+// best dot 80 and mean+std 80 (wins under mean+std). Values exact in fp16.
 TEST(SparseScoreMeanStd, OutlierPageLosesTheBudgetSlotToTheConsistentPage) {
     constexpr int nkv = 1, nh = 1, hd = 64, n_blocks = 4, ctx_len = n_blocks * kBS;
     constexpr int row_elems = nkv * hd;

@@ -1,17 +1,8 @@
-// =============================================================================
-// Unit tests for tools/imp-server/tool_call.cpp — TEST_AUDIT (retired) §7 Tier-2.
-//
-// WHY THIS EXISTS: tool_call.cpp (parse_tool_calls_{chatml,llama3,gemma},
-// validate_tool_call) had ZERO unit tests — tool_call.h was included by no test.
-// The only coverage was the mark-excluded real-server test_tools.py, which does
-// NOT validate arguments against the schema. A wrong arg-parse or a validation
-// bypass is an agent-correctness/security surface (the model's tool calls drive
-// side-effecting actions), and this is CPU-only so it runs in CI where the real
-// handlers.cpp does not. These assert the CURRENT parser/validator contract.
-//
-// ORACLE: hand-constructed inputs in each family's documented wire format, with
-// the expected (name, arguments-JSON, id, valid) spelled out — no imp-vs-imp.
-// =============================================================================
+// tool_call.cpp (parse_tool_calls_{chatml,llama3,gemma}, validate_tool_call) had ZERO unit
+// tests; only the excluded real-server test_tools.py covered it, and that never validates
+// arguments against schema. A wrong parse or validation bypass is an agent-correctness/
+// security surface. CPU-only, runs in CI where handlers.cpp does not. Oracle: hand-built
+// wire-format inputs, no imp-vs-imp.
 
 #include <gtest/gtest.h>
 #include "tool_call.h"
@@ -39,14 +30,10 @@ json weather_tools() {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Harmony (gpt-oss) — the call is a channel with a recipient, not a tag (#1716)
-//
-// The bytes below are what the model actually emitted, captured from a live
-// gpt-oss-20b-mxfp4 run. It used to fall through to the ChatML scanner, which
-// found no <tool_call>, so the response carried an EMPTY content with
-// finish_reason "stop" while the model's own reasoning said it meant to call.
-// ---------------------------------------------------------------------------
+// Harmony (gpt-oss): a tool call is a channel with a recipient, not a tag (#1716). Bytes
+// captured from a live gpt-oss-20b-mxfp4 run used to fall through to the ChatML scanner
+// (found no <tool_call>), returning EMPTY content with finish_reason "stop" while the
+// model's own reasoning said it meant to call.
 
 TEST(ToolCallHarmony, RecipientChannelBecomesACall) {
     std::atomic<int> id{0};
@@ -138,15 +125,10 @@ TEST(ToolCallHarmony, StreamBodyParsesAsBareArguments) {
     EXPECT_EQ(tc.arguments, "{\"city\":\"Berlin\"}");
 }
 
-// ---------------------------------------------------------------------------
-// tool_choice enforcement, per template family (#1592)
-//
-// `tool_choice: "required"` and a named function are enforced by the decode FSM
-// only where the family's tool envelope has a grammar. Everywhere else the
-// constraint degrades to a sentence in the prompt, and the request is still
-// accepted. This matrix is what makes that boundary reviewable: a family that
-// gains an envelope grammar, or loses one, moves a row here.
-// ---------------------------------------------------------------------------
+// #1592: tool_choice "required"/named-function is enforced by the decode FSM only where a
+// template family's tool envelope has a grammar; elsewhere the constraint degrades to a
+// prompt sentence and the request is still accepted. This matrix makes that boundary
+// reviewable per family.
 
 namespace {
 
@@ -184,10 +166,9 @@ TEST(ToolChoiceEnforcement, NamedFunctionIsEnforcedOnChatMLAndLlama3) {
 }
 
 TEST(ToolChoiceEnforcement, Llama3EnforcesTheNamedCaseButNotRequired) {
-    // The asymmetry is deliberate and is the reason this test exists: the
-    // Llama3 envelope carries the name in the TAG (`<function=NAME>`), so a
-    // forced single function maps onto the plain parameter schema, while
-    // "required" would need a name-in-tag enum binding that does not exist.
+    // Llama3's envelope carries the function name in the TAG (<function=NAME>), so a forced
+    // single function maps onto the plain parameter schema, while "required" would need a
+    // name-in-tag enum binding that does not exist.
     EXPECT_FALSE(
         collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), named_choice("get_weather"))
             .first.empty());
@@ -216,11 +197,9 @@ TEST(ToolChoiceEnforcement, NamedFunctionNotInTheToolsArrayFallsBack) {
 }
 
 TEST(ToolChoiceEnforcement, HelperAgreesWithTheCollectors) {
-    // The predicate and the collectors are two statements of one boundary, and
-    // a request is refused on the predicate while the FSM is built from the
-    // collectors. If they drift, the server refuses a request it could have
-    // enforced, or accepts one it cannot - and either reads as correct from
-    // the other side. Same inputs, both paths, asserted equal.
+    // The refusal predicate and the FSM-building collectors are two statements of one boundary;
+    // if they drift, the server refuses a request it could enforce or accepts one it can't, each
+    // looking correct from its own side. Asserted equal on the same inputs.
     const json enforceable_schema = weather_tools();
     for (ChatTemplateFamily f : kAllFamilies) {
         for (const json& choice : {json("required"), named_choice("get_weather")}) {
@@ -391,10 +370,9 @@ TEST(ToolCallLlama3, PlainJsonAnswerIsNotACall) {
 // Gemma — <|tool_call>call:NAME{key:value}<tool_call|>
 // ---------------------------------------------------------------------------
 TEST(ToolCallGemma, SingleCall) {
-    // Gemma string values are wrapped in the kGemmaQuote sequence <|"|>...<|"|>,
-    // not ASCII quotes; an integer value sidesteps that and still exercises
-    // name + args parsing. (String quoting is covered indirectly via build/parse
-    // round-trips elsewhere.)
+    // Gemma string values are wrapped in kGemmaQuote (<|"|>...<|"|>), not ASCII quotes; using
+    // an integer value here sidesteps that while still exercising name+args parsing (string
+    // quoting covered elsewhere via build/parse round-trips).
     std::atomic<int> id(0);
     std::string text = "<|tool_call>call:get_weather{days:3}<tool_call|>";
     auto [content, calls] = parse_tool_calls_gemma(text, id);
@@ -494,10 +472,8 @@ TEST(ToolCallValidate, AdditionalPropertiesAllowed) {
     EXPECT_TRUE(tc.valid) << tc.error;
 }
 
-// ---------------------------------------------------------------------------
-// Qwen3.6 XML fallback — <function=NAME><parameter=KEY>VAL</parameter></function>
-// The distinct parse_qwen36_xml_call path had no direct coverage.
-// ---------------------------------------------------------------------------
+// Qwen3.6 XML fallback (<function=NAME><parameter=KEY>VAL</parameter></function>):
+// parse_qwen36_xml_call had no direct coverage before this.
 TEST(ToolCallQwen36Xml, NoFunctionTagReturnsFalse) {
     ParsedToolCall tc;
     EXPECT_FALSE(parse_qwen36_xml_call("just some text", tc));
@@ -635,10 +611,9 @@ TEST(ToolCallReconstruct, SkipsEntryWithoutFunction) {
     EXPECT_EQ(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "keep"), "keep");
 }
 
-// Qwen-Coder XML dialect (xml=true): prior calls replay in the shape the
-// template's own tool_calls branch renders — raw multi-line string values,
-// non-strings stringified — never the ChatML JSON body (a JSON replay teaches
-// the model the wrong dialect for its next call).
+// Qwen-Coder XML dialect (xml=true): prior tool calls must replay in the template's own
+// tool_calls-branch shape (raw multi-line string values, non-strings stringified), never as
+// ChatML JSON - a JSON replay would teach the model the wrong dialect for its next call.
 TEST(ToolCallReconstruct, XmlDialectWrapsCall) {
     json calls = json::array(
         {{{"function",
@@ -719,12 +694,9 @@ TEST(ToolCallLlama3, BraceInsideStringDoesNotEndTheObject) {
     EXPECT_EQ(args["n"], 1);
 }
 
-// =============================================================================
-// #1597: `strict` is per-function in OpenAI's API. imp enforced it only when
-// EVERY tool in the request declared it and carried enforceable parameters, so
-// one loose tool turned off constrained decoding for the whole set. These pin
-// the per-function contract.
-// =============================================================================
+// #1597: strict is per-function in OpenAI's API; imp enforced it only when EVERY tool in the
+// request declared it with enforceable parameters, so one loose tool disabled constrained
+// decoding for the whole set. Pins the per-function contract.
 namespace {
 
 // Two tools, as a realistic agent set does it: one schema-bound, one free text.

@@ -1,23 +1,8 @@
-// =============================================================================
-// test_nvfp4_prefill_cache_knob.cpp — a decode-only knob must not touch prefill
-// =============================================================================
-//
-// diagnostics.no_nvfp4_decode_cache is declared a decode-side bisection tool
-// (core/dispatch_policy.h): "decode runs on the source-precision paths". It
-// used to return early from pre_dequant_phase3_nvfp4_decode_ before
-// nvfp4_decode_convert_cutlass_ ran, and that function populates
-// wcache_->cutlass_nvfp4 — the PREFILL cache that infer_tier_from_wcache
-// (exec/pre_dequant_internal.h) reads to set prefill_tier. So the knob silently
-// moved every native-NVFP4 dense weight's prefill from W4A4 (the CUTLASS kernel
-// quantizes the activation too) to W4A16, and moved a teacher-forced perplexity
-// on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 from 9.165 to 9.051.
-//
-// The invariant this pins needs only a native-NVFP4 checkpoint that has a
-// CUTLASS conversion at all — not the Mamba2/recurrent case — so it runs on the
-// smallest such model on the box rather than a 19 GB hybrid.
-//
-// GTEST_SKIPs when the model is absent, like the other SafeTensors suites.
-// =============================================================================
+// diagnostics.no_nvfp4_decode_cache is a decode-only bisection knob but used to return early
+// before nvfp4_decode_convert_cutlass_ populated the PREFILL cache infer_tier_from_wcache
+// reads, silently moving native-NVFP4 prefill W4A4->W4A16 (PPL on
+// Nemotron-3.5-Lightning-30B-A3B-NVFP4: 9.165 -> 9.051). Runs on the smallest
+// CUTLASS-converting checkpoint on the box; GTEST_SKIPs if absent.
 
 #include "model/model.h"
 #include "model/safetensors_loader.h"

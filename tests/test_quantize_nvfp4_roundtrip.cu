@@ -1,18 +1,9 @@
-// The export round trip imp-quantize never had: quantize a tiny model the way
-// the tool does, decode the written bytes by the format's own rule, and put a
-// number on what came back.
-//
-// tests/test_quantize_checkpoint_out.cpp covers the FORMAT rules (which key
-// holds the reciprocal, which tensors share a scale) and asserts nothing
-// numeric; tests/test_awq_calibration.cpp proves the transform's algebra on
-// exact arithmetic. Between the two sat the case that matters: a checkpoint
-// whose bytes are structurally perfect and numerically wrong. A reciprocal
-// written the wrong way round is off by absmax^2/36 and still loads.
-//
-// Second half: the unit-offset norm fold (Qwen3.5 / 3.8). The stored delta is
-// (1 + g)/s - 1, so the gain the loader reconstructs is (1 + g') and the
-// consumer's columns carry s. This asserts the product survives BF16 storage,
-// including on the channel that made the clamp necessary.
+// The export round trip imp-quantize never had: quantize a tiny model, decode the written
+// bytes by the format's own rule, put a number on the result. test_quantize_checkpoint_out.cpp
+// covers FORMAT rules only (no numeric assertion); this catches a structurally-perfect,
+// numerically-wrong checkpoint (e.g. a backwards reciprocal, off by absmax^2/36).
+// Second half: unit-offset norm fold (Qwen3.5/3.8) asserts (1+g')*s survives BF16 storage,
+// including on the clamp-triggering channel.
 
 #include "../tools/imp-quantize/checkpoint_out.h"
 #include "../tools/imp-quantize/quant_report.h"
@@ -101,10 +92,9 @@ Packed quantize_like_the_exporter(const std::vector<uint16_t>& h_fp16, int64_t N
 
 }  // namespace
 
-// Two layers, K = 256: quantize -> decode by the format -> bound the error.
-// The bound is loose on purpose. It is not a quality claim about NVFP4; it is
-// the line between "this checkpoint is the model" and "this checkpoint is
-// noise", and every layout bug lands far on the wrong side of it.
+// Two layers, K=256: quantize -> decode by format -> bound the error. Bound is loose on
+// purpose: it is the line between "this checkpoint is the model" and "this checkpoint is
+// noise", not a quality claim about NVFP4; every layout bug lands far past it.
 TEST(NvFP4ExportRoundTrip, TinyModelDecodesWithinTheGridBound) {
     constexpr int64_t N = 64, K = 256;
     std::mt19937 rng(20260909);
@@ -123,10 +113,9 @@ TEST(NvFP4ExportRoundTrip, TinyModelDecodesWithinTheGridBound) {
                                                                      w.data(), q.packed.data(),
                                                                      q.micro.data(), q.tensor_scale, N, K);
 
-        // FP4 E2M1's widest gap is 4 -> 6 against a block absmax of 6, so half
-        // a step is 1/6 of the block's own scale; the FP8 micro-scale adds its
-        // own 2^-3 relative. A wrong reciprocal or a swapped nibble order lands
-        // orders of magnitude past this.
+        // FP4 E2M1's widest gap (4->6) against a block absmax of 6 makes half a step 1/6 of the
+        // block's own scale, plus the FP8 micro-scale's 2^-3 relative. A wrong reciprocal or swapped
+        // nibble order lands orders of magnitude past 0.30.
         EXPECT_LT(e.max_rel, 0.30) << "layer " << layer;
         EXPECT_GT(e.max_rel, 0.0) << "layer " << layer
                                   << ": a 4-bit grid is not lossless, so an exact "

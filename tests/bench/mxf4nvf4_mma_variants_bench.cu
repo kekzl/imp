@@ -1,35 +1,6 @@
-// =============================================================================
-// mxf4nvf4_mma_variants_bench.cu -- Microbench all sm_120 FP4/FP8 MMA variants
-// =============================================================================
-//
-// Compares throughput of every relevant block_scale + sparse PTX MMA the
-// CUTLASS sm120 headers expose (mma_sm120.hpp + mma_sm120_sparse.hpp).
-// Goal: identify any variant beyond `kind::mxf4nvf4.block_scale.scale_vec::
-// 4X.m16n8k64.ue4m3` (Project B's current default) that would beat it on
-// raw throughput for our QK^T workload.
-//
-// What we test (all dense; sparse requires 2:4 metadata, also tested):
-//
-//   Dense, no scaling:
-//     [DENSE_F8F6F4_K32]   kind::f8f6f4.m16n8k32              (legacy, baseline)
-//
-//   Dense block_scale variants:
-//     [BS_NVFP4_4X_E4M3]   mxf4nvf4 vec::4X k64 ue4m3  (current default)
-//     [BS_MXFP4_4X_E8M0]   mxf4nvf4 vec::4X k64 ue8m0  (NVFP4 layout, MXFP4 scale)
-//     [BS_MXFP4_2X_E8M0]   mxf4nvf4 vec::2X k64 ue8m0  (per-32 scales, half scale loads)
-//     [BS_MXF8F6F4_1X_44]  mxf8f6f4 vec::1X k32 ue8m0 e4m3.e4m3  (FP8 × FP8 mixed)
-//     [BS_MXF8F6F4_1X_41]  mxf8f6f4 vec::1X k32 ue8m0 e4m3.e2m1  (FP8 Q × FP4 K)
-//     [BS_MXF8F6F4_1X_11]  mxf8f6f4 vec::1X k32 ue8m0 e2m1.e2m1  (FP4 × FP4 with HW scale)
-//     [BS_MXF8F6F4_2X_11]  mxf8f6f4 vec::2X k64 e2m1.e2m1 — DISABLED (ptxas rejects k64 for mxf8f6f4)
-//
-//   Sparse (require 2:4 sparsity on A):
-//     [SP_F8F6F4_K64]      f8f6f4.sp::ordered_metadata k64
-//     [SP_NVFP4_4X_K128]   mxf4nvf4 vec::4X.sp k128 ue4m3
-//
-// Sparse ones double K per issue → 2× raw throughput vs dense if 2:4 sparsity
-// is achievable. Mixed-precision ones don't change K but enable Q-precision
-// trade-offs.
-// =============================================================================
+// Benchmarks every block_scale/sparse PTX MMA CUTLASS sm120 headers expose (mma_sm120.hpp,
+// mma_sm120_sparse.hpp), to find a variant beating the default mxf4nvf4.block_scale
+// vec::4X.m16n8k64.ue4m3 on QK^T throughput. Sparse variants need 2:4 metadata on A.
 
 #include "bench/mxf4nvf4_mma_variants_bench.h"
 #include <cuda_runtime.h>
@@ -38,10 +9,8 @@
 
 namespace imp {
 
-// Helper: stable input registers (different per thread to defeat any
-// constant-folding) plus 0x38 UE4M3 / 0x7f UE8M0 ≈ 1.0 scales. Each kernel
-// below references a subset of these; [[maybe_unused]] silences NVCC #550-D
-// for the regs a given variant doesn't consume.
+// Stable per-thread input registers (defeat constant-folding) plus UE4M3=0x38 / UE8M0=0x7f
+// (~1.0 scales). [[maybe_unused]] silences NVCC #550-D for regs a given variant skips.
 #define BENCH_PREAMBLE                                                                   \
     [[maybe_unused]] uint32_t a0 = threadIdx.x * 37u + 1u;                               \
     [[maybe_unused]] uint32_t a1 = threadIdx.x * 41u + 2u;                               \
@@ -141,10 +110,8 @@ __global__ void bench_v_mxfp4_2x_e8m0(int iterations, float* sink) {
     BENCH_SINK_STORE;
 }
 
-// ---------------------------------------------------------------------------
-// (5) BS_MXF8F6F4_1X_E2M1 — FP4 × FP4 at K=32 with HW scale (alternative to
-//     legacy + manual scale; same K so should be ~same throughput as legacy).
-// ---------------------------------------------------------------------------
+// (5) BS_MXF8F6F4_1X_E2M1: FP4xFP4 at K=32 with HW scale; same K as legacy so expect
+// similar throughput.
 __global__ void bench_v_mxf8f6f4_1x_e2m1(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
@@ -202,15 +169,8 @@ __global__ void bench_v_mxf8f6f4_1x_e4m3_e2m1(int iterations, float* sink) {
     BENCH_SINK_STORE;
 }
 
-// ---------------------------------------------------------------------------
-// (8) BS_MXF8F6F4_2X_E2M1_K64 — DISABLED. ptxas rejects on sm_120a:
-// "Incorrect instruction type specified for mma with shape '.m16n8k64'".
-// kind::mxf8f6f4 is limited to m16n8k32 — k64 is only valid for kind::mxf4nvf4.
-// The mxf8f6f4 kind covers FP8/FP6/FP4 formats (min element = 4 bits, max = 8
-// bits), so k32 already exercises 256 elements per tile at 8 bpe. Combining
-// scale_vec::2X with k64 would require PTX support that simply doesn't exist.
-// Dead end — do not retry.
-// ---------------------------------------------------------------------------
+// (8) BS_MXF8F6F4_2X_E2M1_K64: DISABLED. ptxas rejects m16n8k64 for kind::mxf8f6f4 on
+// sm_120a (max is m16n8k32); k64 is valid only for kind::mxf4nvf4. Dead end, do not retry.
 __global__ void bench_v_mxf8f6f4_2x_e2m1_k64(int iterations, float* sink) {
     BENCH_PREAMBLE;
     // Intentionally empty — ptxas rejects mxf8f6f4 m16n8k64 on sm_120a.
@@ -236,12 +196,9 @@ __global__ void bench_v_sparse_f8f6f4_k64(int iterations, float* sink) {
     BENCH_SINK_STORE;
 }
 
-// ---------------------------------------------------------------------------
-// (9) SP_NVFP4_4X_K128 — DISABLED. ptxas rejects the instruction on sm_120f:
-// "Feature '.kind::mxf4nvf4 with .sp modifier' not supported on .target 'sm_120f'".
-// CUTLASS exposes the PTX template in mma_sm120_sparse.hpp but the actual
-// hardware doesn't have it on consumer Blackwell. Marking as a dead end.
-// ---------------------------------------------------------------------------
+// (9) SP_NVFP4_4X_K128: DISABLED. ptxas rejects '.kind::mxf4nvf4 with .sp modifier' on
+// sm_120f: CUTLASS exposes the PTX template but consumer Blackwell lacks the hardware.
+// Dead end, do not retry.
 __global__ void bench_v_sparse_nvfp4_k128(int iterations, float* sink) {
     BENCH_PREAMBLE;
     // Intentionally empty — see comment above.

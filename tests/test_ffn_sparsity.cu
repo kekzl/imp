@@ -104,16 +104,12 @@ TEST(FFNSparsity, MaskMatchesCPUOracle) {
     cudaFree(mask_dev);
 }
 
-// -----------------------------------------------------------------------------
-// Masked GEMV at threshold=0 ⇒ all mask bits set ⇒ output bit-identical to the
+// Masked GEMV at threshold=0: all mask bits set, output must be bit-identical to the
 // reference unmasked Q8_0 residual GEMV.
-// -----------------------------------------------------------------------------
 TEST(FFNSparsity, MaskedGEMVBitIdenticalWhenAllBitsSet) {
-    // M must be large enough that the reference dispatcher picks the kpar
-    // layout (Q8_0 has kPreferKpar=false; needs M ≳ #SMs for kpar to dominate
-    // the rpar block-count baseline). At M=512 the reference's
-    // launch_gemv_dp4a routes through gemv_dp4a_kpar_kernel<Q8_0, true>,
-    // which is exactly what gemv_q8_0_q8_1_residual_masked mirrors.
+    // M=512 is large enough that the reference dispatcher picks the kpar layout (Q8_0
+    // kPreferKpar=false needs M >~ #SMs), routing through gemv_dp4a_kpar_kernel<Q8_0,true> -
+    // exactly what gemv_q8_0_q8_1_residual_masked mirrors.
     const int K = 1024;
     const int M = 512;
 
@@ -296,10 +292,8 @@ TEST(FFNSparsity, MaskedGEMVSkipsBlocks) {
     cudaFree(y_half);
 }
 
-// -----------------------------------------------------------------------------
-// Probe smoke test: probe entry-points are safe to call from a test fixture
-// regardless of whether the probe is enabled (default off). flush also no-ops.
-// -----------------------------------------------------------------------------
+// Probe entry-points must be safe to call from a test fixture regardless of whether the
+// probe is enabled (default off); flush also no-ops.
 TEST(FFNSparsity, ProbeOffNoOps) {
     // Default config has sparsity_probe = false.
     const int K = 256;

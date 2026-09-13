@@ -1,9 +1,7 @@
-// The serving metadata pool (engine_kv_cache_init.cpp) hands every forward
-// path a fixed region of one allocation so nothing allocates while serving
-// (invariant I2). The engine relies on three things the layout function
-// promises: regions are 256-byte aligned, they do not overlap, and they end
-// inside `total`. Mutation: drop the rounding in `region()` and Aligned fails;
-// shrink any region below its byte count and Disjoint fails.
+// Serving metadata pool (engine_kv_cache_init.cpp) hands every forward path a fixed region
+// of one allocation so nothing allocates while serving (I2): regions are 256-byte aligned, do
+// not overlap, and end inside total. Mutation: drop rounding in region() -> Aligned fails;
+// shrink a region below its byte count -> Disjoint fails.
 
 #include "runtime/serving_metadata_layout.h"
 

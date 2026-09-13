@@ -283,11 +283,10 @@ protected:
     }
 };
 
-// Llama-3.x rope_scaling.type=="llama3": per-frequency factor table.
-// We feed a config matching meta-llama/Llama-3.1-8B-Instruct's published values
-// and check that rope_short_factor / rope_long_factor get populated with one
-// entry per rope-pair, that the highest-frequency dim survives unscaled
-// (factor=1.0) and the lowest-frequency dim is fully scaled (factor=8.0).
+// Llama-3.x rope_scaling.type=="llama3": per-frequency factor table. Feeds
+// meta-llama/Llama-3.1-8B-Instruct's published config values and checks
+// rope_short_factor/rope_long_factor get one entry per rope-pair, highest-frequency dim
+// unscaled (factor=1.0), lowest-frequency dim fully scaled (factor=8.0).
 TEST_F(RopeScalingConfigTest, Llama3PerFrequencyFactorTable) {
     write_config(R"({
         "architectures": ["LlamaForCausalLM"],
@@ -509,11 +508,10 @@ TEST_F(RopeScalingConfigTest, VisionConfigWarning) {
     // vision_config triggers WARN; loader still succeeds.
 }
 
-// MXFP4 quantization config detection (audit gap #13). GPT-OSS and other
-// MXFP4 SafeTensors exports declare `quantization_config.quant_method ==
-// "mxfp4"` at config.json top level. The loader sets the metadata flag
-// so downstream code can warn that the SafeTensors decode path isn't
-// implemented yet (use GGUF for actual MXFP4 inference).
+// MXFP4 quantization config detection (audit gap #13): GPT-OSS and other MXFP4 SafeTensors
+// exports declare quantization_config.quant_method=="mxfp4" at config.json top level; the
+// loader sets a metadata flag so downstream code can warn the SafeTensors decode path isn't
+// implemented (use GGUF for MXFP4 inference).
 TEST_F(RopeScalingConfigTest, Mxfp4QuantConfigDetection) {
     write_config(R"({
         "architectures": ["GptOssForCausalLM"],
@@ -603,17 +601,11 @@ TEST_F(RopeScalingConfigTest, Llama3DegenerateConfigSkipped) {
     EXPECT_TRUE(cfg.rope_long_factor.empty());
 }
 
-// ---------------------------------------------------------------------------
-// audio_config: an unsupported modality has to be detected from the object, not
-// from the key.
-//
-// Gemma-4-12B-NVFP4 writes `audio_config` as an object (model_type
-// `gemma4_unified_audio`) and ships `model.embed_audio.*`.
-// Gemma-4-26B-A4B-it-NVFP4 writes `"audio_config": null` and ships no audio
-// tensor. Both set `audio_token_id` 258881, so that field is not a signal.
-// Keying off presence would warn on every Gemma-4; keying off the token id
-// would warn on both too.
-// ---------------------------------------------------------------------------
+// audio_config: an unsupported modality must be detected from the object shape, not the key
+// or the token id. Gemma-4-12B-NVFP4 writes audio_config as an object (model_type
+// gemma4_unified_audio) and ships model.embed_audio.*; Gemma-4-26B-A4B-it-NVFP4 writes
+// audio_config: null with no audio tensor. Both set audio_token_id 258881, so keying off
+// presence or the token id would warn on both or neither incorrectly.
 
 class AudioConfigTest : public ::testing::Test {
 protected:
@@ -678,16 +670,12 @@ TEST_F(AudioConfigTest, NullDoesNotMarkTheModality) {
     EXPECT_FALSE(cfg.has_audio_config);
 }
 
-// ---------------------------------------------------------------------------
-// rope_scaling: an unhandled spelling left the chain with no final arm, so
-// `rope_freq_scale` stayed 1.0 and the model loaded reporting its full declared
-// context while rotating UNSCALED. Older Phi-3 exports spell LongRoPE `su` (the
-// handled `longrope` is the rename), and `dynamic_ntk` appears in the wild.
-//
+// rope_scaling: an unhandled spelling left rope_freq_scale at 1.0 with the model reporting
+// its full declared context while rotating UNSCALED. Older Phi-3 exports spell LongRoPE `su`
+// (longrope is the rename); dynamic_ntk appears in the wild too.
 // Latent: the one local checkpoint that falls through is Qwen3-VL-4B with
-// `"rope_type": "default"`, which means no scaling and wants exactly that -
-// hence the silent exemption the third test pins.
-// ---------------------------------------------------------------------------
+// rope_type=="default", which means no scaling and wants exactly that - the silent exemption
+// the third test pins.
 
 TEST_F(RopeScalingConfigTest, UnhandledTypeIsFlagged) {
     write_config(R"({

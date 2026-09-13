@@ -1,13 +1,6 @@
-// =============================================================================
-// fp4_pv_bench.cu — Phase 3a FP4 PV microbench
-// =============================================================================
-//
-// See bench/fp4_pv_bench.h for the design rationale (in short: discriminates
-// whether single-level FP4 quantisation of post-softmax probabilities
-// preserves enough numerical precision for the +13 % MMA-level upside to
-// translate into useful end-to-end attention quality — before committing
-// the multi-week Phase 3b/3c production work).
-// =============================================================================
+// Phase 3a FP4 PV microbench: discriminates whether single-level FP4 quant of post-softmax
+// probabilities preserves enough precision for the +13% MMA-level upside before committing
+// to multi-week Phase 3b/3c integration. See bench/fp4_pv_bench.h.
 
 #include "bench/fp4_pv_bench.h"
 #include <cuda_runtime.h>
@@ -20,17 +13,9 @@
 
 namespace imp {
 
-// -----------------------------------------------------------------------------
-// FP4 + UE4M3 encode/decode (host-side reference)
-// -----------------------------------------------------------------------------
-//
-// E2M1 magnitudes (sign bit separate): {0, 0.5, 1, 1.5, 2, 3, 4, 6}
-// E4M3 unsigned: exponent 4 bits (bias 7), mantissa 3 bits → max=448, min>0=2^-9.
-//
-// Mirrors the software fallback in `src/compute/attention_fmha_mxfp4_sm120.cu`
-// (`pack_fp4_pair` and `float_to_fp8_e4m3`). The PTX HW path uses IEEE RNE;
-// our software path uses midpoint cascade — tiny divergence at boundaries
-// that is not material for the long-tail truncation question Phase 3a tests.
+// E2M1 magnitudes {0,.5,1,1.5,2,3,4,6}; E4M3 exp4/mant3 bias7, max=448, min>0=2^-9.
+// Mirrors src/compute/attention_fmha_mxfp4_sm120.cu pack_fp4_pair/float_to_fp8_e4m3.
+// Software path uses midpoint cascade vs PTX IEEE RNE: immaterial for the long-tail question.
 
 static constexpr float kFp4Mag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
 
@@ -104,12 +89,9 @@ static void dequantise_row_fp4(const std::vector<uint8_t>& codes,
     }
 }
 
-// Generate one synthetic post-softmax row.
-//
-// Pattern: softmax(N(0, 1) + spike_at_random) where spike strength is
-// drawn from U(3, 8). This produces 1-3 high-mass values (0.05..0.95) and
-// a long tail in [1e-4 .. 1e-1] — representative of real attention rows
-// (`fp4_pv_potential_2026_04_25.md` cites the same distribution shape).
+// Synthetic post-softmax row: softmax(N(0,1) + spike), spike strength U(3,8).
+// Produces 1-3 high-mass values plus a long tail [1e-4..1e-1], matching real attention rows
+// (fp4_pv_potential_2026_04_25.md).
 static void generate_postsoftmax_row(float* row, int K, std::mt19937& rng) {
     std::normal_distribution<float> logit_dist(0.0f, 1.0f);
     std::uniform_int_distribution<int> spike_idx(0, K - 1);
@@ -213,15 +195,9 @@ Fp4PvAccuracyResult bench_fp4_pv_accuracy(int n_rows, int K, int head_dim,
     return r;
 }
 
-// -----------------------------------------------------------------------------
-// Phase 3a throughput harness (raw MMA loop, HMMA reference vs blockscale)
-// -----------------------------------------------------------------------------
-//
-// Same warps × iterations × tight-loop pattern as
-// `bench/mxf4nvf4_mma_bench.cu`. The HMMA reference is `mma.sync.m16n8k16`
-// FP16-in/FP32-out — the same instruction the WMMA m16n16k16 wrapper
-// decomposes into. Two MMA tiles for n=16 are skipped (single n=8 issue
-// is sufficient for relative throughput).
+// Phase 3a throughput harness: same warps x iterations pattern as bench/mxf4nvf4_mma_bench.cu.
+// HMMA reference is mma.sync.m16n8k16 f16-in/f32-out, the op the WMMA m16n16k16 wrapper uses.
+// n=16 two-tile case skipped; single n=8 issue suffices for relative throughput.
 
 __global__ void bench_hmma_m16n8k16_pv_kernel(int iterations, float* sink) {
     uint32_t a0 = threadIdx.x * 37u + 1u;
@@ -307,22 +283,9 @@ static float run_kernel_bench(void (*kernel)(int, float*), int warps, int iterat
     return total / NUM_REPS;
 }
 
-// -----------------------------------------------------------------------------
-// Phase 3b: two-level accumulator simulation
-// -----------------------------------------------------------------------------
-//
-// Numerical model: the coarse MMA computes P_lossy @ V_lossy. The residual
-// MMA adds (P - P_lossy) @ V_orig (V kept at FP16 precision). Sum is the
-// 2-level output. Mathematically:
-//
-//   O_2L = P_lossy @ V_lossy + (P - P_lossy) @ V
-//        = P @ V + P_lossy @ (V_lossy - V)
-//
-// So the remaining error after 2-level is `P_lossy @ delta_V` where
-// delta_V is V's FP4 quantisation error. For post-softmax P (mostly
-// near-zero with a spike), this should be much smaller than the
-// single-level error which was `P @ V - P_lossy @ V_lossy` (dominated by
-// long-tail truncation in P_lossy).
+// Phase 3b two-level accumulator: O_2L = P_lossy@V_lossy + (P-P_lossy)@V_orig
+//        = P@V + P_lossy@(V_lossy - V), so remaining error is P_lossy @ delta_V (V's FP4
+// quant error), expected smaller than single-level's P@V - P_lossy@V_lossy long-tail error.
 
 Fp4PvAccuracyResult bench_fp4_pv_accuracy_2level(int n_rows, int K, int head_dim,
                                                  unsigned seed) {
@@ -408,21 +371,9 @@ Fp4PvTwoLevelThroughputEstimate bench_fp4_pv_2level_throughput_estimate(
     e.coarse_ms = single.blockscale_ms;
     e.residual_full_ms = single.hmma_ms;
 
-    // Throughput math is on PER-OP basis, not per-instruction:
-    //   HMMA m16n8k16 covers   4096 ops/instr  → tops = blockscale_tops / 4
-    //   mxf4nvf4 m16n8k64 cov. 16384 ops/instr → tops = 4 × HMMA per instr
-    // The Fp4PvThroughputResult already encodes this in TOPS — work
-    // exclusively with TOPS here.
-    //
-    // For a fixed PV work payload of W ops, the wall time on each pipe is
-    //   T_coarse_full      = W / blockscale_tops
-    //   T_residual_full    = W / hmma_tops
-    //   T_residual_sparse  = 0.1 · W / hmma_tops   (SageAttention3 projection)
-    //
-    // Coarse MMA + residual MMA run on independent pipes (FP4 MMA pipe vs
-    // HMMA pipe) so combined wall time = max(coarse, residual). Speedup vs
-    // HMMA-alone baseline is hmma_tops / combined_tops, equivalently
-    // T_hmma_alone / T_combined.
+    // Throughput is PER-OP: HMMA m16n8k16 = 4096 ops/instr, mxf4nvf4 m16n8k64 = 16384 (4x HMMA).
+    // Coarse and residual MMA run on independent pipes: combined wall time = max(coarse, residual).
+    // Speedup vs HMMA-alone = hmma_tops / combined_tops.
 
     constexpr double kSparseFrac = 0.10;
 
@@ -435,10 +386,8 @@ Fp4PvTwoLevelThroughputEstimate bench_fp4_pv_2level_throughput_estimate(
     const double t_2l_b = std::max(t_coarse, t_residual_full);
     const double t_hmma_alone = t_residual_full;
 
-    // Scale to the same convention as the input (single-instruction wall ms,
-    // for printout consistency). Per-instruction wall time of the dominant
-    // pipe gives the answer: the bench just uses these as a "shape" for the
-    // display — the speedup ratio is the load-bearing number.
+    // Per-instruction wall time of the dominant pipe is a display "shape" only; the speedup
+    // ratio is the load-bearing number here.
     e.estimated_2l_a_ms = static_cast<float>(t_2l_a / t_hmma_alone * single.hmma_ms);
     e.estimated_2l_b_ms = static_cast<float>(t_2l_b / t_hmma_alone * single.hmma_ms);
     e.speedup_2l_a = t_hmma_alone / t_2l_a;

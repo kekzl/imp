@@ -96,11 +96,8 @@ void fill_linear(std::vector<float>& v) {
     }
 }
 
-// =========================================================================
-// Test 1 -- RopeBasicFP32
-//   Small tensor (1 batch, 2 seq, 2 heads, 4 head_dim), FP32
-//   Verify GPU output matches CPU reference within FP32 tolerance.
-// =========================================================================
+// Small tensor (1 batch, 2 seq, 2 heads, 4 head_dim), FP32: GPU output vs CPU reference
+// within FP32 tolerance.
 TEST(RoPETest, RopeBasicFP32) {
     const int batch = 1;
     const int seq_len = 2;
@@ -155,32 +152,11 @@ TEST(RoPETest, RopeBasicFP32) {
     cudaFree(pos_dev);
 }
 
-// =========================================================================
-// Test 2 -- RopeBasicFP16
-//   Same small shape but FP16.  Tolerance 1e-2.
-// =========================================================================
-// =========================================================================
-// RoPE across the long-context position range, against DOUBLE truth.
-//
-// Every other RoPE test here uses positions <= 40 and a float32 CPU reference.
-// That was enough to miss #1316: the angle `pos * freq` was formed in float and
-// handed to the fast intrinsics, and the resulting drift grew with position --
-// 2.3e-4 at 2000, 1.0e-2 at 131071, the trained context limit. It lands on the
-// lowest-frequency rotary pair, the one carrying long-range position
-// information.
-//
-// Two things make this test different from the ones above:
-//
-//   1. The oracle is DOUBLE, not float32. Comparing two float32 computations
-//      cannot tell which one drifted; measured against double, the float32 CPU
-//      reference is accurate to ~1e-7 while the pre-fix kernel was 1e-2 out.
-//   2. It sweeps to 131071, so the range the model actually supports is
-//      covered.
-//
-// Post-fix the kernel reduces the angle in double before the intrinsic and
-// tracks double truth to 1.9e-4 at the context limit -- closer than the float32
-// CPU reference manages (5.8e-4). kTol is set from that measurement.
-// =========================================================================
+// #1316: pos*freq formed in float and fed to fast intrinsics, drift growing with position
+// (2.3e-4 at 2000, 1.0e-2 at 131071) on the lowest-frequency rotary pair carrying long-range
+// position info. Oracle is DOUBLE, not float32 (float32 vs float32 can't tell who drifted);
+// sweeps to 131071. Post-fix kernel tracks double truth to 1.9e-4 at the limit, tighter than
+// the float32 CPU reference (5.8e-4); kTol set from that.
 TEST(RoPETest, LongContextPositionsMatchDoubleReference) {
     const int batch = 1, seq_len = 1, n_heads = 1, n_kv_heads = 1, head_dim = 8;
     const float theta = 10000.0f, scaling = 1.0f;
@@ -228,18 +204,9 @@ TEST(RoPETest, LongContextPositionsMatchDoubleReference) {
     }
 }
 
-// =========================================================================
-// The YaRN branch, against DOUBLE truth (#1630).
-//
-// LongContextPositionsMatchDoubleReference above calls rope_forward with the
-// default ext_factor = 0.0f, so it takes the linear branch and cannot reach
-// this one. #1316 reduced the angle before the fast intrinsics in two of
-// rope_forward's three branches and left YaRN calling __sinf/__cosf on an
-// unreduced angle - which is the same defect the test above exists to catch,
-// on the path a long-context model actually takes.
-//
-// The oracle mirrors rope_yarn(): ramp, blend, mscale, all in double.
-// =========================================================================
+// #1316's angle-reduction fix covered two of rope_forward's three branches; YaRN still
+// called __sinf/__cosf on an unreduced angle (default ext_factor=0.0 means the test above
+// can't reach this path). Oracle mirrors rope_yarn() (ramp, blend, mscale) in double.
 TEST(RoPETest, YarnLongContextPositionsMatchDoubleReference) {
     const int batch = 1, seq_len = 1, n_heads = 1, n_kv_heads = 1, head_dim = 8;
     const float theta = 10000.0f;
@@ -371,12 +338,7 @@ TEST(RoPETest, RopeBasicFP16) {
     cudaFree(pos_dev);
 }
 
-// =========================================================================
-// Test 3 -- RopePositionInvariance
-//   At position 0, angle = 0 for every frequency.
-//   cos(0)=1, sin(0)=0, so the rotation is identity.
-//   Verify that the output equals the input exactly.
-// =========================================================================
+// At position 0, angle=0 for every frequency (cos=1,sin=0), so output must equal input exactly.
 TEST(RoPETest, RopePositionInvariance) {
     const int batch = 2;
     const int seq_len = 3;
@@ -425,12 +387,8 @@ TEST(RoPETest, RopePositionInvariance) {
     cudaFree(pos_dev);
 }
 
-// =========================================================================
-// Test 4 -- RopeThetaScaling
-//   Different theta values must produce different rotations for non-zero
-//   positions.  We run with theta=10000 and theta=1000000, then confirm
-//   the outputs differ.
-// =========================================================================
+// Different theta values (10000 vs 1000000) must produce different rotations at non-zero
+// positions.
 TEST(RoPETest, RopeThetaScaling) {
     const int batch = 1;
     const int seq_len = 2;
@@ -496,11 +454,8 @@ TEST(RoPETest, RopeThetaScaling) {
     cudaFree(pos_dev);
 }
 
-// =========================================================================
-// Test 5 -- RopeLargerDim
-//   head_dim = 128 (typical for LLMs) to exercise the full kernel with
-//   many rotation pairs (64 threads).  Verify against CPU reference.
-// =========================================================================
+// head_dim=128 (typical LLM size) exercises the full kernel with many rotation pairs
+// (64 threads) vs CPU reference.
 TEST(RoPETest, RopeLargerDim) {
     const int batch = 2;
     const int seq_len = 4;
@@ -555,24 +510,13 @@ TEST(RoPETest, RopeLargerDim) {
     cudaFree(pos_dev);
 }
 
-// =========================================================================
-// Test 6 -- PartialRoPE, the convention that actually ships
-//   Qwen3.5/3.6/3.8: head_dim 256, rope_dim 64, NeoX pairs (i, i + 32).
-//
-//   This test used to run the INTERLEAVED default (neox=false, pairs
-//   (2i, 2i+1)) and call it "Qwen3.5 style". Both conventions leave dims
-//   [rope_dim, head_dim) untouched and both rotate 64 dims, so every shape
-//   assertion passed either way and the pair layout - the only thing that
-//   differs, and the thing #503 broke on Phi-4 - was never checked. The
-//   loader ships neox=true for this family (src/compute/rope.cu, "neox pair
-//   layout for partial RoPE": x1 = x[ix + n_dims/2], n_dims = 64, NOT
-//   head_dim).
-//
-//   Positions span the range the double-precision angle exists for: 0, 1,
-//   and three past float mantissa precision at these frequencies (#1630).
-//   262143 is 2^18-1, beyond any context this family serves, and is here
-//   because the failure is silent: a wrong angle is still a plausible number.
-// =========================================================================
+// Qwen3.5/3.6/3.8 convention: head_dim 256, rope_dim 64, NeoX pairs (i, i+32). Used to test
+// the INTERLEAVED default and call it Qwen3.5-style; both conventions leave [rope_dim,
+// head_dim) untouched and rotate 64 dims, so every shape assertion passed either way while
+// the pair layout - what #503 broke on Phi-4 - was never checked.
+// Positions include 0, 1, and values past float mantissa precision at these frequencies
+// (#1630); 262143=2^18-1 is beyond any served context, included because a wrong angle is
+// still a plausible number.
 TEST(RoPETest, PartialRoPE) {
     const int batch = 1;
     const int n_heads = 2;
@@ -632,14 +576,10 @@ TEST(RoPETest, PartialRoPE) {
     auto q_out = to_host(q_dev, q_count);
     auto k_out = to_host(k_dev, k_count);
 
-    // The kernel computes the pair frequency in float (device powf, 4 ulp)
-    // and only the position product in double (#1630); the reference above
-    // does the same with the host's powf (1 ulp). The two disagree by a few
-    // ulp of freq and the position multiplies that: at pos 262143, pair 3
-    // (freq 0.42) one ulp is 0.013 rad, 26x the base tolerance, and it showed
-    // up as 0.0058 on a 0.40 value. Budget: 8 ulp of freq times pos, times the
-    // rotation's sensitivity (|x0| + |x1| <= 2). Dims past rope_dim keep the
-    // base tolerance and get a bit-exact check further down.
+    // Kernel computes pair frequency in float (device powf, 4 ulp), position product in double
+    // (#1630); host reference uses 1-ulp powf. At pos 262143 the ulp difference times position
+    // hits 0.013 rad (26x base tolerance), measured as 0.0058 on a 0.40 value. Budget: 8 ulp of
+    // freq * pos * rotation sensitivity (|x0|+|x1|<=2); dims past rope_dim keep base tolerance.
     const float tol = 5e-4f;
     auto tol_at = [&](int pos, int d) {
         if (d >= rope_dim)
@@ -711,13 +651,9 @@ TEST(RoPETest, PartialRoPE) {
     cudaFree(pos_dev);
 }
 
-// =========================================================================
-// MtpMropeMatchesMainYarn (issue #897)
-//   The MTP draft head must rotate Q/K identically to the main forward on a
-//   rope-scaled (YaRN) model. Runs the shared main rope_forward and the MTP
-//   mtp_apply_mrope with the SAME YaRN params at an extended position and
-//   asserts they agree — the exact drift the old inline plain-RoPE caused.
-// =========================================================================
+// #897: MTP draft head must rotate Q/K identically to the main forward on a YaRN model.
+// Runs shared rope_forward and mtp_apply_mrope with the SAME YaRN params at an extended
+// position and asserts agreement - the drift the old inline plain-RoPE caused.
 TEST(RoPETest, MtpMropeMatchesMainYarn) {
     const int n_heads = 2, n_kv_heads = 2;
     const int head_dim = 256, rope_dim = 64;   // Qwen3.x partial rope

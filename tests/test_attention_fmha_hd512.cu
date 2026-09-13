@@ -135,11 +135,9 @@ class FmhaHd512Test : public ::testing::Test {
         ref_attention_f64(Qh, Kh, Vh, ref, Sq, Skv, NH, NKV, HD, causal, sw, softcap, scale, q_offset);
 
         void *d_q, *d_k, *d_v, *d_o, *d_s;
-        // 4x so cuBLAS takes the production FP32-S path: use_fp32_s needs the
-        // score buffer >= 3x the (NH*Sq*Skv) element count (#677 — FP32 scores
-        // in the front 2x, non-overlapping FP16 probs after). At hd=512 the
-        // FP16-S path truncates the large QK^T scores and is materially less
-        // accurate; Gemma-4 / Qwen3.5-27B run FP32-S in production.
+        // use_fp32_s needs the score buffer >= 3x (NH*Sq*Skv) elems (#677: FP32 scores in the front
+        // 2x, non-overlapping FP16 probs after). At hd=512 FP16-S truncates large QK^T scores;
+        // Gemma-4/Qwen3.5-27B run FP32-S in production.
         const size_t s_elems = (size_t)4 * NH * Sq * Skv;
         ASSERT_EQ(cudaMalloc(&d_q, q_elems * 2), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&d_k, kv_elems * 2), cudaSuccess);
@@ -202,14 +200,9 @@ class FmhaHd512Test : public ::testing::Test {
                "fmha_vs_cublas max=%.2e\n",
                name.c_str(), mf.max_rel, mf.mean_rel, mc.max_rel, mc.mean_rel, mfc.max_rel);
 
-        // Correctness bar = the f16 numerical class vs the trusted fp64 reference
-        // (a 512-long reduction rounds harder than HD<=256). The fused hd=512
-        // kernel is the O(n) fallback for long-context S-matrix overflow, where
-        // cuBLAS cannot run at all — so "no worse than cuBLAS" is not a meaningful
-        // production bar (there is no cuBLAS to compare against there). Both paths
-        // must simply land in the f16 class. The Bkv=32 tile trades ~0.9e-2 of
-        // accuracy on rect+offset shapes for +40% throughput (both < 2.5e-2).
-        // Thresholds frozen, not to be widened.
+        // Correctness bar is the f16 numerical class vs fp64 ref (512-long reduction rounds harder
+        // than HD<=256); hd=512 has no cuBLAS to compare against in its O(n) fallback regime.
+        // Bkv=32 tile trades ~0.9e-2 accuracy for +40% throughput (both <2.5e-2). Threshold frozen.
         EXPECT_LT(mf.max_rel, 2.5e-2) << name << ": FMHA hd=512 off vs the fp64 reference";
         EXPECT_LT(mf.mean_rel, 1e-3) << name << ": FMHA hd=512 mean error too high vs fp64";
         EXPECT_LT(mc.max_rel, 2.5e-2) << name << ": cuBLAS FP32-S reference itself off vs fp64";
@@ -227,13 +220,8 @@ TEST_F(FmhaHd512Test, TileEdge) { run("tile_edge", 17, 33, 8, 4, true, 0, 0.0f, 
 // Sliding window (kernel generality — hd=512 production is full-attention).
 TEST_F(FmhaHd512Test, SlidingWindow) { run("sliding_window", 96, 96, 8, 4, true, 48, 0.0f, 0); }
 
-// Isolated kernel A/B: the WMMA FMHA hd=512 vs the materialized cuBLAS FP32-S
-// path it replaces, at Gemma-4 global-layer shapes (nh=16, nkv=8, hd=512).
-// This isolates the per-shape prefill-attention win (the whole-model Gemma-4
-// prefill is MoE-dequant-dominated and hd=512 is only 1/6 of attention layers,
-// so an end-to-end delta would sit in prefill restart noise). DISABLED so the
-// normal suite stays fast; run with --gtest_also_run_disabled_tests.
-// Clock warmup >1s first (RTX 5090 idles downclocked, ~1s ramp — CLAUDE.md).
+// DISABLED isolated A/B: WMMA hd=512 vs cuBLAS FP32-S at Gemma-4 shapes (nh=16,nkv=8,hd=512);
+// run with --gtest_also_run_disabled_tests. Clock warmup >1s first (RTX 5090 idle-downclocked).
 TEST_F(FmhaHd512Test, DISABLED_BenchVsCublas) {
     const int HD = 512, NH = 16, NKV = 8;
     const float scale = 1.0f / std::sqrt((float)HD);
@@ -303,11 +291,8 @@ TEST_F(FmhaHd512Test, DISABLED_BenchVsCublas) {
     }
 }
 
-// Parity of the q-row-sliced cuBLAS path (attention_cublas_prefill_sliced) —
-// the S-overflow production route for hd=512 layers. The S buffer is sized so
-// the FP32-S 3× rule forces 32-row slices (3 slices over Sq=96); the result
-// must match the fp64 reference within the f16 class and track the whole-call
-// FP32-S path (independent slicing of the same math).
+// Parity of q-row-sliced cuBLAS (attention_cublas_prefill_sliced), the S-overflow production
+// route for hd=512: S buffer sized so the FP32-S 3x rule forces 32-row slices (3 over Sq=96).
 TEST_F(FmhaHd512Test, SlicedCublasParity) {
     const int HD = 512, NH = 8, NKV = 4, Sq = 96, Skv = 160, q_offset = 64;
     const float scale = 1.0f / std::sqrt((float)HD);
@@ -384,13 +369,9 @@ TEST_F(FmhaHd512Test, SlicedCublasParity) {
     EXPECT_LT(msw.max_rel, 2.5e-2) << "sliced diverges from the whole-call FP32-S path";
 }
 
-// Long-context fallback-regime bench: continuation chunk Sq=2048 against a long
-// KV (Skv 8k/16k, q_offset = Skv - Sq). This is the shape the fused hd=512
-// kernel actually serves in production — the materialized S-matrix overflows
-// the workspace there, so (pre-dispatch) the executor had to run cuBLAS in thin
-// s_cap-respecting row slices. Arms: FMHA whole-chunk vs cuBLAS in 256-row
-// slices (the realistic alternative at this regime). DISABLED so the normal
-// suite stays fast; run with --gtest_also_run_disabled_tests.
+// DISABLED long-context fallback bench: Sq=2048 continuation vs long KV (8k/16k), the actual
+// production shape for hd=512 (materialized S overflows the workspace). FMHA whole-chunk vs
+// cuBLAS 256-row slices. Run with --gtest_also_run_disabled_tests.
 TEST_F(FmhaHd512Test, DISABLED_BenchLongCtxFallback) {
     const int HD = 512, NH = 16, NKV = 8;
     const float scale = 1.0f / std::sqrt((float)HD);

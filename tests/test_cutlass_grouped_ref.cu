@@ -1,58 +1,13 @@
-// =============================================================================
-// TEST_AUDIT (retired) Re-Audit 2026-06-06 — P1.2 / R1.2 (issue #576).
-// CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM (src/compute/gemm_cutlass_grouped_3x.cu)
-// — the #574 pp512-10x MoE prefill path — vs an INDEPENDENT fp64 CPU reference.
-//
-// WHY THIS EXISTS (audit §2 "CUTLASS grouped GEMM" = class B):
-//   The sibling test (test_cutlass_grouped_3x_nvfp4.cu) compares the grouped
-//   dispatch against the per-expert single GEMM, but BOTH run through the same
-//   CUTLASS adapter ("only the staging buffer build differs") — it catches
-//   staging bugs, not adapter/math bugs. The new dominant prefill path had no
-//   independent reference. This test adds one: a per-expert fp64 CPU matmul
-//   that decodes the SAME quantized bits the GPU GEMM consumes, then asserts
-//   the f16-accumulation class tolerance, NOT the loose NVFP4 quant envelope.
-//
-// INDEPENDENCE (audit §3 — no tautologies, no transcribed kernel):
-//   * The reference decodes the EXACT bits the GPU GEMM sees: the packed E2M1
-//     nibbles (RowMajor [rows, K/2]) plus the per-16-block UE4M3 micro-scales
-//     read back from device, de-swizzled from CUTLASS SfAtom layout. Decode is
-//     from the published NVFP4 format definition (E2M1 magnitude LUT + UE4M3
-//     scale), implemented independently in this file — never imp's dequant.
-//   * Because the reference and the GPU consume the IDENTICAL quantized bits,
-//     quantization error CANCELS: only GEMM accumulation + the f16 output store
-//     differ. That justifies the f16-class tolerance below rather than the
-//     1e-1 NVFP4 single-op floor.
-//   * The grouped GEMM applies the per-expert tensor scale as the epilogue
-//     alpha (B's micro-scales carry only the relative scale; A is quantized
-//     with no separate tensor scale). The reference reproduces exactly:
-//         D[m,n] = alpha_e * sum_k A_dec[m,k] * B_dec[n,k]
-//     with alpha_e = B_e.tensor_scale and *_dec computed in fp64.
-//
-// THE BITS ARE GENUINELY IDENTICAL (not a re-quantization):
-//   A: dA_packed[i] / dA_sf[i] are the very buffers passed as host_ptr_A /
-//      host_ptr_SFA to gemm_grouped_cutlass_3x_nvfp4. We read them back and
-//      decode them; the GPU read the same DRAM.
-//   B: cutlass_w.data is BORROWED from the NVFP4 result (RowMajor packed
-//      nibbles) and cutlass_w.scale_factors is the SfAtom conversion of the
-//      native UE4M3 micro-scales (a value-preserving byte permutation:
-//      convert_scales_sfatom drops the always-zero sign bit and re-encodes the
-//      identical UE4M3 byte). We decode the SfAtom bytes the GPU actually uses.
-//
-// TOLERANCE (tests/refs/README.md policy):
-//   f16-class accumulation: the GPU accumulates in fp32 and stores fp16; the
-//   reference accumulates in fp64. Over a 256-term NVFP4 dot the fp16 OUTPUT
-//   rounding (~2^-11 rel) dominates. Asserted <= 1e-2 rel (+ small abs floor
-//   for near-zero outputs), MEASURED ~1e-3 (printed per case). This is the
-//   tight GEMM/adapter class, an order of magnitude under the NVFP4 1e-1 floor.
-//   Plus a hard no-NaN/Inf guard on every output element (the corruption assert,
-//   e.g. an empty-expert staging bug must not poison neighbours).
-//
-// BOUNDARY DISTRIBUTIONS (the staging build must handle these):
-//   - an EMPTY expert (M_i = 0)
-//   - a 1-token expert (M_i = 1)
-//   - a large-M expert that crosses the 128-row SfAtom tile boundary
-//   - K = 256 crossing the 64-element atom-K boundary (4 atom-K-tiles)
-// =============================================================================
+// TEST_AUDIT(retired) P1.2/R1.2 (#576): CUTLASS 3.x NVFP4 grouped GEMM (the #574 pp512-10x
+// MoE prefill path) vs an INDEPENDENT fp64 CPU reference. The sibling test
+// (test_cutlass_grouped_3x_nvfp4.cu) only compares against the same CUTLASS adapter, so it
+// catches staging bugs, not adapter/math bugs - this is the first independent reference.
+// Reference decodes the EXACT quantized bits the GPU consumes (E2M1 nibbles + de-swizzled
+// UE4M3 micro-scales) from the published NVFP4 format definition, never imp's dequant, so
+// quantization error cancels and only GEMM accumulation + f16 store differ.
+// Tolerance: f16-class <=1e-2 rel (measured ~1e-3), an order under the NVFP4 1e-1 floor, plus
+// a hard no-NaN/Inf guard. Boundary distributions: empty expert, 1-token expert, a 128-row
+// SfAtom tile crossing, K=256 crossing the 64-elem atom-K boundary.
 
 #include <gtest/gtest.h>
 #include "compute/gemm_cutlass_grouped_3x.h"
@@ -71,10 +26,8 @@
 namespace imp {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Independent NVFP4 decode helpers (from the published format definition).
-// Deliberately NOT imp's dequant kernel — this is the reference ground truth.
-// ---------------------------------------------------------------------------
+// Independent NVFP4 decode helpers from the published format definition, deliberately not
+// imp's dequant kernel - this is the reference ground truth.
 
 // E2M1 magnitude LUT, indexed by the 3-bit code (sign is the 4th nibble bit).
 // {0, 0.5, 1, 1.5, 2, 3, 4, 6} — the 8 representable FP4 E2M1 magnitudes.
@@ -96,10 +49,8 @@ static void decode_packed_byte(uint8_t byte, double& lo, double& hi) {
         hi = -hi;
 }
 
-// Decode a UE4M3 scale byte to fp64. UE4M3 = unsigned E4M3 (the scale-factor
-// dtype): bit pattern is identical to IEEE FP8 E4M3 with the sign forced 0.
-//   bias 7; normals 2^(e-7) * (1 + m/8); subnormals (e==0) m/8 * 2^-6.
-//   e==15 with m==7 is the e4m3 NaN slot — not produced for scales; treat as 0.
+// UE4M3 = unsigned E4M3 scale-factor dtype: bias 7, normals 2^(e-7)*(1+m/8), subnormals
+// (e==0) m/8*2^-6; e==15&m==7 (E4M3 NaN slot) treated as 0 since it's never produced for scales.
 static double ue4m3_to_double(uint8_t b) {
     uint8_t e = (b >> 3) & 0xF;  // 4 exponent bits (sign bit ignored)
     uint8_t m = b & 0x7;         // 3 mantissa bits
@@ -110,11 +61,9 @@ static double ue4m3_to_double(uint8_t b) {
     return std::ldexp(1.0 + static_cast<double>(m) / 8.0, static_cast<int>(e) - 7);
 }
 
-// CUTLASS SfAtom byte offset for logical scale at (row, k_group).
-// Mirrors imp's sfatom_offset() formula (atom 128 rows x 4 k-groups = 512 B,
-// K-tiles inner). A value-preserving layout permutation, orthogonal to the
-// GEMM/adapter math under test — the reference stays independent of the
-// CUTLASS adapter, but a layout change there must be reflected here.
+// CUTLASS SfAtom byte offset for (row, k_group): mirrors imp's sfatom_offset() (atom 128
+// rows x 4 k-groups = 512B, K-tiles inner). A value-preserving layout permutation independent
+// of the GEMM/adapter math under test, but must track a layout change there.
 static int ref_sfatom_offset(int row, int k_group, int n_k_tiles) {
     const int kAtomRows = 128, kAtomKGroups = 4, kAtomSize = 512;
     int tile_row = row / kAtomRows;

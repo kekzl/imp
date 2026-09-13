@@ -1,15 +1,7 @@
-// Speculation as a per-request contract.
-//
-// Three rules live here, all pure, all previously unreachable from any CI lane:
-//   1. mtp_resolve_request  - what depth a request gets and why it did not get
-//                             what it asked for. The server and the engine both
-//                             call it, so they cannot disagree about a request.
-//   2. spec_batch_rr_active - round-robin batched speculation needs a DRAFT
-//                             SOURCE, not `speculative.ngram` by name.
-//   3. dequant_cap_decide   - the 512 MiB NVFP4 dequant cap counts only planes
-//                             that can take the M>1 fallback it guards.
-//
-// CI has no GPU; every one of these decides something on a GPU path.
+// Three pure per-request rules, previously unreachable from CI (no GPU): mtp_resolve_request
+// (depth granted and why not), spec_batch_rr_active (round-robin needs a DRAFT SOURCE, not
+// speculative.ngram by name), dequant_cap_decide (512 MiB NVFP4 dequant cap counts only
+// planes that can take the M>1 fallback it guards).
 
 #include "compute/attention_paged.h"
 #include "exec/dequant_cap.h"
@@ -221,23 +213,18 @@ TEST(DequantCap, TheDiagnosticOverrideKeepsCaptureOnButNotTheVerdict) {
 
 // ------------------------------------------------------- FP8 decode kernels
 
-// The pin `kv_cache.dtype=fp8` passes init on a head_dim-256 model
-// (paged_attention_serves_head_dim says FP8 covers 64/96/128/256/512) and then
-// lands on the scalar template, because the four-token and GQA-lane kernels are
-// head_dim-128 instances: 4 FP8 bytes per lane is what makes one uint32 load
-// per lane work (attention_paged_fp8_multitok.cu's static_assert, and
-// paged_attention_fp8_multitok_heads_per_cta's `if (head_dim != 128) return 0`).
-// Serving and serving fast are two questions and only the first had a predicate.
+// kv_cache.dtype=fp8 passes init on head_dim-256 (FP8 covers 64/96/128/256/512) but lands on
+// the scalar template: the four-token and GQA-lane fast kernels are head_dim-128-only (4 FP8
+// bytes/lane needed for one uint32 load, static_assert + "if head_dim!=128 return 0").
 TEST(PagedFp8Decode, FastKernelsAreHeadDim128Only) {
     EXPECT_TRUE(paged_fp8_decode_has_fast_kernel(128));
     for (int hd : {64, 96, 192, 256, 512})
         EXPECT_FALSE(paged_fp8_decode_has_fast_kernel(hd)) << "hd=" << hd;
 }
 
-// The two questions must not be confused: FP8 SERVES head_dim 256 (the scalar
-// kernel writes a correct answer), it just does not serve it fast. A predicate
-// that answered "no" to both would have init fall back to FP16 KV instead of
-// logging, which is a different and wrong behaviour.
+// FP8 SERVES head_dim 256 (scalar kernel writes a correct answer), it just doesn't serve it
+// fast. Conflating the two would make init fall back to FP16 KV instead of logging - a
+// different and wrong behavior.
 TEST(PagedFp8Decode, ServingAndServingFastAreDifferentQuestions) {
     EXPECT_TRUE(paged_attention_serves_head_dim(imp::QType::FP8_E4M3, 256));
     EXPECT_FALSE(paged_fp8_decode_has_fast_kernel(256));

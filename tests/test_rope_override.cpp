@@ -1,9 +1,6 @@
-// Runtime RoPE-scaling override (imp.conf [rope]) — host-only semantics.
-//
-// apply_rope_override must set exactly the ModelConfig fields the GGUF/HF
-// loaders set from model-declared rope_scaling (rope_freq_scale stores the
-// FACTOR — the kernel applies 1/factor and the paper mscale itself), bump
-// max_seq_len to factor × orig_ctx, and refuse model classes where a scalar
+// apply_rope_override must set exactly the ModelConfig fields the GGUF/HF loaders set from
+// model-declared rope_scaling (rope_freq_scale stores the FACTOR; the kernel applies
+// 1/factor), bump max_seq_len to factor*orig_ctx, and refuse model classes where a scalar
 // factor is silently wrong (per-dim tables, MLA, NoPE).
 
 #include <gtest/gtest.h>

@@ -1,17 +1,9 @@
-// CPU unit tests for the think/stop state machine (Test-Audit Phase 2, Risk #4).
-//
-// These exercise the *pure* host logic extracted into runtime/think_stop_logic.h
-// from engine_sampling_stop.cpp + engine_workspace_warmup.cpp. The week these
-// were written, three stacked bugs lived in this exact code with zero coverage:
-//   (a) budget recount ignored prompt-injected <think> prefixes (no opener in
-//       output) -> seeded by started_in_think,
-//   (b) think-id cache required CONTROL token type, but Qwen3-GGUF tags
-//       <think> USER_DEFINED -> accept any special (non-NORMAL) type,
-//   (c) </think> split across BPE tokens was never detected for SafeTensors
-//       quants that ship the marker as special=False text.
-//
-// Ground truth here is derived by hand from the documented semantics and stated
-// as a comment per case — no snapshot of the code's own output.
+// Pure host logic from engine_sampling_stop.cpp + engine_workspace_warmup.cpp (Test-Audit
+// Phase 2, Risk #4). Three stacked bugs shipped with zero coverage: (a) budget recount
+// ignored prompt-injected <think> prefixes, fixed via started_in_think; (b) think-id cache
+// required CONTROL token type but Qwen3-GGUF tags <think> USER_DEFINED, fixed to accept any
+// non-NORMAL type; (c) </think> split across BPE tokens was undetected for SafeTensors quants
+// shipping it as special=false text.
 
 #include "runtime/think_stop_logic.h"
 
@@ -23,12 +15,8 @@
 
 using namespace imp::think_logic;
 
-// ---------------------------------------------------------------------------
-// Warmup: think-token-type acceptance (bug (b))
-// ---------------------------------------------------------------------------
-// Token-type codes (tokenizer.h): NORMAL=1, CONTROL=3, USER_DEFINED=4.
-// is_special_token() returns (type != NORMAL). The engine passes
-// `has_token_types() && is_special_token(ts)` as `is_special`.
+// Bug (b): token-type codes NORMAL=1, CONTROL=3, USER_DEFINED=4; is_special_token() returns
+// (type != NORMAL). Engine passes has_token_types() && is_special_token(ts) as is_special.
 
 TEST(ThinkTokenAccept, ControlTypeAccepted) {
     // GGUF metadata path: <think> tagged CONTROL -> is_special=true -> accept.
@@ -45,20 +33,18 @@ TEST(ThinkTokenAccept, UserDefinedTypeAccepted) {
 }
 
 TEST(ThinkTokenAccept, AddedButNotSpecialAccepted) {
-    // THE Qwen3/Qwen3.x NVFP4 SafeTensors case: </think> is added_tokens id
-    // 151668 with special=false -> is_special=false but is_added=true. The old
-    // is_special-only gate rejected it (think_end_id_ == -1), forcing every
-    // think chat onto the eager decode path. An explicit added marker must be
-    // accepted so the conditional-graph loop runs.
+    // Qwen3/Qwen3.x NVFP4 SafeTensors: </think> is added_tokens id 151668 with special=false
+    // (is_special=false, is_added=true). The old is_special-only gate rejected it
+    // (think_end_id_==-1), forcing every think chat onto eager decode; an explicit added marker
+    // must be accepted.
     EXPECT_TRUE(accept_think_token(/*start_id=*/151667, /*has_token_types=*/true,
                                    /*is_special=*/false, /*is_added=*/true, /*vocab=*/151936));
 }
 
 TEST(ThinkTokenAccept, NormalTypeRejected) {
-    // Nemotron: "<think>" is plain text at ID 12, type NORMAL, NOT in
-    // added_tokens -> is_special=false, is_added=false. Must NOT be treated as a
-    // think marker (else every literal "<think>" in ordinary text would toggle
-    // reasoning mode).
+    // Nemotron: "<think>" is plain text at ID 12, type NORMAL, not in added_tokens
+    // (is_special=false, is_added=false) and must NOT be treated as a think marker, or every
+    // literal "<think>" in ordinary text would toggle reasoning mode.
     EXPECT_FALSE(accept_think_token(/*start_id=*/12, /*has_token_types=*/true,
                                     /*is_special=*/false, /*is_added=*/false, /*vocab=*/256000));
 }
@@ -81,22 +67,13 @@ TEST(ThinkTokenAccept, NoTypeTableHeuristicTopOfVocab) {
                                     /*is_special=*/false, /*is_added=*/false, /*vocab=*/1000));
 }
 
-// ---------------------------------------------------------------------------
-// Budget recount + force-token (bug (a))
-// ---------------------------------------------------------------------------
-// think_start_id=100, think_end_id=200 in these fixtures. Reasoning tokens are
-// the ones emitted while "currently_thinking" is true; the opener/closer ids
-// themselves are NOT counted.
+// Bug (a). think_start_id=100, think_end_id=200 in these fixtures; reasoning tokens are
+// those emitted while currently_thinking is true, opener/closer ids themselves not counted.
 
-// ---------------------------------------------------------------------------
-// Prompt-tail seed (the flag pair Engine::add_request derives from the prompt)
-// ---------------------------------------------------------------------------
-// The defect this covers: add_request set only `in_think_block` and never
-// `started_in_think`, so on every model whose template ends the generation
-// prompt with "<think>\n" (Qwen3/3.5/3.6/3.8, DeepSeek-R1) the recount below
-// started outside think, counted 0, should_force_think_end never fired, and the
-// request spent all of max_tokens reasoning. Both flags come from one tail, so
-// they are derived in one place and cannot drift apart again.
+// Defect: add_request set only in_think_block, never started_in_think, so on any model whose
+// template ends the generation prompt with "<think>\n" (Qwen3/3.5/3.6/3.8, DeepSeek-R1) the
+// recount started outside think, counted 0, should_force_think_end never fired, and the
+// request spent all of max_tokens reasoning. Both flags now derive from one tail.
 
 TEST(ThinkSeedFromPromptTail, TrailingOpenerSeedsBothFlags) {
     // The Qwen3.x generation prompt: "...<|im_start|>assistant\n<think>\n".
@@ -139,10 +116,9 @@ TEST(BudgetRecount, OpenerInOutputCountsBetweenMarkers) {
 }
 
 TEST(BudgetRecount, OpenerOnlyInPromptSeedsInThink) {
-    // Prompt-injected "<think>\n" prefix: the opener is in the PROMPT, so the
-    // output has NO opener. Every output token before any close is reasoning.
-    // started_in_think=true makes the recount start in-think; here 4 reasoning
-    // tokens and the model is still thinking at the end.
+    // Prompt-injected "<think>\n" prefix: the opener is in the PROMPT so the output has no
+    // opener, and every output token before any close is reasoning. started_in_think=true starts
+    // the recount in-think.
     std::vector<int32_t> out = {7, 8, 9, 10};
     bool thinking = false;
     int n = count_reasoning_tokens(out, 100, 200, /*started_in_think=*/true, thinking);
@@ -186,10 +162,9 @@ TEST(ForceThinkEnd, DoesNotFireBelowBudget) {
 }
 
 TEST(ForceThinkEnd, DoesNotFireAfterThinkClosed) {
-    // Even with many tokens, once </think> (id 200) has been emitted the model
-    // is no longer thinking, so the budget must not force another close.
-    // out: open + 8 reasoning + close -> ends not thinking. limit=int(10*.5)=5,
-    // but currently_thinking=false suppresses the force.
+    // Once </think> (id 200) has been emitted the model is no longer thinking, so the budget
+    // must not force another close, even with many tokens (currently_thinking=false suppresses
+    // the force).
     std::vector<int32_t> out = {100, 1, 2, 3, 4, 5, 6, 7, 8, 200};
     EXPECT_FALSE(should_force_think_end(0.5f, 200, 10, out, 100, /*started_in_think=*/false));
 }
@@ -204,11 +179,9 @@ TEST(ForceThinkEnd, DisabledWhenBudgetZeroOrNoCloseId) {
     EXPECT_FALSE(should_force_think_end(0.5f, 200, 10, {}, 100, true));
 }
 
-// --- Answer-reserve cap (kMaxAnswerReserve) -------------------------------
-// For generous max_tokens the fractional budget over-reserves; the cap lets the
-// model think up to max_tokens - kMaxAnswerReserve so it is not cut off
-// mid-thought (the reasoning-into-content leak). The cap only ever GROWS the
-// think limit, so small-max_tokens behaviour is unchanged.
+// kMaxAnswerReserve caps the think budget at max_tokens - kMaxAnswerReserve for generous
+// max_tokens, so the model is not cut off mid-thought (the reasoning-into-content leak).
+// The cap only ever GROWS the think limit; small-max_tokens behavior is unchanged.
 
 TEST(ForceThinkEnd, ReserveCapGrantsMoreThinkingForLargeMaxTokens) {
     // max_tokens=1024, budget=0.5 -> frac_limit=512, reserve_limit=1024-256=768.
@@ -231,14 +204,10 @@ TEST(ForceThinkEnd, ReserveCapDoesNotChangeSmallMaxTokens) {
     EXPECT_FALSE(should_force_think_end(0.5f, 200, 200, below, 100, /*started_in_think=*/true));
 }
 
-// --- The reserve scales above the flat floor (#1248) -----------------------
-//
-// A FLAT reserve makes the answer length independent of max_tokens: think_limit
-// takes the LATER of the two limits, so past 2*kMaxAnswerReserve the reserve
-// always wins and the answer is pinned at 256 tokens whatever the caller asks
-// for. Measured on Qwen3.6-35B-A3B-NVFP4, same request, only max_tokens varied:
-// 600/1500/3000/4096 returned 935/1084/968/934 characters — five times the
-// budget for fifty more characters, and never finish_reason "stop".
+// #1248: a FLAT reserve makes think_limit take the LATER of the two limits, so past
+// 2*kMaxAnswerReserve the reserve always wins and the answer pins at 256 tokens regardless of
+// max_tokens. Measured on Qwen3.6-35B-A3B-NVFP4: max_tokens 600/1500/3000/4096 all returned
+// ~935-1084 characters, never finish_reason "stop".
 
 TEST(ForceThinkEnd, AnswerRoomGrowsWithMaxTokens) {
     // The property the flat cap broke: a bigger budget must buy answer room.
@@ -310,16 +279,10 @@ TEST(AnswerReserveKey, NegativeReserveClampsToZero) {
     EXPECT_EQ(answer_reserve_for(600, -100000), 150);
 }
 
-// ---------------------------------------------------------------------------
-// One limit for every enforcement path
-// ---------------------------------------------------------------------------
-// Three paths enforce the think budget: the eager sampler
-// (engine_sampling_stop.cpp), the CUDA-graph loop's device counter
-// (engine_graph_decode.cpp, twice) and the n-gram/scheduler gates. The graph
-// loop used to compute int(max_tokens * budget) ALONE - no answer reserve - so
-// it cut thinking earlier than the documented rule and ignored
-// runtime.think_answer_reserve entirely. think_limit() is now the single
-// formula; these pin that the two readings agree.
+// Three paths enforce the think budget (eager sampler, CUDA-graph device counter x2,
+// n-gram/scheduler gates); the graph loop used to compute int(max_tokens*budget) ALONE,
+// ignoring runtime.think_answer_reserve entirely. think_limit() is now the single formula;
+// these pin that graph and host readings agree.
 
 TEST(ThinkLimit, GraphPathAndHostPathAgree) {
     // The graph path's old formula, kept here as the thing that must NOT come
@@ -416,11 +379,8 @@ TEST(TextThink, MarkerSurvivesWindowEviction) {
     EXPECT_FALSE(s.in_think_block);
 }
 
-// ---------------------------------------------------------------------------
-// Post-</think> grace period (should_stop)
-// ---------------------------------------------------------------------------
-// kMinAnswerAfterThink == 16: after the block closes, suppress stop until at
-// least 16 content tokens have been produced.
+// kMinAnswerAfterThink == 16: after </think> closes, suppress stop until at least 16
+// content tokens have been produced.
 
 TEST(GracePeriod, BlocksStopImmediatelyAfterExitWithNoContent) {
     // Empty-think case: </think> at 10, EOS at 11, no content emitted yet -> 1
@@ -430,10 +390,9 @@ TEST(GracePeriod, BlocksStopImmediatelyAfterExitWithNoContent) {
 }
 
 TEST(GracePeriod, HonorsStopOnceContentSeen) {
-    // THE FIX: the model produced a real answer (content_after_think=true) and
-    // then emitted its stop token only 2 tokens after </think>. Previously the
-    // raw-distance grace blocked this and padded/repeated the answer; now the
-    // stop is honored the instant content exists. (A complete "Paris"/"4".)
+    // Fix: a real answer (content_after_think=true) followed by a stop token only 2 tokens
+    // after </think> used to be blocked by the raw-distance grace, padding/repeating the answer;
+    // stop is now honored the instant content exists.
     EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/12,
                                    /*content_after_think=*/true));
 }
@@ -471,16 +430,11 @@ TEST(GracePeriod, RealTextPieceIsContent) {
     EXPECT_FALSE(piece_is_whitespace("\n4"));      // newline + digit
 }
 
-// ---------------------------------------------------------------------------
-// Sampler-side stop mask (fill_sampling_params / post_decode_step_kernel)
-// ---------------------------------------------------------------------------
-// A stop token that should_stop suppresses still lands in the context. On
-// Qwen3.8-27B a near-tie inside the think block then picks <|endoftext|>, the
-// model continues as a new document ("Human: ...") and the answer is empty
-// (AUDIT_qwen38_nvfp4 P3). The mask removes stop ids from the logits BEFORE
-// sampling wherever the stop would have been suppressed, so the second-best
-// token is sampled instead. Termination: in-think only while a budget can
-// force </think>; after the close only for the bounded grace window.
+// A stop token that should_stop suppresses still lands in the context; on Qwen3.8-27B a
+// near-tie inside the think block then picks <|endoftext|> and the model starts a new
+// document, leaving an empty answer (AUDIT_qwen38_nvfp4 P3). Mask removes stop ids from
+// logits BEFORE sampling wherever suppression would apply; in-think only while a budget can
+// force </think>, after close only during the bounded grace window.
 
 TEST(StopMask, InThinkWithBudgetMasks) {
     EXPECT_TRUE(stop_mask_active(/*in_think=*/true, /*budget_can_close=*/true,

@@ -139,14 +139,8 @@ TEST(FP8KVCache, BlockBytesMatchesDTypeSize) {
     EXPECT_EQ(dtype_size(QType::FP8_E4M3), 1u);  // FP8 = 1 byte per element
 }
 
-// ============================================================================
-// Test 5: FP8 Split-K decode consistency vs FP16 reference
-// ============================================================================
-//
-// Creates a small paged attention scenario (batch=1, heads=8, hd=128, ctx=256),
-// runs FP16 decode for reference, quantizes KV to FP8, runs FP8 decode with
-// Split-K scratch enabled, and checks relative error < 2%.
-// ============================================================================
+// FP8 Split-K decode vs FP16 reference: batch=1, heads=8, hd=128, ctx=256; quantizes KV to
+// FP8, runs FP8 decode with Split-K scratch, checks relative error < 2%.
 
 TEST(FP8KVCache, SplitKConsistency) {
     SKIP_IF_NO_CUDA();
@@ -296,14 +290,11 @@ TEST(FP8KVCache, SplitKConsistency) {
     cudaFree(d_scratch);
 }
 
-// ============================================================================
-// GQA-batched FP8 tile kernel vs per-head tile kernel vs non-split reference.
-// Flagship FP8-KV shape: GQA 32q/4kv, hd=128, block_size=32 (chunks_per_page=2,
-// the Qwen3-MoE FP8-KV page size). ctx_len=1000 is deliberately unaligned
-// (tail-chunk masking), and num_splits=13 leaves two empty splits (sentinel
-// path). The two tile kernels are launched directly (bypassing dispatch) so
-// each is pinned regardless of config defaults.
-// ============================================================================
+// GQA-batched vs per-head FP8 tile kernel vs non-split reference, flagship FP8-KV shape (GQA
+// 32q/4kv, hd=128, block_size=32, Qwen3-MoE page size). ctx_len=1000 is deliberately
+// unaligned (tail-chunk masking); num_splits=13 leaves two empty splits (sentinel path).
+// Both tile kernels launched directly, bypassing dispatch, so each is pinned regardless of
+// config defaults.
 TEST(FP8KVCache, SplitKGqaTileConsistency) {
     SKIP_IF_NO_CUDA();
 
@@ -495,15 +486,9 @@ TEST(INT8KVCache, Construction) {
     fp16_cache.free_block(blk2);
 }
 
-// ============================================================================
-// Test 7: INT8 Split-K decode consistency
-// ============================================================================
-//
-// Creates a small paged attention scenario (batch=1, heads=8, hd=128, ctx=256),
-// manually quantizes FP16 KV data to INT8 with per-head scales on the host,
-// uploads to device, runs INT8 decode with and without Split-K,
-// and checks relative error < 2%.
-// ============================================================================
+// INT8 Split-K decode consistency: batch=1, heads=8, hd=128, ctx=256; host-quantizes FP16 KV
+// to INT8 with per-head scales, runs INT8 decode with/without Split-K, checks relative error
+// < 2%.
 
 // Host helper: quantize FP16 KV data to INT8 with per-head scales.
 // KV layout: [num_blocks, block_size, n_kv_heads, head_dim]
@@ -748,13 +733,8 @@ TEST(FP8KVCache, QuantDequantRoundtrip) {
     cudaFree(d_output);
 }
 
-// ============================================================================
-// Test 9: FP8 Paged Attention Decode — FP8 KV vs FP16 reference
-// ============================================================================
-//
-// Writes identical KV data as FP16 and FP8, runs paged attention decode on
-// both, and verifies the FP8 output matches FP16 within tolerance.
-// ============================================================================
+// FP8 paged attention decode vs FP16 reference: writes identical KV as both dtypes, runs
+// decode on both, verifies FP8 matches FP16 within tolerance.
 TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     SKIP_IF_NO_CUDA();
 
@@ -896,14 +876,9 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     cudaFree(d_o_fp8);
 }
 
-// ============================================================================
-// Test: FP8 Split-K decode HD=256 (Gemma-3 config: GQA, head_dim=256)
-// ============================================================================
-//
-// Exercises the FP8 pipelined Split-K kernel with ELEMS=8 (HD=256).
-// Prior to fix, cp.async only copied 4 bytes per thread instead of 8,
-// corrupting half the K/V data in shared memory.
-// ============================================================================
+// FP8 Split-K HD=256 (Gemma-3 GQA config): exercises the pipelined kernel with ELEMS=8.
+// Prior bug: cp.async copied 4 bytes/thread instead of 8, corrupting half the K/V data in
+// shared memory.
 
 TEST(FP8KVCache, SplitKHD256) {
     SKIP_IF_NO_CUDA();

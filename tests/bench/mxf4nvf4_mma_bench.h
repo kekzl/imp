@@ -12,13 +12,9 @@ struct MmaBenchResult {
     double speedup;  // blockscale_tops / legacy_tops
 };
 
-// Run a raw-MMA throughput microbench for both instructions and return
-// per-warp effective TOPS. Answers the "is Project B Stage 4 worth the
-// integration effort?" question with a concrete number.
-//
-// warps: number of resident warps (1 per SM for 170 warps = full
-//        sm_120f on RTX 5090; smaller values isolate single-SM perf).
-// iterations: MMA issues per warp per rep. 1M is a reasonable default.
+// Raw-MMA throughput microbench for both MMA variants; answers the Project B Stage 4
+// integration-effort gate with per-warp effective TOPS.
+// warps: resident warps (170 = full sm_120f on RTX 5090). iterations: MMA issues/warp/rep.
 MmaBenchResult bench_mma_comparison(int warps, int iterations, cudaStream_t stream);
 
 }  // namespace imp

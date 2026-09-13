@@ -1,9 +1,6 @@
-// Expanding a chat template's single image placeholder to the encoder's token
-// count.
-//
-// A miscount here does not crash: the embedding replacement fills whatever
-// placeholders it finds, and every position after the image is shifted, so the
-// model reads a coherent prompt that says something else.
+// Expanding a chat template's single image placeholder to the encoder's token count. A
+// miscount does not crash: the embedding replacement fills whatever placeholders it finds and
+// shifts every later position, so the model reads a coherent prompt that says something else.
 
 #include "model/image_placeholders.h"
 

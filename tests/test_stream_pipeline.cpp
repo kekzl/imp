@@ -1,16 +1,8 @@
-// CPU unit tests for the server streaming text pipeline (Test-Audit Phase 2,
-// Risk #5). Targets the pure holdback + UTF-8-boundary logic in
-// tools/imp-server/stream_pipeline.h, which is the single source of truth used
-// by all three streaming handlers in handlers.cpp.
-//
-// The bug this guards: with max_stop_len == 0 (no stop sequences) the holdback
-// math `pending.size() - max_stop_len + 1` evaluated to size + 1 and was fed to
-// flush_text, which read ONE byte past pending_text — emitting the std::string
-// '\0' terminator into every SSE content delta and silently disabling
-// cross-token stop matching. Mock-server contract tests stayed green throughout.
-//
-// Ground truth is hand-derived from the holdback contract (documented in
-// stream_pipeline.h) and from the UTF-8 spec; each case states the reasoning.
+// Pure holdback + UTF-8-boundary logic in stream_pipeline.h, single source of truth for all
+// three streaming handlers (Test-Audit Phase 2, Risk #5). Bug: with max_stop_len==0, holdback
+// math pending.size()-max_stop_len+1 evaluated to size+1 and read one byte past pending_text,
+// emitting the std::string '\0' terminator into every SSE delta and silently disabling
+// cross-token stop matching; mock-server contract tests stayed green throughout.
 
 #include "stream_pipeline.h"
 
@@ -22,10 +14,9 @@
 using imp::stream::holdback_decision;
 using imp::stream::utf8_complete_len;
 
-// A faithful re-implementation of the handler flush loop, driven purely by
-// holdback_decision, so we can assert stream==non-stream equality end to end.
-// It mirrors handlers.cpp: append piece -> decide -> flush prefix -> on a
-// complete match, drop the stop and everything after it.
+// Faithful re-implementation of the handler flush loop driven by holdback_decision, so
+// stream==non-stream equality can be asserted end to end (mirrors handlers.cpp: append,
+// decide, flush prefix, drop the stop and everything after it on a complete match).
 struct StreamSim {
     std::string pending;
     std::string emitted;  // concatenation of all SSE content deltas
@@ -97,10 +88,8 @@ TEST(Holdback, NoMatchLeavesTheIndexUnset) {
     EXPECT_EQ(d.matched_index, -1);
 }
 
-// The list order used to decide, so with {"B", "A"} on "xAyB" the cut landed at
-// offset 3 and the reported sequence was "B" - while the text the model
-// produced ended at "A", offset 1. The documented contract always said "first
-// occurrence".
+// List order used to decide the cut: {"B","A"} on "xAyB" cut at offset 3 ("B") while
+// the model's text ended at "A", offset 1. Documented contract always said first occurrence.
 TEST(Holdback, EarliestOccurrenceWinsNotListOrder) {
     std::string pending = "xAyB";
     auto d = holdback_decision(pending, 1, {"B", "A"});
@@ -143,12 +132,9 @@ TEST(Holdback, CompleteMatchFlushesPrefixAndSignalsStop) {
     EXPECT_EQ(d.flush_len, 3u);  // "abc"; the stop and "xyz" are dropped
 }
 
-// This used to assert the opposite - "stops are tried in LIST order and the
-// first one that occurs anywhere wins, NOT the earliest position ... this is
-// intentional" - and it was pinning the loop, not a requirement: the function's
-// own contract two screens up always said "byte offset of the FIRST such
-// occurrence", and list order shipped the text BETWEEN the two stops, which the
-// model was never supposed to have generated past. Both orders now cut at byte
+// Used to assert the OPPOSITE (list order wins) intentionally, pinning the loop rather than
+// the documented contract ("byte offset of the FIRST occurrence"); list order shipped text
+// between two stops the model was never meant to generate past. Both orders now cut at byte
 // 2 (#1550, found while making the matched sequence reportable).
 TEST(Holdback, EarliestOccurrenceWinsWhicheverOrderTheListIsIn) {
     std::vector<std::string> stops = {"STOP", "END"};
@@ -204,10 +190,9 @@ TEST(Utf8, TruncatedTrailingSequenceHeldBack) {
 
 TEST(Utf8, EmptyAndInvalidLead) {
     EXPECT_EQ(utf8_complete_len(""), 0u);
-    // A stray continuation byte (0x80) preceded by valid ASCII: the walk-back
-    // lands on index 0 ('a', a valid 1-byte lead) which IS complete, so the
-    // whole 2-byte string is reported (the stray 0x80 is emitted, matching the
-    // production fallback "emit what we have rather than stall").
+    // A stray continuation byte (0x80) after valid ASCII: walk-back lands on index 0 ('a', a
+    // complete 1-byte lead), so the whole 2-byte string is reported (production fallback: emit
+    // what we have rather than stall).
     EXPECT_EQ(utf8_complete_len("a\x80"), 2u);
 }
 

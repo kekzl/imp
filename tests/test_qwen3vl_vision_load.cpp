@@ -1,11 +1,6 @@
-// Routing the Qwen3-VL vision weights into the tower.
-//
-// The failure this guards is silent: a tower that loads with a null slot, or
-// with the merger norms swapped, still runs and returns embeddings unrelated to
-// the image. So the loader refuses, and these tests pin what it refuses.
-//
-// Oracle: the tensor names AND shapes of the staged Qwen3-VL-4B-Instruct
-// checkpoint, reconstructed here so the test needs neither it nor a GPU.
+// A tower loading with a null slot or swapped merger norms still runs and returns embeddings
+// unrelated to the image - a silent failure - so the loader refuses. Oracle: tensor names AND
+// shapes of the staged Qwen3-VL-4B-Instruct checkpoint, reconstructed here (no GPU needed).
 
 #include "vision/qwen3vl_vision_load.h"
 

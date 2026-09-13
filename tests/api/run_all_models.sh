@@ -4,12 +4,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-# The list is aspirational: 6 of these are not on this host right now and the
-# loop below reports them as SKIP with a count, so a thin run is visible in
-# the summary rather than silent. Two entries were not merely absent but
-# dead names (Qwen3.5-4B-Q8_0, Qwen3.5-9B-Q8_0); those are resolved.
-# This script hangs off no CI job and no make target, and it sets no exit
-# code - read the SUMMARY line, do not trust $?.
+# MODELS list is aspirational; absent models SKIP with a count so a thin run is visible.
+# No CI job or make target runs this; read the SUMMARY line, not $?.
 MODELS=(
   Llama-3.2-3B-Instruct-Q8_0.gguf
   Qwen3-4B-Instruct-2507-Q8_0.gguf
@@ -130,11 +126,8 @@ for MODEL in "${MODELS[@]}"; do
     "pip install -q httpx pytest 2>/dev/null && IMP_TEST_MODEL=$MODEL python -m pytest test_errors.py test_chat.py test_streaming.py -v --tb=line 2>&1" \
   )
 
-  # Parse result
-  # Herestrings, not `echo "$OUTPUT" | grep -q`. grep -q leaves at the first
-  # match and closes the pipe; echo dies of EPIPE and `set -o pipefail` (:4)
-  # makes the pipeline non-zero although grep MATCHED. $OUTPUT is a full pytest
-  # run, so a passing model would be recorded as ERROR.
+  # Use herestrings, not `echo | grep -q`: grep -q closes the pipe early, echo gets EPIPE,
+  # and pipefail then marks a PASSING run as ERROR.
   if grep -q "passed" <<< "$OUTPUT"; then
     PASSED=$(echo "$OUTPUT" | grep -oP '\d+ passed' | head -1)
     FAILED=$(echo "$OUTPUT" | grep -oP '\d+ failed' | head -1)

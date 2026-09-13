@@ -1,14 +1,9 @@
-// The "not one expert tensor was recognised" guard in WeightMap::apply_weights.
-//
-// It exists to stop a MoE checkpoint whose expert layout imp cannot read from
-// loading and generating garbage through null experts (the #925 class). It had
-// no test, and it was wrong: it asked only about `expert_w_gate`, so it fired on
-// every up/down-only MoE — the entire Nemotron-H family, which has no gate
-// projection. That went unnoticed because the caller discards the bool, so
-// Nemotron-3-Nano logged the error and then generated correctly.
-//
-// These tests pin both directions: the guard must stay silent for a 2-projection
-// MoE, and must still fire when the experts really are absent.
+// The "not one expert tensor recognised" guard (WeightMap::apply_weights) stops a MoE
+// checkpoint whose expert layout imp can't read from loading and generating garbage through
+// null experts (#925 class). Untested and wrong: it checked only expert_w_gate, so it fired
+// on every up/down-only MoE (the whole Nemotron-H family), unnoticed because the caller
+// discards the bool. Pins both directions: silent for a 2-projection MoE, fires when experts
+// are truly absent.
 
 #include "model/model.h"
 #include "model/weight_map.h"

@@ -1,10 +1,6 @@
-// speculative.mtp_k tri-state resolution (tools/common/mtp_auto.*).
-//
-// The rule decides a DEFAULT behaviour change on every checkpoint that ships
-// an MTP head, and two of its branches are failure-shaped: a checkpoint
-// without a head must not end up with the n-gram matcher switched off and
-// nothing drafting, and an operator who set `ngram` themselves must keep it.
-// CPU-only: plain config in, plain config out.
+// speculative.mtp_k tri-state resolution (tools/common/mtp_auto.*): a checkpoint without an
+// MTP head must not end up with n-gram off and nothing drafting; an operator-set ngram value
+// must be kept. CPU-only, plain config in/out.
 
 #include <gtest/gtest.h>
 #include "common/mtp_auto.h"

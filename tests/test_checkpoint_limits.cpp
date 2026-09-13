@@ -1,16 +1,10 @@
-// Bounds on what a checkpoint may declare about itself (#1611, #1612, #1613).
-//
-// Everything a loader sizes a container from - the layer count, the expert
-// count, a shard filename, the nesting of a JSON document or a chat template -
-// comes out of a file the operator did not write. These tests drive the
-// hostile value through the real entry point and assert the refusal, because
-// the failure mode without one is not a wrong answer, it is a 18.9 TiB
-// allocation or a SIGSEGV before the first weight is read.
-//
-// The measured numbers behind the caps:
-//   sizeof(TransformerLayer) = 9680 B, so INT_MAX layers is 18.9 TiB.
-//   JsonParser survives 30 000 nesting levels on an 8 MiB stack and takes
-//   SIGSEGV before 40 000, while a SafeTensors header may declare 128 MiB.
+// Bounds on what a checkpoint may declare about itself (#1611-1613): layer count, expert
+// count, shard filename, JSON/template nesting all come from an untrusted file. Failure mode
+// without a refusal is not a wrong answer but an 18.9 TiB allocation or SIGSEGV before the
+// first weight is read.
+// Caps: sizeof(TransformerLayer)=9680B so INT_MAX layers = 18.9 TiB; JsonParser survives
+// 30000 nesting levels on an 8MiB stack, SIGSEGVs before 40000; SafeTensors header may
+// declare 128MiB.
 
 #include "core/logging.h"
 #include "model/jinja.h"
@@ -32,10 +26,9 @@
 namespace imp {
 namespace {
 
-// Any test that reads a log line has to pin the level itself.
-// `test_process_diag.cpp` mutates the process-global level and does not put it
-// back, so whether these three tests can see an ERROR line depended on
-// alphabetical suite order: green alone, red in the full binary.
+// Any test reading a log line must pin the level itself: test_process_diag.cpp mutates the
+// process-global level and never restores it, so seeing an ERROR line here depended on
+// alphabetical suite order (green alone, red in the full binary).
 struct LogLevelPin {
     LogLevel saved = log_get_level();
     LogLevelPin() { log_set_level(LogLevel::ERROR); }
@@ -113,11 +106,10 @@ TEST(CheckpointLimits, AnIndexThatFitsIsStillAccepted) {
     EXPECT_NE(model.layers_[3].wq.data, nullptr);
 }
 
-// The overflow that is not a DoS. `std::atoi("4294967296")` returns 0 on this
-// toolchain (measured), and the old guard only asked `< 0`, so a tensor named
-// `model.layers.4294967296.*` was written into layer 0 - on top of the weight
-// that belongs there. The two spellings that saturate ("2147483648" -> INT_MIN,
-// "99999999999999999999" -> -1) were rejected by that guard by accident.
+// std::atoi("4294967296") returns 0 on this toolchain, and the old guard only checked `< 0`,
+// so tensor name model.layers.4294967296.* wrote into layer 0 over the real weight. The two
+// saturating spellings ("2147483648"->INT_MIN, "999...9"->-1) were rejected by that guard
+// only by accident.
 TEST(CheckpointLimits, AnAliasingLayerIndexDoesNotOverwriteLayerZero) {
     std::vector<uint16_t> backing(1024, 0);
     Model model;
@@ -126,10 +118,9 @@ TEST(CheckpointLimits, AnAliasingLayerIndexDoesNotOverwriteLayerZero) {
     model.config_.d_model = 8;
     model.layers_.resize(1);
 
-    // Only the hostile name. Pairing it with a real layer-0 tensor would make
-    // the assertion depend on `unordered_map` iteration order, which decides
-    // which of the two writes lands last: measured, that test passes with the
-    // defect in place about half the time.
+    // Only the hostile name, not paired with a real layer-0 tensor: pairing would make the
+    // assertion depend on unordered_map iteration order (measured: passes with the defect in
+    // place about half the time).
     std::unordered_map<std::string, Tensor> tensors;
     tensors["model.layers.4294967296.self_attn.q_proj.weight"] = fake_weight(backing.data());
 
@@ -193,14 +184,10 @@ TEST(CheckpointLimits, ShardNameMustBeABareFilename) {
     EXPECT_FALSE(safetensors_shard_name_is_safe(""));
 }
 
-// The end-to-end half: the predicate is only worth anything if the loader
-// consults it before it opens the file.
-//
-// `EXPECT_EQ(model, nullptr)` alone would be a blind assertion here - this
-// load returns nullptr either way, because a shard with no usable tensors
-// fails a few steps later regardless. So the test reads the reason out of
-// stderr. Without the containment check the loader gets as far as opening the
-// traversed file and the message is a different one.
+// EXPECT_EQ(model, nullptr) alone is a blind assertion: this load returns nullptr either way
+// since a shard with no usable tensors fails later regardless. The test reads the refusal
+// reason from stderr, which only names the containment check if the loader consults it
+// before opening the traversed file.
 TEST(CheckpointLimits, ATraversingIndexFailsForTheRightReason) {
     LogLevelPin log_pin;
     namespace fs = std::filesystem;

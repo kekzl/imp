@@ -17,10 +17,9 @@ namespace fs = std::filesystem;
 namespace imp {
 namespace {
 
-// The synthetic cases above pin the rule; this one pins it against a real
-// checkpoint, because a hand-written weight_map is a statement about what I
-// think checkpoints look like. Reads the index only, no GPU, no weights.
-// Skipped where the model is absent, which includes CI.
+// Pins the synthetic-case rule against a real checkpoint, since a hand-written weight_map is
+// only a statement about expected shapes. Reads the index only, no GPU/weights; skipped
+// (including CI) where the model is absent.
 TEST(MtpProbe, FindsTheHeadInARealCheckpoint) {
     const char* env = std::getenv("IMP_MTP_MODEL");
     std::string path = env ? env : "/models/Qwen3.8-27B-NVFP4-vllm";

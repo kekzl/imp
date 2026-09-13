@@ -1,11 +1,6 @@
-// Parity tests for imp_generate vs the imp_prefill_with_params +
-// imp_decode_step loop. After Phase 5 Track B (refactor: dedupe imp_generate
-// via imp_prefill + imp_decode_step), imp_generate is a thin wrapper around
-// those two primitives. This test pins the contract — if the wrapper drifts
-// from manual prefill+decode-loop output, this test fails.
-//
-// Requires a real model on disk. Skipped via IMP_TEST_MODEL or default
-// /models/Qwen3-8B-Q8_0.gguf, matching test_degeneration.cpp.
+// Parity: imp_generate is a thin wrapper around imp_prefill_with_params + imp_decode_step
+// (post Phase 5 Track B refactor). Pins wrapper output against the manual prefill+decode loop.
+// Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-Q8_0.gguf.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -70,10 +65,8 @@ class ApiGenerateParityTest : public ::testing::Test {
     ImpContext ctx_ = nullptr;
 };
 
-// Sanity: imp_generate produces non-empty output for a simple chat prompt.
-// This pins the post-refactor wrapper against the prefill+decode_step
-// primitives — if the wrapper drops the prefill-sampled token or otherwise
-// breaks the contract, generation will look empty / one-token-short.
+// imp_generate must produce non-empty output for a simple chat prompt: pins the wrapper
+// against dropping the prefill-sampled token or otherwise breaking the primitive contract.
 TEST_F(ApiGenerateParityTest, GenerateProducesNonEmptyOutput) {
     ImpGenerateParams params = imp_generate_params_default();
     params.seed = 42;
@@ -90,14 +83,9 @@ TEST_F(ApiGenerateParityTest, GenerateProducesNonEmptyOutput) {
     EXPECT_LT(n, sizeof(buf)) << "output exceeded buffer";
 }
 
-// Streaming + non-streaming must produce the same number of callback
-// invocations as final detokenised characters, and both paths must agree on
-// token count under fixed greedy params + same-context reset.
-//
-// Both code paths share the generate_via_prefill_decode_loop helper
-// internally, so this is a regression guard: if a future change diverges the
-// streaming wrapper's token-handling from the non-streaming wrapper, this
-// test fails.
+// Streaming and non-streaming must emit the same callback count as final detokenised chars,
+// and both must agree on token count under fixed greedy params + same-context reset.
+// Both share generate_via_prefill_decode_loop; a future divergence fails this.
 TEST_F(ApiGenerateParityTest, StreamingDeliversAllTokens) {
     ImpGenerateParams params = imp_generate_params_default();
     params.seed = 42;
@@ -131,10 +119,8 @@ TEST_F(ApiGenerateParityTest, StreamingDeliversAllTokens) {
     };
     ASSERT_EQ(imp_generate_streaming(ctx_, "Say hi.", &params, cb, &state), IMP_SUCCESS);
 
-    // With ignore_eos=1 + max_tokens=16, both paths should emit 16 tokens.
-    // The callback fires once per generated token, so callback_count should
-    // equal max_tokens (or be 1 fewer if the prefill-sampled token bookkeeping
-    // is wrong — which is what this test guards against).
+    // ignore_eos=1, max_tokens=16: callback_count must equal max_tokens on both paths.
+    // A value 1 fewer than max_tokens signals wrong prefill-sampled-token bookkeeping.
     EXPECT_EQ(callback_count, params.max_tokens)
         << "streaming wrapper delivered " << callback_count << " tokens, expected "
         << params.max_tokens << " — wrapper may be dropping the prefill-sampled token";
@@ -143,11 +129,9 @@ TEST_F(ApiGenerateParityTest, StreamingDeliversAllTokens) {
     EXPECT_GT(nonstream.size(), 0u) << "non-streaming produced empty output";
 }
 
-// Manual prefill + decode_step loop must run successfully end-to-end with the
-// same params imp_generate uses. This is a smoke test that the public C API
-// composes correctly — the wrapper-vs-manual content parity is not asserted
-// because cross-engine non-determinism (separate Engine instances loading the
-// same weights) can shift greedy logits enough to diverge after a few tokens.
+// Manual prefill+decode_step loop must run end-to-end with imp_generate's params: smoke
+// test only. Content parity not asserted: cross-engine nondeterminism (separate Engine
+// instances) can diverge greedy logits after a few tokens.
 TEST_F(ApiGenerateParityTest, ManualPrefillDecodeLoopRuns) {
     ImpGenerateParams params = imp_generate_params_default();
     params.seed = 42;
@@ -184,14 +168,8 @@ TEST_F(ApiGenerateParityTest, ManualPrefillDecodeLoopRuns) {
     EXPECT_GT(std::strlen(buf), 0u) << "detokenised manual output is empty";
 }
 
-// I6, admission half: a prompt the KV pool can never hold must come back as a
-// TYPED, actionable error — not as a generic cancel, and not as a successful
-// call that produced nothing.
-//
-// Before this, the scheduler cancelled with a clear log line and the API
-// returned IMP_ERROR_CANCELLED, which is the same code a client disconnect
-// produces. A caller could not tell "you went away" from "this will never fit,
-// shorten the prompt", so the server answered 200 with an empty completion.
+// I6 admission: a prompt too large for the KV pool must return a TYPED error, not the
+// generic IMP_ERROR_CANCELLED a client disconnect also produces, and not a silent-empty 200.
 TEST(AdmissionCapacityTest, PromptLargerThanTheKvPoolIsTypedNotCancelled) {
     SKIP_IF_NO_MODEL();
 

@@ -26,10 +26,9 @@ TEST(MmaVariantsBench, Compare) {
     }
     std::printf("\n");
 
-    // The throughput ranking is diagnostic, but at least one variant must be
-    // viable: on sm_120a the mxf4/nvf4 mma.sync path is imp's core FP4 kernel,
-    // so if EVERY variant fails to launch the FP4 tensor-core path is broken,
-    // not merely "some datacenter-only variants got rejected".
+    // At least one mxf4/nvf4 mma.sync variant must launch: it is imp's core FP4 kernel on
+    // sm_120a, so if every variant fails the FP4 tensor-core path itself is broken, not just
+    // some datacenter-only variant being rejected.
     ASSERT_GT(r.count, 0) << "bench_mma_variants produced no entries";
     bool any_viable = false;
     for (int i = 0; i < r.count; ++i)

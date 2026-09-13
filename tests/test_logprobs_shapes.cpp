@@ -1,15 +1,6 @@
-// The two logprobs shapes and the token attribution behind them
-// (#1588, #1589, #1601).
-//
-// Three separate defects met here:
-//
-//   * The streaming chat path attached logprobs only when the request carried
-//     NO stop sequence. With any stop present every chunk went out through the
-//     logprob-free writer, so the field was absent from the whole stream.
-//   * /v1/completions returned the CHAT logprobs object on a `text_completion`
-//     response. An OpenAI SDK reading `.logprobs.tokens` sees nothing there.
-//   * safe_token_json and token_bytes_json, which every one of those paths
-//     calls, had no test in any lane.
+// Two logprobs shapes plus their defects (#1588, #1589, #1601): streaming chat dropped
+// logprobs whenever a stop sequence was present; /v1/completions returned the chat logprobs
+// shape on text_completion; safe_token_json/token_bytes_json had no test.
 
 #include "stream_pipeline.h"
 #include "utils.h"

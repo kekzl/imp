@@ -1,19 +1,9 @@
-// Dropping the weight-file pages must not change what reads back.
-//
-// The loaders map the checkpoint with MAP_POPULATE + MADV_WILLNEED and nothing
-// dropped it again, so a serving process held the whole file resident for its
-// lifetime: measured 18.48 GiB of file-backed RSS out of 21.53 GiB total on
-// Qwen3.8-27B-NVFP4-vllm, while `docker stats` reported 3.2 GiB because the
-// cgroup does not account it. It cost another session two OOM-killed jobs.
-//
-// The release is MADV_DONTNEED, not munmap, and that choice is the whole safety
-// argument: a host-resident expert or an offloaded layer still holds a pointer
-// INTO the mapping (`executor_forward_moe_nvfp4_host.cu` passes `w.data` to the
-// expert cache), and there is no tensor iterator that could prove otherwise
-// field by field. Dropping pages keeps every such pointer valid and correct;
-// unmapping would turn one missed field into a use-after-free.
-//
-// This pins that property on a real mapping, with no GPU and no checkpoint.
+// Loaders map checkpoints with MAP_POPULATE+MADV_WILLNEED and never dropped them, holding
+// the whole file resident (measured 18.48 GiB file-backed RSS of 21.53 GiB on
+// Qwen3.8-27B-NVFP4-vllm; docker stats reported 3.2 GiB since cgroups don't account it; cost
+// another session two OOM kills). Release is MADV_DONTNEED, not munmap: a host-resident
+// expert or offloaded layer still holds a pointer INTO the mapping with no field-by-field way
+// to prove otherwise, so dropping pages keeps it valid while unmapping would use-after-free it.
 
 #include "model/model.h"
 
@@ -64,10 +54,9 @@ struct MappedFile {
 
 constexpr size_t kMapBytes = 2u * 1024u * 1024u;  // 2 MiB, several pages
 
-// The bytes must survive the release: MADV_DONTNEED on a read-only private file
-// mapping discards resident pages, and the next read refaults them from the
-// page cache. If this ever became munmap, this test segfaults, which is the
-// point.
+// MADV_DONTNEED on a read-only private mapping discards resident pages; the next read
+// refaults them from the page cache. If this ever became munmap, this test segfaults, which
+// is the point.
 TEST(WeightPageRelease, DataStillReadsBackAfterRelease) {
     MappedFile f(kMapBytes);
     ASSERT_NE(f.base, nullptr) << "could not map the fixture file";

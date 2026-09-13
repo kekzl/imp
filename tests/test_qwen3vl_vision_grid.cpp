@@ -1,12 +1,7 @@
-// Qwen3-VL encoder grid math: token order, RoPE positions, position-embedding
-// resample.
-//
-// Every failure here is silent — the encoder runs either way and returns
-// embeddings that are merely wrong. So the resample is tested against a real
-// oracle rather than against itself: a bilinear interpolation of a table that is
-// an AFFINE function of (row, col) must reproduce that affine function exactly
-// at the resampled coordinate. That pins the taps and the weights independently,
-// without reimplementing the formula under test.
+// Encoder grid math (token order, RoPE positions, position-embedding resample) fails
+// silently: the encoder runs either way and returns merely-wrong embeddings. Resample tested
+// against a real oracle: bilinear interpolation of an affine table must reproduce that affine
+// function exactly at the resampled coordinate, pinning taps and weights independently.
 
 #include "vision/qwen3vl_vision_grid.h"
 

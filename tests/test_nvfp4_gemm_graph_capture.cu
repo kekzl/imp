@@ -1,22 +1,7 @@
-// Regression tests for the gemm_nvfp4 fallback's CUDA-stream-capture safety.
-//
-// The M>1 fallback in gemm_nvfp4 dequantizes the NVFP4 weight to FP16 and
-// calls cuBLAS GEMM. Historically the dequant scratch buffer was lazy-allocated
-// via cudaMalloc on first use, which crashes when the call happens inside a
-// captured CUDA stream ("operation not permitted when stream is capturing").
-// Memo: spec_decode_qwen36_broken_2026_05_02.md (Failure 2).
-//
-// Fix: pre-allocated workspace registered via set_nvfp4_dequant_workspace().
-// When set and large enough, ensure_dequant_buffer() reuses it instead of
-// touching the host allocator. When the workspace is missing AND the stream
-// is in capture mode, the path now fails-loud (clear log, returns nullptr)
-// instead of crashing the runtime via cudaMalloc.
-//
-// NOTE: this fix addresses the cudaMalloc-during-capture bug, NOT the
-// orthogonal fact that cuBLAS GEMM itself isn't reliably graph-safe in some
-// configurations (algo reselect under capture can fail with internal errors).
-// These tests therefore verify the workspace decision and the capture-guard,
-// without trying to actually replay the captured graph.
+// gemm_nvfp4 M>1 fallback dequantizes NVFP4 to FP16 then calls cuBLAS; the dequant scratch
+// buffer used to lazy-cudaMalloc on first use, crashing inside a captured CUDA stream. Fix:
+// pre-allocated workspace (set_nvfp4_dequant_workspace); missing workspace + capture mode
+// now fails loud instead of crashing. Does NOT cover cuBLAS's own graph-safety (algo reselect).
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -129,11 +114,9 @@ TEST_F(NvFP4GemmGraphCapture, WorkspaceIsPreferredOverLazyAlloc) {
     tw.destroy();
 }
 
-// Without a pre-allocated workspace, gemm_nvfp4 inside CUDA stream capture
-// must NOT crash the runtime via cudaMalloc. The cudaStreamIsCapturing guard
-// in ensure_dequant_buffer logs an error and returns nullptr, gemm_nvfp4
-// early-returns. We verify by checking the runtime stays usable for further
-// ordinary work afterwards.
+// Without a pre-allocated workspace, gemm_nvfp4 inside stream capture must NOT crash via
+// cudaMalloc: the cudaStreamIsCapturing guard logs and returns nullptr, gemm_nvfp4
+// early-returns. Verified by checking the runtime stays usable afterwards.
 TEST_F(NvFP4GemmGraphCapture, FallbackInsideCaptureWithoutWorkspaceFailsLoud) {
     TinyNvFP4 tw;
     tw.create(stream_);
@@ -147,10 +130,9 @@ TEST_F(NvFP4GemmGraphCapture, FallbackInsideCaptureWithoutWorkspaceFailsLoud) {
     int64_t cshape[2] = {tw.M, tw.N};
     Tensor a_t(tw.d_a, QType::F16, 2, ashape, /*on_device=*/true);
     Tensor c_t(tw.d_c, QType::F16, 2, cshape, /*on_device=*/true);
-    // Must fail LOUD: a silent skip records a graph that lacks this GEMM and
-    // launches with an uninitialized activation buffer (the #855 census
-    // "hybrid crash" — misaligned address on Nemotron). The capture-refusal
-    // in ensure_dequant_buffer now surfaces as a throw the capturer catches.
+    // Must fail LOUD: a silent skip records a graph missing this GEMM, later launched with an
+    // uninitialized activation buffer (#855 "hybrid crash", misaligned address on Nemotron).
+    // The capture-refusal now surfaces as a throw the capturer catches.
     EXPECT_THROW(gemm_nvfp4(tw.qr, a_t, c_t, stream_), std::runtime_error);
 
     cudaGraph_t graph = nullptr;

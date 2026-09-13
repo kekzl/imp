@@ -1,8 +1,5 @@
-// Test for MXFP4 tensor core prefill attention (sm_120).
-//
-// Tests the quantize → MXFP4 GEMM → softmax → P·V pipeline against
-// a reference FP16 attention implementation. Since MXFP4 quantizes
-// to 4 bits, we expect larger error than FP16 but correct behavior.
+// MXFP4 tensor-core prefill attention (sm_120): quantize -> MXFP4 GEMM -> softmax -> P.V
+// vs an FP16 reference; larger error expected at 4-bit but must stay correct.
 
 #include <gtest/gtest.h>
 #include "compute/attention_mxfp4_prefill.h"
@@ -68,12 +65,9 @@ static void compute_errors(const half* ref, const half* test, size_t n, float& m
     mean_err = static_cast<float>(sum_err / n);
 }
 
-// Independent fp64 attention reference from the f16-rounded inputs (NOT imp's
-// FP16 kernel). Layout matches the [B=1,S,H,HD] tensors: Q[(i*NH+h)*HD+d],
-// K/V[(j*NKV+kvh)*HD+d]. Used to turn the MXFP4 check from "imp-FP4 vs imp-FP16"
-// (two imp kernels, absolute tol) into "imp-FP4 vs independent fp64", with a
-// signed-mean BIAS guard — the thing an absolute-error budget cannot catch
-// (a systematically shifted dequant within 0.1 abs passes the old test).
+// Independent fp64 MHA reference from f16-rounded inputs (not imp's FP16 kernel), plus a
+// signed-mean BIAS guard: turns the check into imp-FP4 vs independent fp64 rather than
+// imp-FP4 vs imp-FP16 with absolute tol, which a systematic dequant shift within 0.1 passes.
 static void ref_attention_f64_mha(const std::vector<half>& Qh, const std::vector<half>& Kh,
                                   const std::vector<half>& Vh, std::vector<double>& O, int Sq, int Skv,
                                   int NH, int NKV, int HD, bool causal, double softcap) {
@@ -240,13 +234,8 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
     EXPECT_LT(mean_err, 0.1f) << "Mean absolute error too large";
     EXPECT_LT(max_err, 0.5f) << "Max absolute error too large";
 
-    // ---- INDEPENDENT fp64 oracle + BIAS guard (TEST_AUDIT (retired) §7 Tier-0) ----
-    // The abs-error check above is imp-FP4 vs imp-FP16 — a systematically
-    // shifted mxfp4 dequant (wrong scale exponent / off-by-one block) that
-    // stays within 0.5 abs passes it. Compute the attention from the ORIGINAL
-    // f16 inputs in fp64 and check (a) the mxfp4 output is unbiased relative to
-    // it, and (b) its noise envelope is comparable to imp's own FP16 kernel's
-    // (not systematically worse).
+    // Independent fp64 oracle + bias guard (TEST_AUDIT(retired) SS7 Tier-0): catches a
+    // systematically shifted mxfp4 dequant that an imp-FP4-vs-imp-FP16 absolute-tol check misses.
     std::vector<half> Qh(qo_elems), Kh(kv_elems), Vh(kv_elems);
     cudaMemcpy(Qh.data(), d_q, qo_elems * sizeof(half), cudaMemcpyDeviceToHost);
     cudaMemcpy(Kh.data(), d_k, kv_elems * sizeof(half), cudaMemcpyDeviceToHost);

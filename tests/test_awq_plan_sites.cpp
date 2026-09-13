@@ -1,12 +1,6 @@
-// The AWQ fold-site table: which consumers share an activation, which producer
-// absorbs 1/s, and whether that producer's norm carries a unit offset.
-//
-// Every one of these is silent when wrong. A missing group member means the
-// norm is divided for a consumer whose columns were never multiplied; a wrong
-// offset flag means the checkpoint is a different model that still loads; a
-// hardcoded layer prefix means every group finds zero members and the export
-// is labelled calibrated while being byte-identical to round-to-nearest.
-// None of that needs a GPU to check, which is why the table is a pure function.
+// AWQ fold-site table (which consumers share an activation, which producer absorbs 1/s, norm
+// unit-offset flag): every field is silent-wrong if incorrect - missing group member, wrong
+// offset flag, or hardcoded layer prefix all still load successfully. Pure function, no GPU.
 
 #include "../tools/imp-quantize/awq_sites.h"
 

@@ -1,30 +1,9 @@
-// =============================================================================
-// Byte-for-byte chat-template goldens, per family, through the PRODUCTION path.
-//
-// WHY THIS EXISTS (#1572): one of imp's ten template families had an exact
-// golden; the other nine were covered by structural smoke - token counting and
-// substring presence - which cannot detect a wrong prompt. A wrong prompt is
-// the highest-leverage silent defect in an inference server: it changes what
-// the model was asked, and the answer still looks like an answer. The engine
-// underneath degrades silently by design (jinja.cpp skips an unknown tag with
-// no log), so a template regression reached the model and nothing noticed.
-//
-// ORACLE: transformers `AutoTokenizer.apply_chat_template(tokenize=False,
-// add_generation_prompt=True)`, captured per family by
-// tests/refs/gen_chat_goldens.py. Never imp-vs-imp: the reference is the
-// implementation every checkpoint author tests against.
-//
-// WHAT MAKES THIS DIFFERENT FROM THE PRE-EXISTING HARMONY GOLDEN: that one
-// drives jinja::Template directly and rebuilds the render context by hand, so
-// `ChatTemplate`'s own context builder - where the thinking flags, the
-// bos/eos stamping and the message shaping live - was outside every golden
-// (#1572 calls this out). These go through `ChatTemplate::init()` +
-// `render_jinja()`, which `apply_jinja()` itself calls.
-//
-// NO MODEL, NO GPU, NO SKIPS: rendering does not need a real vocabulary, only
-// the bos/eos STRINGS, which the generator commits next to each render. So
-// these run in `ctest -L unit` on a machine with no checkpoint.
-// =============================================================================
+// Byte-for-byte chat-template goldens per family through the PRODUCTION path (#1572): most
+// families had only structural smoke (token count, substring), which cannot catch a wrong
+// prompt - jinja.cpp skips unknown tags with no log, so a regression reaches the model unseen.
+// Oracle: transformers apply_chat_template, captured by tests/refs/gen_chat_goldens.py, never
+// imp-vs-imp. Goes through ChatTemplate::init()+render_jinja(), unlike the pre-existing
+// harmony golden which bypasses the context builder. No model/GPU needed: only bos/eos strings.
 
 #include <gtest/gtest.h>
 
@@ -38,14 +17,10 @@
 namespace imp {
 namespace {
 
-// Every `<...>`-shaped literal in a template, which is what its special tokens
-// look like in all ten families: `<|im_start|>`, `<start_of_turn>`,
-// `<|÷begin÷of÷sentence÷|>` (DeepSeek uses fullwidth bars), `<extra_id_0>`.
-//
-// Derived from the template rather than tabulated per family: `init()` refuses
-// when a family's special tokens are absent from the vocabulary, and a
-// hand-kept table would have to be edited every time a checkpoint adds a
-// marker - the kind of maintenance that ends with the table being wrong.
+// Extracts every `<...>`-shaped literal (special tokens across all ten families:
+// <|im_start|>, <start_of_turn>, DeepSeek's fullwidth-bar tokens, <extra_id_0>).
+// Derived from the template, not tabulated: init() refuses when a family's tokens are absent
+// from the vocab, so a hand-kept table would need editing per checkpoint and rot.
 std::vector<std::string> special_tokens_in(const std::string& tpl) {
     std::vector<std::string> out;
     for (size_t i = 0; i < tpl.size(); ++i) {
@@ -126,14 +101,10 @@ std::vector<GoldenCase> cases(const std::string& user_only, const std::string& s
     };
 }
 
-// Render each conversation through init() + render_jinja() and compare exactly.
-//
-// The family comes from imp's own `detect_family()` rather than from a label I
-// picked, and is asserted against a pinned value. Picking it by hand was wrong
-// twice: Nemotron-3-Nano and Phi-4-reasoning both ship ChatML-shaped templates,
-// while the enum comments describe the older `<extra_id_0>` and `<|user|>`
-// checkpoints. `init()` then fell back to raw and the golden failed for a
-// reason that had nothing to do with rendering.
+// Family comes from imp's own detect_family(), not a hand-picked label, pinned against a
+// value: Nemotron-3-Nano and Phi-4-reasoning both ship ChatML-shaped templates while the enum
+// comments describe older checkpoints, so hand-picking failed twice and init() fell back to
+// raw for an unrelated reason.
 void check_family(ChatTemplateFamily expect_family, const std::string& tpl_src, const std::string& bos,
                   const std::string& eos, const std::vector<GoldenCase>& cs) {
     const ChatTemplateFamily family = ChatTemplate::detect_family(tpl_src);
@@ -217,10 +188,9 @@ TEST(ChatTemplateGolden, Phi) {
                        chat_goldens::k_phi_multi_turn));
 }
 
-// The generation prompt is the half a structural test cannot see: without it the
-// model is handed a finished transcript and answers by writing the next turn's
-// role marker as text. That is the Phi-4 `{% generation %}` derailment
-// src/model/chat_template.cpp already documents.
+// The generation prompt is the half a structural test cannot see: without it the model is
+// handed a finished transcript and answers by writing the next turn's role marker as text
+// (the Phi-4 {% generation %} derailment, src/model/chat_template.cpp).
 TEST(ChatTemplateGolden, GenerationPromptIsWhatTheGoldenPins) {
     Tokenizer tok = make_tokenizer(chat_goldens::k_chatml_bos, chat_goldens::k_chatml_eos,
                                    chat_goldens::k_chatml_template);

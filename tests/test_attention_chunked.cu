@@ -183,27 +183,12 @@ TEST(AttentionChunkedTest, RectangularEqualsSquareAtZeroOffset) {
     cudaFree(O.data); cudaFree(S.data);
 }
 
-// Adversarial test for the offset-aware causal mask.
-//
-// Setup:
-//   Q rows have abs_pos = q_offset + i = 128..191.
-//   K[0][0] = 10  → score 100 for every Q row (visible: 0 <= 128..191). GOOD bait.
-//   K[255][0] = 10 → score 100 too, but abs_pos 255 > every Q row's abs_pos. MUST be masked.
-//   V[0][0] = 7, V[255][0] = 99.
-//
-// If the causal mask works:   weight on j=0 → 1.0, O[:,0] ≈ 7.
-// If the causal mask is BROKEN: j=0 and j=255 tie (both score 100), softmax splits 0.5/0.5,
-//   O[:,0] ≈ 0.5*7 + 0.5*99 = 53 — the EXPECT_NEAR(val, 7.0f, 0.05f) assertion fires.
-//
-// kv_len = 256 > q_offset + q_len = 192, placing the sentinel strictly beyond every
-// Q row's absolute position.
+// Offset-aware causal mask adversarial test: K[0] (abs_pos 0, score 100) is valid bait,
+// K[255] (score 100, abs_pos 255) must be masked for Q rows at abs_pos 128..191.
+// Broken mask: softmax splits 0.5/0.5 -> O[:,0]~53 instead of ~7 (V[0]=7, V[255]=99).
 TEST(AttentionChunkedTest, OffsetAwareCausalMask) {
-    // kv_len = 256 chosen so kv_len-1 (= 255) is past every Q row's absolute position
-    // (Q rows have abs_pos = q_offset..q_offset+q_len-1 = 128..191). The K sentinel
-    // at position 255 must be excluded by the causal mask for every Q row — otherwise
-    // its score=100 would tie with K[0]'s score=100 and split softmax weight 0.5/0.5,
-    // giving O[:,0] = 0.5*7 + 0.5*99 = 53 instead of the expected 7. This test is the
-    // canary for an offset-aware causal mask vs. a no-mask kernel.
+    // kv_len=256 so sentinel position 255 is past every Q row's abs_pos (128..191); canary for
+    // offset-aware masking vs a no-mask kernel.
     const int q_len = 64, kv_len = 256, q_offset = 128, nh = 1, nkv = 1, hd = 16;
     const float scale = 1.0f;
 
@@ -288,11 +273,8 @@ TEST(AttentionChunkedTest, GQA_Ratio4) {
     cudaFree(O.data); cudaFree(S.data);
 }
 
-// ---------------------------------------------------------------------------
-// Sliding-window attention parity: cuBLAS path with sliding_window must match
-// the local naive_attention_prefill_ref within FP16/FP32-S precision. Catches
-// off-by-ones at the window edge.
-// ---------------------------------------------------------------------------
+// Sliding-window attention: cuBLAS path with sliding_window must match naive_attention_
+// prefill_ref within FP16/FP32-S precision; catches off-by-ones at the window edge.
 TEST(AttentionChunkedTest, SlidingWindowMatchesNaive) {
     constexpr int q_len = 128, kv_len = 128;
     constexpr int nh = 2, nkv = 2, hd = 64;
@@ -348,12 +330,9 @@ TEST(AttentionChunkedTest, SlidingWindowMatchesNaive) {
     cudaFree(O_cublas.data); cudaFree(O_naive.data); cudaFree(S.data);
 }
 
-// Sliding-window + q_offset: the chunked-prefill use case. K[0] must be masked
-// when its distance from the query exceeds the window. Adversarial: K[0][0]=10
-// (bait beyond window), V[0][0]=99 (the wrong value if mask fails). With
-// q_offset=64 and sliding_window=32, every query has abs_pos in [64..127] and
-// window_lo in [33..96], so K[0]=position-0 is OUTSIDE the window for ALL queries.
-// Expected O[:,0] ≈ 0 (no in-window key has nonzero score).
+// Sliding-window + q_offset adversarial: K[0] (score 10 bait) must be masked for ALL queries
+// when q_offset=64, sliding_window=32 (window_lo 33..96 excludes position 0).
+// Expected O[:,0]~0; V[0]=99 would reveal any unmasked leak.
 TEST(AttentionChunkedTest, SlidingWindowMasksOutsideWindow) {
     const int q_len = 64, kv_len = 128, q_offset = 64;
     const int nh = 1, nkv = 1, hd = 16;
