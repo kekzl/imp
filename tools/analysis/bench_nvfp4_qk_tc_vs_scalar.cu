@@ -1,7 +1,5 @@
-// tools/analysis/bench_nvfp4_qk_tc_vs_scalar.cu
-// Phase 0 microbench (BitDecoding port plan):
-// compare scalar-FFMA Q.K dot vs HMMA-MMA Q.K dot on dequantized NVFP4 KV.
-// No imp dependencies. Build via the wrapper script.
+// Phase 0 microbench (BitDecoding port plan): scalar-FFMA Q.K dot vs HMMA-MMA Q.K dot on
+// dequantized NVFP4 KV. No imp dependencies; build via the wrapper script.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -11,10 +9,8 @@
 #include <cmath>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// NVFP4 dequant: 1 byte = 2 packed E2M1 nibbles → 2 half via PTX cvt
-// (same as imp's fp4_byte_to_half2 in src/compute/ptx92_utils.cuh)
-// ---------------------------------------------------------------------------
+// NVFP4 dequant: 1 byte = 2 packed E2M1 nibbles -> 2 half via PTX cvt (same as imp's
+// fp4_byte_to_half2 in src/compute/ptx92_utils.cuh).
 __device__ __forceinline__ __half2 fp4_byte_to_half2(uint32_t byte_val) {
     uint32_t fp16x2;
     asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
@@ -82,13 +78,9 @@ __global__ void qk_dot_scalar_kernel(
     if (lane == 0) out[tok] = dot;
 }
 
-// ---------------------------------------------------------------------------
-// TC kernel: WMMA Q.K dot on dequantized NVFP4 KV.
-// Uses the nvcuda::wmma API (16×16×16 fragments) to avoid the m16n8k16
-// ldmatrix-layout gotcha while still issuing HMMA on Tensor Cores.
-// Each block processes 16 KV tokens. Q is replicated into rows 0..15 of A;
-// only row 0 of D contributes the per-token dot.
-// ---------------------------------------------------------------------------
+// TC kernel: WMMA Q.K dot on dequantized NVFP4 KV. Uses nvcuda::wmma (16x16x16 fragments) to
+// avoid the m16n8k16 ldmatrix-layout gotcha while still issuing HMMA. Each block processes 16
+// KV tokens; only row 0 of D contributes the per-token dot.
 template <int HEAD_DIM>
 __global__ void qk_dot_tc_kernel(
     const __half* __restrict__ Q,
@@ -149,11 +141,9 @@ __global__ void qk_dot_tc_kernel(
 
         // A: Q replicated, row-major [16,16]. ld stride = 16.
         wmma::load_matrix_sync(a_frag, sQ, 16);
-        // B: K [n_tok, hd_chunk] is row-major in memory but we want col_major for
-        // the matrix_b with shape [k=16, n=16]. Loading the same row-major buffer
-        // with col_major declaration effectively transposes it: each row of sK
-        // becomes a column of B → token i ↔ B column i. That's what we want
-        // (Q.K^T over the 16-token tile).
+        // K is row-major but wmma wants col_major for matrix_b [k=16,n=16]: loading the same buffer
+        // with a col_major declaration transposes it, so token i maps to B column i (Q.K^T over the
+        // 16-token tile).
         wmma::load_matrix_sync(b_frag, sK, 16);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
 

@@ -1,13 +1,7 @@
 #pragma once
 
-// Internal (server-private) shared declarations for the imp-server HTTP
-// handlers. These were file-local (anonymous-namespace structs + `static`
-// helpers) inside the original monolithic handlers.cpp. handlers.cpp was split
-// across several translation units to cut recompile blast radius (chat core /
-// chat streaming / chat endpoints / Anthropic messages / misc endpoints), and
-// the pieces shared between those TUs live here.
-//
-// This header is NOT part of the public handler API — that stays in handlers.h.
+// Internal (server-private) declarations shared across the handlers.cpp split (chat core/stream/
+// endpoints, Anthropic messages, misc). NOT the public handler API - that is handlers.h.
 
 #include "handlers.h"
 #include "spec_usage_keys.h"
@@ -51,33 +45,23 @@ struct ChatRequestParams {
     // mapped by anthropic_to_openai_body; also a direct llama.cpp-style
     // "cache_prompt" body field on the OpenAI route).
     bool cache_prompt = false;
-    // cache_control breakpoint boundary (#1046): number of leading chat
-    // messages that form the cacheable prefix (-1 = whole prompt). Set by
-    // anthropic_to_openai_body ("cache_prefix_messages"); shifted when a
-    // system message is injected in front (tool-prompt fallback).
+    // cache_prefix_messages: leading chat-message count forming the cacheable prefix (-1 = whole
+    // prompt). Set by anthropic_to_openai_body; shifted when a system message is injected in front
+    // (tool-prompt fallback).
     int cache_prefix_messages = -1;
-    // Per-request n-gram speculation override (tri-state): -1 = server default,
-    // 0 = force off, 1 = force on. From the imp extension body field
-    // "speculative" (bool). Lets code-gen calls opt into speculation while
-    // short tool-arg generations skip it on the same server.
+    // spec_override: per-request n-gram speculation tri-state (-1 server default, 0 off, 1 on) from
+    // the "speculative" bool body field.
     int spec_override = -1;
-    // Per-request MTP chain depth, from `"speculative": {"mtp_k": N}`. -1 =
-    // the server default (speculative.mtp_k). Orthogonal to spec_override: the
-    // object form addresses the head only, so `{"mtp_k": 0}` leaves the n-gram
-    // matcher alone. Resolved against what the process armed
-    // (src/runtime/spec_request.h) - a request can lower the depth or ask for
-    // the head, it cannot upload one.
+    // spec_mtp_k: per-request MTP chain depth from {"speculative":{"mtp_k":N}} (-1 = server
+    // default). Orthogonal to spec_override - addresses the head only. Resolved against the
+    // process-armed depth (src/runtime/spec_request.h); a request can lower it, never raise it.
     int spec_mtp_k = -1;
-    // OpenAI Predicted Outputs: concatenated text of the "prediction" body
-    // field ({"type":"content","content": string | [{"type":"text","text"}]}).
-    // Tokenized later in the snapshot stage (needs the tokenizer) and fed to
-    // the n-gram draft corpus. Empty = no prediction.
+    // prediction_text: OpenAI Predicted Outputs "prediction" body field (concatenated text).
+    // Tokenized in the snapshot stage and fed to the n-gram draft corpus; never forwarded as output.
     std::string prediction_text;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
-    // "reasoning_effort" body field, passed through to the chat template
-    // verbatim (empty = not sent, template default applies). Legal values are
-    // the template's business, not ours: Qwen3.8 takes xhigh/medium/low, the
-    // OpenAI convention is low/medium/high.
+    // reasoning_effort: passed to the chat template verbatim (empty = template default). Legal
+    // values are the template's business - Qwen3.8 takes xhigh/medium/low, OpenAI low/medium/high.
     std::string reasoning_effort;
     std::string lora_name;                   // "lora" body field (empty = base model)
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
@@ -148,10 +132,8 @@ struct ChatStateSnapshot {
     // req->image at every request-build site. The batch worker encodes + binds
     // it per-request (no engine pause). Null for text-only requests.
     std::shared_ptr<imp::ImageData> vision_image;
-    // Qwen3-VL takes the other route: dynamic-resolution images are patchified
-    // here (CPU only) and their token counts are known BEFORE tokenizing,
-    // because the prompt has to reserve exactly that many placeholders — and
-    // each picture reserves its own number, so this stays a list.
+    // Qwen3-VL: dynamic-resolution images are patchified CPU-side before tokenizing (token counts
+    // must be known up front to reserve exact placeholder counts per image, hence a list).
     std::vector<std::shared_ptr<imp::QwenPatches>> qwen_patches;
     // Token count per image, in prompt order — the k-th placeholder expands to
     // the k-th entry, so this must stay parallel to `qwen_patches`.
@@ -168,10 +150,9 @@ struct ChatStateSnapshot {
     // Tokenized Predicted-Outputs text (params.prediction_text) — encoded here
     // because the tokenizer only exists inside the snapshot stage.
     std::vector<int32_t> prediction_tokens;
-    // cache_control breakpoint boundary in TOKENS (#1046): -1 = pin the whole
-    // prompt; >=0 = pin only the first N prompt tokens' full KV blocks.
-    // Computed by re-rendering the leading params.cache_prefix_messages
-    // messages (tokenizer lives in the snapshot stage).
+    // pin_prefix_tokens: cache_control breakpoint in tokens (#1046). -1 = pin whole prompt; >=0 =
+    // pin only the first N tokens' full KV blocks. Computed by re-rendering the leading
+    // cache_prefix_messages messages.
     int pin_prefix_tokens = -1;
     // Engine adapter id the request named via `lora` (0 = base). Resolved
     // here, switched by the batching worker at admission (E-1).
@@ -208,27 +189,10 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
     return creation > 0 ? creation : 0;
 }
 
-// usage.prompt_tokens_details — prefix-cache accounting, plus `evicted_tokens`:
-// context this request LOST to StreamingLLM eviction while it was generating.
-// That last one is the point of the field existing at all. When the KV pool
-// runs out mid-generation the engine frees the middle of the sequence and keeps
-// decoding; it logs a WARN, but a server-side WARN is not something the caller
-// sees, and the answer it gets back was written against less context than it
-// sent. `evicted_tokens` is how the caller finds out (roadmap gap 6).
-//
-// Returns a null json when there is nothing to report, so the field appears
-// only when it says something.
-// Per-request speculation accounting (AUDIT_arch_2026 C-6): the counters the
-// request already carries, under vendor-prefixed keys inside
-// completion_tokens_details so an OpenAI-strict client sees extras it can
-// ignore. Absent when no verify step ran AND nothing was declined, so a
-// request with speculation off (or a model without a drafter) never sees the
-// keys.
-//
-// The decline is the half that was missing. `speculative.mtp_k=auto` refuses
-// the head on any server that takes concurrent requests, and until now a
-// caller asking for MTP got a plain decode and no way to tell: the refusal
-// lived in one startup INFO line.
+// usage.prompt_tokens_details.evicted_tokens: context lost to StreamingLLM eviction mid-
+// generation (roadmap gap 6), else only a WARN the caller never sees. Null when nothing to report.
+// add_spec_usage_ (AUDIT_arch_2026 C-6): per-request speculation counters, vendor-prefixed keys
+// in completion_tokens_details, present only when a verify ran or mtp_k=auto declined the head.
 inline void add_spec_usage_(nlohmann::json& usage, const std::shared_ptr<imp::Request>& req) {
     if (!req)
         return;
@@ -246,15 +210,9 @@ inline void add_spec_usage_(nlohmann::json& usage, const std::shared_ptr<imp::Re
     }
 }
 
-// `"speculative"` on the request body (imp extension), in both accepted forms:
-//   true / false     - every drafter on / off, as before
-//   {"mtp_k": N}     - MTP chain depth for THIS request, 0 <= N <= armed
-// The two are orthogonal: the object form addresses the head only.
-//
-// `armed_mtp_k` is the depth the process armed (Engine::mtp_spec_decode_k()),
-// 0 when no head is loaded. It bounds the accepted range so the message can
-// name it; without a model loaded the bound is the device chain cap, which is
-// what makes this answerable on the model-less validation lane.
+// SpecFieldParse: "speculative" body field, true/false (every drafter on/off) or {"mtp_k":N}
+// (0<=N<=armed, head only). armed_mtp_k bounds the accepted range (0 = no head); without a
+// model loaded the bound is the device chain cap, so this is testable model-less.
 struct SpecFieldParse {
     bool ok = true;
     int spec_override = -1;
@@ -339,10 +297,8 @@ inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>
     return details;
 }
 
-// Set true on the calling thread when a shim handler (handle_messages,
-// handle_responses, handle_count_tokens) is delegating to
-// handle_chat_completions — suppresses inner request-log entries so the
-// call only logs once at the outer handler. Defined in handlers_chat_core.cpp.
+// g_in_anthropic_shim: set when a shim handler (messages/responses/count_tokens) delegates to
+// handle_chat_completions, suppressing the inner request-log entry so the call logs once.
 extern thread_local bool g_in_anthropic_shim;
 
 // Set by the non-streaming path to the stop sequence that ended the
@@ -366,21 +322,17 @@ bool validate_constraints(const json& body, httplib::Response& res);
 // image_url part) instead of answering as if it had been understood.
 bool validate_content_parts(const json& body, httplib::Response& res);
 
-// The same rule for `/v1/messages`, checked on the Anthropic body BEFORE
-// anthropic_to_openai_body deletes the offending block and leaves
-// validate_content_parts nothing to find. True = unreadable, `why` describes it;
-// the caller sends the Anthropic error envelope.
+// Same content-part rule as validate_content_parts, for the Anthropic body, run BEFORE
+// anthropic_to_openai_body deletes an unreadable block and leaves nothing to find downstream.
 bool anthropic_unreadable_block(const json& body, std::string& why);
 
 // Rejects a tool_choice that contradicts the request (names a tool that is not
 // there, or demands a call with no tools).
 bool validate_tool_choice(const json& body, httplib::Response& res);
 
-// Defined in handlers_chat_core.cpp. client_request_id: sanitized client
-// X-Request-Id (empty = none sent; written as "client_request_id" so an
-// external trace joins the server req_id).
-// `trace` (optional) carries the timing/traceparent for the OTLP span the
-// tracer emits from the same accounting point; its ids land in the record.
+// client_request_id: sanitized client X-Request-Id (empty = none), written as
+// "client_request_id" so an external trace joins the server req_id. trace carries the
+// OTLP timing/traceparent from the same accounting point.
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
                        const std::string& raw_body, double latency_ms, int prompt_tokens,
@@ -389,12 +341,9 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
                                ChatRequestContext& ctx);
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx);
-// Build an imp::Request from a parsed+snapshotted chat request context — the
-// single params->request mapping for all four ctx-based submission sites
-// (chat streaming + non-streaming, /v1/messages streaming, /v1/responses
-// streaming); this was hand-copied per site and drifted (#941).
-// completion_idx offsets the seed for n>1 choice generation; stream keeps the
-// request on per-step decode for real per-token SSE (#754).
+// build_imp_request_: single params->request mapping for all four ctx-based submission sites
+// (chat stream/non-stream, /v1/messages stream, /v1/responses stream) - was hand-copied per
+// site and drifted (#941). completion_idx offsets the seed for n>1; stream forces per-step decode (#754).
 std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  const std::vector<int32_t>& input_tokens, int completion_idx,
                                                  bool stream);

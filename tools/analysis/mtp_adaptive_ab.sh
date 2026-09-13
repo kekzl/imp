@@ -1,21 +1,12 @@
 #!/bin/bash
-# Adaptive MTP chain depth A/B: k=1 vs fixed k=2 vs adaptive k=2, on a
-# draft-poor and a draft-rich prompt class. Single image, alternating arms,
-# fresh server process per arm; econ guard at its shipping default.
-#
-# Usage: bash tools/analysis/mtp_adaptive_ab.sh              # 3 rounds
-#        ROUNDS=2 CLASSES="poor" bash tools/analysis/mtp_adaptive_ab.sh
-#        THINK=1 CLASSES="poor" bash tools/analysis/mtp_adaptive_ab.sh
-#        ARMS="k2ad w2ad" THINK=1 bash tools/analysis/mtp_adaptive_ab.sh   # width axis
-# THINK=1 keeps the model's thinking on (drops --think-budget 0) and raises
-# max_tokens to 1024 - the think-traffic regime where a spec config must also
-# be judged (#1796: numbers praising a spec config need a think arm).
-#
-# Prints CSV: class,arm,round,tokens,ms,tok_s,drafted,accepted,verifies
-# Controls inherited from mtp_k_sweep.sh (each earned by a past false result):
-# ngram=false (MTP is the only drafter), prefix_cache=false, --think-budget 0,
-# fresh process per arm, arms alternated across rounds, tokens from
-# usage.completion_tokens, counters from /metrics.
+# Adaptive MTP chain depth A/B: k=1 vs fixed k=2 vs adaptive k=2, on draft-poor and draft-rich
+# prompt classes. Single image, alternating arms, fresh server per arm, econ guard at default.
+# THINK=1 keeps the model's thinking on (drops --think-budget 0, raises max_tokens to 1024): the
+# think-traffic regime where a spec config must also be judged (#1796).
+# Controls inherited from mtp_k_sweep.sh, each earned by a past false result: ngram=false,
+# prefix_cache=false, --think-budget 0, fresh process per arm, arms alternated across rounds.
+# Prints CSV: class,arm,round,tokens,ms,tok_s,drafted,accepted,verifies.
+# Usage: bash tools/analysis/mtp_adaptive_ab.sh [ROUNDS=..] [CLASSES=..] [THINK=1] [ARMS=..].
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}
 MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}

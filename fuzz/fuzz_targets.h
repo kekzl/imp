@@ -1,34 +1,14 @@
 #pragma once
 
-// Fuzz targets for the parsers that take untrusted bytes (#1620).
-//
-// Two consumers, one body each:
-//
-//   1. libFuzzer, one binary per target, built with
-//      `cmake -DIMP_FUZZERS=ON` and a clang toolchain. Each .cpp defines the
-//      standard `LLVMFuzzerTestOneInput` entry point, so the targets are also
-//      OSS-Fuzz shaped if that ever happens.
-//   2. `tests/test_fuzz_corpus.cpp`, which drives the SAME functions over a
-//      committed corpus plus a deterministic mutator, with g++, in the CPU
-//      lane CI actually runs. That is what makes "fuzzed in CI" true rather
-//      than aspirational - `docs/audit/SETTLED.md` S-28 claimed it for two
-//      seeded property tests and two hand-written fault-injection batteries,
-//      none of which mutate anything.
-//
-// The corpus build compiles every target with IMP_FUZZ_NO_ENTRY so the
-// LLVMFuzzerTestOneInput definitions do not collide in one binary.
-//
-// What belongs here: a parser reachable from a file or a request body that a
-// user does not control. What does not: anything needing a GPU, a model, or
-// more than a few milliseconds per input.
+// Fuzz targets for parsers taking untrusted bytes (#1620): libFuzzer binaries (clang,
+// -DIMP_FUZZERS=ON) and tests/test_fuzz_corpus.cpp (same functions, g++, corpus+mutator, what CI runs).
+// In scope: parsers reachable from a file/request body a user doesn't control; not GPU/model work.
 
 #include <cstddef>
 #include <cstdint>
 
-// Return value: 0 for "input processed". A non-zero return means the target
-// detected a violated invariant it can express without crashing - only
-// imp_fuzz_tool_stream does that today. Under libFuzzer the same condition
-// aborts instead, because that is the only thing libFuzzer saves an input for.
+// Return 0 for "input processed"; non-zero means the target detected a violated invariant
+// without crashing (only imp_fuzz_tool_stream does). Under libFuzzer the same condition aborts instead.
 extern "C" {
 
 // JSON Schema -> SchemaNode tree (src/compute/json_schema.cpp).

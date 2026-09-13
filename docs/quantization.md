@@ -370,7 +370,7 @@ Interactions, same baselines:
 | **BD x C** | **+0.0346** | |
 | C x ABD | **+1.8964** | **+0.0479** |
 
-At 14B `n_rep=5`, `BD` alone is −0.1330 (best, beats RTN). At `n_rep=2`, all groups together win. The split is attention vs FFN; FFN works independently at both sizes. Attention fails once GQA widens: C x ABD interaction is +1.90 at `n_rep=5` (71% of ABCD's damage) vs +0.05 at `n_rep=2`. Mechanism: C and D folds rewrite `v_proj` and `up_proj` (members of A and B), so A searches on a pre-divided `v_proj`. `search_group_scale` sums one objective over q, k, v. C's tie statistic (`awq_plan.cpp:302-313`) inflates channels by median 1.346x at `n_rep=5` vs 1.000x at `n_rep=2` (20.5% of channels inflated >=2x vs 8.3%); `a_j` is the weight in the objective (`err += (a_j/s_j)^2 * (...)^2`), so a distorted `a_j` makes the search optimise the wrong thing.
+At 14B `n_rep=5`, `BD` alone is −0.1330 (best, beats RTN). At `n_rep=2`, all groups together win. The split is attention vs FFN; FFN works independently at both sizes. Attention fails once GQA widens: C x ABD interaction is +1.90 at `n_rep=5` (71% of ABCD's damage) vs +0.05 at `n_rep=2`. Mechanism: C and D folds rewrite `v_proj` and `up_proj` (members of A and B), so A searches on a pre-divided `v_proj`. `search_group_scale` sums one objective over q, k, v. C's tie statistic (`awq_plan.cpp:266-277`) inflates channels by median 1.346x at `n_rep=5` vs 1.000x at `n_rep=2` (20.5% of channels inflated >=2x vs 8.3%); `a_j` is the weight in the objective (`err += (a_j/s_j)^2 * (...)^2`), so a distorted `a_j` makes the search optimise the wrong thing.
 
 **Splitting the tie (scale constraint vs error weight) was REFUTED; do not re-try.** Measured 2026-08-05:
 

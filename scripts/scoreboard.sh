@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Mission scoreboard harness — measures imp across the hero model matrix on RTX 5090.
-# Reproducible: same weights, pp512 + tg128, canonical bench methodology.
-# Output: docs/scoreboard.tsv (append) + prints a table.
-#
-# Usage: scripts/scoreboard.sh [reps] [extra imp-cli flags...]
-#   reps default 10. GPU must be free (checked).
+# Mission scoreboard: measures imp across the hero model matrix on RTX 5090 (pp512+tg128,
+# canonical bench methodology). Output: docs/scoreboard.tsv (append) + prints a table.
+# Usage: scripts/scoreboard.sh [reps] [extra imp-cli flags...]. reps default 10, GPU must be free.
 set -uo pipefail
 
 REPS="${1:-10}"; shift || true

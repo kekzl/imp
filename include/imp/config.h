@@ -73,10 +73,9 @@ typedef struct {
     char prefix_cache_path[512];  // path to save/load prefix cache (empty = disabled)
     int prefix_pin_budget_pct;    // cap on cache_control-pinned blocks, % of KV pool (default 25)
 
-    // StreamingLLM smart KV cache (Xiao et al., 2023):
-    // attention sinks + sliding window. Reduces decode KV bandwidth and frees
-    // middle KV blocks for long generations. Currently active only for the FP16
-    // GQA decode path; other quantized variants ignore these settings.
+    // StreamingLLM smart KV cache (Xiao et al. 2023): attention sinks + sliding window, reduces
+    // decode KV bandwidth, frees middle KV blocks for long generations. FP16 GQA decode path only;
+    // quantized KV variants ignore these settings.
     int streaming_kv_enabled;    // 0 = off (default), 1 = on
     int streaming_kv_auto;       // 1 = auto-enable when KV cache >90% full (default)
     int streaming_kv_n_sinks;    // # of initial tokens to always keep (default 4)

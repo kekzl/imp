@@ -1,14 +1,9 @@
-// tools/analysis/host_transfer_latency.cu — what one MoE-layer host round trip
-// actually costs on this box (docs/roadmap.md, "CPU-resident cold experts").
-//
-// Build + run (needs a free GPU):
-//   docker run --rm --gpus all -v $PWD/tools/analysis:/w -w /w imp:toolchain \
-//     bash -c "nvcc -O3 -arch=sm_120 host_transfer_latency.cu -o hxl && ./hxl 300"
-//
-// Split the round trip: how much of it is the two transfers, and how much is
-// the kernel launch sitting between them? The cold-expert path has NO GPU
-// kernel there — the CPU is what computes — so launch overhead must not be
-// billed to the transfer.
+// What one MoE-layer host round trip costs on this box (docs/roadmap.md, CPU-resident cold
+// experts). Splits the round trip into the two transfers and the launch sitting between them:
+// the cold-expert path has NO GPU kernel there, so launch overhead must not be billed to the
+// transfer.
+// Build+run: docker run --rm --gpus all -v $PWD/tools/analysis:/w -w /w imp:toolchain
+// bash -c "nvcc -O3 -arch=sm_120 host_transfer_latency.cu -o hxl && ./hxl 300".
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

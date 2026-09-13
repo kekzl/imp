@@ -321,10 +321,9 @@ def _expand_messages(prompt: dict) -> list[dict]:
 def call_chat(model_id: str, prompt: dict, port: int,
               temperature: float = 0.0, seed: int = SEED,
               capture_logprobs: bool = True) -> dict:
-    # Floor max_tokens at 256 so reasoning models (Gemma-4, Qwen3.x) have
-    # space to finish a <think>...</think> block before emitting the actual
-    # answer. The check helpers strip <think> blocks, so the first-N-token
-    # checks still apply to the visible answer.
+    # Floor max_tokens at 256 so reasoning models (Gemma-4, Qwen3.x) have room to finish a
+    # <think>...</think> block before the actual answer; check helpers strip <think>, so
+    # first-N-token checks still apply to the visible answer.
     cfg_max = prompt.get("max_tokens", 256)
     body = {
         "model": model_id,
@@ -349,10 +348,9 @@ def call_chat(model_id: str, prompt: dict, port: int,
     msg = choice.get("message", {})
     content = msg.get("content", "") or ""
     reasoning = msg.get("reasoning_content", "") or ""
-    # imp-server's deepseek-style reasoning parser routes <think>...</think>
-    # into reasoning_content; some models (Gemma-4 NVFP4 here) emit tokens
-    # entirely inside that block. We always evaluate the union so we test
-    # the model's actual output, not the parser split.
+    # imp-server's deepseek-style reasoning parser routes <think>...</think> into
+    # reasoning_content; some models emit tokens entirely inside that block. Always evaluate the
+    # union (reasoning+content) so the check tests the model's actual output, not the parser split.
     if reasoning and content:
         text = f"<think>{reasoning}</think>\n{content}"
     elif reasoning:
@@ -632,10 +630,9 @@ def phase0(server: ImpServer, model_dir: Path, report: ModelReport) -> bool:
     # crude param count from bytes/0.5 for FP4 → bytes*2 = parameters
     report.param_count_b = round(report.weight_bytes * 2 / 1e9, 1)
 
-    # 0b: tokenizer roundtrip via the chat endpoint — we ask for an "echo" only on a few
-    # short ASCII strings that the server supports. (Real tokenizer roundtrip would
-    # need a /tokenize endpoint; imp-server doesn't expose one. We fall back to
-    # behavioral check: the model can complete trivially without errors on these strings.)
+    # Tokenizer roundtrip via the chat endpoint: asks for an "echo" on a few short ASCII strings.
+    # imp-server exposes no /tokenize endpoint, so this is a behavioral fallback (model completes
+    # trivially without errors), not a real roundtrip check.
     fixture = (FIXTURES / "tokenizer_roundtrip.txt").read_text().splitlines()
     sample = [s for s in fixture if s.strip()][:6]
     failures = []
@@ -667,11 +664,9 @@ def phase0(server: ImpServer, model_dir: Path, report: ModelReport) -> bool:
 
 def phase3_graph_replay(server: ImpServer, report: ModelReport,
                         replays: int = 32) -> bool:
-    # Short prompt, low max_tokens, T=0, seed=42, deterministic_gemm=true.
-    # We do TWO warmup requests first (engine warmup forward primes cuBLAS,
-    # but the first real request still allocates graph-capture resources +
-    # the KV high-water mark on FP8/NVFP4 KV caches). The 32 replays must
-    # then be byte-identical across the board.
+    # Short prompt, low max_tokens, T=0, seed=42, deterministic_gemm=true. Two warmup requests
+    # first: engine warmup primes cuBLAS, but the first real request still allocates graph-capture
+    # resources + the KV high-water mark on FP8/NVFP4 KV. The 32 replays must be byte-identical.
     prompt = {"messages": [{"role": "user",
                              "content": "Reply with a single short sentence about the moon."}],
               "max_tokens": 24}

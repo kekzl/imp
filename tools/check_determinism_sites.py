@@ -41,12 +41,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "determinism.md"
 READER = "process_diag_deterministic_gemm()"
 
-# The files the doc's known-limit 5 enumerates as reading the flag. Keep this
-# list and that paragraph in sync; the gate exists to force it.
-# file -> number of reads. The count is pinned, not just the file: gemm.cu
-# reads the flag in two dispatch branches and losing one of them is the same
-# drift as losing the file (a branch that stops honouring the mode), which the
-# file-level check passed silently until 2026-09-02.
+# Files the doc's known-limit 5 enumerates as reading the determinism flag; keep this list and
+# that paragraph in sync. Count is pinned per file, not just presence: gemm.cu reads the flag
+# in two dispatch branches, and losing one is the same drift as losing the file.
 EXPECTED = {
     "src/compute/gemm.cu": 2,
     "src/compute/sampling_topk_topp.cu": 1,

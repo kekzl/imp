@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# Alternating `imp-cli --bench` pairs under nsys for one config key with two
-# values, reporting the nsys time sum of a kernel-name regex per arm next to
-# the e2e pp tok/s (a <5% prefill-kernel delta only resolves in the kernel
-# sum, docs/internals/BENCHMARKING.md).
-#
-#   tools/analysis/prefill_kernel_ab.sh KEY VAL_A VAL_B KERNEL_REGEX [PP] [PAIRS]
-#   e.g. tools/analysis/prefill_kernel_ab.sh gemm.nvfp4_cutlass_streamk 0 1 \
-#          'cutlass.*BlockScaled' 512 3
-#
-# Runs build-dev/imp-cli inside imp:toolchain (the only image with nsys, same
-# recipe as serving_idle_profile.sh); the .qdstrm import and `nsys stats` run
-# on the host nsys. Env: MODEL (default Qwen3-14B-NVFP4), MODELS_DIR, OUT.
+# Alternating imp-cli --bench pairs under nsys for one config key with two values, reporting
+# the nsys time sum of a kernel-name regex per arm next to e2e pp tok/s (a <5% prefill-kernel
+# delta only resolves in the kernel sum, docs/internals/BENCHMARKING.md).
+# Runs build-dev/imp-cli inside imp:toolchain; qdstrm import and nsys stats run on host nsys.
+# Usage: tools/analysis/prefill_kernel_ab.sh KEY VAL_A VAL_B KERNEL_REGEX [PP] [PAIRS].
+# Env: MODEL (default Qwen3-14B-NVFP4), MODELS_DIR, OUT.
 set -euo pipefail
 KEY="$1"; VAL_A="$2"; VAL_B="$3"; KREGEX="$4"
 PP="${5:-512}"

@@ -40,15 +40,11 @@ EXEMPT_PREFIXES = ("src/memory/",)
 
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh", ".hpp")
 
-# Driver/runtime memory APIs. Ordered longest-first so the alternation reports
-# the most specific name (cudaMallocAsync, not cudaMalloc).
-# Split on purpose. Invariant I1 is titled "single ACQUISITION point", and the
-# two halves need different work: an acquisition needs a tier to move to, while
-# a release follows for free once the owner is a RAII type (Region, BlockRef,
-# GraphSlotLease) — it is a consequence of migrating, not separate work.
-# Reporting one number for both overstated the distance to criterion 2 by more
-# than half: 696 total is 309 acquisitions and 407 releases, and EIGHT files
-# contain only releases, so no allocation migration can ever remove them.
+# Driver/runtime memory APIs, ordered longest-first so the alternation reports the most
+# specific name. Acquisition and release are split on purpose (Invariant I1, "single
+# ACQUISITION point"): an acquisition needs a tier to move to, a release follows for free once
+# the owner is a RAII type. One combined number overstates the distance to criterion 2 by more
+# than half (696 total = 309 acquisitions + 407 releases; 8 files contain only releases).
 APIS_ACQUIRE = [
     "cudaMallocAsync",
     "cudaMallocManaged",
@@ -78,11 +74,10 @@ APIS = APIS_ACQUIRE + APIS_RELEASE
 # a '(' or '<' on the right so a mention in an identifier is not either.
 PATTERN = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS) + r")\s*[(<]")
 PATTERN_ACQUIRE = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS_ACQUIRE) + r")\s*[(<]")
-# The pinned-host subset of the acquisitions. Split out because a device arena
-# cannot serve them: `Backend` covers device memory only, so until T5's
-# engine-persistent half existed (memory/host_pinned.h) these sites had no tier
-# to move to at all — 26 of them in 11 files. Reporting them inside the device
-# count made the remaining work look uniform when it is two different jobs.
+# Pinned-host subset of the acquisitions, split out because a device arena (Backend) can't
+# serve them: until memory/host_pinned.h existed these sites had no tier to move to at all.
+# Counting them inside the device total made the remaining work look uniform when it's two
+# different jobs.
 APIS_HOST_ACQUIRE = ["cudaMallocHost", "cudaHostAlloc", "cudaHostRegister"]
 PATTERN_HOST_ACQUIRE = re.compile(
     r"\b(" + "|".join(re.escape(a) for a in APIS_HOST_ACQUIRE) + r")\s*[(<]")
@@ -206,10 +201,9 @@ def main() -> int:
           f"(allowlist: {len(allowed)} files / {budget_total} sites)")
 
     if args.stats:
-        # Acquisition / release split. I1 is titled "single ACQUISITION point",
-        # and the halves need different work: an acquisition needs a tier to move
-        # to, a release follows for free once the owner is a RAII type. Reporting
-        # one number overstated the distance to criterion 2 by more than half.
+        # Acquisition/release split (I1, "single ACQUISITION point"): an acquisition needs a tier to
+        # move to, a release follows for free once the owner is a RAII type. One combined number
+        # overstates the distance to criterion 2 by more than half.
         acq = rel_ = host_acq = 0
         only_release = []
         host_files = []

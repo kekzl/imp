@@ -21,11 +21,9 @@
 
 using json = nlohmann::json;
 
-// The routes that consume engine capacity and must go through --max-concurrent
-// admission control. /v1/messages (Anthropic) and /v1/embeddings were once
-// omitted from these checks, silently bypassing both guards (the non-stream
-// /v1/messages path reaches inference by directly calling
-// handle_chat_completions() without re-entering pre-routing).
+// is_inference_endpoint: routes gated by --max-concurrent admission control. /v1/messages and
+// /v1/embeddings were once omitted, silently bypassing it (non-stream /v1/messages calls
+// handle_chat_completions() directly, without re-entering pre-routing).
 static bool is_inference_endpoint(const std::string& path) {
     return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses" ||
            path == "/v1/messages" || path == "/v1/embeddings" || path == "/v1/rerank" ||
@@ -37,12 +35,10 @@ static bool is_inference_endpoint(const std::string& path) {
 // thread that serves the request (AUDIT_arch_2026 E-2).
 static thread_local bool t_inflight_entered = false;
 
-// What the RATE limit covers is a wider set, and the difference is the defect
-// in #1615: --max-concurrent protects the engine, so it belongs on the routes
-// that queue work, but --rate-limit is there to stop a client from hammering
-// the process at all. Tokenisation walks the whole prompt through the BPE
-// merge table on a server thread, and /admin/suspend flips global state; both
-// were reachable at any rate. The exemptions below are deliberate and short.
+// is_rate_limited_endpoint: a WIDER set than --max-concurrent (which protects the engine) -
+// --rate-limit stops a client hammering the process itself. #1615: tokenization (BPE walk on a
+// server thread) and /admin/suspend (global state) were reachable at any rate; exemptions here are
+// deliberate.
 static bool is_rate_limited_endpoint(const std::string& path) {
     if (path == "/health" || path == "/metrics")
         return false;
@@ -59,12 +55,9 @@ int main(int argc, char** argv) {
     state.default_think_budget = args.think_budget;
     state.default_args = args;
 
-    // Load imp.conf (if present) + apply --set overrides, then stash for
-    // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
-    // RuntimeConfig::install() process-wide singleton). The server may load
-    // a model at runtime (auto-load on first request when started without
-    // --model); load_model_into_state re-stashes the same config snapshot
-    // before each Engine construction.
+    // Loads imp.conf + --set overrides, stashed for Engine::init (replaces the RuntimeConfig::install
+    // process-wide singleton). load_model_into_state re-stashes the same snapshot before each Engine
+    // construction, since the server may load/swap models at runtime.
     std::vector<std::string> rejected_overrides;
     state.runtime_config = imp::RuntimeConfig::load(args.config_path, args.config_overrides, &rejected_overrides);
     if (!rejected_overrides.empty()) {
@@ -80,13 +73,9 @@ int main(int argc, char** argv) {
                           state.runtime_config.server.otlp_service_name, imp_version());
         imp::set_pending_runtime_config(state.runtime_config);
 
-        // --model is optional (it has always been documented that way in --help).
-        // Without it the server starts model-less: the request-validation surface,
-        // /health, /v1/models and /metrics all answer, and the first request that
-        // names a model in --models-dir auto-loads it (ensure_model_loaded). A
-        // request that cannot resolve a model gets 503 — never a silent success.
-        // This is also what lets CI run the shipping binary on a GPU-less runner
-        // instead of a Python stand-in (#1302).
+        // --model is optional: model-less start still answers /health, /v1/models, /metrics, and the
+        // first request naming a model in --models-dir auto-loads it (ensure_model_loaded); an
+        // unresolvable name is 503, never a silent success. Lets CI run the shipping binary GPU-less (#1302).
         ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
         std::string resolved_model;
         if (!args.model_path.empty()) {
@@ -113,10 +102,9 @@ int main(int argc, char** argv) {
         printf("Models directory: %s\n", state.models_dir.c_str());
     }
 
-    // Set up the HTTP server and BIND the listen socket now — before the (slow)
-    // model load — so a port conflict fails in <1 s instead of after a full
-    // model load (#760). Routes are registered once the model is ready;
-    // listen_after_bind() below starts accepting connections then.
+    // Binds the listen socket before the (slow) model load so a port conflict fails in <1s (#760),
+    // not after a full load. Routes register once the model is ready; listen_after_bind() then
+    // starts accepting.
     httplib::Server svr;
     if (svr.bind_to_port(args.host, args.port) == 0) {
         fprintf(stderr, "Failed to start server on %s:%d: port already in use\n", args.host.c_str(),
@@ -166,38 +154,21 @@ int main(int argc, char** argv) {
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)
     svr.set_payload_max_length(static_cast<size_t>(100) * 1024 * 1024);
 
-    // Connection-level limits (#1622). Every one of these was previously
-    // whatever the build-time cpp-httplib defaulted to, which this repo cannot
-    // even read: the library is fetched at a pinned tag, not vendored. A slow
-    // reader holding a socket open costs a worker thread either way, so the
-    // point is that the number is ours and is written down.
-    //
-    // The write timeout is the one that must not be tightened casually: a
-    // streamed completion writes for as long as it generates, so 600 s is a
-    // deliberate asymmetry against the 60 s read side.
+    // Connection-level limits (#1622): previously whatever cpp-httplib's build-time defaults were
+    // (unreadable - the library is fetched at a pinned tag, not vendored). Write timeout (600s) is
+    // deliberately asymmetric to the 60s read timeout: a streamed completion writes as long as it generates.
     svr.set_read_timeout(args.read_timeout, 0);
     svr.set_write_timeout(args.write_timeout, 0);
     svr.set_keep_alive_max_count(args.keep_alive_max);
-    // Disable Nagle on accepted sockets (cpp-httplib defaults it OFF). The
-    // streaming path writes one small SSE frame per token; with Nagle a frame
-    // can sit behind the peer's delayed ACK (up to ~40 ms) instead of leaving
-    // immediately, which is inter-token latency a network client observes and
-    // the engine never sees. Loopback clients are unaffected either way;
-    // throughput is unaffected (frames coalesce in flight regardless).
+    // Disables Nagle on accepted sockets (cpp-httplib defaults it OFF): the streaming path writes one
+    // small SSE frame per token, and Nagle would delay it behind the peer's ACK (~40ms), adding ITL a
+    // network client observes. Loopback and throughput are unaffected either way.
     svr.set_tcp_nodelay(true);
-    // Worker threads must cover the CONCURRENT STREAMS, not the cores: a
-    // streamed completion holds its worker for the whole generation, and the
-    // library default (max(8, cores-1) = 15 here) silently queued the tail
-    // of a 32-stream burst behind finished streams - measured as 6-10
-    // requests arriving at the scheduler 4-7 s late with TTFT at wave-end
-    // while the engine sat ready (2026-08-25). +8 covers health checks and
-    // admin routes while every stream slot is held.
-    // Connections beyond the pool used to queue in httplib's job list with no
-    // response and no timer (the read timeout starts when a worker picks the
-    // socket up): at 10x the intended concurrency 9 of 10 hung instead of
-    // seeing the documented 429 (AUDIT_arch_2026 E-2). The queue is bounded
-    // at one pool's worth; past that httplib closes the connection at once,
-    // which a client reads as "overloaded" rather than as a stall.
+    // Worker pool sized to COVER CONCURRENT STREAMS, not cores: a streamed completion holds its
+    // worker for the whole generation, and the httplib default (max(8,cores-1)) queued the tail
+    // of a 32-stream burst 4-7s late (2026-08-25). +8 covers health/admin while every stream slot is held.
+    // Task queue is bounded at exactly one pool's worth; past that httplib closes the connection at
+    // once (AUDIT_arch_2026 E-2: an unbounded queue hung 9/10 requests with no timer instead of 429).
     svr.new_task_queue = [&args] {
         const size_t workers = static_cast<size_t>(args.max_concurrent) + 8;
         return new httplib::ThreadPool(workers, /*max_n=*/0, /*mqr=*/workers);
@@ -249,10 +220,9 @@ int main(int argc, char** argv) {
         res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-        // Skip auth/limits for health checks and CORS preflight. /metrics is
-        // exempt by default so a stock Prometheus scrape works, but it leaks the
-        // loaded model name, d_model and cumulative token counts — so
-        // --metrics-require-auth folds it back under the api_key check (#1207).
+        // /metrics is exempt from auth/limits by default (stock Prometheus scrape works out of the box),
+        // but leaks model name, d_model, and cumulative token counts - --metrics-require-auth folds it
+        // back under the api_key check (#1207).
         const bool metrics_exempt = (req.path == "/metrics" && !state.metrics_require_auth);
         if (req.path == "/health" || req.path == "/ready" || metrics_exempt || req.method == "OPTIONS")
             return httplib::Server::HandlerResponse::Unhandled;
@@ -279,12 +249,9 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Max concurrent requests. The depth read takes state.mtx, which a
-        // model swap or /admin/suspend holds for minutes: a blocking acquire
-        // here parked every arriving worker thread inside the load-shedding
-        // guard until the pool was gone (AUDIT_arch_2026 F2-3). Bounded like
-        // every observability path; a timeout means "engine busy", and 503 is
-        // the right answer during a swap anyway.
+        // The in-flight depth read takes state.mtx, which a model swap or /admin/suspend can hold for
+        // minutes: a blocking acquire here parked every arriving worker inside the load-shedding guard
+        // until the thread pool was gone (AUDIT_arch_2026 F2-3). A lock timeout means "engine busy", 503.
         if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
             int queue = 0;
             {
@@ -305,10 +272,9 @@ int main(int argc, char** argv) {
                                    "Server overloaded, too many concurrent requests");
                 return httplib::Server::HandlerResponse::Handled;
             }
-            // The depth read above is check-then-submit: N workers that read
-            // "63 in flight" at once were all admitted (AUDIT_arch_2026 E-2).
-            // The gate counts admitted handlers atomically; the post-routing
-            // hook on this same worker thread leaves it.
+            // The depth read above is check-then-submit (a race let N workers all read "63 in flight" and
+            // all get admitted, AUDIT_arch_2026 E-2). This gate counts admitted handlers atomically instead;
+            // the post-routing hook on the same thread releases it.
             if (!state.inflight.try_enter(state.max_concurrent)) {
                 send_dialect_error(res, req.path, 429, "rate_limit_error", "overloaded_error",
                                    "Server overloaded, too many concurrent requests");
@@ -317,11 +283,9 @@ int main(int argc, char** argv) {
             t_inflight_entered = true;
         }
 
-        // Enforce API key if configured. The constant-time compare lives in
-        // api_key_matches()/bearer_token_matches() (utils.cpp) so it is
-        // unit-testable (test-core). Accept both the OpenAI `Authorization:
-        // Bearer` and the Anthropic `x-api-key` header so real Anthropic SDK
-        // clients aren't 401'd on /v1/messages.
+        // API-key enforcement uses a constant-time compare (api_key_matches/bearer_token_matches,
+        // utils.cpp, unit-tested in test-core). Accepts both OpenAI `Authorization: Bearer` and
+        // Anthropic `x-api-key` so either SDK works unmodified.
         if (!state.api_key.empty()) {
             std::string auth = req.get_header_value("Authorization");
             std::string xkey = req.get_header_value("x-api-key");
@@ -361,10 +325,8 @@ int main(int argc, char** argv) {
         handle_model_retrieve(req, res, state, req.matches[1].str());
     });
 
-    // Context-window auto-detection probes for OpenAI-compatible clients:
-    // /props is the llama.cpp shape, /info the TGI shape (/v1/models also
-    // carries vLLM's max_model_len). A client written for any of the three can
-    // read imp's context length without a hard-coded table.
+    // /props (llama.cpp shape), /info (TGI shape), and /v1/models (vLLM max_model_len) all expose
+    // context length so a client written for any of the three auto-detects it without a hardcoded table.
     svr.Get("/props", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_props(req, res, state);
     });
@@ -428,13 +390,9 @@ int main(int argc, char** argv) {
         handle_metrics(req, res, state);
     });
 
-    // Global safety net: any exception that escapes a handler must become a
-    // JSON error envelope, never a bare "500 Internal Server Error". Malformed
-    // or invalid-UTF-8 client input surfaces as a json::exception (parse_error,
-    // or type_error.316 when an error message echoes the offending bytes) — map
-    // those to 400. Everything else is a genuine internal failure → 500, but
-    // still with a JSON body. dump_safe (inside send_json_error) guarantees the
-    // envelope itself can't throw on bad bytes.
+    // Global exception handler: every escaping exception becomes a JSON error envelope, never a bare
+    // "500 Internal Server Error". json::exception (parse_error, or type_error.316 echoing bad bytes)
+    // maps to 400; everything else is a genuine 500, still JSON. dump_safe cannot throw on bad bytes.
     svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
         try {
             std::rethrow_exception(std::move(ep));
@@ -448,23 +406,16 @@ int main(int argc, char** argv) {
         }
     });
 
-    // Any error response that would go out with an empty body gets the same
-    // JSON envelope every handler uses. The reachable case is an unmatched
-    // route: httplib answers 404 with zero bytes, so a client that does
-    // `r.json()["error"]["message"]` on a typo'd path got a parse error instead
-    // of a message. The mock CI tests against has always sent an envelope here
-    // (#1302). Responses that already carry a body — i.e. everything a handler
-    // produced — are left untouched: this callback runs for EVERY status >= 400.
+    // Wraps any >=400 response that would go out with an EMPTY body (e.g. an unmatched route's bare
+    // httplib 404) in the standard JSON error envelope - a client doing
+    // r.json()["error"]["message"] got a parse error instead (#1302). A body already present is untouched.
     svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
         if (!res.body.empty())
             return httplib::Server::HandlerResponse::Unhandled;
         const bool not_found = res.status == 404;
-        // The method and the path are the client's bytes. Echoing them raw put
-        // arbitrary input into a response body and into `.dump()`, which throws
-        // json::type_error.316 on ill-formed UTF-8 - so a 404 for a path with a
-        // stray 0x80 in it produced a 500 with an empty body instead (#1618).
-        // Both halves are fixed: the echo is sanitised and truncated, and the
-        // serialiser is the one that cannot throw.
+        // Echoes method+path sanitized and truncated (#1618): raw client bytes fed straight into
+        // .dump() threw json::type_error.316 on ill-formed UTF-8, so a 404 for a bad path produced a 500
+        // with an empty body instead.
         const std::string msg = not_found ? "Unknown endpoint: " + sanitize_for_echo(req.method, 16) + " " +
                                                 sanitize_for_echo(req.path, 128)
                                           : "Request failed with status " + std::to_string(res.status);
@@ -488,13 +439,9 @@ int main(int argc, char** argv) {
             t_inflight_entered = false;
             state.inflight.leave();
         }
-        // Trace propagation (roadmap "no distributed tracing", the id half):
-        // a client-sent X-Request-Id is echoed on EVERY response, including
-        // refusals, so an agent framework can join its own trace to this
-        // hop. The generation handlers set the header themselves (client id,
-        // or the server req_id when none was sent) - has_header keeps this
-        // from stacking a duplicate. sanitize_for_echo turns CR/LF into '.',
-        // which is the header-injection guard.
+        // X-Request-Id is echoed on EVERY response, including refusals, so a client can join its trace
+        // (has_header avoids double-setting it when a generation handler already did). sanitize_for_echo
+        // turns CR/LF into '.' as the header-injection guard.
         if (!res.has_header("X-Request-Id")) {
             const std::string cid = req.get_header_value("X-Request-Id");
             if (!cid.empty())
@@ -502,10 +449,9 @@ int main(int argc, char** argv) {
         }
         if (res.status >= 500)
             state.metrics.requests_failed++;
-        // 4xx is where this server puts every refusal it is designed to make
-        // (tools/imp-server/CLAUDE.md), so counting only 5xx left the entire
-        // designed error surface invisible (#1579). Separate series, because
-        // "the server broke" and "the server refused" want different alerts.
+        // 4xx is where this server puts every refusal it is designed to make (tools/imp-server/CLAUDE.md);
+        // counting only 5xx left that whole surface invisible (#1579). Separate series: "the server
+        // broke" and "the server refused" want different alerts.
         else if (res.status >= 400)
             state.metrics.requests_rejected++;
     });
@@ -547,11 +493,9 @@ int main(int argc, char** argv) {
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
-    // listen_after_bind() returns false on stop() AND on a listen failure, and
-    // the two used to leave the same exit code: 0. A supervisor that restarts
-    // on non-zero therefore did not restart a server that never listened
-    // (#1584). g_server is nulled by the signal handler, so it is what
-    // separates "we were asked to stop" from "we could not serve".
+    // listen_after_bind() returns false both on stop() and on a listen failure, and both used to exit
+    // 0 - a supervisor restarting on non-zero never restarted a server that failed to listen (#1584).
+    // g_server (nulled by the signal handler) distinguishes "asked to stop" from "could not serve".
     int exit_status = 0;
     if (!svr.listen_after_bind()) {
         if (!g_server.load(std::memory_order_relaxed)) {
@@ -565,12 +509,10 @@ int main(int argc, char** argv) {
     g_server.store(nullptr, std::memory_order_relaxed);
     g_draining.store(true, std::memory_order_relaxed);
     if (state.batching) {
-        // Let the in-flight generations FINISH before the engine goes: stop()
-        // cancels them. Same drain contract and budget as a model swap;
-        // pause() needs state.mtx held (no new submit during the window), and
-        // a drain that runs out of budget just falls through to the cancel
-        // (AUDIT_arch_2026 E-6). docker-compose.yml's stop_grace_period covers
-        // this budget so `docker stop` does not SIGKILL a draining server.
+        // Drains in-flight generations before engine teardown (stop() would cancel them) - same
+        // contract/budget as a model swap. A drain that exhausts its budget falls through to cancel
+        // (AUDIT_arch_2026 E-6); docker-compose.yml's stop_grace_period must cover this so
+        // `docker stop` doesn't SIGKILL a draining server.
         {
             std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::seconds(5));
             if (lock.owns_lock()) {

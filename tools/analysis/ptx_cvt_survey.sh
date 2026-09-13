@@ -1,22 +1,11 @@
 #!/usr/bin/env bash
-# PTX cvt instruction survey for sm_120 (RTX 5090, GB202 Blackwell).
-#
-# Tests every relevant FP4/FP6/FP8 cvt variant against ptxas to determine
-# which are supported on the current CUDA toolkit. Output: markdown table.
-#
-# Usage:
-#   tools/analysis/ptx_cvt_survey.sh                # full run
-#   tools/analysis/ptx_cvt_survey.sh --quick        # FP4 only
-#   tools/analysis/ptx_cvt_survey.sh --image IMAGE  # custom CUDA docker image
-#
+# PTX cvt instruction survey for sm_120 (RTX 5090, GB202): tests every FP4/FP6/FP8 cvt variant
+# against ptxas to determine support on the current CUDA toolkit. Output: markdown table.
 # Re-run after CUDA toolkit upgrades to refresh dead-ends.
-#
-# Register sizing per type (this matters — wrong register class = false negative):
-#   e2m1x2 (FP4 pair) =  8 bits → .b8  register class (route via uint32 + cvt.u32.u8)
-#   e2m3x2 (FP6 pair) = 12 bits → .b16 register class (16-bit reg, 4 unused bits)
-#   e3m2x2 (FP6 pair) = 12 bits → .b16
-#   e4m3x2 (FP8 pair) = 16 bits → .b16
-#   e5m2x2 (FP8 pair) = 16 bits → .b16
+# Register class per type (wrong class = false negative): e2m1x2 (FP4 pair, 8 bits) -> .b8 via
+# uint32+cvt.u32.u8; e2m3x2/e3m2x2 (FP6 pair, 12 bits) -> .b16; e4m3x2/e5m2x2 (FP8 pair, 16
+# bits) -> .b16.
+# Usage: tools/analysis/ptx_cvt_survey.sh [--quick] [--image IMAGE].
 
 set -u
 

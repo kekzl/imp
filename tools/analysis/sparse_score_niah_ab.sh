@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# NIAH A/B for the sparse page score: min/max corner bound vs mean+std.
-# One image, one model, one budget; the only difference between arms is
-# attention.sparse_score_meanstd. Prints the per-arm hit count.
-#
-# Usage: bash scratch/niah_score_ab.sh <budget_tokens> [std_coef]
+# NIAH A/B for the sparse page score: min/max corner bound vs mean+std, one image/model/budget,
+# only attention.sparse_score_meanstd differs. Prints per-arm hit count.
+# Usage: bash scratch/niah_score_ab.sh <budget_tokens> [std_coef].
 set -u
 
 BUDGET="${1:-4096}"

@@ -1,13 +1,9 @@
 #pragma once
 
-// Remote `image_url` fetching, with the destination checks that make it safe to
-// hand a request-supplied URL to an HTTP client (#1610).
-//
-// The fetch itself is opt-in (`--allow-remote-images`, default off). A data URI
-// is the path every real client uses and needs none of this; a remote URL turns
-// the server into an HTTP client that an unauthenticated caller aims, which on
-// this host means loopback, the container network, and the cloud metadata
-// endpoint are all one request body away.
+// Remote image_url fetch with destination checks that make handing a request-supplied URL to an
+// HTTP client safe (#1610). Opt-in only (--allow-remote-images, default off): a remote URL turns
+// the server into an HTTP client an unauthenticated caller aims at loopback, the container
+// network, or the cloud metadata endpoint.
 
 #include <cstddef>
 #include <cstdint>
@@ -38,22 +34,13 @@ enum class DestinationVerdict {
     Reserved,  // everything else IANA does not route publicly
 };
 
-// Classify one textual IP address (v4 or v6, no host name, no port).
-// Pure and allocation-free apart from the parse: this is the part that gets
-// unit-tested, because the interesting cases are the ones nobody reaches by
-// accident (0x7f.1, ::ffff:127.0.0.1, 100.64/10).
+// classify_ip_literal: pure, allocation-free IP classification (v4/v6 literal only, no host/port).
+// Unit-tested for the accidental-bypass cases: 0x7f.1, ::ffff:127.0.0.1, 100.64/10.
 DestinationVerdict classify_ip_literal(const std::string& ip);
 
-// Resolve `host` and classify every address it maps to. A host is allowed only
-// when it resolves to at least one address and ALL of them are public: a name
-// with one public and one loopback record is a rebinding primitive, not a
-// partial success.
-//
-// NOTE the residual risk, which is not fixable at this layer: the check and the
-// connection are two separate resolutions, so a name whose records change in
-// between still reaches a private address (DNS rebinding). Closing that needs a
-// connect-time callback, which httplib does not expose. The opt-in default is
-// what actually carries this.
+// classify_host: a host is allowed only when ALL resolved addresses are public - one public +
+// one loopback record is a rebinding primitive, not a partial success. Residual risk: check and
+// connect are separate DNS resolutions (rebinding window); httplib has no connect-time hook to close it.
 DestinationVerdict classify_host(const std::string& host);
 
 struct FetchResult {
@@ -64,11 +51,8 @@ struct FetchResult {
     std::string detail;
 };
 
-// Fetch an http/https image URL with every bound this header describes:
-// destination classified, redirects NOT followed (each hop would need its own
-// check and httplib gives no hook for one), body capped, read timeout set.
-//
-// `allow_remote` false returns ok=false without touching the network.
+// fetch_remote_image: destination classified, redirects NOT followed (no per-hop check hook in
+// httplib), body capped, read timeout set. allow_remote=false returns ok=false, no network touched.
 FetchResult fetch_remote_image(const std::string& url, bool allow_remote);
 
 }  // namespace imp_server

@@ -33,10 +33,8 @@ import sys
 
 BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel_resource_baseline.txt")
 
-# A kernel is worth pinning when it is within reach of the 255-register ceiling,
-# or already keeps state in local memory. 240 is 15 registers of headroom: one
-# more live value in a hot loop closes that, and the next step after the ceiling
-# is a spill.
+# REG_AT_RISK=240: 15 registers of headroom below the 255 ceiling; one more live value in a hot
+# loop closes that gap, and the step after the ceiling is a spill.
 REG_AT_RISK = 240
 
 _FUNC = re.compile(r"^\s*Function (\S+):\s*$")
@@ -44,11 +42,9 @@ _ARCH = re.compile(r"^arch = (\S+)\s*$")
 _USE = re.compile(r"REG:(\d+)\s+STACK:(\d+)\s+SHARED:(\d+)\s+LOCAL:(\d+)")
 
 
-# Internal-linkage kernels carry an nvcc prefix that c++filt cannot read:
-#   __nv_static_48__<hash>_26_gemm_capture_fp16_sm120_cu_<hash>__ZN3imp...
-# The Itanium name starts at the _Z. Without stripping this, every kernel in an
-# anonymous namespace stays mangled in the baseline, which is most of the GEMM
-# ones - exactly the kernels the register ceiling matters for.
+# Internal-linkage kernels carry an nvcc prefix (__nv_static_N__<hash>_..._<hash>__ZN3imp...)
+# that c++filt cannot demangle; the Itanium name starts at _Z. Without stripping, most GEMM
+# kernels (anonymous namespace) stay mangled in the baseline where the register ceiling matters.
 _NV_STATIC = re.compile(r"^__nv_static_\d+__.*?(_ZN)")
 
 

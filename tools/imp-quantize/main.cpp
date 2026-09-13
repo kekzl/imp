@@ -1,74 +1,21 @@
-// imp-quantize — turn a BF16/FP16 SafeTensors checkpoint into an NVFP4 one.
-//
-// STATUS: EXPERIMENTAL. The pipeline is verified end to end and `--calib` now
-// recovers a measurable part of the quantization loss, but the result still
-// sits below a published Modelopt export. Intended for getting a model onto
-// the NVFP4 path for evaluation or performance work — not for producing
-// checkpoints anyone should rely on.
-//
-// Why this exists: imp could only ever CONSUME NVFP4 checkpoints, so both model
-// coverage and quantization quality were gated on somebody else publishing a
-// Modelopt / llm-compressor export (docs/roadmap.md, gap 1). A model without an
-// export falls back to the GGUF path, whose prefill ceiling is architectural.
-//
-// The quantization itself is not new code: src/quant/nvfp4_quant.h already has
-// the two-level (FP8 E4M3 micro-scale per 16 values + FP32 tensor scale) kernel
-// used to build the decode cache at load time. This tool applies it offline and
-// writes the result in one of two layouts (--format, see checkpoint_out.h):
-//
-//   modelopt (default)             compressed-tensors (--format vllm)
-//   <p>.weight         U8          <p>.weight_packed        U8
-//   <p>.weight_scale   F8_E4M3     <p>.weight_scale         F8_E4M3
-//   <p>.weight_scale_2 F32         <p>.weight_global_scale  F32 (1/scale)
-//   + hf_quant_config.json         + quantization_config in config.json
-//
-// Both are read by imp. Only the second is read by vLLM.
-//
-// Scope of this version: dense models AND MoE checkpoints that store experts
-// the HF-standard way — one 2-D tensor per expert
-// (`...mlp.experts.<e>.gate_proj.weight`). Those need no special handling and
-// are quantized like any other matrix; measured on DeepSeek-V2-Lite, 4992
-// expert tensors quantize and the result generates correctly. Expert weights
-// stored as a single 3-D [n_experts, N, K] STACK (gpt-oss-style) are still
-// unsupported, and such a checkpoint is now REFUSED outright rather than
-// written with its experts copied through — see tensor_policy.h.
-//
-// Two roles are deliberately excluded even though they are 2-D and K-aligned:
-// the MLA latent projections and the MoE router (see should_quantize for the
-// measurements). Quantizing either produces a checkpoint that loads and then
-// emits garbage — which is why they are refused rather than trusted to shape.
-//
-// QUALITY, MEASURED — read before using this on anything you care about.
-// Without --calib the scales are plain round-to-nearest over the weights
-// (absmax per micro-block, absmax per tensor): nothing protects the channels
-// that matter most, because nothing has looked at an activation. With --calib
-// they are AWQ scales searched against a calibration pass (awq.h, awq_plan.cpp).
-// Measured over tools/analysis/ppl_corpus_45k.txt (13 537 tokens), calibrated
-// on general prose that is NOT the scoring corpus:
-//
-//   Qwen3-0.6B  BF16 24.08 -> RTN 29.42 (+22%) -> AWQ 27.60 (+15%)
-//   Qwen3-1.7B  BF16 17.22 -> RTN 20.39 (+18%) -> AWQ 18.71 (+9%)
-//
-// Both arms improved when fused layers started sharing a tensor scale
-// (2026-08-17). The figures this file carried before that change were
-// 30.10 / 28.48 and 20.43 / 19.21.
-//
-// Use a corpus of that size to judge this. The same model over the 199-token
-// ppl_corpus.txt reads wildly different numbers and inverts the size trend —
-// an artifact of too few tokens, not a property of the quantizer.
-//
-// Coherence: tools/analysis/degen_suite.py reads 45/45 on every checkpoint
-// above (the AWQ ones re-run). Checkpoints built from a NON-deterministic
-// calibration file each flipped one probe, a different one each time — which
-// is why --calibrate forces runtime.deterministic_gemm. See
-// docs/quantization.md.
-//
-// A published export is NOT automatically better: on Qwen3-14B — same weights
-// (bit-identical untouched tensors), same 280 quantized tensors, same corpus —
-// this tool without --calib read PPL 9.9252 against a Modelopt export's 10.0301.
-// One model, one corpus, so not a general claim; see docs/quantization.md.
-// Useful today for: getting a model onto the NVFP4 path at all, and for
-// performance work where the weights only need to be the right shape.
+// imp-quantize: turn a BF16/FP16 SafeTensors checkpoint into NVFP4. STATUS: EXPERIMENTAL:
+// verified end to end, --calib recovers some loss, but still below a published Modelopt
+// export; for NVFP4 coverage/eval/perf work, not checkpoints to rely on.
+// Two output layouts (--format): modelopt (default: weight/weight_scale/weight_scale_2 +
+// hf_quant_config.json) or compressed-tensors (--format vllm: weight_packed/weight_scale/
+// weight_global_scale=1/scale + quantization_config in config.json). Both read by imp; only
+// the second by vLLM.
+// Scope: dense models and MoE with per-expert 2-D tensors; 3-D stacked-expert checkpoints
+// (gpt-oss-style) are REFUSED (tensor_policy.h). MLA latent projections and the MoE router are
+// excluded from quantization even though 2-D/K-aligned (should_quantize).
+// Quality (ppl_corpus_45k.txt, calibrated on separate prose): Qwen3-0.6B BF16 24.08 -> RTN
+// 29.42 -> AWQ 27.60; Qwen3-1.7B BF16 17.22 -> RTN 20.39 -> AWQ 18.71. A short (199-token)
+// corpus gives unrelated numbers; always judge with a corpus this size.
+// Coherence: degen_suite.py reads 45/45 on these checkpoints; --calibrate forces
+// runtime.deterministic_gemm since a non-deterministic calib file flips probes randomly.
+// A published export isn't automatically better: on Qwen3-14B (same weights/corpus) this tool
+// without --calib read PPL 9.9252 vs a Modelopt export's 10.0301 (one model, not a general
+// claim; docs/quantization.md).
 
 #include "common/exit_codes.h"
 #include "awq.h"
@@ -110,17 +57,15 @@ struct Options {
     std::string calib_file;  // --calib: activation statistics for AWQ scaling
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
     std::string calib_groups = awq::kAwqAllGroups;
-    // Which activation moment weights the AWQ search's error. "abs" is the
-    // shipped (mean|x|/s)^2, "sq" the second moment E[x^2]/s^2 that the layer's
-    // output error actually calls for (calibration_stats.h). Opt-in until
-    // measured against roadmap item 6, where --calib still hurts at wide GQA.
+    // Which activation moment weights the AWQ search's error: "abs" is the shipped
+    // (mean|x|/s)^2, "sq" the second moment E[x^2]/s^2 the layer's output error actually calls
+    // for (calibration_stats.h). Opt-in until measured against roadmap item 6, where --calib still
+    // hurts at wide GQA.
     bool calib_weight_sq = false;
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
-    // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half
-    // demonstrably carries the #1273 divergence, but excluding it did NOT
-    // improve perplexity when measured end to end — it cost ~1.5% (see the
-    // header). Kept as an opt-in so the trade stays available on models where
-    // the gate share is higher than the one checkpoint that could be measured.
+    // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half carries the #1273
+    // divergence, but excluding it measured ~1.5% WORSE perplexity end to end. Opt-in since the
+    // trade may still favor models with a higher gate share than the one checkpoint measured.
     bool keep_attn_gate = false;
     bool dry_run = false;
     quantize::OutputFormat format = quantize::OutputFormat::Modelopt;
@@ -188,14 +133,10 @@ const std::vector<float>& plan_vec(const std::map<std::string, std::vector<float
     return (it == m.end()) ? kNone : it->second;
 }
 
-// A fresh copy of a 1-D producer with 1/s folded in, in the tensor's ORIGINAL
-// dtype — the loader reads these by dtype, so widening here would be a format
-// change rather than a fix. It would also be a WRONG fix on a unit-offset norm:
-// src/model/weight_upload.cu adds the +1 on BF16-source paths only, so an F32
-// copy of the same norm would load without the offset.
-//
-// `offset` is the plan's, not this function's guess: a norm folded as if it
-// were plain produces a checkpoint that loads and is a different model.
+// Fresh copy of a 1-D producer with 1/s folded in, in the tensor's ORIGINAL dtype: the loader
+// reads by dtype, so widening would be a format change, and would be WRONG on a unit-offset
+// norm (weight_upload.cu adds +1 on BF16-source paths only). `offset` comes from the plan, not
+// a guess: folding a norm as plain produces a checkpoint that loads and is a different model.
 std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<float>& div, NormOffset offset,
                                        bool& ok) {
     std::vector<unsigned char> out(t.nbytes);
@@ -253,12 +194,9 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
     return out;
 }
 
-// The FP16 form a tensor is quantized from: an FP8 source widened against its
-// block-scale grid, otherwise the raw BF16/F16 bits, then the AWQ transform.
-//
-// One function because two callers need it — the scale planner and the writer —
-// and a planner that measured a different tensor than the writer quantized
-// would produce scales that are wrong by exactly the transform.
+// The FP16 form a tensor is quantized from: an FP8 source widened against its block-scale
+// grid, otherwise raw BF16/F16 bits, then the AWQ transform. One function for two callers (scale
+// planner, writer) so they never measure/quantize a different tensor from each other.
 std::expected<std::vector<uint16_t>, std::string> tensor_as_fp16(
     const RawTensor& t, const std::map<std::string, const RawTensor*>& fp8_scale_of, const awq::Plan& plan) {
     std::vector<uint16_t> out;
@@ -275,20 +213,15 @@ std::expected<std::vector<uint16_t>, std::string> tensor_as_fp16(
     return out;
 }
 
-// What is gone from the card before imp allocates a single weight. Both are
-// measurements on this target, not headroom guesses: the library reserve is
-// kMeasuredLibraryReserveBytes (src/memory/plan.h, re-measure after a CUDA or
-// driver bump), and the CUDA primary context is the figure the same header
-// records for this WSL2/WDDM box.
+// What is gone from the card before imp allocates a single weight: kMeasuredLibraryReserveBytes
+// (src/memory/plan.h, re-measure after a CUDA/driver bump) and the CUDA primary context size
+// for this WSL2/WDDM box. Both are measurements, not headroom guesses.
 constexpr size_t kContextBytes = 1680ull * 1024 * 1024;
 
-// Where the bytes that did not shrink went, largest first.
-//
-// The compression ratio answers "did it work" and not "why is it still this
-// big", and those have different fixes. Every line here is a role deliberately
-// left in source precision, so the table doubles as the list of what could be
-// traded if a checkpoint misses the card: on a modern vocabulary the embedding
-// pair is a quarter of the output, which no ratio reveals.
+// Where the bytes that did NOT shrink went, largest first: the compression ratio answers
+// "did it work", not "why is it still this big". Every line is a role deliberately left at
+// source precision, so the table doubles as what could be traded (e.g. the embedding pair is a
+// quarter of the output on a modern vocabulary, which the ratio alone never reveals).
 void report_copied_breakdown(const std::map<std::string, size_t>& by_reason, size_t bytes_out) {
     if (by_reason.empty() || bytes_out == 0)
         return;
@@ -306,14 +239,10 @@ void report_copied_breakdown(const std::map<std::string, size_t>& by_reason, siz
         printf("\n      %8s   (%zu smaller reasons)", "", rows.size() - 5);
 }
 
-// Report the checkpoint against the card it is meant to run on. Deliberately
-// states the ON-DISK size against the budget rather than predicting VRAM:
-// what the engine actually resides is the weights PLUS a scale-factor cache and
-// MINUS whatever the loader skips (a vision tower is uploaded separately, an MTP
-// sidecar may not be loaded at all). Measured on Qwen3.8-27B: 18.60 GiB on disk
-// arrived as 16.08 GiB of weights plus a 1.49 GiB CUTLASS scale cache. So the
-// disk figure is the right order and the wrong decimal, and this prints the
-// budget the reader needs rather than a number that looks exact and is not.
+// Reports the checkpoint against the target card by ON-DISK size, not a VRAM prediction: what
+// the engine resides is weights PLUS a scale-factor cache MINUS what the loader skips (vision
+// tower uploaded separately, MTP sidecar maybe unloaded). Measured on Qwen3.8-27B: 18.60 GiB
+// disk arrived as 16.08 GiB weights + 1.49 GiB CUTLASS scale cache - right order, wrong decimal.
 void report_card_fit(size_t bytes_out) {
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess || total_b == 0)
@@ -396,10 +325,9 @@ int main(int argc, char** argv) {
         usage();
         return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
     }
-    // What this export IS, before it starts. The tool has been EXPERIMENTAL in
-    // a source comment and a doc heading since it shipped and said so nowhere
-    // an operator would see it; the calibrated arm prints the same line with
-    // its sample count once the calibration file has been read.
+    // States what this export IS before it starts: EXPERIMENTAL, previously said only in a
+    // source comment and a doc heading where no operator would see it. The calibrated arm prints
+    // the same line plus its sample count once the calibration file is read.
     if (opt.calib_file.empty())
         printf("%s\n", quantize::experimental_banner(/*calibrated=*/false, 0).c_str());
 
@@ -447,11 +375,9 @@ int main(int argc, char** argv) {
         opened.push_back(std::move(src));
     }
 
-    // Refuse a stacked-expert checkpoint before writing anything. The experts
-    // are the bulk of the bytes and there is no NVFP4 layout the loader can
-    // read them back from, so "quantizing" one produced a checkpoint that was
-    // mostly still BF16 and said NVFP4 in its config — the failure being that
-    // it loads and runs, just without the size or bandwidth win it claims.
+    // Refuses a stacked-expert checkpoint before writing anything: the experts are the bulk of
+    // the bytes and there is no NVFP4 layout the loader can read them back from, so
+    // "quantizing" one produced a checkpoint mostly still BF16 that claimed NVFP4 in its config.
     {
         std::vector<const RawTensor*> stacked;
         size_t stacked_bytes = 0, total_bytes = 0;
@@ -481,27 +407,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Fused Q+gate projections are quantized like anything else. They are
-    // reported because the gate half is where #1273's divergence is created:
-    // rounding ONLY that half on a healthy GGUF twin reproduces the real defect
-    // (+0.0169 injected per attention block vs +0.0156 for the actual NVFP4
-    // checkpoint), while the Q half sits below the noise floor.
-    //
-    // That divergence is real. What does NOT follow from it is a quality win
-    // for excluding the tensor, and this shipped briefly asserting one. Measured
-    // end to end on Qwen3.5-4B (8 gated layers of 32), perplexity over
-    // ppl_corpus_45k, three runs each:
-    //
-    //   gate quantized  14.6665 / 14.6476 / 14.6716   (spread 0.16%)
-    //   gate excluded   14.8672 / 14.9339 / 14.8672   (spread 0.45%)
-    //   BF16 reference  12.6735
-    //
-    // Excluding it is ~1.5% WORSE, consistently, with non-overlapping spreads —
-    // so it also costs 1-4% of the checkpoint for nothing. Divergence against a
-    // twin is not the same measurement as quality, and only the latter decides
-    // this. `--keep-attn-gate` retains the option: the one checkpoint that could
-    // be measured has a lower gate share than the worst #1273 offender (8/32
-    // against 16/64), so the trade may still turn on a model with more of them.
+    // Fused Q+gate projections are quantized like anything else; reported because the gate half
+    // is where #1273's divergence is created (+0.0169 injected per attention block on a rounded
+    // twin vs +0.0156 for the real NVFP4 checkpoint; the Q half sits below the noise floor).
+    // That divergence is real, but excluding the tensor measured ~1.5% WORSE perplexity end to end
+    // on Qwen3.5-4B (gate quantized 14.6665/14.6476/14.6716 vs gate excluded 14.8672/14.9339/14.8672,
+    // BF16 reference 12.6735), for a 1-4% size cost. --keep-attn-gate keeps the option: the one
+    // measured checkpoint has a lower gate share than the worst #1273 offender, so the trade may
+    // still turn on a model with more of them.
     std::set<std::string> gated_q_proj;
     {
         std::vector<const RawTensor*> gated;
@@ -510,18 +423,11 @@ int main(int argc, char** argv) {
             gated.insert(gated.end(), found.begin(), found.end());
         }
         if (!gated.empty()) {
-            // --keep-attn-gate + --calib is mathematically unsound and would be
-            // SILENT. A fused Q+gate q_proj is copied through below without the
-            // group's column scale, but the planner has no idea this set exists
-            // — it builds group A from {q,k,v} unconditionally and folds that
-            // group's 1/s into input_layernorm. The result is an input divided
-            // by s whose columns were never multiplied by it: a wrong
-            // checkpoint that loads and generates.
-            //
-            // Reachable since the norm-convention table admitted qwen3_5 and
-            // qwen3_next, which are exactly the architectures with a fused
-            // attention gate. Refuse rather than mangle, the same call #1188
-            // made for stacked experts.
+            // --keep-attn-gate + --calib is mathematically unsound and would be SILENT: a fused Q+gate
+            // q_proj is copied through without the group's column scale, but the planner unconditionally
+            // builds group A from {q,k,v} and folds its 1/s into input_layernorm regardless, producing a
+            // wrong checkpoint that loads and generates. Refused outright, same call #1188 made for
+            // stacked experts.
             if (opt.keep_attn_gate && !opt.calib_file.empty()) {
                 fprintf(stderr,
                         "Error: --keep-attn-gate cannot be combined with --calib. The gate half is\n"
@@ -594,14 +500,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    // FP8 sources. A checkpoint published only in FP8 (DeepSeek-V3, Qwen3.8's
-    // FP8 line) stores an E4M3 weight beside a `weight_scale_inv` block grid.
-    // Pairing them up front, across shards, because the two are not guaranteed
-    // to share a file and should_quantize sees one tensor at a time.
-    //
-    // The scale tensors are then CONSUMED: once the weight is NVFP4 they
-    // describe nothing, and copying them through would leave a checkpoint whose
-    // scales contradict its weights.
+    // FP8 sources (DeepSeek-V3, Qwen3.8's FP8 line) store an E4M3 weight beside a
+    // weight_scale_inv block grid; paired up front across shards since the two aren't guaranteed
+    // to share a file and should_quantize sees one tensor at a time. Scale tensors are then
+    // CONSUMED (once the weight is NVFP4 they describe nothing).
     std::map<std::string, const RawTensor*> fp8_scale_of;
     std::set<std::string> fp8_scale_names;
     {
@@ -615,10 +517,9 @@ int main(int argc, char** argv) {
                 continue;
             const auto it = by_name.find(name.substr(0, name.size() - kW.size()) + ".weight_scale_inv");
             if (it == by_name.end()) {
-                // Without its grid the tensor is unreadable, and the generic
-                // dtype exclusion below would report it as merely "unsupported".
-                // Say which scale is missing: a scalar-scale FP8 export
-                // (Modelopt style) lands here and needs different handling.
+                // Without its grid the tensor is unreadable, and the generic dtype exclusion would report it
+                // as merely "unsupported". Names which scale is missing: a scalar-scale FP8 export (Modelopt
+                // style) lands here and needs different handling.
                 fprintf(stderr,
                         "note: %s is E4M3 but has no .weight_scale_inv beside it, so it is copied\n"
                         "      through unquantized. Block-scaled FP8 is what this reads.\n",
@@ -633,12 +534,10 @@ int main(int argc, char** argv) {
                    fp8_scale_of.size());
     }
 
-    // Fused layers share one tensor scale (see checkpoint_out.h): an engine that
-    // merges q/k/v into a single linear keeps one scale for the merged weight,
-    // so three independently calibrated scales leave two matrices dequantized
-    // against the wrong one. The scale must be known before the first member is
-    // quantized and members are not guaranteed to share a shard, so it is
-    // decided here, in its own pass over the source.
+    // Fused layers share one tensor scale (checkpoint_out.h): an engine merging q/k/v into one
+    // linear keeps one scale for the merged weight, so three independently calibrated scales leave
+    // two matrices dequantized wrong. Decided in its own pass over the source since the scale must
+    // be known before the first member is quantized and members aren't guaranteed to share a shard.
     std::map<std::string, float> forced_scale;
     if (!opt.dry_run) {
         std::map<std::string, std::vector<const RawTensor*>> groups;
@@ -646,10 +545,10 @@ int main(int argc, char** argv) {
             for (const auto& t : src->tensors()) {
                 if (fp8_scale_names.count(t.name) || gated_q_proj.count(t.name))
                     continue;
-                // Ask the policy exactly as the writer does, so a tensor the
-                // writer keeps at full precision is not given a scale here -
-                // and, worse, does not drag a fused sibling's scale up with an
-                // absmax that was never quantized.
+                // Asks the policy exactly as the writer does, so a tensor the writer keeps at full precision
+                // isn't given a scale here, and doesn't drag a fused sibling's scale up with an absmax that
+                // was
+                // never quantized.
                 std::string why;
                 const bool refused = fp8_scale_of.count(t.name)
                                          ? quantize::fp8_source_action(t, false, opt.quantize_lm_head, why) !=
@@ -708,10 +607,9 @@ int main(int argc, char** argv) {
     // on the host at this point.
     std::vector<quantize::TensorError> tensor_errors;
     size_t bytes_in = 0, bytes_out = 0;
-    // Where the bytes that did NOT shrink went. A checkpoint that misses the
-    // card by a gigabyte is a question about this table, not about the ratio:
-    // on a modern vocabulary the embedding pair alone is a quarter of the
-    // output, and the ratio never says so.
+    // Where the bytes that did NOT shrink went: a checkpoint missing the card by a gigabyte is a
+    // question about this table, not the ratio (e.g. the embedding pair alone is a quarter of the
+    // output on a modern vocabulary, which the ratio never reveals).
     std::map<std::string, size_t> copied_bytes_by_reason;
     std::vector<std::string> excluded_modules;
     std::vector<std::pair<std::string, std::string>> tensor_to_shard;
@@ -748,10 +646,10 @@ int main(int argc, char** argv) {
             if (fp8_it != fp8_scale_of.end()) {
                 const int64_t N = t.shape.size() == 2 ? t.shape[0] : 0;
                 const int64_t K = t.shape.size() == 2 ? t.shape[1] : 0;
-                // The same roles that must stay full precision in a BF16 source
-                // must stay full precision here; only the dtype gate differs, so
-                // ask the policy about the widened form rather than duplicating
-                // the rule. An FP8 tensor it refuses is copied through as-is.
+                // The same roles that must stay full precision in a BF16 source must stay full precision
+                // here; only the dtype gate differs, so the policy is asked about the widened form rather
+                // than
+                // duplicating the rule. An FP8 tensor it refuses is copied through as-is.
                 std::string why_fp8;
                 if (quantize::fp8_source_action(t, gated_q_proj.count(t.name) != 0, opt.quantize_lm_head,
                                                 why_fp8) != quantize::Fp8SourceAction::Quantize) {
@@ -943,15 +841,11 @@ int main(int argc, char** argv) {
             "      Measured cost on the dense Qwen3 pair: PPL +25%% (0.6B) / +19%% (1.7B).\n"
             "      Pass --calib to spend a calibration pass and recover most of that.");
     else if (!opt.dry_run)
-        // The scale search minimises a per-group weight-reconstruction error,
-        // which is a local proxy: it improved on every group here and the model
-        // can still come out worse. Measured 2026-08-01 on Qwen3-14B, from two
-        // independently produced calibration files (imp's own round-to-nearest
-        // checkpoint and NVIDIA's Modelopt export): PPL 9.93 round-to-nearest
-        // vs 12.60 / 12.29 calibrated. Attributed 2026-08-05 with --calib-groups:
-        // the harm is the ATTENTION groups on wide GQA, and mostly their
-        // interaction (A x C +1.36). BD alone GAINS 0.13 there, so the warning
-        // names the way out instead of just the hazard.
+        // The scale search minimises a per-group weight-reconstruction error, a local proxy: it can
+        // improve on every group and still leave the model worse. On Qwen3-14B, two independently
+        // produced calibration files gave PPL 9.93 (round-to-nearest) vs 12.60/12.29 (calibrated).
+        // Attributed via --calib-groups: the harm is the ATTENTION groups on wide GQA, mostly their
+        // interaction (AxC +1.36); BD alone GAINS 0.13, so the warning names the way out.
         printf(
             "\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.%s"
             "\n      Score this checkpoint with --perplexity against the uncalibrated one"

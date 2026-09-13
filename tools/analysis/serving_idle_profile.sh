@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# serving_idle_profile.sh - nsys profile of imp-server under a 32-stream wave
-# burst, then the idle attribution (tools/analysis/nsys_gap_attribution.py).
-#
-# The server runs from the dev build (build-dev/imp-server) inside
-# imp:toolchain (the only image that ships nsys); the .qdstrm -> .nsys-rep
-# conversion fails silently inside that image (missing libcap/libdw), so the
-# export runs on the host's nsys. Same pinned 32-stream shape as the
-# BENCHMARKS.md attribution (mbs 32, seq 4096, kv blocks 2387) so numbers
-# compare to the 2026-08-24/26 rows.
-#
-# Usage: bash tools/analysis/serving_idle_profile.sh [OUTDIR] [CONC] [WAVES]
+# nsys profile of imp-server under a 32-stream wave burst, then idle attribution
+# (nsys_gap_attribution.py). Runs the dev build inside imp:toolchain (only image with nsys); the
+# qdstrm->nsys-rep conversion fails silently there (missing libcap/libdw), so export runs on the
+# host's nsys. Same pinned 32-stream shape as BENCHMARKS.md (mbs 32, seq 4096, kv blocks 2387)
+# for comparability.
+# Usage: bash tools/analysis/serving_idle_profile.sh [OUTDIR] [CONC] [WAVES].
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT=${1:-/tmp/serving_idle}

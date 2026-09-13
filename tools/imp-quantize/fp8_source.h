@@ -1,24 +1,13 @@
 #pragma once
 
-// Reading an FP8 checkpoint as a quantization SOURCE.
-//
-// A growing share of large models is published only in FP8 (DeepSeek-V3,
-// Qwen3.8's FP8 line), so refusing the dtype refuses whole release families
-// rather than an edge case. The tool's own accepted set was BF16/F16, which is
-// what this widens.
-//
-// Both conventions seen in the wild store the same thing: an E4M3 weight
-// [N, K] beside a `<prefix>.weight_scale_inv` block-scale grid [N/B, K/B],
-// where a scale entry multiplies its whole BxB tile. Only the scale's dtype
-// differs (DeepSeek-V3 F32, Qwen3.8-27B-FP8 BF16), and B is 128 in both.
-//
-// B is DERIVED from the two shapes rather than assumed, because a checkpoint
-// that used another tile would otherwise be read with a silently wrong stride:
-// the result still loads, still generates, and is simply wrong.
-//
-// Note this is a different layout from the scalar per-tensor `weight_scale`
-// imp's runtime already handles for Modelopt exports (pre_dequant_phase0).
-// `weight_scale_inv` appears nowhere else in the tree.
+// Reading an FP8 checkpoint as a quantization SOURCE: DeepSeek-V3 and Qwen3.8's FP8 line ship
+// only this way, and the tool's accepted set was BF16/F16.
+// Both conventions store an E4M3 weight [N,K] beside a weight_scale_inv block-scale grid
+// [N/B,K/B] (a scale multiplies its whole BxB tile); only the scale dtype differs (F32 vs BF16),
+// B=128 in both. B is DERIVED from the two shapes, not assumed, since a wrong tile stride still
+// loads and generates, just wrong.
+// Different layout from the scalar per-tensor weight_scale imp already handles for Modelopt
+// (pre_dequant_phase0); weight_scale_inv appears nowhere else in the tree.
 
 #include "model/safetensors_raw.h"
 

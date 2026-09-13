@@ -60,11 +60,9 @@ ACQUIRE = ("cudaMallocAsync", "cudaMallocManaged", "cudaMallocPitch", "cudaMallo
            "cudaMalloc3D", "cudaMalloc", "cudaHostAlloc", "cudaHostRegister")
 RELEASE = ("cudaFreeAsync", "cudaFreeHost", "cudaFree", "cudaHostUnregister")
 
-# The first argument of the call, with the address-of and any cast peeled off.
-# The call plus its first argument. `\s` spans newlines because four sites in
-# executor_forward_moe_cutlass.cu put the argument on the next line, and a
-# line-based match silently dropped them — the census is only useful if it can
-# say it saw everything.
+# First argument of the call, address-of and any cast peeled off. `\s` spans newlines: four
+# sites in executor_forward_moe_cutlass.cu put the argument on the next line, and a line-based
+# match silently dropped them.
 CALL = re.compile(
     r"\b(" + "|".join(ACQUIRE + RELEASE) + r")\s*\(\s*"
     r"(?:reinterpret_cast\s*<[^>]*>\s*\(\s*)?"
@@ -74,11 +72,9 @@ CALL = re.compile(
 ANY_CALL = re.compile(r"\b(" + "|".join(ACQUIRE + RELEASE) + r")\s*\(")
 COMMENT = re.compile(r"^\s*(//|\*|/\*)")
 
-# A declaration of the name: a type-ish run, the name, then `=`, `;` or `[`.
-# Counting the FILES that declare a name is what separates "one buffer threaded
-# through several files" from "several classes that happen to use the same member
-# name" — the tool cannot tell them apart from the calls alone, and guessing
-# wrong sends a migration at a coincidence.
+# A declaration of the name: type-ish run, name, then `=`, `;` or `[`. Counting the FILES that
+# declare a name separates "one buffer threaded through several files" from "several classes
+# that happen to share a member name", which calls alone can't tell apart.
 def declaration_re(name: str) -> re.Pattern:
     return re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:<>,*&\s]*\b" + re.escape(name) + r"\b\s*(=|;|\[)")
 
@@ -87,10 +83,9 @@ def declaration_re(name: str) -> re.Pattern:
 # family; keeping them would split every workspace member by call site.
 CONTAINER_PREFIX = re.compile(r"^(ws|ctx|p|c|buf|entry|w|e|slot|cache|wcache_|moe_|qscratch_)\s*(\.|->)\s*")
 
-# Names that carry no identity: the same `p` in twelve files is twelve unrelated
-# locals, and grouping them produced the largest "family" in the first run of
-# this tool — an artefact that would have sent the next migration at a coincidence.
-# These get qualified by file, so they still show up but as what they are.
+# Names that carry no identity (p, ptr, buf, tmp, ...): the same `p` in twelve files is twelve
+# unrelated locals, and grouping them produced the largest "family" in this tool's first run.
+# These get qualified by file instead.
 GENERIC = {"p", "ptr", "buf", "tmp", "out", "dst", "src", "data", "mem", "h", "d",
            "d_a", "d_b", "d_c", "raw", "hp", "result", "scratch"}
 
@@ -220,10 +215,9 @@ def main() -> int:
             if len(decls) > 1:
                 mark = f"  <- {len(decls)} declarations: SAME-NAMED SIBLINGS, not one buffer"
             elif a == 0:
-                # One declaration, releases but no acquisition: the buffer is
-                # acquired under a different spelling and this family is one
-                # half of it. B59's case — `d_bt` acquired as a local, freed as
-                # `async_d_block_tables_`.
+                # One declaration, releases but no acquisition: the buffer is acquired under a different
+                # spelling and this family is one half of it (e.g. `d_bt` acquired as a local, freed as
+                # `async_d_block_tables_`).
                 mark = "  <- one declaration, 0 acquisitions: OTHER HALF NAMED DIFFERENTLY"
             else:
                 mark = "  <- one declaration: genuinely threaded"

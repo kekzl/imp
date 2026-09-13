@@ -1,10 +1,7 @@
-// Can an expert promotion be hidden behind compute, or does it stall the layer?
-//
-// docs/roadmap.md prices promotions as if serialised on the critical path,
-// because routing for layer N is known only at layer N. That is the pessimistic
-// reading. The optimistic one is a prefetch issued a layer early on a copy
-// stream. Which one holds depends on whether copy/compute overlap actually works
-// on this WSL2/WDDM box — so measure all three arms, don't assume.
+// Can an expert promotion hide behind compute, or does it stall the layer? docs/roadmap.md
+// prices promotions as serialised on the critical path (routing for layer N is known only at
+// layer N); the optimistic reading is a prefetch on a copy stream. Which holds depends on
+// whether copy/compute overlap works on this WSL2/WDDM box, so all three arms are measured.
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -41,10 +38,8 @@ int main(int argc, char** argv) {
     std::vector<cudaEvent_t> ev(LAYERS);
     for (auto& evt : ev) CK(cudaEventCreateWithFlags(&evt, cudaEventDisableTiming));
 
-    // calibrate: cycles for ~100 us
-    // Calibrate over MANY launches: one launch is mostly launch overhead, so a
-    // single-shot calibration set the spin an order of magnitude too short and
-    // the baseline came out 5x faster than the target.
+    // Calibrate over MANY launches: one launch is mostly launch overhead, so a single-shot
+    // calibration undershoots the spin by an order of magnitude.
     long long cyc = 100000;
     for (int i=0;i<4;i++){
         const int K=200;

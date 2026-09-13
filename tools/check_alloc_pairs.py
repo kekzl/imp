@@ -79,16 +79,12 @@ FAMILIES = {
 ALLOC_FAMILY = {a: f for f, (allocs, _) in FAMILIES.items() for a in allocs}
 FREE_FAMILY = {free: f for f, (_, free) in FAMILIES.items()}
 
-# `cudaMalloc` is a prefix of `cudaMallocAsync`/`cudaMallocHost`/`cudaMallocManaged`, so
-# the alternation must try the longest first and the boundary must be explicit.
-#
-# The regex finds the CALL, not the argument. Reading the first argument with
-# `[^,)]+` looks equivalent and is not: this codebase wraps most calls in
-# IMP_CUDA_CHECK_LOG and clang-format then breaks the line right after the open
-# paren, so `cudaMallocAsync(\n    &d_alpha, ...)` yields an empty first argument
-# and the pointer silently drops out of the census. Three matched MoE pairs
-# disappeared that way on the first run of this tool. `first_arg()` below walks
-# the real parentheses instead, across newlines.
+# cudaMalloc is a prefix of cudaMallocAsync/Host/Managed, so the alternation must try the
+# longest first with an explicit boundary.
+# Regex finds the CALL, not the argument: `[^,)]+` for the first argument breaks when
+# IMP_CUDA_CHECK_LOG + clang-format puts the argument on the next line after the open paren,
+# silently dropping the pointer from the census. first_arg() walks the real parens across
+# newlines instead.
 API_RE = re.compile(
     r"\b(cudaMallocAsync|cudaMallocManaged|cudaMallocHost|cudaHostAlloc|cudaMalloc"
     r"|cudaFreeAsync|cudaFreeHost|cudaFree)\s*\(")
@@ -124,10 +120,9 @@ def strip_comments(text: str) -> str:
             if c == "*" and nxt == "/":
                 state = None; out.append("  "); i += 2; continue
             out.append(c if c == "\n" else " "); i += 1; continue
-        # Inside a string/char literal: blank the CONTENT but keep the quotes and
-        # the line count. `IMP_LOG_ERROR("cudaMalloc(%zu bytes) failed")` is a
-        # message, and counting it as a call site inflates the census with two
-        # entries that can never be attributed to a pointer.
+        # Inside a string/char literal: blank the CONTENT but keep quotes and line count. A log
+        # message like `IMP_LOG_ERROR("cudaMalloc(...) failed")` is not a call site and must not be
+        # counted as one.
         if c == "\\":
             out.append("  ")
             if i + 1 < n and text[i + 1] == "\n":

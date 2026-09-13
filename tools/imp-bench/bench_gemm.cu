@@ -198,11 +198,10 @@ static float bench_int4_gemm(const GemmSize& sz) {
     return avg_ms;
 }
 
-// Benchmark the PRODUCTION CUTLASS sm_120 block-scaled NVFP4xNVFP4 dense GEMM
-// (gemm_nvfp4_cutlass_sm120) — the kernel the from-scratch tools/standalone/
-// gemm_nvfp4_sm120a.cu reference beats (48% vs ~41% of FP4 peak). Square shapes
-// match the standalone's M=N=K cubed measurements so ncu profiles line up
-// apples-to-apples (occupancy + lts__t_requests/sectors). Returns avg ms.
+// Benchmarks the production CUTLASS sm_120 block-scaled NVFP4xNVFP4 dense GEMM
+// (gemm_nvfp4_cutlass_sm120), the kernel tools/standalone/gemm_nvfp4_sm120a.cu's reference
+// beats (48% vs ~41% of FP4 peak). Square shapes match the standalone's M=N=K measurements so
+// ncu profiles line up. Returns avg ms.
 static float bench_nvfp4_cutlass_gemm(const GemmSize& sz) {
     int64_t M = sz.M, N = sz.N, K = sz.K;
     if (!cutlass_sm120_nvfp4_available()) {

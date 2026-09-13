@@ -1,31 +1,8 @@
-// =============================================================================
-// handle_rerank — POST /v1/rerank (Cohere / Jina / vLLM-compatible shape)
-//
-// RAG agents use an embedding model to retrieve and a RERANKER to order what
-// came back, and imp shipped only the first half (roadmap gap 9). The quality
-// bar the gap sets is that query and document must be scored JOINTLY — a score
-// recomputed from two independent embeddings is an endpoint with the right name
-// and the wrong answer.
-//
-// WHAT THIS IS NOT: a BERT sequence-classification head. The gap assumed one,
-// because that is what a reranker was when it was written. The current
-// generation (Qwen3-Reranker, bge-reranker-v2-gemma) are CAUSAL LMs that read
-// query and document in one forward and answer a yes/no question, and their
-// relevance score is the softmax over those two logits. That is a cross-encoder
-// by the definition that matters — one joint forward, no independent
-// embeddings — and it runs on imp's existing decoder stack (NVFP4 GEMMs, FA2,
-// paged KV, prefix cache) instead of a second architecture family bolted on for
-// a 22M-parameter model.
-//
-// The prompt below is the Qwen3-Reranker format verbatim; the score is
-// softmax(logit_yes, logit_no)[yes], which is what the reference implementation
-// computes. Deviating from either would make imp's numbers incomparable to
-// everyone else's.
-//
-// The shared "system + instruct + query" prefix is identical across every
-// document in one call, so the prefix cache turns an N-document rerank into one
-// full prefill plus N document tails.
-// =============================================================================
+// POST /v1/rerank (Cohere/Jina/vLLM-compatible): query+document scored JOINTLY in one
+// forward (roadmap gap 9), not independent embeddings, not a BERT classification head.
+// Current models (Qwen3-Reranker, bge-reranker-v2-gemma) are causal LMs: score =
+// softmax(logit_yes,logit_no)[yes] over the reference prompt verbatim, on imp's normal
+// decoder stack; shared prefix lets prefix-cache turn N documents into 1 prefill + N tails.
 
 #include "handlers.h"
 #include "handlers_internal.h"

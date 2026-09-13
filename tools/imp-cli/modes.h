@@ -1,16 +1,10 @@
 #pragma once
 
-// One imp-cli mode per function. main() used to hold all of them: 737 code LOC,
-// the fifth-largest function body in the repo and a genuine conflation of
-// config install, model detection, flag override, benchmark, chat-template
-// resolve, REPL, /image handling, multi-turn and the think-tag stream filter.
-// The modes moved out here in #1906 (move-verbatim; the only edits are the
-// dedent, a local `ImpError err` per mode and `params` taken by value where the
-// mode overrides it). main() is now load + resolve + one dispatch, 246 LOC.
-//
-// Each returns a process exit code. Freeing ctx/model stays with main, which
-// owns them — which is also why the one-shot error paths that used to `return`
-// straight out of main now free first.
+// One imp-cli mode per function: main() used to hold all of them (737 LOC, the fifth-largest
+// function body in the repo), conflating config install, model detection, flag override,
+// benchmark, chat-template resolve, REPL, /image, multi-turn and the think-tag filter.
+// Moved out in #1906 (move-verbatim); main() is now load + resolve + one dispatch, 246 LOC.
+// Each mode returns a process exit code; freeing ctx/model stays with main, which owns them.
 
 #include "api/imp_internal.h"
 #include "args.h"

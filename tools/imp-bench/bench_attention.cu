@@ -271,12 +271,8 @@ bool bench_attention() {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Paged Attention Decode Benchmark
-// ---------------------------------------------------------------------------
-// Measures latency of paged_attention_decode at various context lengths
-// for MHA and GQA head configurations. Reports µs, effective bandwidth,
-// and whether split-K was activated.
+// Paged Attention Decode Benchmark: measures latency at various context lengths for MHA and
+// GQA configs. Reports us, effective bandwidth, and whether split-K activated.
 
 static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, cudaStream_t stream,
                                        int block_size = 16) {
@@ -418,10 +414,8 @@ bool bench_paged_attention() {
             float avg_ms = bench_paged_decode_kernel(cfg, ctx_len, stream);
             float avg_us = avg_ms * 1000.0f;
 
-            // Effective bandwidth: reads = Q + K_cache + V_cache, writes = O
-            // KV read = ctx_len * n_kv_heads * head_dim * 2 bytes
-            // Q read = n_heads * head_dim * 2 bytes
-            // O write = n_heads * head_dim * 2 bytes
+            // Effective bandwidth: reads = Q + K_cache + V_cache, writes = O. KV read = ctx_len *
+            // n_kv_heads * head_dim * 2 bytes; Q read and O write = n_heads * head_dim * 2 bytes.
             double kv_bytes = 2.0 * ctx_len * cfg.n_kv_heads * cfg.head_dim * 2.0;
             double qo_bytes = 2.0 * cfg.n_heads * cfg.head_dim * 2.0;
             double total_bytes = kv_bytes + qo_bytes;
@@ -443,10 +437,9 @@ bool bench_paged_attention() {
         printf("\n");
     }
 
-    // Block-size sweep (AUDIT_arch_2026 B-5): the same kernel at 16, 32 and 64
-    // tokens per block, the values kv_cache.block_size can set. The engine's
-    // auto rule picks 32 for n_kv_heads <= 4 and 16 otherwise; this is the
-    // instrument that rule never had.
+    // Block-size sweep (AUDIT_arch_2026 B-5): same kernel at 16/32/64 tokens per block
+    // (kv_cache.block_size values). The engine's auto rule (32 for n_kv_heads<=4, else 16) never
+    // had this instrument before.
     printf("=== Paged Attention Decode: block-size sweep (FP16 KV) ===\n");
     printf("batch=1, warmup=20, iters=50\n\n");
     for (const auto& cfg : configs) {

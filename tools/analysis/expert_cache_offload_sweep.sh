@@ -1,25 +1,13 @@
 #!/usr/bin/env bash
-# Measure the MoE expert LRU cache under host-resident experts.
-#
-# The engine only offloads experts to host when they do not fit in VRAM, which
-# makes the path awkward to reach on purpose. `moe.force_host_experts=N` pins
-# the last N MoE layers to host regardless of fit, so the whole range from
-# "barely offloaded" to "nothing on the GPU" is reachable on a model that
-# otherwise fits.
-#
-# Reports, per arm, the cache's own sizing and hit-rate lines plus pp/tg
-# throughput, so the hit rate can be read against what it costs.
-#
-# Two things this harness exists to keep honest:
-#   * Prefill throughput on this path is NOISY — a 15% spread between two runs
-#     of the SAME arm was measured on 2026-08-11. Judge only paired, alternating
-#     rounds (ROUNDS>=5), never two runs 20 minutes apart.
-#   * The cache's hit rate pools prefill and decode. `--bench-pp 8` isolates
-#     decode; a large `--bench-pp` with `--max-tokens 8` isolates prefill.
-#
-# Usage:
-#   tools/analysis/expert_cache_offload_sweep.sh              # host-layer sweep
-#   MODE=ab ROUNDS=5 tools/analysis/expert_cache_offload_sweep.sh   # paired A/B
+# Measures the MoE expert LRU cache under host-resident experts. `moe.force_host_experts=N`
+# pins the last N MoE layers to host regardless of fit, making the whole offload range reachable
+# on a model that otherwise fits. Reports the cache's sizing/hit-rate lines plus pp/tg
+# throughput per arm.
+# Prefill throughput on this path is NOISY (~15% spread between same-arm runs): judge only
+# paired, alternating rounds (ROUNDS>=5), never runs minutes apart. --bench-pp 8 isolates
+# decode; a large --bench-pp with --max-tokens 8 isolates prefill.
+# Usage: tools/analysis/expert_cache_offload_sweep.sh (host-layer sweep) or
+# MODE=ab ROUNDS=5 tools/analysis/expert_cache_offload_sweep.sh (paired A/B).
 set -u
 
 MODEL=${MODEL:-/models/Qwen3-30B-A3B-Q4_K_M/Qwen3-30B-A3B-Q4_K_M.gguf}

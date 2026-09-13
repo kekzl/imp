@@ -1,7 +1,6 @@
-// Tile FA2 perf microbench (GOAL pivotal Q: is cuTile codegen competitive on sm_120?).
-// Causal fp16 prefill, S=2048 D=128, single head replicated over grid.y to fill the GPU.
-// cudaEvent timing → effective attention TFLOPS vs the 838 TFLOPS FP16 TC roofline.
-// Standalone (no imp code). Correctness sanity vs CPU causal oracle for head 0.
+// Tile FA2 perf microbench (is cuTile codegen competitive on sm_120?): causal fp16 prefill,
+// S=2048 D=128, single head replicated over grid.y. cudaEvent timing vs the 838 TFLOPS FP16 TC
+// roofline. Standalone; correctness sanity vs CPU causal oracle for head 0.
 #include "cuda_tile.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

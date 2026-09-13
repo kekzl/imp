@@ -57,11 +57,8 @@ private:
     std::string path_;
 };
 
-// Full UTF-8 validation. imp::stream::utf8_complete_len only inspects the TAIL
-// of a buffer (it answers "does this end mid-character"), so it says nothing
-// about a byte flipped in the middle - which is exactly what a mutator
-// produces. Using it as an input filter let the tool-stream target report its
-// own mutated garbage as findings.
+// utf8_complete_len only checks the TAIL of a buffer (does it end mid-character), so it can't
+// catch a byte flipped mid-buffer, which is exactly what a mutator produces.
 inline bool is_valid_utf8(const std::string& s) {
     size_t i = 0;
     while (i < s.size()) {

@@ -1,8 +1,7 @@
 #!/bin/bash
-# ptxas maxrregcount sweep for the register-resident FA2 prefill kernel
-# (fmha_sm120_fa2_kernel, REG:144, SHARED:0 — occupancy is register-bound).
-# Recompiles ONLY the attn TU per candidate, relinks imp-cli, benches pp4096.
-# Run inside imp:ciq with build-ciq/ present, GPU, and /models mounted.
+# ptxas maxrregcount sweep for the register-resident FA2 prefill kernel (fmha_sm120_fa2_kernel,
+# REG:144, SHARED:0, occupancy register-bound). Recompiles only the attn TU per candidate,
+# relinks imp-cli, benches pp4096. Run inside imp:ciq with build-ciq/ present, GPU, /models mounted.
 set -uo pipefail
 cd /src/build-ciq
 

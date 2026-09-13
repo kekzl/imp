@@ -1,14 +1,8 @@
-// Per-request tracing for imp-server: W3C trace-context propagation and an
-// OpenTelemetry (OTLP/HTTP, JSON encoding) span exporter.
-//
-// One request becomes one SERVER span (the endpoint) with up to three
-// INTERNAL children on the same trace: `queue` (admission wait, from the
-// engine's queue_ms), `prefill` (queue end to first token) and `decode`
-// (first token to the last). The client's `traceparent` header, when sent,
-// supplies the trace id and the parent span, so the hop lands inside the
-// agent framework's own trace; otherwise a fresh trace id is minted. Spans
-// are exported by a background thread in batches; export failures are
-// logged once and dropped - the serving path never waits on the collector.
+// Per-request tracing: W3C trace-context propagation + OTLP/HTTP JSON span exporter. One request
+// = one SERVER span with up to three INTERNAL children (queue, prefill, decode). A client
+// traceparent supplies the trace id/parent (else a fresh trace is minted). Exported by a
+// background thread in batches; export failures are logged once and dropped, never blocking the
+// serving path.
 #pragma once
 
 #include <chrono>

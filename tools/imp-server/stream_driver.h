@@ -1,16 +1,11 @@
 #pragma once
 
-// Shared per-token SSE streaming loop for the three streaming dialects
-// (/v1/chat/completions, /v1/messages, /v1/responses). The outer token loop —
-// disconnect/timeout/keepalive handling, batching-engine pop_token, structural
-// stop-token filtering, the Harmony and Gemma-4 channel filters, the
-// reasoning/content demux, the streaming tool-call demux, stop-sequence
-// holdback and UTF-8 buffering, and end-of-stream flushing — used to be
-// hand-copied per dialect (~600 LOC each) and drifted repeatedly (#941 was the
-// 3rd/4th drift bug: /v1/responses had no metrics and no keepalive). The loop
-// now lives once in stream_driver.cpp; each dialect supplies only its wire
-// format via StreamDialect callbacks and emits its own terminal events after
-// the loop returns.
+// Shared per-token SSE loop for all three streaming dialects (chat/messages/responses):
+// disconnect/timeout/keepalive, pop_token, structural-stop filtering, Harmony/Gemma-4 channel
+// filters, reasoning demux, tool-call demux, stop holdback, UTF-8 buffering, end-of-stream flush.
+// Used to be hand-copied per dialect (~600 LOC each) and drifted repeatedly (#941: /v1/responses
+// had no metrics or keepalive). Now lives once; each dialect supplies its wire format via
+// StreamDialect callbacks.
 
 #include "handlers.h"
 #include "handlers_internal.h"
@@ -28,29 +23,18 @@ struct StreamDialect {
     // User-visible content / reasoning deltas.
     std::function<bool(const std::string&)> emit_text;
     std::function<bool(const std::string&)> emit_reasoning;
-    // Content carrying a token index, so the chat dialect can attach the
-    // right per-token logprob. The other dialects alias this to emit_text and
-    // ignore the index.
-    //
-    // The index is passed rather than read off StreamLoopResult::n_output_tokens
-    // because the two emission paths disagree about "now": without stop
-    // sequences the driver emits as it decodes, so the live counter is right,
-    // but with them it holds bytes back until a stop match is ruled out, and by
-    // the time those bytes go out the counter has moved on. That is why the
-    // stop path used to bypass this sink entirely and ship no logprobs at all
+    // emit_content_token carries the token index explicitly rather than reading a live counter:
+    // without stop sequences the counter is current, but held-back bytes (stop matching) ship after
+    // the counter has moved on - the stop path used to bypass this sink and ship no logprobs at all
     // (#1588). -1 means the driver cannot attribute the bytes to one token.
     std::function<bool(const std::string&, int token_index)> emit_content_token;
     // Idle keepalive, sent when no token arrived for ~10s. A false return is
     // treated as a client disconnect (request cancelled).
     std::function<bool()> keepalive;
-    // Tool calls. A streamed (JSON-layout) call arrives as on_call_begin ->
-    // on_call_args_delta* -> on_call_end; a buffered (non-JSON layout) call as
-    // a single on_call_buffered. The driver assigns tc.id and appends the call
-    // to StreamLoopResult::tool_calls BEFORE invoking on_call_begin /
-    // on_call_buffered — the callback receives a reference to the recorded
-    // element (its index is tool_calls.size() - 1) and may mutate it
-    // (validation). on_call_end receives the completed call (arguments
-    // recorded), or nullptr when no call was recorded.
+    // Tool calls: a streamed (JSON) call is on_call_begin -> on_call_args_delta* -> on_call_end; a
+    // buffered (non-JSON) call is one on_call_buffered. The driver appends to
+    // StreamLoopResult::tool_calls BEFORE invoking the begin/buffered callback, so it gets a
+    // reference to the recorded element (index = size()-1) and may mutate it (validation).
     std::function<bool(const ParsedToolCall&)> on_call_begin;
     std::function<bool(const std::string&)> on_call_args_delta;
     std::function<bool(ParsedToolCall*)> on_call_end;
@@ -66,29 +50,22 @@ struct StreamDialect {
 // (see StreamDialect::emit_content_token / on_call_begin).
 struct StreamLoopResult {
     const char* finish = nullptr;
-    // The stop sequence that ended the generation, empty otherwise. The
-    // Anthropic wire format reports it (`stop_reason: "stop_sequence"`,
-    // `stop_sequence: "<text>"`); with only `finish = "stop"` to go on, a stop
-    // match was indistinguishable from the model ending its turn (#1550).
+    // stop_sequence: the matched text, reported by the Anthropic wire format
+    // (stop_reason:"stop_sequence", stop_sequence:"<text>") - with only finish=="stop" a match was
+    // indistinguishable from the model ending its turn (#1550).
     std::string stop_sequence;
-    // Set when the stream ended on a server-side fault rather than on the
-    // model finishing. The Anthropic dialect turns this into an `error` SSE
-    // event; without it a timeout arrived as stop_reason "max_tokens" and an
-    // admission refusal as "capacity", both reading as a completed turn
-    // (#1552, #1553). `error_type` is an Anthropic error type; null means no
-    // fault. The OpenAI dialect ignores both: its finish_reason enum has no
-    // member for either, which is deliberate (#1590).
+    // error_type: set when the stream ended on a server fault, not the model finishing. Anthropic
+    // turns it into an `error` SSE event; without it a timeout read as stop_reason "max_tokens" and
+    // a refusal as "capacity" (#1552, #1553). OpenAI ignores both deliberately (#1590, no enum member).
     const char* error_type = nullptr;
     std::string error_message;
     int n_output_tokens = 0;
     int n_reasoning_tokens = 0;
     double ttft_ms = 0.0;
     bool tool_calls_emitted = false;
-    // Any non-empty content byte reached the wire. The exhaustion signal needs
-    // the streaming equivalent of the non-streaming `content.empty()` test, and
-    // `reasoning_truncated` below is not it: that one is finish == "length"
-    // only, so a reasoning model that hit EOS mid-thought (finish "stop", the
-    // in-think stop suppression plus the 16-token grace) reported nothing.
+    // content_emitted: the streaming equivalent of the non-streaming content.empty() test.
+    // reasoning_truncated is not a substitute - it only covers finish=="length", missing a reasoning
+    // model that hit EOS mid-thought (finish "stop" via the in-think suppression + 16-token grace).
     bool content_emitted = false;
     // Generation hit max_tokens while still inside reasoning and produced no
     // content (the chat dialect emits its "[Reasoning truncated ...]" notice).

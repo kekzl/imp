@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
-# Stage 3 of the test gate — the SERVER stage (local, GPU-only).
-#
-# CI has no GPU runner, so the real imp-server (handlers.cpp / batching_engine /
-# the OpenAI+Anthropic wire protocols) can only be exercised here, against a
-# live model on the 5090. Stage 1 (pre-commit `make test-gpu`) covers GPU kernel
-# correctness; Stage 2 (CI `ctest -L unit`) covers the CPU helper units; neither
-# boots a server. This script does, and GATES on the result (every battery's
-# exit code is propagated — unlike scripts/coverage_server.sh, which runs the
-# same batteries with `|| true` purely to measure coverage).
-#
-# Boots imp-server once, then runs, as hard gates:
-#   - exercise_all_endpoints.py        every endpoint/mode returns non-5xx
-#   - test_server_robustness.py        bad input -> 4xx+envelope, valid -> 2xx (#712)
-#   - test_server_0token_battery.py    no empty-completion wedge under mixed load (#710)
-#   - test_server_embed_chat_interleave.sh   embeddings don't cancel in-flight chat
-#   - test_server_logprobs.py          logprob sum + top-k descending order
-#   - test_server_ignore_eos.py        ignore_eos runs to max_tokens on both dialects
-#   - test_server_messages_stream.py   Anthropic /v1/messages event sequence
-#   - test_server_vision_and_utf8.py   images refused when unusable (#1198),
-#                                     non-ASCII survives json_schema (#1197)
-#   - test_server_metrics.py           /v1/completions and non-stream chat feed the
-#                                     latency histograms; preemption counters exist
-#
-# Usage:   make test-server   (or: scripts/test_server.sh)
-# Env:     IMP_SRV_MODEL    (default Qwen3-8B-NVFP4-cortecs) — needs chat+tools+embeddings
-#          IMP_MODELS_DIR   (default $HOME/models)      — host dir mounted at /models
-#          IMP_SRV_PORT     (default 8080)
-#          IMP_TEST_IMG     (default imp:test)               — built by `make build`
-#          IMP_SRV_BUILD    (set to 1 to force a docker build first)
+# Stage 3 of the test gate (local, GPU-only): the only place handlers.cpp/batching_engine and
+# the OpenAI+Anthropic wire protocols run end to end against a live model. Every battery's exit
+# code gates (unlike coverage_server.sh, which runs the same batteries with || true).
+# Hard gates: exercise_all_endpoints.py, test_server_robustness.py (#712),
+# test_server_0token_battery.py (#710), test_server_embed_chat_interleave.sh,
+# test_server_logprobs.py, test_server_ignore_eos.py, test_server_messages_stream.py,
+# test_server_vision_and_utf8.py (#1198/#1197), test_server_metrics.py.
+# Usage: make test-server (or scripts/test_server.sh). Env: IMP_SRV_MODEL (default
+# Qwen3-8B-NVFP4-cortecs), IMP_MODELS_DIR, IMP_SRV_PORT, IMP_TEST_IMG, IMP_SRV_BUILD.
 set -uo pipefail
 
 MODEL="${IMP_SRV_MODEL:-Qwen3-8B-NVFP4-cortecs}"
@@ -52,10 +32,8 @@ fi
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-# Stage 3a: does the server start with NO capacity flags at all? Every battery
-# below runs against a server booted with four of them, so the configuration a
-# first-time reader runs was the one nothing covered (#1631). Its own script,
-# because it needs its own container with different arguments.
+# Stage 3a: does the server start with NO capacity flags at all? Every battery below boots
+# with four of them, so the config a first-time reader runs was the one nothing covered (#1631).
 echo "== default-start gate (#1631) =="
 if ! bash scripts/test_server_default_start.sh; then
     echo "test-server: FAIL - imp-server does not start on shipped defaults"
@@ -102,10 +80,9 @@ run "logprobs"            python3 tests/test_server_logprobs.py
 run "ignore_eos"          python3 tests/test_server_ignore_eos.py
 run "messages stream"     python3 tests/test_server_messages_stream.py
 run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
-# The budget sweep the toggle test cannot see: it pins max_tokens 512, and the
-# answer-headroom force-close only bites below it. multiturn_deep.py had ZERO
-# invocation sites (the #1573 class). --assert-answered makes an empty reply a
-# failure unless the server labels it reasoning_budget_exhausted.
+# Budget sweep the toggle test can't see: pins max_tokens 512, the answer-headroom force-close
+# only bites below it. multiturn_deep.py had zero invocation sites (#1573 class).
+# --assert-answered fails an empty reply unless the server labels it reasoning_budget_exhausted.
 run "reasoning budget reaches the answer" python3 tools/analysis/multiturn_deep.py \
     --url "http://localhost:$PORT" --model "$MODEL" --max-tokens 200,260,400,600 \
     --assert-answered
@@ -114,14 +91,10 @@ run "metrics (every path feeds the histograms)" python3 tests/test_server_metric
 run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
 run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py
-# #1573: tools/analysis/degen_suite.py had ZERO invocation sites - 41 checks
-# that exit non-zero correctly and that nothing ever ran. The pre-push gate's
-# degeneration half is one smoke prompt against one model; this is the deep
-# battery, and this script already has the running server it needs.
-#
-# Categories, not --corpus: the corpus battery is ~250 prompts and belongs in a
-# longer lane. These are the server-protocol failure classes the C-API GTests
-# structurally cannot see (think-leak, special tokens, stream consistency).
+# #1573: tools/analysis/degen_suite.py had ZERO invocation sites, 41 checks nothing ever ran.
+# Categories, not --corpus (the ~250-prompt corpus belongs in a longer lane): server-protocol
+# failure classes the C-API GTests structurally cannot see (think-leak, special tokens, stream
+# consistency).
 run "degeneration suite (#1573)" python3 tools/analysis/degen_suite.py --url "http://localhost:$PORT"
 
 echo

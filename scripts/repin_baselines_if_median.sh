@@ -1,30 +1,14 @@
 #!/bin/bash
-# Guarded baseline re-pin: refuses to run on top-range or volatile host days.
-#
-# Both open re-pins (tests/perf_baseline.json after the 07-12 top-range pin,
-# tests/perf_baseline_north_star.json after the #982 lm_head net rule, −1.9%
-# intended) must be sampled on an ORDINARY median host day — re-pinning on a
-# top day bakes a gate threshold that fails on normal days (issue #526 /
-# #697 lesson). 2026-07-12 and 2026-07-13 both probed top-range (285.5 and
-# 271→295 volatile, mem-clock 14001 vs nominal 13801), so the refresh waits.
-#
-# Run from the repo root on the host (invokes docker itself):
-#   bash scripts/repin_baselines_if_median.sh
-#
-# Gate: two Qwen3-8B Q8_0 tg128@pp512 probes must BOTH land inside the
-# healthy band AND agree within 2%. On pass:
-#   1. scripts/gen_perf_baseline.sh (Q8)  -> tests/perf_baseline.json
-#   2. scripts/gen_perf_baseline.sh (14B) -> tests/perf_baseline_north_star.candidate.json
-#      (candidate only — the north-star file carries extra schema fields and
-#      an explanatory _note; merge deliberately, then `make verify-north-star`.)
-# Then: make verify-fast, review diffs, and ship both files in one PR that
-# states the intended deltas (north star −~1.9% from the #982 net rule).
+# Guarded baseline re-pin: refuses to run on top-range or volatile host days (issue #526/#697
+# lesson: re-pinning on a top day bakes a threshold that fails on normal days).
+# Gate: two Qwen3-8B Q8_0 tg128@pp512 probes must BOTH land inside the healthy band AND agree
+# within 2%. On pass: gen_perf_baseline.sh for Q8 -> perf_baseline.json, for 14B ->
+# perf_baseline_north_star.candidate.json (merge deliberately, then make verify-north-star).
+# Run from repo root: bash scripts/repin_baselines_if_median.sh.
 set -euo pipefail
 
-# Band re-derived 2026-07-15 for the spec-OFF gate metric: three healthy-clock
-# probes read 281.6/282.4/283.1 (0.5% spread). The old band [266,278] belonged
-# to the spec-ON metric, whose verify-path volatility (11% across restarts)
-# caused the 07-12/07-13 refusals in the first place.
+# Band derived for the spec-OFF gate metric (tight, ~0.5% spread); the spec-ON metric's
+# verify-path volatility (~11% across restarts) does not belong in this band.
 BAND_LO="${BAND_LO:-275}"
 BAND_HI="${BAND_HI:-290}"
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"

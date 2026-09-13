@@ -1,19 +1,10 @@
 #!/bin/bash
-# Does MTP speculation truncate answers? Runs six prompts through one process
-# and flags any answer that stops early (finish_reason=stop, well under the
-# budget) -- the signature is a ~40-token answer ending in a re-statement of the
-# question.
-#
-# Usage: bash tools/analysis/mtp_truncation_check.sh 1   # MTP on
-#        bash tools/analysis/mtp_truncation_check.sh 0   # control
-#
-# MTP_EXTRA_SET adds further `--set k=v` pairs, space separated, so an arm can
-# be varied without editing this file:
-#   MTP_EXTRA_SET='speculative.verify_row_parity=true' bash ... 1
-#
-# deterministic_gemm is pinned on purpose: it does not remove the degenerate
-# state, it stabilises it, which is what makes this a repeatable check.
-# Findings: docs/LIMITATIONS.md, "MTP speculation truncates answers".
+# Does MTP speculation truncate answers? Runs six prompts and flags any answer stopping early
+# (finish_reason=stop well under budget; signature is a ~40-token answer restating the question).
+# deterministic_gemm is pinned on purpose: it stabilises the degenerate state rather than
+# removing it, making this a repeatable check. Findings: docs/LIMITATIONS.md.
+# Usage: bash tools/analysis/mtp_truncation_check.sh 1|0 (MTP on|control).
+# MTP_EXTRA_SET='k=v' adds further --set pairs without editing this file.
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}; MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4}; PORT=8095; K=$1
 EXTRA=""; for kv in ${MTP_EXTRA_SET:-}; do EXTRA="$EXTRA --set $kv"; done
@@ -43,9 +34,7 @@ Summarise the difference between prefill and decode in transformer inference, an
 What is speculative decoding, and under what conditions does it fail to pay off?
 PROMPTS
 
-# The engine's own counters, read BEFORE the trap removes the container: once it
-# is gone the log is gone, and an arm whose knob never engaged looks exactly
-# like an arm whose knob did nothing. Every MTP arm measured through this script
-# has needed that distinction at least once.
+# Engine counters read BEFORE the trap removes the container: once it's gone the log is gone,
+# and an arm whose knob never engaged looks identical to one whose knob did nothing.
 echo "  --- engine counters (an arm with no line here proves nothing) ---"
 docker logs prproc 2>&1 | grep -E '\[spec-ngram\]' | sed 's/^/  /' || true

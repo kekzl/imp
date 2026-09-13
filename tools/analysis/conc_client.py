@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# conc_client.py - N concurrent unique short prompts against a running
-# imp-server, 300-token greedy gens, aggregate tok/s = sum completion
-# tokens / wall. Usage: conc_client.py PORT CONC WAVES [TAG] [PLEN].
-# PLEN > 0 prepends ~PLEN tokens of filler prose after the unique header
-# (the long-prompt shape); GEN=<n> in the environment overrides the 300.
+# N concurrent unique short prompts against imp-server, 300-token greedy gens, aggregate
+# tok/s = sum completion tokens / wall.
+# Usage: conc_client.py PORT CONC WAVES [TAG] [PLEN]. PLEN>0 prepends filler prose (long-prompt
+# shape); GEN=<n> env overrides 300.
 import json
 import os
 import sys
@@ -63,10 +62,9 @@ def one(i, wave, out):
         "max_tokens": GEN,
         "temperature": 0,
         "stream": False,
-        # IGNORE_EOS=1: every request emits exactly max_tokens, so two arms do
-        # identical work even when their greedy trajectories differ (a
-        # speculative arm's do, docs/LIMITATIONS.md). Without it an arm that
-        # stops early runs the tail of the wave at lower concurrency.
+        # IGNORE_EOS=1: every request emits exactly max_tokens, so two arms do identical work even
+        # when their greedy trajectories differ (a speculative arm's do, docs/LIMITATIONS.md). Without
+        # it an early-stopping arm runs its wave tail at lower concurrency.
         "ignore_eos": os.environ.get("IGNORE_EOS", "0") == "1",
     }).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/completions", data=body,

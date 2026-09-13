@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# two_image_conc_ab.sh - alternating two-IMAGE aggregate-throughput A/B at
-# CONC streams: arm A runs IMG_A, arm B runs IMG_B, same pinned config, fresh
-# server per arm, TRIALS alternating pairs, WAVES waves each; the client is
-# tools/analysis/conc_client.py (unique prompts, 300-token greedy gens).
-# This is the "two-image A/B" of the benchmark-cuda skill for a CODE change
-# (as opposed to smallm_v2_conc_ab.sh, which flips a config flag on one image).
-#
+# Alternating two-IMAGE aggregate-throughput A/B at CONC streams: arm A=IMG_A, arm B=IMG_B,
+# same pinned config, fresh server per arm, TRIALS alternating pairs, WAVES waves each.
+# The "two-image A/B" of the benchmark-cuda skill for a CODE change (vs smallm_v2_conc_ab.sh,
+# which flips a config flag on one image).
 # Usage: IMG_A=imp:ab-base IMG_B=imp:test bash tools/analysis/two_image_conc_ab.sh
-#        CONC=32 TRIALS=3 WAVES=3 EXTRA="--set x=y" (EXTRA applies to both arms)
+# [CONC=32] [TRIALS=3] [WAVES=3] [EXTRA="--set x=y"].
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"

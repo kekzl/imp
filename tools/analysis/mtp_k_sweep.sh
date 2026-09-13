@@ -1,21 +1,12 @@
 #!/bin/bash
 # MTP k-sweep: throughput, acceptance and cost-per-verify against chain length.
-#
-# Usage: bash tools/analysis/mtp_k_sweep.sh            # k=0..3, 2 rounds
-#        KS="0 1" ROUNDS=1 bash tools/analysis/mtp_k_sweep.sh
-#        MTP_MODEL=/models/<other> bash tools/analysis/mtp_k_sweep.sh
-#
-# Prints CSV: k,round,tokens,ms,tok_s,drafted,accepted,verifies
-# Results and how to read them: docs/roadmap.md, "Re-measured on the fixed build".
-#
-# Controls, each one earned by a past false result:
-#   - speculative.ngram=false      MTP head is the ONLY drafter
-#   - speculative.mtp_econ_min_emit=0  the guard unbinds after 8 verifies otherwise
-#   - server.prefix_cache=false    a hit fakes throughput
-#   - --think-budget 0             the default 0.5 disables speculation in a
-#                                  think block, and this IS a reasoning model
-#   - fresh process per arm, arms ALTERNATED across rounds
-#   - tokens from usage.completion_tokens, verifies from /metrics
+# Controls, each earned by a past false result: speculative.ngram=false (MTP is the ONLY
+# drafter), speculative.mtp_econ_min_emit=0 (else the guard unbinds after 8 verifies),
+# server.prefix_cache=false (a hit fakes throughput), --think-budget 0 (default 0.5 disables
+# speculation in a think block on this reasoning model), fresh process per arm, arms ALTERNATED
+# across rounds, tokens from usage.completion_tokens, verifies from /metrics.
+# Prints CSV: k,round,tokens,ms,tok_s,drafted,accepted,verifies. Results: docs/roadmap.md.
+# Usage: bash tools/analysis/mtp_k_sweep.sh [KS="0 1"] [ROUNDS=1] [MTP_MODEL=...].
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}
 MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4}

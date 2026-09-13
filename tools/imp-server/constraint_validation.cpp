@@ -1,9 +1,7 @@
-// Admission-time validation of constrained-decoding requests.
-//
-// Split out of handlers.cpp for the same reason bearer_token_matches() lives in
-// utils.cpp: the CPU test lane compiles this file, and handlers.cpp (with its
-// engine, CUDA and httplib-server dependencies) it does not. A validation rule
-// that only runs inside the real handler is a rule CI never checks.
+// Admission-time validation of constrained-decoding requests. Split out of handlers.cpp (same
+// reason as bearer_token_matches() in utils.cpp): the CPU test lane compiles this file but not
+// handlers.cpp's engine/CUDA/httplib dependencies, so a rule only inside the real handler is a
+// rule CI never checks.
 
 #include "handlers_internal.h"
 #include "utils.h"
@@ -15,17 +13,12 @@
 #include <string>
 #include <vector>
 
-// A constraint imp cannot compile used to be dropped and the request answered
-// anyway: HTTP 200, free-form text, nothing in the reply to distinguish it from
-// a satisfied constraint (#1256). Constrained decoding is a guarantee, so a
-// pattern that cannot back it is a bad request, not a silent downgrade.
-//
-// Validated here, at admission, rather than where the constrainer is built:
-// ensure_constraints_() runs from prefill and decode, where the only way to
-// report this would be to abort a request that was already accepted.
-//
-// The same parsers the engine uses are called, so the two cannot drift into
-// disagreeing about what is enforceable.
+// A constraint imp can't compile used to be silently dropped and the request answered anyway
+// (HTTP 200, free-form text, no signal it wasn't enforced, #1256). Constrained decoding is a
+// guarantee, so an uncompilable pattern is a bad request, not a silent downgrade. Validated at
+// admission rather than where the constrainer is built, since ensure_constraints_() runs from
+// prefill/decode where the only way to report this is aborting an already-accepted request. The
+// same parsers the engine uses are called, so the two can't disagree about what's enforceable.
 bool validate_constraints(const json& body, httplib::Response& res) {
     auto reject = [&res](const std::string& message) {
         res.status = 400;
@@ -83,18 +76,13 @@ bool validate_constraints(const json& body, httplib::Response& res) {
             return reject("the GBNF grammar cannot be enforced as a constraint: " + err);
     }
 
-    // A schema the parser cannot build rejects for a narrow set of reasons — an
-    // unresolvable or unsupported `$ref`, or a document that is not JSON. The
-    // engine logged "Failed to parse JSON schema" and carried on, which for a
-    // `json_schema` request means falling back to any-JSON: the reply is still
-    // JSON, so it looks right, while the structure the caller asked for was
-    // never enforced. That is harder to notice than the regex case, not easier.
-    //
-    // Deliberately NOT rejected here: a schema the parser accepts but cannot
-    // extract structure from (`{"type":"object"}` with no properties) is
-    // documented to mean json_object, and an unknown `type` falls back to
-    // string rather than failing. Those are tolerances, not failures, so
-    // turning them into 400s would break working clients.
+    // A schema the parser can't build rejects for a narrow set of reasons (unresolvable/
+    // unsupported $ref, non-JSON document). Previously logged and fell back to any-JSON, which
+    // still looks like valid JSON while the requested structure was never enforced - harder to
+    // notice than the regex case.
+    // Deliberately NOT rejected: a schema the parser accepts but can't extract structure from
+    // ({"type":"object"} with no properties, documented as meaning json_object) and an unknown
+    // `type` (falls back to string) - those are tolerances, not failures.
     if (!schema.empty() && !imp::parse_json_schema(schema))
         return reject(
             "the JSON schema cannot be enforced as a constraint: it could not be "
@@ -108,15 +96,9 @@ bool validate_constraints(const json& body, httplib::Response& res) {
     return true;
 }
 
-// A content part this server cannot read used to fall through the parsing chain
-// in silence: `video_url` (imp has no video path at all) produced a 200
-// answering a prompt the model never saw, and an `image_url` part with the
-// object missing did the same. Answering as if the input had been understood is
-// worse than refusing it — the caller cannot tell that reply apart from one that
-// actually used its picture.
-//
-// Checked at admission alongside the constraints, and in this TU for the same
-// reason: the CPU lane compiles it, so the rule runs in CI.
+// A content part this server cannot read (video_url, malformed image_url) must be rejected,
+// not silently dropped: a 200 answering unread input looks identical to a real answer.
+// Checked at admission; compiled in the CPU-only lane so the rule runs in CI.
 bool validate_content_parts(const json& body, httplib::Response& res) {
     if (!body.contains("messages") || !body["messages"].is_array())
         return true;
@@ -144,25 +126,9 @@ bool validate_content_parts(const json& body, httplib::Response& res) {
     return true;
 }
 
-// The same rule for the Anthropic dialect, in the Anthropic spelling.
-//
-// `/v1/messages` converts to an OpenAI body first (`anthropic_to_openai_body`)
-// and only then reaches `validate_content_parts`. The converter's block loop
-// has no `else`, so a block it does not know is deleted and the transformed
-// body arrives clean: the check meant to catch the problem stands behind a gate
-// that already removed the evidence (the #1384 shape). Measured on the
-// model-less server: `input_audio` and `video_url` were 400 on
-// /v1/chat/completions and /v1/responses, and fell through /v1/messages.
-//
-// The allowlist is the set `anthropic.cpp` can actually convert, read off its
-// own loops: `text` and `image` (convert_message_content), `tool_use` and
-// `thinking` (push_assistant_turn), `tool_result` (the user-turn split).
-// `redacted_thinking` carries no input and rides along. Anything else - a
-// `document`, a `search_result`, an audio block - is content the caller
-// believes was read.
-//
-// Returns true when a block is unreadable, with `why` describing it. The caller
-// owns the response because the Anthropic error envelope differs from OpenAI's.
+// Anthropic dialect equivalent of the OpenAI content-part check (id 441).
+// Allowlist = what anthropic_to_openai_body converts: text, image, tool_use, thinking,
+// tool_result; redacted_thinking passes through. Runs before conversion silently drops unknowns.
 namespace {
 
 // An `image` block converts only from a `base64` or a `url` source; every other
@@ -179,12 +145,8 @@ bool anthropic_image_is_readable(const json& block, std::string& why) {
     return false;
 }
 
-// `tool_result.content` may itself be an array of blocks, and the converter's
-// inner loop (anthropic.cpp, push_user_turn) reads only `text` and `image`
-// there. Accepting `tool_result` wholesale at the outer level left that array
-// unguarded, which costs more than a drop: an unreadable block leaves the tool
-// body EMPTY, so the model is told the tool returned nothing and answers 200 on
-// it.
+// tool_result.content array: only text/image blocks are read downstream (push_user_turn).
+// An unguarded unreadable block leaves the tool body empty, so the model answers 200 on nothing.
 bool anthropic_tool_result_unreadable(const json& block, std::string& why) {
     if (!block.contains("content"))
         return false;
@@ -212,17 +174,8 @@ bool anthropic_tool_result_unreadable(const json& block, std::string& why) {
 
 }  // namespace
 
-// The `system` field, which the block walk below never reached: it keys on
-// "messages" only. `flatten_system` (anthropic.cpp) reads a string, or an array
-// from which it keeps `text` blocks; every other shape returns "" and the whole
-// system prompt is gone. Measured on the model-less binary before this: a bare
-// object, a number, and an array carrying an image block all reached the model
-// lookup, so with weights the model would have answered without its
-// instructions and said nothing about it.
-//
-// The allowlist is `flatten_system`'s own capability, which is also what the
-// upstream API allows in this field. `cache_control` rides on a `text` block and
-// is unaffected.
+// system field allowlist matches flatten_system: string, or array of text blocks; other shapes
+// silently become "" and the whole system prompt is lost.
 bool anthropic_system_unreadable(const json& system_field, std::string& why) {
     if (system_field.is_null() || system_field.is_string())
         return false;
@@ -250,14 +203,8 @@ bool anthropic_unreadable_block(const json& body, std::string& why) {
         return true;
     if (!body.contains("messages") || !body["messages"].is_array())
         return false;
-    // The Messages API has no `system` role, but clients ported from the OpenAI
-    // dialect send one and imp folds the LEADING run of them into the system
-    // prompt through flatten_system (anthropic.cpp), consuming each one whether
-    // or not anything survived the fold. Those carry the system field's narrower
-    // allowlist. A system message AFTER the first turn is not folded; it reaches
-    // push_user_turn and keeps its images, so it is checked as an ordinary
-    // message. Getting this boundary wrong in either direction is a false
-    // refusal or a silent drop, so it is read off the converter's own loop.
+    // Leading run of system-role messages folds into the system prompt via flatten_system and uses
+    // its allowlist; a system message after the first turn is an ordinary message (keeps images).
     bool still_leading = true;
     for (const auto& msg : body["messages"]) {
         const bool is_leading_system = still_leading && msg.is_object() &&
@@ -298,13 +245,8 @@ bool anthropic_unreadable_block(const json& body, std::string& why) {
     return false;
 }
 
-// `tool_choice` naming a tool that is not in `tools`, or demanding a tool call
-// with no tools at all, is a CONTRADICTORY request rather than a loose one —
-// unlike a tool whose schema simply cannot be enforced, which legitimately
-// degrades to prompt-hint choice. Answering it anyway produced a model
-// inventing a call to a function the caller never described (measured: a
-// request naming "nonexistent" came back with a call to "g"). OpenAI answers
-// 400 for both.
+// tool_choice naming a tool absent from `tools`, or requiring a call with no tools at all, is a
+// contradictory request: 400, not a degrade-to-prompt-hint (OpenAI parity).
 bool validate_tool_choice(const json& body, httplib::Response& res) {
     if (!body.contains("tool_choice"))
         return true;

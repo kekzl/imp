@@ -1,29 +1,8 @@
 #!/usr/bin/env bash
-# Long-context decode A/B across models.
-#
-# WHY THIS EXISTS: the perf gate measures tg128 at pp512. A change whose effect
-# depends on context length is invisible there by construction — #1270 shipped a
-# split-count heuristic that gained +10% at 32k on one model, cost -7.30% at 32k
-# on another, and passed `verify-fast` at +0.33% because the boost is inactive at
-# pp512. It was reverted in #1271.
-#
-# Two rules this encodes, both learned the expensive way:
-#
-#   1. TWO MODELS MINIMUM. Six context lengths on one checkpoint produced a clean
-#      monotone curve with sub-0.5% spreads and was still wrong. Precision is not
-#      coverage. The default model list has different GQA shapes on purpose
-#      (n_kv_heads 8/g 4 vs n_kv_heads 4/g 8) — that pair is what caught #1270.
-#
-#   2. SPEC-OFF. n-gram speculation puts 14-17% spread on short-context points,
-#      enough to hide a 1% effect and to make a -11% median look real. Spec-OFF
-#      (what the gate measures) brings it under 0.5%.
-#
-# Usage:
-#   scripts/bench_longctx_ab.sh <image-A> <image-B> [ctx-list] [model-list]
-#   scripts/bench_longctx_ab.sh imp:base imp:test "2048 8192 32768"
-#
-# A and B are docker images or host paths to a build dir (mounted at /bd).
-# Exits non-zero if any model/context pair regresses beyond the threshold.
+# Long-context decode A/B: the perf gate (tg128 @ pp512) is blind to context-length-dependent
+# effects (#1270/#1271, a change that gained at 32k and cost -7.3% at 32k on another model).
+# Two models minimum: different GQA shapes catch shape-dependent regressions. SPEC-OFF: n-gram
+# speculation puts 14-17% spread on short context, enough to hide a 1% effect.
 
 set -euo pipefail
 

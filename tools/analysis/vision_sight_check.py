@@ -86,12 +86,9 @@ def make_image(n_circles: int, size: int = 448) -> bytes:
     return png(size, size, rows)
 
 
-# Sent by default, and not decoration. The #1246 regression lived exactly here:
-# the image block was keyed on "message index 0 is the user message", so any
-# request opening with a system prompt — the normal shape for a pipeline —
-# rendered text-only. A check that omits the system message passes straight over
-# it. `--no-system` drops it, which is useful for isolating whether a failure is
-# the system message's doing.
+# Sent by default, not decoration: #1246 regressed exactly here, the image block keyed on
+# "message index 0 is the user message", so any request opening with a system prompt rendered
+# text-only. --no-system drops it to isolate whether a failure is the system message's doing.
 DEFAULT_SYSTEM = "You describe images briefly and factually."
 
 

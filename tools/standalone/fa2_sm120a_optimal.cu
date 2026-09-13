@@ -1,57 +1,19 @@
-// fa2_sm120a_optimal.cu
-// -----------------------------------------------------------------------------
-// A self-contained, from-scratch FlashAttention-2 forward kernel for the
-// RTX 5090 (GB202, sm_120a — consumer Blackwell). No imp engine headers, no
-// CUTLASS, no cuDNN. One file: kernel + CPU reference + correctness check +
-// timing. This is the *reference* shape of the optimal sm_120a attention kernel
-// described in docs/internals/KERNELS.md — meant to be read and run, not to
-// beat imp's production FA2 (which adds f16-acc variants, TWOSLOT, INT8/FP8-QK,
-// and per-head GQA plumbing on top of exactly this skeleton).
-//
-// What it demonstrates (the "optimal kernel" properties):
-//   * Register-resident O accumulator — O never touches shared memory across the
-//     whole KV loop. This is THE defining FA2 property and the reason raw
-//     mma.sync is required (WMMA hides the accumulator->row mapping, so you
-//     cannot apply the per-row online-softmax rescale to a WMMA O fragment).
-//   * Online softmax (running row max + sum), no global S materialization.
-//   * Tensor-core QK^T and P·V via mma.sync.m16n8k16 (HMMA on sm_120 — there is
-//     no wgmma / tcgen05 / TMEM on consumer Blackwell).
-//   * Bq=128 / Bkv=64 / D=128: 8 warps (256 threads), each warp owns one 16-row
-//     query tile. 1 block/SM, latency-hidden by the software pipeline.
-//
-// Profiling-driven optimization trail (ncu on RTX 5090, BH=8 causal). Each step
-// targets the bottleneck the previous ncu run revealed — measured, not guessed.
-//   reference                         50.3 / ~80 / ~91   TFLOP/s  (S = 4k / 8k / 16k)
-//   A. V staged transposed -> contiguous PV B-fragment load (LSU/MIO relief)
-//   B. ldmatrix.x4 for K/P/V fragments — 1 instr per 16x16 tile
-//   C. PV f16-accumulate (O as packed half2): lower mma latency, 218 -> 154 regs
-//   D. drop the smem Q stage; Q A-fragments straight to registers
-//   E. NO P smem round-trip: the QK-output and PV-A column->lane maps coincide,
-//      so P is repacked from S_acc registers (no shuffle, no smem, no syncwarp)
-//   F. PAD K_s/V_s to stride HD+8: killed a 7.8M-event 8-way bank conflict . +25%
-//   G. V via cp.async + ldmatrix.trans (not a regular transposing load): hides
-//      the global-load latency that showed up as a long-scoreboard stall ... +25%
-//   H. double-buffer K/V (ping-pong cp.async, prefetch tile j+1) .......... +13%
-//   final                             113.7 / 157.7 / 186.8 TFLOP/s   (~2.1-2.3x ref)
-//   (Past imp's production FA2 ~135 at S>=8k. QK f16-accumulate was tried and
-//    REVERTED — unpack overhead > latency win.)
-//
-// Remaining bottleneck: the cp.async `wait` stall (~1.6 cyc/issue) now dominates
-// (DRAM 4%, L1/TEX 29%, SM 14% — still latency-bound, at 16.7% occupancy). A
-// deeper 3-stage pipeline would chip at it but is INFEASIBLE here: ldmatrix needs
-// 16-byte row alignment (KS a multiple of 8 halves), so the minimum pad is HD+8,
-// and 3 slots of K+V then need 102 KB > the 99 KB smem cap. The hard ceiling is
-// the absence of an async MMA (tcgen05/TMEM on sm_120): the mma dependency chain +
-// per-tile barrier cap concurrency regardless of residency (forcing 2 blocks/SM
-// measured -24%). The remaining gap to a B200 FA4 kernel is silicon, not code.
-//
-// Still simplified vs production: f32 QK^T accumulate, MHA only (no GQA grouping).
-//
-// Build & run (host has no CUDA toolkit — use the CUDA 13.3 container):
+// fa2_sm120a_optimal.cu: self-contained sm_120a FlashAttention-2 reference kernel (no imp
+// engine/CUTLASS/cuDNN) - the shape documented in docs/internals/KERNELS.md, meant to be read
+// and run, not to beat imp's production FA2.
+// Properties: register-resident O accumulator (no smem across the KV loop), online softmax, QK^T
+// and P.V via mma.sync.m16n8k16 (HMMA; no wgmma/tcgen05/TMEM on sm_120a), Bq=128/Bkv=64/D=128,
+// 8 warps/block, 1 block/SM.
+// Optimization trail (ncu, RTX 5090, BH=8 causal), TFLOP/s at S=4k/8k/16k:
+// reference 50.3/~80/~91 -> V transposed load -> ldmatrix.x4 -> PV f16-accum (218->154 regs) ->
+// drop smem Q stage -> no P smem round-trip -> pad K_s/V_s +8 (kills an 8-way bank conflict,
+// +25%) -> V via cp.async+ldmatrix.trans (+25%) -> double-buffer K/V (+13%) -> final
+// 113.7/157.7/186.8 (~2.1-2.3x ref, vs imp production FA2 ~135 at S>=8k; QK f16-accum tried and reverted).
+// Remaining bottleneck: cp.async wait stall, latency-bound at 16.7% occupancy; a 3-stage
+// pipeline needs 102 KB smem > the 99 KB cap; the real ceiling is no async MMA on sm_120a.
+// Build (host has no CUDA toolkit, use the CUDA 13.3 container):
 //   docker run --rm --gpus all -v "$PWD":/w -w /w nvidia/cuda:13.3.1-devel-ubuntu26.04 \
 //     sh -c 'nvcc -O3 -std=c++23 -arch=sm_120a fa2_sm120a_optimal.cu -o fa2 && ./fa2'
-// (imp's own image already has nvcc: imp:test works as the image too.)
-// -----------------------------------------------------------------------------
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -198,21 +160,16 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     const half* Vb = V + (int64_t)bh * S * HD;
     half* Ob = O + (int64_t)bh * S * HD;
 
-    // ---- shared memory ----
-    // Q_s : staged once       (BQ*HD)     = 128*128 halves = 32 KB
-    // K_s : one KV tile        (BKV*HD)   = 64*128  halves = 16 KB
-    // V_t : one KV tile, TRANSPOSED to [d][kv] with padded stride VTS, so the
-    //       PV B-fragment (col-major, k-contiguous) is a single uint32 load
-    //       instead of two non-contiguous half reads (the LSU/MIO bottleneck).
-    // P_s : per-warp P repack  (BQ*BKV)   = 128*64  halves = 16 KB
+    // Shared memory budget: Q_s (BQ*HD=32KB), K_s (BKV*HD=16KB), V_t (TRANSPOSED [d][kv], padded
+    // stride VTS, so PV's B-fragment is one contiguous uint32 load instead of two strided half
+    // reads), P_s (BQ*BKV=16KB per-warp repack).
     extern __shared__ half smem[];
     half* K_s = smem;                // [2][BKV*KS] double-buffer (ping-pong)
     half* V_s = K_s + 2 * BKV * KS;  // [2][BKV*KS]; P needs no smem (built from S_acc registers)
 
-    // ---- load this warp's Q A-fragments straight from global into registers
-    //      ONCE (kept resident across the whole KV loop). No smem Q stage: Q is
-    //      read exactly once per CTA, and dropping the 32 KB stage is what lets
-    //      the kernel fit 2 blocks/SM. DRAM has ample headroom (~2% busy). ----
+    // Loads this warp's Q A-fragments straight from global into registers once, kept resident across
+    // the whole KV loop: skipping the smem Q stage is what lets the kernel fit 2 blocks/SM (DRAM has
+    // ~2% headroom).
     const int qr0 = q_base + gid, qr1 = q_base + gid + 8;
     uint32_t Qf[KC_QK][4];
 #pragma unroll
@@ -232,10 +189,8 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     float m_lo = -INFINITY, m_hi = -INFINITY;  // running row max
     float l_lo = 0.f, l_hi = 0.f;              // running row sum
 
-    // n_kv MUST be uniform across the whole block: the loop body has block-wide
-    // __syncthreads() + cooperative K/V loads, so every warp must run the same
-    // trip count. Size it to the block's *last* query row (q_tile*BQ + BQ - 1);
-    // warps/rows that shouldn't see a tile get fully -INF-masked below.
+    // n_kv must be uniform across the whole block (block-wide __syncthreads + cooperative K/V
+    // loads): sized to the block's LAST query row; rows that shouldn't see a tile are -INF-masked.
     const int q_block_max = min(q_tile * BQ + BQ, S);  // exclusive
     const int n_kv = causal ? ((q_block_max + BKV - 1) / BKV) : ((S + BKV - 1) / BKV);
 
@@ -256,10 +211,8 @@ __global__ void __launch_bounds__(NTHREADS, 1)
         const half* K_sl = K_s + slot * BKV * KS;  // this tile's slot
         const half* V_sl = V_s + slot * BKV * KS;
 
-        // ---- Phase 1: S = Q @ K^T via ldmatrix.x4 -> 8 n8-tile accumulators.
-        //      K_s is [n=kv][k=d], same layout as V_t, so ldmatrix.x4 (NO trans)
-        //      yields the col-major B fragment directly. One x4 = 2 n-tiles;
-        //      quadrants -> n-tile0=(k0,k2), n-tile1=(k1,k3) (f32-acc QK^T). ----
+        // Phase 1 (S = Q@K^T): K_s shares V_t's [n][k] layout, so ldmatrix.x4 (no trans) yields the
+        // col-major B fragment directly. One x4 load covers 2 n-tiles (f32-accumulate QK^T).
         const int lr = lane % 16, lc = (lane / 16) * 8;  // ldmatrix per-lane row/col-base
         float S_acc[N_S][4];
 #pragma unroll
@@ -334,23 +287,17 @@ __global__ void __launch_bounds__(NTHREADS, 1)
             O_h2[n][1] = mul_h2(O_h2[n][1], ahi2);
         }
 
-        // ---- Phase 3: O += P @ V  (into the register-resident accumulator) ----
-        // NO P smem round-trip: the QK output column->lane mapping and the PV
-        // A-fragment column->lane mapping COINCIDE, so each lane already holds in
-        // S_acc exactly the P values its A-fragment needs. Build a0..a3 by
-        // repacking f32->f16 in registers -> kills 32 smem writes + a syncwarp +
-        // 16 ldmatrix reads + the write->read dependency (the short-scoreboard
-        // stall) and frees the 16 KB P buffer. (P[gid][kc*16+tig*2] = S_acc[2kc][0].)
+        // Phase 3 (O += P@V): no P smem round-trip - the QK-output and PV-A column->lane mappings
+        // coincide, so each lane already holds the P values its A-fragment needs; repacked f32->f16 in
+        // registers, killing 32 smem writes + a syncwarp + 16 ldmatrix reads and freeing the 16KB P buffer.
 #pragma unroll
         for (int kc = 0; kc < KC_PV; kc++) {
             uint32_t a0 = pack2(__float2half(S_acc[2 * kc][0]), __float2half(S_acc[2 * kc][1]));
             uint32_t a1 = pack2(__float2half(S_acc[2 * kc][2]), __float2half(S_acc[2 * kc][3]));
             uint32_t a2 = pack2(__float2half(S_acc[2 * kc + 1][0]), __float2half(S_acc[2 * kc + 1][1]));
             uint32_t a3 = pack2(__float2half(S_acc[2 * kc + 1][2]), __float2half(S_acc[2 * kc + 1][3]));
-            // B = V via ldmatrix.x4.trans on row-major V_s[kv=k][d=n]: the trans
-            // turns the row-major [k][n] storage into the col-major B fragment.
-            // Addressing: lr splits the k-half (matrix 0/1), lc splits the n-tile
-            // (matrix 0,1 vs 2,3) -> n-tile0=(v0,v1), n-tile1=(v2,v3).
+            // B = V loaded via ldmatrix.x4.trans on row-major V_s[k][d]: the .trans turns row-major storage
+            // into the col-major B fragment the MMA needs.
 #pragma unroll
             for (int nb = 0; nb < N_O / 2; nb++) {
                 uint32_t v0, v1, v2, v3;

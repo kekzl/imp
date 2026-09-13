@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# conc_arms_ab.sh - alternating N-arm A/B at CONC concurrent streams, fresh
-# server per arm, identical work per arm (ignore_eos: every request emits
-# exactly GEN tokens, so an arm whose greedy trajectory stops early does not
-# run the tail of its wave at lower concurrency).
-#   ARMS    "name=--set k=v ...;name=..."   per-arm sets on top of COMMON
-#   COMMON  sets every arm gets
-#   CONC WAVES TRIALS MBS SEQ               client and server geometry
+# Alternating N-arm A/B at CONC concurrent streams, fresh server per arm, identical work per
+# arm (ignore_eos: every request emits exactly GEN tokens, so an early-stopping arm doesn't run
+# its wave tail at lower concurrency).
+# ARMS "name=--set k=v ...;..." per-arm sets on top of COMMON; CONC WAVES TRIALS MBS SEQ =
+# client/server geometry.
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"

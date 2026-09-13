@@ -1,46 +1,15 @@
 #!/usr/bin/env bash
-# The blocking static gates, in one list, run from two places.
-#
-# WHY THIS FILE EXISTS. Until 2026-08-21 these ran only as their own CI jobs,
-# and branch ruleset 14716423 requires exactly one context: `Build`. Every other
-# job is advisory. #1523 merged with `File size` FAILED, #1524 merged over the
-# same red gate forty minutes later, and `main` stayed red. A step that blocks
-# its own job blocks nothing when the job is not required
-# (docs/audit/DEBT_LEDGER_2026_08_21.md section (j)).
-#
-# So the same list runs as the FIRST step of the `Build` job, where a failure
-# makes the one required context red and the PR unmergeable. The named jobs stay
-# as they are, because "which gate failed" is worth a check name; they call this
-# script with a filter so there is exactly one list rather than two that drift.
-#
-# WHY NOT `needs:`. Making `Build` depend on the gate jobs would keep the names
-# and add no wall time, but it rests on an unverified claim: that a required
-# check SKIPPED because its dependency failed blocks a merge rather than being
-# treated as satisfied. GitHub's behaviour differs between `needs`-skips and
-# path-filter skips, and this campaign's rule is not to build on a claim nobody
-# checked. Running inside `Build` needs no such assumption.
-#
-# WHAT IS DELIBERATELY NOT HERE, and it is a decision rather than an oversight:
-#   Lint            apt-installs clang-format and hits the network for upstream
-#                   dependency tags. Adding an apt install and a network call to
-#                   the one required check trades enforcement for flakiness.
-#   Mock API        `pip install -r tests/api/requirements.txt` then pytest. Same
-#                   objection as Lint: a network install inside the required
-#                   check. It is cheap in CPU and not hermetic, which is the axis
-#                   that matters here.
-#   clang-tidy      ~1m30, and it is advisory by its own step name.
-#   Real API        ~1m50, needs the build artifact, so it cannot run before the
-#                   compile it would gate.
-#   alloc-interpose costs ~15 minutes and a GPU. It belongs in check-release.sh,
-#                   where it already is (stage 9's sibling), not in CI at all.
-# Those four stay advisory. Everything in this file is cheap, hermetic and
-# deterministic: no apt, no network, no build directory, seconds in total.
+# Blocking static gates run from two places: as CI's own (advisory) jobs, and as the FIRST
+# step of the `Build` job, the only required context under branch ruleset 14716423 (#1523/#1524
+# merged over red advisory gates because non-required jobs block nothing). Not `needs:` on
+# Build: a needs-skip's effect on required-check merging is unverified.
+# Deliberately kept advisory: Lint and Mock API (network installs in a required check),
+# clang-tidy, Real API (needs the build artifact), alloc-interpose (~15min+GPU, lives in
+# check-release.sh). Everything here is cheap, hermetic, deterministic.
 set -uo pipefail
 
-# Repo root from this script's own location, not from git. The GitHub Actions
-# container runs as a different user than owns the checkout, so `git rev-parse`
-# there dies with "detected dubious ownership in repository at /__w/imp/imp" and
-# takes the whole required check with it. This needs no git and no safe.directory.
+# Repo root from this script's own location, not git: the Actions container runs as a
+# different user than owns the checkout, so git rev-parse dies with "dubious ownership".
 cd "$(dirname "$(readlink -f "$0")")/.."
 FAIL=0
 run() {  # run <label> <cmd...>
@@ -100,10 +69,9 @@ if want api; then
     run "that gate still classifies its cases"  python3 tools/check_api_guard.py --selftest
 fi
 
-# The offline half of the dependency-pin check: cmake/imp-deps.cmake vs the
-# Dockerfile ARG defaults, sed/grep over two tracked files, no network. Until
-# 2026-09-05 it ran only as `--online` inside the advisory Lint job, so a
-# drifted pin merged with a red X (AUDIT_arch_2026 H-1). Lint keeps --online.
+# Offline half of the dependency-pin check (cmake/imp-deps.cmake vs Dockerfile ARG defaults,
+# textual, no network). Previously ran only as --online inside the advisory Lint job, so a
+# drifted pin could merge (AUDIT_arch_2026 H-1). Lint still runs --online.
 if want deps; then
     echo "== Dependency pins =="
     run "cmake/imp-deps.cmake vs Dockerfile (offline)" bash scripts/check_dep_pins.sh
@@ -121,10 +89,8 @@ if want alloc; then
     run "that gate still classifies its cases"  python3 tools/check_static_reset.py --selftest
 fi
 
-# Needs a BUILT artifact plus cuobjdump, unlike every other gate here, which is
-# source-derived. Skips rather than fails when the build is absent so a fresh
-# checkout still gets the rest of the list; CI runs it unconditionally in the
-# `Build` job, where both halves exist.
+# Needs a BUILT artifact + cuobjdump (unlike every other gate here, which is source-derived).
+# Skips (not fails) when the build is absent, so a fresh checkout still gets the rest of the list.
 if want kernels; then
     echo "== Kernel resources =="
     KRES_LIB=""
@@ -157,11 +123,9 @@ if want docs; then
     run "that gate still counts a long entry"      python3 tools/check_changelog_form.py --selftest
 fi
 
-# Own group: a file:line citation in a living doc dies the moment a TU is
-# split or shrinks, and until 2026-08-26 this surfaced only in CI (the #1782
-# scheduler split cost a full CI roundtrip on a roadmap.md citation the
-# pre-push never checked). Cheap (<0.5 s), hermetic, covers roadmap.md plus
-# every living doc; records (archive/, plans/, audit/) stay excluded.
+# A file:line citation in a living doc dies the moment a TU is split or shrinks (#1782
+# scheduler split cost a CI roundtrip on a roadmap.md citation pre-push never checked).
+# Cheap (<0.5s), covers roadmap.md plus every living doc; archive/plans/audit stay excluded.
 if want layering; then
     echo "== Layering =="
     # Backward #include edges between src/ layers against tools/layering_pins.txt.

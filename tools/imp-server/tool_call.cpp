@@ -115,12 +115,9 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::Ch
 
 std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplateFamily family,
                                                                const json& tools, const json& tool_choice) {
-    // Llama3 tool calls are `<function=NAME>{JSON args}</function>` — the body
-    // IS the arguments object (name is in the tag), so a forced single function
-    // maps onto the plain parameter schema with a per-tool envelope. Only the
-    // forced-function case is enforceable here: "required"/auto would need a
-    // name-in-tag enum binding (follow-up); Gemma/Qwen3.6-XML bodies are
-    // non-JSON and need a separate grammar (out of scope for the JSON FSM).
+    // Llama3 tool calls (<function=NAME>{JSON}</function>): body IS the arguments object, so only a
+    // FORCED single function maps onto the plain parameter schema here. "required"/auto would need a
+    // name-in-tag enum binding (follow-up); Gemma/Qwen3.6-XML bodies are non-JSON (separate grammar).
     if (family != imp::ChatTemplateFamily::LLAMA3 || tools.empty())
         return {};
     if (!tool_choice.is_object() || !tool_choice.contains("function"))
@@ -152,27 +149,19 @@ std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     // ChatML `<tool_call>` JSON envelope only (as the forced path).
     if (family != imp::ChatTemplateFamily::CHATML)
         return out;
-    // Optional strict enforcement applies only when the model is FREE to decide:
-    // tool_choice auto/absent. A forced function or "required" is mandatory and
-    // goes the forced-envelope path (collect_tool_constraint); "none"/unknown
-    // suppress tools.
+    // Optional strict enforcement applies only when the model is FREE to choose (tool_choice
+    // auto/absent); a forced function or "required" takes the forced-envelope path
+    // (collect_tool_constraint) instead, and "none"/unknown suppress tools.
     if (tool_choice.is_object())
         return out;
     if (tool_choice.is_string() && tool_choice.get<std::string>() != "auto")
         return out;
 
-    // `strict` is per-function in OpenAI's API, so it is enforced per function
-    // here. A tool that did not ask for enforcement, or whose parameters carry
-    // no properties to enforce, still enters the name enum - with a free-form
-    // parameter schema, so its arguments stay unconstrained while every tool
-    // that did ask keeps its own schema.
-    //
-    // Bailing out instead (the previous behaviour) meant one loose tool in the
-    // set turned off constrained decoding for all of them: a realistic agent
-    // mixes a schema-bound `write_file` with a free-text `bash`, and the
-    // caller who set strict on the one whose arguments must parse got post-hoc
-    // validation for it (#1597). The free-form schema became representable in
-    // #1729; before that there was nothing to put in the enum for such a tool.
+    // `strict` is per-function (OpenAI API): a tool without enforcement, or with no properties to
+    // enforce, still enters the name enum with a free-form schema, leaving only ITS arguments
+    // unconstrained. Bailing out entirely on one loose tool used to disable constrained decoding for
+    // the whole set (#1597: a schema-bound write_file next to a free-text bash tool). Free-form
+    // schemas became representable in #1729.
     static constexpr const char* kFreeFormParams = R"({"type":"object","additionalProperties":true})";
     bool any_strict = false;
     for (const auto& tool : tools) {
@@ -197,14 +186,8 @@ std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     return out;
 }
 
-// Parse Qwen3.6's XML-flavored tool-call body:
-//   <function=NAME>
-//   <parameter=KEY1>
-//   VALUE1
-//   </parameter>
-//   ...
-//   </function>
-// Strings round-trip as strings; bare numerics get coerced to JSON numbers.
+// Parses Qwen3.6's XML-flavored tool-call body (<function=NAME><parameter=KEY>VALUE</parameter>...):
+// strings round-trip as strings, bare numerics coerce to JSON numbers.
 bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     size_t fn = body.find("<function=");
     if (fn == std::string::npos)
@@ -229,11 +212,10 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
 
     json args = json::object();
     size_t pos = fn_end + 1;
-    // Newline-anchored close tags first — the constrained-decode grammar
-    // (schema_constrain.cu XML phases) only recognizes "\n</parameter>" /
-    // "\n</function>" as delimiters, so a raw value may legally CONTAIN a
-    // bare close tag (code writing about tool calls). The unanchored find is
-    // kept as a fallback for sloppy unconstrained output.
+    // Tries newline-anchored close tags first: the constrained-decode grammar
+    // (schema_constrain.cu) only recognizes "\n</parameter>"/"\n</function>" as delimiters, so a raw
+    // value may legally contain a bare close tag (e.g. code). Unanchored find is the fallback for
+    // sloppy unconstrained output.
     size_t fn_close = body.find("\n</function>", pos);
     if (fn_close == std::string::npos)
         fn_close = body.find("</function>", pos);
@@ -336,10 +318,8 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
         if (bs != std::string::npos && be != std::string::npos)
             body = body.substr(bs, be - bs + 1);
 
-        // Decode the body through the shared streaming body-parser — classic
-        // ChatML JSON ({"name":..., "arguments":...}) then Qwen3.6's XML-styled
-        // <function=...><parameter=...>... fallback — so the streaming and
-        // non-streaming paths cannot drift. id is assigned only on success.
+        // Decodes the body through the shared streaming body-parser (ChatML JSON, then Qwen3.6 XML
+        // fallback) so the streaming and non-streaming tool-call paths cannot drift. id set only on success.
         ParsedToolCall tc;
         if (parse_stream_tool_body(body, /*gemma_body=*/false, /*fn_name=*/"", tc)) {
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
@@ -374,13 +354,10 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
 
     size_t first_tag = text.find("<function=");
     if (first_tag == std::string::npos) {
-        // Llama 3.2 emits a bare JSON object — {"name": F, "parameters": {...}}
-        // — where 3.1 used the <function=F> envelope above. Without this the
-        // call is handed back as `content` and an agent never sees a tool call,
-        // even though the model and the constrained grammar did their job.
-        // Deliberately strict: an object with a non-empty string `name` and an
-        // object `parameters`/`arguments`, nothing else, so a plain JSON answer
-        // is not mistaken for a call.
+        // Llama 3.2 emits a bare JSON object ({"name":F,"parameters":{...}}) instead of 3.1's
+        // <function=F> envelope; without recognizing it the call reached the caller as plain `content`.
+        // Deliberately strict (non-empty string name + object parameters/arguments, nothing else) so a
+        // plain JSON answer is never mistaken for a call.
         std::string trimmed = text;
         auto b = trimmed.find_first_not_of("\n\r\t ");
         auto e = trimmed.find_last_not_of("\n\r\t ");
@@ -389,10 +366,9 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
         trimmed = trimmed.substr(b, e - b + 1);
         if (trimmed.front() != '{')
             return {text, {}};
-        // Take the FIRST balanced object: a small model asked for one call can
-        // emit several, separated by "; ", and parsing the whole string then
-        // fails outright (Llama-3.2-3B does this with a two-property schema).
-        // Brace counting is string-aware so a '}' inside a value doesn't end it.
+        // Takes the FIRST balanced JSON object: a small model asked for one call can emit several
+        // separated by "; " (Llama-3.2-3B does this), and parsing the whole string then fails outright.
+        // Brace counting is string-aware so a '}' inside a value doesn't end the object early.
         size_t depth = 0, end_obj = std::string::npos;
         bool in_str = false, esc = false;
         for (size_t i = 0; i < trimmed.size(); i++) {
@@ -495,10 +471,9 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_harmony(
     for (auto& tc : segs.tool_calls) {
         ParsedToolCall p;
         p.name = std::move(tc.name);
-        // The body is the arguments object verbatim. Keep it as text rather
-        // than re-serialising: a re-dump would silently normalise whatever the
-        // model produced, and a body that is not valid JSON is the caller's to
-        // see. validate_tool_call() checks it against the schema afterwards.
+        // Keeps the tool-call body as text verbatim rather than re-serializing: a re-dump would silently
+        // normalize whatever the model produced, and invalid JSON is the caller's to see.
+        // validate_tool_call() checks it against the schema afterward.
         p.arguments = std::move(tc.arguments);
         p.id = "call_" + std::to_string(next_tool_call_id.fetch_add(1));
         calls.push_back(std::move(p));
@@ -568,11 +543,9 @@ ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family
     }
 
     if (family == imp::ChatTemplateFamily::HARMONY) {
-        // The open marker is a channel header addressed to a function:
-        //   <|channel|>commentary to=functions.NAME <|constrain|>json<|message|>
-        // The name is in the header, so the body is the bare arguments object -
-        // the same shape the Llama3 path produces, and parse_stream_tool_body
-        // already handles it via fn_name.
+        // Harmony's open marker is a channel header addressed to a function
+        // (<|channel|>commentary to=functions.NAME ...<|message|>); the name is in the header, so the
+        // body is the bare arguments object - the same shape parse_stream_tool_body handles for Llama3.
         constexpr const char* kTo = "to=functions.";
         constexpr size_t kToLen = 13;
         const size_t to_pos = buf.find(kTo);
@@ -784,10 +757,8 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
 // Tool-call argument validation (self-contained; no engine constraint code).
 // ---------------------------------------------------------------------------
 
-// Does a parsed JSON value match a JSON-schema "type" string? Only the
-// top-level scalar/container kinds are checked — enough to catch the common
-// hallucination failure modes (string where a number is required, missing
-// object, etc.) without reimplementing a full validator.
+// json_type_matches: checks only top-level scalar/container "type" kinds - enough to catch
+// common hallucinations (string where a number is required, missing object) without a full validator.
 static bool json_type_matches(const json& v, const std::string& type) {
     if (type == "string")
         return v.is_string();
@@ -873,10 +844,9 @@ void validate_tool_call(ParsedToolCall& tc, const json& tools) {
 }
 
 std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg) {
-    // Tool responses arrive either as a plain string (OpenAI canonical) or as
-    // a structured JSON object/array (some clients pass through tool output
-    // verbatim). `msg.value("content", "")` silently returns "" for the
-    // non-string case, dropping the entire payload — serialise it instead.
+    // Tool responses arrive as either a plain string (OpenAI canonical) or structured JSON;
+    // msg.value("content","") silently drops the whole payload for the non-string case - serialize it
+    // instead.
     std::string content;
     if (msg.contains("content") && !msg["content"].is_null()) {
         const auto& c = msg["content"];
@@ -887,21 +857,15 @@ std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg
         return content;
     }
     if (family == imp::ChatTemplateFamily::GEMMA) {
-        // Gemma native format. The chat-template's role=tool branch is reachable
-        // only via forward-scan from a preceding assistant-with-tool_calls
-        // message; standalone tool-role messages get skipped (template
-        // line ~215). Caller in handlers.cpp must therefore APPEND this
-        // string to the previous assistant ChatMessage's content rather
-        // than push a separate ChatMessage.
+        // Gemma's chat template reaches the role=tool branch only via forward-scan from a preceding
+        // assistant-with-tool_calls message (standalone tool messages are skipped, template line ~215):
+        // the caller must APPEND this string to that assistant message's content, not push a new one.
         std::string name = msg.value("name", "tool");
         return "<|tool_response>response:" + name + "{value:" + std::string(kGemmaQuote) + content +
                kGemmaQuote + "}<tool_response|>";
     }
-    // ChatML (Qwen3, Qwen3.6): the chat template wraps role=tool messages
-    // with `<tool_response>` markers itself (see tool branch in
-    // chat_template.jinja). Returning a pre-wrapped string here would nest
-    // the markers (`<tool_response><tool_response>...</tool_response></tool_response>`)
-    // and the model fails to recognise the result — silently degenerates to
-    // its training prior (e.g. claiming the search target doesn't exist).
+    // ChatML (Qwen3/Qwen3.6) templates wrap role=tool messages with <tool_response> themselves:
+    // returning an already-wrapped string here would nest the markers and the model fails to
+    // recognize the result, silently degenerating to its training prior.
     return content;
 }

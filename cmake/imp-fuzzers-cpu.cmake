@@ -1,9 +1,6 @@
-# CPU-only libFuzzer build: the parser targets and the four translation units
-# they need, no CUDA language, no dependency fetched.
-#
-# The full build (IMP_FUZZERS=ON at the end of CMakeLists.txt) links every
-# target against imp and adds the file-format and tool-stream targets, which
-# need the loader and httplib. Commands: fuzz/README.md.
+# CPU-only libFuzzer build: parser targets + the 4 TUs they need, no CUDA language, no deps fetched.
+# Full build (IMP_FUZZERS=ON) links against imp and adds file-format/tool-stream targets (loader,
+# httplib). Commands: fuzz/README.md.
 
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "IMP_FUZZERS_CPU_ONLY=ON needs clang (-fsanitize=fuzzer); "

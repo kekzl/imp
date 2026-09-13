@@ -1,54 +1,10 @@
 #!/usr/bin/env bash
-# scripts/check-release.sh — pre-release sanity gate.
-#
-# Runs the cheap checks that should always pass on a publishable
-# tree: doc links, secrets/path leaks, no accidentally tracked
-# binaries, then defers to `make verify-fast` for tests + perf + smoke,
-# to `make test-server` for the HTTP surface, and to `make test-spec-fidelity`
-# for the captured speculative verify chunk. All three rebuild the image first
-# (their `build` prerequisite), so all three measure the tree in front of you.
-#
-# The four model-backed stages are needed and none substitutes for another:
-# verify-fast measures kernels and throughput, test-server is the ONLY place
-# handlers.cpp and batching_engine run end to end (Makefile, test-server).
-# A defect that only shows over HTTP passes verify-fast untouched — one did:
-# `response_format: json_schema` returned invalid JSON for months and this gate
-# reported OK every time, because it never asked the server anything.
-# test-spec-fidelity is the third such blind spot: it asserts a cached verify-
-# chunk graph still reproduces an eager forward of the same state, which nothing
-# else runs — the case skips inside every batched lane on a 32 GiB card because
-# the checkpoint plus a second forward does not fit behind another model
-# (measured: 15769 MiB free, needs ~26000), so without its own stage here it is
-# a gate nobody runs.
-#
-# bench-competitive is the fourth, and it is the only one that asks a question
-# about a COMPETITOR. GOAL.md makes "a hero regresses against a competitor" a
-# release blocker, and until 2026-08-21 that blocker was defined over seven
-# heroes and observed on two: perf_baseline.json pins Qwen3-8B Q8_0 and
-# perf_baseline_north_star.json pins Qwen3-14B Q6_K, and nothing measured the
-# other five. Gemma-4 sat 5.3% down for six weeks and no gate could have said
-# so, because no gate looked (DEBT_LEDGER section (h)). The other three stages
-# cannot cover this: they compare the tree against ITSELF, and a lead is a
-# statement about someone else's build. It lives at release scope rather than in
-# verify-fast because that is the scope GOAL.md defines the blocker at, and
-# because it costs a full sweep.
-#
-# Budget accordingly: stage 9 runs six models through three arms each and adds
-# roughly 50 minutes to this script. SKIP_VERIFY=1 skips it with the other
-# three, so the `Release hygiene` CI job is unaffected.
-#
-# SKIP_VERIFY=1 skips ALL FOUR. The summary then refuses the words "all
-# gates passed" and says what it actually checked, because a run that put no
-# model in front of the GPU is a statement about the tree, not a release
-# verdict — the rule #1474 put into scripts/verify.sh, for the same reason.
-#
-# It still exits 0 in that mode, deliberately: the `Release hygiene` CI job
-# runs exactly this way (ci.yml, SKIP_VERIFY: "1") because the runner has no
-# GPU, and a job that can never be green teaches people to ignore it. The
-# distinction is carried by the summary line, which is what a human reads
-# before tagging — not by an exit code that would only break CI.
-#
-# Exit code 0 if everything passes; non-zero otherwise.
+# Pre-release sanity gate: doc-link/secret/tracked-binary checks, then defers to make
+# verify-fast (tests+perf+smoke), make test-server (HTTP surface), make test-spec-fidelity
+# (captured verify chunk), make bench-competitive (vs a competitor, GOAL.md release bar 2).
+# SKIP_VERIFY=1 skips all four; the summary then reports what actually ran instead of "all
+# gates passed" (the Release hygiene CI job runs this way, no GPU there). Exit 0 always: the
+# summary line, not the exit code, is what a human reads before tagging.
 
 set -euo pipefail
 
@@ -72,11 +28,8 @@ fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 # Every (./*.md or docs/*.md) link of the form ](path) — where path looks
 # like a relative file — must resolve to a tracked file.
 section "doc links"
-# Resolve each link against the file that CONTAINS it, which is the only
-# correct answer. The previous version deduplicated targets globally and then
-# guessed a prefix from a fixed list (repo root, docs/, docs/audit/); adding
-# docs/internals/ broke every sibling link inside it, and the next new
-# subdirectory would have broken again.
+# Resolve each markdown link against the file that CONTAINS it (the only correct answer);
+# do not dedupe targets globally and guess a prefix from a fixed list.
 BROKEN=0
 while IFS= read -r docfile; do
     [ -z "$docfile" ] && continue
@@ -91,12 +44,8 @@ done < <(git ls-files -- 'README.md' 'CONTRIBUTING.md' 'CHANGELOG.md' 'docs/**/*
 [ "$BROKEN" -eq 0 ] && pass "all internal doc links resolve" \
                    || fail "$BROKEN broken internal doc link(s)"
 
-# ------------------------------------------------- 1b. doc pointers in code
-# A "see docs/<name>.md" in a comment is a promise the file is there. Sixteen
-# design memos were deleted in doc-consolidation PRs (#183, #273, #441) and the
-# ~38 pointers to them stayed behind in kernel comments, so following one led
-# nowhere for two months. Section 1 covers markdown links; this covers code and
-# scripts. Allowlisted: paths a tool WRITES rather than reads.
+# A "see docs/<name>.md" pointer in a comment or script is a promise the file exists;
+# checked separately from markdown links. Allowlisted: paths a tool WRITES rather than reads.
 section "doc pointers in code"
 DOC_ALLOW="docs/gemma4_layer_diff.md"   # generated by tools/analysis/layer_diff.py --out-md
 DOCREFS=$(git ls-files -- '*.sh' '*.py' '*.cpp' '*.cu' '*.h' '*.hpp' '*.toml' '*.cmake' 'CMakeLists.txt' \
@@ -112,17 +61,8 @@ while IFS= read -r ref; do
     fi
 done <<< "$DOCREFS"
 
-# Same promise, everything the `docs/` pattern above does not reach: bare names
-# (`TEST_AUDIT`) and paths under any other prefix (the retired `review/` tree).
-# 25 TEST_AUDIT pointers across 27 files survived the deletion of both copies of
-# that file, docs/ in #805 and tests/ in #946, for months. That is the exact
-# incident this section's header describes, slipping through this section
-# because the pattern demanded a prefix the pointer did not have.
-#
-# Resolved by BASENAME, not by path, because that is what a reader following the
-# pointer would search for: it passes as long as some tracked file carries the
-# name, wherever it now lives. The `docs/` scan above stays strict on the full
-# path on purpose, so a doc that MOVED still fails there.
+# Covers bare names (e.g. TEST_AUDIT) and paths outside the docs/ prefix, resolved by BASENAME
+# so a doc that only moved still passes. The docs/ scan above stays strict on the full path.
 BARE_ALLOW="MODEL_VALIDATION_REPORT.md"   # written by scripts/validate_safetensors.py, not read
 # Named in comments but living in the agent memory store (outside this repo), so
 # no repo gate can resolve them. Listed rather than deleted: they are the
@@ -137,18 +77,10 @@ BARE_ALLOW="$BARE_ALLOW gemma4_working_2026_04_14.md"
 BARE_ALLOW="$BARE_ALLOW nvfp4_long_context_regression_2026_04_28.md"
 BARE_ALLOW="$BARE_ALLOW sass_audit_120a_no_tcgen05_2026_05_04.md"
 TRACKED_BASENAMES=$(git ls-files | sed 's#.*/##' | sort -u)
-# A URL is matched AS AN ALTERNATIVE in the same -o pass, then dropped. Filtering
-# the extracted token instead does not work: inside an http link the token
-# starts after the double slash, carries no scheme of its own, and gets reported
-# as a dead local file. Matching the URL first consumes it, because grep takes
-# the leftmost match and only the URL branch can start at the scheme.
-# (Writing a concrete example here is what proved it: the gate reads its own
-# source, so a sample link in this comment was flagged twice.)
-#
-# Stripping URLs with a sed pipe does not work either: it merges every file into
-# ONE stream, and tests/test_sse_stream_utils.cpp is binary, so grep discards the
-# whole stream and the scan silently finds nothing. -a keeps that file readable
-# and the per-file grep keeps one bad file from silencing the rest.
+# A URL is matched as an alternative in the same grep pass, then dropped: filtering the
+# extracted token separately fails because a URL's token has no scheme and reads as a dead file.
+# Per-file grep, not a sed-merged stream: test_sse_stream_utils.cpp is binary and would
+# silence the whole scan under -a.
 BAREREFS=$(git ls-files -- '*.sh' '*.py' '*.cpp' '*.cu' '*.h' '*.hpp' '*.toml' '*.cmake' 'CMakeLists.txt' \
            | xargs grep -ahoE 'https?://[^[:space:])]*|[A-Za-z0-9_./-]+\.md\b' 2>/dev/null \
            | grep -v '://' \
@@ -158,13 +90,9 @@ while IFS= read -r ref; do
     [ -z "$ref" ] && continue
     case " $BARE_ALLOW " in *" $ref "*) continue ;; esac
     BARECHECKED=$((BARECHECKED+1))
-    # Herestring, NOT `printf ... | grep -q`. grep -q exits at the first match and
-    # closes the pipe; printf then dies of EPIPE, and under `set -o pipefail` that
-    # makes the pipeline non-zero even though grep FOUND the name. `! pipeline` is
-    # then true and an existing file is reported dead. It is a race, so it fires
-    # only when the match comes early enough for grep to leave before the last
-    # write: `AGENTS.md` once locally, `GOAL.md` in CI, both near the front of the
-    # sorted list. Three clean local runs are not evidence against it.
+    # Herestring, not `printf ... | grep -q`: grep -q exits at the first match, printf then dies
+    # of EPIPE, and set -o pipefail turns that into a false failure even though grep found the name.
+    # It is a race: fires only when the match comes early in the sorted list.
     if ! grep -qxF "$ref" <<< "$TRACKED_BASENAMES"; then
         echo "  dead pointer: $ref (no tracked file has this name)"
         DOCBROKEN=$((DOCBROKEN+1))
@@ -178,23 +106,16 @@ fi
 [ "$DOCBROKEN" -eq 0 ] && pass "every docs/*.md path and bare *.md name in code resolves ($BARECHECKED bare names checked)" \
                       || fail "$DOCBROKEN dead doc pointer(s) in code"
 
-# ---------------------------------------------------- 1c. settled-prior anchors
-# docs/audit/SETTLED.md is the ledger an audit reads BEFORE generating
-# hypotheses; each entry names the file that makes it settled. If that anchor
-# stops resolving, the entry is no longer a statement about this engine — it is
-# the next stale prior, which is exactly what cost the 2026-07-29 audit eight of
-# its thirteen hypotheses. Fail loudly so the entry gets re-opened rather than
-# silently repointed. Same shape as 1b, different corpus.
+# docs/audit/SETTLED.md is the ledger an audit reads before generating hypotheses; each entry
+# names the file that makes it settled. A dead anchor means the entry is a stale prior, not a
+# true statement about the engine. Same shape as 1b, different corpus.
 section "settled-prior anchors"
 if [ ! -e docs/audit/SETTLED.md ]; then
     fail "docs/audit/SETTLED.md is missing — the audit priors ledger is load-bearing"
 else
-    # The ledger also RECORDS removals, so a handful of the paths it names are
-    # deliberately gone. Listing them is a two-way ratchet, the same mechanism as
-    # tools/alloc_allowlist.txt: absent is expected, and a listed path that comes
-    # BACK is a failure too, because then the entry describing its removal is
-    # false. Do not use this to silence an anchor that merely moved — that is the
-    # case the gate exists for.
+    # The ledger also records deliberate removals (two-way ratchet, same as tools/alloc_allowlist.txt):
+    # absent is expected, and a listed path coming BACK is also a failure.
+    # Not for anchors that merely moved; that's what the gate above catches.
     SETTLED_REMOVED="src/compute/gemv_ggml_compat.h src/compute/gemv_ggml_compat.cu
                      src/core/threading.h src/core/threading.cpp"
     ANCHORS=$(grep -ohE '\b(src|tests|tools|scripts|docs|include|cmake)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+\b' \
@@ -218,11 +139,9 @@ else
             ANCHORBROKEN=$((ANCHORBROKEN+1))
         fi
     done <<< "$ANCHORS"
-    # Floor, because "0 anchors, all resolving" is a PASS that checked nothing —
-    # the same shape as a --gtest_filter matching no tests and reporting PASSED,
-    # or the `gpu` ctest label that is defined and never runs. The ledger had 49
-    # anchors when this was written; 20 catches a gutted file without tripping on
-    # ordinary edits.
+    # Floor guards "0 anchors, all resolving" passing vacuously (same shape as an empty gtest_filter
+    # reporting PASSED). Ledger had 49 anchors when written; 20 catches a gutted file without
+    # tripping on ordinary edits.
     ANCHOR_FLOOR=20
     if [ "$ANCHORN" -lt "$ANCHOR_FLOOR" ]; then
         fail "only $ANCHORN anchors in docs/audit/SETTLED.md (expected >= $ANCHOR_FLOOR) — ledger gutted or the extraction broke"
@@ -233,46 +152,12 @@ else
     fi
 fi
 
-# ------------------------------------------------ 1d. finding-status coherence
-# 1c checks that the FILES the ledger names still exist. It cannot check that
-# the ledger's CLAIMS are still true, and that is the failure mode that has now
-# hit three times, always in the same direction — a finding gets fixed and the
-# ledger keeps listing it as open:
-#   F-6  closed before SETTLED.md ever listed it as open (the file says so itself)
-#   F-15 fixed in #1209; S-10 read "still open" for two days
-#   F-10 fixed in #1227; section G read "Open: NOT settled" for a day
-# A stale *open* entry is strictly worse than a stale closed one: it sends the
-# next audit pass to work that is already done, which is the exact cost this
-# ledger exists to prevent (eight of thirteen hypotheses in the 07-29 pass).
-#
-# The report is the authority on status: every finding there carries one status
-# line. This cross-checks it against the ledger, both ways.
-#   * every F-nn headline must carry a status mark  — no mark is how F-10, F-12
-#     and F-24 sat statusless for a day, which is what let G go stale unnoticed
-#   * ✅ / ⛔ mean resolved; ⚠️ means still open
-#   * the set the report calls open must equal the set the ledger files under an
-#     "Open" heading — a fixed finding left under "Open", or an open one missing
-#     from the ledger entirely, both fail
-#
-# Note honestly: with 25/25 resolved the set comparison currently compares two
-# empty sets. It is a ratchet for the next campaign, not a check that is doing
-# work today. The per-finding status-mark check IS doing work today — it runs
-# over all 25 — and the floor below is what stops the whole section degrading
-# into a vacuous pass if the extraction ever silently stops matching.
-#
-# Known and deliberate: the ledger side collects EVERY F-nn mentioned under an
-# "Open" heading, prose included, not just the entry headers. Mutation-testing
-# this section surfaced it — renaming G back to "Open: NOT settled" reported
-# eight findings because the section's preamble names F-6 and F-15 while
-# explaining how they went stale. Tightening it to entry headers only would
-# make the check miss a finding discussed but never given its own bullet, which
-# is the likelier drift. A false positive here prints both sets and costs one
-# read; a false negative costs the next audit pass a day.
-#
-# Mutation-validated 2026-08-05, all four fail as intended: strip a status mark
-# (F-21) -> statusless; mark F-8 ⚠️ with no ledger entry -> sets disagree; rename
-# G back to "Open: NOT settled" -> sets disagree; rename the F-nn headlines ->
-# floor trips at 0.
+# Cross-checks the audit report's finding-status marks against SETTLED.md's Open-heading set,
+# both directions: every F-nn headline must carry a status mark (checkmark/x resolved, warning
+# open), and the report's open set must equal the ledger's.
+# A stale OPEN entry is worse than stale closed: it sends the next audit to redo finished work.
+# Set-comparison is a ratchet (currently all resolved = two empty sets); the per-finding
+# status-mark check runs over every finding and does real work today.
 section "finding-status coherence"
 ARCH_REPORT=docs/audit/AUDIT_ARCH_2026_07_29.md
 if [ ! -e "$ARCH_REPORT" ] || [ ! -e docs/audit/SETTLED.md ]; then
@@ -362,11 +247,8 @@ if [ -f LICENSE ] && grep -q "MIT" LICENSE && grep -q "MIT" README.md; then
 else
     fail "LICENSE missing or README license claim mismatched"
 fi
-# Apache-2.0 code (src/compute/nvfp4_quant_hw.cu, adapted from SageAttention) is
-# in every distribution, so section 4(a) of that licence makes its text part of
-# the artefact. Until 2026-09-05 nothing in the tree carried it and the image
-# label said MIT (AUDIT_arch_2026 H-7). Four-way pin: the file, its content,
-# the OCI label, the README pointer.
+# nvfp4_quant_hw.cu (Apache-2.0, adapted from SageAttention) requires its license text in
+# every distribution (AUDIT_arch_2026 H-7). Four-way pin: file, content, OCI label, README pointer.
 if [ -f THIRD_PARTY_LICENSES.md ] && grep -q "Apache License" THIRD_PARTY_LICENSES.md \
    && grep -q "SageAttention" THIRD_PARTY_LICENSES.md \
    && grep -q 'image.licenses="MIT AND Apache-2.0"' Dockerfile \
@@ -377,12 +259,8 @@ else
     fail "THIRD_PARTY_LICENSES.md missing or incomplete, or the Dockerfile label / COPY / README pointer do not name it"
 fi
 
-# --------------------------------------------------- 5b. version consistency
-# The version lives in three places that have to agree, and nothing pinned
-# them: CMakeLists.txt is the source of truth, CHANGELOG.md must carry a
-# released section for it, and docs/BENCHMARKS.md names the release its
-# tabulated numbers were taken on. Bumping one and forgetting the others is a
-# documented red flag in the shipping playbook — this makes it a failure.
+# Version must agree in three places: CMakeLists.txt (source of truth), CHANGELOG.md (a
+# released section for it), docs/BENCHMARKS.md (the release its tabulated numbers were taken on).
 section "version consistency"
 CM_VER=$(sed -nE 's/^project\(imp .*VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' CMakeLists.txt | head -1)
 CL_VER=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -1 | tr -d '#[] ')
@@ -395,14 +273,10 @@ else
     fail "version drift — CMakeLists '$CM_VER', CHANGELOG '${CL_VER:-none}', BENCHMARKS '${BM_VER:-none}'"
 fi
 
-# ------------------------------------------------ 5a. roadmap citations
-# Since 2026-08-26 the checker covers every LIVING doc (roadmap.md, docs/*.md,
-# docs/internals/*.md, the root docs) — records under archive/, plans/ and
-# audit/ stay excluded (their line numbers describe the commit they document).
-# It gates the two mechanical drift classes: a file:line citation past EOF,
-# and a bare docs/*.md name that was renamed (not a markdown link, so the
-# link checker never sees it). Judgement calls stay human. The same gate runs
-# in the pre-commit/pre-push hooks and the Build job (`citations` selection).
+# Covers every living doc (roadmap.md, docs/*.md, docs/internals/*.md, root docs); archive/,
+# plans/, audit/ excluded (their line numbers describe the commit they document).
+# Gates a file:line citation past EOF and a renamed bare docs/*.md name. Same gate runs in the
+# pre-commit/pre-push hooks and the Build job (citations selection).
 section "roadmap citations"
 if python3 scripts/check_doc_citations.py . >/tmp/imp_check_citations.log 2>&1; then
     pass "living-doc citations resolve"
@@ -411,18 +285,12 @@ else
     fail "a living doc cites files or lines that no longer exist"
 fi
 
-# ------------------------------------------- 5b. changelog section hygiene
-# Entries get prepended to [Unreleased] one PR at a time, and prepending a
-# "### Changed" block in front of an existing one produces a section with the
-# same heading twice. Keep-a-Changelog readers (and the release cut, which
-# renames the whole block) then silently carry the duplicate into a tag.
-# Mechanical, so gate it rather than rely on noticing.
+# Entries prepend to [Unreleased] one PR at a time; prepending a duplicate "### Changed"
+# heading produces two sections with the same name, silently carried into the release tag.
 section "changelog section hygiene"
 UNREL=$(awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)
-# `|| true`: right after a release cut [Unreleased] is empty by design, grep
-# then exits 1, and under `set -euo pipefail` that aborted the whole script —
-# silently, with no FAIL line, before `make verify-fast` ever ran. v0.25.0 was
-# cut with this check dying at exactly this point.
+# `|| true`: right after a release cut [Unreleased] is empty, grep exits 1, and
+# set -euo pipefail would abort the script silently before make verify-fast ever ran.
 DUP=$(printf '%s\n' "$UNREL" | grep -E '^### ' | sort | uniq -d || true)
 if [ -n "$DUP" ]; then
     printf '%s\n' "$DUP" | sed 's/^/  duplicate heading: /'
@@ -449,11 +317,8 @@ else
     fi
 fi
 
-# ----------------------------------------------- 7. defer to make test-server
-# The HTTP surface, which verify-fast never touches. Its batteries are the only
-# thing in this repository that drives handlers.cpp and batching_engine against
-# a live model, so a release that skips it ships whatever the wire protocol has
-# broken since the last manual run.
+# The HTTP surface, untouched by verify-fast: the only battery driving handlers.cpp and
+# batching_engine against a live model end to end.
 section "make test-server"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
     echo "  (skipped via SKIP_VERIFY=1)"
@@ -470,11 +335,9 @@ else
     fi
 fi
 
-# ------------------------------------------ 8. defer to make test-spec-fidelity
-# The captured speculative verify chunk, which neither stage above touches.
-# It runs in its own container on purpose (Makefile, test-spec-fidelity): the
-# checkpoint plus the comparison's extra forward do not fit behind another
-# model, so in a batched lane the case skips and the lane still reports green.
+# The captured speculative verify chunk, untouched by the two stages above. Runs in its own
+# container (Makefile test-spec-fidelity): checkpoint + comparison forward don't fit behind
+# another model, so the case skips silently in a batched lane without its own stage here.
 section "make test-spec-fidelity"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
     echo "  (skipped via SKIP_VERIFY=1)"
@@ -498,10 +361,8 @@ else
     fi
 fi
 
-# --------------------------------------------- 9. defer to make bench-competitive
-# GOAL.md release bar 2: decode must lead llama.cpp by >= 5% on every hero. The
-# competitor image is pinned by digest in scripts/bench_competitive.sh, so this
-# cannot silently drift onto a newer build the way the 2026-07-12 sweep did.
+# GOAL.md release bar 2: decode must lead llama.cpp by >=5% on every hero. Competitor image
+# pinned by digest in scripts/bench_competitive.sh, so this can't silently drift onto a newer build.
 section "make bench-competitive (release bar 2)"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
     echo "  (skipped via SKIP_VERIFY=1)"

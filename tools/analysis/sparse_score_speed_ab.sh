@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Throughput A/B for the sparse page score, same image and model as the NIAH
-# run. Arms alternate across rounds because the host drifts over an evening.
-# The metadata pass changes too (Welford instead of min/max), and a ~77k-token
-# prompt is prefill-dominated, so this shape prices both passes.
-#
-# Usage: bash scratch/speed_score_ab.sh <budget_tokens> <rounds> <gen>
+# Throughput A/B for the sparse page score, same image/model as the NIAH run. Arms alternate
+# across rounds (host drifts over an evening); a ~77k-token prompt is prefill-dominated so this
+# shape prices both the metadata pass (Welford vs min/max) and the score.
+# Usage: bash scratch/speed_score_ab.sh <budget_tokens> <rounds> <gen>.
 set -u
 
 BUDGET="${1:-4096}"

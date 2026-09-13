@@ -1,27 +1,12 @@
-// tools/analysis/vmm_wsl2_probe.cu
-// WSL2/WDDM viability spike for the CUDA virtual-memory-management APIs
-// (docs/internals/MEMORY.md A3.1 — the hard gate on A7 step 7, the growable
-// VMM backend for the KV block pool).
-//
-// No imp dependencies. Build + run inside a CUDA container:
-//   docker run --rm --gpus all -v $PWD:/w -w /w imp:builder \
-//     bash -lc 'nvcc -O2 -arch=sm_120a -o /tmp/vmm_probe \
-//                 tools/analysis/vmm_wsl2_probe.cu -lcuda && /tmp/vmm_probe'
-//
-// Establishes, each with printed evidence:
-//   [1] cuMemAddressReserve of a large VA range costs no physical memory.
-//   [2] cuMemCreate + cuMemMap + cuMemSetAccess in 256 MiB granules works and
-//       cudaMemGetInfo reflects exactly the committed bytes.
-//   [3] The base address is INVARIANT across a grow/shrink cycle (I3).
-//   [4] Data in one committed region survives decommit+recommit of another.
-//   [5] cuMemGetAllocationGranularity minimum + recommended on sm_120a.
-//   [6] Decommitted memory is actually returned (free VRAM goes back up), and
-//       which of cuMemUnmap / cuMemRelease is the call that returns it.
-//   [7] Bonus, because A3.1 names it explicitly: a CUDA-graph-captured kernel
-//       still reads correct data from a fixed VA after the pool grew underneath.
-//   [8] Bonus: per-op latency of commit/decommit (WDDM has a history of making
-//       driver-side mapping calls expensive).
-//
+// WSL2/WDDM viability spike for CUDA VMM APIs (docs/internals/MEMORY.md A3.1, the hard gate
+// on A7 step 7 for the growable KV block pool). No imp dependencies.
+// Build+run: docker run --rm --gpus all -v $PWD:/w -w /w imp:builder bash -lc
+// 'nvcc -O2 -arch=sm_120a -o /tmp/vmm_probe tools/analysis/vmm_wsl2_probe.cu -lcuda && /tmp/vmm_probe'.
+// Checks: VA reserve costs no physical memory; commit/map in 256MiB granules matches
+// cudaMemGetInfo; base address invariant across grow/shrink (I3); data survives
+// decommit+recommit of another region; allocation granularity on sm_120a; decommit actually
+// returns VRAM (which of Unmap/Release does it); a graph-captured kernel still reads correct
+// data after the pool grows; per-op commit/decommit latency.
 // Exit code 0 = GO, non-zero = number of failed checks.
 
 #include <cuda.h>
@@ -200,10 +185,9 @@ int main() {
     char name[256] = {0};
     cuDeviceGetName(name, sizeof(name), dev);
 
-    // The probe's own scratch is allocated BEFORE every baseline reading, so it
-    // cannot show up later as a phantom residual. (It does: an 8-byte cudaMalloc
-    // costs a full 2 MiB page, which is exactly the VMM granule — easy to
-    // misread as a VMM leak.)
+    // Probe's own scratch is allocated BEFORE every baseline reading so it can't show up later as
+    // a phantom residual: an 8-byte cudaMalloc costs a full 2 MiB page (the VMM granule), easy to
+    // misread as a VMM leak.
     unsigned long long* d_bad = nullptr;
     CUDA_TRY(cudaMalloc(&d_bad, sizeof(unsigned long long)));
 
@@ -464,10 +448,8 @@ int main() {
     }
     printf("\n");
 
-    // -----------------------------------------------------------------------
-    // [6] is decommitted memory actually returned to the OS?
-    //     Split the two halves: unmap alone vs unmap + release.
-    // -----------------------------------------------------------------------
+    // [6] Is decommitted memory actually returned to the OS? Splits the two halves: unmap alone
+    // vs unmap + release.
     printf("== [6] decommit returns physical memory (unmap vs release) ==\n");
     {
         // Fresh single chunk at a free slot so this measurement is isolated.

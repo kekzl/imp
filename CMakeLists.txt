@@ -20,10 +20,8 @@ endif()
 set(CMAKE_CUDA_STANDARD 23)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# CMake's NVIDIA-CUDA module (through 4.3.x) tops out at c++20 — it defines no
-# CUDA23 dialect flag, so `CMAKE_CUDA_STANDARD 23` fails with "CMake does not know
-# the flags to enable it". nvcc 13.3 does accept `-std=c++23`, so teach CMake the
-# flag directly. Drop this once the module ships a native CUDA23 mapping.
+# CMake (through 4.3.x) has no CUDA23 dialect flag; nvcc 13.3 accepts -std=c++23 directly.
+# Drop this once CMake ships a native CUDA23 mapping.
 if(NOT DEFINED CMAKE_CUDA23_STANDARD_COMPILE_OPTION)
   set(CMAKE_CUDA23_STANDARD_COMPILE_OPTION  "-std=c++23")
   set(CMAKE_CUDA23_EXTENSION_COMPILE_OPTION "-std=c++23")
@@ -46,28 +44,12 @@ target_compile_options(imp_warnings INTERFACE
 find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 
-# --- CUDA Architecture ---
-# Primary target: sm_120a (RTX 5090, RTX PRO 6000 — GB202).
-# 'a' suffix = architecture-specific (FP8 MMA .kind::f8f6f4, NVFP4 block-scaled
-# MMA, TMA warp-specialized grouped GEMM tactics).
-#
-# Fallback PTX: compute_120f (family-portable). JIT-compiles on load for GB203
-# (RTX 5080, 5070 Ti). Loses TMA-WS grouped GEMM tactics → CUTLASS NVFP4
-# fast-path on Mamba2 shapes is degraded. Set IMP_DISABLE_120F_FALLBACK=ON to
-# strip the PTX entry and shrink the fatbin.
-#
-# CMake < 3.31 doesn't parse the 'a'/'f' suffix in CMAKE_CUDA_ARCHITECTURES,
-# so we pass gencode directly.
+# Target sm_120a (RTX 5090/PRO 6000, GB202): FP8 f8f6f4 MMA, NVFP4 block MMA, TMA-WS GEMM.
+# Fallback PTX compute_120f JIT-compiles for GB203, loses TMA-WS grouped GEMM (NVFP4 degraded).
+# IMP_DISABLE_120F_FALLBACK=ON strips it. CMake<3.31 can't parse a/f suffix; gencode passed direct.
 option(IMP_DISABLE_120F_FALLBACK "Skip compute_120f PTX fallback (RTX 5090-only fatbin)" OFF)
-# Device link-time optimization (AUDIT_arch_2026 H-10). Every kernel TU is
-# compiled -rdc for the PDL device-side launches, which pays separable
-# compilation's cost with none of the recovery unless the device link runs
-# LTO. Measured 2026-09-08 on the RTX 5090, Qwen3-8B-Q8_0, imp:test vs an
-# LTO image, 5 alternating pairs: paired decode mean 0.00 % (+0.03 / -0.01 /
-# -0.61 / +0.03 / +0.56), paired prefill -0.41 % (4 of 5 negative), the
-# verify-fast gtest filter green on the LTO image. NEUTRAL: the hot kernels
-# do not cross TU boundaries, so there is nothing for the device link to
-# inline. Off; kept as the switch that records the trial.
+# AUDIT_arch_2026 H-10: device LTO (per-TU rdc) measured neutral; hot kernels don't cross
+# TU boundaries so there is nothing to inline. Off by default; kept as the switch that records it.
 option(IMP_DEVICE_LTO "Device link-time optimization: LTO IR (code=lto_120a) per TU, SASS produced at the device link" OFF)
 if(IMP_DEVICE_LTO)
     # nvcc refuses `-dlto` next to an explicit -gencode ("use code=lto_<arch>
@@ -99,9 +81,8 @@ option(IMP_BUILD_TESTS "Build tests" ON)
 option(IMP_BUILD_TOOLS "Build CLI and benchmark tools" ON)
 option(IMP_BUILD_BENCH "Build benchmarks" ON)
 option(IMP_BUILD_SERVER "Build imp-server (OpenAI-compatible HTTP server)" ON)
-# Link-time interposition on the CUDA allocation symbols, so acceptance
-# criterion 3 can be measured against EVERY device allocation rather than only
-# the ones routed through Backend (docs/internals/MEMORY.md A6, AUDIT B26).
+# Wraps cudaMalloc/cudaMallocAsync so acceptance criterion 3 covers every device allocation,
+# not only ones routed through Backend (docs/internals/MEMORY.md A6, AUDIT B26).
 # Off by default: --wrap belongs on a measurement build, not a shipping one.
 option(IMP_ALLOC_INTERPOSE "Wrap cudaMalloc/cudaMallocAsync to attribute steady-state allocations" OFF)
 set(IMP_WRAP_LINK_FLAGS "")
@@ -111,9 +92,8 @@ if(IMP_ALLOC_INTERPOSE)
     message(STATUS "Allocation interposition ENABLED (measurement build)")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
-# libFuzzer binaries, one per target in fuzz/ (#1620). Needs clang: g++ has no
-# -fsanitize=fuzzer. The same targets run without clang in the CPU lane via
-# tests/test_fuzz_corpus.cpp, which is what CI executes; this option is for the
+# libFuzzer binaries per fuzz/ target (#1620); needs clang, g++ has no -fsanitize=fuzzer.
+# CI runs the same targets via tests/test_fuzz_corpus.cpp (g++) for PR gating; this is for
 # long runs. See fuzz/README.md.
 option(IMP_FUZZERS "Build libFuzzer binaries from fuzz/ (clang only)" OFF)
 
@@ -652,12 +632,9 @@ if(IMP_BUILD_SERVER)
     endif()
 endif()
 
-# --- Tests ---
-# Tests are split into per-module binaries so a kernel change only relinks the
-# affected binary instead of one monolithic 60-file imp-tests target.
-# A wrapper shell script `imp-tests` is generated for backwards-compat with
-# Makefile, CI, and smoke_test.sh (forwards args to every binary in sequence;
-# gtest_filter mismatches return success, so only matching tests run).
+# Tests split into per-module binaries: a kernel change only relinks the affected binary.
+# Wrapper `imp-tests` forwards args to every binary in sequence (Makefile/CI/smoke_test.sh compat).
+# gtest_filter mismatch returns success, so only matching tests actually run.
 if(IMP_BUILD_TESTS)
     enable_testing()
     include(GoogleTest)
@@ -684,11 +661,9 @@ if(IMP_BUILD_TESTS)
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
         )
-        # NOTE: deliberately NOT gtest_discover_tests() — it would register every
-        # test individually IN ADDITION to the unit/gpu/perf label aggregates
-        # below, so a plain `ctest` (no label) ran the whole suite twice (R5/#580).
-        # The label aggregates are the single ctest registration; discovery would
-        # also require a GPU at configure-time (the binaries enumerate CUDA tests).
+        # Deliberately not gtest_discover_tests(): it would register every test individually in
+        # addition to the unit/gpu/perf label aggregates, so plain `ctest` ran the suite twice (#580).
+        # The label aggregates are the single ctest registration; discovery also needs a GPU at configure.
     endfunction()
 
     set_source_files_properties(
@@ -727,12 +702,9 @@ if(IMP_BUILD_TESTS)
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
         tests/test_mtp_auto.cpp
-        # Both of these define symbols the two tests above and args.cpp call,
-        # and neither pulls nlohmann or httplib. They lived in the
-        # IMP_BUILD_SERVER block until this change, which made test-core unlinkable
-        # in every -DIMP_BUILD_SERVER=OFF configuration - that is what the
-        # Sanitizers lane and `make asan` configure, so both had been failing
-        # to link since #1809 while `Build` stayed green.
+        # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull
+        # neither nlohmann nor httplib. Must build outside IMP_BUILD_SERVER so test-core still links
+        # under -DIMP_BUILD_SERVER=OFF (Sanitizers lane, make asan).
         tools/common/mtp_auto.cpp
         tools/common/args_common.cpp
         # apply_config_pins: the bench pins guard tests/perf_baseline.json's
@@ -767,12 +739,9 @@ if(IMP_BUILD_TESTS)
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp
-        # Fuzz targets driven over a committed corpus + a deterministic mutator
-        # (#1620), the same entry points libFuzzer drives. Unconditional so the
-        # sanitizer build (-DIMP_BUILD_SERVER=OFF) runs them too - which is the
-        # half that matters, since an out-of-bounds read is invisible without
-        # ASan. IMP_FUZZ_NO_ENTRY drops the LLVMFuzzerTestOneInput definitions
-        # so eight of them do not collide in one binary.
+        # Fuzz targets driven over committed corpus + deterministic mutator (#1620), same entry points
+        # libFuzzer drives. Unconditional so -DIMP_BUILD_SERVER=OFF (sanitizer build) runs them too.
+        # IMP_FUZZ_NO_ENTRY drops LLVMFuzzerTestOneInput so the eight targets don't collide in one binary.
         fuzz/fuzz_json_schema.cpp
         fuzz/fuzz_regex.cpp
         fuzz/fuzz_gbnf.cpp
@@ -789,10 +758,8 @@ if(IMP_BUILD_TESTS)
         # checkpoint are needed to pin the refusal.
         tests/test_expert_placement.cpp
         tests/test_nvfp4_expert_offload.cpp
-        # Memory subsystem L1 (docs/internals/MEMORY.md). FakeBackend is the
-        # substitution seam that keeps the whole allocator stack testable in the
-        # CPU lane; it is test scaffolding, so it is compiled here rather than
-        # shipped in the imp library.
+        # Memory subsystem L1 (docs/internals/MEMORY.md) test scaffolding: FakeBackend is the
+        # substitution seam keeping the allocator stack testable in the CPU lane; not shipped in imp.
         src/memory/fake_backend.cpp
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
@@ -844,10 +811,8 @@ if(IMP_BUILD_TESTS)
         # checkpoint (#1159), so it is compiled into the CPU lane directly.
         tools/imp-quantize/tensor_policy.cpp
         tests/test_quantize_policy.cpp
-        # Reading FP8 as a quantization source. Host-only on purpose, so the
-        # bit-level decode is checked by the CPU lane rather than by looking at
-        # a converted checkpoint, where a wrong exponent bias or block stride
-        # produces plausible numbers.
+        # FP8 quantization source read is host-only: bit-level decode is checked by the CPU lane,
+        # not by inspecting a converted checkpoint where a wrong exponent bias/stride looks plausible.
         tools/imp-quantize/fp8_source.cpp
         tests/test_quantize_fp8_source.cpp
         # The output-format rules. Every one of them is silent when wrong: a
@@ -855,10 +820,9 @@ if(IMP_BUILD_TESTS)
         # share a scale, a config.json with two quantization_config keys.
         tools/imp-quantize/checkpoint_out.cpp
         tests/test_quantize_checkpoint_out.cpp
-        # Which consumers share an activation, which producer absorbs 1/s, and
-        # whether that norm carries a unit offset. Wrong here is a checkpoint
-        # that loads and is a different model, so the table is a pure function
-        # and the CPU lane holds it.
+        # Table of which consumers share an activation, which producer absorbs 1/s, and whether a
+        # norm carries a unit offset: a pure function, so the CPU lane holds it. Wrong here means a
+        # checkpoint that loads but is a different model.
         tools/imp-quantize/awq_sites.cpp
         tests/test_awq_plan_sites.cpp
         # What the export cost, per tensor. The decode is checked against
@@ -875,10 +839,9 @@ if(IMP_BUILD_TESTS)
         tests/test_serving_metadata_layout.cpp
     )
     if(IMP_BUILD_SERVER)
-        # Anthropic /v1/messages transform tests reuse the server's
-        # self-contained anthropic.cpp (json-only dependencies).
-        # test_sse_stream_utils.cpp covers the SSE chunk envelopes +
-        # reasoning/channel splits in tools/imp-server/utils.cpp (issue #557).
+        # Anthropic /v1/messages transform tests reuse anthropic.cpp (json-only deps).
+        # test_sse_stream_utils.cpp covers SSE chunk envelopes + reasoning/channel splits in
+        # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
             tools/imp-server/anthropic.cpp
             tools/imp-server/responses.cpp
@@ -916,22 +879,13 @@ if(IMP_BUILD_TESTS)
             # the only lane CI runs.
             tools/imp-server/image_fetch.cpp
             tests/test_image_fetch.cpp
-            # Generative FSM battery for the schema-less json_object grammar.
-            # Lives in the CPU lane on purpose: the FSM is CUDA-free without
-            # init(), and every past grammar bug escaped CI because its tests
-            # need a GPU. It sits in THIS block rather than the unconditional
-            # list because both files use nlohmann as their oracle, and
-            # nlohmann is only fetched under IMP_BUILD_SERVER (:503). Listed
-            # unconditionally, test-core does not compile in any
-            # -DIMP_BUILD_SERVER=OFF configuration - which is what `make asan`
-            # configures, so the sanitizer target could not build its own
-            # binaries.
+            # json_object grammar FSM battery: CPU lane, FSM is CUDA-free without init().
+            # Listed unconditionally (not inside the IMP_BUILD_SERVER block) so -DIMP_BUILD_SERVER=OFF
+            # (make asan) still compiles test-core, even though both files use nlohmann as oracle.
             tests/test_json_constrain_property.cpp
             tests/test_schema_constrain_property.cpp
-            # Only this target needs the server sources: tool_call.h pulls in
-            # nlohmann. The other five are unconditional below, so `make asan`
-            # (-DIMP_BUILD_SERVER=OFF) still runs them - the first version put
-            # all six here and the sanitizer binary silently contained none.
+            # Only this target needs server sources (tool_call.h pulls nlohmann); the other five stay
+            # unconditional below so make asan (-DIMP_BUILD_SERVER=OFF) still runs them.
             fuzz/fuzz_tool_stream.cpp
             tests/test_base64.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
@@ -1034,10 +988,9 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
-        # The export round trip: quantize like the exporter, decode by the
-        # format's own rule, bound the error. Needs the real kernel, so it
-        # lives here rather than in the CPU lane; the fold's algebra is
-        # covered without a GPU by the AWQ calibration tests in test-core.
+        # Export round trip: quantize like the exporter, decode by the format's own rule, bound the
+        # error. Needs the real kernel (not the CPU lane); fold algebra is covered by the AWQ
+        # calibration tests in test-core.
         tests/test_quantize_nvfp4_roundtrip.cu
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/quant_report.cpp
@@ -1135,10 +1088,9 @@ if(IMP_BUILD_TESTS)
         # the same prompt, compared on the state slab rather than on tokens.
         tests/test_hybrid_restore_chain.cu
         tests/test_batch_invariance.cu
-        # Decode-graph buckets on a GDN hybrid: one captured graph per batch
-        # size, two different ways to reach the recurrent slot (captured scalar
-        # at n == 1, device slot table at n > 1), and nothing covered a
-        # capture+replay of bucket i against bucket 1 on a recurrent model.
+        # Decode-graph buckets on a GDN hybrid: one captured graph per batch size, two paths to the
+        # recurrent slot (captured scalar at n==1, device slot table at n>1). Covers capture+replay of
+        # bucket i against bucket 1 on a recurrent model.
         tests/test_gdn_graph_buckets.cu
         tests/test_determinism_e2e.cpp
         tests/test_deepstack_inject.cu
@@ -1157,30 +1109,14 @@ if(IMP_BUILD_TESTS)
         test-quant test-kv test-moe-gdn test-e2e
     )
 
-    # --- CTest label aggregates ---
-    # ctest -L unit  — CPU-only tests (no GPU required)
-    # ctest -L gpu   — GPU tests (require NVIDIA GPU)
-    # ctest -L perf  — Performance regression tests
-    #
-    # Source of truth for the unit/gpu split. The gtest filter only applies to
-    # test-e2e (which contains both stub-only unit tests and CUDA-backed E2E
-    # tests in the same binary). All other binaries are clean unit-or-GPU.
-    #
-    # The CPU and GPU tests are interleaved inside test_e2e.cpp / test_continuous_
-    # batching.cpp (e.g. StubModelTest has both CPU and GPU subtests, sharing one
-    # fixture), so they cannot be split into a separate binary without duplicating
-    # fixtures. Instead the split stays a filter, but `guard_e2e_lane_split` below
-    # asserts the filter still resolves to the exact expected CPU-only set — a
-    # rename can no longer silently shift a test into the wrong lane (R5/#580).
-    # NOTE: scripts/verify.sh carries a literal copy of this filter (container
-    # path has no build/ dir) — keep both in sync when changing it.
+    # ctest -L unit/gpu/perf: source of truth for the CPU/GPU test split.
+    # gtest filter (_unit_e2e_filter) applies only to test-e2e (mixed stub+CUDA E2E in one binary);
+    # guard_e2e_lane_split asserts it resolves to the expected CPU-only set. Keep verify.sh's copy in sync.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
-    # Each lane command writes a GTest JSON report; guard_unit_skips (below)
-    # fails on any skipped test in it. The unit lane has no skips: a test that
-    # needs a GPU or a model file lives in test-kv or in test-e2e outside the
-    # filter above. check_test_lanes.py counts macros and cannot see a skip
-    # (62 test-core cases sat here green without ever running, #1860).
+    # Each lane writes a GTest JSON report; guard_unit_skips fails on any skipped test in it.
+    # Unit lane has zero skips by design: GPU/model-dependent tests live in test-kv or test-e2e
+    # outside the filter.
     set(_gtest_reports "${CMAKE_CURRENT_BINARY_DIR}/gtest-reports")
     add_test(NAME unit_core       COMMAND test-core "--gtest_output=json:${_gtest_reports}/unit_core.json")
     add_test(NAME unit_text       COMMAND test-text "--gtest_output=json:${_gtest_reports}/unit_text.json")
@@ -1191,12 +1127,9 @@ if(IMP_BUILD_TESTS)
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_e2e_lane_split.sh
                 $<TARGET_FILE:test-e2e> "${_unit_e2e_filter}")
 
-    # The deterministic-mode suite is value-parameterised over model env vars
-    # (#1299), so its names carry the instantiation prefix and the model label.
-    # A stale `DetEvalE2ETest.*` filter matches nothing and gtest calls that
-    # PASSED — this asserts the filter `make test-e2e` uses still resolves, and
-    # still covers every model row. Listing tests runs no bodies, so it is a
-    # CPU-lane check. Keep the literal in sync with the Makefile's test-e2e.
+    # DetEvalE2ETest is value-parameterised over model env vars (#1299); names carry an
+    # instantiation prefix + model label. Asserts the `*DetEvalE2ETest*` filter still resolves and
+    # covers every model row (CPU-lane: listing tests runs no bodies). Keep in sync with test-e2e.
     set(_det_e2e_filter "*DetEvalE2ETest*")
     add_test(NAME guard_det_suite_filter
         COMMAND ${CMAKE_COMMAND} -E env
@@ -1210,10 +1143,8 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cancel_teardown.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
-    # #1586: the pre-push gate's filter is a string literal in verify.sh, and a
-    # pattern that matches nothing is a gtest success. Reads the filter out of
-    # verify.sh rather than keeping a copy; skips when imp-tests cannot run.
-    # imp-tests is a generated wrapper script, not a target, so it is a path.
+    # #1586: a gtest filter matching nothing is a gtest success. Reads the filter out of verify.sh
+    # (not a copy) and asserts it still matches; skips when imp-tests cannot run.
     add_test(NAME guard_verify_filter
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_verify_filter.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/imp-tests ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify.sh)
@@ -1225,10 +1156,8 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
-    # Every --gtest_filter literal in the Makefile must match a test in the
-    # binary the same line names (AUDIT_arch_2026 I-7). The Qwen3.8 parity line
-    # named test-text for a suite in test-e2e and ran "0 tests, PASSED" on every
-    # commit. Same fail-open shape as guard_verify_filter.
+    # AUDIT_arch_2026 I-7: every --gtest_filter literal in the Makefile must match a test in the
+    # binary the same line names. Same fail-open shape as guard_verify_filter.
     add_test(NAME guard_makefile_filters
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_makefile_filters.sh
                 ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/Makefile)
@@ -1240,24 +1169,15 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_lane_filter_copy.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
-    # The degeneration thresholds in scripts/degen_verdict.sh, exercised against
-    # known token streams. They had never been exercised at all: verify.sh read
-    # imp-cli's [tok=...] markers, imp-cli capped them at the first ten decode
-    # steps, and the gate judged those eleven and called them "the last 32
-    # tokens". The first run that could see a whole generation failed CORRECT
-    # output on two of the three thresholds. No GPU: the verdict is a function
-    # of the stream.
+    # Pins the degeneration thresholds in scripts/degen_verdict.sh against known token streams.
+    # No GPU: the verdict is a pure function of the stream.
     add_test(NAME guard_degen_thresholds
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_degen_thresholds.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
-    # Batch>1 speculation is gated on "is there a draft source" at two call
-    # sites (scheduler round-robin, #1003 pipeline yield). Both used to ask
-    # speculative.ngram, the key the measured MTP recipe sets to false, and a
-    # mutant that points either back survives the whole CPU lane: answering
-    # the question at runtime needs a GPU, a model and a batch. A grep, like
-    # guard_cancel_teardown; a script rather than a TEST body because the
-    # shipped binaries run without the tree.
+    # Batch>1 speculation gating at two call sites (scheduler round-robin, #1003 pipeline yield)
+    # must ask "is there a draft source", not speculative.ngram (the key the MTP recipe sets false).
+    # Source-reading script, not a gtest body: shipped binaries run without the tree.
     add_test(NAME guard_spec_rr_wiring
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_spec_rr_wiring.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
@@ -1292,11 +1212,8 @@ if(IMP_BUILD_TESTS)
     set_tests_properties(perf_compute perf_attention perf_quant perf_e2e
         PROPERTIES LABELS "perf")
 
-    # --- Convenience wrappers for environments without the build tree ---
-    # The Docker runtime image only carries the test binaries (no
-    # CTestTestfile.cmake), so `ctest -L unit` cannot be used there. These
-    # shell wrappers run the same partitions inside the runtime container.
-    # On a host build, prefer `ctest -L unit|gpu|perf` over the wrappers.
+    # Shell wrappers for the Docker runtime image (no CTestTestfile.cmake there), running the
+    # same partitions ctest -L would. On a host build prefer ctest -L unit|gpu|perf.
 
     # imp-tests: run all GTest binaries sequentially. Matches `ctest` (no label).
     file(WRITE ${CMAKE_BINARY_DIR}/imp-tests
@@ -1355,13 +1272,9 @@ if(IMP_BUILD_SERVER)
     install(TARGETS imp-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
-# ---- libFuzzer binaries (#1620) ----
-#
-# One binary per target, standard LLVMFuzzerTestOneInput entry points, so these
-# are also the shape OSS-Fuzz wants. clang only. The CPU lane runs the same
-# target functions through tests/test_fuzz_corpus.cpp with g++, which is what
-# gates a pull request; this is for the long runs. fuzz/README.md has the
-# commands.
+# One binary per target, standard LLVMFuzzerTestOneInput entry points (OSS-Fuzz shaped). clang
+# only. The CPU lane runs the same functions via tests/test_fuzz_corpus.cpp with g++, which
+# gates PRs; this is for long runs. Commands: fuzz/README.md.
 if(IMP_FUZZERS)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "IMP_FUZZERS=ON needs clang (-fsanitize=fuzzer); "

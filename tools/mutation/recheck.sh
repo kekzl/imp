@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # Targeted re-check for survivors whose would-be oracle was red in the baseline.
 #
-# The full `test-e2e` run loads three large models in one process; on WSL2 a
-# process never gets its peak VRAM back, so ~38 tests fail for capacity alone.
-# run.py correctly discounts those as pre-existing — but that also means those
-# tests cannot *kill* a mutant, so a "SURVIVED" verdict from that lane says
-# nothing. This re-runs one mutant against one small, isolated filter that is
-# green on the clean tree in a fresh process.
-#
 # Usage: recheck.sh <MID> <binary> <gtest_filter>
+#
+# test-e2e loads three large models in one process; on WSL2 a process never gets its peak VRAM
+# back, so ~38 tests fail for capacity alone and cannot kill a mutant there. This re-runs one
+# mutant against a small, isolated filter that is green on the clean tree in a fresh process.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 MID=$1 BIN=$2 FILTER=$3 REPEATS=${4:-1}

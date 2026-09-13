@@ -1,31 +1,17 @@
 #!/bin/bash
-# Stage 1 of the two-stage test gate (the other is CI, which runs the CPU-only
-# `ctest -L unit` lane — see .github/workflows/ci.yml).
-#
-# This pre-commit hook runs the GPU test suite locally, because CI has no GPU
-# runner: GPU correctness is gated on this machine or nowhere. It is not the
-# only local gate — the pre-push hook runs `verify-fast`, a filtered subset plus
-# the perf and smoke gates — but it is the only one that runs the FULL suite. It
-# fires only when staged changes touch buildable sources (src/, include/, tools/,
-# tests/, CMakeLists, *.cmake) — doc/config-only commits are not gated, and
-# neither are the .md and .py files that live inside those directories.
-#
-# Runs `make build` (skipped when imp:test already carries this tree, see
-# scripts/build_image.sh) and then the test modules the staged diff can reach
-# (modules_for below); the full suite (`make test-gpu`, imp-tests, ~4 min) when
-# the diff touches what every module links, or with IMP_PRECOMMIT_FULL=1.
-# Skip a single commit with:  git commit --no-verify
+# Stage 1 of the two-stage gate (CI runs the CPU-only ctest -L unit lane, ci.yml).
+# Runs the FULL GPU suite locally since CI has no GPU runner; pre-push runs verify-fast (a
+# filtered subset + perf/smoke) instead. Fires only when staged changes touch buildable sources
+# (src/, include/, tools/, tests/, CMakeLists, *.cmake). Skip one commit: git commit --no-verify.
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-# Cheap static gates FIRST, before any early exit: an allowlist-pin drift or a
-# dead doc citation used to surface at push time (or in CI), after this hook's
-# ~10-minute Docker build + suite had already run — three amend/rerun cycles
-# on 2026-08-26 alone. Placed BEFORE the buildable-source check on purpose:
-# the #1782 citation red was a docs-only drift, exactly the commit class the
-# early exit below skips. ~2 s, source-independent, so it costs nothing here.
+# Cheap static gates run FIRST, before any early exit: an allowlist-pin drift or dead doc
+# citation used to surface only at push time or in CI, after the full build+suite already ran.
+# Placed before the buildable-source check since a docs-only commit is exactly the class the
+# early exit below skips; costs ~2s.
 if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
     if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards layering docs citations; then
         echo "pre-commit: static gates failed (see above) - fix or commit --no-verify" >&2
@@ -33,15 +19,10 @@ if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_ga
     fi
 fi
 
-# The path prefix says WHERE, not WHETHER: `tools/` and `tests/` also hold
-# Markdown (the CLAUDE.md tree) and Python (the gates and generators), and
-# neither reaches the compiler or the suite - no test in tests/ shells out to a
-# script, and no CMake target embeds one. Editing tests/CLAUDE.md used to pay a
-# full image build plus the whole GTest suite for a result that could not move.
-#
-# Deliberately NOT excluded: .html, because cmake/embed_webui.cmake compiles
-# tools/imp-server/webui/index.html into imp-server, and .txt, because tests
-# read reference corpora from tests/refs at runtime.
+# Path prefix says WHERE, not WHETHER: tools/ and tests/ also hold Markdown (the CLAUDE.md
+# tree) and Python (gate/generator scripts) that reach neither the compiler nor the suite.
+# Deliberately NOT excluded: .html (embed_webui.cmake compiles it into imp-server) and .txt
+# (tests read reference corpora from tests/refs at runtime).
 CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
           | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
           | grep -vE '\.(md|py|hook)$|^tools/mutation/' \
@@ -58,21 +39,17 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
     exit 0
 fi
 
-# A co-tenant on the card makes this stage judge the host instead of the commit,
-# and it takes a Docker build plus the full suite to say so. One rule, read by
-# this hook and by pre-push, because both end in a CUDA run.
-# Guarded: an installed hook outlives the branch it came from, and a checkout
-# that predates this script must still run the gate rather than die on it.
+# A co-tenant on the card makes this stage judge the host instead of the commit, after a
+# Docker build + full suite already ran. One rule, read by both pre-commit and pre-push.
+# Guarded: an installed hook may predate this script and must still run rather than die on it.
 if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-commit (Stage 1 / GPU)" || exit 1
 fi
 
-# Which test modules the staged diff can reach. The full suite (imp-tests, 224
-# tests, ~4 min after the build) runs when the diff touches what every module
-# links (core, include, the build itself) or when IMP_PRECOMMIT_FULL=1; a diff
-# confined to one subsystem runs that subsystem's modules (~30 s to 2 min).
-# A tests/ file maps to the module CMakeLists.txt lists it under. The push
-# hook still runs verify-fast on the whole tree.
+# Maps the staged diff to reachable test modules: the full suite (imp-tests, ~4min after
+# build) runs when the diff touches what every module links (core, include, the build itself)
+# or IMP_PRECOMMIT_FULL=1; else only the touched subsystem's modules run.
+# A tests/ file maps to the module its CMakeLists.txt lists it under.
 modules_for() {
     case "$1" in
         include/*|src/core/*|src/api/*|CMakeLists.txt|cmake/*|*.cmake) echo ALL ;;

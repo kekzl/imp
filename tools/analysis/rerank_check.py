@@ -112,12 +112,9 @@ def run(url, compare):
     record("it wins by a clear margin (>0.5)", margin > 0.5, f"margin={margin:.4f}")
 
     print("== stability ==")
-    # The FIRST call after load populates the prefix cache, and a cold prefill
-    # is numerically a hair different from one that reuses cached blocks (~1e-3
-    # on a 0.99 score — the same order as the gap between two engines running
-    # the same weights). Ordering is unaffected, so the contract is "stable
-    # once warm", not "bit-identical from the first request": measure it that
-    # way rather than pretending otherwise.
+    # The FIRST call after load populates the prefix cache; a cold prefill differs numerically
+    # from a cached-block reuse by ~1e-3 on a 0.99 score. Ordering is unaffected, so the contract
+    # is "stable once warm", not bit-identical from the first request.
     cold = s
     _, warm1 = post(url, "/v1/rerank", {"query": QUERY, "documents": DOCS})
     _, warm2 = post(url, "/v1/rerank", {"query": QUERY, "documents": DOCS})

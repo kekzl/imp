@@ -1,12 +1,6 @@
-// OpenAI Responses API (/v1/responses) — the dialect the OpenAI Agents SDK
-// and Codex CLI speak by default. Non-streaming reuses the chat-completions
-// code path via the transform shim (responses.h, same pattern as the
-// Anthropic adapter); streaming drives the shared token loop
-// (stream_driver.h) and emits native Responses events
-// (response.created … response.output_text.delta …
-// response.function_call_arguments.delta … response.completed) so TTFT is
-// real first-token latency and tool-call arguments stream incrementally
-// (tool_stream_filter.h CALL_BEGIN/ARGS_DELTA segments).
+// OpenAI Responses API (/v1/responses, OpenAI Agents SDK / Codex CLI default dialect).
+// Non-streaming shims through the chat-completions path (responses.h); streaming drives the
+// shared token loop and emits native Responses events for real TTFT and incremental tool-call args.
 
 #include "handlers.h"
 #include "handlers_internal.h"
@@ -45,11 +39,8 @@ struct ResponsesSSE {
         return sink.write(buf.data(), buf.size());
     }
 
-    // #1657: the per-token path. emit() builds a json object and dump()s it for
-    // every token; /v1/chat/completions has not done that since SSEChunkWriter.
-    // Everything but the sequence number and the text is constant for the whole
-    // item, so `prefix` is built once when the item opens and ends at
-    // `"sequence_number":`; `mid` reopens the object for the delta value.
+    // #1657: builds the SSE prefix once per item (up to "sequence_number":") and reopens only for
+    // the delta value - avoids dumping a full json object per token (see id 581).
     bool emit_delta(const std::string& prefix, const char* mid, const std::string& text) {
         hot_buf.clear();
         hot_buf += prefix;
@@ -92,12 +83,8 @@ json response_skeleton(const std::string& response_id, const std::string& model,
 
 }  // anonymous namespace
 
-// Responses dialect adapter: maps the shared token loop onto Responses output
-// items:
-//   reasoning -> reasoning item (reasoning_summary_text.delta)
-//   content   -> message item (output_text.delta)
-//   tool call -> function_call item (function_call_arguments.delta,
-//                incremental for JSON layouts)
+// Responses dialect adapter: reasoning -> reasoning_summary_text.delta, content ->
+// output_text.delta, tool call -> function_call_arguments.delta (incremental for JSON layouts).
 static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& ctx,
                                   ServerState& state,
                                   const std::shared_ptr<ServerRequest>& server_req,

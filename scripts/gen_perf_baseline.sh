@@ -1,30 +1,10 @@
 #!/bin/bash
-# Generate performance baseline JSON for regression testing.
-#
-# Methodology: N independent cli invocations (default 5) per metric, with a
-# short cooldown between, then take the **median**. Resists cuBLAS-algo-state
-# drift over long sessions — see
-# memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md for the failure
-# mode this guards against (multi-hour bench session can drift decode -10 %
-# even with no code change). The old script used a single invocation; CI was
-# then sensitive to whatever cuBLAS state happened to be cached at that moment.
-#
-# Usage (always inside the imp:test container — uses bare `imp-cli`):
-#   docker run --rm --gpus all \
-#     -v $HOME/models:/models \
-#     -v $PWD:/src -w /src \
-#     -u $(id -u):$(id -g) \
-#     -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
-#     --entrypoint bash imp:test scripts/gen_perf_baseline.sh
-#
-# The `-u $(id -u):$(id -g)` is required so the container can write the new
-# tests/perf_baseline.json back to the host bind mount. Without it the script
-# completes the benches but fails at the final `cat > $OUTPUT` step.
-#
-# Optional positional args:
-#   $1  model path (default /models/Qwen3-8B-Q8_0.gguf)
-#   $2  number of trials (default 5)
-#
+# Generates tests/perf_baseline.json: N independent cli invocations (default 5) per metric,
+# median (resists cuBLAS-algo-state drift over long sessions, up to -10% decode with no code change).
+# Run inside imp:test: docker run --rm --gpus all -v $HOME/models:/models -v $PWD:/src -w /src
+# -u $(id -u):$(id -g) -e CUBLAS_WORKSPACE_CONFIG=:4096:8 --entrypoint bash imp:test
+# scripts/gen_perf_baseline.sh (-u required so the container can write perf_baseline.json back).
+# Args: $1 model path (default /models/Qwen3-8B-Q8_0.gguf), $2 trials (default 5).
 set -euo pipefail
 
 MODEL="${1:-/models/Qwen3-8B-Q8_0.gguf}"
@@ -42,20 +22,9 @@ echo "Generating performance baseline..."
 echo "Model: $MODEL"
 echo "Trials: $N_TRIALS × $REPS reps, $COOLDOWN_SEC s cooldown between trials"
 
-# Read one throughput number out of `imp-cli --bench --json` (#1583).
-#
-# This used to regex the human table (`pp 512 tokens avg 33.95 ms (15083.10
-# tok/s) [5 reps]`), which made the column layout a contract nobody had
-# written down: a formatting change here silently produced an empty sample,
-# and an empty sample is a median computed from fewer runs than the header
-# claims. With --json, stdout carries exactly one document and the two
-# numbers have names.
-#
-# $1 = "prefill" or "decode"; stdin = the run's stdout.
-#
-# `jq -e` exits non-zero on a missing key, and this aborts the whole run rather
-# than appending nothing: an empty sample is a median computed over fewer runs
-# than the header claims, which is the silent half of the old regex.
+# Reads one throughput number from imp-cli --bench --json (#1583) rather than regexing the
+# human table (a format change there used to silently produce an empty sample).
+# $1 = "prefill"|"decode"; stdin = the run's stdout. jq -e aborts the whole run on a missing key.
 extract_tps() {
     local v
     v=$(jq -er ".${1}_tps") || {
@@ -95,15 +64,11 @@ trap 'rm -f "$pp128_samples" "$pp512_samples" "$pp4096_samples" "$tg128_samples"
 for trial in $(seq 1 "$N_TRIALS"); do
     echo "  trial $trial/$N_TRIALS..."
     run_trial 128 prefill >> "$pp128_samples"
-    # pp512 AND tg128 come from ONE invocation, exactly how verify.sh measures
-    # the gate (tg128 = decode at ctx≈512 after the pp512 prefill, single-chunk).
-    # The old behaviour measured tg after a pp128 prefill, which pins a
-    # systematically HIGHER decode rate (KV depth cost ~2.5% on 8B, ~5% on 14B)
-    # that verify.sh can never reproduce — the gate then fails without any
-    # regression (found 2026-07-13 re-pinning the north star).
-    # speculative.ngram=false: matches verify.sh — the self-repetitive bench
-    # prompt (~99.9% accept) makes spec-ON tg measure the batched verify GEMMs,
-    # which are restart-volatile (11% swing on healthy clocks, 2026-07-15).
+    # pp512 and tg128 come from ONE invocation (tg128 = decode at ctx~512 after pp512 prefill,
+    # single-chunk), matching how verify.sh measures the gate; a pp128 prefill pins a
+    # systematically higher decode rate (~2.5% on 8B, ~5% on 14B).
+    # speculative.ngram=false matches verify.sh: the self-repetitive bench prompt (~99.9% accept)
+    # would otherwise measure the batched verify GEMMs instead (restart-volatile).
     gate_out=$($CLI --model "$MODEL" --bench --bench-pp 512 --bench-reps "$REPS" \
         --prefill-chunk-size "$CHUNK_SIZE" --max-tokens 128 --temperature 0 --json \
         --set speculative.ngram=false 2>/dev/null)
@@ -131,10 +96,8 @@ echo "  tg128 samples: $(paste -sd, "$tg128_samples")  → median $tg128"
 # Get GPU info. Try nvcc first, then fall back to nvidia-smi cuda_version
 # (the runtime image has no nvcc, only the devel image does).
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-# `a | b | c || fallback` never reaches the fallback: sed exits 0 on empty
-# input, so the pipeline succeeds with nothing and CUDA lands empty. That is how
-# the shipped baseline recorded cuda="unknown" while sync_docs.py published the
-# constant 13.3 over it (#1684). Test the value, not the exit code.
+# `a | b | c || fallback` never reaches the fallback: sed exits 0 on empty input, so the
+# pipeline succeeds with nothing. Test the value, not the exit code (#1684).
 CUDA=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9.]+' | head -1)
 [ -n "$CUDA" ] || CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' | head -1)
 [ -n "$CUDA" ] || CUDA="unknown"
@@ -151,10 +114,9 @@ VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2
 vram_line=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 1 --temperature 0 2>&1 | grep "GPU memory after weight upload" | tail -1)
 vram_weights=$(echo "$vram_line" | grep -oP 'weights ~\K[0-9]+' || echo "0")
 
-# Peak VRAM for the gate in verify.sh. Same invocation the gate uses, so the
-# pinned number and the measured one are comparable; own_peak (this process's
-# allocations since engine init) rather than device peak_used, which also
-# carries the CUDA context and any neighbour process.
+# Peak VRAM for the verify.sh gate: same invocation the gate uses, so pinned and measured are
+# comparable. own_peak (this process's allocations since engine init), not device peak_used
+# (which also carries the CUDA context and any neighbour process).
 own_peak=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
               --temperature 0 --set speculative.ngram=false --mem-report 2>&1 \
            | grep -oP 'own_peak=\K[0-9]+' | tail -1)

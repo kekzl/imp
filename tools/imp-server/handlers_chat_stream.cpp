@@ -1,7 +1,6 @@
-// OpenAI chat-completions streaming: the SSE chunked-provider setup
-// (stream_chat_response_) and the chat dialect adapter for the shared token
-// loop (stream_driver.h) — pre-built envelope templates, per-token logprobs,
-// tool_calls deltas, usage chunk, [DONE].
+// OpenAI chat-completions streaming: SSE chunked-provider setup (stream_chat_response_) and the
+// chat dialect adapter (stream_driver.h) - envelope templates, per-token logprobs, tool_calls
+// deltas, usage chunk, [DONE].
 
 #include "handlers.h"
 #include "handlers_internal.h"
@@ -16,12 +15,9 @@
 #include <cstring>
 #include <string>
 
-// Set up SSE chunked content provider for streaming chat completion.
-// Captures state and ctx by reference for the chunked-provider lambda. ctx
-// must outlive the SSE response (httplib invokes the chunked provider after
-// this function returns; ctx is a stack-local in handle_chat_completions
-// which keeps the request frame alive until the response is fully sent).
-// run_chat_stream_ itself is declared in handlers_internal.h.
+// Sets up the SSE chunked-provider for streaming chat. Captures state/ctx by reference: ctx must
+// outlive the response since httplib invokes the chunked-provider lambda after this function
+// returns (ctx is a stack-local kept alive by handle_chat_completions' frame).
 void stream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
                                   const std::shared_ptr<ServerRequest>& server_req) {
     // SSE streaming response
@@ -38,12 +34,9 @@ void stream_chat_response_(httplib::Response& res, ServerState& state, ChatReque
         });
 }
 
-// Chat dialect adapter: emits OpenAI chat.completion.chunk SSE frames around
-// the shared token loop (run_stream_loop_). httplib calls the chunked-provider
-// lambda repeatedly until it returns false; the lambda dispatches here. ctx is
-// captured by value into the lambda (so it survives stream_chat_response_'s
-// return); state is captured by reference (lives in the long-lived
-// ServerState).
+// Chat dialect adapter: emits chat.completion.chunk SSE frames around the shared token loop
+// (run_stream_loop_). ctx is captured BY VALUE (must survive the caller's return); state BY
+// REFERENCE (long-lived ServerState).
 bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                              const std::shared_ptr<ServerRequest>& server_req) {
     const std::string& comp_id = ctx.comp_id;
@@ -175,14 +168,9 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     if (!run_stream_loop_(sink, ctx, state, server_req, dialect, out))
         return false;
 
-    // The model exhausted its budget while still reasoning and never produced
-    // content. This used to write a server-authored English sentence into
-    // delta.content, which made the streaming and non-streaming answers to the
-    // identical request differ, and put text into `content` that no token
-    // produced (#1593). It is the same shape as the reasoning leak this file's
-    // invariant already forbids, so it goes where the non-streaming path
-    // already puts it: the server log. finish_reason is "length" either way,
-    // which is the machine-readable half a client can act on.
+    // #1593: budget exhausted while still reasoning (no content produced) used to write a
+    // server-authored sentence into delta.content, diverging from the non-streaming answer. Now
+    // logged server-side only; finish_reason stays "length" either way.
     if (out.reasoning_truncated) {
         IMP_LOG_WARN(
             "empty content: the answer never started because the token budget went to "
@@ -190,11 +178,9 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             "model needs room to answer AFTER it thinks.");
     }
 
-    // ...and the machine-readable half, which #1593 could not give it: the same
-    // condition the non-streaming path uses (utils.cpp answer_lost_to_reasoning)
-    // - empty content, no tool call, a non-empty reasoning channel. Broader than
-    // reasoning_truncated above, which is finish == "length" only, so a model
-    // that hit EOS mid-thought was reported by neither.
+    // finish_detail carries the machine-readable half #1593 lacked: same condition as
+    // answer_lost_to_reasoning (utils.cpp) but broader than reasoning_truncated above (also catches
+    // EOS-mid-thought, not just finish=="length").
     const char* finish_detail = reasoning_finish_detail(out.tool_calls_emitted, !out.content_emitted,
                                                         out.n_reasoning_tokens > 0);
     if (finish_detail)

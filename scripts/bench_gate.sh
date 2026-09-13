@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Perf regression gate: run imp-cli --bench and compare decode/prefill against a
-# baseline json. Single-session, warmed clocks (see docs/internals/BENCHMARKING.md). Decode
-# tg128 is the headline. Extracted from ci.yml so the same logic runs locally
-# (scripts/verify.sh) and in the GPU CI job.
-#
-# Usage: bench_gate.sh <imp-cli> [baseline.json] [model_path]
-#   IMP_MODELS_DIR overrides the model search dir (default $HOME/models).
-# Skips (exit 0) when the baseline model isn't present, so CPU-only runners pass.
+# Perf regression gate: run imp-cli --bench, compare decode/prefill against baseline.json.
+# Single-session, warmed clocks (docs/internals/BENCHMARKING.md); decode tg128 is the headline.
+# Usage: bench_gate.sh <imp-cli> [baseline.json] [model_path]. IMP_MODELS_DIR overrides the model
+# dir (default $HOME/models). Skips (exit 0) when the baseline model isn't present.
 set -euo pipefail
 
 CLI="${1:?usage: bench_gate.sh <imp-cli> [baseline.json] [model_path]}"
@@ -26,15 +22,9 @@ DEC_THR=$(jq -r '.thresholds.decode_regression_pct' "$BASELINE")
 PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
 
 run_bench() {
-  # NOTE: imp-cli prints the "pp 512 …" / "tg 128 …" result lines to STDERR, so
-  # do NOT merge 2>&1 here — the measured call below captures stderr into $ERR and
-  # parses it. (Merging would send the result lines to the caller's /dev/null and
-  # leave $ERR empty, which set -e then turns into a silent early exit.)
-  # `speculative.ngram=false` is not optional here: tests/perf_baseline.json
-  # states in its own `methodology` field that the pin was taken spec-OFF, and
-  # scripts/verify.sh passes the same flag. Without it this script measured a
-  # different quantity than the number it compares against, while both were
-  # documented as one gate (#1625).
+  # imp-cli prints bench result lines to STDERR: do not merge 2>&1, or $ERR (parsed below) ends
+  # up empty and set -e silently exits early.
+  # speculative.ngram=false is required: perf_baseline.json's methodology pin is spec-OFF (#1625).
   CUBLAS_WORKSPACE_CONFIG=:4096:8 "$CLI" --model "$MODEL_PATH" --bench \
     --bench-pp 512 --bench-reps 3 --prefill-chunk-size 0 --max-tokens 128 \
     --temperature 0 --set speculative.ngram=false "$@"

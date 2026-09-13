@@ -8,12 +8,9 @@
 #include <cstring>
 #include <cstdio>
 
-// Make a client-supplied string safe to put back into a response body.
-//
-// Two independent problems, one helper. Ill-formed UTF-8 reaches `dump()` and
-// throws; control bytes and unbounded length reach whatever reads the response
-// (a log viewer, a terminal, a dashboard). Printable ASCII only, everything
-// else one '.', truncated with a marker so a reader can tell (#1618).
+// sanitize_for_echo: makes a client-supplied string safe to echo back. Two problems, one helper:
+// ill-formed UTF-8 throws in dump(), and control bytes/unbounded length reach log viewers or
+// terminals. Printable ASCII only; everything else becomes '.', truncated with a marker (#1618).
 std::string sanitize_for_echo(std::string_view in, size_t max_len) {
     std::string out;
     const size_t n = std::min(in.size(), max_len);
@@ -33,18 +30,10 @@ std::string dump_safe(const json& j) {
     return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
-// Drop an incomplete trailing UTF-8 sequence from a FINISHED string (#1310).
-//
-// Utf8Stitch carries such a tail forward to the next piece, which is right for
-// a stream. At the end of a generation there is no next piece: max_tokens can
-// stop mid-codepoint, and those bytes then reach dump_safe(), whose
-// error_handler_t::replace substitutes U+FFFD - so `message.content` carries a
-// character no generated token produced. The streaming path never showed this
-// because the stitcher simply never releases the tail.
-//
-// Same 3-byte bound as Utf8Stitch::feed: a split codepoint is at most 3 bytes
-// short, and a longer tail is genuinely ill-formed input rather than a
-// truncation, so it is left alone for dump_safe to handle.
+// drop_incomplete_utf8_tail (#1310): drops an incomplete trailing UTF-8 sequence from a FINISHED
+// string. Utf8Stitch defers such a tail for the next streaming piece, but generation end has no
+// next piece - dump_safe would otherwise substitute U+FFFD for a character no token produced.
+// Same 3-byte bound as Utf8Stitch::feed; a longer tail is genuinely ill-formed and left for dump_safe.
 void drop_incomplete_utf8_tail(std::string& s) {
     const size_t complete = imp::stream::utf8_complete_len(s);
     if (complete < s.size() && s.size() - complete <= 3)
@@ -52,11 +41,9 @@ void drop_incomplete_utf8_tail(std::string& s) {
 }
 
 bool reject_body_too_deep(const httplib::Request& req, httplib::Response& res) {
-    // Every parser downstream is recursive and none bounds depth, nlohmann
-    // included and it runs first: measured on this tree, 50 000 nested arrays
-    // parse and dump() fine, 100 000 segfault the process. That is ~100 KB
-    // against a 100 MiB body cap, from an unauthenticated request, and one
-    // process means the SIGSEGV takes every in-flight stream with it.
+    // kMaxBodyNesting=100: every downstream parser (nlohmann included) is recursive and unbounded -
+    // measured 50000 nested arrays parse fine, 100000 segfault (~100KB against the 100MiB body cap,
+    // unauthenticated, and one process crash takes every in-flight stream with it).
     constexpr int kMaxBodyNesting = 100;
     if (req.body.empty() || json_nesting_depth(req.body, kMaxBodyNesting) <= kMaxBodyNesting)
         return false;
@@ -114,12 +101,9 @@ size_t utf8_chunk_len(const std::string& s, size_t off, size_t max) {
     const size_t complete = imp::stream::utf8_complete_len(s.substr(off, max));
     if (complete > 0)
         return complete;
-    // complete == 0 means no whole character fits in `max`. Emitting `max`
-    // bytes here would be the very split this function exists to prevent, so
-    // the cap yields: one character, whole, even if it is longer than `max`.
-    // A chunk size is a hint about frame size; a half character is wrong at any
-    // size. Falls back to one byte only for input that is ill-formed at `off`,
-    // where there is no character to keep intact and stalling is worse.
+    // complete==0 (no whole character fits in `max`): yields one whole character anyway rather than
+    // splitting it, since a chunk-size hint is wrong at any size if it cuts a character. Falls back
+    // to one raw byte only when the input is ill-formed at `off`.
     const unsigned char lead = static_cast<unsigned char>(s[off]);
     size_t char_len = 1;
     if ((lead & 0xE0) == 0xC0)
@@ -136,10 +120,9 @@ std::string Utf8Stitch::feed(const std::string& piece) {
     carry_.clear();
 
     const size_t complete = imp::stream::utf8_complete_len(buf);
-    // A split character is at most 3 bytes short. A longer tail is not a split
-    // character but invalid input, and utf8_complete_len parks on it — holding
-    // that back would stall the stream forever, so pass it through and let
-    // dump_safe replace it.
+    // A split character is at most 3 bytes short; a longer tail is invalid input, not a split
+    // character, and holding it back would stall the stream forever - pass it through for dump_safe
+    // to replace instead.
     if (complete < buf.size() && buf.size() - complete <= 3) {
         carry_.assign(buf, complete, buf.size() - complete);
         buf.resize(complete);
@@ -233,15 +216,10 @@ bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, c
 
 bool report_answer_lost_to_reasoning(bool has_tool_calls, const std::string& content,
                                      const std::string& reasoning, const char* finish) {
-    // An empty answer beside a full reasoning channel is not a defect, and it
-    // reads exactly like one. The reply shares the token budget with the
-    // thinking, so once the thinking fills it the answer never starts and the
-    // caller sees `content: ""`. Measured on Qwen3.8-27B before the budget
-    // engaged on prompt-injected <think>: a 74-turn session returned empty
-    // replies at max_tokens 260 and was 74/74 clean at 600
-    // (docs/TROUBLESHOOTING.md). Say which of the two it was, rather than leave
-    // someone bisecting an engine that did what it was asked. The caller turns
-    // the same bool into the wire signal and the counter.
+    // An empty answer beside a full reasoning channel is not a defect - the reply shares the token
+    // budget with thinking. Measured on Qwen3.8-27B: a 74-turn session returned empty replies at
+    // max_tokens 260, clean 74/74 at 600 (docs/TROUBLESHOOTING.md). Report which case it was rather
+    // than leave the caller bisecting a working engine.
     if (!answer_lost_to_reasoning(has_tool_calls, content, reasoning))
         return false;
     IMP_LOG_WARN(
@@ -453,12 +431,9 @@ json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, si
     json top_logprobs = json::array();
     json text_offset = json::array();
 
-    // The offset walk: each token's offset is where its text begins in the
-    // completion. Tracked by advancing through `text` rather than by summing
-    // token lengths, because the decoded token text and the assembled string
-    // can disagree (a stop sequence trims the tail, and a detokenizer may drop
-    // a leading space). When they do, the offsets stop advancing rather than
-    // running past the end of the string.
+    // Token offsets are tracked by advancing through the assembled `text`, not by summing decoded
+    // token lengths - a stop-sequence trim or a detokenizer's dropped leading space can make the two
+    // disagree; when they do, offsets stop advancing rather than running past the string's end.
     size_t cursor = 0;
     for (size_t i = 0; i < lps.size() && i < limit; i++) {
         const auto& lp = lps[i];
@@ -584,11 +559,10 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
     return out;
 }
 
-// Split `text` at the LAST "</think>". On success fills `reasoning` (the text
-// before it, a leading "<think>" stripped, trimmed both ends) and `content`
-// (the text after it, leading whitespace trimmed) and returns true; returns
-// false (out-params untouched) when there is no "</think>". Shared by the two
-// non-streaming reasoning demuxers below so their split point cannot drift.
+// split_last_think: splits `text` at the LAST "</think>" (reasoning = text before, leading
+// "<think>" stripped and trimmed; content = text after, trimmed). Returns false, out-params
+// untouched, when there is no "</think>". Shared by both non-streaming demuxers so the split
+// point cannot drift between them.
 static bool split_last_think(const std::string& text, std::string& reasoning, std::string& content) {
     auto last_end = text.rfind("</think>");
     if (last_end == std::string::npos)
@@ -681,10 +655,9 @@ ChannelSegments split_channel_segments(const std::string& text) {
                     name = name.substr(0, sp);
             }
             current_channel = std::move(name);
-            // Skip past the header — including the trailing \n if that's what
-            // ended it. If a <channel|> marker ended the header, leave it for
-            // the close-marker branch on the next iteration so the "header
-            // separator" rule below stays a no-op rather than swallowing body.
+            // Skips past the header (including its trailing \n if present). If a <channel|> marker ended the
+            // header instead, it is left for the close-marker branch next iteration, so this rule stays a
+            // no-op rather than swallowing body text.
             if (end == nl && nl != std::string::npos) {
                 i = nl + 1;
             } else {
@@ -693,13 +666,9 @@ ChannelSegments split_channel_segments(const std::string& text) {
             continue;
         }
         if (is_close) {
-            // <channel|> on its own. The model's observed Gemma-4 emission is
-            //   <|channel>thought\nTHOUGHT<channel|>FINAL
-            // i.e. <channel|> CLOSES the current channel and the body that
-            // follows is the user-facing answer (no explicit
-            // <|channel>final\n<channel|> opener for the final answer — the
-            // chat-template prefix already supplied that). Treat a standalone
-            // close-marker as "switch back to default (content)".
+            // A standalone <channel|> CLOSES the current channel and everything after is the user-facing
+            // answer (observed Gemma-4 shape: "<|channel>thought\nTHOUGHT<channel|>FINAL" has no explicit
+            // "final" opener - the template prefix already supplied it). Treated as switch-to-content.
             current_channel.clear();
             i += kCloseLen;
             continue;
@@ -723,12 +692,9 @@ ChannelSegments split_channel_segments(const std::string& text) {
 }
 
 ChannelSegments split_harmony_channels(const std::string& text) {
-    // gpt-oss Harmony output looks like:
-    //   <|channel|>analysis<|message|>REASONING<|end|>
-    //   <|start|>assistant<|channel|>final<|message|>ANSWER<|return|>
-    // analysis/commentary channels carry chain-of-thought (-> reasoning_content);
-    // the final channel carries the user-facing answer (-> content). All Harmony
-    // control markup and the <|start|>role plumbing are stripped.
+    // gpt-oss Harmony output: "<|channel|>analysis<|message|>...<|end|><|start|>assistant<|channel|>
+    // final<|message|>..."; analysis/commentary -> reasoning_content, final -> content, all control
+    // markup and <|start|>role plumbing stripped.
     static const std::string CH = "<|channel|>";
     static const std::string MSG = "<|message|>";
     static const std::string END = "<|end|>";
@@ -772,13 +738,10 @@ ChannelSegments split_harmony_channels(const std::string& text) {
     while (i < n) {
         if (at(CH)) {
             i += CH.size();
-            // The header between <|channel|> and <|message|> is not just a
-            // name: a tool call carries a recipient and a constraint, as in
-            //   commentary to=functions.get_weather <|constrain|>json
-            // Splitting only on '<' left `cur` as the whole string, which
-            // matched no known channel, so the body went to `other` and was
-            // dropped (#1716). Take the first token as the channel and read a
-            // `to=` out of the rest.
+            // The Harmony header between <|channel|> and <|message|> can carry a recipient/constraint too
+            // ("commentary to=functions.X <|constrain|>json"); splitting only on '<' matched no known
+            // channel and dropped the body (#1716). Take the first token as the channel, read `to=` from the
+            // rest.
             std::string header;
             while (i < n && !at(MSG) && !at(END) && !at(START) && !at(CH) && text[i] != '<')
                 header.push_back(text[i++]);
@@ -881,10 +844,9 @@ void strip_channel_headers(std::string& text) {
             continue;
         }
         if (is_close) {
-            // Close / channel-switch marker: just drop the marker token itself.
-            // Gemma-4 Q5_K_M emits "<channel|>answer body" directly without a
-            // trailing newline, so we must NOT wait for one here — otherwise
-            // the answer body gets eaten (observed on "What is 5+3?").
+            // Drops the close/channel-switch marker token itself without waiting for a trailing newline:
+            // Gemma-4 Q5_K_M emits "<channel|>answer body" with none, and waiting would eat the answer
+            // (observed on "What is 5+3?").
             i += kCloseLen;
             continue;
         }

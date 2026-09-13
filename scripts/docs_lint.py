@@ -58,24 +58,16 @@ EXCLUDED_FILES = {
     # Verbatim licence text (Apache-2.0 body + upstream notices): not
     # documentation, must not be reworded for a lint rule.
     "THIRD_PARTY_LICENSES.md",
-    # The roadmap is a dated research record ("a gap list, not a schedule"):
-    # its numbers are the narrative of how each gap was measured or refuted,
-    # and stripping them for provenance blocks would destroy the record. The
-    # reader-facing distillation lives in LIMITATIONS.md / DESIGN_DECISIONS.md
-    # / PERF.md, which ARE linted.
+    # roadmap.md is a dated research record (a gap list, not a schedule): its numbers narrate how
+    # each gap was measured or refuted, so PROV-block stripping would destroy the record.
+    # Reader-facing distillation (LIMITATIONS.md/DESIGN_DECISIONS.md/PERF.md) IS linted.
     "docs/roadmap.md",
 }
 EXCLUDED_SUBSTRINGS = (".pytest_cache/", "node_modules/")
 
-# The single place allowed to spell out what consumer Blackwell does NOT have.
-#
-# docs/internals/ is allowlisted as a whole, and the distinction is the point of
-# the rule rather than a hole in it. What must not be repeated is the
-# *delimitation* ("sm_120a is not a small B200"), because a reader who meets it
-# in eight places cannot tell which one is maintained. What an L2 kernel
-# document does instead is derive from it: "no tcgen05, therefore the MMA blocks
-# the issuing warp" is design rationale, and deleting it would leave the kernel's
-# shape unexplained. L0 and L1 have no business doing either; they link.
+# Only ARCHITECTURE.md may spell out what consumer Blackwell lacks (docs/internals/ is
+# allowlisted as a whole, but this delimitation must stay maintained in one place).
+# L2 docs may derive kernel rationale from it; L0/L1 just link, never repeat it.
 DELIMITATION_ALLOWLIST = {"docs/internals/ARCHITECTURE.md"}
 DELIMITATION_ALLOWLIST_PREFIXES = ("docs/internals/",)
 
@@ -100,22 +92,15 @@ FORBIDDEN = [
 NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:k\s*)?(?:tok/s|tokens/s|x faster|x behind)\b")
 PROV_RE = re.compile(r"\[PROV:")
 
-# Documents that carry provenance per row in a convention they declare in their
-# own header, predating this linter. The rule is "no number without provenance",
-# not "no number without this particular syntax": BENCHMARKS.md already states
-# that every row names its date, commit, CUDA version, quant and command, and
-# GOAL.md dates each re-measurement inline. Rewriting either into [PROV:] blocks
-# would move the provenance without adding any. They must keep declaring it,
-# which is what PROV_HEADER_RE checks.
+# Docs that declare per-row provenance in their own header convention (BENCHMARKS.md,
+# GOAL.md, MODELS.md), predating this linter: the rule is "no number without provenance", not
+# a specific syntax, so they keep their convention instead of being rewritten into [PROV:] blocks.
 PROV_HEADER_ALLOWLIST = {"docs/BENCHMARKS.md", "docs/GOAL.md", "docs/MODELS.md"}
 PROV_HEADER_RE = re.compile(r"commit|re-measured|measured", re.I)
 
-# The metadata header is an HTML COMMENT, not YAML frontmatter, and that is
-# deliberate: GitHub renders YAML front matter as a visible table at the top of
-# the page, so the README - the one file that exists for first contact - opened
-# with `layer / audience / verified / commit` instead of with what imp is.
-# Machine-readable and invisible beats machine-readable and in the reader's way.
-# The legacy `---` form is still accepted so a file is never silently unchecked.
+# The metadata header is an HTML comment, not YAML frontmatter: GitHub renders YAML
+# frontmatter as a visible table, which would open README.md with metadata instead of the project.
+# Legacy `---` form is still accepted so a file is never silently unchecked.
 FRONTMATTER_RE = re.compile(r"\A(?:<!--\n(.*?)\n-->|---\n(.*?)\n---)\n", re.S)
 VALID_LAYERS = {"L0", "L1", "L2", "L3"}
 
@@ -125,19 +110,12 @@ README_MAX_LINES = 400
 CLAUDE_ROOT_MAX_TOKENS = 2000
 CLAUDE_DIR_MAX_TOKENS = 800
 STALE_DAYS = 180
-# L3 files (the CLAUDE.md tree, AGENTS.md) load into every agent session, so a
-# `verified:` date that the file's own history contradicts is an error there,
-# not a warning: root CLAUDE.md sat at verified 2026-08-13 through ten later
-# edits until 2026-09-06. The grace covers the gap between the day a PR is
-# authored and the day its squash lands on main.
+# L3 files (the CLAUDE.md tree, AGENTS.md) load into every agent session, so a verified: date
+# the file's own history contradicts is an error, not a warning. Grace covers the gap between
+# a PR's authoring day and its squash-merge day.
 L3_VERIFIED_GRACE_DAYS = 14
-# A `commit:` marker is reported when THE FILE ITSELF changed after it, not at
-# some commit count. The count was the first attempt and it was arbitrary: 200
-# did not fire on the case that motivated the check (40 files pinned at
-# 81ffa573 with main 133 commits ahead), and any number that did fire would
-# have been picked to fit that one case. "Was this file edited since it was
-# last verified" needs no threshold and is the question the field claims to
-# answer (#1683).
+# commit: marker is checked against whether the FILE ITSELF changed since, not a commit count
+# (a count threshold is arbitrary; #1683 found a case 133 commits stale that a count would have missed).
 _COMMIT_DEPTH_CACHE: dict = {}
 
 
@@ -231,11 +209,9 @@ def approx_tokens(text: str) -> int:
     return len(text) // 4
 
 
-# The layer is a property of the path (the docs-layers table), not of the
-# header: severity of a provenance failure follows the layer, so a doc in
-# docs/ declaring L2 would demote its own errors to warnings (AUDIT_arch_2026
-# J-7). Paths outside the four homes (CONTRIBUTING.md, tests/README.md,
-# tools/*/README.md) keep whatever they declare.
+# Layer is a property of the PATH (docs-layers table), not the header: a docs/ file declaring
+# L2 would demote its own provenance errors to warnings (AUDIT_arch_2026 J-7).
+# Paths outside the four homes keep whatever layer they declare.
 def _layer_for_path(rel: str):
     if rel == "README.md":
         return "L0"
@@ -259,10 +235,8 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
         errors.append(f"{rel}: missing frontmatter (needs layer/audience/verified/commit)")
     else:
         fm = m.group(1) or m.group(2)
-        # The error message above promises four fields and this validated one
-        # until #1683: `audience:` and `commit:` were read by no line in the
-        # file, so 40 documents carried `commit: 81ffa573` unnoticed while main
-        # moved 133 commits past it.
+        # audience: and commit: were declared but read by no line until #1683: 40 docs carried a
+        # stale commit: field unnoticed while main moved on past it.
         for field in ("audience", "commit"):
             if not re.search(rf"^{field}:\s*\S+", fm, re.M):
                 errors.append(f"{rel}: frontmatter has no `{field}:`")
@@ -314,14 +288,10 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
                     )
                     break
 
-    # 2. numbers without provenance.
-    #
-    # Severity depends on the layer, deliberately. In L0/L1 a number is a claim
-    # made TO a reader who cannot check it, so it must carry its referent or go.
-    # In L2 a number is usually the result of an experiment the surrounding
-    # paragraph describes, often one that was refuted; making that a build
-    # failure would push the next author to delete the figure rather than
-    # document it, which is the opposite of what this linter is for.
+    # Severity depends on layer: L0/L1 numbers are claims to a reader who can't check them, so
+    # must carry a referent or fail. L2 numbers are usually an experiment result the surrounding
+    # text describes (often refuted); a hard failure there would push authors to delete rather
+    # than document.
     if rel in PROV_HEADER_ALLOWLIST and not PROV_HEADER_RE.search("\n".join(lines[:40])):
         errors.append(
             f"{rel}: is allowlisted for inline provenance but its header no longer "

@@ -1,27 +1,12 @@
 #!/usr/bin/env bash
-# #1007 stage-2 EXTERNAL gate: REAL third-party agent binaries driving
-# imp-server through a genuine edit loop. Proves the whole loop survives an
-# ACTUAL agent, not just our own driver — which is the point: our own probes
-# assert what imp *thinks* correct looks like.
-#
-# Two legs, one per dialect:
-#   aider          -> /v1/chat/completions (OpenAI)     image imp:agents
-#   Claude Code    -> /v1/messages         (Anthropic)  image imp:claude-code
-#   OpenAI Agents  -> /v1/responses        (Responses)  image imp:agents-sdk
-#
-# Each runs on a throwaway git repo, asks for a one-function edit, and asserts
-# the function landed in the file — an assertion only a real tool call can
-# satisfy. The Claude Code leg additionally asserts that no raw chain of thought
-# reached the user-visible channel: it was added after pointing Claude Code at
-# imp-server printed the model's reasoning AS the answer (streaming + tools
-# started the reasoning splitter scanning for a `<think>` opener that the chat
-# template had rendered into the PROMPT, so it never arrived in the output).
-#
-# Opt-in (heavier: builds harness images + uses --network host) — the hard gate
-# is `make test-agents` (agent_task_loop.py).
-#
-# Usage: tools/analysis/agent_external_smoke.sh [MODEL] [PORT] [LEG]
-#        LEG = all (default) | aider | claude-code | agents-sdk
+# #1007 stage-2 EXTERNAL gate: real third-party agent binaries driving imp-server through a
+# genuine edit loop, proving the loop survives an ACTUAL agent rather than our own probes.
+# Three legs: aider -> /v1/chat/completions (imp:agents), Claude Code -> /v1/messages
+# (imp:claude-code), OpenAI Agents SDK -> /v1/responses (imp:agents-sdk). Each asks for a
+# one-function edit on a throwaway repo and asserts it landed. Claude Code leg also asserts no
+# raw chain-of-thought reaches the user-visible channel.
+# Opt-in (builds harness images, uses --network host); hard gate is make test-agents.
+# Usage: tools/analysis/agent_external_smoke.sh [MODEL] [PORT] [LEG=all|aider|claude-code|agents-sdk].
 set -euo pipefail
 
 MODEL="${1:-Qwen3-8B-Q8_0.gguf}"
@@ -97,11 +82,8 @@ if [ "$LEG" = "all" ] || [ "$LEG" = "aider" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Leg 2 — Claude Code over the Anthropic dialect. The demanding client: a ~20K
-# system prompt, 25 tool definitions, cache_control, extended-thinking fields
-# and streaming, all in one request.
-# ---------------------------------------------------------------------------
+# Leg 2, Claude Code over the Anthropic dialect: the demanding client (~20K system prompt, 25
+# tool definitions, cache_control, extended-thinking fields, streaming, all in one request).
 if [ "$LEG" = "all" ] || [ "$LEG" = "claude-code" ]; then
     echo "--- leg: Claude Code -> /v1/messages ---"
     docker build -q -f tools/Dockerfile.claude-code -t "$IMG_CC" tools/ >/dev/null
@@ -136,19 +118,12 @@ if [ "$LEG" = "all" ] || [ "$LEG" = "claude-code" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Leg 3 — the OpenAI Agents SDK over the RESPONSES dialect (roadmap gap 10's
-# remaining leg). aider covers chat-completions and Claude Code covers
-# /v1/messages; /v1/responses is what the Agents SDK and Codex speak, and until
-# this leg nothing outside our own probes had ever driven it.
-#
-# The driver pins temperature=0 and max_tokens=400. The budget is not cosmetic:
-# measured on Qwen3-8B-Q8_0 against this exact request, 400 yields
-# `reasoning` + `function_call` (232 output tokens) while 1400 yields a bare
-# `message` (511) — given room, the model reasons its way past the call and
-# answers in prose. imp emits both shapes correctly; the leg pins the budget so
-# it tests the DIALECT rather than the model's appetite for deliberation.
-# ---------------------------------------------------------------------------
+# Leg 3, OpenAI Agents SDK over /v1/responses (what the Agents SDK and Codex speak; aider
+# covers chat-completions, Claude Code covers /v1/messages).
+# Driver pins temperature=0, max_tokens=400: on Qwen3-8B-Q8_0 a 400-token budget yields
+# reasoning+function_call, while 1400 yields a bare message (model reasons past the call given
+# room). imp emits both shapes correctly; pinning the budget tests the DIALECT, not the model's
+# appetite for deliberation.
 if [ "$LEG" = "all" ] || [ "$LEG" = "agents-sdk" ]; then
     echo "--- leg: OpenAI Agents SDK -> /v1/responses ---"
     docker build -q -f tools/Dockerfile.agents-sdk -t "$IMG_SDK" tools/ >/dev/null

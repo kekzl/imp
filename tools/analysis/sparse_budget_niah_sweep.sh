@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Single-arm NIAH sweep over sparse budgets: where does the page score start
-# losing needles? Used to find a target budget for further selection work,
-# since 4096 already reads 10/10 under mean+std.
-#
-# Usage: bash scratch/niah_budget_sweep.sh <meanstd true|false> <budget...>
+# Single-arm NIAH sweep over sparse budgets: where does the page score start losing needles?
+# Used to find a target budget for further selection work (4096 already reads 10/10 under
+# mean+std).
+# Usage: bash scratch/niah_budget_sweep.sh <meanstd true|false> <budget...>.
 set -u
 
 MEANSTD="$1"; shift
