@@ -15,36 +15,17 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
                                        const float*, const float*, float*, half*, const half*, int, int, int,
                                        int, int);
 
-// ---------------------------------------------------------------------------
-// Fused multi-token GDN Delta Rule Scan kernel.
-//
-// Processes ALL tokens in a single kernel launch. The recurrent state is
-// cached in registers (128 floats per thread = 512 bytes), eliminating
-// per-token global memory round-trips.
-//
-// Grid:  (n_heads)
-// Block: (head_dim_ssm)  — typically 128 threads
-//
-// Each block handles one head, processing all tokens sequentially.
-// Each thread owns one column (d) of the state matrix H[state_size, head_dim].
-// Thread d holds H[0..state_size-1, d] in register array.
-//
-// Shared memory: K_norm[state_size] + Q_norm[state_size] + reduce[block_dim]
-// ---------------------------------------------------------------------------
-// SPLIT: how many threads cooperate on one state column. 1 is the original
-// shape — one thread owns H[0..SS-1, d] entirely, which at SS=128 costs 128
-// registers for the state alone and made ptxas spill (88 B stack, 128 B spill
-// stores, 255 registers used, 2 blocks/SM, 8.3 % occupancy). With SPLIT=2 each
-// thread owns half a column, the two partners sit in ADJACENT lanes so the two
-// dot products reduce with a single __shfl_xor_sync, and the register pressure
-// halves. Every HD=SS=128 launch, batched or single-sequence, runs SPLIT=2
-// (kScanSplit128, AUDIT_arch_2026 A2-3); HD=SS=64 stays at 1.
-// StateT: h_state STORAGE type — float (default) or __nv_bfloat16
-// (gdn.state_bf16: halves the state traffic that dominates batched decode;
-// the microbench reads the FP32 kernel at 1527 GB/s = the box's resident
-// ceiling, so bytes are the only lever). All arithmetic stays FP32 in
-// registers; loads/stores convert. BF16 keeps FP32's range — FP16 state was
-// refuted for GDN (subnormal truncation at ~6e-5 breaks near-zero heads).
+// Fused multi-token GDN Delta Rule Scan: processes ALL tokens in one launch, recurrent state
+// cached in registers (128 floats/thread = 512B), no per-token global round-trips.
+// Grid:(n_heads), Block:(head_dim_ssm) (typically 128). Each block owns one head; thread d owns
+// H[0..state_size-1,d]. Shared memory: K_norm[SS]+Q_norm[SS]+reduce[block_dim].
+// SPLIT: threads cooperating on one state column. SPLIT=1 at SS=128 needs 128 regs for state
+// alone and ptxas spills; SPLIT=2 halves the state per thread, partners in adjacent lanes reduce
+// via one __shfl_xor_sync. Every HD=SS=128 launch runs SPLIT=2 (kScanSplit128, AUDIT_arch_2026
+// A2-3); HD=SS=64 stays at 1.
+// StateT: h_state storage type, float (default) or bf16 (gdn.state_bf16, halves state traffic).
+// All arithmetic stays FP32 in registers; only loads/stores convert. FP16 state was refuted for
+// GDN (subnormal truncation at ~6e-5 breaks near-zero heads); bf16 keeps FP32's range.
 template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float>
 __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -58,36 +39,26 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
     StateT* __restrict__ h_snap,         // second state output, or nullptr
     const int* __restrict__ d_snap_n,    // row count h_snap is taken at
-    // --- batched decode over independent sequences (#GDN-batch) ---
-    // seq_slots: per-blockIdx.y recurrent-state slot id, or nullptr for the
-    // single-sequence call (then h_state is already the caller's slot pointer
-    // and gridDim.y is 1, so every offset below is zero and the emitted code
-    // is the one this kernel always ran).
-    // Concurrent GDN sequences are INDEPENDENT — each owns its own state slot —
-    // so they parallelise across blockIdx.y exactly like heads do across
-    // blockIdx.x. Tokens within one sequence stay sequential, which is the part
-    // that genuinely cannot batch.
+    // Batched decode over independent sequences (#GDN-batch). seq_slots: per-blockIdx.y recurrent-
+    // state slot id, nullptr for single-sequence (h_state is then the caller's slot pointer,
+    // gridDim.y=1). Sequences are INDEPENDENT and parallelise across blockIdx.y like heads do across
+    // blockIdx.x; tokens within one sequence stay sequential (cannot batch).
     const int* __restrict__ seq_slots = nullptr,
     int64_t h_state_seq_stride = 0,
-    // Ragged batch (cross-sequence prefill batching, roadmap 0(d)): prefix
-    // sums [n_seq+1] into the CONCATENATED row arrays. Sequence `seq` owns
-    // rows [off[seq], off[seq+1]); n_tokens is ignored per-seq. Uniform
-    // batches pass nullptr and keep the seq * n_tokens rebase, byte-for-byte.
-    // d_real_n is a single-sequence contract and must be nullptr when ragged.
+    // Ragged batch (cross-sequence prefill batching, roadmap 0(d)): seq_row_offsets is a prefix sum
+    // [n_seq+1] into concatenated row arrays; sequence `seq` owns rows [off[seq],off[seq+1]),
+    // n_tokens is ignored per-seq. Uniform batches pass nullptr (byte-for-byte seq*n_tokens rebase).
+    // d_real_n must be nullptr when ragged.
     const int* __restrict__ seq_row_offsets = nullptr,
-    // Batched speculative verify: per-sequence commit destination and
-    // snapshot slot, both ids into the same pool as seq_slots. out_slots[seq]
-    // receives the state at real_n rows (nullptr = in place, the slot read
-    // from); snap_slots[seq] receives the state at snap_n rows for EVERY
-    // sequence (nullptr = the one-slab h_snap contract above). A sequence may
-    // snapshot in place (snap_slots[seq] == seq_slots[seq]): this CTA is the
-    // only reader and writer of its column, and the read precedes the write.
+    // Batched speculative verify: out_slots[seq]/snap_slots[seq] are commit/snapshot slot ids into
+    // the seq_slots pool. out_slots[seq] receives state at real_n rows (nullptr = in place);
+    // snap_slots[seq] receives state at snap_n rows for EVERY sequence (nullptr = the one-slab
+    // h_snap contract). In-place snapshot (snap_slots[seq]==seq_slots[seq]) is safe: read precedes write.
     const int* __restrict__ out_slots = nullptr,
     const int* __restrict__ snap_slots = nullptr,
-    // Factored spare (compute/gdn_factor.cuh): fac_in carries a pending
-    // rank-1 row applied right after the state load, fac_out receives the row
-    // for real_n instead of a second full state copy. Both [n_seq, n_heads,
-    // fac_stride]; nullptr keeps the full-state contract above.
+    // Factored spare (gdn_factor.cuh): fac_in carries a pending rank-1 row applied right after the
+    // state load, fac_out receives the row for real_n instead of a second full state copy. Both
+    // [n_seq,n_heads,fac_stride]; nullptr keeps the full-state contract above.
     float* __restrict__ fac_out = nullptr,
     const float* __restrict__ fac_in = nullptr,
     int fac_stride = 0) {
@@ -107,27 +78,21 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const int part = (SPLIT == 1) ? 0 : static_cast<int>(threadIdx.x) % SPLIT;
     constexpr int SS_PER = SS / SPLIT;   // state rows this thread owns
     const int s_base = part * SS_PER;
-    // Padded verify chunk (#847): y is produced for every row (padding rows
-    // are causally invisible downstream), but the committed h_state is the
-    // register snapshot at the real last row — H_reg keeps evolving through
-    // the pads only to define their (discarded) y values.
+    // Padded verify chunk (#847): y is produced for every row (pads are causally invisible
+    // downstream), but the committed h_state is the register snapshot at the real last row - H_reg
+    // keeps evolving through pads only to define their (discarded) y values.
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
-    // Second commit row for the speculative verify: the state as of snap_n
-    // rows, written alongside the one at real_n. 0 disables it.
-    // One slab, not one per sequence: a multi-candidate verify chunk (W
-    // sequences, every candidate's row 0 the same token from the same
-    // committed state) takes it from sequence 0 only — the other sequences
-    // would write identical bits, but only one writer keeps the contract
-    // "the state after the chunk's first row" free of a race on the slab.
+    // Second commit row for speculative verify: state as of snap_n rows, written alongside real_n's
+    // (0 disables). One slab, not per-sequence: a multi-candidate verify chunk (W sequences, same
+    // row-0 token from the same committed state) takes it from sequence 0 only - other sequences
+    // would write identical bits, but only one writer keeps the "state after the first row" contract.
     const bool per_seq_snap = seq_slots != nullptr && snap_slots != nullptr && d_snap_n != nullptr;
     const int snap_n = per_seq_snap                    ? min(n_tokens, __ldg(d_snap_n))
                        : (h_snap && d_snap_n && seq == 0) ? min(n_tokens, __ldg(d_snap_n))
                                                           : 0;
 
-    // Head-to-K-group mapping. GGUF stores heads in tiled layout where head h's
-    // group is `h % n_groups`. HF SafeTensors (Qwen3.5/3.6) stores heads in
-    // grouped layout where head h's group is `h / (n_heads / n_groups)`.
-    // grouped_layout=1 selects the HF formula.
+    // Head-to-K-group mapping: GGUF tiled layout has head h's group = h % n_groups; HF SafeTensors
+    // (Qwen3.5/3.6) grouped layout has group = h / (n_heads/n_groups). grouped_layout=1 selects HF.
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     const int inner = n_heads * HD;
 
@@ -225,25 +190,16 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
                     s_reduce[tid] += s_reduce[tid + stride];
                 __syncthreads();
             }
-            // PyTorch-style L2 norm (matches llama's ggml_l2_norm): rsqrtf(max(sum_sq, eps^2)).
-            // Additive eps (sum + eps) over-clamps near-zero heads and produces
-            // 100-1000x too-small normalization scale vs llama, which breaks Qwen 3.6 scan
-            // outputs at layers where some heads have near-zero K (e.g. L1 h19/20/22/25/29).
+            // PyTorch-style L2 norm (matches llama's ggml_l2_norm): rsqrtf(max(sum_sq, eps^2)). Additive
+            // eps (sum+eps) over-clamps near-zero heads, breaking Qwen3.6 scan outputs at layers with
+            // near-zero K.
             float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
-            // Every thread has to finish READING s_reduce[0] above before any
-            // thread overwrites s_reduce for the q reduction. Without this
-            // barrier thread 0 can store q_sq into s_reduce[0] while a slower
-            // warp is still loading k_inv from it, and that warp normalises K
-            // by Q's norm.
-            //
-            // Latent since the kernel was written and invisible at the shipped
-            // grid: (n_heads) is at most 48 blocks here, well under the 170 SMs,
-            // so every block had an SM to itself and its four warps ran in
-            // lockstep. Batching decode over sequences makes the grid
-            // (n_heads x n_seq) — at 256 blocks the race fires and one block's
-            // state comes out different run to run (measured: stable through
-            // 128 blocks, 16384 of 4194304 floats differing at 256).
+            // Barrier required: every thread must finish reading s_reduce[0] (k_inv) before any thread
+            // overwrites s_reduce for the q reduction, or a slow warp reads a partially-overwritten value.
+            // Latent at grid (n_heads) <= 48 blocks (one SM each, in lockstep); batching decode over
+            // sequences makes the grid (n_heads x n_seq), where at higher block counts the race fires and
+            // results differ run to run.
             __syncthreads();
             s_reduce[tid] = q_sq;
             __syncthreads();
@@ -306,11 +262,9 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
         // no barrier needed). For the unpadded case real_n == n_tokens and
         // this is the single end-of-scan store the kernel always did.
         if (t + 1 == real_n) {
-            // Factored only when there IS a drafted row past the snapshot.
-            // Otherwise the row would describe the transition into the state
-            // the snapshot already holds and the next step would apply it a
-            // second time; the 0 sentinel below keeps the buffer defined so a
-            // stale row from an earlier step cannot survive either.
+            // Factored only when a drafted row exists past the snapshot: otherwise the row would re-describe
+            // a transition the snapshot already holds and the next step would apply it twice; the 0 sentinel
+            // keeps the buffer defined against a stale row from an earlier step.
             if (fac_out && snap_n >= 1 && real_n > snap_n) {
                 gdn_factor_store<SS_PER>(fac_out + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
             } else {
@@ -340,17 +294,9 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
 
 // Gated-norm family (FP16/FP32 variants) lives in gdn_gated_norm.cu.
 
-// ---------------------------------------------------------------------------
-// V-head reorder: tiled -> grouped (undo GGUF converter reorder for ssm_out)
-//
-// FP16 twin removed 2026-08-21: it and its kernel were declared, defined and
-// called nowhere. The only consumer of `gdn.vhead_reorder`
-// (executor_ssm_gdn.cu:421) gathers V out of the FP32 conv1d output, so it has
-// only ever called the _f32 variant below.
-// ---------------------------------------------------------------------------
-// FP32 variant for conv1d-SiLU output (= scan V input). Same math as FP16,
-// different element type. Used when the GGUF stored V in tiled layout and the
-// scan kernel reads V[h*HD+d] assuming grouped layout.
+// V-head reorder: tiled -> grouped (undoes the GGUF converter reorder for ssm_out). FP32 variant
+// for conv1d-SiLU output (= scan V input): used when GGUF stored V in tiled layout but the scan
+// kernel reads V[h*HD+d] assuming grouped layout.
 __global__ void vhead_tiled_to_grouped_f32_kernel(const float* __restrict__ src, float* __restrict__ dst,
                                                   int n_tokens, int n_heads, int head_dim, int n_groups) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -388,20 +334,13 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
 // ---------------------------------------------------------------------------
 
 
-// Batched fused scan over N INDEPENDENT sequences, n_tokens rows each.
-//
-// This is what lets concurrent GDN decode batch. The recurrent scan is
-// sequential in TOKENS, which is why a single sequence cannot be parallelised
-// over its own timeline — but separate sequences share nothing except the
-// weights, so they map onto blockIdx.y the same way heads map onto blockIdx.x.
-// At decode n_tokens is 1 and the launch goes from (n_heads) blocks, which
-// leaves an RTX 5090 almost idle, to (n_heads x n_seq).
-//
-// h_state_pool: base of the recurrent-state pool; seq_slots[i] selects the slot
-// for sequence i (device pointer, n_seq ints). h_state_seq_stride is the
-// distance between slots in FLOATS.
-// conv_f32 / alpha / beta / y are [n_seq * n_tokens, ...] with sequence-major
-// rows — the layout a batched decode step already produces.
+// Batched fused scan over N independent sequences, n_tokens rows each: lets concurrent GDN
+// decode batch. The scan is sequential in tokens (can't parallelise one sequence's timeline),
+// but sequences share nothing but weights, so they map to blockIdx.y like heads map to
+// blockIdx.x (decode: (n_heads) blocks -> (n_heads x n_seq)).
+// h_state_pool: base of the recurrent-state pool; seq_slots[i] selects sequence i's slot;
+// h_state_seq_stride is the distance between slots in floats. conv_f32/alpha/beta/y are
+// [n_seq*n_tokens,...] sequence-major (the layout a batched decode step already produces).
 void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha,
                                 const half* beta, const float* A_log, const float* dt_bias,
                                 float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
@@ -420,25 +359,11 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
             "gdn_scan_fused_f32_batched: h_snap/out_slots/snap_slots are uniform-batch contracts - nullptr when ragged");
     dim3 grid(n_heads, n_seq);
     if (head_dim_ssm == 128 && state_size == 128) {
-        // SPLIT=2: two threads per state column. At SS=128 one-thread-per-column
-        // needs 128 registers for the state alone and ptxas spills (255 used,
-        // 88 B stack); halving the slice removes the spill.
-        //
-        // 4 and 8 were measured and are WORSE, despite strictly better register
-        // pressure and occupancy (114 and 64 registers, up to 1024 threads/SM
-        // against 256). us/launch on this card, 48 heads:
-        //
-        //   n_seq   SPLIT=2   SPLIT=4   SPLIT=8
-        //      16     26.49     40.40     58.15
-        //      32     96.25    100.28    109.67
-        //      64    280.39    286.14    293.16
-        //
-        // The kernel is bandwidth-bound, so occupancy is not the binding
-        // constraint — coalescing is, and SPLIT spends it: SPLIT threads share
-        // one column, so a warp touches 32/SPLIT distinct columns and reads
-        // 128/SPLIT bytes per access. SPLIT=1 would be perfectly coalesced and
-        // spills instead. 2 is where the spill is gone and the access is still
-        // half a cache line. Do not raise it without re-measuring.
+        // SPLIT=2 (not 4 or 8): 4/8 give better register pressure/occupancy but measured WORSE
+        // throughput - kernel is bandwidth-bound, so occupancy isn't binding; coalescing is. SPLIT
+        // threads share one column, so a warp touches 32/SPLIT distinct columns at 128/SPLIT
+        // bytes/access. SPLIT=2 is where the register spill is gone and access is still half a cache
+        // line. Do not raise it without re-measuring.
         constexpr int SPLIT = 2;
         const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
         pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, half, SPLIT>);
@@ -495,14 +420,10 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Fused scan: processes all tokens in one kernel launch.
-// conv_f32: [n_tokens, conv_channels] FP32 — full conv output (Q|K|V interleaved per token)
-// grouped_layout: 0 = GGUF tiled (g = h % n_groups), 1 = HF SafeTensors grouped
-//                 (g = h / n_v_per_k). See kernel comment for details.
-// The single-sequence HD=SS=128 launches below run the SPLIT=2 instance the
-// batched launchers measured (see gdn_scan_fused_f32_batched): SPLIT=1 sits at
-// 255 registers with an 88-96 B local frame, SPLIT=2 at 180 with none. 256
-// threads, reduce buffer HD * SPLIT floats (AUDIT_arch_2026 A2-3).
+// Fused scan: all tokens in one launch. conv_f32: [n_tokens,conv_channels] FP32 (Q|K|V
+// interleaved per token). grouped_layout: 0=GGUF tiled (g=h%n_groups), 1=HF SafeTensors grouped
+// (g=h/n_v_per_k). Single-sequence HD=SS=128 launches run SPLIT=2 (255 regs+88-96B local frame
+// at SPLIT=1 vs 180 regs, none, at SPLIT=2); 256 threads, reduce buffer HD*SPLIT floats.
 constexpr int kScanSplit128 = 2;
 constexpr size_t kScanSmem128 = (2 * 128 + 128 * kScanSplit128) * sizeof(float);
 
@@ -590,21 +511,10 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                                             h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        // Refuse, do not approximate. This branch used to run the FP16 decode
-        // kernel into a scratch buffer, log a WARN that the FP32 conversion was
-        // "not implemented", and free the scratch — leaving `y_fp32` exactly as
-        // the caller passed it in. The scan silently contributed nothing, the
-        // step still returned, and the only trace was one warning in a log
-        // nobody reads per token. The same failure shape as #654: an unchecked
-        // fallback that keeps serving.
-        //
-        // Every GDN checkpoint staged here is HD=SS=128 (Qwen3.5/3.6/3.8:
-        // linear_key_head_dim = linear_value_head_dim = 128), so nothing reaches
-        // this today — which is precisely why it could sit unfinished. A shape
-        // that does arrive now says so at the first token instead of producing
-        // an answer nobody can tell from a correct one. Mamba2 checkpoints with
-        // other shapes (Nemotron-3.5: mamba_head_dim 64, ssm_state_size 128) use
-        // the Mamba2 scan, not this one.
+        // Refuse, do not approximate: an unsupported HD throws immediately rather than silently no-op
+        // (same failure shape as #654 - an unchecked fallback that keeps serving). Every GDN checkpoint
+        // today is HD=SS=128 (Qwen3.5/3.6/3.8), so nothing reaches this path; other Mamba2 shapes
+        // (Nemotron-3.5: head_dim 64, state 128) use the separate Mamba2 scan, not this one.
         throw std::runtime_error("gdn_scan_fused_fp32out: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size) +
                                  " (supported: 128/128 and 64/64). The FP16 decode fallback never wrote "
@@ -633,22 +543,10 @@ void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// Reference scan kernel — unfused semantics for validation.
-//
-// Design: one CUDA block per v_head, block size = head_dim_v. Each block owns
-// the full [state_size, head_dim_v] state slab for one head. State is kept in
-// shared memory for the duration of the per-token loop and written back to
-// global at the end. Differences vs. `gdn_scan_fused_kernel`:
-//   - State in SHARED memory (not per-thread registers). Easier to reason
-//     about; no cross-thread register ownership of state columns.
-//   - Q, K, V, alpha, beta loaded afresh each token from global via shared
-//     (no reuse across tokens).
-//   - L2-norm of Q, K uses the standard block-reduce pattern.
-//   - No `#pragma unroll` over state_size — keeps the inner loop predictable.
-// Math is identical to the fused kernel. If outputs differ, the fused
-// kernel has a correctness bug (register lifetime, sync, or dataflow).
-// ---------------------------------------------------------------------------
+// Reference scan kernel: unfused semantics for validation. One block/v_head, block size =
+// head_dim_v; state kept in SHARED memory (not registers) for the token loop, written back at
+// the end. Math is identical to the fused kernel - if outputs differ, the fused kernel has a
+// correctness bug (register lifetime, sync, or dataflow).
 __global__ void gdn_scan_reference_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
@@ -676,12 +574,8 @@ __global__ void gdn_scan_reference_kernel(
     const float A_h = A_log[h];
     const float dtb_h = dt_bias[h];
 
-    // Shared memory layout:
-    //   s_H[SS * HD]       — state slab (owned by this block, this head)
-    //   s_k[SS]            — K for current token (after L2-norm)
-    //   s_q[SS]            — Q for current token (after L2-norm)
-    //   s_v[HD]            — V for current token
-    //   s_reduce[HD]       — block reduction scratch
+    // Shared memory: s_H[SS*HD] state slab, s_k[SS]/s_q[SS] K/Q post-L2-norm, s_v[HD] V,
+    // s_reduce[HD] block reduction scratch (all for this block's head, this token).
     extern __shared__ float smem[];
     float* s_H = smem;
     float* s_k = s_H + SS * HD;
@@ -753,10 +647,8 @@ __global__ void gdn_scan_reference_kernel(
         }
         __syncthreads();
 
-        // Delta rule scan for this token.
-        // Each thread owns column d of the state: s_H[s * HD + d] for s in [0, SS).
-        //
-        // kv[d] = sum_s H[s, d] * k_norm[s]
+        // Delta rule scan for this token: thread d owns column d of the state, s_H[s*HD+d] for s in
+        // [0,SS). kv[d] = sum_s H[s,d] * k_norm[s].
         float kv_d = 0.0f;
         for (int s = 0; s < SS; s++) {
             kv_d += s_H[s * HD + d] * s_k[s];

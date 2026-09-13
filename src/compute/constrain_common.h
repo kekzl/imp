@@ -1,9 +1,7 @@
 #pragma once
 
-// Shared token classification for JSON and schema constrainers.
-// Both JsonConstrainer and SchemaConstrainer classify vocabulary tokens
-// into category bitmasks. This header provides the shared classification
-// function and the common mask kernel.
+// Shared token classification for JSON and schema constrainers: both classify vocabulary tokens
+// into category bitmasks via the shared classification function and common mask kernel.
 
 #include <cstdint>
 #include <cstring>
@@ -72,11 +70,9 @@ static inline uint16_t classify_token(const std::string& text) {
             cat |= CAT_NUMBER_CONT | CAT_STRING_CHAR;
         if (first == ' ' || first == '\t' || first == '\n' || first == '\r')
             cat |= CAT_WHITESPACE;
-        // General string chars: anything that is not a control character, a
-        // quote or a backslash. The cast is load-bearing — `char` is signed
-        // here, so every byte of a multi-byte UTF-8 sequence (0x80-0xFF) reads
-        // as negative and would fail this test, which is how constrained output
-        // lost its umlauts (#1197).
+        // General string chars: anything not a control char, quote, or backslash. The cast to
+        // unsigned char is load-bearing - plain `char` is signed, so UTF-8 continuation bytes
+        // (0x80-0xFF) read negative and fail the test, dropping umlauts (#1197).
         if (static_cast<unsigned char>(first) >= 32 && first != '"' && first != '\\')
             cat |= CAT_STRING_CHAR;
         // Literal continuation characters
@@ -109,17 +105,10 @@ static inline uint16_t classify_token(const std::string& text) {
             cat |= CAT_COLON;
         if (first == ',')
             cat |= CAT_COMMA;
-        // CAT_QUOTE follows the PRESENCE of a quote, not its position. A BPE
-        // vocabulary spells the end of a string far more often as `."`, `n"`,
-        // `!"` than as a bare `"`, and those tokens are the only way out of a
-        // free string value. Keying on `first == '"'` gave them neither
-        // CAT_QUOTE (they do not start with one) nor CAT_STRING_CHAR (is_str
-        // clears on any quote, four lines up), so cat came out 0x0000 and the
-        // category pre-filter dropped them before token_legal — which accepts
-        // them — was ever asked. Same shape as #1197 one class over: the mask
-        // decided something the FSM was supposed to decide, and the model
-        // closed the string with a typographic `”` instead, which IS legal
-        // string content, so the value never ended (#1199).
+        // CAT_QUOTE follows the PRESENCE of a quote, not its position: BPE tokens spelling the end of a
+        // string (`."`, `n"`, `!"`) don't start with a quote, so keying on first=='"' gave them neither
+        // CAT_QUOTE nor CAT_STRING_CHAR, and the category pre-filter dropped them before token_legal
+        // (which accepts them) ever ran - same class of bug as #1197 (#1199).
         if (text.find('"') != std::string::npos)
             cat |= CAT_QUOTE;
 
@@ -148,16 +137,13 @@ static inline uint16_t classify_token(const std::string& text) {
     return cat;
 }
 
-// The kernels below are the only device code in this header. They are guarded
-// so a host-only translation unit can include it for classify_token() alone —
-// which is what puts the classifier under test in the CPU `unit` lane, the lane
+// The kernels below are the only device code in this header, guarded so a host-only TU can
+// include it for classify_token() alone - which puts the classifier under the CPU `unit` lane
 // CI actually runs. #1197 lived here precisely because nothing tested it.
 #ifdef __CUDACC__
 
-// ---------------------------------------------------------------------------
-// Shared GPU kernel: apply category bitmask to logits.
-// Sets logits to -FLT_MAX for tokens whose category doesn't match the mask.
-// ---------------------------------------------------------------------------
+// Shared GPU kernel: applies category bitmask to logits, setting -FLT_MAX for tokens whose
+// category doesn't match the mask.
 
 __global__ inline void constrain_mask_kernel(float* __restrict__ logits,
                                              const uint16_t* __restrict__ token_cats,
@@ -170,18 +156,13 @@ __global__ inline void constrain_mask_kernel(float* __restrict__ logits,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Extended mask kernel with per-token allow (for schema constraining).
-// Tokens must pass BOTH category mask AND token_allow when use_token_allow
-// is true.
-// ---------------------------------------------------------------------------
+// Extended mask kernel with per-token allow (schema constraining): tokens must pass BOTH the
+// category mask AND token_allow when use_token_allow is true.
 
-// `vocab_size` is the LOGITS width (model vocab); `n_classified` is the number
-// of tokens the constrainer classified (tokenizer vocab). SafeTensors models
-// pad the lm_head past the tokenizer vocab (Qwen3-8B-NVFP4: 151936 vs 151669);
-// those padding ids have no grammar classification and untrained weight rows,
-// so they are masked unconditionally — and the category/allow buffers are only
-// n_classified wide, so reading them at idx >= n_classified would be OOB.
+// vocab_size is the LOGITS width (model vocab); n_classified is the tokenizer vocab the
+// constrainer classified. SafeTensors models pad lm_head past n_classified; those padding ids
+// have no grammar classification, so they are masked unconditionally - the category/allow
+// buffers are only n_classified wide, and reading past it would be OOB.
 __global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
                                                    const uint16_t* __restrict__ token_cats,
                                                    const uint8_t* __restrict__ token_allow,

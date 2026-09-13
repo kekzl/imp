@@ -20,26 +20,19 @@ constexpr int TC_STRIDE = TC_K_TILE + TC_PAD;  // 264
 
 constexpr int TC_BLOCK = 256;  // 8 warps
 
-// Dynamic shared memory layout:
-//   B_smem:       [TC_TILE_N × TC_STRIDE] half  = 33792 bytes
-//   A_smem:       [TC_TILE_M × TC_STRIDE] half  = 16896 bytes
-//   tile_prefix:  [n_experts+1] int32            ≤ 528 bytes (up to 132 experts)
-//   Total:        ~51216 bytes
+// Dynamic shared memory: B_smem [TC_TILE_N x TC_STRIDE] half = 33792 B; A_smem [TC_TILE_M x
+// TC_STRIDE] half = 16896 B; tile_prefix [n_experts+1] int32 <= 528 B (up to 132 experts).
+// Total ~51216 bytes.
 constexpr int B_SIZE = TC_TILE_N * TC_STRIDE * sizeof(half);  // 33792
 constexpr int A_SIZE = TC_TILE_M * TC_STRIDE * sizeof(half);  // 16896
 constexpr int PREFIX_SIZE = 132 * sizeof(int32_t);            // 528
 constexpr int SMEM_TOTAL = B_SIZE + A_SIZE + PREFIX_SIZE;     // 51216
 
-// ---------------------------------------------------------------------------
-// Kernel: persistent work-queue fused Q6_K dequant + WMMA GEMM for MoE prefill
-//
-// Each CTA atomically grabs work tiles from a global counter.  A tile is
-// (expert_id, m_base, n_base) representing one TC_TILE_M × TC_TILE_N output
-// block.  This eliminates M-loop imbalance: all CTAs do exactly 1 tile per
-// iteration, and heavy experts are spread across many CTAs.
-//
-// Tile mapping:  flat_idx → (n_tile, m_tile_flat) → binary-search expert_id
-// ---------------------------------------------------------------------------
+// Persistent work-queue fused Q6_K dequant + WMMA GEMM for MoE prefill: each CTA atomically
+// grabs work tiles from a global counter. A tile is (expert_id, m_base, n_base), one
+// TC_TILE_M x TC_TILE_N output block, eliminating M-loop imbalance (every CTA does exactly
+// one tile/iteration; heavy experts spread across many CTAs). Tile mapping: flat_idx ->
+// (n_tile, m_tile_flat) -> binary-search expert_id.
 __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel(
     const uint8_t* __restrict__ packed_weights, const half* __restrict__ activations,
     half* __restrict__ output, const int32_t* __restrict__ offsets,
@@ -238,10 +231,9 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 // Host launcher
 // ---------------------------------------------------------------------------
 
-// Launch config + tile counter, configured once per engine. File-scope so the
-// reset hook re-arms the guard: a function-local `configured` survived every
-// engine teardown and the counter pointed into the closed arena
-// (AUDIT_arch_2026 B-2).
+// Launch config + tile counter, configured once per engine, file-scope so the reset hook can
+// re-arm the guard: a function-local `configured` survived engine teardown and the counter
+// pointed into the closed arena (AUDIT_arch_2026 B-2).
 namespace {
 bool s_configured = false;
 int s_grid_size = 0;
@@ -278,10 +270,9 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
         s_grid_size = num_sms * max(max_blocks_per_sm, 1);
 
-        // T2 (engine-persistent): a 4-byte counter allocated once under the
-        // `s_configured` guard — the arena is exactly the tier for that. Falls
-        // back to a direct allocation when the arena is closed (a bare GEMM
-        // unit test has no engine), same as the other migrated one-shot tenants.
+        // T2 (engine-persistent): a 4-byte counter allocated once under the `s_configured` guard, the
+        // arena tier for exactly this. Falls back to a direct allocation when the arena is closed
+        // (a bare GEMM unit test has no engine), like the other migrated one-shot tenants.
         if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty()) {
             s_tile_counter = reinterpret_cast<int*>(slab.data());
             s_tile_counter_owned = false;

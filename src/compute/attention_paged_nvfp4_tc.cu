@@ -11,24 +11,12 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// NVFP4 Paged Attention Decode
-//
-// KV cache stores 2 FP4 (E2M1) values per byte (low nibble = even, high = odd).
-// Per-token-head-group_of_16 UE4M3 (FP8 E4M3) scales stored separately.
-//
-// Layout per cache block:
-//   K_cache : [block, t_in_block, kv_head, head_dim/2]    uint8_t  (packed FP4)
-//   V_cache : same shape as K_cache
-//   K_scales: [block, t_in_block, kv_head, head_dim/16]   uint8_t  (UE4M3)
-//   V_scales: same shape as K_scales
-//
-// Dequant: val = e2m1_decode(nibble) * ue4m3_decode(scale_byte)
-//
-// Each lane covers ELEMS = HEAD_DIM/32 contiguous elems. For all imp head_dims
-// (64/128/256/512), ELEMS ≤ 16 so a lane covers a slice of exactly ONE
-// 16-element scale group. lane scale index = lane_offset / 16.
-// ---------------------------------------------------------------------------
+// NVFP4 paged attention decode. KV cache: 2 FP4 (E2M1) values/byte (low=even, high=odd);
+// per-token-head-group_of_16 UE4M3 scales stored separately.
+// Layout/block: K_cache/V_cache [block,t_in_block,kv_head,hd/2] uint8; K/V_scales
+// [block,t_in_block,kv_head,hd/16] uint8 UE4M3. Dequant: e2m1_decode(nibble)*ue4m3_decode(scale).
+// Each lane covers ELEMS=HD/32 elems; for all imp head_dims (64/128/256/512) ELEMS<=16, so a
+// lane covers exactly one 16-element scale group (lane scale index = lane_offset/16).
 
 // UE4M3 byte → float (standard FP8 E4M3, sign always 0 in NVFP4 scale role).
 __device__ __forceinline__ float ue4m3_decode(uint8_t bits) {
@@ -51,10 +39,9 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 // Non-Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
-// Kernel uses no __launch_bounds__: with the dots/weights moved to shared
-// mem (warp-shfl reduction, see block-softmax section) the spill is gone
-// (cuobjdump STACK:0 across HD ∈ {64,128,256,512}); the compiler picks the
-// best occupancy/register trade-off automatically.
+// No __launch_bounds__: with dots/weights moved to shared mem (warp-shfl reduction), the
+// register spill is gone (cuobjdump STACK:0 across HD in {64,128,256,512}); the compiler picks
+// the best occupancy/register tradeoff automatically.
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_nvfp4_tc_kernel(
     const half* __restrict__ Q,
@@ -65,15 +52,12 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     half* __restrict__ O, const int* __restrict__ block_tables,
     const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int block_size,
     float scale, int max_context_len, int max_num_blocks, int sliding_window, float softcap,
-    // Phase 3b residual args.
-    // Single-seq form (batch_size==1): K_residual / V_residual point at the
-    //   (seq, layer) slice; residual_count_scalar / residual_write_idx_scalar
-    //   carry per-seq state. Layout [residual_n_tokens, n_kv_heads, head_dim].
-    // Multi-seq form (batch_size>=1): K_residual_base / V_residual_base point at
-    //   slot 0's (K|V) data for this layer; residual_seq_stride_elems is the FP16
-    //   stride between slots; d_residual_seq_slots/_counts/_write_idxes are device
-    //   arrays of length batch_size, indexed by blockIdx.x.
-    // Multi-seq is selected when d_residual_seq_slots != nullptr.
+    // Phase 3b residual args. Single-seq (batch_size==1): K/V_residual point at the (seq,layer)
+    // slice; residual_count/write_idx_scalar carry per-seq state, layout [residual_n_tokens,
+    // n_kv_heads,hd]. Multi-seq (batch_size>=1): K/V_residual_base point at slot 0's data;
+    // residual_seq_stride_elems is the FP16 stride between slots; d_residual_seq_slots/_counts/
+    // _write_idxes are device arrays of length batch_size, indexed by blockIdx.x. Multi-seq is
+    // selected when d_residual_seq_slots != nullptr.
     const half* __restrict__ K_residual, const half* __restrict__ V_residual,
     int residual_count_scalar, int residual_n_tokens, int residual_write_idx_scalar,
     const half* __restrict__ K_residual_base, const half* __restrict__ V_residual_base,
@@ -186,12 +170,8 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 
     for (int blk = first_block + warp_id; blk < num_paged_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -208,13 +188,9 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         if (tok_start < effective_start)
             first_tok = effective_start - tok_start;
 
-        // ---------------------------------------------------------------
-        // BitDecoding TC dispatch: WMMA Q.K^T over all valid tokens of this
-        // page block at once. block_size <= 16 maps cleanly to a 16x16 WMMA
-        // tile (m=16 rows of replicated Q × n=16 token columns, k=16
-        // head-dim chunks). V accumulation remains per-token scalar in
-        // Phase 1 (Phase 2 will TC the PV path).
-        // ---------------------------------------------------------------
+        // BitDecoding TC dispatch: WMMA QK^T over all valid tokens of this page block at once.
+        // block_size<=16 maps to a 16x16 WMMA tile (m=16 replicated Q rows x n=16 token cols, k=16
+        // head-dim chunks). V accumulation stays per-token scalar in Phase 1 (Phase 2 will TC the PV path).
         constexpr int K_TILES = HEAD_DIM / 16;
 
         // Per-warp WMMA scratch
@@ -274,31 +250,15 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         wmma::store_matrix_sync(sK_w, c_frag, 16, wmma::mem_row_major);
         __syncwarp();
 
-        // ---------------------------------------------------------------
-        // Phase 2 BISECT STEP A: block-softmax + SCALAR V accum.
-        //
-        // Critical: Phase 1's online_softmax_step (in attention_paged_common.cuh)
-        // produces NORMALIZED rescale + w_new (divided by l_new at each step),
-        // so o_reg is always normalized = (running sum exp(d-m_w) V) / l_w.
-        // crosswarp_reduce_and_write assumes warp_o is normalized — it computes
-        //   weight = exp(m_w - global_max) * l_w
-        //   o_val += weight * warp_o[w]
-        //   o_val /= global_l
-        // For this to give the correct global attention, warp_o must be the
-        // l_w-divided normalized form. Block-softmax must preserve that
-        // invariant.
-        // ---------------------------------------------------------------
+        // Phase 2 BISECT STEP A: block-softmax + scalar V accum. Critical invariant: Phase 1's
+        // online_softmax_step produces NORMALIZED rescale (divided by l_new each step), so o_reg is
+        // always the l_w-divided normalized form. crosswarp_reduce_and_write assumes warp_o is
+        // normalized (weight = exp(m_w-global_max)*l_w; o_val += weight*warp_o; o_val /= global_l).
+        // Block-softmax must preserve this invariant.
 
-        // Block-softmax with shared-mem dots/weights to avoid the per-thread
-        // float[16] arrays (forced a 64-byte stack spill into DRAM-backed
-        // local memory at HD>=128, dominated decode tg/s).
-        //
-        // Lanes 0..15 each compute one entry; full 32-lane warp-shfl reduce
-        // for m_local / l_local so EVERY lane sees the same scalar (the
-        // sQ_w fill below has lanes 16..31 also reading weights[col], so
-        // they need consistent l_inv).
-        // Use the front of sFV_w for dots/weights — sFV_w is per-warp (1024B
-        // floats = 256 entries) and only used after this for V WMMA store.
+        // Block-softmax uses shared-mem dots/weights instead of per-thread float[16] (avoids a 64-byte
+        // stack spill at HD>=128). Lanes 0..15 each compute one entry; full 32-lane warp-shfl reduce for
+        // m_local/l_local so lanes 16..31 (which also read weights[col]) see consistent l_inv.
         float* dots_smem = sFV_w;
         float* weights_smem = sFV_w + 16;
 
@@ -346,16 +306,10 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 #pragma unroll
         for (int i = 0; i < ELEMS; i++) o_reg[i] *= rescale_norm;
 
-        // ---------------------------------------------------------------
-        // WMMA V accum: D[m=16, n=16] = A[m, k]=normalized_weights[k] × B[k=tok, n=hd_local]
-        // (B as row_major reads sK_w[tok*16+hd] = V[tok][hd] directly — no
-        //  transpose needed; different from QK phase's col_major B which
-        //  intentionally transposes K.)
-        //
-        // Per-lane scatter into o_reg: each lane owns ELEMS contiguous
-        // absolute hd offsets within ONE 16-element chunk, so exactly one
-        // kt iteration's contributions land in this lane's o_reg.
-        // ---------------------------------------------------------------
+        // WMMA V accum: D[m=16,n=16] = A[m,k]=normalized_weights[k] x B[k=tok,n=hd_local] (B row_major
+        // reads sK_w[tok*16+hd] = V[tok][hd] directly, no transpose; unlike QK's col_major B).
+        // Per-lane scatter into o_reg: each lane owns ELEMS contiguous absolute hd offsets within one
+        // 16-element chunk, so exactly one kt iteration's contributions land in this lane's o_reg.
         constexpr int LANES_PER_CHUNK = (16 / ELEMS) > 0 ? (16 / ELEMS) : 1;
         const int my_chunk = lane_id / LANES_PER_CHUNK;
         const int my_offset_in_chunk = (lane_id % LANES_PER_CHUNK) * ELEMS;
@@ -418,18 +372,12 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         }
     }
 
-    // ------------------------------------------------------------------
-    // Phase 3b: residual FP16 pass over the newest `residual_active_count`
-    // tokens. Same WMMA QK + block-softmax + WMMA V structure as the paged
-    // loop, but reads K/V directly as FP16 from the residual ring (no FP4
-    // dequant, no UE4M3 fold). Tiles distribute round-robin across warps;
-    // each warp's m_w/l_w/o_reg evolves independently and the cross-warp
-    // reduce later integrates them correctly.
-    //
-    // Ring slot for chronological position i in the active range:
-    //   slot = (residual_write_idx + residual_n_tokens - residual_count
-    //          + residual_skip + i) % residual_n_tokens
-    // ------------------------------------------------------------------
+    // Phase 3b: residual FP16 pass over the newest residual_active_count tokens. Same WMMA QK +
+    // block-softmax + WMMA V structure as the paged loop, but reads K/V directly as FP16 (no FP4
+    // dequant/UE4M3 fold). Tiles distribute round-robin across warps; each warp's (m_w,l_w,o_reg)
+    // evolves independently, integrated later by the cross-warp reduce.
+    // Ring slot for chronological position i: (write_idx+residual_n_tokens-residual_count+skip+i)
+    // % residual_n_tokens.
     if (residual_active_count > 0) {
         const int kv_head_stride_res = HEAD_DIM;            // FP16 elems per (slot, kv_head)
         const int slot_stride_res = n_kv_heads * HEAD_DIM;  // FP16 elems per slot
@@ -445,10 +393,8 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         const int slot_base = (residual_write_idx + residual_n_tokens - residual_count + residual_skip)
                               % residual_n_tokens;
 
-        // Fragments declared INSIDE the loop so they don't allocate registers
-        // for warps that skip the loop entirely (register pressure cuts kernel
-        // occupancy and slows the paged loop, which is the dominant cost at
-        // long context — verified via A/B at ctx=1024 vs 4096).
+        // Fragments declared INSIDE the loop so warps that skip it allocate no registers for them -
+        // register pressure cuts occupancy on the paged loop, the dominant cost at long context.
         for (int tile = warp_id; tile < n_tiles_r; tile += NUM_WARPS) {
             using namespace nvcuda;
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
@@ -497,17 +443,10 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
             wmma::store_matrix_sync(sK_r, c_frag, 16, wmma::mem_row_major);
             __syncwarp();
 
-            // Block-softmax (mirrors paged loop's normalized-rescale invariant).
-            //
-            // dots and weights live in shared memory rather than per-thread
-            // register arrays. Per-thread `float[16]` forced a 64-byte stack
-            // spill (cuobjdump STACK:64 at HD>=128) that turned the residual
-            // pass into a 3× tg/s regression on the long-context decode path
-            // — every spilled access is a DRAM round-trip. With shared-mem
-            // tables, lanes 0..15 each compute one entry, the warp shfl-
-            // reduces for m_local / l_local, and the V-phase A-operand fill
-            // reads from shared memory instead of registers. Reuses the front
-            // 32 floats of sFV_r (which is 16×16=256 floats so plenty of room).
+            // Block-softmax (mirrors the paged loop's normalized-rescale invariant): dots and weights live
+            // in shared memory, not per-thread float[16] registers (that spilled to DRAM-backed local memory
+            // at HD>=128 and badly regressed decode). Lanes 0..15 each compute one entry, warp-shfl reduces
+            // m_local/l_local, and the V-phase A-operand fill reads from shared memory instead of registers.
             float* dots_smem = sFV_r;             // [16] floats per warp
             float* weights_smem = sFV_r + 16;     // [16] floats per warp
 
@@ -520,12 +459,9 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
             if (lane_id < 16) dots_smem[lane_id] = my_dot;
             __syncwarp();
 
-            // Full 32-lane warp reduce so EVERY lane (including 16..31, which
-            // have my_dot = -FLT_MAX) sees the same m_local. Skipping the
-            // off=16 step would leave lanes 16..31 with m_local=-FLT_MAX,
-            // diverging the subsequent m_new / exp_diff / l_inv computation
-            // and corrupting the per-lane sQ_r weight fill (each lane writes
-            // some rows of the A operand; inconsistent l_inv → garbage WMMA).
+            // Full 32-lane warp reduce so every lane (including 16..31, whose my_dot=-FLT_MAX) sees the
+            // same m_local. Skipping it would diverge m_new/exp_diff/l_inv and corrupt the per-lane sQ_r
+            // weight fill (inconsistent l_inv -> garbage WMMA).
             float m_local = my_dot;
             #pragma unroll
             for (int off = 16; off > 0; off >>= 1) {
@@ -693,12 +629,8 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -766,36 +698,21 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
                                       num_splits, split_idx);
 }
 
-// ---------------------------------------------------------------------------
-// Phase 3b residual + reduce kernel.
-//
-// Replaces `paged_attention_reduce_kernel` for the residual path. Reads the
-// per-split paged partials from `partial_out` (written by the existing splitk
-// paged kernel), processes the FP16 residual ring tokens, and emits the final
-// merged O.
-//
-// Why a fused kernel: profiling (nsys, 2026-05-09) showed the original Phase 3b
-// design — embed the residual pass into the non-splitk decode kernel — forced
-// the launcher onto the slow non-splitk path (414 µs/call vs splitk at 33
-// µs/call, 12× regression). Letting splitk run normally and folding residual
-// into the reduce kernel preserves the splitk parallelism while still matching
-// the residual-FP16 contribution.
-//
-// Math (write-through residual: paged contains all tokens, residual contains
-// the same tail tokens at higher precision):
-//   m_paged   = max over paged splits of m_s
-//   l_paged   = sum_s exp(m_s - m_paged) * l_s
-//   O_paged_unnorm[d] = sum_s exp(m_s - m_paged) * partial_out[s, 2+d]
-//                     = sum over all paged tokens of exp(d_t - m_paged) V_t
-//   m_res, l_res, O_res_unnorm[d]: same accumulation over residual tokens.
-//   m_global  = max(m_paged, m_res)
-//   l_global  = exp(m_paged - m_global) * l_paged + exp(m_res - m_global) * l_res
-//   O_final[d] = (exp(m_paged - m_global) * O_paged_unnorm[d] +
-//                 exp(m_res - m_global) * O_res_unnorm[d]) / l_global
-//
-// One block per (batch, head). NUM_WARPS warps cooperatively process the
-// residual tokens (round-robin); thread 0 reduces paged partials.
-// ---------------------------------------------------------------------------
+// Phase 3b residual + reduce kernel, replacing paged_attention_reduce_kernel for the residual
+// path. Reads per-split paged partials from partial_out, processes the FP16 residual ring
+// tokens, emits the final merged O. Fused because embedding the residual pass into the
+// non-splitk decode kernel forces the launcher onto that slow path; letting split-K run
+// normally and folding residual into the reduce preserves split-K parallelism.
+// Math (write-through: paged holds all tokens, residual holds the same tail at higher precision):
+//   m_paged = max over paged splits of m_s; l_paged = sum_s exp(m_s-m_paged)*l_s
+//   O_paged_unnorm[d] = sum_s exp(m_s-m_paged)*partial_out[s,2+d] (= sum over paged tokens of
+//     exp(d_t-m_paged)*V_t). m_res/l_res/O_res_unnorm: same over residual tokens.
+//   m_global = max(m_paged,m_res)
+//   l_global = exp(m_paged-m_global)*l_paged + exp(m_res-m_global)*l_res
+//   O_final[d] = (exp(m_paged-m_global)*O_paged_unnorm[d] + exp(m_res-m_global)*O_res_unnorm[d])
+//     / l_global
+// One block per (batch,head); NUM_WARPS warps process residual tokens round-robin, thread 0
+// reduces paged partials.
 template <int HEAD_DIM>
 __global__ void paged_attention_residual_reduce_kernel(
     const float* __restrict__ partial_out,           // [b, h, num_paged_splits, 2+HD]
@@ -809,12 +726,10 @@ __global__ void paged_attention_residual_reduce_kernel(
     const half* __restrict__ K_residual,
     const half* __restrict__ V_residual,
     int residual_count_scalar, int residual_write_idx_scalar,
-    // Multi-seq / per-slot array form. Two indirection styles:
-    //   (a) per-batch arrays:   d_residual_counts[batch_idx], d_residual_write_idxes[batch_idx]
-    //   (b) per-slot arrays:    d_residual_widx_per_slot[slot], d_residual_fc_per_slot[slot]
-    //                           (slot looked up via d_residual_seq_slots[batch_idx])
-    // (b) is graph-capture-safe — kv_manager_'s persistent ring state is used
-    // directly. (a) is the legacy form (engine builds per-step host buffer).
+    // Multi-seq/per-slot array form. Two indirection styles: (a) per-batch arrays
+    // d_residual_counts[batch_idx]/d_residual_write_idxes[batch_idx]; (b) per-slot arrays
+    // d_residual_widx_per_slot[slot]/d_residual_fc_per_slot[slot] (slot via d_residual_seq_slots).
+    // (b) is graph-capture-safe (uses kv_manager_'s persistent ring state directly); (a) is legacy.
     const half* __restrict__ K_residual_base,
     const half* __restrict__ V_residual_base,
     int residual_seq_stride_elems,
@@ -1041,15 +956,10 @@ __global__ void paged_attention_residual_reduce_kernel(
     }
 }
 
-// Note: a pipelined splitk variant (double-buffered K + V via smem, mirroring
-// `paged_attention_splitk_int4_pipeline_kernel`) was tested 2026-05-08 and
-// regressed Qwen3-8B Q8 + NVFP4 KV decode by ~3% (147.0 → 142.7 tok/s,
-// 5 reps). Once the inner loop became HW-FP4-cvt-bound (PR landed earlier
-// today) there was no longer enough work between issuing K[t+1] and using
-// K[t] for the prefetch to hide global-memory latency. The int4 pattern
-// works because INT4 dequant is heavier (8-entry LUT + sign branch). Don't
-// re-attempt without first profiling to confirm the kernel is back to
-// memory-bound (e.g. once block_size grows past 16 or HD>512 lands).
+// A pipelined split-K variant (double-buffered K+V via smem) regressed this kernel: once the
+// inner loop is HW-FP4-cvt-bound, there is no longer enough work to hide K[t+1]'s prefetch
+// latency. Don't re-attempt without first confirming the kernel is memory-bound again (e.g.
+// block_size > 16 or HD > 512).
 
 // ---------------------------------------------------------------------------
 // Host launcher
@@ -1075,10 +985,9 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
 
-    // Phase 3b: residual is not wired into the split-K scaffold.  Force
-    // non-split path when EITHER form is active. Multi-seq form is selected
-    // by d_residual_seq_slots != nullptr; single-seq scalar form requires
-    // K_residual && residual_count > 0 && batch_size == 1.
+    // Phase 3b: residual is not wired into the split-K scaffold; forces the non-split path when
+    // either form is active. Multi-seq form selected by d_residual_seq_slots != nullptr; single-seq
+    // scalar form requires K_residual && residual_count>0 && batch_size==1.
     const bool residual_active_multiseq =
         (d_residual_seq_slots != nullptr) && (K_residual_base != nullptr) &&
         (V_residual_base != nullptr) && (residual_n_tokens > 0);
@@ -1101,14 +1010,10 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr);
 
-    // Residual path: ALWAYS use splitk + residual_reduce_kernel even if
-    // compute_splitk_splits returned 1. Embedding the residual pass into the
-    // non-splitk decode kernel was the previous design and forced a 12× slow
-    // path (414 µs/call vs splitk at 33 µs/call) per nsys profile (2026-05-09).
-    // The splitk paged kernel runs unmodified (writes per-split partials);
-    // residual_reduce_kernel folds in the FP16 residual contribution as part
-    // of the reduce. Requires scratch_ptr to be allocated — caller (engine
-    // workspace) provides this when NVFP4 KV is enabled.
+    // Residual path always uses split-K + residual_reduce_kernel, even when compute_splitk_splits
+    // returns 1: embedding the residual pass into the non-splitk kernel was the previous design and
+    // forced a much slower path. The split-K paged kernel runs unmodified (per-split partials);
+    // residual_reduce_kernel folds in the FP16 residual contribution. Requires scratch_ptr allocated.
     if (residual_active && scratch_ptr == nullptr) {
         IMP_LOG_WARN("paged_attention_decode_nvfp4_tc: residual active but no splitk "
                      "scratch — falling back to non-splitk path (slow)");

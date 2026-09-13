@@ -6,11 +6,9 @@
 
 namespace imp {
 
-// The cuBLASLt workspace and the algo-selection bench scratch. Both are taken
-// from the engine-persistent (T2) arena by gemm_init() (A7 step 8) and are
-// charged in exec_t2_demand as `cublas_workspace`, so Engine::init reserves
-// them before anything else can spend the free VRAM they need. Exported so the
-// demand function's replicated copies can be static_asserted against them.
+// cuBLASLt workspace + algo-selection bench scratch, taken from the engine-persistent
+// (T2) arena by gemm_init() (A7 step 8), charged in exec_t2_demand as `cublas_workspace`
+// so Engine::init reserves them before anything else spends the free VRAM they need.
 inline constexpr size_t kGemmCublasWorkspaceBytes = 64ull << 20;  // 64 MiB
 inline constexpr size_t kGemmBenchScratchBytes = 32ull << 20;     // 32 MiB
 
@@ -18,10 +16,10 @@ inline constexpr size_t kGemmBenchScratchBytes = 32ull << 20;     // 32 MiB
 // to ensure workspace is allocated while GPU memory is available.
 void gemm_init();
 
-// Graph-captured verify (#847): allow cuBLASLt calls to record into an active
-// stream capture. Default off — cold-shape Lt calls fail with status 14 under
-// capture on sm_120 (heuristic/workspace paths); the verify capturer warms
-// every shape eagerly first and toggles this around its capture.
+// Graph-captured verify (#847): allows cuBLASLt calls to record into an active stream
+// capture. Default off: cold-shape Lt calls fail with status 14 under capture on
+// sm_120; the verify capturer warms every shape eagerly first and toggles this around
+// its capture.
 void gemm_set_lt_capture_allowed(bool allowed);
 bool gemm_lt_capture_allowed();
 
@@ -66,23 +64,14 @@ void gemv_gate_fp32(const half* W, const half* x, float* y, int M, int K, cudaSt
 void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, int K,
                               cudaStream_t stream = nullptr);
 
-// ---------------------------------------------------------------------------
-// MMVQ (Mixed-precision Matrix-Vector Quantized) — dp4a-accelerated GEMV.
-// Quantizes the FP16 input vector to Q8_1 format, then uses dp4a (INT8x4 dot
-// product) for the accumulation. ~2x faster than the FP16 dequant path above.
-// ---------------------------------------------------------------------------
+// MMVQ (Mixed-precision Matrix-Vector Quantized) GEMV: quantizes the FP16 input to
+// Q8_1, then uses dp4a (INT8x4 dot product) for the accumulation.
 
-// Q8_1 block: 32 int8 quantized values + FP16 scale (d) + FP16 sum (s).
-// The sum field enables the dp4a bias subtraction trick.
-//
-// LAYOUT (since 2026-06-07, #598 follow-up): qs first + alignas(16) + pad to
-// a 48-B stride. The historical ggml-style 36-B layout put qs at offset 4 —
-// never 16-B aligned — which chained every dp4a GEMV activation read to
-// 8× LDG.32 per block (the measured structural ceiling of the kernel
-// family: 31-42% DRAM BW). With qs at offset 0 and 16-B block alignment the
-// existing 32-B memcpy loads compile to 2× LDG.128. Costs 12 pad bytes per
-// block in tiny scratch buffers. mmvq keeps its own ggml_block_q8_1 (the
-// imported ggml vec_dot kernels expect the original layout).
+// Q8_1 block: 32 int8 quantized values + FP16 scale (d) + FP16 sum (s) (dp4a
+// bias-subtraction trick). Layout: qs first + alignas(16) + 48-B stride (#598) so the
+// 32-B activation reads compile to 2x LDG.128 instead of 8x LDG.32 (ggml's offset-4 qs
+// was never 16-B aligned). mmvq keeps its own ggml_block_q8_1 (imported ggml vec_dot
+// kernels expect that layout).
 struct alignas(16) block_q8_1 {
     int8_t qs[32];  // quantized values (16-B aligned: offset 0, stride 48)
     half d;         // delta (scale): val = d * qs[i]
@@ -113,9 +102,8 @@ void geglu_quantize_q8_1(const half* gate, const half* up, block_q8_1* q8_out, f
 void relu_sqr_quantize_q8_1(const half* input, block_q8_1* q8_out, float* d8_out, int total_elements,
                             cudaStream_t stream = nullptr);
 
-// Fused RMSNorm + Q8_1 quantization: applies RMSNorm to input, then quantizes
-// the normalized result directly to Q8_1 format. Eliminates the intermediate
-// FP16 norm_out buffer write+read. Single-row only (n=1 decode).
+// Fused RMSNorm + Q8_1 quantization: normalises input then quantizes directly to Q8_1,
+// eliminating the intermediate FP16 norm_out write+read. Single-row only (n=1 decode).
 // If norm_out is non-null, also writes the FP16 normalized output.
 void rmsnorm_quantize_q8_1(const half* x, const half* weight, block_q8_1* q8_out, float* d8_out,
                            half* norm_out, int d_model, float eps, cudaStream_t stream = nullptr,
@@ -154,19 +142,15 @@ void gemv_q2_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
 void gemv_q3_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8, half* y,
                              const half* residual, int M, int K, cudaStream_t stream = nullptr);
 
-// ---------------------------------------------------------------------------
-// Fused gate+up dense GEMV: both projections in a single kernel launch.
-// Dispatches internally by quant type. M = output rows, K = inner dim.
-// ---------------------------------------------------------------------------
+// Fused gate+up dense GEMV: both projections in one kernel launch, dispatched
+// internally by quant type. M = output rows, K = inner dim.
 void gemv_gate_up_fused(const void* gate_weights, const void* up_weights, const block_q8_1* q8_1,
                         const float* d8, half* y_gate, half* y_up, int M, int K, QType qtype,
                         cudaStream_t stream = nullptr);
 
-// ---------------------------------------------------------------------------
-// Fused QKV GEMV: reads input once, computes Q, K, V projections in one kernel.
-// All three weight matrices must be the same quant type and inner dim K.
-// q_rows/k_rows/v_rows are the output dimensions of each projection.
-// ---------------------------------------------------------------------------
+// Fused QKV GEMV: reads input once, computes Q/K/V projections in one kernel. All
+// three weight matrices must share quant type and inner dim K. q_rows/k_rows/v_rows
+// are each projection's output dim.
 void gemv_qkv_fused_q6k_q8_1(const void* W_q, const void* W_k, const void* W_v, const block_q8_1* q8_1,
                              const float* d8, half* y_q, half* y_k, half* y_v, int q_rows, int k_rows,
                              int v_rows, int K, cudaStream_t stream = nullptr);
@@ -201,31 +185,26 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
 void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& out1, Tensor& out2,
                        cudaStream_t stream = nullptr);
 
-// MoE decode GEMV: processes all top_k experts in a single kernel launch.
-// packed_weights: base pointer to packed expert tensor (all experts contiguous).
-// expert_indices: [top_k] int32 on device — selects which expert's weights to use.
-// x: input vector(s). x_stride: 0 = shared input (gate/up), K = per-expert input (down).
-// y: output [top_k, rows] FP16.
-// expert_stride_bytes: byte offset between experts in packed_weights.
+// MoE decode GEMV: processes all top_k experts in one kernel launch. packed_weights:
+// base pointer to contiguous packed expert tensors. expert_indices: [top_k] int32 on
+// device. x_stride: 0 = shared input (gate/up), K = per-expert input (down). y:
+// [top_k,rows] FP16.
 void gemv_q6k_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
                          int rows, int K, size_t expert_stride_bytes, int x_stride, int top_k,
                          cudaStream_t stream = nullptr);
 void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
                           int rows, int K, size_t expert_stride_bytes, int x_stride, int top_k,
                           cudaStream_t stream = nullptr);
-// FP16 experts (the MTP draft head — the main model's are always quantized).
-// Note the stride is in ELEMENTS, not bytes, unlike the quantized variants:
-// there is no block packing to reason about, so elements are the natural unit
-// and a byte stride here would just invite a factor-of-two mistake.
+// FP16 experts (MTP draft head only; main model experts are always quantized). Stride
+// is in ELEMENTS not bytes, unlike the quantized variants: no block packing here, so
+// elements are the natural unit (a byte stride would invite an off-by-factor-of-two).
 void gemv_f16_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
                          int rows, int K, size_t expert_stride_elems, int x_stride, int top_k,
                          cudaStream_t stream = nullptr);
 
-// dp4a-accelerated MoE decode GEMV variants.
-// Same interface as above but uses pre-quantized Q8_1 input for dp4a acceleration.
-// q8_1: pre-quantized input blocks, d8: block scales.
-// q8_1_stride: 0 = shared input for all experts (gate/up), K/32 = per-expert (down).
-// d8_stride: 0 = shared, K/32 = per-expert.
+// dp4a-accelerated MoE decode GEMV: same interface as above but with pre-quantized Q8_1
+// input. q8_1_stride: 0 = shared input for all experts (gate/up), K/32 = per-expert
+// (down). d8_stride matches (0 shared, K/32 per-expert).
 void gemv_q6k_q8_1_moe_decode(const void* packed_weights, const int32_t* expert_indices,
                               const block_q8_1* q8_1, const float* d8, half* y, int rows, int K,
                               size_t expert_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
@@ -330,10 +309,10 @@ void gemv_q2_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
 void gemv_q3_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8, float* y, int M, int K,
                          cudaStream_t stream = nullptr);
 
-// Batched-activation variant for the spec-verify LM head (#847 lever 2):
-// n_act pre-quantized activation rows (row r at q8_1/d8 + r*act_stride_blocks)
-// share one pass over W; logits land at y + r*M. Falls back to the per-row
-// GEMV when a quant type has no dp4a traits or the rows don't fit smem.
+// Batched-activation LM head GEMV for spec-verify (#847 lever 2): n_act pre-quantized
+// rows (row r at q8_1/d8 + r*act_stride_blocks) share one pass over W; logits land at
+// y + r*M. Falls back to per-row GEMV when the quant type has no dp4a traits or rows
+// don't fit smem.
 void gemv_dp4a_fp32_batched(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
                             float* y, int M, int K, int n_act, int act_stride_blocks,
                             cudaStream_t stream = nullptr);

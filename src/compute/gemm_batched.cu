@@ -34,17 +34,15 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
     cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
 
-    // Col-major interpretation (same trick as gemm()):
-    //   weight [N,K] row-major = [K,N] col-major; CUBLAS_OP_T → [N,K]
-    //   input  [M,K] row-major = [K,M] col-major; CUBLAS_OP_N
-    //   result [N,M] col-major = [M,N] row-major
+    // Col-major interpretation (same trick as gemm()): weight[N,K] row-major = [K,N]
+    // col-major, OP_T -> [N,K]; input[M,K] row-major = [K,M] col-major, OP_N; result[N,M]
+    // col-major = [M,N] row-major.
     long long weight_stride = static_cast<long long>(N) * K;  // stride between wk and wv in weight_kv
-    // strideC: derive from the ACTUAL pointer distance between the two output
-    // views, like gemm_pair_batched. The old `M*N` only matched the workspace
-    // layout when M == the buffer's max_tokens (the engine maintains that via
-    // resize_workspace, the raw-executor path does not) — for M < max_tokens
-    // the V batch landed inside the K buffer and v_out stayed stale (#677:
-    // first-forward V was silently zero/garbage).
+    // strideC derived from the actual pointer distance between the two output views (like
+    // gemm_pair_batched), not M*N: that only matches the workspace layout when M equals the
+    // buffer's max_tokens, which the raw-executor path does not maintain, so for M <
+    // max_tokens the V batch landed inside the K buffer and stayed stale (#677: first-forward
+    // V silently zero).
     long long output_stride = (static_cast<const char*>(v_out.data) -
                                static_cast<const char*>(k_out.data)) /
                               static_cast<long long>(dtype_size(input.qtype));

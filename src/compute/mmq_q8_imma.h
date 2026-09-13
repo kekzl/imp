@@ -39,16 +39,11 @@ bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* ou
 bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta = 0.0f);
 
-// MoE grouped prefill GEMM over ne experts in ONE launch (gridDim.z = ne).
-//   w_blocks     : packed expert weights [ne][N][K] (GGUF blocks, contiguous)
-//   x_f16        : gathered activations [expanded][K] (expert-contiguous)
-//   out_f16      : [expanded][N]
-//   d_offsets    : device int32 [ne+1] expert row offsets
-//   h_max_rows   : host-known max rows per expert (sizes grid.y; < 96 picks
-//                  the BM=32 small-M tile — pp512 top-8/128 routing averages
-//                  ~32 rows per expert)
-//   expanded     : total gathered rows (activation quantize span)
-//   qkind: 0 = Q8_0, 1 = Q4_K, 2 = Q6_K
+// MoE grouped prefill GEMM over ne experts in one launch (gridDim.z=ne).
+// w_blocks[ne][N][K] packed GGUF blocks; x_f16[expanded][K] gathered activations
+// (expert-contiguous); out_f16[expanded][N]; d_offsets device int32[ne+1] row offsets.
+// h_max_rows: host max rows/expert, sizes grid.y (<96 picks BM=32 small-M tile;
+// pp512 top-8/128 routing averages ~32 rows/expert). qkind: 0=Q8_0, 1=Q4_K, 2=Q6_K.
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
                        int K, cudaStream_t stream);
@@ -56,13 +51,11 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();
 
-// VRAM budget for the per-weight prefill caches (Q8_0 SoA planes, Q6_K
-// repack). They are taken lazily on a tensor's first prefill and were charged
-// to nothing, so they grew into whatever the KV pool left free and made every
-// start's spill victim a lottery (#1899). Engine::init sets the figure the
-// plan reserved (vram_budget's imma_plane_bytes); a take past it declines and
-// that GEMM runs the dequant path. SIZE_MAX (the default) is uncapped; 0 means
-// no planes at all.
+// Per-weight prefill cache VRAM budget (Q8_0 SoA planes, Q6_K repack), taken lazily on
+// first prefill. Uncharged planes grew into whatever KV pool left free, making the spill
+// victim a lottery (#1899). Engine::init sets the plan's reserved figure
+// (vram_budget's imma_plane_bytes); a take past it declines to the dequant path.
+// SIZE_MAX (default) = uncapped; 0 = no planes.
 void mmq_q8_imma_set_plane_budget(size_t bytes);
 size_t mmq_q8_imma_plane_bytes_used();
 
@@ -70,11 +63,9 @@ size_t mmq_q8_imma_plane_bytes_used();
 // charges this exact arithmetic, so the two cannot drift.
 size_t imma_q8_plane_bytes(int64_t N, int64_t K);
 
-// Take the IMMA prefill activation scratch (and the split-K slice) from the T2
-// arena once, at the bound exec_t2_demand charged as `imma_scratch`. Call from
-// Engine::init after the arena is open; `rows`/`k` come from
-// exec_imma_scratch_shape(). A no-op for a model with no IMMA-eligible weights
-// (rows or k == 0).
+// Takes the IMMA prefill activation scratch (+ split-K slice) from the T2 arena once, at
+// the bound exec_t2_demand charged as `imma_scratch`. Call from Engine::init after the
+// arena opens. No-op if the model has no IMMA-eligible weights (rows or k == 0).
 void mmq_q8_imma_preallocate(int rows, int k);
 
 }  // namespace imp

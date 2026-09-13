@@ -18,13 +18,9 @@ namespace imp {
 // Repetition / frequency / presence penalties
 // ===========================================================================
 
-// Kernel: for each token in history, adjust its logit.
-// Uses atomics to handle tokens appearing multiple times.
-// Strategy: first count occurrences, then apply penalties.
-// For simplicity with small history, we iterate the history per thread.
-// Shared body — the row-batched kernel below resolves per-row args from
-// blockIdx.y and runs the identical per-vocab-entry math, so the logits are
-// bit-identical to the per-row launch.
+// Per-history-token logit adjustment via atomics (tokens may repeat). Shared body: the
+// row-batched kernel resolves per-row args from blockIdx.y and runs identical per-vocab
+// math, so logits are bit-identical to the per-row launch.
 __device__ __forceinline__ void apply_penalties_body(float* __restrict__ logits,
                                                      const int32_t* __restrict__ token_ids, int n_tokens,
                                                      int vocab_size, float repetition_penalty,
@@ -191,10 +187,9 @@ void apply_penalties_device_count_sweep(float* logits, int vocab_size, const int
 // DRY (Don't Repeat Yourself) repetition penalty
 // ===========================================================================
 
-// File-scope persistent GPU buffers for DRY penalty application.
-// Promoted from function-local statics so sampling_preallocate_dry() can
-// pre-allocate them at engine init time and avoid cudaStreamSynchronize on
-// first use during inference.
+// File-scope persistent GPU buffers for DRY penalty. Promoted from function-local statics
+// so sampling_preallocate_dry() can pre-allocate at engine init and avoid a
+// cudaStreamSynchronize on first use.
 static int32_t* s_dry_tokens_buf = nullptr;
 static float* s_dry_values_buf = nullptr;
 static size_t s_dry_buf_cap = 0;
@@ -267,14 +262,10 @@ void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_toke
     if (!s_dry_tokens_buf || !s_dry_values_buf)
         return;  // preallocation did not run or the arena was closed
     if (needed > s_dry_buf_cap) {
-        // Unreachable by construction, and that is why the grow-and-realloc path
-        // that used to live here is gone: `n` counts DISTINCT tokens collected
-        // from the penalty window, so it cannot exceed the token history, which
-        // cannot exceed max_seq_len — the capacity sampling_preallocate_dry()
-        // takes at engine init. The old path freed and re-cudaMalloc'd both
-        // buffers on the sampling hot path, behind a cudaStreamSynchronize.
-        // Clamping keeps the impossible case bounded instead of allocating for
-        // it (A7 step 8, AUDIT B72).
+        // Unreachable by construction: `n` counts DISTINCT tokens from the penalty window, bounded
+        // by token history, bounded by max_seq_len (the capacity sampling_preallocate_dry() takes
+        // at init). Clamping keeps the impossible case bounded rather than reallocating for it
+        // (A7 step 8, AUDIT B72).
         IMP_LOG_WARN("apply_dry_penalty: %zu tokens exceeds the %zu-slot capacity — applying the "
                      "first %zu. This should be impossible; please report the config.",
                      needed, s_dry_buf_cap, s_dry_buf_cap);
@@ -347,11 +338,9 @@ __global__ void mirostat_v2_sample_kernel(const float* __restrict__ logits, int 
     }
     __syncthreads();
 
-    // Mirostat threshold: keep tokens with surprise ≤ mu
-    // With temperature T, p_i = exp((l_i - max)/T) / sum_exp
-    // surprise_i = -log2(p_i) ≤ mu
-    // ⟺ (l_i - max)/T ≥ log(sum_exp) - mu * ln(2)
-    // ⟺ l_i ≥ max + T * (log(sum_exp) - mu * ln(2))
+    // Mirostat threshold: keep tokens with surprise <= mu. With temperature T,
+    // p_i = exp((l_i-max)/T)/sum_exp, surprise_i = -log2(p_i) <= mu
+    // <=> l_i >= max + T*(log(sum_exp) - mu*ln(2)).
     float temperature = (inv_temperature > 0.0f) ? (1.0f / inv_temperature) : 1.0f;
     float log_sum_exp = logf(s_sum);
     float threshold = gmax + temperature * (log_sum_exp - mu * 0.6931471805599453f);
@@ -636,10 +625,9 @@ void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
     if (cap <= s_dry_buf_cap)
         return;  // already large enough
 
-    // T2 (A7 step 8). Engine-lifetime, sized once from max_seq_len, and the
-    // caller already treats a null buffer as "DRY penalty off" — so no
-    // direct-allocation fallback and the sites leave the I1 allowlist rather
-    // than moving (AUDIT B47).
+    // T2 (A7 step 8). Engine-lifetime, sized once from max_seq_len; caller treats a null
+    // buffer as "DRY penalty off", so no direct-allocation fallback (stays off the I1
+    // allowlist rather than moving, AUDIT B47).
     s_dry_tokens_buf = nullptr;
     s_dry_values_buf = nullptr;
     s_dry_buf_cap = 0;
@@ -667,11 +655,10 @@ void sampling_cleanup_dry() {
     s_dry_buf_cap = 0;
 }
 
-// Same shape as sampling_cleanup_dry(): the slots are arena-owned, so only
-// the guard is re-armed. Without this the second engine in a process kept
-// s_bias_buf_cap = 4096 from the first one, sampling_preallocate_logit_bias
-// short-circuited on `cap <= s_bias_buf_cap`, and the first logit_bias request
-// wrote into the closed arena's address range (AUDIT_arch_2026 B-1).
+// Same shape as sampling_cleanup_dry(): slots are arena-owned, only the guard is
+// re-armed. Without this a second engine kept the first one's s_bias_buf_cap, so
+// sampling_preallocate_logit_bias short-circuited and wrote into the closed arena's
+// address range (AUDIT_arch_2026 B-1).
 void sampling_cleanup_bias() {
     s_bias_tokens_buf = nullptr;
     s_bias_values_buf = nullptr;

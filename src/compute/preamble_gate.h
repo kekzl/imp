@@ -6,47 +6,22 @@
 
 namespace imp {
 
-// Gate that lets a model emit a free-form preamble before strict JSON
-// enforcement kicks in. Two-axis configuration: think-close vs. budget
-// (selects when the gate "gives up" on a non-tool path) and tool-aware
-// vs. legacy (controls whether tool-tag transitions are recognised).
-//
-//   Think-close mode (close_token >= 0)
-//     Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4 thinking) prepend
-//     `<think>...</think>` to every response. Gate stays "no-mask"
-//     until the close token; budget is a safety cap.
-//
-//   Budget-only mode (close_token < 0, max_tokens > 0)
-//     Non-reasoning models that wrap JSON in markdown fences (` ```json `)
-//     or short verbal preambles ("Sure! ") need a small slack window
-//     before strict enforcement. Gate exits on the first `{`/`[`, on
-//     budget exhaustion, or — in tool-aware mode — on a tool opener.
-//
-// Tool-aware overlay (configure_with_tools): hand the gate sets of
-// tool-opener/close token IDs plus optional char-level prefix/suffix
-// for multi-token dialects (Llama3 <function=NAME>). Internal FSM:
-//
-//   ACTIVE        — preamble running; mask off; transitions:
-//                     · `{`/`[`/close-token/budget → OFF (mask kicks in)
-//                     · tool-opener (token or char-prefix) → TOOL_BODY (legacy)
-//                       or TOOL_ARGS (strict_tool mode)
-//   TOOL_BODY     — inside a tool call; mask off; transitions:
-//                     · tool-close (token or char-suffix) → TERMINAL_OFF
-//   TOOL_ARGS     — inside a tool call, strict_tool mode; mask ENGAGED so the
-//                   TOOL_CALL body FSM constrains the arguments (#1002 strict:
-//                   the envelope is emitted freely, only the body is enforced).
-//                   The gate absorbs the opener token, then forwards every body
-//                   token to the FSM (which drives body + close literal + EOS).
-//   TERMINAL_OFF  — tool call closed; mask off forever (parallel calls,
-//                   trailing text, EOS all pass through).
-//   OFF           — preamble exited normally; FSM mask now applies.
-//
-// External API stays binary:
-//   active() = true  → mask is bypassed (ACTIVE / TOOL_BODY / TERMINAL_OFF)
-//   active() = false → mask is enforced by FSM (OFF / TOOL_ARGS)
-//   absorb() returns true if the token was consumed by the gate, false
-//   on the ACTIVE → OFF transition via `{`/`[` (forwarded to FSM) and for
-//   every body token once in TOOL_ARGS (the FSM drives the tool-call body).
+// Gate allowing a free-form preamble before strict JSON enforcement. Two axes:
+// think-close (close_token>=0) vs budget-only (close_token<0, max_tokens>0); tool-aware
+// (configure_with_tools) vs legacy.
+// Think-close: reasoning models (Qwen3.6/DeepSeek-R1/Gemma-4) prepend <think>...</think>;
+// gate stays no-mask until close_token, budget is a safety cap.
+// Budget-only: non-reasoning models wrapping JSON in markdown/verbal preambles; gate exits
+// on first {/[, budget exhaustion, or (tool-aware) a tool opener.
+// Tool-aware overlay: tool-opener/close token ids + optional char prefix/suffix (multi-token
+// dialects, e.g. Llama3 <function=NAME>). FSM:
+//   ACTIVE      - preamble running, mask off. {/[/close/budget->OFF; tool-opener->TOOL_BODY
+//                 (legacy) or TOOL_ARGS (strict_tool).
+//   TOOL_BODY   - inside tool call, mask off. tool-close->TERMINAL_OFF.
+//   TOOL_ARGS   - inside tool call (strict_tool): mask ENGAGED, FSM constrains args (#1002).
+//   TERMINAL_OFF- tool call closed, mask off forever.
+//   OFF         - preamble exited, FSM mask applies.
+// active()=true bypasses mask (ACTIVE/TOOL_BODY/TERMINAL_OFF); false = FSM enforces (OFF/TOOL_ARGS).
 class PreambleGate {
 public:
     // Existing two-arg overload — preserved for non-tool callers.
@@ -58,17 +33,12 @@ public:
                              /*close_suffix=*/"", thinking_open);
     }
 
-    // Tool-aware configure. open_tokens/close_tokens are token IDs of
-    // tool-tag boundaries (single-token dialects: ChatML <tool_call>,
-    // Gemma <|tool_call>). open_prefix/close_suffix are char-level
-    // fallbacks for multi-token dialects (Llama3 <function=).
-    //
-    // Empty open_tokens AND empty open_prefix means "tool detection
-    // disabled" — gate behaves exactly like the legacy two-arg configure.
-    //
-    // strict_tool: on the tool opener, enter TOOL_ARGS (mask ENGAGED) instead
-    // of TOOL_BODY (mask off) so the TOOL_CALL body FSM constrains the arguments
-    // of an OPTIONAL (model-chosen) tool call — OpenAI `strict: true` (#1002).
+    // Tool-aware configure: open_tokens/close_tokens = tool-tag boundary token ids
+    // (ChatML <tool_call>, Gemma <|tool_call>); open_prefix/close_suffix = char-level
+    // fallback for multi-token dialects (Llama3 <function=). Empty open_tokens AND
+    // open_prefix = tool detection disabled (behaves like legacy 2-arg configure).
+    // strict_tool: on tool opener, enter TOOL_ARGS (mask ENGAGED) instead of TOOL_BODY, so
+    // the TOOL_CALL body FSM constrains an optional tool call's args (OpenAI strict:true, #1002).
     void configure_with_tools(int32_t close_token, int max_tokens, std::vector<int32_t> open_tokens,
                               std::vector<int32_t> close_tokens, std::string open_prefix,
                               std::string close_suffix, bool thinking_open = true, bool strict_tool = false) {
@@ -85,14 +55,11 @@ public:
     }
 
     void reset() {
-        // Reasoning models gate on </think>. But if generation begins with the
-        // thinking block ALREADY closed (e.g. /no_think — the template emits an
-        // empty <think></think> in the prompt, so no </think> is ever generated),
-        // there is nothing to absorb: waiting for a close token that never comes
-        // would let the model ramble unconstrained until the budget. Start OFF so
-        // the structural mask enforces immediately. Tool-aware mode keeps ACTIVE
-        // (tool openers may still appear post-think) and budget-only mode is
-        // unaffected (close_token_ < 0).
+        // Reasoning models gate on </think>, but if generation starts with thinking already
+        // closed (/no_think: template emits empty <think></think> in the prompt, no </think>
+        // generated), waiting for a close token that never comes lets the model ramble
+        // unconstrained until budget. Start OFF instead so the structural mask applies immediately.
+        // Tool-aware mode keeps ACTIVE (tool openers may follow); budget-only unaffected.
         const bool reasoning_already_closed = (close_token_ >= 0) && !thinking_open_ &&
                                               !tool_detection_active();
         state_ = (configured_ && !reasoning_already_closed) ? State::ACTIVE : State::OFF;
@@ -100,10 +67,9 @@ public:
         char_buf_.clear();
     }
 
-    // active() returns true whenever the FSM mask should be skipped:
-    // ACTIVE (preamble), TOOL_BODY (unconstrained tool call), TERMINAL_OFF
-    // (after a tool call closed). OFF (via {/[/think-close/budget) and
-    // TOOL_ARGS (strict tool-call body) let the FSM mask through.
+    // active()=true skips the FSM mask: ACTIVE (preamble), TOOL_BODY (unconstrained tool
+    // call), TERMINAL_OFF (after tool call closed). OFF and TOOL_ARGS (strict tool-call body)
+    // let the FSM mask through.
     bool active() const noexcept {
         return state_ == State::ACTIVE || state_ == State::TOOL_BODY || state_ == State::TERMINAL_OFF;
     }
@@ -113,10 +79,9 @@ public:
     // frame on the ACTIVE → TOOL_ARGS transition.
     bool in_tool_args() const noexcept { return state_ == State::TOOL_ARGS; }
 
-    // Re-arm after a strict tool-call body completed, for parallel_tool_calls
-    // (#1002): TOOL_ARGS → ACTIVE so free text / EOS / another tool opener all
-    // pass again, and a following `<tool_call>` engages a fresh body FSM. The
-    // preamble budget restarts (a fresh slack window for the inter-call gap).
+    // Re-arm after a strict tool-call body completes (parallel_tool_calls, #1002): TOOL_ARGS
+    // -> ACTIVE so free text/EOS/another tool opener pass again, and the next <tool_call>
+    // starts a fresh body FSM. Preamble budget restarts for the inter-call gap.
     void rearm_after_call() noexcept {
         state_ = State::ACTIVE;
         seen_ = 0;
@@ -148,11 +113,9 @@ private:
     bool absorb_active(int32_t token, const std::string& text) {
         seen_++;
 
-        // Close token (e.g. </think>) — in tool-aware mode, stay ACTIVE so
-        // tool-opener detection runs in the post-think window. Reset the
-        // budget counter so the post-think slack is fresh. In legacy mode
-        // (no tool detection), exit to OFF and let the FSM enforce the
-        // structural mask.
+        // On close token (e.g. </think>): tool-aware mode stays ACTIVE (tool-opener detection
+        // continues post-think) and resets the budget for fresh post-think slack. Legacy mode
+        // (no tool detection) exits to OFF so the FSM enforces the structural mask.
         if (close_token_ >= 0 && token == close_token_) {
             if (tool_detection_active()) {
                 seen_ = 0;

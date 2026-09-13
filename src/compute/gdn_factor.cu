@@ -1,13 +1,6 @@
-// Clear for the factored spare's recurrent rows (compute/gdn_factor.cuh).
-//
-// The scan writes a row for EVERY group of a verify chunk, but only an
-// accepted draft may be applied by the next step. Rejected groups, finished
-// requests and reassigned slots therefore have to be cleared, and clearing is
-// writing the 0 sentinel into g. Only g: the rest of the row is then dead and
-// costs nothing to leave behind.
-//
-// Its own translation unit rather than a member of ssm_conv_tap.cu, which
-// carries the conv half; gdn.cu is at the 600-code-LOC kernel ceiling.
+// Clears the factored spare's recurrent rows (compute/gdn_factor.cuh). Scan writes a row
+// per verify-chunk group; rejected/finished/reassigned rows are cleared by zeroing g only
+// (rest of the row is dead). Own TU vs ssm_conv_tap.cu: gdn.cu is at the 600-LOC kernel ceiling.
 
 #include "compute/gdn_factor.cuh"
 #include "core/logging.h"

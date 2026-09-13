@@ -11,148 +11,34 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Chunk-PARALLEL GDN delta-rule prefill scan.
-//
-// Every prior scan variant in this repo (fused, chunkwise 1b.1, WY 2a/2b/2c)
-// launches <<<n_heads, HD>>> = 32 CTAs on 170 SMs and walks the tokens (or the
-// chunks) sequentially inside the CTA. At Qwen3.6-35B pp512 that kernel is 42%
-// of the prefill wall (658 us/layer, 1.28 us/tok) on 19% of the SMs.
-//
-// This variant makes the CHUNKS independent by splitting the WY solution on
-// its linearity in the incoming state H_0:
-//
-//     u = u_A - W @ H_0
-//
-// where u_A solves the chunk's triangular system with RHS beta_t * v_t and W
-// solves the SAME system with RHS beta_t * D[0..t+1] * k~_t (both independent
-// of H_0). Substituting into the WY forms (gdn_scan_chunkwise_wy_kernel):
-//
-//     y_t  = Qeff[t] @ H_0 + Y_A[t]
-//     H_L  = D[0..L] * H_0 - K_d^T (W @ H_0) + K_d^T U_A
-//
-// with  Qeff[t,:] = D[0..t+1] q~_t - sum_j P[t,j] W[j,:]
-//       Y_A[t,:]  = sum_j P[t,j] U_A[j,:]
-//       P[t,j]    = D[j+1..t+1] QK[t,j]          (j <= t)
-//       K_d[t,:]  = D[t+1..L] k~_t
-//
-// All five per-chunk arrays (W, K_d, U_A, Qeff, Y_A) are independent of H_0,
-// so kernel 1 computes them with grid (n_chunks x n_heads) — full-device
-// parallelism. Kernel 2 then runs the cheap sequential chain per head: per
-// chunk it is three L x 128 x 128 matmuls against the register-resident
-// state, with the strip factors staged through shared memory.
-//
-// Perf notes from the first (refuted) cut, measured on Qwen3.6-35B pp512:
-//   - K1 with the triangular-solve histories in GLOBAL memory ran 379 us:
-//     the j-loop is one dependent L2 round-trip per term. The histories now
-//     live in shared memory, aliased over the K/Q staging region (the K/Q
-//     data they replace has already been folded into the Gram matrices and
-//     the decay-scaled global copies by then).
-//   - K2 as one CTA per head with scalar smem reads ran 628 us — as slow as
-//     the sequential scan it replaces (every FMA carried a 4 B shared-memory
-//     operand, 1 CTA/SM). Now: float4 staging reads, and the state columns
-//     split across gridDim.y CTAs (column-local everything), 2 CTAs/SM.
-//   - Accumulator-split (2-4 partial chains) and 2-row-unroll variants of the
-//     K2 loops measured WORSE (242 -> 295/309 us: register growth vs the
-//     2-CTA residency); the simple single-chain float4 form ships. The K1
-//     solve keeps 4 partial accumulators — there they pay.
-//   - #1847 shipped state (Qwen3.6-35B class kernel sums): pp512 144.5 ->
-//     98.5 ms (-32%), pp4096 1485 -> 786 ms (-47%); K1 196 us, K2 242 us per
-//     512-token strip, both ~4x over the compute floor (ncu: short_scoreboard
-//     2.4 + barrier 2.1 stalls/issue in K1).
-//   - K2 on tensor cores (mma.sync m16n8k8 tf32, this file): 242 -> 65 us
-//     with plain tf32 on all three GEMMs, but PPL 6.8216 -> 6.8304 (+0.13%,
-//     the state path compounds the 10-bit operand rounding); with 3xTF32 on
-//     the two GEMMs that feed the carried state (u_eff, H update) and plain
-//     tf32 on y: 90 us, PPL 6.8122, FP32 state 8.9e-7 vs the fused kernel.
-//     Class pp512 145 -> 67/69 ms (-53%), pp4096 1530/1574 -> 546/542 ms
-//     (-65%), e2e pp4096 12.5k -> 21.5k tok/s (#1848).
-//   - K1 phases per CTA (ncu, test geometry): A 54 us (64 serial row loads +
-//     the scalar Gram), B 45 (solve), C 33 (Qeff/Y_A). Now: float4-per-lane
-//     row loads, per-token decay/beta in parallel, Gram as 3xTF32 mma, P@W /
-//     P@U_A as 3xTF32 mma -> 75 us per CTA, 201 -> 128 us per strip in situ.
-//     Plain tf32 on P@W is NOT safe: Qeff = D q~ - P W is a difference of
-//     O(1) terms. The 35B PPL is no judge below ~0.5% (MoE routing flips
-//     between fp32-equivalent kernels: 6.8122..6.8493 across variants with
-//     state diffs of 1e-6); Qwen3.8-27B (deterministic) reads fused 4.6283
-//     -> 4.6148. The solve (45 us, 128 barriers) was then 60% of K1.
-//   - Blockwise solve (this file): T built once in place of KK, RHS staged
-//     into the histories, per 16-row block an off-diagonal 3xTF32 mma update
-//     + a register-resident diagonal block per thread; 8 barriers instead of
-//     128. K1 per CTA 75 -> 49.5 us, in situ 128 -> 82 us per strip (K2 91).
-//     Class pp512 144 -> 42.5/42.3 ms (-71%), pp4096 1497/1489 -> 307/308 ms
-//     (-79%), e2e pp4096 12.9k -> 27.0k tok/s; Qwen3.8 PPL 4.6273.
-//   - K2 at 8 warps + software-pipelined staging (gdn_scan_chunkpar_pass.cu),
-//     the strip sized per n_heads (2026-09-02): ncu on the 4-warp K2 read
-//     long_scoreboard 4.25 stalls/issue (the global staging loads) at 16.7%
-//     warps active, 1 CTA/SM by shared memory. 8 warps: K2 -12/-14% (27B/
-//     35B); prefetching the next factor block into registers before each
-//     GEMM phase: another -19/-21%. Strip: 48 heads x 8 chunks = 384 K1
-//     CTAs = 2.26 waves; 7 chunks (336, 1.98 waves) reads K1 -12% on the
-//     27B, 10 chunks on 32 heads -11%; 14-16 chunks read K1 -21% but K2
-//     +11% (the strip's factor set no longer fits L2), hence the L2 cap in
-//     chunkpar_strip_chunks. pp4096 kernel sums vs #1850: 27B K1 365 -> 322
-//     ms, K2 474 -> 332; 35B K1 150 -> 134, K2 152 -> 103; e2e 27B 10.5k ->
-//     11.0k tok/s (+5%), 35B 27.3k -> 28.9k (+5.5%). K1's shared tiles then
-//     got the XOR swizzle (swz128): ncu bank conflicts 11.1M -> 0.56M on
-//     17.3M -> 3.7M wavefronts, but K1 only -1..-1.5% (4/4 pairs): with the
-//     conflicts gone the top stall is math_pipe_throttle 2.9 (3xTF32 issue).
-//   - After #1851 (ncu, 35B pp512): K2 tensor pipe 67% active, K1 50%,
-//     math_pipe_throttle the top stall in both - the TF32 mma.sync rate is
-//     the limit. Refuted on that basis: K2 at two CTAs per SM (32-row
-//     staging passes, 47.6 KB): 27B K2 333/330 vs 331/335 ms, flat (two CTAs
-//     share one tensor pipe); u_eff on plain tf32: FP32 state diff 9.5e-7 ->
-//     8.5e-5..1.1e-4. Shipped instead: the state-feeding GEMMs (Gram, solve
-//     off-diagonal, P@W here; u_eff and the H update in K2) as 3xFP16
-//     m16n8k16 (22-bit products at the FP16/FP32-accumulate rate, 2x TF32),
-//     Y_A = P@U_A (output term only, like K2's y GEMM) plain tf32 k8, and
-//     the operand splits hoisted out of the n-tile loops (K1 -1%). K1 3xTF32
-//     -> 3xFP16: 27B 297 -> 244 ms, 35B 126 -> 104 (-18/-17%, pp4096). ncu
-//     after: tensor pipe 30%, bank conflicts 25% of the shared wavefronts,
-//     long_scoreboard 2.1 / short_scoreboard 1.3 / wait 1.35 - latency now.
-//     Tried and refuted on that: T/P tiles as a swizzled [64 x 64] (stride
-//     64, XOR by row) instead of the stride-68 padding: conflicts unchanged
-//     (they are not on the T/P loads) and the diagonal-block reads lose their
-//     linear pointer, K1 +10%; Y_A on fp16 k16 sharing the Qeff loop's split
-//     fragments: K1 +5% (the x1 path pays the hi+lo split it does not use).
-//     Unit-test state diff 1.3e-6 / 1.5e-6 (4 / 48 heads), Y 6.1e-5 unchanged.
-//
-// Numerics: identical formulas to gdn_scan_chunkwise_wy_kernel (log-space
-// cumulative decay, the same softplus/sigmoid/L2-norm forms), reassociated
-// per the split above. Validated against the fused kernel by
-// GDNScanTest.ChunkparMatchesFused (nonzero initial state, mild + hard
-// decay heads — hard decay alone makes the H_0 coupling invisible).
-//
-// Scope: HD=SS=128 (every staged GDN checkpoint), single-sequence prefill,
-// no d_real_n (padded verify chunks are tiny and stay on the fused kernel).
-// StateT float or __nv_bfloat16 for the committed pool state; the state stays
-// FP32 in registers within a strip and in the FP32 side buffer across strips,
-// so a scan rounds to BF16 exactly once (at the final commit), matching the
-// fused kernel's behaviour.
-// ---------------------------------------------------------------------------
+// Chunk-PARALLEL GDN delta-rule prefill scan: prior scan variants launch <<<n_heads,HD>>>
+// and walk chunks sequentially per CTA, underusing the SM count. Splits the WY solution on
+// its linearity in incoming state H_0: u = u_A - W @ H_0, where u_A solves the chunk's
+// triangular system with RHS beta_t*v_t and W solves the same system with RHS
+// beta_t*D[0..t+1]*k~_t (both H_0-independent). Substituting into the WY forms
+// (gdn_scan_chunkwise_wy_kernel):
+//   y_t = Qeff[t] @ H_0 + Y_A[t],  H_L = D[0..L]*H_0 - K_d^T(W @ H_0) + K_d^T U_A
+// with Qeff[t,:] = D[0..t+1] q~_t - sum_j P[t,j] W[j,:], Y_A[t,:] = sum_j P[t,j] U_A[j,:],
+// P[t,j] = D[j+1..t+1] QK[t,j] (j<=t), K_d[t,:] = D[t+1..L] k~_t.
+// W, K_d, U_A, Qeff, Y_A are all H_0-independent: kernel 1 computes them on grid
+// (n_chunks x n_heads); kernel 2 runs the sequential per-head chain (three L x 128 x 128
+// matmuls per chunk against the register-resident state).
+// Numerics match gdn_scan_chunkwise_wy_kernel (log-space decay, same softplus/sigmoid/L2-norm),
+// reassociated per above; validated by GDNScanTest.ChunkparMatchesFused.
+// Scope: HD=SS=128, single-sequence prefill, no d_real_n (padded verify chunks use the fused
+// kernel). StateT float or bf16; state stays FP32 in registers/side buffer across strips
+// and rounds to BF16 once at final commit.
 
 namespace chunkpar {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Kernel 1 — per-(chunk, head) state-independent factors.
-// Grid (n_chunks, n_heads), block HD threads.
-//
-// Shared-memory phases (one allocation, region 1 reused):
-//   region 1 [2*kChunk*SS]: phase A = k~ | q~ staging; phase B/C = the solve
-//                           histories U_A | W (k~/q~ are already folded into
-//                           the Gram matrices and the global RHS copies).
-//   region 2: KK -> T in place (phase B mma A operand) | QK -> P in place
-//             (phase C mma A operand), both padded stride kChunk+4.
-//   region 3: beta[kChunk], logD[kChunk+1].
-// Phase A: float4-per-lane row loads, parallel per-token decay/beta, Gram
-// matrices as 3xTF32 mma. Phase B: blockwise forward substitution (16-row
-// diagonal blocks per thread in registers, off-diagonal updates as 3xTF32
-// mma). Phase C: P @ W and P @ U_A as 3xTF32 mma.
-// ---------------------------------------------------------------------------
-// 2*HD threads: the solve has 2*HD independent columns (HD of U_A + HD of W),
-// one per thread — 8 warps hide the smem/global latency that 4 could not
-// (the 128-thread cut ran 215 us/launch with each thread walking BOTH chains).
+// Kernel 1: per-(chunk,head) state-independent factors. Grid (n_chunks,n_heads), block
+// 2*HD threads (8 warps): the solve has 2*HD independent columns (HD of U_A + HD of W),
+// one per thread. Shared memory: region1 [2*kChunk*SS] reused (phase A: k~|q~ staging;
+// phase B/C: solve histories U_A|W); region2 KK->T, QK->P in place (padded stride
+// kChunk+4); region3 beta, logD. Phase A: float4 row loads, Gram matrices as 3xTF32 mma.
+// Phase B: blockwise forward substitution (16-row diagonal blocks in registers,
+// off-diagonal as 3xTF32 mma). Phase C: P@W and P@U_A as 3xTF32 mma.
 template <int HD, int SS>
 __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -267,10 +153,9 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     if (tid == 0)
         ws.D0L[slot] = expf(logD_L);
 
-    // Gram matrices KK = K~ K~^T and QK = Q~ K~^T (lower triangle incl. the
-    // diagonal, zero elsewhere) as 3xFP16 mma: warp w takes matrix w/4 and
-    // m-tile w%4 across all 8 n-tiles. Both feed the state (T and P
-    // coefficients), hence the compensated form.
+    // Gram matrices KK=K~K~^T and QK=Q~K~^T (lower triangle incl. diagonal, else zero) as
+    // 3xFP16 mma: warp w takes matrix w/4, m-tile w%4, across all 8 n-tiles. Both feed the
+    // state (T,P coefficients), hence the compensated (3x) form.
     {
         const bool is_qk = warp >= 4;
         const float* A = is_qk ? s_q : s_k;
@@ -313,16 +198,12 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     }
     __syncthreads();  // region 1 is dead as k~/q~ from here on
 
-    // ---- phase B: blockwise forward triangular solve for U_A and W ----
-    // T[t][j] = beta_t D[j+1..t+1] KK[t][j] (j < t) is built once, in place
-    // of KK, and P = D QK (independent of the solve) alongside it. The RHS of
-    // both systems is staged into the histories (rows >= L zero). Then per
-    // 16-row block: the off-diagonal update hist[b] -= T[b, <b] @ hist[<b] as
-    // 3xTF32 mma (it feeds the state), one barrier, the 16x16 diagonal block
-    // per thread in registers (its own column; the T reads are warp-broadcast),
-    // one barrier. 8 barriers instead of 128, and the up-to-63-term serial
-    // j-chain of the row-at-a-time form (45 us per CTA, 60% of this kernel)
-    // becomes a tensor-core product.
+    // Phase B blockwise forward triangular solve for U_A,W: T[t][j] = beta_t*D[j+1..t+1]*
+    // KK[t][j] (j<t) built once in place of KK; P = D*QK built alongside. RHS staged into the
+    // histories (rows >= L zero). Per 16-row block: off-diagonal update hist[b] -= T[b,<b] @
+    // hist[<b] as 3xTF32 mma, one barrier, then the 16x16 diagonal block per thread in
+    // registers (own column, T reads warp-broadcast), one barrier. 8 barriers total instead
+    // of a serial j-chain.
     {
         constexpr int F4_PER_ROW = HD / 4;
         for (int idx = tid; idx < kChunk * F4_PER_ROW; idx += 2 * HD) {
@@ -438,16 +319,10 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         }
     }
 
-    // ---- phase C: Qeff (in place on QE) and Y_A on tensor cores ----
-    // P[t][j] = D[j+1..t+1] QK[t][j] (j <= t, built with T above), then
-    //   Qeff = D q~ - P @ W      Y_A = P @ U_A
-    // as two [L x 128] GEMMs over K = j. Output terms, but NOT tf32-safe:
-    // Qeff is the difference of two O(1) terms (D q~ and P W cancel), so the
-    // 10-bit operand rounding on P W becomes an O(1e-2) relative error on
-    // Qeff - measured PPL 6.8122 -> 6.8845 (+0.9%) with plain tf32 here.
-    // 3xTF32 on both. History rows [L, kChunk) are zero from the staging, so
-    // the K range may run to the next multiple of 8; the solve loop ended
-    // with a barrier.
+    // Phase C: P[t][j] = D[j+1..t+1]*QK[t][j] (j<=t), then Qeff = D*q~ - P@W, Y_A = P@U_A, as
+    // two [L x 128] GEMMs over K=j, both 3xTF32. Qeff is a difference of two O(1) terms (D*q~
+    // and P*W cancel): plain tf32 on P@W is NOT safe, it puts an O(1e-2) relative error on
+    // Qeff. History rows [L,kChunk) are zero from staging so K may run to the next multiple of 8.
     {
         const int m0 = (warp % 4) * 16;           // t rows of this warp
         const int nbase = (warp / 4) * (HD / 2);  // its 64 output columns
@@ -570,16 +445,12 @@ namespace {
 
 using namespace chunkpar;
 
-// Strip length for this n_heads. Two constraints: kernel 1 runs strip x
-// n_heads CTAs at one CTA per SM, so the strip decides how full the last wave
-// is (48 heads x 8 = 384 CTAs = 2.26 waves on 170 SMs: the third wave runs
-// 26% of the SMs); and kernel 2 re-reads the five [64 x 128] FP32 factor
-// blocks per (chunk, head) that kernel 1 just wrote, so the strip's factor
-// set (strip x n_heads x 160 KB) must stay L2-resident - at 16 x 48 = 126 MB
-// it does not, and kernel 2 read +11% slower from DRAM while kernel 1 read
-// -21% (Qwen3.8-27B pp4096, 2026-09-02). Auto: the strip in [4, cap] with
-// the fullest last wave, the larger one on ties, cap = the largest strip
-// whose factor set fits two thirds of L2 (max kMaxStripChunks).
+// Strip length for n_heads: two constraints. Kernel 1 runs strip*n_heads CTAs at 1 CTA/SM,
+// so strip sets how full the last wave is. Kernel 2 re-reads the five [64x128] FP32 factor
+// blocks kernel 1 wrote per (chunk,head); that set (strip*n_heads*160 KB) must stay
+// L2-resident, or kernel 2 reads slower from DRAM while kernel 1 speeds up. Auto: strip in
+// [4,cap] with the fullest last wave (larger wins ties); cap = largest strip whose factor
+// set fits 2/3 of L2 (kMaxStripChunks).
 int chunkpar_strip_chunks(int n_heads, int requested) {
     if (requested > 0)
         return std::min(requested, kMaxStripChunks);

@@ -41,20 +41,13 @@ __device__ __forceinline__ float lcg_rand_float(unsigned int& state) {
     return static_cast<float>(lcg_rand(state)) / 4294967296.0f;
 }
 
-// Decorrelate a sampler seed before its FIRST draw (issue #1142).
-//
-// The samplers are handed `base_seed + step` — consecutive integers, one per
-// generated token — and then take a single LCG step. An LCG's first output is
-// affine in its seed, so seed+1 moves the drawn float by 1664525 / 2^32 ~=
-// 0.0004: across a whole generation the sampler keeps drawing essentially the
-// SAME quantile of the distribution. At small top_k that lands on the argmax
-// and reads as fluent greedy text, which is why it hid for so long; at
-// top_k = 2000 it lands on a fixed rank deep in the tail and the model emits
-// the same token forever (`Okay,,,,,,,,`).
-//
-// splitmix32's finalizer fixes it in four ALU ops: consecutive seeds produce
-// uncorrelated states, and the same seed still produces the same state, so
-// seeded reproducibility is unchanged.
+// Decorrelate a sampler seed before its first draw (#1142). Samplers get
+// base_seed+step (consecutive ints) then take one LCG step; an LCG's first output is
+// affine in its seed, so seed+1 moves the drawn float by ~1664525/2^32 ~= 0.0004 -
+// the sampler keeps drawing nearly the same quantile all generation (small top_k: reads as
+// fluent greedy; top_k=2000: fixed tail rank, same token forever).
+// splitmix32's finalizer fixes it in 4 ALU ops: consecutive seeds decorrelate, same seed
+// still reproduces the same state.
 __device__ __forceinline__ unsigned int sampler_seed_scramble(unsigned int seed) {
     unsigned int s = seed + 0x9E3779B9u;
     s = (s ^ (s >> 16)) * 0x21F0AAADu;
@@ -62,11 +55,10 @@ __device__ __forceinline__ unsigned int sampler_seed_scramble(unsigned int seed)
     return s ^ (s >> 15);
 }
 
-// Block-cooperative top-k selection. Each thread passes its own (unsorted) local
-// candidate list; produces the block's global top_k (sorted desc, tie-break by
-// smaller index) in out_val/out_idx (may be smem or global, written by thread 0).
-// s_warp_vals/idxs: smem scratch of NUM_WARPS*top_k each. Caller must have all
-// threads reach this with their local arrays populated.
+// Block-cooperative top-k: each thread passes its own unsorted local candidates; produces
+// the block's global top_k (sorted desc, ties -> smaller index) in out_val/out_idx.
+// s_warp_vals/idxs: smem scratch of NUM_WARPS*top_k each. All threads must reach this with
+// local arrays populated.
 __device__ __forceinline__ void block_reduce_topk(float* local_vals, int* local_idxs, int local_count,
                                                   int top_k, float* s_warp_vals, int* s_warp_idxs,
                                                   float* out_val, int* out_idx) {

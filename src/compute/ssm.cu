@@ -31,10 +31,8 @@ void silu_inplace(Tensor& x, cudaStream_t stream) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Squared ReLU: out[i] = max(0, x[i])^2
-// Used by Nemotron-H expert FFN (non-gated) instead of SiLU.
-// ---------------------------------------------------------------------------
+// Squared ReLU: out[i] = max(0,x[i])^2. Used by Nemotron-H expert FFN (non-gated) instead
+// of SiLU.
 __global__ void relu_sqr_inplace_fp16_kernel(half* __restrict__ x, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -55,11 +53,7 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Element-wise multiply kernel
-// ---------------------------------------------------------------------------
-// Sigmoid multiply: out[i] = a[i] * sigmoid(b[i])
-// Used by Qwen3.5 attention output gate.
+// Sigmoid multiply: out[i] = a[i] * sigmoid(b[i]). Used by Qwen3.5 attention output gate.
 __global__ void sigmoid_mul_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
                                         half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -124,10 +118,9 @@ __global__ void ssm_conv1d_decode_kernel(
     float* state = conv_state + ch * kernel_size;
     float sum;
     if (kernel_size == 4) {
-        // One 16 B read and one 16 B write per channel instead of the shift
-        // loop's three loads and four stores: the decode kernel was at 64% of
-        // bandwidth on its instruction count (9.4 us per launch at 32 rows,
-        // nsys 2026-09-02). Explicit fmaf chain = the contracted loop below.
+        // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
+        // four stores (the shift form was bandwidth-bound on instruction count). Explicit fmaf
+        // chain = the contracted loop below.
         float4 s = *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
@@ -177,10 +170,9 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     float* state = conv_state + ch * kernel_size;
     float sum;
     if (kernel_size == 4) {
-        // One 16 B read and one 16 B write per channel instead of the shift
-        // loop's three loads and four stores: the decode kernel was at 64% of
-        // bandwidth on its instruction count (9.4 us per launch at 32 rows,
-        // nsys 2026-09-02). Explicit fmaf chain = the contracted loop below.
+        // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
+        // four stores (the shift form was bandwidth-bound on instruction count). Explicit fmaf
+        // chain = the contracted loop below.
         float4 s = *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
@@ -303,14 +295,12 @@ __global__ void ssm_conv1d_prefill_kernel(
         }
         x_out[token * channels + ch] = __float2half(sum);
 
-        // The conv window commit for the last real row is
-        // ssm_conv1d_commit_kernel, launched after this grid: rows 0..K-2
-        // read the PREVIOUS window from conv_state above, and nothing inside
-        // one grid orders the last row's block after theirs.
-        // Same window, taken at snap_n rows. Its leading values come from the
-        // PRE-chunk state (conv_prev), not the live one: the real-row commit
-        // above may already have run on another block. snap_n == real_n needs
-        // no second copy — the two commits coincide.
+        // The conv window commit for the last real row is ssm_conv1d_commit_kernel, launched
+        // after this grid: rows 0..K-2 read the PREVIOUS window here, nothing inside one grid
+        // orders the last row's block after theirs.
+        // Same window at snap_n rows; its leading values come from PRE-chunk state (conv_prev),
+        // not the live one (the real-row commit may have already run on another block).
+        // snap_n==real_n needs no second copy - the two commits coincide.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
             float* snap = conv_snap + ch * kernel_size;
             const float* prev = conv_prev + ch * kernel_size;
@@ -323,15 +313,13 @@ __global__ void ssm_conv1d_prefill_kernel(
     }
 }
 
-// Conv window commit, one launch after the prefill grid: the window is the
-// last K real inputs; a chunk shorter than K shifts the missing leading
-// values in from the previous window (the per-thread read index real_n + k
-// stays ahead of every write index k, so the in-place shift is ordered).
-// Stream order puts it after every row's read of the previous window, which
-// the prefill grid itself cannot promise (rows 0..K-2 and the commit row are
-// different blocks). grid.y indexes the sequence group of the grouped form.
-// dst_slots (batched speculative verify): the window is read from slot
-// seq_slots[seq] and written to slot dst_slots[seq]; nullptr = in place.
+// Conv window commit, one launch after the prefill grid: window = last K real inputs; a
+// chunk shorter than K shifts missing leading values in from the previous window
+// (per-thread read index real_n+k stays ahead of write index k, ordering the in-place
+// shift). Stream order places it after every row's read of the previous window, which the
+// prefill grid alone cannot guarantee. grid.y indexes the sequence group (grouped form).
+// dst_slots (batched speculative verify): window read from seq_slots[seq], written to
+// dst_slots[seq]; nullptr = in place.
 __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const half* __restrict__ x_in,
                                          int n_tokens, int channels, int kernel_size,
                                          const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
@@ -389,16 +377,12 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
                          d_real_n, nullptr, 0, 1, stream);
 }
 
-// ---------------------------------------------------------------------------
-// Fused conv1d + SiLU + FP32 output for prefill.
-// Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one.
-// ---------------------------------------------------------------------------
-// seq_slots / slot_stride (grouped verify chunk, blockIdx.z = sequence): the
-// rows are gridDim.z groups of n_tokens each, group z reading and committing
-// the conv window of pool slot seq_slots[z] (stride in floats). nullptr =
-// the single-sequence launch (gridDim.z == 1, every rebase +0). The snapshot
-// is written from group 0 only - every group's row 0 is the same token from
-// the same committed window.
+// Fused conv1d + SiLU + FP32 output for prefill, replacing 3 kernels (conv->SiLU->FP16-
+// >FP32) with one.
+// seq_slots/slot_stride (grouped verify, blockIdx.z=sequence): rows are gridDim.z groups
+// of n_tokens, group z reads/commits the conv window of pool slot seq_slots[z] (stride in
+// floats); nullptr = single-sequence launch (gridDim.z==1). Snapshot written from group 0
+// only (every group's row 0 is the same token from the same committed window).
 __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     float* __restrict__ conv_state, const half* __restrict__ x_in, const half* __restrict__ weight,
     const half* __restrict__ bias, float* __restrict__ x_out_f32, int n_tokens, int channels, int kernel_size,
@@ -421,15 +405,12 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     // gdn.cu): the conv window as of snap_n rows. 0 disables it.
     const int snap_n = (conv_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
-    // Channels are split across blockIdx.y as well as threads. With the grid
-    // keyed on tokens alone, a speculative verify chunk launched 2-4 blocks
-    // total and left 166 of 170 SMs idle while each block walked every channel:
-    // measured 2.10 ms for a 2-row chunk against 0.10 ms for the single-token
-    // decode kernel, a 21x ratio on two rows. Tokens are independent here (each
-    // reads its own window from x_in, and conv_state only for the leading
-    // positions), and the two state commits below are per channel, so widening
-    // the grid changes no result. Prefill keeps the same mapping, with more
-    // blocks.
+    // Channels split across blockIdx.y as well as threads: with the grid keyed on tokens
+    // alone, a small speculative verify chunk launched few blocks and left most SMs idle
+    // while each walked every channel. Tokens are independent (each reads its own window
+    // from x_in, conv_state only for leading positions), and the two state commits below are
+    // per channel, so widening the grid changes no result. Prefill keeps the same mapping
+    // with more blocks.
     for (int ch = blockIdx.y * blockDim.x + threadIdx.x; ch < channels;
          ch += gridDim.y * blockDim.x) {
         float sum = 0.0f;
@@ -456,15 +437,12 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         // Fused SiLU + FP32 output
         x_out_f32[token * channels + ch] = sum / (1.0f + expf(-sum));
 
-        // The conv window commit is ssm_conv1d_commit_kernel, launched after
-        // this grid (see ssm_conv1d_prefill_kernel).
-        // Same window, taken at snap_n rows. Its leading values come from the
-        // state BEFORE this chunk, and they must be read from the caller's
-        // pre-chunk copy rather than from conv_state: the commit above writes
-        // conv_state from a different block, and nothing orders the two. Read
-        // the live buffer here and the snapshot silently picks up whichever
-        // block ran first — measured as a drop in draft acceptance from 2.26 to
-        // 2.03 emitted per verify, with no error anywhere.
+        // Conv window commit is ssm_conv1d_commit_kernel, launched after this grid. Same window
+        // at snap_n rows; its leading values come from the state BEFORE this chunk and must be
+        // read from the caller's pre-chunk copy, not conv_state: the commit above writes
+        // conv_state from a different block and nothing orders the two. Reading the live buffer
+        // here silently picks up whichever block ran first, dropping draft acceptance with no
+        // error anywhere.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
             const float* src_state = conv_prev + ch * kernel_size;
             float* snap = conv_snap + ch * kernel_size;
@@ -534,33 +512,15 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
                              conv_kernel, d_snap_n, seq_slots, slot_stride, n_seq, stream, snap_slots);
 }
 
-// ---------------------------------------------------------------------------
-// Mamba2 SSM scan — optimized fused multi-token kernel
-// ---------------------------------------------------------------------------
-//
-// One block per head. Threads organized as (d_tid, s_tid) to parallelize
-// both head_dim_ssm and state_size dimensions.
-//
-// Key optimizations over v1:
-// 1. Transposed h_state layout: [n_heads, state_size, head_dim_ssm]
-//    Adjacent d-threads access adjacent memory → coalesced reads/writes.
-// 2. State-dimension parallelism: s_tiles threads per d-value reduce the
-//    inner loop from state_size to state_size/s_tiles iterations.
-// 3. Optional fused gating: when z is non-null, computes y * SiLU(z)
-//    inline, eliminating 2 kernel launches (silu_inplace + elementwise_mul).
-//
-// Mamba2 scan equations (discrete-time):
-//   dt_h = softplus(dt_raw[h] + dt_bias[h])
-//   a_bar = exp(dt_h * A_log[h])
-//   For each d in [0, head_dim_ssm):
-//     For each s in [0, state_size):
-//       h_state[h,s,d] = a_bar * h_state[h,s,d] + dt_h * x[h*hd+d] * B[g*S+s]
-//     y[h*hd+d] = sum_s(h_state[h,s,d] * C[g*S+s]) + D[h] * x[h*hd+d]
-//   If z provided: y[h*hd+d] *= SiLU(z[h*hd+d])
-//
-// Template parameters:
-//   H_FP16: h_state stored as FP16 (all compute in FP32)
-//   FUSE_GATE: fuse y * SiLU(z) into output
+// Mamba2 SSM scan, optimized fused multi-token kernel. One block per head; threads
+// (d_tid,s_tid) parallelize head_dim_ssm and state_size.
+// h_state layout [n_heads,state_size,head_dim_ssm] (transposed: adjacent d-threads
+// coalesce); s_tiles threads per d-value reduce the inner loop to state_size/s_tiles;
+// optional fused gating (z non-null): y*SiLU(z) inline.
+// Scan: dt_h=softplus(dt_raw[h]+dt_bias[h]); a_bar=exp(dt_h*A_log[h]);
+// h_state[h,s,d]=a_bar*h_state[h,s,d]+dt_h*x[h*hd+d]*B[g*S+s];
+// y[h*hd+d]=sum_s(h_state[h,s,d]*C[g*S+s])+D[h]*x[h*hd+d]; if z: y*=SiLU(z[h*hd+d]).
+// Template: H_FP16 (h_state stored FP16, compute FP32); FUSE_GATE (fuse y*SiLU(z)).
 template <bool H_FP16, bool FUSE_GATE>
 __global__ void ssm_scan_kernel(
     const half* __restrict__ x,         // [n_tokens, inner_size]

@@ -11,9 +11,6 @@
 
 namespace imp {
 
-// --------------------------------------------------------------------------
-// Block-level reduction using shared memory (up to 32 warps = 1024 threads)
-// --------------------------------------------------------------------------
 __device__ float block_reduce_sum(float val) {
     __shared__ float shared[32];  // one slot per warp, up to 1024 threads = 32 warps
     const int lane = threadIdx.x & 31;
@@ -35,17 +32,12 @@ __device__ float block_reduce_sum(float val) {
     return val;
 }
 
-// --------------------------------------------------------------------------
-// RMSNorm kernel for FP32
-// One block per row. Block size 256.
-// --------------------------------------------------------------------------
 __global__ void rmsnorm_fp32_kernel(const float* __restrict__ x, const float* __restrict__ weight,
                                     float* __restrict__ out, int d_model, float eps, float weight_offset) {
     const int row = blockIdx.x;
     const float* x_row = x + static_cast<int64_t>(row) * d_model;
     float* out_row = out + static_cast<int64_t>(row) * d_model;
 
-    // Compute sum of squares
     float sum_sq = 0.0f;
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         float v = x_row[i];
@@ -53,7 +45,6 @@ __global__ void rmsnorm_fp32_kernel(const float* __restrict__ x, const float* __
     }
     sum_sq = block_reduce_sum(sum_sq);
 
-    // Broadcast the inverse RMS
     __shared__ float s_inv_rms;
     if (threadIdx.x == 0) {
         s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
@@ -61,16 +52,12 @@ __global__ void rmsnorm_fp32_kernel(const float* __restrict__ x, const float* __
     __syncthreads();
     const float inv_rms = s_inv_rms;
 
-    // Normalize and scale
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         out_row[i] = x_row[i] * inv_rms * (weight[i] + weight_offset);
     }
 }
 
-// --------------------------------------------------------------------------
-// RMSNorm kernel for FP16 — vectorized float4 loads (8 halfs per load)
-// Requires d_model % 8 == 0 (true for all supported models).
-// --------------------------------------------------------------------------
+// FP16 RMSNorm via vectorized float4 loads (8 halfs/load). Requires d_model % 8 == 0.
 __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* __restrict__ weight,
                                     __half* __restrict__ out, int d_model, float eps, float weight_offset) {
     const int row = blockIdx.x;
@@ -141,16 +128,9 @@ __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* 
     }
 }
 
-// --------------------------------------------------------------------------
-// Warp-per-row FP16 RMSNorm — the batch-prefill variant (#602).
-//
-// The block-per-row kernel above runs 512 threads on rows of d_vec =
-// d_model/8 float4s (256 for d=2048): half the threads idle and every row
-// pays two __syncthreads + a smem round-trip — measured 8-10% of DRAM BW
-// at 7-8% of the NVFP4 prefill window (latency-bound, not bandwidth).
-// One WARP per row needs only shuffle reductions: no barrier, no smem.
-// Eight rows per 256-thread block.
-// --------------------------------------------------------------------------
+// Warp-per-row FP16 RMSNorm (#602): one warp per row, shuffle reductions only, no barriers or smem.
+// Block-per-row above was latency-bound: idle threads and a smem round-trip per row.
+// 256-thread block = 8 warps = 8 rows per block.
 __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
                                          const __half* __restrict__ weight,
                                          __half* __restrict__ out, int rows, int d_model,
@@ -215,13 +195,10 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
 }
 
 // Row-block batched-decode kernels (plain + NVFP4 producer fusion) live in
-// layernorm_rowblock.cu — see rmsnorm_fp16_rowblock() / rmsnorm_nvfp4().
+// layernorm_rowblock.cu: see rmsnorm_fp16_rowblock() / rmsnorm_nvfp4().
 
-// --------------------------------------------------------------------------
-// Fused RMSNorm + residual for FP32
-// out = rmsnorm(x + residual) * weight
-// x is updated in-place to (x + residual)
-// --------------------------------------------------------------------------
+// Fused RMSNorm + residual (FP32): out = rmsnorm(x + residual) * weight.
+// x is updated in-place to (x + residual).
 __global__ void rmsnorm_residual_fp32_kernel(float* __restrict__ x, const float* __restrict__ residual,
                                              const float* __restrict__ weight, float* __restrict__ out,
                                              int d_model, float eps, float weight_offset) {
@@ -233,7 +210,7 @@ __global__ void rmsnorm_residual_fp32_kernel(float* __restrict__ x, const float*
     float sum_sq = 0.0f;
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         float v = x_row[i] + r_row[i];
-        x_row[i] = v;  // store x + residual back
+        x_row[i] = v;
         sum_sq += v * v;
     }
     sum_sq = block_reduce_sum(sum_sq);
@@ -250,9 +227,7 @@ __global__ void rmsnorm_residual_fp32_kernel(float* __restrict__ x, const float*
     }
 }
 
-// --------------------------------------------------------------------------
-// Fused RMSNorm + residual for FP16 — vectorized float4 loads
-// --------------------------------------------------------------------------
+// Fused RMSNorm + residual (FP16): vectorized float4 loads, same semantics as the FP32 kernel above.
 __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __half* __restrict__ residual,
                                              const __half* __restrict__ weight, __half* __restrict__ out,
                                              int d_model, float eps, float weight_offset) {
@@ -289,7 +264,6 @@ __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __hal
         float2 s2 = make_float2(xf2.x + rf2.x, xf2.y + rf2.y);
         float2 s3 = make_float2(xf3.x + rf3.x, xf3.y + rf3.y);
 
-        // Write x + residual back
         float4 sv;
         *reinterpret_cast<half2*>(&sv.x) = __float22half2_rn(s0);
         *reinterpret_cast<half2*>(&sv.y) = __float22half2_rn(s1);
@@ -347,9 +321,6 @@ __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __hal
     }
 }
 
-// --------------------------------------------------------------------------
-// Host dispatch: rmsnorm
-// --------------------------------------------------------------------------
 void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cudaStream_t stream,
              float weight_offset) {
     const int rows = static_cast<int>(x.shape[0]);
@@ -366,15 +337,14 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
                         static_cast<float*>(out.data), d_model, eps, weight_offset);
             break;
         case QType::F16:
-            // Batched decode (2..64 rows): row-block kernel, register-
-            // resident single DRAM pass — the warp kernel reads every row
-            // twice and fields 4 CTAs at rows=32 (see its comment).
+            // Batched decode (2..64 rows): row-block kernel is register-resident, single DRAM pass.
+            // Warp kernel reads each row twice and only fields 4 CTAs at rows=32.
             if (rows >= 2 && rows <= 64 && (d_model & 7) == 0 && (d_model >> 3) <= 1024) {
                 rmsnorm_fp16_rowblock(x, weight, out, rows, d_model, eps, stream, weight_offset);
                 break;
             }
-            // Batch prefill (#602): warp-per-row — no barriers/smem; the
-            // block-per-row kernel was latency-bound at 8-10% BW.
+            // Batch prefill (#602): warp-per-row, no barriers/smem.
+            // Block-per-row kernel here is latency-bound, not bandwidth-bound.
             if (rows >= 16 && (d_model & 7) == 0) {
                 const int warps_per_block = 8;
                 const int grid = (rows + warps_per_block - 1) / warps_per_block;
@@ -393,11 +363,8 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
     }
 }
 
-// --------------------------------------------------------------------------
-// RMSNorm with FP32 input and FP16 output — used for Gemma-4 to avoid
-// losing precision on the attention/FFN entry when the residual stream is
-// kept in FP32 (`fp32_hidden_`) but the downstream GEMM expects FP16 input.
-// --------------------------------------------------------------------------
+// RMSNorm FP32 input, FP16 output: used when the residual stream stays FP32
+// (`fp32_hidden_`, Gemma-4) but the downstream GEMM needs FP16 input.
 __global__ void rmsnorm_fp32_in_fp16_out_kernel(const float* __restrict__ x,
                                                 const __half* __restrict__ weight, __half* __restrict__ out,
                                                 int d_model, float eps, float weight_offset) {
@@ -478,9 +445,6 @@ void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight, float* out
                 d_model, eps, weight_offset);
 }
 
-// --------------------------------------------------------------------------
-// Host dispatch: rmsnorm_residual
-// --------------------------------------------------------------------------
 void rmsnorm_residual(const Tensor& x, const Tensor& residual, const Tensor& weight, Tensor& out, float eps,
                       cudaStream_t stream, float weight_offset) {
     const int rows = static_cast<int>(x.shape[0]);
@@ -508,9 +472,6 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual, const Tensor& wei
     }
 }
 
-// --------------------------------------------------------------------------
-// PDL registration
-// --------------------------------------------------------------------------
 void layernorm_pdl_register() {
     // Only kernels that call pdl_wait() may be registered (core/pdl_device.cuh).
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp16_kernel));
@@ -518,11 +479,9 @@ void layernorm_pdl_register() {
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp16_kernel));
 }
 
-// --------------------------------------------------------------------------
-// True LayerNorm with bias + optional residual (#836, encoder post-LN).
-// One CTA per row; the row is staged in dynamic shared memory (d_model * 4 B
-// = 3 KiB at nomic's 768), mean/var via two block reductions.
-// --------------------------------------------------------------------------
+// LayerNorm with bias + optional residual (#836, encoder post-LN).
+// One CTA per row, staged in dynamic shared memory (d_model * 4 B, e.g. 3 KiB at nomic's 768).
+// Mean/var computed via two block reductions.
 namespace {
 __device__ __forceinline__ float ln_param(const void* p, bool f32, int i) {
     return f32 ? static_cast<const float*>(p)[i]

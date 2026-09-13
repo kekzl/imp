@@ -92,32 +92,27 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
         double angle = static_cast<double>(pos) * static_cast<double>(longrope_inv_freqs[pair_idx]);
         rope_sincos(angle, &sin_val, &cos_val);
     } else if (ext_factor != 0.0f) {
-        // YaRN mode: per-dimension frequency blending
-        // Double, for the same reason the linear branch below is: at the
-        // context limit the position times the frequency does not survive
-        // float (#1630).
+        // YaRN: per-dimension frequency blending. theta_extrap is double for the same reason as
+        // the linear branch: at the context limit position*frequency does not survive float (#1630).
         double theta_extrap = static_cast<double>(pos) /
                               pow(static_cast<double>(theta),
                                   (2.0 * pair_idx) / static_cast<double>(2 * rope_pairs));
         rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1, 2 * pair_idx, ext_factor, attn_factor,
                   cos_val, sin_val);
     } else {
-        // Linear mode: simple frequency * inv_scaling
-        // Use rope_pairs*2 (=rope_dim) as denominator, not head_dim.
-        // For partial RoPE (rope_dim < head_dim), the base frequency spacing
-        // is determined by rope_dim, not the full head dimension.
+        // Linear mode: freq = theta^(-2*pair_idx/rope_dim). Uses rope_pairs*2 (=rope_dim) as the
+        // denominator, not head_dim: for partial RoPE (rope_dim < head_dim) the base frequency
+        // spacing is set by rope_dim.
         float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
         freq *= inv_scaling;
         double angle = static_cast<double>(pos) * static_cast<double>(freq);
         rope_sincos(angle, &sin_val, &cos_val);
     }
 
-    // neox pair layout for partial RoPE: pair = (i, i + rope_pairs) — both
-    // indices are within the first `rope_dim = 2*rope_pairs` dimensions of the
-    // head. Matches llama.cpp ggml_rope_neox / LLAMA_ROPE_TYPE_IMROPE, which
-    // read x1 = x[ix + n_dims/2] where n_dims is the RoPE dimension count
-    // (64 for Qwen 3.5/3.6), NOT the full head_dim (256). Dims
-    // [rope_dim, head_dim) stay unchanged.
+    // NeoX pair layout for partial RoPE: pair=(i, i+rope_pairs), both within the first
+    // rope_dim=2*rope_pairs dims. Matches llama.cpp ggml_rope_neox/LLAMA_ROPE_TYPE_IMROPE
+    // (x1=x[ix+n_dims/2], n_dims=RoPE dim count, not full head_dim). Dims [rope_dim,head_dim)
+    // stay unchanged.
     const int idx0 = neox ? pair_idx : (2 * pair_idx);
     const int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
 
@@ -289,10 +284,9 @@ __global__ void qknorm_rope_fused_fp16_kernel(
             q_head[idx0] = __float2half(q0 * cos_val - q1 * sin_val);
             q_head[idx1] = __float2half(q0 * sin_val + q1 * cos_val);
         }
-        // Copy back non-rotated dims. For partial RoPE (rope_dim < head_dim),
-        // rotation pairs (i, i+rope_pairs) are within [0, 2*rope_pairs); dims
-        // [2*rope_pairs, head_dim) stay unchanged. This matches the layout
-        // used by llama.cpp's rope_neox kernel.
+        // Copy back non-rotated dims: for partial RoPE, pairs (i,i+rope_pairs) live in
+        // [0,2*rope_pairs); dims [2*rope_pairs,head_dim) stay unchanged (matches llama.cpp's
+        // rope_neox kernel).
         for (int i = 2 * rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
             q_head[i] = __float2half(normed_vals[i]);
         }

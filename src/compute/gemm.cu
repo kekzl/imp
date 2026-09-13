@@ -79,13 +79,9 @@ static cublasLtHandle_t get_cublaslt_handle() {
     return s_cublaslt_handle;
 }
 
-// ---------------------------------------------------------------------------
-// Shared workspace for cuBLASLt — taken once from the engine-persistent (T2)
-// arena via gemm_init(), used by all GEMM calls.  cuBLASLt takes the workspace
-// as an argument, so ONE slice sized at the plan's maximum serves every call:
-// per-handle would multiply it by handle count for no benefit
-// (docs/internals/MEMORY.md A5.3).
-// ---------------------------------------------------------------------------
+// Shared cuBLASLt workspace, taken once from the engine-persistent (T2) arena via
+// gemm_init(), used by all GEMM calls. cuBLASLt takes the workspace as an argument, so
+// one slice sized at the plan's max serves every call (docs/internals/MEMORY.md A5.3).
 static void* s_workspace = nullptr;
 static size_t s_workspace_size = 0;
 
@@ -100,20 +96,16 @@ void gemm_init() {
     get_cublas_handle();
     get_cublaslt_handle();
 
-    // T2 (A7 step 8). Both buffers are engine-lifetime and both already
-    // DEGRADE cleanly to null — a 0-byte workspace makes cuBLASLt's heuristic
-    // return only algos that need none, and a null bench scratch skips the
-    // timing loop and takes the heuristic's first choice. That is why they can
-    // leave the I1 allowlist outright instead of keeping a cudaMalloc fallback
-    // the gate cannot see (AUDIT B47). Outside an Engine — the GPU test
-    // binaries call gemm_init() directly — the arena is not open, take_bytes()
-    // returns empty, and both stay null.
+    // T2 (A7 step 8). Both buffers are engine-lifetime and degrade cleanly to null: a
+    // 0-byte workspace makes cuBLASLt's heuristic return only algos needing none, a null
+    // bench scratch takes the heuristic's first choice. That is why they leave the I1
+    // allowlist instead of a cudaMalloc fallback the gate cannot see (AUDIT B47). Outside an
+    // Engine (GPU test binaries calling gemm_init() directly), take_bytes() returns empty
+    // and both stay null.
     if (!s_workspace) {
-        // The size ladder is kept from the pre-arena code, but it now degrades
-        // against the ARENA rather than against free VRAM: exec_t2_demand
-        // charges the full kGemmCublasWorkspaceBytes, so anything below it
-        // means the plan under-reserved, which is worth a line in the log
-        // rather than a silent halving.
+        // Size ladder kept from the pre-arena code, but degrades against the ARENA rather than
+        // free VRAM: exec_t2_demand charges the full kGemmCublasWorkspaceBytes, so anything
+        // below it means the plan under-reserved, worth a log line rather than a silent halving.
         constexpr size_t kTrySizes[] = {
             kGemmCublasWorkspaceBytes,  // 64 MiB — the charged size
             32ULL << 20,                // 32 MiB
@@ -207,10 +199,8 @@ static cublasComputeType_t dtype_to_compute(QType dt) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bucket M for cache key: exact for decode (M<=1), bucketed for prefill.
-// cuBLASLt algorithm selection is stable across nearby M values.
-// ---------------------------------------------------------------------------
+// Bucket M for the cache key: exact for decode (M<=1), bucketed for prefill. cuBLASLt
+// algorithm selection is stable across nearby M values.
 static int64_t bucket_m(int64_t m) {
     if (m <= 1)
         return m;  // decode: exact
@@ -266,10 +256,9 @@ struct GemmCacheEntry {
     cublasLtMatmulAlgo_t algo;
     size_t workspace_size;
     bool has_algo;
-    // The algo came from the TIMED probe, not from the heuristic. Without this
-    // the reselect path cannot tell which of the two it is about to overwrite,
-    // so discarding a benchmarked pin looked exactly like re-picking a
-    // heuristic one - i.e. like nothing at all (#1545).
+    // The algo came from the TIMED probe, not the heuristic. Without this flag the reselect
+    // path cannot tell which of the two it is about to overwrite, so discarding a
+    // benchmarked pin looked identical to re-picking a heuristic one (#1545).
     bool benchmarked = false;
     int64_t desc_M;  // M dimension baked into layout descriptors
 };
@@ -309,19 +298,11 @@ static void rebuild_layouts_for_m(GemmCacheEntry& entry, cudaDataType_t dtype_A,
     entry.desc_M = M;
 }
 
-// Re-select algorithm via heuristic after a cublasLtMatmul failure.
-// Called when the cached algo (benchmarked for a different M within the
-// same bucket) is invalid for the current M — e.g. FP8 algos on sm_120
-// are sensitive to exact dimensions.
-// Re-pick an algo after a runtime matmul failure (a stale algo from a different
-// M in the same bucket).
-//
+// Re-selects the algo via heuristic after a runtime cublasLtMatmul failure (a stale algo
+// from a different M in the same bucket; e.g. FP8 algos on sm_120 are dimension-sensitive).
 // Returns false without touching the entry when deterministic mode is on: the
-// heuristic's results[0] is exactly the pick the deterministic branch above
-// refuses to trust without a warmup probe, and taking it here would discard
-// that validation silently, mid-run, on the one path that promises
-// reproducibility (#1574). The caller then falls back rather than retrying
-// with an unvalidated algo.
+// heuristic's results[0] is exactly what the deterministic branch refuses to trust
+// without a warmup probe (#1574); the caller falls back instead of retrying unvalidated.
 static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K, int64_t N) {
     if (imp::process_diag_deterministic_gemm()) {
         IMP_LOG_DEBUG(
@@ -342,13 +323,10 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K,
     cublasLtMatmulPreferenceDestroy(pref);
 
     if (nresults > 0) {
-        // Say it once, when it happens. The benchmarked pin is being replaced
-        // by heuristic results[0] for the REST OF THE PROCESS, and the old code
-        // logged nothing here - only a second failure, further down, logged
-        // anything at all. So a shape could quietly run on a different algo
-        // than the one the probe chose, differently on each process start
-        // (#1545). `benchmarked` is cleared with it, so this fires once per
-        // pin rather than once per failure.
+        // Logs once when the benchmarked pin is replaced by heuristic results[0] for the rest
+        // of the process: previously only a second failure logged anything, so a shape could
+        // silently run on a different algo than the probe chose, differing per process start
+        // (#1545). `benchmarked` is cleared with it, so this fires once per pin, not per failure.
         if (entry.benchmarked) {
             IMP_LOG_WARN(
                 "[gemm-algo] matmul failed with the BENCHMARKED algo for M=%ld K=%ld N=%ld "
@@ -378,53 +356,20 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
     }
 }
 
-// ---------------------------------------------------------------------------
-// Algorithm benchmarking: request top-N candidates, time each, pick fastest.
-// Uses a temporary output buffer to avoid corrupting C during live inference.
-// Eliminates 2.6x prefill variance from non-deterministic cuBLAS autotuning.
-// ---------------------------------------------------------------------------
+// Algorithm benchmarking: request top-N candidates, time each, pick fastest. Uses a
+// temporary output buffer to avoid corrupting C during live inference.
 static constexpr int kMaxAlgoCandidates = 8;
 static constexpr int kBenchmarkIters = 5;
 
-// Selection stability (F-9). A single timed sample per candidate made the choice
-// a coin flip at small M: measured over 5 fresh processes on Qwen3-1.7B, all four
-// M=512 shapes picked the same tile every time, while all four M=16 shapes picked
-// 3-4 *different* tiles, and the winning time for one shape ranged 0.055-0.321 ms
-// (5.8x). At M=16 a candidate runs ~0.05 ms, so kBenchmarkIters spans ~0.25 ms —
-// short enough that one scheduling hiccup decides the winner.
-//
-// Two fixes, both on the estimator rather than on persistence. An on-disk algo
-// cache (the other candidate fix) would freeze whatever the first noisy run chose
-// and hand it to every later process, turning a per-process mispick into a
-// permanent one — on top of needing invalidation against driver/cuBLAS version.
-//
-// Logging every candidate's cost (not just the winner's) showed where the
-// instability actually lives: shapes whose best candidate is genuinely ahead pick
-// the same one every time — M=512 N=6144 K=2048 spans 0.196-0.449 ms and chose
-// cand[0] in 4/4 runs, its cost reproducing to 0.3 % (0.1961/0.1964/0.1961/0.1966),
-// and it chose right even in a run where cold clocks inflated everything 5x. Every
-// unstable shape instead has its top candidates bunched within ~5-10 %, i.e. inside
-// the measurement's own error. So the flips are ties resolved by noise, and the
-// throughput at stake in a flip is bounded by how close the tie is.
-//
-// Two fixes, both on the estimator rather than on persistence. An on-disk algo
-// cache (the other candidate fix) would freeze whatever the first noisy run chose
-// and hand it to every later process, turning a per-process mispick into a
-// permanent one — on top of needing invalidation against driver/cuBLAS version.
-//
-//  1. Size the timed window instead of fixing the rep count. A fixed
-//     kBenchmarkIters makes the window scale with the shape, and at M=16 a
-//     candidate runs ~6-24 us, so five reps time ~30-120 us — mostly launch
-//     overhead. A probe round now sizes each candidate's reps for a
-//     ~kTargetWindowMs window, which puts every shape at comparable measurement
-//     quality. Costs are then compared per rep.
-//  2. kAlgoMargin hysteresis toward heuristic order. A candidate replaces the
-//     incumbent only if it beats it by more than the margin; otherwise the lower
-//     heuristic index wins. Heuristic order is deterministic for a given shape and
-//     device, so candidates inside the margin resolve the same way in every process
-//     instead of by measurement noise. The margin is set from the measured residual
-//     spread, not guessed — an earlier 3 % attempt sat below the noise and left the
-//     picks as unstable as before.
+// Selection stability (F-9): a single timed sample per candidate is unstable at small M
+// because the timed window is dominated by scheduling noise; the two fixes are on the
+// estimator, not persistence (an on-disk cache would freeze a mispick permanently and
+// needs driver/cuBLAS version invalidation).
+//   1. Size the timed window per candidate to ~kTargetWindowMs (not a fixed rep count),
+//      so every shape gets comparable measurement quality; costs compared per rep.
+//   2. kAlgoMargin hysteresis toward heuristic order: a candidate replaces the incumbent
+//      only by beating it by more than the margin, else the lower heuristic index wins
+//      (deterministic per shape/device). Margin is set from measured residual spread.
 static constexpr int kBenchmarkRounds = 3;
 static constexpr float kTargetWindowMs = 0.5f;
 static constexpr int kMaxBenchIters = 512;
@@ -479,17 +424,12 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // repeat runs produce bitwise-identical prefill outputs.
     const bool s_deterministic_gemm = imp::process_diag_deterministic_gemm();
     if (s_deterministic_gemm || nresults == 1) {
-        // Deterministic selection must still be VALID: the cuBLASLt heuristic
-        // can return a top candidate that faults at RUNTIME on sm_120 (status
-        // 14 / NOT_SUPPORTED at certain M) — the timing path below rejects
-        // those in its warmup, but deterministic mode skips timing. Blindly
-        // trusting results[0] here is what let an unvalidated algo reach the
-        // real matmul and corrupt the forward pass (FP8-KV forces this path
-        // model-wide on models FA2 doesn't serve — pre-#932 that included all
-        // hd=256 models; the failure surfaced as silent repeated-token garbage
-        // on Qwen3.6-35B FFN GEMMs). Warmup-probe the
-        // candidates in heuristic order and pick the FIRST that survives —
-        // that order is stable across runs, so determinism is preserved.
+        // Deterministic selection must still be VALID: the cuBLASLt heuristic can return a
+        // candidate that faults at runtime on sm_120 (status 14 NOT_SUPPORTED at certain M) even
+        // though deterministic mode skips the timing warmup that would normally reject it
+        // (FP8-KV forces this path on models FA2 doesn't serve; pre-#932 that included all
+        // hd=256 models, surfacing as silent repeated-token garbage on FFN GEMMs). Warmup-probe
+        // candidates in heuristic order and pick the first that survives: that order is stable.
         int pick = 0;
         if (nresults > 1 && s_bench_scratch && C_bytes <= s_bench_scratch_size) {
             void* temp_c = s_bench_scratch;
@@ -547,15 +487,11 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     cudaEventCreate(&stop);
     std::vector<float> cand_ms(nresults, 1e30f);
 
-    // Warmup all candidates first so steady-state caches are warm before any
-    // candidate is timed. One warmup call per candidate (the previous policy)
-    // let single-rep bench mode pick legacy WMMA paths whose first-call cost
-    // is competitive but whose steady-state cost is 3-9× higher than modern
-    // m16n8k16 (`s16816gemm`) tiles. Three warmups per candidate covers
-    // cuBLASLt's per-algo lazy compile + L2 fill so the timed loop reflects
-    // hot-path behavior, eliminating WMMA-fallback selection (Finding 1).
-    // Track which algos actually work — cuBLAS heuristic can return algos
-    // that fail at runtime (e.g. FP8 on sm_120 at certain M values).
+    // Warmup all candidates first so steady-state caches are warm before any is timed: a
+    // single warmup per candidate let single-rep bench mode pick legacy WMMA paths whose
+    // first-call cost is competitive but whose steady-state cost is much higher than modern
+    // m16n8k16 tiles. Three warmups covers cuBLASLt's per-algo lazy compile + L2 fill.
+    // Tracks algo_ok per candidate since heuristic algos can fail at runtime.
     std::vector<bool> algo_ok(nresults, true);
     constexpr int kWarmupIters = 3;
     for (int i = 0; i < nresults; i++) {
@@ -605,13 +541,11 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
             base = i;
     }
 
-    // Interleaved rounds. Each round compares every candidate against `base`
-    // timed in that SAME round, and a candidate keeps its claim only by beating
-    // base by kAlgoMargin in every round. Pairing the comparison inside a round is
-    // what makes it survive a bad one: cold clocks or a busy host inflate base and
-    // challenger together, so their ratio still carries signal where their absolute
-    // times carry none. Comparing per-candidate minima across rounds does not have
-    // this property, and measurably did not work.
+    // Interleaved rounds: each round compares every candidate against `base` timed in the
+    // SAME round, and a candidate keeps its claim only by beating base by kAlgoMargin in
+    // every round. Pairing the comparison within a round makes it survive a bad one (cold
+    // clocks / a busy host inflate base and challenger together, so the ratio still carries
+    // signal). Comparing per-candidate minima across rounds does not have this property.
     std::vector<bool> beats_base(nresults, base >= 0);
     for (int round = 0; round < kBenchmarkRounds && base >= 0; round++) {
         // Base is timed first and explicitly — every other candidate in this round
@@ -647,17 +581,11 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
                           algo_ok[i] ? "" : " REJECTED");
     }
 
-    // Lowest-indexed candidate that beat base in every round wins; otherwise base.
-    // Taking the lowest index rather than the smallest time matters: where two
-    // challengers are tied with each other but both clearly ahead of base — which is
-    // exactly what M=512 N=1024 K=2048 does here, cand[3] and cand[5] both ~8-45 %
-    // ahead — picking by time flips between them run to run, and demanding a single
-    // undisputed winner throws away a real gain to keep the slower base. Index order
-    // is stable across processes, so this takes the gain and stays reproducible.
-    //
-    // The reason the timing loop exists is preserved: a legacy WMMA candidate whose
-    // steady-state cost is 3-9x worse never beats base by the margin in any round,
-    // and a base that bad loses to every challenger in every round.
+    // Lowest-indexed candidate that beat base in every round wins, not the smallest time:
+    // when two challengers tie with each other but both beat base, picking by time flips
+    // between them run to run. Index order is stable across processes, so this keeps the
+    // gain and stays reproducible. A legacy WMMA candidate whose steady-state cost is much
+    // worse never beats base by the margin in any round.
     int best_idx = base;
     for (int i = 0; i < nresults; i++) {
         if (beats_base[i]) {
@@ -726,16 +654,10 @@ namespace {
 IMP_REGISTER_CUDA_STATIC_RESET(gemm_reset_static_cuda_state);
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// gemm:  C = alpha * A @ B^T + beta * C
-//   A [M, K]  B [N, K]  C [M, N]   -- all row-major
-//
-// Weight matrices from GGUF are [out_features, in_features] = [N, K].
-// cuBLAS is column-major.  For row-major C = A @ B^T:
-//   C^T = B @ A^T  (in col-major)
-// So we call cuBLAS with (transa=T, transb=N, m=N, n=M, k=K,
-//   lda=K (for B), ldb=K (for A), ldc=N (for C)).
-// ---------------------------------------------------------------------------
+// gemm: C = alpha*A@B^T + beta*C, A[M,K] B[N,K] C[M,N] all row-major. GGUF weights are
+// [out_features,in_features] = [N,K]. cuBLAS is column-major; for row-major C=A@B^T,
+// C^T = B@A^T (col-major), so cuBLAS is called with transa=T, transb=N, m=N, n=M, k=K,
+// lda=K (B), ldb=K (A), ldc=N (C).
 
 // gemm_try_gemv() (M=1 decode fast path) and gemm_try_sgemm() (FP32 fast path)
 // live in gemm_gemv_dtype.cu (declared in gemm_internal.cuh).
@@ -756,26 +678,20 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
     cublasComputeType_t compute_type = dtype_to_compute(A.qtype);
 
-    // FP16-accumulate prefill fast path (gemm.cublas_fp16_acc): GeForce
-    // sm_120 runs FP16 TC with FP32 accumulate at 1/4 rate; COMPUTE_16F
-    // restores full rate (~2x measured on prefill shapes). F16-only, M>1 —
-    // decode (M==1) routes through gemm_try_gemv before this and stays 32F.
+    // FP16-accumulate prefill fast path (gemm.cublas_fp16_acc): sm_120 runs FP16 TC with
+    // FP32 accumulate at 1/4 rate; COMPUTE_16F restores full rate. FP16-only, M>1 (decode
+    // M==1 routes through gemm_try_gemv before this, stays FP32 accumulate).
     const bool use_fp16_acc = process_diag_cublas_fp16_acc() && M > 1 && A.qtype == QType::F16 &&
                               B.qtype == QType::F16 && C.qtype == QType::F16;
     if (use_fp16_acc)
         compute_type = CUBLAS_COMPUTE_16F;
 
-    // Capture-safe path: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR
-    // (status 14) under stream capture on sm_120 — heuristic + workspace
-    // allocation paths aren't graph-safe on a COLD shape. Route FP16×FP16→FP16
-    // GEMMs to the hand-tuned sm_120 WMMA kernel when the stream is in capture
-    // mode — unless the capturer opted in via gemm_set_lt_capture_allowed():
-    // the graph-captured verify chunk (#847) warms every shape eagerly before
-    // capturing, so Lt's heuristic cache and handle workspace are populated
-    // and the call records cleanly (the WMMA fallback measured ~5x slower than
-    // Lt's nvjet kernels on the verify GEMMs — 167 ms/1400 tok on Q8-8B). A
-    // residual status-14 fails that one capture; the engine falls back to the
-    // eager verify and disables capture after repeated failures.
+    // Capture-safe path: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR under stream
+    // capture on sm_120 for cold shapes (heuristic + workspace allocation aren't graph-safe).
+    // Routes FP16 GEMMs to the hand-tuned sm_120 WMMA kernel when the stream is capturing,
+    // unless the capturer opted in via gemm_set_lt_capture_allowed() (graph-captured verify,
+    // #847, warms every shape eagerly first). A residual status-14 fails that one capture;
+    // the engine falls back to eager verify and disables capture after repeated failures.
     if (A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F16 &&
         !gemm_lt_capture_allowed()) {
         cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
@@ -788,12 +704,10 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         }
     }
 
-    // Mixed-precision output (e.g. FP16×FP16 → FP32 for diagnostic precision
-    // probes): bypass cuBLASLt and use cublasGemmEx directly. cuBLASLt's
-    // descriptor + algo selection produces wildly wrong results with our
-    // FP16→FP32 dimensions on sm_120 (sums in the billions while real
-    // attention output is ±100). cublasGemmEx is the legacy, well-tested API
-    // that handles FP16×FP16→FP32 with CUBLAS_COMPUTE_32F correctly.
+    // Mixed-precision output (e.g. FP16xFP16->FP32 for diagnostic precision probes): bypasses
+    // cuBLASLt and uses cublasGemmEx directly. cuBLASLt's descriptor + algo selection produces
+    // wildly wrong results for FP16->FP32 dims on sm_120; cublasGemmEx with CUBLAS_COMPUTE_32F
+    // handles it correctly.
     if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F32) {
         cublasHandle_t fb_handle = get_cublas_handle();
         cublasSetStream(fb_handle, stream);
@@ -863,10 +777,9 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                 (int)K, A.data, cuda_dtype_A, (int)K, &ibeta, C.data, cuda_dtype_C, (int)N,
                 CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
             if (fb_st != CUBLAS_STATUS_SUCCESS) {
-                // Both cublasLt and the cublasGemmEx fallback failed: C holds
-                // garbage. Continuing corrupts the forward pass silently
-                // (repeated-token gibberish + downstream IMA). Fail loudly —
-                // the throw is translated to ImpError at the API boundary.
+                // Both cublasLt and the cublasGemmEx fallback failed: C holds garbage. Continuing
+                // corrupts the forward pass silently (repeated-token gibberish + downstream IMA).
+                // Fail loudly instead.
                 char msg[192];
                 snprintf(msg, sizeof(msg),
                          "gemm(INT): cublasLtMatmul + cublasGemmEx fallback both failed (status %d) "
@@ -888,10 +801,9 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                            entry->has_algo ? &entry->algo : nullptr, s_workspace,
                                            entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            // Stale algo from a different M within the same bucket.
-            // Re-select via heuristic and retry before falling back - unless
-            // deterministic mode is on, where the heuristic pick is exactly
-            // what the warmup probe exists to reject (#1574).
+            // Stale algo from a different M within the same bucket: re-select via heuristic and
+            // retry, unless deterministic mode is on, where the heuristic pick is exactly what the
+            // warmup probe exists to reject (#1574).
             {
                 std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
                 reselect_algo_for_entry(*entry, M, K, N);
@@ -915,12 +827,10 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                                     cuda_dtype_A, (int)K, &beta, C.data, cuda_dtype_C, (int)N,
                                                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
                 if (fb_st != CUBLAS_STATUS_SUCCESS) {
-                    // Both cublasLt and cublasGemmEx failed. Output buffer holds
-                    // garbage; continuing corrupts the forward pass silently
-                    // (repeated-token gibberish + downstream IMA). Fail loudly
-                    // instead — the throw is translated to ImpError at the API
-                    // boundary, and under CUDA-graph capture it aborts the
-                    // capture (per-step fallback) rather than baking in garbage.
+                    // Both cublasLt and cublasGemmEx failed. Output buffer holds garbage; continuing
+                    // corrupts the forward pass silently (repeated-token gibberish + downstream IMA). Fail
+                    // loudly: under CUDA-graph capture this aborts the capture (per-step fallback) rather
+                    // than baking in garbage.
                     char msg[192];
                     snprintf(msg, sizeof(msg),
                              "gemm: cublasLtMatmul + cublasGemmEx fallback both failed (status %d) "
@@ -936,18 +846,12 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
 }
 
 void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream) {
-    // Defensive guard: a packed NVFP4 weight (or its INT8-typed packed
-    // payload) must never reach the generic FP16 cuBLAS path. cuBLAS rejects
-    // the FP16xINT8/NVFP4 operand mix with CUBLAS_STATUS_NOT_SUPPORTED
-    // (status 15) and leaves an uninitialised output buffer — silent
-    // repeated-token garbage plus downstream illegal-memory-access crashes.
-    // The correct dispatch for these weights is the NVFP4 decode/CUTLASS cache
-    // (see pre_dequant_phase3_*), which the budget planner now reserves for
-    // (the double-counted-reserve fix). If one still slips through — a future
-    // budget regression or an un-tiered weight — fail LOUD and skip the
-    // multiply instead of corrupting the forward pass. The output buffer is
-    // pre-zeroed by the caller, so an early return is safe (wrong-but-bounded,
-    // never an IMA). Log the exact identity, bounded to avoid flooding.
+    // Defensive guard: a packed NVFP4 weight (or INT8-typed packed payload) must never reach
+    // the generic FP16 cuBLAS path. cuBLAS rejects FP16xINT8/NVFP4 with
+    // CUBLAS_STATUS_NOT_SUPPORTED and leaves the output uninitialised (silent garbage + IMA).
+    // Correct dispatch is the NVFP4 decode/CUTLASS cache (pre_dequant_phase3_*); if one slips
+    // through, fail loud and skip the multiply (output is pre-zeroed by the caller) rather
+    // than corrupt.
     if ((B.qtype == QType::INT8 || B.qtype == QType::NVFP4) && A.qtype == QType::F16) {
         static std::atomic<int> leak_count{0};
         int n = leak_count.fetch_add(1, std::memory_order_relaxed);
@@ -962,10 +866,10 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
         }
         return;
     }
-    // Guard against quantized weight tensors (e.g. MXFP4 with dtype=INT4)
-    // that should have been handled by the FP16 weight cache path.
-    // Passing raw quantized data to cuBLAS causes illegal memory access
-    // (cuBLAS reads sizeof(FP16)*numel bytes but only sizeof(quant)*numel exist).
+    // Guards against quantized weight tensors (e.g. MXFP4 with dtype=INT4) that should have
+    // been handled by the FP16 weight cache path: passing raw quantized data to cuBLAS
+    // causes illegal memory access (cuBLAS reads sizeof(FP16)*numel but only
+    // sizeof(quant)*numel bytes exist).
     if (B.qtype == QType::INT4) {
         // This should never be reached — FP16 cache or gemm_dispatch should
         // handle quantized weights. If we get here, output will be zero (safe).
@@ -981,10 +885,8 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
 // gemv() and the dtype GEMV kernels (fp32/fp16/bf16) live in
 // gemm_gemv_dtype.cu.
 
-// ---------------------------------------------------------------------------
-// gemm_cublaslt: cuBLASLt GEMM with explicit algorithm selection + FP8 scales
-//   Uses the same static workspace as gemm().
-// ---------------------------------------------------------------------------
+// gemm_cublaslt: cuBLASLt GEMM with explicit algorithm selection + FP8 scales. Uses the
+// same static workspace as gemm().
 void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, const float* aScale,
                    const float* bScale, cudaStream_t stream) {
     const int64_t M = A.shape[0];
@@ -1036,12 +938,10 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
         }
     }
 
-    // Set per-call scale pointers (vary by weight tensor, not cached).
-    // SAFETY: This mutates the cached opDesc WITHOUT holding s_gemm_cache_mutex.
-    // This is safe because imp enforces single-stream GEMM execution — all GEMM
-    // calls are serialized on a single CUDA stream, so no two threads can race
-    // on the same opDesc concurrently. If multi-stream GEMM is ever added, this
-    // section must be protected by the mutex (or opDesc must be duplicated per-call).
+    // Sets per-call scale pointers (vary by weight tensor, not cached) on the cached opDesc
+    // WITHOUT holding s_gemm_cache_mutex. Safe because imp serializes all GEMM calls on a
+    // single CUDA stream, so no two threads race on the same opDesc. If multi-stream GEMM
+    // is added, this needs the mutex or a per-call opDesc duplicate.
     set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
 
     cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
@@ -1113,9 +1013,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     }
 }
 
-// The dtype GEMV kernels (fp8/q6k/q8_0) + gemv_fp8 live in gemm_gemv_dtype.cu.
-// The MoE gate/decode/gate-up-fused GEMV kernels live in gemm_moe_gemv.cu.
-// gemm_kv_batched / gemm_pair_batched / gemm_cublaslt_fp8_probe live in
-// gemm_batched.cu.
+// dtype GEMV kernels (fp8/q6k/q8_0) + gemv_fp8 live in gemm_gemv_dtype.cu. MoE
+// gate/decode/gate-up-fused GEMV kernels live in gemm_moe_gemv.cu. gemm_kv_batched /
+// gemm_pair_batched / gemm_cublaslt_fp8_probe live in gemm_batched.cu.
 
 }  // namespace imp

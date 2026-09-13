@@ -22,11 +22,9 @@ namespace imp {
 
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
-// Coverage instrumentation (FA2-coverage dispatch): counts materialized-cuBLAS
-// prefill launches. A test resets this, runs a target-model (Gemma-4) prefill,
-// and asserts it stays 0 — proving the legacy path is unreachable for the
-// target set (the dispatch's executed-kernel coverage gate). Relaxed atomic,
-// diagnostic only; never gates behaviour.
+// Coverage instrumentation (FA2-coverage dispatch): counts materialized-cuBLAS prefill launches.
+// A Gemma-4 prefill test asserts this stays 0, proving the legacy path is unreachable for the
+// target set. Relaxed atomic, diagnostic only; never gates behavior.
 static std::atomic<uint64_t> s_cublas_prefill_calls{0};
 uint64_t attention_cublas_prefill_call_count() {
     return s_cublas_prefill_calls.load(std::memory_order_relaxed);
@@ -56,20 +54,13 @@ static cublasHandle_t get_attn_cublas_handle() {
 static void ensure_attn_ptr_arrays(int n_heads);
 
 void attention_cublas_prewarm() {
-    // Force lazy-init of the static cuBLAS handle AND issue a dummy
-    // GemmBatchedEx so cuBLAS allocates its internal workspace + selects
-    // an algorithm. Also pre-size the s_attn_d_ptrs device buffer for
-    // the largest n_heads any current model uses (256, matching the host
-    // stack array bound). All cudaMallocs happen eagerly here; subsequent
-    // calls inside captured streams find everything ready and don't
-    // trigger any cudaMalloc (illegal under capture).
+    // Force lazy-init of the static cuBLAS handle plus a dummy GemmBatchedEx so cuBLAS allocates its
+    // workspace and picks an algorithm; pre-sizes s_attn_d_ptrs for n_heads=256 (host stack bound).
+    // All cudaMallocs happen eagerly here so captured-stream calls never trigger one (illegal under capture).
     cublasHandle_t h = get_attn_cublas_handle();
-    // The handle is process-global and outlives engines. Its last
-    // cublasSetStream() may reference a stream the previous engine destroyed
-    // (server model auto-swap) — issuing the dummy GEMM there segfaults inside
-    // cuBLAS algo selection (cuStreamGetGreenCtx on the dangling stream).
-    // Rebind to the default stream; real callers set their own stream before
-    // every use.
+    // Handle is process-global and outlives engines; its last cublasSetStream() may reference a stream
+    // a previous engine destroyed (model auto-swap), segfaulting inside cuBLAS algo selection. Rebind to
+    // the default stream here; real callers set their own stream before every use.
     cublasSetStream(h, nullptr);
     ensure_attn_ptr_arrays(/*n_heads=*/256);
 
@@ -106,14 +97,8 @@ void attention_cublas_prewarm() {
     cudaFree(d_ap); cudaFree(d_bp); cudaFree(d_cp);
 }
 
-// ---------------------------------------------------------------------------
-// Fused causal softmax FP32 → FP16: reads FP32 S matrix, writes FP16 probs
-// to a separate output buffer. Fuses the FP32 softmax with the FP16 cast for
-// the cuBLAS prefill path. Saves one full pass
-// over the [n_heads × q_len × kv_len] tensor (~36% memory traffic on the
-// softmax+cast block, ~6-8% prefill on dense Q8). FP32 reduction internal,
-// only the final normalized value is downcast.
-// ---------------------------------------------------------------------------
+// Fused causal softmax FP32->FP16: reads FP32 S, writes FP16 probs to a separate buffer, saving
+// one pass over [n_heads, q_len, kv_len]. FP32 reduction internal; only the final value is downcast.
 __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_in,
                                                     half* __restrict__ S_out, int q_len,
                                                     int kv_len, int q_offset, bool causal,
@@ -184,17 +169,9 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fused causal mask + in-place softmax kernel
-//
-// S: [n_heads, seq_len, seq_len] FP16, row-major
-// Each block handles one (head, row) pair.
-// Algorithm:
-//   1. Apply causal mask: S[h][i][j] = -inf for j > i
-//   2. Row-wise softmax: max -> exp -> sum -> normalize
-//
-// Warp-level reductions for max and sum using __shfl_xor_sync.
-// ---------------------------------------------------------------------------
+// Fused causal mask + in-place softmax. S: [n_heads, seq_len, seq_len] FP16. Each block handles
+// one (head, row) pair: mask j>i, then row-wise softmax (max -> exp -> sum -> normalize) using
+// warp-level __shfl_xor_sync reductions.
 __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, int kv_len,
                                                int q_offset, bool causal, int sliding_window,
                                                const half* __restrict__ sinks) {
@@ -298,10 +275,7 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, i
     }
 }
 
-// ---------------------------------------------------------------------------
-// Softcap kernel: S[i] = softcap * tanh(S[i] / softcap)
-// Applied in-place to the S matrix (FP16) between GEMM and softmax.
-// ---------------------------------------------------------------------------
+// Softcap: S[i] = softcap*tanh(S[i]/softcap), in-place on FP16 S between GEMM and softmax.
 __global__ void softcap_fp16_kernel(half* S, int64_t n, float softcap) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -322,21 +296,14 @@ __global__ void softcap_fp32_kernel(float* S, int64_t n, float softcap) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Static device pointer arrays for cublasGemmBatchedEx (GQA attention).
-// Allocated once, grown as needed. Layout: [A_ptrs..., B_ptrs..., C_ptrs...]
-// ---------------------------------------------------------------------------
+// Static device pointer arrays for cublasGemmBatchedEx (GQA attention). Allocated once, grown as
+// needed. Layout: [A_ptrs..., B_ptrs..., C_ptrs...].
 static void** s_attn_d_ptrs = nullptr;
 static int s_attn_d_ptrs_capacity = 0;  // in number of pointers
 
-// NOT a T2 tenant, and the reason is worth recording (A7 step 8). This 6 KiB
-// pointer array has no degradation contract: attention_cublas_prefill() returns
-// void and the GQA branch dereferences s_attn_d_ptrs unconditionally, so a null
-// is a corrupted CUDA context a few microseconds later rather than a slower
-// path — which is exactly what happened when it was migrated and a caller
-// without an open arena got null back. Moving it needs either a fallback the
-// I1 gate cannot see (AUDIT B47) or a signature that can refuse; neither is
-// worth 6 KiB. It stays a direct allocation, prewarmed at n_heads = 256.
+// Not a T2 arena tenant (A7 step 8): attention_cublas_prefill() returns void and dereferences
+// s_attn_d_ptrs unconditionally, so null means a corrupted CUDA context, not a slower path.
+// Direct allocation, prewarmed at n_heads=256; moving it needs a signature that can refuse (AUDIT B47).
 static void ensure_attn_ptr_arrays(int n_heads) {
     int needed = 3 * n_heads;
     if (needed <= s_attn_d_ptrs_capacity)
@@ -365,13 +332,9 @@ namespace {
 IMP_REGISTER_CUDA_STATIC_RESET(attention_cublas_reset_static_cuda_state);
 }  // namespace
 
-// Fill s_attn_d_ptrs device-side so the GQA cuBLAS batched path is
-// graph-capturable. The previous implementation built host stack arrays and
-// issued cudaMemcpyAsync — host pointers have no stable identity across
-// graph replays and the H2D copies abort capture. Pointer pattern:
-//   A: GQA-shared,   ptr = base_A + (h / gqa_ratio) * stride_A_bytes
-//   B: per-head,     ptr = base_B + h * stride_B_bytes
-//   C: per-head,     ptr = base_C + h * stride_C_bytes
+// Fills s_attn_d_ptrs device-side for graph-capturable GQA cuBLAS: host pointers have no stable
+// identity across graph replays and H2D copies abort capture. Pattern:
+//   A: GQA-shared, ptr = base_A + (h/gqa_ratio)*stride_A; B/C: per-head, ptr = base + h*stride.
 __global__ void build_attn_ptr_arrays_kernel(const void** d_A, const void** d_B, void** d_C,
                                               const char* base_A, int64_t stride_A_bytes,
                                               const char* base_B, int64_t stride_B_bytes,
@@ -401,19 +364,9 @@ static inline void launch_build_attn_ptrs(void** d_ptrs, int n_heads, const void
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// cuBLAS batched attention for prefill
-//
-// Q: [seq, n_heads * hd], K: [seq, n_kv * hd], V: [seq, n_kv * hd]
-// O: [seq, n_heads * hd], S: [n_heads, seq, seq] workspace
-//
-// For GQA (n_kv_heads < n_heads): uses cublasGemmBatchedEx with explicit
-// pointer arrays so that multiple Q heads map to the same K/V head in a
-// single cuBLAS call. This reduces n_kv_heads calls per direction to 1.
-//
-// For MHA (n_kv_heads == n_heads): uses cublasGemmStridedBatchedEx for
-// maximum efficiency (single call, no pointer arrays needed).
-// ---------------------------------------------------------------------------
+// cuBLAS batched attention for prefill. Q:[seq,n_heads*hd], K/V:[seq,n_kv*hd], O:[seq,n_heads*hd],
+// S:[n_heads,seq,seq] workspace. GQA (n_kv_heads<n_heads): cublasGemmBatchedEx with pointer arrays
+// mapping multiple Q heads to one K/V head. MHA: cublasGemmStridedBatchedEx, single call.
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
                               float softcap, int q_offset, cudaStream_t stream, int sliding_window,
@@ -448,33 +401,16 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     float one_f = 1.0f;
     float zero_f = 0.0f;
 
-    // FP32 S matrix: avoids FP16 truncation of attention scores before softmax.
-    // Originally gated on scale==1.0 (Gemma-4, where the lack of 1/sqrt(hd)
-    // scaling makes QK^T scores large enough for FP16 to truncate). But the
-    // FP16-S path also fails for Qwen3.5-27B (head_dim=512, scale=1/sqrt(512))
-    // at deeper layers — the residual stream values grow ~5× from L0 to L58
-    // and the post-RMSNorm Q/K projections produce attention scores that
-    // accumulate FP16 round-off into NaN by L59. Symptom: cuBLAS attention
-    // emits all-NaN output at one specific layer and silently produces NaN
-    // logits downstream. Use FP32 S whenever the scratch buffer fits — FP16
-    // only when forced by buffer constraints.
+    // FP32 S avoids FP16 truncation of attention scores before softmax: FP16 S can accumulate
+    // round-off into NaN at deep layers (seen on Qwen3.5-27B, hd=512) and emit all-NaN output.
+    // Use FP32 S whenever the scratch buffer fits; FP16 only when forced by buffer constraints.
     int64_t s_buf_fp16_elems = static_cast<int64_t>(S.shape[0]) * S.shape[1];
     if (S.ndim >= 3)
         s_buf_fp16_elems *= S.shape[2];
     int64_t s_fp32_elems = static_cast<int64_t>(n_heads) * q_len * kv_len;
-    // FP32-S needs 3× the score element count, not 2× (#677): the FP32 QK^T
-    // scores occupy the front 2·s_fp32_elems half-slots, and the FP16
-    // probabilities are written to a SEPARATE, non-overlapping region right
-    // after them (S_prob below). Aliasing the two (the old fused in-place
-    // FP32→FP16 downcast wrote FP16 over the front half of the FP32 scores)
-    // is a cross-block WAR hazard: the FP16 output of a higher (head,row)
-    // block overwrites the FP32 scores of a lower block before that block has
-    // read them, so the softmax result depends on block-scheduling order and
-    // the buffer's prior contents — nondeterministic across forward calls. The
-    // band where 2×≤buf<3× falls back to the FP16-S softmax (read/write FP16 at
-    // the SAME address per element — no aliasing); in practice cuBLAS prefill
-    // only serves small/moderate n (large n routes to FA2/FMHA), so FP32-S is
-    // retained wherever it matters (deep-layer NaN avoidance).
+    // FP32-S needs 3x the score element count, not 2x (#677): FP32 QK^T scores occupy the front
+    // 2x half-slots, FP16 probs go to a separate non-overlapping region (aliasing causes a
+    // cross-block WAR hazard, nondeterministic across calls). 2x<=buf<3x falls back to FP16-S softmax.
     bool use_fp32_s = (s_fp32_elems * 3 <= s_buf_fp16_elems);
     float* S_f32 = use_fp32_s ? reinterpret_cast<float*>(S.data) : nullptr;
     // FP16 probabilities: non-overlapping with the FP32 scores on the FP32-S
@@ -538,10 +474,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                                    static_cast<long long>(head_dim), n_heads, CUBLAS_COMPUTE_32F, kGemmAlgo);
 
     } else {
-        // ---------------------------------------------------------------
-        // GQA path: single batched call with explicit pointer arrays
-        // Multiple Q heads share the same K/V head.
-        // ---------------------------------------------------------------
+        // GQA path: single batched call with explicit pointer arrays; multiple Q heads share one K/V head.
         ensure_attn_ptr_arrays(n_heads);
 
         // Step 1: S = scale * Q × K^T — fill pointer arrays device-side.
@@ -592,10 +525,8 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             }
         }
 
-        // Step 3: O = P × V — re-fill pointer arrays device-side for the
-        // second cuBLAS call. cuBLAS: C = alpha * A * B with A=V (OP_N),
-        // B=P (OP_N). A is GQA-shared, B and C are per-head. P is read from
-        // S_prob (non-overlapping FP16 region on the FP32-S path, #677).
+        // Step 3: O = P x V, pointer arrays refilled device-side for the second cuBLAS call.
+        // C = alpha*A*B, A=V (OP_N, GQA-shared), B=P (OP_N, per-head), read from S_prob (#677).
         launch_build_attn_ptrs(s_attn_d_ptrs, n_heads, V_base,
                                static_cast<int64_t>(head_dim) * sizeof(half), S_prob,
                                static_cast<int64_t>(strideS) * sizeof(half), O_base,
@@ -620,10 +551,8 @@ bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Ten
     int64_t s_buf_fp16_elems = static_cast<int64_t>(S.shape[0]) * S.shape[1];
     if (S.ndim >= 3)
         s_buf_fp16_elems *= S.shape[2];
-    // Largest slice that keeps every call on the FP32-S path (3× elements —
-    // the use_fp32_s gate above). kv_len is fixed across slices (K/V already
-    // hold the full context incl. this chunk's rows; causal masking bounds
-    // each row), so the solve is linear, not quadratic.
+    // Largest slice keeping every call on the FP32-S path (use_fp32_s gate above). kv_len is fixed
+    // across slices, so the solve is linear, not quadratic.
     int64_t ns64 = s_buf_fp16_elems / (3LL * n_heads * kv_len);
     int ns = static_cast<int>(std::min<int64_t>(ns64, n));
     ns = (ns / 16) * 16;

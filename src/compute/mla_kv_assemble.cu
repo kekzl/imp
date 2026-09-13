@@ -1,14 +1,10 @@
-// MLA KV-buffer assembly kernels (Task 2.3).
-//
-// RoPE layout choice (b): pe FIRST in each K (and Q) head so that the
-// existing rope kernel (which rotates the first rope_dim dims) applies
-// unchanged to both Q and K.
-//
-// kv_b layout from kv_b_proj: per token, per head h:
-//   kv_b[h] = [k_nope(nope_dim) | v(v_head_dim)]
-// k_rope: [n_tokens, rope_dim]  — MQA-style, shared across all heads.
-// K output: [n_tokens, n_heads, rope_dim+nope_dim] — [pe | nope]
-// V output: [n_tokens, n_heads, v_head_dim]
+// MLA KV-buffer assembly kernels (Task 2.3). RoPE layout choice (b): pe FIRST in each K (and
+// Q) head so the existing rope kernel (rotating the first rope_dim dims) applies unchanged to
+// both Q and K.
+//   kv_b[h] = [k_nope(nope_dim) | v(v_head_dim)] per token per head (from kv_b_proj)
+//   k_rope: [n_tokens,rope_dim] MQA-style, shared across heads
+//   K output: [n_tokens,n_heads,rope_dim+nope_dim] [pe|nope]; V output:
+//   [n_tokens,n_heads,v_head_dim]
 
 #include "compute/mla_kv_assemble.h"
 #include "core/logging.h"
@@ -17,11 +13,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Kernel: assemble K[pe|nope] and V from kv_b + k_rope
-//   Grid:  (n_heads, n_tokens)
-//   Block: 64 threads (sufficient for all practical head dims ≤ 192)
-// ---------------------------------------------------------------------------
+// Assembles K[pe|nope] and V from kv_b + k_rope. Grid (n_heads,n_tokens), block 64 threads
+// (sufficient for all practical head dims <= 192).
 __global__ static void mla_assemble_kv_kernel(
         const __half* __restrict__ kv_b,    // [n, n_heads*(nope+v)]
         const __half* __restrict__ k_rope,  // [n, rope_dim]
@@ -54,12 +47,8 @@ __global__ static void mla_assemble_kv_kernel(
         v_dst[j] = (j < v_head_dim) ? kv_b_h[nope_dim + j] : __float2half(0.0f);
 }
 
-// ---------------------------------------------------------------------------
-// Kernel: reorder Q per-head from [nope | pe] to [pe | nope] in-place
-//   Grid:  (n_heads, n_tokens)
-//   Block: 64 threads
-//   Smem:  head_dim halfs
-// ---------------------------------------------------------------------------
+// Reorders Q per-head from [nope|pe] to [pe|nope] in-place. Grid (n_heads,n_tokens), block
+// 64 threads, smem head_dim halfs.
 __global__ static void mla_reorder_q_kernel(
         __half* __restrict__ q_data,
         int n_heads, int nope_dim, int rope_dim)
@@ -82,12 +71,9 @@ __global__ static void mla_reorder_q_kernel(
         q_head[rope_dim + j] = smem[j];
 }
 
-// ---------------------------------------------------------------------------
-// Kernel: compact attention output [n, n_heads, head_dim] -> [n, n_heads, v_hd]
-//   Grid:  (n_heads, n_tokens)
-//   Block: up to 256 threads
-// Reads the first v_hd dims of each head's head_dim-strided slot; writes compact.
-// ---------------------------------------------------------------------------
+// Compacts attention output [n,n_heads,head_dim] -> [n,n_heads,v_hd]. Grid (n_heads,n_tokens),
+// block up to 256 threads. Reads the first v_hd dims of each head's head_dim-strided slot;
+// writes compact.
 __global__ static void mla_compact_attn_output_kernel(
         const __half* __restrict__ src,  // [n, n_heads, head_dim]
         __half* __restrict__ dst,        // [n, n_heads, v_hd]

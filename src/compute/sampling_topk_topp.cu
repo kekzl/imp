@@ -20,29 +20,19 @@ namespace imp {
 // Top-k / Top-p (nucleus) sampling with temperature
 // ============================================================================
 
-// ============================================================================
-// Multi-block top-k + top-p sampling (two phases).
-//
-// The original single-block kernel ran <<<1, BLOCK_SIZE>>>, using 1 of 170 SMs,
-// and scanned the full vocab (~150k) three times — ~737 us/call, the #1 GPU
-// consumer in batched server decode (profiled 2026-06-23). This splits the
-// full-vocab work across SAMPLE_NBLOCKS blocks.
-//
-// Phase 1 (multi-block): each block scans a strided vocab subset and emits
-//   block_max, block_sum (= sum exp((logit-block_max)*invT)), and the block's
-//   top_k *logits* (sorted desc) into candidate scratch. Candidates store
-//   logits, not probabilities, so the global softmax can be applied in phase 2.
-// Phase 2 (single block): merges block partials into the global max/sum via the
-//   online-softmax rescale, k-way merges the SAMPLE_NBLOCKS candidate lists into
-//   the global top_k, converts to probabilities, applies top-p and samples with
-//   the same LCG as before. Distribution-identical to the old kernel (not
-//   bit-identical: reduction order differs).
-// ============================================================================
+// Multi-block top-k+top-p (two phases): single-block kernel used 1 of 170 SMs with three
+// full vocab scans (#1 GPU consumer in batched decode); this splits work across
+// SAMPLE_NBLOCKS blocks.
+// Phase 1: each block scans a strided subset, emits block_max, block_sum, top_k logits
+// (sorted desc) into candidate scratch (logits not probabilities, so phase 2 applies the
+// global softmax).
+// Phase 2: merges partials via online-softmax rescale, k-way merges candidate lists into
+// global top_k, converts to probabilities, applies top-p, samples with the same LCG.
+// Distribution-identical to the old kernel, not bit-identical (reduction order differs).
 
-// Phase 1: per-block max, sum, and top_k logit candidates over a strided subset.
-// Body shared between the single-row kernel and the row-parallel batched
-// wrapper (grid.y = row) — blockIdx.x / gridDim.x usage is identical, so
-// per-row results are bit-identical across the two launch shapes.
+// Phase 1: per-block max, sum, top_k logit candidates over a strided subset. Body shared
+// between the single-row kernel and the row-parallel batched wrapper (grid.y=row);
+// blockIdx.x/gridDim.x usage identical, so per-row results are bit-identical.
 __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logits, int vocab_size,
                                                   int top_k, float inv_temperature,
                                                   float* __restrict__ block_max_out,
@@ -166,11 +156,10 @@ __global__ void topk_partial_rows_kernel(const TopkRowArgs* __restrict__ rows, i
                       cand_idx);
 }
 
-// Phase 2: merge the per-block candidate lists into the global top_k, apply
-// top-p and sample. All threads cooperate to select the global top_k from the
-// candidate pool (block_reduce_topk over the SAMPLE_NBLOCKS*top_k candidates read
-// straight from global — coalesced, no big smem staging); only the final
-// top-p/sample over top_k entries is serial. Runs inside graph capture.
+// Phase 2: merges per-block candidate lists into the global top_k, applies top-p, samples.
+// block_reduce_topk over SAMPLE_NBLOCKS*top_k candidates read straight from global
+// (coalesced, no big smem staging); only the final top-p/sample is serial. Runs inside
+// graph capture.
 __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float inv_temperature,
                                                    unsigned int seed, int n_blocks,
                                                    const float* __restrict__ block_max_in,
@@ -345,17 +334,10 @@ void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ============================================================================
-// CUB-based top-k sampling for k > MAX_TOP_K (128).
-//
-// Strategy:
-//   1. Compute softmax probabilities with temperature scaling.
-//   2. Sort (probability, vocab_index) pairs descending via CUB RadixSort.
-//   3. Take first k elements, apply top-p cutoff, sample.
-//
-// This path is NOT used inside CUDA graph capture (CUB launches internal
-// kernels). The single-block kernel above handles the graph-captured path.
-// ============================================================================
+// CUB-based top-k for k > MAX_TOP_K (128): softmax with temperature scaling, CUB
+// RadixSort (probability,vocab_index) descending, take first k, apply top-p, sample.
+// NOT used inside CUDA graph capture (CUB launches internal kernels); the single-block
+// kernel above handles the graph-captured path.
 
 // Kernel: compute softmax probabilities reading max/sum from device memory.
 // d_max_sum[0] = global_max, d_max_sum[1] = sum. Avoids 2 D2H syncs.
@@ -424,11 +406,9 @@ __global__ void softmax_sum_device_max_kernel(const float* __restrict__ logits, 
     }
 }
 
-// Deterministic single-block variant of softmax_sum_device_max_kernel.
-// A single block strides the whole vocab and reduces via a fixed-order
-// shared-memory tree, writing the sum directly. This removes the cross-block
-// FP atomicAdd of the multi-block path whose accumulation order varies
-// run-to-run. Opt-in (deterministic mode) only.
+// Deterministic single-block variant of softmax_sum_device_max_kernel: one block strides
+// the whole vocab, reduces via a fixed-order shared-memory tree, writes the sum directly -
+// removes the cross-block FP atomicAdd whose order varies run-to-run. Opt-in only.
 __global__ void softmax_sum_device_max_single_block_kernel(const float* __restrict__ logits, int vocab_size,
                                                           float inv_temperature,
                                                           const float* __restrict__ d_max,
@@ -508,11 +488,9 @@ struct CubSortScratch {
         const uint64_t g = engine_arena().generation();
         if (vocab_size <= capacity && gen == g)
             return true;
-        // T2 (A7 step 8). One take per (model, arena) — `capacity` is the
-        // vocabulary, which does not change while a model is loaded, so this
-        // runs once and never climbs a staircase. The pre-arena code freed and
-        // re-cudaMalloc'd six buffers from the SAMPLER, i.e. potentially while
-        // serving; the arena take is pointer arithmetic and cannot.
+        // T2 (A7 step 8). One take per (model,arena): `capacity` is the vocabulary, fixed while a
+        // model is loaded, so this never climbs a staircase. Arena take is pointer arithmetic and
+        // cannot free-while-serving, unlike the pre-arena code's free+cudaMalloc of six buffers.
         *this = CubSortScratch{};
         size_t elem_bytes = static_cast<size_t>(vocab_size) * sizeof(float);
         size_t idx_bytes = static_cast<size_t>(vocab_size) * sizeof(int32_t);
@@ -557,11 +535,10 @@ struct CubSortScratch {
 
 static CubSortScratch s_cub_scratch;
 
-// Initialise the softmax accumulators on the device (#1654). They used to be
-// two `cudaMemcpyAsync` from function-local `int`/`float`, which is only safe
-// because the enclosing function synchronised before returning. The enqueue
-// form below does not, and a stack address that outlives its frame is the kind
-// of bug that reproduces once a month.
+// Initialize softmax accumulators on device (#1654): two cudaMemcpyAsync from
+// function-local int/float were only safe because the caller synced before returning.
+// The enqueue form does not - a stack address outliving its frame is a bug that
+// reproduces once a month.
 __global__ void init_cub_max_sum_kernel(float* __restrict__ d_max_sum) {
     if (threadIdx.x == 0) {
         d_max_sum[0] = -FLT_MAX;
@@ -569,15 +546,11 @@ __global__ void init_cub_max_sum_kernel(float* __restrict__ d_max_sum) {
     }
 }
 
-// CUB-based top-k sampling for k > MAX_TOP_K. ENQUEUE ONLY: everything below
-// runs on `stream`, nothing reads back and nothing synchronises, so a caller can
-// queue one of these per sequence and gather every token with a single pinned
+// CUB-based top-k for k > MAX_TOP_K, ENQUEUE ONLY: everything runs on `stream`, nothing
+// reads back or syncs, so callers queue one per sequence and gather with a single pinned
 // D2H at the end (#1654). Returns false when the scratch is unavailable.
-//
-// It was already all-async internally; only the trailing readback forced the
-// sync, and that one readback is why crossing MAX_TOP_K dropped aggregate
-// throughput 14.5% at six concurrent sequences - one host round trip per
-// sequence per step instead of one for the batch.
+// Was already async internally; only the trailing readback forced a sync (one host round
+// trip per sequence per step).
 static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, int top_k, float top_p,
                                          float inv_temperature, unsigned int seed, int32_t* d_result,
                                          cudaStream_t stream) {
@@ -603,10 +576,9 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum);
     IMP_CUDA_CHECK_LAUNCH();
 
-    // Phase 2: sum of exp — reads max from device memory (no D2H sync).
-    // The default multi-block kernel sums via cross-block FP atomicAdd, whose
-    // accumulation order varies run-to-run. In deterministic mode use a single
-    // block with a fixed-order tree reduction instead.
+    // Phase 2: sum of exp, reading max from device memory (no D2H sync). Default multi-block
+    // kernel sums via cross-block FP atomicAdd (order varies run-to-run); deterministic mode
+    // uses a single block with fixed-order tree reduction instead.
     if (deterministic) {
         softmax_sum_device_max_single_block_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
             d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
@@ -625,24 +597,12 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
                                                                            sc.d_keys_in, sc.d_vals_in);
     IMP_CUDA_CHECK_LAUNCH();
 
-    // Step 3: sort the whole vocabulary by probability, descending. The top_k
-    // entries the sampler needs are then simply the head of the result.
-    //
-    // This used to run cub::DeviceTopK::MaxPairs first and radix-sort only the
-    // k survivors, which is asymptotically the better plan when k << vocab.
-    // It is gone because it does not work here (issue #1142): instrumented on
-    // Qwen3-8B-Q8_0 at top_k=129, MaxPairs writes all 129 slots on the first
-    // call, writes NOTHING on the second while still returning cudaSuccess,
-    // and from the fourth call on fails permanently with `invalid device
-    // ordinal` — same thread, same stream, device 0, no pending error before
-    // the call. The stale candidates left behind are what the model then
-    // samples from, which is the `Okay,,,,,,,,` loop the issue reports.
-    //
-    // Nothing checked the return code, so the failure was silent. The full
-    // sort is one well-trodden CUB entry point instead of two, the scratch is
-    // already sized for it (`rs_full_bytes` in ensure()), and it only runs at
-    // all when a request asks for top_k > MAX_TOP_K, which is rare and which
-    // the caller has already opted into paying for.
+    // Sorts the whole vocabulary by probability descending (top_k = head of the result), not
+    // cub::DeviceTopK::MaxPairs + radix-sort on the k survivors: MaxPairs failed
+    // non-deterministically after a few calls with a stale result and no error (#1142),
+    // which is why the model started repeating one token forever. Full sort uses one CUB
+    // entry point, scratch already sized (rs_full_bytes in ensure()), and only runs when
+    // top_k > MAX_TOP_K (rare, caller opted in).
     {
         size_t rs_bytes = sc.temp_bytes;
         cudaError_t rc = cub::DeviceRadixSort::SortPairsDescending(sc.d_temp, rs_bytes, sc.d_keys_in,
@@ -751,10 +711,8 @@ bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float 
         temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    // The CUB regime enqueues like any other now (#1654). It used to return
-    // false here and send the caller to the synchronous variant, which cost one
-    // host round trip per sequence per step: 14.5% of aggregate throughput at
-    // six concurrent sequences, for a top_k one candidate over the limit.
+    // The CUB regime enqueues like any other now (#1654), instead of falling back to the
+    // synchronous variant (one host round trip per sequence per step).
     if (top_k > MAX_TOP_K)
         return sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
                                             d_result, stream);
@@ -774,11 +732,9 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float
         temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    // No clamp (#1654). This used to cut top_k down to MAX_TOP_K with a warning,
-    // so a request with top_k=200 sampled from 128 candidates when it was alone
-    // in the batch and from 200 when it shared the batch with another sequence -
-    // the same request, two distributions, decided by its neighbours. The CUB
-    // path enqueues now, so both honour what was asked.
+    // No clamp (#1654): used to cut top_k down to MAX_TOP_K with a warning, so the same
+    // request sampled from a different candidate count depending on which other sequences
+    // shared its batch. The CUB path enqueues now, so every request gets what it asked for.
     if (top_k > MAX_TOP_K) {
         if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
                                           stream))

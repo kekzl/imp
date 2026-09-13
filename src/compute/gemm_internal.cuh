@@ -31,10 +31,8 @@ static constexpr int kGemvWarps = kGemvThreads / 32;
 // Compute the number of blocks needed to cover M rows at kGemvWarps rows/block.
 static inline int gemv_blocks(int M) { return (M + kGemvWarps - 1) / kGemvWarps; }
 
-// ---------------------------------------------------------------------------
-// cuBLAS internals shared with the batched-GEMM TU (gemm_batched.cu). The
-// definitions + the lazily-initialized handles/workspace live in gemm.cu.
-// ---------------------------------------------------------------------------
+// cuBLAS internals shared with the batched-GEMM TU (gemm_batched.cu); definitions + the
+// lazily-initialized handles/workspace live in gemm.cu.
 cublasHandle_t gemm_internal_cublas_handle();
 cublasLtHandle_t gemm_internal_cublaslt_handle();
 cudaDataType_t gemm_internal_dtype_to_cuda(QType dt);

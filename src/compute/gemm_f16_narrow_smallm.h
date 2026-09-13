@@ -1,17 +1,11 @@
 #pragma once
-// Narrow FP16 GEMM for batched decode: up to two (W, C) pairs in one launch.
-//
-//   C_p[M, N_p] = A[M, K] @ W_p[N_p, K]^T     p = 0, 1
-//
-// FP16 operands, FP32 accumulate, FP16 out; M <= 32, N_p % 16 == 0, K % 128 == 0.
-// Built for the GDN alpha/beta projections (N = n_heads, 48 on Qwen3.8-27B):
-// at M = 32 they ran as two cuBLAS GEMMs of nvjet + splitKreduce each, 4
-// launches per GDN layer. Split-K across CTAs with a fixed-order final
-// reduce: bitwise deterministic per shape.
-//
-// Workspace (device, zero-initialised once): gemm_f16_narrow_smallm_workspace_bytes()
-// for the largest N_0 + N_1 the caller will pass. The tickets in it are reset
-// by the kernel itself, so one zeroing at allocation is enough.
+// Narrow FP16 GEMM for batched decode: up to two (W,C) pairs in one launch.
+//   C_p[M,N_p] = A[M,K] @ W_p[N_p,K]^T   p = 0,1
+// FP16 operands, FP32 accumulate, FP16 out; M<=32, N_p%16==0, K%128==0. Built for the GDN
+// alpha/beta projections (N=n_heads): split-K across CTAs with a fixed-order final reduce,
+// bitwise deterministic per shape. Workspace (device, zero-initialised once):
+// gemm_f16_narrow_smallm_workspace_bytes() for the largest N_0+N_1 the caller passes; tickets
+// reset by the kernel itself, one zeroing at allocation is enough.
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

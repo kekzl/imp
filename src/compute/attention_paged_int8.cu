@@ -8,18 +8,10 @@
 
 namespace imp {
 
-// ===========================================================================
-// INT8 dp4a Paged Attention — Split-K kernel
-// ===========================================================================
-//
-// Q·K uses dp4a: Q is quantized to INT8 in registers once per kernel, then
-// __dp4a(K_int8x4, Q_int8x4, acc) computes 4 multiply-adds in 1 instruction.
-// V accumulation uses trivial int8→float: (float)(int8_t)byte = 1 CVT instruction.
-// Per-head scales from the INT8 KV cache write kernel handle dequantization.
-//
-// Grid: (batch, n_heads, num_splits)
-// Block: BLOCK_THREADS (256 = 8 warps)
-// ===========================================================================
+// INT8 dp4a paged attention split-K: Q quantized to INT8 once per kernel, __dp4a(K_int8x4,
+// Q_int8x4,acc) does 4 multiply-adds/instruction. V accum via int8->float (1 CVT). Per-head
+// scales from the INT8 KV write kernel handle dequant. Grid:(batch,n_heads,num_splits),
+// Block: 256 (8 warps).
 
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_int8_kernel(
@@ -126,12 +118,8 @@ __global__ void paged_attention_splitk_int8_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const int8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -350,12 +338,8 @@ __global__ void paged_attention_decode_int8_kernel(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const int8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -481,12 +465,8 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window, float softcap, cudaStream_t stream,
                                  int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
-    // StreamingLLM (n_sinks > 0, evicted-token bookkeeping) is still not wired
-    // into the INT8 kernels; classical sliding-window applies instead.
-    //
-    // LEARNED sinks (attn_sinks, gpt-oss) now are (#1345) — same wiring as the
-    // FP8 path took in #1346. Without it a quantised KV cache served a softmax
-    // denominator missing the sink column.
+    // StreamingLLM (n_sinks>0, eviction bookkeeping) not wired into the INT8 kernels; classical
+    // sliding-window applies. Learned sinks (attn_sinks, gpt-oss) wired since #1345 (same as FP8, #1346).
     (void)n_sinks;
     const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);

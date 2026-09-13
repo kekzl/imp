@@ -1,16 +1,9 @@
 #pragma once
 
-// The identities of the kernel paths imp can resolve to, as plain enums.
-//
-// Deliberately free of RuntimeConfig, CUDA and Tensor so that BOTH consumers
-// can include it without dragging a layer with them:
-//   - the pure routing models (attention_dispatch_decision.h,
-//     exec/moe_prefill_decision.h), which pull in runtime/config.h,
-//   - the dispatch recorder (dispatch_record.h), which is included from the
-//     hot path and must stay weightless.
-//
-// Splitting the enums out is what keeps the recorded path and the modelled
-// path expressed in ONE vocabulary: a tier renamed here breaks both sides.
+// Identities of the kernel paths imp can resolve to, as plain enums. Deliberately free of
+// RuntimeConfig/CUDA/Tensor so both the pure routing models (attention_dispatch_decision.h,
+// moe_prefill_decision.h) and the hot-path dispatch recorder (dispatch_record.h) can include it
+// without dragging in a heavier layer. One vocabulary keeps a renamed tier consistent on both sides.
 
 namespace imp {
 

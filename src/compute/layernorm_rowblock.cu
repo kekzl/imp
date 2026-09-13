@@ -1,9 +1,7 @@
-// layernorm_rowblock.cu — the batched-decode (2..64 rows) FP16 RMSNorm
-// family: one register-resident CTA per row, plus the producer-fusion
-// variant that also emits the small-M NVFP4 activation quantize. Split out
-// of layernorm.cu (one logical unit per TU; the hard-review size gate was
-// the trigger, the recompile blast radius is the reason it stays split).
-// Both kernels moved VERBATIM from layernorm.cu.
+// Batched-decode (2..64 rows) FP16 RMSNorm family: one register-resident CTA per row, plus the
+// producer-fusion variant emitting the small-M NVFP4 activation quantize. Split out of
+// layernorm.cu (one logical unit per TU; the file-size gate triggered it, recompile blast
+// radius is why it stays split). Both kernels moved verbatim from layernorm.cu.
 #include "compute/layernorm.h"
 #include "quant/nvfp4_pack.cuh"
 #include "core/pdl.h"
@@ -15,17 +13,11 @@
 
 namespace imp {
 
-// --------------------------------------------------------------------------
-// Row-block FP16 RMSNorm — the batched-decode variant (2 <= rows <= 64).
-//
-// At mbs<=32 the warp-per-row kernel launches 4 CTAs on 170 SMs and
-// walks every row TWICE through DRAM (sum-of-squares pass + normalize
-// pass): measured 6.3 us median for 0.65 MB of traffic at rows=32 d=5120,
-// ~6% of DRAM bandwidth, pure latency (nsys 2026-08-25, the norms row of
-// the concurrency-gap attribution). One CTA per row keeps the row
-// REGISTER-resident across the reduction: read once, one block reduce,
-// write once — and rows x 1 CTA puts every row's loads in flight at once.
-// --------------------------------------------------------------------------
+// Row-block FP16 RMSNorm, batched-decode variant (2<=rows<=64). The warp-per-row kernel
+// underfills the SM array at small batch and walks every row TWICE through DRAM (sum-of-
+// squares pass + normalize pass). One CTA per row keeps the row REGISTER-resident across the
+// reduction: read once, one block reduce, write once; rows x 1 CTA puts every row's loads in
+// flight at once.
 template <int kVecs>
 __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const __half* __restrict__ weight,
                                              __half* __restrict__ out, int d_model, float eps,
@@ -93,17 +85,13 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
     }
 }
 
-// --------------------------------------------------------------------------
-// Row-block FP16 RMSNorm + NVFP4 activation quantize — the batched-decode
-// producer fusion. Identical norm arithmetic to the kernel above; on top,
-// each adjacent thread PAIR owns one 16-value micro-block (two consecutive
-// float4s in every j-slice) and emits the packed nibbles + FP8 micro-scale
-// the small-M NVFP4 GEMM reads, from the ROUNDED fp16 values — the separate
-// quantize kernel reads the stored FP16 row, so bit-identity requires
-// quantizing post-rounding. Kills one quantize launch + one [M,K] FP16
-// re-read per consumer group (q/kv, gate/up, GDN in/z).
-// Caller guarantees d_model % 256 == 0 (whole-warp pair activity per slice).
-// --------------------------------------------------------------------------
+// Row-block FP16 RMSNorm + NVFP4 activation quantize, batched-decode producer fusion.
+// Identical norm arithmetic to the plain kernel; each adjacent thread PAIR also owns one
+// 16-value micro-block (two consecutive float4s per j-slice) and emits packed nibbles + FP8
+// micro-scale for the small-M NVFP4 GEMM, from the ROUNDED fp16 values (bit-identity requires
+// quantizing post-rounding, since the separate quantize kernel reads the stored FP16 row).
+// Kills one quantize launch + one [M,K] FP16 re-read per consumer group (q/kv, gate/up, GDN
+// in/z). Caller guarantees d_model%256==0 (whole-warp pair activity per slice).
 template <int kVecs>
 __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                                                    const __half* __restrict__ weight,
@@ -200,11 +188,8 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
     }
 }
 
-// --------------------------------------------------------------------------
-// Launcher for the plain row-block kernel — called from rmsnorm()'s
-// batched-decode branch (layernorm.cu). Caller checked the envelope
-// (F16, rows 2..64, d % 8 == 0, d_vec <= 1024).
-// --------------------------------------------------------------------------
+// Launcher for the plain row-block kernel, called from rmsnorm()'s batched-decode branch
+// (layernorm.cu). Caller checked the envelope (F16, rows 2..64, d%8==0, d_vec<=1024).
 void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, int rows, int d_model,
                            float eps, cudaStream_t stream, float weight_offset) {
     if ((d_model >> 3) <= 512) {
@@ -220,12 +205,9 @@ void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, i
     }
 }
 
-// --------------------------------------------------------------------------
-// Host dispatch: rmsnorm + NVFP4 activation quantize (producer fusion).
-// Returns false when the shape is outside the fused kernel's envelope —
-// the caller then runs the plain rmsnorm() and lets the GEMM dispatch
-// quantize as before.
-// --------------------------------------------------------------------------
+// Host dispatch: rmsnorm + NVFP4 activation quantize (producer fusion). Returns false when the
+// shape is outside the fused kernel's envelope; the caller then runs plain rmsnorm() and lets
+// the GEMM dispatch quantize as before.
 bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
                    uint8_t* xq_scales, float eps, cudaStream_t stream, float weight_offset) {
     const int rows = static_cast<int>(x.shape[0]);

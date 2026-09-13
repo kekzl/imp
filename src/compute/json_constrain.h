@@ -13,12 +13,10 @@
 
 namespace imp {
 
-// JSON state machine states.
-//
-// Note the two *_NEED_* states: after a comma a value/key is MANDATORY. They
-// exist because the comma used to return to the matching *_START state, and
-// those legally accept the closer — an empty [] / {} is valid JSON — so `[1,]`
-// and `{"a":1,}` passed the mask and the reply did not parse (#1096).
+// JSON state machine states. The two *_NEED_* states exist because after a comma a value/key
+// is MANDATORY: the comma used to return to the matching *_START state, which legally accepts
+// the closer (empty [] / {} is valid JSON), so `[1,]` and `{"a":1,}` passed the mask and the
+// reply did not parse (#1096).
 enum class JsonState : uint8_t {
     START,              // Expecting { or [
     OBJECT_START,       // After {: expecting " (key) or }
@@ -62,32 +60,20 @@ enum JsonTokenCat : uint16_t {
 static constexpr uint16_t CAT_VALUE_START = CAT_OPEN_BRACE | CAT_OPEN_BRACKET | CAT_QUOTE | CAT_NUMBER_START |
                                             CAT_TRUE_START | CAT_FALSE_START | CAT_NULL_START;
 
-// The JSON grammar with no vocabulary attached (#1729).
-//
-// Split out of JsonConstrainer so the grammar can be reused without dragging a
-// classified vocabulary along — #1729 needs exactly that, to run a free-form
-// JSON value as a nested sub-state of the schema FSM.
-//
-// The split is a MOVE, not a rewrite: `advance_char` and `compute_allowed_mask`
-// referenced zero vocabulary members (measured: 0 hits for token_categories_,
-// token_texts_, token_allow_, vocab_size_, eos_ids_), so nothing about the
-// grammar had to change to lift it out.
-//
-// What it buys today is sim_token_valid: snapshot and restore are one struct
-// copy instead of eleven fields listed by hand. That list had already gone
-// stale once — #1104 added the number sub-state to the FSM and not to the
-// save/restore, so a simulated token that walked into a number mutated the
-// real state. A field added to the grammar now round-trips because it is in
-// the grammar.
+// JSON grammar with no vocabulary attached (#1729): split out of JsonConstrainer so the
+// grammar can be reused without a classified vocabulary (needed to run a free-form JSON value
+// as a nested sub-state of the schema FSM). Pure move: advance_char/compute_allowed_mask
+// referenced zero vocabulary members. Buys sim_token_valid: snapshot/restore is one struct
+// copy instead of eleven hand-listed fields (that list had already gone stale once, #1104,
+// when the number sub-state was added to the FSM but not the save/restore).
 struct JsonGrammar {
     std::vector<JsonState> state_stack;
     JsonState current_state = JsonState::START;
     // Consecutive whitespace chars in non-string states (escape-hatch cap).
     int ws_run = 0;
-    // JSON number sub-state (RFC 8259: [minus] int [frac] [exp]). Without it
-    // IN_NUMBER accepted '.', 'e', 'E', '+', '-' unlimited times, so
-    // "3.5.5.5.5…" was a legal continuation and a model that wandered into a
-    // number could never be forced out of it (#1104).
+    // JSON number sub-state (RFC 8259: [minus] int [frac] [exp]). Without it IN_NUMBER accepted
+    // '.', 'e', 'E', '+', '-' unlimited times, so a model wandering into a number could never be
+    // forced out of it (#1104).
     bool num_seen_frac = false;
     bool num_seen_exp = false;
     bool num_exp_sign_ok = false;
@@ -127,10 +113,9 @@ public:
     // Reset FSM for a new generation.
     void reset();
 
-    // Output tokens still available to the request. Once only just enough
-    // remain to close every open structure, the mask narrows to the closers so
-    // the document always ends well-formed instead of being truncated (#1104).
-    // -1 (default) disables the narrowing entirely.
+    // Output tokens still available to the request. Once only just enough remain to close every
+    // open structure, the mask narrows to closers so the document always ends well-formed instead
+    // of truncating (#1104). -1 (default) disables the narrowing entirely.
     void set_remaining_budget(int n) { g_.remaining_budget = n; }
 
     // Check if initialized
@@ -141,10 +126,9 @@ public:
     // FSM unit tests; apply_mask uses it for whole-token validation.
     bool sim_token_valid(const std::string& text);
 
-    // Category mask the decode path would apply right now. Public for the FSM
-    // unit tests: apply_mask() needs an initialised GPU vocabulary, but the
-    // force-close narrowing (#1104) lives in this mask, not in the grammar
-    // simulator, so sim_token_valid() cannot observe it.
+    // Category mask the decode path would apply right now. Public for the FSM unit tests:
+    // apply_mask() needs an initialised GPU vocabulary, but the force-close narrowing (#1104)
+    // lives in this mask, not the grammar simulator, so sim_token_valid() cannot observe it.
     uint16_t allowed_categories_for_test() const { return compute_allowed_mask(); }
 
     // Advance the FSM over raw text (tests use this to reach mid-document
@@ -153,19 +137,17 @@ public:
         for (char c : text) advance_char(c);
     }
 
-    // Allow the model to emit a free-form preamble before strict JSON
-    // enforcement starts. close_token>=0 enables close-token mode (reasoning
-    // models with </think>); close_token<0 + max_tokens>0 enables budget-only
-    // mode (markdown-fence preambles). Both modes also exit on the first
-    // `{` / `[` seen. Pass close_token=-1 with max_tokens<=0 to fully disable.
+    // Allows a free-form preamble before strict JSON enforcement starts. close_token>=0 enables
+    // close-token mode (reasoning models with </think>); close_token<0 + max_tokens>0 enables
+    // budget-only mode (markdown-fence preambles). Both modes also exit on the first `{`/`[` seen.
+    // Pass close_token=-1 with max_tokens<=0 to fully disable.
     void set_preamble(int32_t close_token, int max_tokens = 8192, bool thinking_open = true) {
         preamble_.configure(close_token, max_tokens, thinking_open);
     }
 
-    // Tool-aware preamble: when configured, the gate stays "no-mask" through
-    // a tool-call body (delimited by open_tokens/close_tokens or the
-    // open_prefix/close_suffix char fallback) and never re-enables the mask
-    // after the tool closes. See PreambleGate::configure_with_tools.
+    // Tool-aware preamble: when configured, the gate stays "no-mask" through a tool-call body
+    // (delimited by open_tokens/close_tokens or the open_prefix/close_suffix char fallback) and
+    // never re-enables the mask after the tool closes. See PreambleGate::configure_with_tools.
     void set_preamble_with_tools(int32_t close_token, int max_tokens,
                                  std::vector<int32_t> open_tokens,
                                  std::vector<int32_t> close_tokens,
@@ -179,10 +161,9 @@ public:
                                        std::move(close_suffix), thinking_open);
     }
 
-    // Is the per-token allow list resident? True after a successful
-    // initialize() and never false again — the point of issue #1104, where it
-    // was allocated lazily inside apply_mask() and a failure there produced a
-    // silently UNCONSTRAINED reply instead of a refused one.
+    // Is the per-token allow list resident? True after a successful initialize() and never false
+    // again - the point of #1104, where it was allocated lazily inside apply_mask() and a failure
+    // there produced a silently UNCONSTRAINED reply instead of a refused one.
     bool has_device_allow_list() const { return dev_.has_token_allow(); }
 
 private:

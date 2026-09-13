@@ -12,11 +12,8 @@ static constexpr int WARP_SIZE = 32;
 static constexpr int BLOCK_THREADS = 256;
 static constexpr int NUM_WARPS = BLOCK_THREADS / WARP_SIZE;  // 8
 
-// cp.async helpers for pipelined Split-K attention
-// 4-byte async copy (2 halves): the only size legal for ELEMS=2 lanes
-// (head_dim=64 → per-lane offset is 4-byte aligned; an 8-byte cp.async from
-// odd lanes raises cudaErrorMisalignedAddress — found via gpt-oss #547,
-// the first hd=64 model through this path).
+// 4-byte async copy (2 halves): the only size legal for ELEMS=2 lanes (head_dim=64). An 8-byte
+// cp.async from odd lanes raises cudaErrorMisalignedAddress (found via gpt-oss #547, hd=64).
 __device__ __forceinline__ void cp_async_ca_4(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
     asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(s), "l"(glob));
@@ -39,12 +36,8 @@ __device__ __forceinline__ void cp_async_cg_16(void* smem, const void* glob) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(glob));
 }
 
-// ---------------------------------------------------------------------------
-// L2 streaming load/store hints for paged attention decode.
-// KV cache data is read once per decode step with no inter-kernel reuse.
-// Streaming loads (__ldcs = .cs) hint L2 to evict these lines first,
-// preserving L2 space for weight data used by subsequent FFN GEMV kernels.
-// ---------------------------------------------------------------------------
+// L2 streaming load/store hints (__ldcs) for paged decode: KV cache is read once per step with
+// no inter-kernel reuse, so evict these lines first, preserving L2 for FFN GEMV weight data.
 __device__ __forceinline__ half ldcs_half(const half* p) {
     return __ushort_as_half(__ldcs(reinterpret_cast<const unsigned short*>(p)));
 }
@@ -67,16 +60,10 @@ __device__ __forceinline__ void cp_async_wait_group() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
-// ---------------------------------------------------------------------------
-// StreamingLLM context range: sink tokens + sliding window.
-//
-// When n_sinks == 0 this collapses to the classical sliding-window (or full)
-// attention range: tokens [effective_start, ctx_len) are attended.
-// When n_sinks > 0 and sliding_window > 0 and ctx_len > n_sinks + sliding_window,
-// two disjoint ranges are attended: [0, sink_end) ∪ [window_start, ctx_len).
-// The block range in between [sink_end_block, window_start_block) contains no
-// attended tokens and must be skipped by the decode loop.
-// ---------------------------------------------------------------------------
+// StreamingLLM context range: sink tokens + sliding window. n_sinks==0 collapses to classical
+// sliding-window (or full) attention: [effective_start, ctx_len). n_sinks>0 with
+// sliding_window>0 and ctx_len>n_sinks+sliding_window attends two disjoint ranges:
+// [0,sink_end) U [window_start,ctx_len); the block range between them has no attended tokens.
 struct ContextRange {
     int effective_start;  // legacy: start of contiguous range when streaming disabled
     int first_block;      // first block to iterate
@@ -133,12 +120,9 @@ __device__ __forceinline__ int next_valid_block(const ContextRange& r, int cur_b
     return next;
 }
 
-// Compute the [first_tok, last_tok) slice of the current block that should be
-// attended. For streaming-disabled paths this matches the legacy
-// `first_tok = max(0, effective_start - tok_start)` convention.
-//
-// Returns false if the entire block is outside the attention range (caller
-// should `continue` past it).
+// Computes the [first_tok,last_tok) slice of the current block to attend. Non-streaming paths
+// match the legacy first_tok = max(0, effective_start - tok_start). Returns false if the whole
+// block is outside the range (caller should `continue` past it).
 __device__ __forceinline__ bool block_token_range(const ContextRange& r, int blk, int block_size, int ctx_len,
                                                   int& first_tok, int& last_tok) {
     int tok_start = blk * block_size;
@@ -181,11 +165,9 @@ static inline int kpar_n_sms() {
     return n_sms;
 }
 
-// ---------------------------------------------------------------------------
-// Online softmax step: update running max (m_w), sum-of-exp (l_w), and
-// compute rescale factor for accumulated output and new attention weight.
-// Used by all paged attention kernel variants (FP16, FP8, INT8, INT4).
-// ---------------------------------------------------------------------------
+// Online softmax step: updates running max (m_w) and sum-of-exp (l_w), computes the rescale
+// factor for accumulated output and the new attention weight. Shared by FP16/FP8/INT8/INT4
+// paged attention kernels.
 __device__ __forceinline__ void online_softmax_step(float dot, float& m_w, float& l_w, float& rescale,
                                                     float& w_new) {
     float m_new = fmaxf(m_w, dot);
@@ -205,11 +187,8 @@ __device__ __forceinline__ float apply_softcap(float dot, float softcap) {
     return (softcap > 0.0f) ? (softcap * tanhf(dot / softcap)) : dot;
 }
 
-// ---------------------------------------------------------------------------
-// Write sentinel partial result for an empty split-K split (max=-inf, sum=0,
-// O=0). Must be called with all threads in the block active; only
-// threadIdx.x==0 writes the scalar fields and the first warp zeroes O.
-// ---------------------------------------------------------------------------
+// Writes a sentinel partial for an empty split-K split (max=-inf, sum=0, O=0). Requires all
+// threads in the block active; only thread 0 writes the scalars, the first warp zeroes O.
 template <int HEAD_DIM>
 __device__ __forceinline__ void write_empty_split_sentinel(float* partial_out, int batch_idx, int n_heads,
                                                            int head_idx, int num_splits, int split_idx,
@@ -230,13 +209,8 @@ __device__ __forceinline__ void write_empty_split_sentinel(float* partial_out, i
     }
 }
 
-// ---------------------------------------------------------------------------
-// Split-K decision logic shared across all paged attention host launchers.
-// Returns the number of splits (1 = no split-K). Checks scratch buffer size.
-//
-// Forward-declare the scratch accessor from attention_paged.h so this header
-// remains self-contained for .cu files that already include it.
-// ---------------------------------------------------------------------------
+// Split-K decision logic shared by all paged attention host launchers. Returns split count
+// (1 = no split-K), checked against the scratch buffer size.
 void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 
 static inline int compute_splitk_splits(int batch_size, int n_heads, int head_dim, int max_context_len,
@@ -251,11 +225,8 @@ static inline int compute_splitk_splits(int batch_size, int n_heads, int head_di
     int num_splits = 1;
     static int num_sms_cached = kpar_n_sms();
     if (num_ctx_blocks >= 4 && total_blocks_nosplit < 2 * num_sms_cached && scratch_ptr != nullptr) {
-        // 4 CTAs per SM (was 2 until 2026-09-03). Measured on the four-token
-        // NVFP4 kernel (24/4 heads, HD=256, batch 1, warm >1 s): 2x reads
-        // 4k 69.2 / 8k 44.2 / 16k 72.5 / 32k 107.0 / 77k 241.3 us per launch
-        // (the sub-wave shapes at 2x are bistable), 4x reads 25.8 / 28.7 /
-        // 48.5 / 99.3 / 209.6 us; at 2x the 77k launch ran ~35% warps active.
+        // 4 CTAs per SM: measured optimum on the four-token NVFP4 kernel (occupancy vs per-launch time
+        // tradeoff). Do not lower without re-measuring across context lengths.
         const int cta_per_sm = 4;
         int target_blocks = cta_per_sm * num_sms_cached;
         num_splits = (target_blocks + total_blocks_nosplit - 1) / total_blocks_nosplit;
@@ -282,13 +253,9 @@ static constexpr int kWmmaTileM = 16;
 static constexpr int kWmmaTileN = 16;
 static constexpr int kWmmaTileK = 16;
 
-// ---------------------------------------------------------------------------
-// Compute KV tile loop bounds for causal + sliding_window masking.
-// Shared by all WMMA prefill attention kernels.
-//
-// On entry:  first_kv_tile = 0, num_kv_tiles = ceil(seq_kv / Bc).
-// On return: both are narrowed to the range that can produce non-masked scores.
-// ---------------------------------------------------------------------------
+// Computes KV tile loop bounds for causal + sliding_window masking, shared by all WMMA prefill
+// kernels. On entry: first_kv_tile=0, num_kv_tiles=ceil(seq_kv/Bc); narrowed on return to the
+// range that can produce non-masked scores.
 __device__ __forceinline__ void compute_kv_tile_bounds(int q_start, int Br, int Bc, int seq_q, int seq_kv,
                                                        bool causal, int sliding_window, int& first_kv_tile,
                                                        int& num_kv_tiles, int q_offset = 0) {
@@ -312,11 +279,8 @@ __device__ __forceinline__ void compute_kv_tile_bounds(int q_start, int Br, int 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Apply scale, softcap, and causal/sliding_window mask to a score tile.
-// S_tile is [Br x Bc] row-major.  Called by all threads in the block with a
-// strided loop.  Used by the sm_120 WMMA prefill kernels.
-// ---------------------------------------------------------------------------
+// Applies scale, softcap, and causal/sliding_window mask to a [Br x Bc] row-major score tile.
+// Called by all threads with a strided loop; used by the sm_120 WMMA prefill kernels.
 __device__ __forceinline__ void apply_score_masks(float* S_tile, int Br, int Bc, int block_threads, int tid,
                                                   int q_start, int kv_start, int seq_q, int seq_kv,
                                                   float scale, float softcap, bool causal,
@@ -344,17 +308,11 @@ __device__ __forceinline__ void apply_score_masks(float* S_tile, int Br, int Bc,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cross-warp reduction: merge per-warp softmax states (m_w, l_w, o_reg)
-// into final output. Shared by all paged attention decode kernels.
-//
-// Non-split variant: writes normalized FP16 output directly to O[].
-// Requires shared memory: float[NUM_WARPS + NUM_WARPS + NUM_WARPS * HEAD_DIM].
-// Only the first warp (warp_id==0) writes to global memory.
-// ---------------------------------------------------------------------------
-// attn_sinks (gpt-oss, #547): per-head learned sink logit — virtual extra
-// softmax column: joins the global max and adds exp(sink - max) to the
-// denominator; dropped from the numerator. nullptr = off.
+// Cross-warp reduction: merges per-warp softmax states (m_w,l_w,o_reg) into final output,
+// shared by all paged attention decode kernels. Non-split: writes normalized FP16 O directly
+// (needs shared float[NUM_WARPS*2 + NUM_WARPS*HEAD_DIM]; only warp 0 writes to global).
+// attn_sinks (gpt-oss #547): virtual softmax column, joins the global max and adds
+// exp(sink-max) to the denominator, dropped from the numerator. nullptr = off.
 template <int HEAD_DIM>
 __device__ __forceinline__ void crosswarp_reduce_and_write(
     float* smem_base,      // shared memory region (warp_max | warp_l | warp_o)
@@ -406,11 +364,8 @@ __device__ __forceinline__ void crosswarp_reduce_and_write(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cross-warp reduction for Split-K: writes partial result
-// (global_max, global_l, O_unnormalized) to partial_out buffer.
-// The split-K reduction kernel merges partials into final output.
-// ---------------------------------------------------------------------------
+// Cross-warp reduction for split-K: writes partial (global_max, global_l, O_unnormalized) to
+// partial_out; the split-K reduce kernel merges partials into the final output.
 template <int HEAD_DIM>
 __device__ __forceinline__ void crosswarp_reduce_splitk(float* smem_base, float m_w, float l_w,
                                                         const float* o_reg, int warp_id, int lane_id,

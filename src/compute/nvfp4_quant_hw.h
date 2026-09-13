@@ -6,31 +6,16 @@
 
 namespace imp {
 
-// =========================================================================
-// NVFP4 quantization — HW-consumption layout
-// =========================================================================
-//
-// Adapted from thu-ml/SageAttention (Apache-2.0), specifically
-// scaled_fp4_quant_kernel in
-// sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu.
-// The repository is `SageAttention`; `SageAttention3` is the method, and the
-// subtree carrying it. THIRD_PARTY_LICENSES.md names the same path.
-// This is the layout required by
-//   mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
-// for the `sfa`/`sfb` scale operand. Unlike nvfp4_quant_ref (linear), here
-// the scale bytes are stored in a specific interleaved pattern that
-// matches the hardware MMA fetch.
-//
-// Input shape:  [batch, n_heads, n_tokens, head_dim] FP16 or BF16
-// Output NVFP4: [batch, n_heads, n_tokens, head_dim/2] packed uint8
-// Output SF:    FP8 UE4M3 scale per 16-element group, in hardware layout.
-//               Allocated size = (n_tokens_rounded_64) * 128 bytes per
-//               (batch, head) where n_tokens_rounded_64 = ceil(n_tokens/64)*64.
-//
-// Constraints:
-//   - head_dim must be 64 or 128
-//   - head_dim must be divisible by 16 (always true for 64, 128)
-// =========================================================================
+// NVFP4 quantization, HW-consumption layout. Adapted from thu-ml/SageAttention
+// (Apache-2.0), scaled_fp4_quant_kernel in
+// sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu
+// (repo SageAttention; method/subtree SageAttention3; see THIRD_PARTY_LICENSES.md).
+// Layout required by mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64's
+// sfa/sfb scale operand (interleaved, unlike nvfp4_quant_ref's linear layout).
+// Input: [batch,n_heads,n_tokens,head_dim] FP16/BF16. Output NVFP4:
+// [batch,n_heads,n_tokens,head_dim/2] packed uint8. Output SF: FP8 UE4M3 per 16-elem group,
+// HW layout, size = ceil(n_tokens/64)*64 * 128 bytes per (batch,head).
+// Constraints: head_dim in {64,128} (always divisible by 16).
 
 // Host-callable entry: quantize a 4D FP16/BF16 tensor to NVFP4 + HW-layout
 // FP8 UE4M3 scales. Returns false on invalid parameters. Lays out the

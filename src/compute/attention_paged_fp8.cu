@@ -23,26 +23,11 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
 // Pipelined Split-K: FP8 E4M3 variant
 // ---------------------------------------------------------------------------
 
-// Copy exactly ELEMS bytes per lane from global KV into the per-warp smem
-// staging buffer. The valid cp.async transfer sizes are 4, 8 and 16 bytes, and
-// each lane's address is `lane_id * ELEMS`, so the instruction size has to
-// match ELEMS *and* the resulting alignment:
-//
-//   ELEMS 16 (hd=512) -> 16 B, lane_id*16 is 16 B aligned
-//   ELEMS  8 (hd=256) ->  8 B, lane_id*8  is  8 B aligned
-//   ELEMS  4 (hd=128) ->  4 B, lane_id*4  is  4 B aligned
-//   ELEMS  2 (hd=64), 3 (hd=96) -> no cp.async size fits
-//
-// The old code had one branch for `ELEMS >= 8` (always 8 B — so hd=512 copied
-// half its bytes and left the rest of K/V unwritten) and a hard-coded 4 B
-// otherwise, which at hd=64 both over-copied (4 B for a 2 B slice, running past
-// k_buf0 into k_buf1) and misaligned (odd lanes land on offset 2 mod 4). That
-// misalignment is #1339: the kernel faulted and took the CUDA context with it.
-//
-// For the two head dims no cp.async size fits, the copy is synchronous. The
-// pipeline loses its overlap there and nothing else changes — correct and
-// slower beats fast and faulting, and hd=64/96 are not the shapes this kernel
-// was tuned for.
+// Copies exactly ELEMS bytes/lane from global KV to per-warp smem; cp.async sizes are 4/8/16 B
+// and must match ELEMS's natural alignment (lane_id*ELEMS):
+//   ELEMS 16(hd=512)->16B, ELEMS 8(hd=256)->8B, ELEMS 4(hd=128)->4B, ELEMS 2/3(hd=64/96)-> none.
+// No cp.async size fits hd=64/96: copy is synchronous there (correct, no overlap) - misaligning
+// this faulted the CUDA context (#1339).
 template <int ELEMS>
 __device__ __forceinline__ void fp8_kv_stage_lane(uint8_t* smem_dst, const uint8_t* glob_src) {
     if constexpr (ELEMS == 16) {
@@ -139,12 +124,8 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -315,12 +296,8 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
-        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
-        // physical block would be an OOB KV read. The FP16 twin has carried
-        // this since #963 and the quantised ones did not (#1678): host-side
-        // eviction keeps the window range valid, so this is defense-in-depth -
-        // future range drift degrades to a skipped block instead of an illegal
-        // access or silent garbage.
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative physical block is an OOB
+        // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -413,13 +390,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                 float kv_scale, int max_context_len, int sliding_window, float softcap,
                                 cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
                                 const void* attn_sinks) {
-    // StreamingLLM (n_sinks > 0, evicted-token bookkeeping) is still not wired
-    // into the FP8 kernels; classical sliding-window applies instead.
-    //
-    // LEARNED sinks (attn_sinks, gpt-oss) now are (#1345). They used to be
-    // dropped here — the launcher had no pointer to take them through — so a
-    // quantised KV cache served a softmax denominator missing the sink column,
-    // and gpt-oss stopped answering at all rather than answering slightly worse.
+    // StreamingLLM (n_sinks>0, eviction bookkeeping) not wired into the FP8 kernels; classical
+    // sliding-window applies instead. Learned sinks (attn_sinks, gpt-oss) are wired since #1345.
     (void)n_sinks;
     const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
@@ -447,10 +419,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
 
         if (paged_attention_splitk_fp8_tile_gqa_supported(head_dim, block_size, n_heads, n_kv_heads) &&
             process_diag_attention_fp8_tile() && process_diag_attention_fp8_tile_gqa()) {
-            // GQA-batched tile variant: grid.y = n_kv_heads instead of n_heads
-            // (each block computes all G Q heads from one shared smem tile ->
-            // KV L2 traffic /G). The split count is re-derived for that
-            // geometry next to the kernel.
+            // GQA-batched tile variant: grid.y = n_kv_heads instead of n_heads (each block computes all G
+            // Q heads from one shared smem tile, cutting KV L2 traffic by G). Split count re-derived nearby.
             num_splits = paged_attention_splitk_fp8_tile_gqa_splits(batch_size, n_heads, n_kv_heads,
                                                                     head_dim, block_size, max_context_len);
             paged_attention_splitk_fp8_tile_gqa_launch(
@@ -460,17 +430,11 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                 sliding_window, softcap, stream);
         } else if (paged_attention_splitk_fp8_tile_supported(head_dim, block_size) &&
                    process_diag_attention_fp8_tile()) {
-            // Token-tiled variant (attention_paged_fp8_tile.cu): bulk-staged KV
-            // pages instead of the per-token latency chain. hd=128, bs multiple of 16.
-            //
-            // Wave-aware split count: the tile kernel is smem-capped at 1
-            // block/SM, so wall time quantizes to ceil(batch*heads*splits/SMs)
-            // waves. The shared heuristic (targets 2*SMs blocks for multi-
-            // block/SM kernels) lands mid-wave here — e.g. 32 heads * 11
-            // splits = 2.07 waves, a nearly idle third wave. Pick the split
-            // count <= the heuristic's (scratch is sized for that) minimizing
-            // waves per unit of split work; ties -> fewer splits (fewer
-            // per-warp pipeline prologues + smaller reduce).
+            // Token-tiled variant (attention_paged_fp8_tile.cu): bulk-staged KV pages instead of per-token
+            // latency chain. hd=128, block_size multiple of 16.
+            // Wave-aware split count: the tile kernel is smem-capped at 1 block/SM, so wall time quantizes
+            // to ceil(batch*heads*splits/SMs) waves. Picks the split count <= the heuristic's target that
+            // minimizes waves per unit of split work; ties favor fewer splits (fewer pipeline prologues).
             {
                 const int sms = kpar_n_sms();
                 const int bh = batch_size * n_heads;

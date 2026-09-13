@@ -1,18 +1,8 @@
-// FP8 E4M3 paged decode attention, TOK tokens per warp iteration
-// (attention.paged_fp8_multitok, 2026-09-03).
-//
-// The plain kernel (attention_paged_fp8.cu) walks one token per warp
-// iteration: one 128-byte K row, a 5-shuffle reduction, the online-softmax
-// update, one 128-byte V row, and the next token waits on all of it. On a
-// dense 40-layer model at 32 streams x ~1.1k context that kernel was 33% of
-// the serving kernel time at ~25% of DRAM bandwidth (Qwen3-14B-NVFP4,
-// 2026-09-03). Here a warp issues the K rows of TOK tokens before reducing
-// any of them, reduces TOK independent dots, takes one max / rescale per
-// group, and issues the TOK V rows together, so TOK x 2 loads are in flight
-// per warp instead of two. The softmax state is the unnormalised (m, l, o)
-// form; o is divided by l once at the end so the shared cross-warp merge
-// (normalised o, weight = exp(m - gmax) * l) is unchanged. HD=128 only;
-// every other shape stays on the plain kernel.
+// FP8 E4M3 paged decode, TOK tokens/warp iteration (attention.paged_fp8_multitok). The plain
+// kernel serializes one token per warp iteration (K row, 5-shuffle reduce, softmax, V row); here
+// a warp issues K rows of TOK tokens before reducing any, so TOK*2 loads are in flight per warp
+// instead of two. Softmax state is unnormalized (m,l,o), divided by l once at the end so the
+// cross-warp merge is unchanged. HD=128 only; other shapes stay on the plain kernel.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/pdl_device.cuh"
@@ -32,10 +22,8 @@ __device__ __forceinline__ float fp8_bits_to_float(uint8_t bits) {
     return static_cast<float>(val);
 }
 
-// Four packed e4m3 bytes -> two half2 with two cvt instructions (e4m3x2 ->
-// f16x2) instead of four byte extractions and four scalar conversions. ncu on
-// the byte-wise form at 32 x 1100: SM throughput 70%, DRAM 33%, stall
-// not_selected 2.25, i.e. issue-bound rather than memory-bound.
+// Converts four packed e4m3 bytes to two half2 with two cvt instructions (e4m3x2->f16x2)
+// instead of four byte extractions and four scalar conversions (issue-bound, not memory-bound).
 __device__ __forceinline__ void fp8x4_to_half2x2(uint32_t packed, half2& lo, half2& hi) {
     __half2_raw r0 = __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(packed & 0xFFFFu),
                                                 __NV_E4M3);

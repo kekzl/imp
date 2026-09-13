@@ -11,18 +11,13 @@ namespace imp {
 // Replaces CUTLASS 2.x GemmGrouped for NVFP4-quantized MoE expert weights.
 bool cutlass_grouped_3x_nvfp4_available();
 
-// Per-expert inputs for grouped NVFP4×NVFP4 → FP16 GEMM.
-// All pointer fields below are HOST arrays of DEVICE pointers (length n_experts).
-// The dispatch copies these to device internally and builds per-expert layouts.
-//
-//   A_i : [M_i,   K] packed NVFP4 (K-contiguous RowMajor, K/2 bytes per row)
-//   SFA_i: SfAtom UE4M3 layout (size = cutlass_nvfp4_sf_size(M_i, K))
-//   B_i : [N,     K] packed NVFP4 (from CutlassNvFP4Weight::data, per-expert)
-//   SFB_i: SfAtom UE4M3 layout (from CutlassNvFP4Weight::scale_factors, per-expert)
-//   D_i : [M_i,   N] FP16 output (RowMajor)
-//   alpha_i: per-expert tensor_scale (applied as GEMM alpha)
-//
-// K and N must be identical across all experts.  M_i varies.
+// Per-expert inputs for grouped NVFP4xNVFP4 -> FP16 GEMM. Pointer fields are HOST
+// arrays of DEVICE pointers (length n_experts); dispatch copies them to device and
+// builds per-expert layouts.
+//   A_i [M_i,K] packed NVFP4 (K-contiguous RowMajor, K/2 bytes/row); SFA_i SfAtom UE4M3
+//   B_i [N,K] packed NVFP4 (per-expert); SFB_i SfAtom UE4M3 (per-expert)
+//   D_i [M_i,N] FP16 output RowMajor; alpha_i per-expert tensor_scale as GEMM alpha
+// K and N must be identical across all experts; M_i varies.
 bool gemm_grouped_cutlass_3x_nvfp4(
     int n_experts,
     const int* host_M,  // [n_experts] M_i per expert
@@ -35,23 +30,16 @@ bool gemm_grouped_cutlass_3x_nvfp4(
     const float* host_alpha,          // [n_experts] per-expert tensor_scale (alpha)
     cudaStream_t stream);
 
-// Phase 3b: graph-capturable variant. All per-expert state lives on the
-// device — the staging buffer is built by an in-stream device kernel
-// (no host iteration, no D2H/H2D sync). Designed to replace the host-args
-// wrapper above inside the MoE prefill dispatch once Phase 3c wires it.
-//
-// Activation buffer layout assumptions (matching executor_forward_moe.cu's
-// CUTLASS 3.x quantize_once lambda):
-//   - A packed FP4: contiguous, K/2 bytes per row.
-//                   ptr_A[e] = base_A_packed + d_expert_offsets[e] * (K/2)
-//   - SFA UE4M3:    SfAtom-padded slab, byte offsets from d_sfa_offsets.
-//                   ptr_SFA[e] = base_A_sf + d_sfa_offsets[e]
-//   - B packed FP4: per-expert, fixed byte stride.
-//                   ptr_B[e] = base_B_packed + e * b_expert_stride_packed
-//   - SFB UE4M3:    per-expert, fixed byte stride.
-//                   ptr_SFB[e] = base_B_sf + e * b_expert_stride_sf
-//   - D FP16:       contiguous output (alias for C, beta=0).
-//                   ptr_D[e] = base_D + d_expert_offsets[e] * N * sizeof(half)
+// Phase 3b graph-capturable variant: all per-expert state lives on device, the staging
+// buffer is built by an in-stream kernel (no host iteration, no D2H/H2D sync). Replaces
+// the host-args wrapper once Phase 3c wires it into the MoE prefill dispatch.
+// Activation buffer layout (matches executor_forward_moe.cu's CUTLASS 3.x
+// quantize_once lambda):
+//   A packed FP4: ptr_A[e] = base_A_packed + d_expert_offsets[e]*(K/2), K/2 bytes/row
+//   SFA UE4M3: ptr_SFA[e] = base_A_sf + d_sfa_offsets[e], SfAtom-padded slab
+//   B packed FP4 / SFB UE4M3: per-expert, fixed byte stride from base_B_packed/base_B_sf
+//   D FP16: ptr_D[e] = base_D + d_expert_offsets[e]*N*sizeof(half), contiguous (alias
+//   for C, beta=0)
 struct GroupedNvfp4DeviceArgs {
     const int32_t* d_M_per;           // [n_experts]   per-expert token count
     const int32_t* d_expert_offsets;  // [n_experts+1] exclusive prefix sum of M_per
@@ -61,16 +49,13 @@ struct GroupedNvfp4DeviceArgs {
     const void* base_A_packed;        // contiguous activation packed FP4 base
     const void* base_A_sf;            // SfAtom-padded SFA base
 
-    // B/SFB storage. Two modes (mutually exclusive — Phase 3c-MVP design):
-    //
-    //   (a) Contiguous slab + per-expert stride. Set base_B_packed + b_expert_stride_packed
-    //       (same for SFB). Set d_B_ptrs = d_SFB_ptrs = nullptr.
-    //       Used by NvFP4MoEQuantResult-style native MoE weights (smallM path).
-    //
-    //   (b) Per-expert device pointer array. Set d_B_ptrs and d_SFB_ptrs to
-    //       [n_experts] device-resident pointer arrays. base_B_*/b_expert_stride_*
-    //       are ignored when these are non-null.
-    //       Used by registry-handle-style per-expert weights (CUTLASS 3.x prefill).
+    // B/SFB storage, two mutually exclusive modes (Phase 3c-MVP):
+    //   (a) contiguous slab + per-expert stride: set base_B_packed/b_expert_stride_packed
+    //       (+ SFB equivalents), d_B_ptrs = d_SFB_ptrs = nullptr. Used by
+    //       NvFP4MoEQuantResult (smallM path).
+    //   (b) per-expert device pointer array: set d_B_ptrs/d_SFB_ptrs to [n_experts]
+    //       device-resident arrays; base_B_*/b_expert_stride_* ignored when non-null. Used
+    //       by registry-handle weights (CUTLASS 3.x prefill).
     const void* base_B_packed;        // mode (a) only
     int64_t     b_expert_stride_packed;
     const void* base_B_sf;            // mode (a) only

@@ -8,10 +8,9 @@ namespace imp {
 
 namespace {
 
-// Drive every disallowed logit to -inf. Ids at or past `n_classified` are the
-// lm_head padding SafeTensors models carry beyond the tokenizer vocabulary
-// (Qwen3-8B-NVFP4: 151936 vs 151669) — they have no token text, so they are
-// masked wholesale rather than indexed.
+// Drives every disallowed logit to -inf. Ids >= n_classified are lm_head padding beyond
+// the tokenizer vocab (SafeTensors models, e.g. Qwen3-8B-NVFP4: 151936 vs 151669);
+// they have no token text, so masked wholesale rather than indexed.
 __global__ void regex_mask_kernel(float* __restrict__ logits, const uint8_t* __restrict__ allow,
                                   int vocab_size, int n_classified) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -25,12 +24,10 @@ __global__ void regex_mask_kernel(float* __restrict__ logits, const uint8_t* __r
 
 RegexConstrainer::~RegexConstrainer() = default;
 
-// The shared engine is permissive about syntax it cannot honour: `(?=x)` parses
-// as an ordinary group and `^`/`$`/`\b` as literals, so a pattern using them
-// would be enforced as something the caller never asked for. Refuse those here
-// instead — a wrong grammar is worse than no grammar. (Not fixed inside
-// RegexNfa on purpose: it also backs JSON-Schema `pattern`, and tightening it
-// there is a separate, testable change.)
+// The shared engine is permissive about syntax it can't honor: `(?=x)` parses as an
+// ordinary group, `^`/`$`/`\b` as literals - enforcing something the caller never asked
+// for. Refuse those here instead. (Not fixed in RegexNfa: it also backs JSON-Schema
+// `pattern`, a separate testable change.)
 static const char* unsupported_construct(const std::string& p) {
     bool in_class = false;  // inside [...] the metacharacters are literals
     for (size_t i = 0; i < p.size(); i++) {
@@ -70,21 +67,11 @@ static const char* unsupported_construct(const std::string& p) {
     return nullptr;
 }
 
-// A constrained reply must match as a WHOLE, so a leading `^` and a trailing
-// `$` state what the matcher already enforces. RegexNfa would read them as
-// literals, so they were refused outright — and that made the most natural way
-// to write a pattern the one that silently got no constraint at all: a client
-// sending `^[0-9]{3}$` over `response_format: regex` got free-form text back
-// with HTTP 200 and only a server-side WARN to show for it.
-//
-// Strip them instead. No grouping is needed around the remainder: the matcher
-// already binds the pattern to the entire output, so a top-level alternation
-// like `^yes|no$` -> `yes|no` still means "the whole reply is yes, or it is no".
-// (Wrapping it in `(…)` was tried and dropped — no test could tell the two
-// apart, which is the evidence that the group did nothing.)
-//
-// Anchors anywhere else are left alone and still refused below, because there
-// they are NOT redundant and the literal reading really would be wrong.
+// A constrained reply matches as a WHOLE; leading `^`/trailing `$` are redundant with
+// that and are stripped (RegexNfa would otherwise read them as literals and silently
+// refuse the pattern, e.g. a client's `^[0-9]{3}$` got free-form text with HTTP 200).
+// No grouping needed around the remainder: `^yes|no$` -> `yes|no` still means the whole
+// reply is yes or no. Anchors elsewhere are left alone and still refused (not redundant there).
 static std::string strip_redundant_anchors(const std::string& p) {
     size_t begin = 0, end = p.size();
     bool stripped = false;
@@ -108,11 +95,9 @@ static std::string strip_redundant_anchors(const std::string& p) {
 }
 
 bool RegexConstrainer::init_pattern_only(const std::string& pattern) {
-    // The manager is pooled and reused across requests, so a new pattern lands
-    // in the SAME object. Without clearing here, the cached masks of the
-    // PREVIOUS pattern stay live and are served for state sets of the new one —
-    // which showed up as one token repeating forever, because the stale mask
-    // allowed a token the new FSM then refused to advance on.
+    // Manager is pooled/reused across requests: a new pattern lands in the SAME object.
+    // Without clearing here, the previous pattern's cached masks stay live and get served
+    // for the new FSM's states - manifests as one token repeating forever.
     mask_cache_.clear();
     initialized_ = false;
     pattern_ = pattern;
@@ -129,11 +114,9 @@ bool RegexConstrainer::init_pattern_only(const std::string& pattern) {
     }
     states_ = nfa_.start_set();
 
-    // A pattern that cannot match anything must be refused here, not discovered
-    // at decode time: the empty-allow guard would fire on the first token, the
-    // request would return an empty string, and the caller would have no idea
-    // why. RegexNfa accepts some of these (`a{2,1}` compiles), so check the
-    // language is non-empty by searching for a reachable accepting state.
+    // A pattern matching nothing must be refused here, not discovered at decode time (the
+    // empty-allow guard would fire on token 1, returning an empty string with no explanation).
+    // RegexNfa accepts some of these (e.g. `a{2,1}`), so check reachability of an accept state.
     if (!language_non_empty()) {
         IMP_LOG_WARN("RegexConstrainer: pattern '%s' matches nothing — not enforcing it", pattern.c_str());
         return false;
@@ -289,10 +272,9 @@ void RegexConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t 
         return;
 
     const std::vector<uint8_t>& allow = allow_for_current_state(vocab_size);
-    // The allow list covers the tokenizer's vocabulary; the logits row can be
-    // wider than that on a checkpoint with a padded lm_head. Upload only what
-    // the buffer holds. The kernel masks everything at or above n_classified
-    // without reading the list, so the padding ids need no entry.
+    // Allow list covers the tokenizer vocabulary; the logits row can be wider on a checkpoint
+    // with a padded lm_head. Upload only what the buffer holds - the kernel masks everything
+    // >= n_classified without reading the list, so padding ids need no entry.
     const int n_classified = std::min(vocab_size, vocab_size_);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), allow.data(), static_cast<size_t>(n_classified),
                                        cudaMemcpyHostToDevice, stream));

@@ -38,15 +38,9 @@ void ensure_init_locked() {
     g_state.enabled = process_diag_ffn_sparsity_probe();
     if (g_state.enabled) {
         const size_t bytes = sizeof(unsigned long long) * kMaxLayers * kSlotsPerLayer;
-        // T2 (engine-persistent): fixed size, allocated once, never freed. The
-        // arena is the tier for that, and it takes this file off the I1
-        // allowlist. Direct allocation only when the arena is closed.
-        // T2 (engine-persistent) and NO direct-allocation fallback on purpose.
-        // Fixed size, allocated once, never freed — the arena is exactly that
-        // tier. Keeping a cudaMalloc fallback would leave this file on the I1
-        // allowlist for a path that only runs when the arena is closed, which
-        // for a diagnostic probe means "not in an engine, so nothing to probe"
-        // (AUDIT B34: a fallback keeps the site even when the site never runs).
+        // T2 (engine-persistent): fixed size, allocated once, never freed - the arena is exactly that
+        // tier, so this file carries no direct-allocation fallback (would keep an I1 allowlist entry for
+        // a path that only runs when the arena is closed, i.e. never in an engine, AUDIT B34).
         auto slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             IMP_LOG_WARN("ffn-sparsity-probe: T2 arena unavailable — probe disabled");

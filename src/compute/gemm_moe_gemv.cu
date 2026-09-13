@@ -7,12 +7,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// MoE decode GEMV: processes all top_k experts in a single kernel launch.
-// expert_indices[slot] selects which expert's weights to read from packed_weights.
-// Grid: top_k * blocks_per_expert blocks. Each block group handles one expert slot.
-// x_stride: 0 = shared input for all experts (gate/up), >0 = per-expert input (down).
-// ---------------------------------------------------------------------------
+// MoE decode GEMV: processes all top_k experts in one kernel launch. expert_indices[slot]
+// selects which expert's weights to read. Grid: top_k*blocks_per_expert; each block group
+// handles one expert slot. x_stride: 0 = shared input (gate/up), >0 = per-expert (down).
 
 __global__ void gemv_q6k_moe_decode_kernel(const uint8_t* __restrict__ packed_weights,
                                            const int32_t* __restrict__ expert_indices,
@@ -138,16 +135,11 @@ void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indi
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// FP16 variant of the same shape. The quantized siblings above all exist
-// because the main model's experts are quantized; the MTP draft head's are not
-// (BF16 on disk, FP16 resident), and without this the draft had to read the
-// routing back to the host and issue one GEMM per chosen expert — which is
-// what kept the whole draft path out of CUDA graph capture.
-//
-// Straight dot product per row, one warp per row, vectorised 2-wide: at
-// K = d_model this is bandwidth-bound on the weight read, so the only thing
-// that matters is that each warp walks its row contiguously.
+// FP16 variant: the MTP draft head's experts are BF16-on-disk/FP16-resident (unlike the main
+// model's quantized experts); without this kernel the draft had to read routing back to host
+// and issue one GEMM per chosen expert, which kept the whole draft path out of CUDA graph
+// capture. Straight dot product per row, one warp per row, vectorised 2-wide: bandwidth-bound
+// on the weight read, so each warp walking its row contiguously is what matters.
 __global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weights,
                                            const int32_t* __restrict__ expert_indices,
                                            const half* __restrict__ x, half* __restrict__ y, int rows, int K,
@@ -200,13 +192,9 @@ void gemv_f16_moe_decode(const void* packed_weights, const int32_t* expert_indic
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// FP16 GEMV with FP32 output for MoE gate logits: y = W @ x
-// W: [M, K] FP16 (row-major), x: [K] FP16, y: [M] FP32.
-// Designed for M=n_experts (64-256), K=d_model (2048-8192), n=1 decode.
-// Replaces cuBLAS gemm() + fp16_to_fp32 cast for tiny M=1 GEMMs.
-// Each warp handles one output row. Uses half2 vectorized loads for 2x bandwidth.
-// ---------------------------------------------------------------------------
+// FP16 GEMV with FP32 output for MoE gate logits: y = W@x. W[M,K] FP16, x[K] FP16, y[M] FP32.
+// For M=n_experts (64-256), K=d_model (2048-8192), n=1 decode; replaces cuBLAS gemm() +
+// fp16_to_fp32 cast for tiny M=1 GEMMs. Each warp handles one row, half2 vectorized loads.
 __global__ void gemv_gate_fp32_kernel(const half* __restrict__ W, const half* __restrict__ x,
                                       float* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
@@ -291,11 +279,8 @@ void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, in
 // Fused gate+up MoE GEMV (scalar FP16 variants — NOT dp4a, kept as-is)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Fused gate+up MoE GEMV: computes both gate and up projections in a single
-// kernel launch. blockIdx.y selects projection: 0=gate, 1=up.
-// Saves one kernel launch per MoE layer (48 launches for Qwen3-Coder).
-// ---------------------------------------------------------------------------
+// Fused gate+up MoE GEMV: computes both projections in one kernel launch. blockIdx.y selects
+// projection (0=gate, 1=up), saving one kernel launch per MoE layer.
 
 __global__ void gemv_q6k_moe_gate_up_fused_kernel(const uint8_t* __restrict__ gate_weights,
                                                   const uint8_t* __restrict__ up_weights,

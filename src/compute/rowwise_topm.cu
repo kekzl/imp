@@ -6,13 +6,10 @@
 
 namespace imp {
 
-// Two-stage split top-M (the rowwise_argmax_partial pattern — the original
-// one-block-per-row form measured 1.4 ms per verify at 151k vocab: 4 blocks
-// on 170 SMs re-scanning the row m times).
-//
-// Stage 1: grid (rows, kTopMSplits); each block computes the local top-M of
-// its V/kTopMSplits slice via m sequential masked block-reductions.
-// Stage 2: one block per row merges kTopMSplits * m candidates.
+// Two-stage split top-M (rowwise_argmax_partial pattern): one-block-per-row re-scans the
+// row m times across few blocks on many SMs.
+// Stage 1: grid(rows,kTopMSplits), each block's local top-M of its V/kTopMSplits slice.
+// Stage 2: one block per row merges kTopMSplits*m candidates.
 constexpr int kTopMSplits = 32;
 
 __global__ void rowwise_topm_partial_kernel(const float* __restrict__ logits, int V, int m,
@@ -113,21 +110,11 @@ int32_t* g_topm_pidxs = nullptr;
 size_t g_topm_cap = 0;
 uint64_t g_topm_gen = 0;  // arena generation; a model swap invalidates the pair
 
-// T2 (A7 step 8). Same shape as AUDIT B13's family and for the same reason: the
-// two pointers below are kernel parameters, the old grow freed them, and the
-// comment in rowwise_topm() already conceded that "growing under stream capture
-// would abort the capture — callers warm the shape up eagerly first". An arena
-// take is not a CUDA call, so it cannot abort a capture, and it does not free
-// the slice a captured graph may still name.
-//
-// Uncharged in exec_t2_demand: the one live caller in the engine is
-// executor_perplexity.cu (the --perplexity tool path, rows = the eval chunk),
-// and rowwise_topm_reserve() has no caller at all today — the header's claim
-// that "callers warm the shape up eagerly first (spec-capture warmup does)" is
-// stale, which the arena move makes harmless rather than latent. Charging the
-// max_tokens worst case would reserve ~16 MiB for a path that is not on the
-// serving hot path at all, so it draws on the arena's slack and returns without
-// a result if that runs out.
+// T2 (A7 step 8), same as AUDIT B13's family: these pointers are kernel params; an arena
+// take is not a CUDA call, so it cannot abort a capture and does not free a slice a
+// captured graph may still name.
+// Uncharged in exec_t2_demand: sole caller is executor_perplexity.cu (--perplexity path);
+// draws on arena slack and returns without a result if that runs out.
 bool topm_ensure(size_t need) {
     const uint64_t g = engine_arena().generation();
     if (g_topm_pvals && g_topm_gen == g && need <= g_topm_cap)

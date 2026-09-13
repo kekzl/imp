@@ -1,18 +1,8 @@
-// NVFP4 (E2M1 pairs + UE4M3 group scales) paged decode attention, four tokens
-// per warp iteration (attention.paged_nvfp4_multitok, 2026-09-03).
-//
-// The scalar kernels in attention_paged_nvfp4.cu walk one token per warp
-// iteration: one K word, one scale byte, a 5-shuffle reduction, the
-// online-softmax update, one V word, all dependent. Measured on the hybrid's
-// geometry (24/4 heads, HD=256) with the split-K scratch registered: 1 x 77k
-// context 299 us per launch = 296 GB/s (~18% of DRAM), 32 x 1100 123 us. The
-// FP8 twin of this structure (attention_paged_fp8_multitok.cu) read 2x. Here
-// a warp issues the K words and scale bytes of four tokens before reducing
-// any of them, reduces four independent dots, takes one max/rescale per
-// group, issues the four V words together; unnormalised (m, l, o) with one
-// division at the end so the shared merges (plain and split-K) are unchanged.
-// HD=128 (4 elems per lane, 2 packed bytes) and HD=256 (8 elems, one 4-byte
-// word) instances, E4M3 scales; other shapes stay on the scalar kernels.
+// NVFP4 (E2M1 + UE4M3 group scales) paged decode, 4 tokens/warp iteration. Unlike the scalar
+// kernel (fully dependent chain), a warp issues K words + scales for 4 tokens before reducing,
+// takes 4 independent dots, one max/rescale per group, then issues the 4 V words together.
+// Unnormalized (m,l,o), one division at the end. HD=128 (4 elems/lane, 2 packed bytes) / HD=256
+// (8 elems, 1 word), E4M3 scales; other shapes use the scalar kernel.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/pdl_device.cuh"

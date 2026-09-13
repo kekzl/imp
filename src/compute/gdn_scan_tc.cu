@@ -6,45 +6,16 @@ namespace imp {
 
 namespace wmma = nvcuda::wmma;
 
-// ---------------------------------------------------------------------------
-// Phase 2b — Tensor Core MMA prototype on top of the Phase 2a WY-rep math.
-//
-// Replaces the four chunk-internal scalar shared-memory matmuls in Phase 2a
-// (KK, QK, KH, QH) with WMMA 16×16×16 FP16→FP32 Tensor Core dispatches.
-// The H_L update (Step 6) stays scalar but with hoisted exp-of-cumulative-
-// decay caching — independent optimisation that drops ~SS × L exp calls per
-// chunk per head down to L per chunk per head.
-//
-// CHUNK=16 (not 32 like Phase 2a) — the WMMA shape is exactly the 16×16
-// fragment and the smem budget at CHUNK=32 with FP16 K̃/Q̃ + FP16 H_0 +
-// FP32 outputs blows past the 99 KiB sm_120 opt-in cap. CHUNK=16 lands at
-// ~69 KiB.
-//
-// Smem layout (HD=SS=128, CHUNK=16):
-//   s_k_fp16[L*SS]    = 4 KiB     normalised K (FP16 for WMMA matmul)
-//   s_q_fp16[L*SS]    = 4 KiB     normalised Q (FP16 for WMMA matmul)
-//   s_h0_fp16[SS*HD]  = 32 KiB    H_0 materialised from registers as FP16
-//   s_kh_fp32[L*HD]   = 8 KiB     KH = K̃ H_0 (WMMA output, FP32 accum)
-//   s_qh_fp32[L*HD]   = 8 KiB     QH = Q̃ H_0
-//   s_kk_fp32[L*L]    = 1 KiB     KK = K̃ K̃^T
-//   s_qk_fp32[L*L]    = 1 KiB     QK = Q̃ K̃^T
-//   s_u_fp32[L*HD]    = 8 KiB     U (output of triangular solve)
-//   s_D[L+1]          = 68 B      cumulative decay (exp space, not log)
-//   s_g, s_beta       = 128 B
-//   s_reduce[HD]      = 512 B
-// Total ~67 KiB → fits with the 96 KiB opt-in (same as Phase 1b.1/2a).
-//
-// WMMA operand setup:
-//   - K̃ K̃^T (KK):   A=K̃ row_major [L,SS], B=K̃ col_major [SS,L]
-//   - Q̃ K̃^T (QK):   A=Q̃ row_major, B=K̃ col_major
-//   - K̃ H_0 (KH):    A=K̃ row_major, B=H_0 row_major [SS,HD]
-//   - Q̃ H_0 (QH):    A=Q̃ row_major, B=H_0 row_major
-//
-// Phase 2b is the FIRST imp GDN-side TC-MMA path. The H_L update remains
-// scalar; integrating WMMA on H_L would require an extra ~16 KiB temp tile
-// buffer or careful warp-fragment-back-to-register choreography that
-// doesn't fit in this initial prototype.
-// ---------------------------------------------------------------------------
+// Phase 2b: Tensor Core MMA on the four chunk-internal scalar matmuls (KK,QK,KH,QH) of
+// Phase 2a, via WMMA 16x16x16 FP16->FP32. H_L update stays scalar with hoisted
+// exp-of-cumulative-decay caching (drops ~SS*L exp calls per chunk/head to L). CHUNK=16
+// (WMMA fragment size); CHUNK=32 would exceed the 99 KiB sm_120 opt-in cap with FP16
+// K~/Q~/H_0 + FP32 outputs.
+// Smem (HD=SS=128, CHUNK=16), ~67 KiB total: s_k_fp16/s_q_fp16 4 KiB each, s_h0_fp16
+// 32 KiB, s_kh_fp32/s_qh_fp32 8 KiB each, s_kk_fp32/s_qk_fp32 1 KiB each, s_u_fp32 8 KiB,
+// rest ~1 KiB. Fits the 96 KiB opt-in.
+// WMMA operands: KK = K~(row_major) x K~(col_major); QK = Q~(row_major) x K~(col_major);
+// KH = K~(row_major) x H_0(row_major); QH = Q~(row_major) x H_0(row_major).
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -229,11 +200,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         }
         __syncthreads();
 
-        // ---------------- STEP 5: triangular solve for u_t ----------------
-        // NB: own-column-only reads (s_u_fp32[j·HD + d] is thread d's own
-        // column) — no per-iteration __syncthreads() needed inside the loop.
-        // The H_L step at the chunk end DOES read cross-thread u, so add
-        // one sync after the loop.
+        // Step 5 triangular solve for u_t: own-column-only reads (s_u_fp32[j*HD+d] is thread d's
+        // own column), no per-iteration __syncthreads(). H_L at the chunk end reads cross-thread
+        // u, so add one sync after the loop.
         for (int t_loc = 0; t_loc < L; t_loc++) {
             const int t = t_chunk_start + t_loc;
             const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
@@ -277,12 +246,10 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         }
         __syncthreads();
 
-        // Loop interchange (t outer, s inner) — sequential smem access to s_k_fp16
-        // along s (stride 1) instead of stride-SS column access. Plus hoist the
-        // per-thread per-t coefficient (s_g[t] · u_t[d]) out of the s loop.
-        // Halves the H_L step's effective memory traffic vs the natural (s, t)
-        // ordering and eliminates SS × L redundant scalar multiplications per
-        // thread per chunk.
+        // Loop interchange (t outer, s inner): sequential smem access to s_k_fp16 along s
+        // (stride 1) instead of stride-SS column access, plus hoists the per-thread per-t
+        // coefficient (s_g[t]*u_t[d]) out of the s loop. Halves H_L's effective memory traffic
+        // and drops SS*L redundant scalar multiplications per thread per chunk.
 #pragma unroll
         for (int s = 0; s < SS; s++) {
             H_reg[s] *= D_0L;
@@ -309,40 +276,18 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 2c — fully-tuned WY-rep + TC-MMA, including H_L update.
-//
-// Builds on Phase 2b with:
-//   1. CHUNK=32 (2× larger than Phase 2b) — half as many chunks per prefill,
-//      half the per-chunk setup / sync / decay-precompute overhead.
-//   2. Drops the persistent s_qh buffer. The s_kh buffer's 16 KiB is reused
-//      twice across a chunk's lifetime: first holds KH (Step 4), then is
-//      overwritten with QH (Step 5), then split into s_u_fp16 (8 KiB) +
-//      s_strip_out_fp32 (8 KiB) for the Phase 2c TC-MMA H_L step.
-//   3. **Phase 2c**: TC-MMA on the H_L update. The Σ_t (D[t+1..L] k̃_t u_t^T)
-//      term is computed as a K̃^T · U_scaled matmul (M=SS=128, K=L=32,
-//      N=HD=128). Processed in M-strips of 16 rows: per strip, all 8 N-tiles
-//      computed in parallel (4 warps × 2 N-tiles each), output written to an
-//      8 KiB s_strip_out_fp32 buffer, then each thread updates 16 elements
-//      of H_reg from its column slice. Total: 8 strips × 8 N-tiles × 2 K-tiles
-//      = 128 WMMA dispatches per chunk — same as KH but with different
-//      operand layout.
-//
-// Smem layout (CHUNK=32, HD=SS=128, all bytes):
-//   s_k_fp16[L*SS]          = 8 KiB
-//   s_q_fp16[L*SS]          = 8 KiB
-//   s_h0_fp16[SS*HD]        = 32 KiB
-//   s_kh_buf[L*HD]          = 16 KiB  (KH → QH → s_u_fp16 + s_strip_out)
-//   s_kk_fp32[L*L]          = 4 KiB
-//   s_qk_fp32[L*L]          = 4 KiB
-//   s_u_fp32[L*HD]          = 16 KiB
-//   s_D[L+1] + s_g + s_beta + s_reduce ≈ 1 KiB
-// Total ~89 KiB — fits in the 96 KiB sm_120 opt-in.
-//
-// Numerics: FP16 storage of K̃/Q̃/H_0/u_scaled introduces ~3-4 mantissa-bit
-// drop on operands; WMMA FP32 accumulation preserves per-matmul precision.
-// Expected output ≈ Phase 2b numerics (max_diff_y ~1e-5).
-// ---------------------------------------------------------------------------
+// Phase 2c: fully-tuned WY-rep + TC-MMA including the H_L update. Builds on Phase 2b:
+// CHUNK=32 (half the per-chunk setup/sync/decay-precompute overhead); drops the
+// persistent s_qh buffer, reusing s_kh's 16 KiB three times (KH -> QH -> s_u_fp16[8KiB]
+// + s_strip_out_fp32[8KiB]); H_L update runs as sum_t(D[t+1..L] k~_t u_t^T) = a
+// K~^T . U_scaled matmul (M=SS=128, K=L=32, N=HD=128) in 16-row M-strips, 8 N-tiles/strip
+// (4 warps x 2 N-tiles each), output through s_strip_out_fp32, then each thread updates
+// 16 H_reg elements from its column.
+// Smem (CHUNK=32, HD=SS=128), ~89 KiB total: s_k_fp16/s_q_fp16 8 KiB each, s_h0_fp16
+// 32 KiB, s_kh_buf 16 KiB, s_kk_fp32/s_qk_fp32 4 KiB each, s_u_fp32 16 KiB, rest ~1 KiB.
+// Fits the 96 KiB opt-in.
+// Numerics: FP16 storage of K~/Q~/H_0/u_scaled drops ~3-4 mantissa bits; WMMA FP32
+// accumulate preserves per-matmul precision. Expected output ~= Phase 2b (max_diff_y ~1e-5).
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -380,10 +325,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
     half* s_k_fp16 = reinterpret_cast<half*>(smem);                  // [L*SS]
     half* s_q_fp16 = s_k_fp16 + CHUNK * SS;                          // [L*SS]
     half* s_h0_fp16 = s_q_fp16 + CHUNK * SS;                         // [SS*HD]
-    // s_kh_buf is the multipurpose 16 KiB region:
-    //   - Step 4: KH (FP32 [L, HD])
-    //   - Between Step 4 and 5: recomputed as QH (FP32 [L, HD])
-    //   - Step 7: split as s_u_fp16 (FP16 [L, HD] = 8 KiB) + s_strip_out (FP32 [16, HD] = 8 KiB)
+    // s_kh_buf is the multipurpose 16 KiB region: Step 4 KH (FP32 [L,HD]); between Step 4
+    // and 5 recomputed as QH (FP32 [L,HD]); Step 7 split as s_u_fp16 (FP16 [L,HD]=8 KiB) +
+    // s_strip_out (FP32 [16,HD]=8 KiB).
     float* s_kh_fp32 = reinterpret_cast<float*>(s_h0_fp16 + SS * HD);  // [L*HD]
     float* s_kk_fp32 = s_kh_fp32 + CHUNK * HD;                       // [L*L]
     float* s_qk_fp32 = s_kk_fp32 + CHUNK * CHUNK;                    // [L*L]
@@ -616,10 +560,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                 wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
                 wmma::fill_fragment(c_frag, 0.0f);
                 for (int k = 0; k < n_k_tiles; k++) {
-                    // A = K̃^T loaded col_major from K̃ row-major storage.
-                    // K̃[k_global, m_global] = s_k_fp16[k_global*SS + m_global].
-                    // For col_major matrix_a with ld=SS: A[m_local, k_local] at
-                    //   base[m_local + k_local*SS] where base = s_k_fp16 + k_offset*SS + m_offset.
+                    // A = K~^T loaded col_major from K~ row-major storage: K~[k_global,m_global] =
+                    // s_k_fp16[k_global*SS+m_global]. For col_major matrix_a with ld=SS: A[m_local,k_local]
+                    // at base[m_local + k_local*SS], base = s_k_fp16 + k_offset*SS + m_offset.
                     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
                     wmma::load_matrix_sync(a_frag, s_k_fp16 + k * 16 * SS + m_offset, SS);
                     // B = U_scaled[k_global, n_global] at s_u_fp16[k_global*HD + n_global].
@@ -663,15 +606,10 @@ void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, cons
                                   int state_size, int n_groups, cudaStream_t stream, int grouped_layout) {
     if (head_dim_ssm == 128 && state_size == 128 && n_tokens >= 1) {
         constexpr int HD = 128, SS = 128, CHUNK = 16;
-        // Shared-memory budget for the TC kernel (FP16 storage of K̃/Q̃/H_0,
-        // FP32 outputs):
-        //   s_k_fp16 + s_q_fp16 = 2 * CHUNK * SS * 2 = 8 KiB
-        //   s_h0_fp16           = SS * HD * 2        = 32 KiB
-        //   s_kh + s_qh         = 2 * CHUNK * HD * 4 = 16 KiB
-        //   s_kk + s_qk         = 2 * CHUNK^2 * 4    = 2 KiB
-        //   s_u_fp32            = CHUNK * HD * 4     = 8 KiB
-        //   s_D + s_g + s_beta + s_reduce ≈ 1 KiB
-        // Total ~67 KiB — fits within the 96 KiB opt-in.
+        // TC kernel shared-memory budget (FP16 K~/Q~/H_0, FP32 outputs): s_k_fp16+s_q_fp16 =
+        // 2*CHUNK*SS*2 = 8 KiB; s_h0_fp16 = SS*HD*2 = 32 KiB; s_kh+s_qh = 2*CHUNK*HD*4 = 16 KiB;
+        // s_kk+s_qk = 2*CHUNK^2*4 = 2 KiB; s_u_fp32 = CHUNK*HD*4 = 8 KiB; rest ~1 KiB.
+        // Total ~67 KiB, fits the 96 KiB opt-in.
         const size_t smem =
             (2 * CHUNK * SS) * sizeof(half) + (SS * HD) * sizeof(half) +
             (2 * CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) * sizeof(float);

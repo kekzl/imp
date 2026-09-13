@@ -1,7 +1,6 @@
-// Internal header of the chunk-parallel GDN prefill scan: the pieces both
-// kernel TUs share (workspace layout, fp16 mma helpers, shared-tile swizzles)
-// and the per-kernel launch wrappers. The narrative lives in
-// gdn_scan_chunkpar.cu; kernel 2 is gdn_scan_chunkpar_pass.cu.
+// Internal header for the chunk-parallel GDN prefill scan: pieces shared by both kernel
+// TUs (workspace layout, fp16 mma helpers, shared-tile swizzles) plus per-kernel launch
+// wrappers. Narrative in gdn_scan_chunkpar.cu; kernel 2 is gdn_scan_chunkpar_pass.cu.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -139,17 +138,12 @@ __device__ __forceinline__ void mma_f16x1(float* c, const F16A& a, const F16B& b
     mma_f16_16x8x16(c, a.hi, b.hi);
 }
 
-// Element offset in a [64 x 128] FP32 shared tile with an XOR swizzle on the
-// float4 column index: physical chunk = (col / 4) ^ ((row & 7) * 2). Both
-// warp patterns of kernel 1 land on 8 distinct 16-B chunks (= 32 banks):
-//   - mma A/B fragments, 8 rows (g) x 4 consecutive floats (tg): rows 0..7
-//     hit chunk c ^ {0, 2, .., 14};
-//   - the history B operand, 4 rows (tg) x 8 consecutive floats (g): rows
-//     0..3 hit {c, c+1} ^ {0, 2, 4, 6}.
-// Unswizzled, the 128-float stride put every row of a fragment on the same
-// banks: ncu read 11.1M bank conflicts on 17.3M shared wavefronts in this
-// kernel (64%). Padding the histories to stride 132 does not fit the 99 KB
-// budget next to the padded T/P tiles; the swizzle costs no bytes.
+// Element offset in a [64x128] FP32 shared tile with an XOR swizzle on the float4 column
+// index: physical chunk = (col/4) ^ ((row&7)*2). Both kernel-1 warp patterns land on 8
+// distinct 16-B chunks (32 banks): mma A/B fragments (8 rows x 4 floats) hit chunk
+// c^{0,2,..,14}; the history B operand (4 rows x 8 floats) hits {c,c+1}^{0,2,4,6}.
+// Unswizzled, the 128-float stride put every row of a fragment on the same bank. Padding
+// the histories to stride 132 does not fit the 99 KB budget; the swizzle costs no bytes.
 __device__ __forceinline__ int swz128(int row, int col) {
     return row * 128 + ((((col >> 2) ^ ((row & 7) << 1))) << 2) + (col & 3);
 }

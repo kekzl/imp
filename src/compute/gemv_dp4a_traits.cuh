@@ -60,12 +60,9 @@ __device__ __forceinline__ float q6k_dp4a_group_preloaded(
     return group_sum;
 }
 
-// 6-bit scale/min unpacker matching ggml get_scale_min_k4, register variant
-// (#598): the 12 scale bytes arrive as three words (s0 = sc[0..3],
-// s1 = sc[4..7], s2 = sc[8..11]) from a single uint4 header load instead of
-// per-byte L1 traffic. A byte-pointer reference copy lives in
-// mmq_q4k_imma_layout.cu (gemv_ggml_compat.cu carried a second one and was
-// removed — nothing called it).
+// 6-bit scale/min unpacker matching ggml get_scale_min_k4, register variant (#598): the 12
+// scale bytes arrive as three words from a single uint4 header load instead of per-byte L1
+// traffic. A byte-pointer reference copy lives in mmq_q4k_imma_layout.cu.
 __device__ __forceinline__ void get_scale_min_k4_reg(uint32_t s0, uint32_t s1, uint32_t s2, int sub,
                                                      uint8_t& sc_val, uint8_t& min_val) {
     auto byte_of = [](uint32_t w, int i) -> uint32_t { return (w >> (8 * i)) & 0xFFu; };
@@ -90,11 +87,9 @@ __device__ __forceinline__ float q4k_dp4a_sub(const uint8_t* __restrict__ qs,  /
     const bool use_high = (sub & 1);
     const uint8_t* qs_base = qs + qs_byte_offset;
 
-    // Two LDG.128 instead of eight LDG.32 (#598): this kernel class is
-    // L1TEX-instruction-bound (L1 hit 98.7%, DRAM 42%), so load count is
-    // the limiter. Alignment is guaranteed: the 144-byte superblock is
-    // 16B-aligned (144 = 9*16, GGUF tensor alignment 32) and qs sits at
-    // +16 + 32*k within it.
+    // Two LDG.128 instead of eight LDG.32 (#598): this kernel class is L1TEX-instruction-bound, so
+    // load count is the limiter. Alignment is guaranteed: the 144-byte superblock is 16B-aligned
+    // (144=9*16, GGUF tensor alignment 32) and qs sits at +16+32*k within it.
     const uint4 lo = *reinterpret_cast<const uint4*>(qs_base);
     const uint4 hi = *reinterpret_cast<const uint4*>(qs_base + 16);
     const uint32_t qsw[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
@@ -123,11 +118,9 @@ __device__ __forceinline__ float q5k_dp4a_sub(
     uint8_t min_val,                 // 6-bit sub-block min
     const int* __restrict__ xi,      // [8] packed Q8_1 int32 values
     float dq) {                      // Q8_1 block scale
-    // Ref layout (ggml dequantize_row_q5_K): qh is 32 bytes shared across
-    // all 8 subs. Element at position `i` within a sub uses bit `sub` of
-    // qh[i]. i.e. qh[l] byte holds the 5th bit for element l of EVERY sub,
-    // at bit position `sub`. Our prior code treated qh as `sub*4` private
-    // bytes with bits 0..7 encoding 4 elements — completely wrong layout.
+    // Ref layout (ggml dequantize_row_q5_K): qh is 32 bytes shared across all 8 subs. Element at
+    // position i within a sub uses bit `sub` of qh[i] (qh[l] holds the 5th bit for element l of
+    // EVERY sub, at bit position sub). Prior code treated qh as sub*4 private bytes, wrong layout.
     const int qs_byte_offset = (sub / 2) * 32;
     const bool use_high = (sub & 1);
     const uint8_t* qs_base = qs + qs_byte_offset;
@@ -153,10 +146,9 @@ __device__ __forceinline__ float q5k_dp4a_sub(
         sumi = __dp4a(static_cast<int>(nibbles), xi[j], sumi);
         q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
 
-        // Four consecutive elements l = j*4 .. j*4+3 live in word qhw[j]
-        // (byte l%4). Each extracts bit `sub` and places the 0/1 into bit 4
-        // (→ value 16) of the corresponding byte, matching how `nibbles`
-        // was built from nibbles 0..15.
+        // Four consecutive elements l=j*4..j*4+3 live in word qhw[j] (byte l%4). Each extracts bit
+        // `sub` and places the 0/1 into bit 4 (value 16) of the corresponding byte, matching how
+        // `nibbles` was built from nibbles 0..15.
         const uint32_t w = qhw[j];
         uint32_t hbits = ((((w >> 0) >> sub) & 1u) << 4) | ((((w >> 8) >> sub) & 1u) << 12) |
                          ((((w >> 16) >> sub) & 1u) << 20) | ((((w >> 24) >> sub) & 1u) << 28);
@@ -167,16 +159,10 @@ __device__ __forceinline__ float q5k_dp4a_sub(
                  dmin_super * (float)min_val * (float)q8_sum_int);
 }
 
-// ============================================================================
-// DequantTraits<DPQTag> — compile-time constants + dp4a_block() per type
-//
-// dp4a_block(bp, sub, xi, dq, q8_sum):
-//   bp      — pointer to the start of the weight block/super-block
-//   sub     — sub-group index within super-block (0 for Q8_0/Q4_0; 0-7 for Q6_K/Q4_K/Q5_K)
-//   xi[8]   — pre-loaded Q8_1 int32 packed values
-//   dq      — Q8_1 block scale
-//   q8_sum  — sum of Q8_1 int8 values (only used by Q4_0)
-// ============================================================================
+// DequantTraits<DPQTag>: compile-time constants + dp4a_block() per type.
+// dp4a_block(bp,sub,xi,dq,q8_sum): bp = pointer to weight block/super-block start; sub =
+// sub-group index (0 for Q8_0/Q4_0, 0-7 for Q6_K/Q4_K/Q5_K); xi[8] = pre-loaded Q8_1 int32
+// values; dq = Q8_1 block scale; q8_sum = sum of Q8_1 int8 values (only used by Q4_0).
 
 template <DPQTag Q>
 struct DequantTraits;
@@ -247,15 +233,11 @@ struct DequantTraits<DPQTag::Q4_0> {
         memcpy(&d_w_h, bp, sizeof(half));
         float d_w = __half2float(d_w_h);
 
-        // ggml Q4_0 packs 32 elements as SPLIT nibbles: of the 16 qs bytes, the
-        // low nibbles are elements 0..15 and the high nibbles are elements 16..31
-        // (same convention as imp's dequant_q4_0_kernel). The Q8_1 activations
-        // xi[0..7] are natural-order, so pair four consecutive low nibbles (then
-        // four consecutive high nibbles) with each xi[j] — the proven Q4_K
-        // extraction (q4k_dp4a_sub). Reading nibbles interleaved instead mispairs
-        // weights with activations. q8_sum (for the -8 zero-point) is summed
-        // internally from xi, like every other type, instead of trusting the
-        // passed value (AUDIT.md F1).
+        // ggml Q4_0 packs 32 elements as SPLIT nibbles: low nibbles of the 16 qs bytes are elements
+        // 0..15, high nibbles are 16..31 (matches imp's dequant_q4_0_kernel). Q8_1 xi[0..7] are
+        // natural-order, so pair four consecutive low nibbles (then high) with each xi[j]; reading
+        // nibbles interleaved mispairs weights with activations. q8_sum is summed internally from xi,
+        // like every other type, instead of trusting the passed value (AUDIT.md F1).
         uint32_t w[4];
         memcpy(w, bp + 2, 16);
 
@@ -343,14 +325,10 @@ struct DequantTraits<DPQTag::Q2_K> {
     static constexpr int kMaxNRows = 4;
     static constexpr bool kPreferKpar = false;
 
-    // Q2_K layout (84 bytes / 256 elements):
-    //   scales[16]  : 4-bit packed (low=scale, high=min) per 16 elements
-    //   qs[64]      : 2-bit packed (4 elements/byte), 2 halves × 4 shifts
-    //   d(fp16)     : at offset 80
-    //   dmin(fp16)  : at offset 82
-    //
-    // Each sub (0..7) covers 32 elements. Two 16-element scale groups per sub.
-    // qs layout: same 32 bytes reused with shift 0,2,4,6 for 4 groups of 32.
+    // Q2_K layout (84 bytes / 256 elements): scales[16] 4-bit packed (low=scale,high=min) per 16
+    // elements; qs[64] 2-bit packed (4 elements/byte, 2 halves x 4 shifts); d(fp16) at offset 80;
+    // dmin(fp16) at offset 82. Each sub (0..7) covers 32 elements, two 16-element scale groups per
+    // sub; qs layout reuses the same 32 bytes with shift 0,2,4,6 for 4 groups of 32.
     static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int sub, const int* xi, float dq,
                                                        float /*q8_sum*/) {
         const uint8_t* scales = bp;
@@ -409,14 +387,9 @@ struct DequantTraits<DPQTag::Q3_K> {
     static constexpr int kMaxNRows = 2;        // complex dequant → cap NR to avoid reg pressure
     static constexpr bool kPreferKpar = true;  // compute-heavy: K-par wins on ties
 
-    // Q3_K layout (110 bytes / 256 elements):
-    //   hmask[32]   : high bit (bit 2) for each of 256 elements
-    //   qs[64]      : 2-bit packed (same layout as Q2_K)
-    //   scales[12]  : packed 6-bit scales (complex GGML packing)
-    //   d(fp16)     : at offset 108
-    //
-    // q3 = q2_lowbits + (hmask_bit ? 0 : -4), range [-4..3]
-    // val = d * (scale6bit - 32) * q3
+    // Q3_K layout (110 bytes / 256 elements): hmask[32] high bit (bit 2) per element; qs[64] 2-bit
+    // packed (same layout as Q2_K); scales[12] packed 6-bit scales; d(fp16) at offset 108.
+    // q3 = q2_lowbits + (hmask_bit ? 0 : -4), range [-4..3]; val = d*(scale6bit-32)*q3.
     static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int sub, const int* xi, float dq,
                                                        float /*q8_sum*/) {
         const uint8_t* hmask = bp;
@@ -427,10 +400,9 @@ struct DequantTraits<DPQTag::Q3_K> {
         int half_idx = sub / 4;
         int shift = (sub % 4) * 2;
         const uint8_t* qs_base = qs + half_idx * 32;
-        // The high bits are one bitplane per 32-element sub-block, not 4 bytes
-        // per sub-block: ggml's dequantize_row_q3_K reads BYTE (element % 32) at
-        // BIT (element / 32) = `sub`. The old `hmask + sub*4` reading agreed with
-        // it only for sub 0 elements 0..7 (AUDIT_arch_2026 D-5).
+        // High bits are one bitplane per 32-element sub-block, not 4 bytes per sub-block: ggml's
+        // dequantize_row_q3_K reads BYTE (element%32) at BIT (element/32)=`sub`. The old
+        // `hmask+sub*4` reading only agreed with it for sub 0 elements 0..7 (AUDIT_arch_2026 D-5).
 
         // Unpack 16 6-bit scales from 12 packed bytes
         uint32_t aux0, aux1, aux2;
@@ -560,14 +532,11 @@ static inline int kpar_n_sms() {
     return n_sms;
 }
 
-// Returns true if K-parallel GEMV gives more active warps/SM than row-parallel.
-// K-parallel: 128 threads (4 warps), 1 row per block, Q8_1 from L2 cache.
-// Row-parallel: 256 threads (8 warps), NR rows per warp, smem-cached Q8_1.
-// PREFER_KPAR: when true, K-par wins on ties (>= comparison). Use for compute-
-// heavy quant types (Q6_K, Q4_K, Q5_K) where warp-cooperative K-splitting and
-// no-syncthreads access pattern outweigh smem's bandwidth advantage. When false,
-// row-par wins on ties (> comparison) since smem Q8_1 caching is faster for
-// bandwidth-bound quant types (Q8_0, Q4_0).
+// Returns true if K-parallel GEMV gives more active warps/SM than row-parallel. K-parallel:
+// 128 threads (4 warps), 1 row/block, Q8_1 from L2. Row-parallel: 256 threads (8 warps), NR
+// rows/warp, smem-cached Q8_1. PREFER_KPAR: true favors K-par on ties (compute-heavy types
+// Q6_K/Q4_K/Q5_K, where warp-cooperative K-splitting outweighs smem bandwidth); false favors
+// row-par on ties (bandwidth-bound types Q8_0/Q4_0, where smem Q8_1 caching wins).
 template <bool PREFER_KPAR>
 static inline bool kpar_is_better(int M, int rpar_blocks) {
     const int n = kpar_n_sms();
@@ -585,13 +554,9 @@ static inline bool kpar_is_better(int M, int rpar_blocks) {
         return kpar_warps > rpar_warps;
 }
 
-// ============================================================================
-// K-parallel GEMV kernels: all warps cooperate on K-dimension for 1 row.
-// 128 threads (4 warps), Q8_1 from L2 cache, static 16-byte smem for reduction.
-// Used when M is small relative to GPU SMs (typical for d_model dimensions).
-// This dramatically increases blocks/SM: e.g., M=3072 → 3072 blocks instead of
-// 192 (NR=2, 256 threads), giving 48 warps/SM instead of 8.
-// ============================================================================
+// K-parallel GEMV kernels: all warps cooperate on the K dimension for 1 row. 128 threads
+// (4 warps), Q8_1 from L2, static 16-byte smem for reduction. Used when M is small relative to
+// GPU SMs, dramatically increasing blocks/SM vs row-parallel.
 
 template <typename QT, bool ADD_RESIDUAL>
 __global__ void gemv_dp4a_kpar_kernel(const uint8_t* __restrict__ W, const block_q8_1* __restrict__ q8_1,
@@ -883,10 +848,9 @@ static void launch_gemv_dp4a(const uint8_t* W, const block_q8_1* q8_1, const flo
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
 
-    // K-parallel check: compare against NR=1 (maximum occupancy row-par baseline).
-    // NR=1 has the most blocks, giving the highest row-par occupancy estimate.
-    // Using higher NR would undercount row-par warps (fewer blocks/SM), falsely
-    // favoring K-par for large M (e.g., gate_up d_ff=14336 on 170 SMs).
+    // K-parallel check compares against NR=1 (max-occupancy row-par baseline): NR=1 has the most
+    // blocks, giving the highest row-par occupancy estimate. Higher NR would undercount row-par
+    // warps, falsely favoring K-par for large M.
     {
         int nr1_blocks = (M + warps_per_block - 1) / warps_per_block;
         if (kpar_is_better<QT::kPreferKpar>(M, nr1_blocks)) {
@@ -1058,17 +1022,12 @@ static void launch_gemv_dp4a_fp32(const uint8_t* W, const block_q8_1* q8_1, cons
     launch(std::integral_constant<int, 1>{});
 }
 
-// ============================================================================
-// Template kernel #2b: FP32 output, batched activations (spec-verify LM head,
-// #847 lever 2). MR activation rows share ONE pass over W — the per-row loop
-// re-read the full vocab x d_model LM head once per chunk row (0.44 ms/row on
-// Qwen3-8B Q8_0, the dominant term of the GGUF verify cycle after #856).
-// Each warp owns one weight row (the LM-head N is the vocab — the grid never
-// underfills, so the N_ROWS/kpar heuristics of kernel #2 don't apply) and
-// accumulates MR dot products against activation rows staged in smem.
-// All current DequantTraits have kNeedsQ8Sum == false; static-assert guards
-// the smem layout if that ever changes.
-// ============================================================================
+// Template kernel #2b: FP32 output, batched activations (spec-verify LM head, #847 lever 2).
+// MR activation rows share ONE pass over W instead of re-reading the full vocab x d_model LM
+// head per chunk row. Each warp owns one weight row (LM-head N=vocab never underfills the
+// grid, so the N_ROWS/kpar heuristics of kernel #2 don't apply) and accumulates MR dot
+// products against activation rows staged in smem. All current DequantTraits have
+// kNeedsQ8Sum==false; a static-assert guards the smem layout if that changes.
 
 template <typename QT, int MR>
 __global__ void gemv_dp4a_fp32_batched_kernel(const uint8_t* __restrict__ W,
@@ -1133,10 +1092,10 @@ __global__ void gemv_dp4a_fp32_batched_kernel(const uint8_t* __restrict__ W,
     }
 }
 
-// Launch helper: picks the largest MR in {8,4,2} whose activation staging fits
-// the smem opt-in budget, and loops over the activation rows in MR chunks.
-// n_act == 1 should route through launch_gemv_dp4a_fp32 instead (kpar/NR
-// heuristics); this launcher still handles it correctly as a tail case.
+// Launch helper: picks the largest MR in {8,4,2} whose activation staging fits the smem
+// opt-in budget, loops over activation rows in MR chunks. n_act==1 should route through
+// launch_gemv_dp4a_fp32 instead (kpar/NR heuristics); this launcher still handles it correctly
+// as a tail case.
 template <typename QT>
 static void launch_gemv_dp4a_fp32_batched(const uint8_t* W, const block_q8_1* q8_1, const float* d8,
                                           float* y, int M, int K, int n_act, int act_stride_blocks,
@@ -1353,10 +1312,8 @@ static void launch_gemv_dp4a_qkv(const uint8_t* W_q, const uint8_t* W_k, const u
     launch(std::integral_constant<int, 1>{});
 }
 
-// ============================================================================
-// Template kernel #4: Gate+Up Fused (replaces 5 hand-written kernels)
-// blockIdx.y: 0 = gate, 1 = up. N_ROWS rows per warp.
-// ============================================================================
+// Template kernel #4: Gate+Up Fused (replaces 5 hand-written kernels). blockIdx.y selects
+// projection: 0=gate, 1=up. N_ROWS rows per warp.
 
 template <typename QT, int N_ROWS>
 __global__ void gemv_dp4a_gate_up_kernel(const uint8_t* __restrict__ gate_weights,
@@ -1440,12 +1397,10 @@ __global__ void gemv_dp4a_gate_up_kernel(const uint8_t* __restrict__ gate_weight
     }
 }
 
-// ============================================================================
-// Template kernel #5: MoE Decode with NR (replaces 4 hand-written kernels)
-// Q8_1 data cooperatively loaded into shared memory — all 8 warps share
-// the same Q8_1 input per expert slot, eliminating 8x redundant L2 reads.
-// NR>1: each warp handles multiple rows, halving CTAs and smem loads.
-// ============================================================================
+// Template kernel #5: MoE Decode with NR (replaces 4 hand-written kernels). Q8_1 data
+// cooperatively loaded into shared memory, all 8 warps sharing the same input per expert slot
+// (eliminates 8x redundant L2 reads). NR>1: each warp handles multiple rows, halving CTAs and
+// smem loads.
 
 template <typename QT, int NR>
 __global__ void gemv_dp4a_moe_decode_kernel(const uint8_t* __restrict__ packed_weights,
@@ -1569,11 +1524,9 @@ static void launch_gemv_dp4a_moe_decode(const uint8_t* packed_weights, const int
     launch(std::integral_constant<int, 1>{});
 }
 
-// ============================================================================
-// Template kernel #6: MoE Gate+Up Dual-Matrix (replaces 4 hand-written kernels)
-// Each warp computes BOTH gate and up projections for the same row, sharing
-// Q8_1 from smem. Halves CTA count and smem loads vs separate gate/up blocks.
-// ============================================================================
+// Template kernel #6: MoE Gate+Up Dual-Matrix (replaces 4 hand-written kernels). Each warp
+// computes both gate and up projections for the same row, sharing Q8_1 from smem, halving
+// CTA count and smem loads vs separate gate/up blocks.
 
 template <typename QT>
 __global__ void gemv_dp4a_moe_gate_up_kernel(

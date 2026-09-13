@@ -31,30 +31,11 @@ int get_device_sm_version() {
     return cached_sm_version;
 }
 
-// The path-selection ORDER + config gates below are mirrored as a pure host
-// function `select_attn_prefill_path` in attention_dispatch_decision.h.
-//
-// That mirror used to be TEST-ONLY: test_routing_decision.cpp was its sole
-// includer, so a reorder here left the test green and its stated purpose ("any
-// reorder or gate change shows up as a diff") unmet — audit finding F-3.
-//
-// This function now CONSULTS it. Each tier records the two booleans it already
-// discovers — did the config gate pass, did the kernel accept — and once a tier
-// wins, the model is replayed against those observations and must name the same
-// winner. A gate that drifts apart, a tier added here and not there, or a
-// reorder that moves a NON-accepting tier earlier now fires a loud one-shot
-// divergence log instead of nothing.
-//
-// KNOWN LIMIT, stated rather than implied: a tier reordered ahead of the winner
-// that WOULD have accepted is still invisible, because the dispatch short-
-// circuits and never asks it. Closing that needs a real `*_supports()` predicate
-// per kernel that the launcher itself consults — the kernels signal acceptance
-// by executing, and two of FA2's seven decline points depend on the tile
-// selection, so a predicate written beside them would be a THIRD copy of the
-// rules. That is a five-TU refactor of the hottest prefill kernel and is not
-// done here.
-// One-shot so a divergence cannot flood a serving log; the first occurrence is
-// the one that matters and it names both answers.
+// Path-selection order + gates here are mirrored as select_attn_prefill_path() in
+// attention_dispatch_decision.h; each tier's outcome is replayed against that model and a
+// divergence fires a one-shot log (not silence) so a reorder or gate drift is caught.
+// KNOWN LIMIT: a tier reordered ahead of the winner that WOULD have accepted stays invisible,
+// since the dispatch short-circuits before asking it.
 static void verify_against_routing_model(const DispatchPolicy& rcfg, const AttnKernelSupport& sup,
                                          bool has_sinks, AttnPrefillPath chosen) {
     const AttnPrefillPath modeled = select_attn_prefill_path(rcfg, sup, has_sinks);
@@ -79,10 +60,8 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // reaches keeps its `false` — see the KNOWN LIMIT above.
     AttnKernelSupport sup{};
     const bool has_sinks = (attn_sinks != nullptr);
-    // Learned attention sinks (gpt-oss #547/#992): only the FP16 WMMA FMHA
-    // tier folds them into its online softmax. Route straight there and fail
-    // loudly on decline — falling through to a sink-blind kernel produces
-    // silently wrong output (the pre-#992 executor WARN case).
+    // Learned attention sinks (#547/#992): only the FP16 WMMA FMHA tier folds them into online
+    // softmax. Route straight there; fail loudly on decline instead of a sink-blind fallback.
     if (has_sinks) {
         if (rcfg.attention.fmha_sm120 != "never" &&
             (sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window,
@@ -99,11 +78,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         throw std::runtime_error(msg);
     }
 
-    // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
-    // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
-    // Enabled with [attention] mxfp4 = "always". Blockscale/ksmooth/pv_fp4
-    // (#846 SageAttention3-recipe spike) are read from process_diag inside
-    // the launcher.
+    // MXFP4 Flash Attention: tiled FP4 E2M1 QK^T with online softmax, O(n) memory, ~4x score
+    // throughput over FP16 / ~2x over FP8. Enabled via [attention] mxfp4="always". Blockscale/
+    // ksmooth/pv_fp4 (#846) read from process_diag inside the launcher.
     sup.mxfp4_available = attention_mxfp4_available();
     if (sup.mxfp4_available) {
         if ((sup.mxfp4_accepts = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window,
@@ -116,19 +93,10 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
     }
 
-    // Register-resident FA2 ("echtes FA"): keeps S/P/O in registers, 1 barrier per
-    // KV tile (vs the FP8 FMHA's smem-materialized S/P/O + 4 barriers). Default on
-    // via [attention] fmha_fa2, env IMP_FMHA_FA2. head_dim=128. QK^T runs in f16
-    // (same numerical class as cuBLAS) unless the user explicitly opts into the
-    // e4m3 fp8-QK mode (fa2_fp16qk=never AND fp8_fmha=on) — raw-converted fp8
-    // scores compound per layer into garbage on real activations (#511).
-    // #1676: `fa2_fp16qk="never"` is documented as restoring the materialized
-    // cuBLAS path, and executor_attention_internal.h honours it - but only
-    // BELOW fmha_prefill_threshold. Above it, control reached here and
-    // re-entered the same FA2 kernel with fp16_qk=true, i.e. exactly the mode
-    // the switch turns off. The one case where "never" still means FA2 is the
-    // explicit fp8-QK opt-in below, which is a different kernel mode and is
-    // what the two-flag combination exists for.
+    // Register-resident FA2 ("echtes FA"): S/P/O in registers, 1 barrier/KV tile (vs FP8 FMHA's
+    // 4-barrier smem path). Default on via [attention] fmha_fa2 / IMP_FMHA_FA2, head_dim=128.
+    // QK^T is FP16 unless fa2_fp16qk="never" AND fp8_fmha="on" (raw fp8 scores compound, #511).
+    // #1676: "never" only restores cuBLAS below fmha_prefill_threshold; above it FA2 still runs fp16.
     const bool fa2_fp8_optin = rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
     const bool fa2_opted_out = rcfg.attention.fa2_fp16qk == "never" && !fa2_fp8_optin;
     if (rcfg.attention.fmha_fa2 == "on" && !fa2_opted_out) {
@@ -144,11 +112,8 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         // unsupported config (hd!=128) → fall through to FP16 WMMA path
     }
 
-    // fp8-QK FMHA (smem-materializing): QK^T in raw-converted FP8 E4M3 for 2x
-    // score throughput — but the unscaled e4m3 conversion carries ~10% relative
-    // score error that compounds across layers (#511): teacher-forced PPL
-    // gemma-3-12b 16.6 -> 549 / Qwen3-8B 40.5 -> 4506 when this kernel actually
-    // serves prefill. Strictly opt-in: [attention] fp8_fmha = "on".
+    // fp8-QK FMHA (smem-materializing): QK^T in raw e4m3 for 2x score throughput, but conversion
+    // error compounds across layers (#511). Strictly opt-in: [attention] fp8_fmha = "on".
     if (rcfg.attention.fp8_fmha == "on") {
         sup.fp8_accepts = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
                                                  stream, q_offset);
@@ -182,10 +147,8 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         return;
     }
 
-    // Chain exhausted. Fail loudly instead of leaving O unwritten — the old
-    // silent blackwell→tc fallback at hd=256 swallowed the launch failure and
-    // produced garbage logits (teacher-forced PPL ~1e10, #654). Reaching this
-    // requires disabling the FP16 WMMA tier by config or an unsupported
+    // Chain exhausted: fail loudly rather than leave O unwritten (the old silent fallback at hd=256
+    // produced garbage logits, #654). Reachable only via a disabled FP16 WMMA tier or unsupported
     // head_dim; both deserve an error, not silent corruption.
     char msg[160];
     snprintf(msg, sizeof(msg),

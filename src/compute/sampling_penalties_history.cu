@@ -12,21 +12,14 @@
 
 namespace imp {
 
-// ===========================================================================
-// History-sized penalties: the path the engine runs
-// ===========================================================================
-// The vocab sweeps above cost every vocab entry a pass over the history,
-// O(vocab x n_tokens) per row: 192 us per decode step at 32 rows and ~300
-// tokens of history on Qwen3.8-27B (nsys, 2026-09-02), growing linearly with
-// the generation. Only tokens IN the history change a logit, so this form
-// walks the history twice: count every token (16-bit halves of 32-bit words,
-// word atomics), then the thread that claims a token's count with a CAS
-// applies the penalty once and leaves the count at zero for the next step.
-// Same per-token arithmetic as apply_penalties_body: bit-identical logits.
-// Scratch: one 16-bit count per vocab entry per row, taken from the T2 arena
-// once (sampling_preallocate_penalty_counts, charged as ExecT2Demand::
-// penalty_counts); a row count above 65535 wraps, which no window reaches.
-// Without the scratch the sweeps run.
+// History-sized penalties: the vocab sweep costs O(vocab x n_tokens) per row, growing
+// with generation length. Walks the history twice instead: count each token (16-bit
+// halves of 32-bit words, word atomics), then the thread that claims a count via CAS
+// applies the penalty once and resets it. Same per-token math as apply_penalties_body:
+// bit-identical.
+// Scratch: one 16-bit count per vocab entry per row, from the T2 arena
+// (sampling_preallocate_penalty_counts, ExecT2Demand::penalty_counts); count wraps past
+// 65535 (no window reaches it). Without the scratch, the vocab sweep runs instead.
 static uint32_t* s_pen_counts = nullptr;
 static int s_pen_counts_rows = 0;
 static int s_pen_counts_vocab = 0;

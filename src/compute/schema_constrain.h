@@ -15,12 +15,10 @@
 
 namespace imp {
 
-// Schema-aware JSON generation constrainer.
-// Extends the basic JSON FSM with schema position tracking to ensure
-// generated JSON matches a specific JSON Schema.
-//
-// Design: category bitmask for structural tokens (reused from JsonConstrainer)
-// + per-token allow mask for property names and enum values.
+// Schema-aware JSON generation constrainer: extends the basic JSON FSM with schema
+// position tracking to match a specific JSON Schema.
+// Design: category bitmask for structural tokens (reused from JsonConstrainer) + per-token
+// allow mask for property names and enum values.
 
 enum class SchemaPhase : uint8_t {
     VALUE_START,         // Expecting value matching current schema node
@@ -78,24 +76,22 @@ struct SchemaFrame {
     // Array item count
     int item_count = 0;
 
-    // FREE_VALUE frames: the JSON grammar parsing the undescribed value.
-    // A whole JsonGrammar rather than a hand-kept depth counter, so a
-    // nested object, an escaped string and a number sub-state all behave
-    // exactly as they do in json_mode (#1729).
+    // FREE_VALUE frames: the JSON grammar parsing the undescribed value. A whole JsonGrammar
+    // rather than a hand-kept depth counter, so nested objects/escaped strings/number
+    // sub-states behave exactly as in json_mode (#1729).
     JsonGrammar free_grammar;
 
-    // TOOL_CALL frames: the tool name chosen by the completed "name" enum —
-    // "arguments" resolves against the root defs entry of this name.
-    // XML_TOOL_CALL frames: the name from the completed <function=NAME> tag —
-    // parameter keys/required resolve against the same defs entry.
+    // TOOL_CALL frames: tool name from the completed "name" enum; "arguments" resolves
+    // against the root defs entry of this name.
+    // XML_TOOL_CALL frames: name from the completed <function=NAME> tag; parameter
+    // keys/required resolve against the same defs entry.
     std::string chosen_tool;
 
-    // XML_TOOL_CALL frames only. Dedicated state instead of overloading
-    // literal_pos/string_len: xml_tool caches the chosen tool's resolved
-    // parameter schema (bound once when the name tag closes — the lookup is
-    // per-char otherwise), xml_delim_match tracks the "\n</parameter>" match
-    // inside a raw value, xml_value_open flags the forced value-opening
-    // newline as consumed.
+    // XML_TOOL_CALL frames only: xml_tool caches the chosen tool's resolved parameter schema
+    // (bound once when the name tag closes, else the lookup is per-char); xml_delim_match
+    // tracks the "\n</parameter>" match in a raw value; xml_value_open flags the forced
+    // value-opening newline as consumed. Dedicated state instead of overloading
+    // literal_pos/string_len.
     const SchemaNode* xml_tool = nullptr;
     int xml_delim_match = 0;
     bool xml_value_open = false;
@@ -110,10 +106,9 @@ struct SchemaFrame {
     // '.'/'e' is seen. Guards integer/number degeneration like `0999...`.
     bool num_leading_zero = false;
 
-    // RFC 8259 number sub-state. Without it the NUMBER_VALUE phase accepted
-    // '.', 'e', 'E', '+', '-' unconditionally, so "3.5.5.5…" was legal and a
-    // degenerating model could not be forced to close the number (#1104 —
-    // same defect as JsonConstrainer's IN_NUMBER).
+    // RFC 8259 number sub-state: without it NUMBER_VALUE accepted '.', 'e', 'E', '+', '-'
+    // unconditionally, so "3.5.5.5..." was legal and a degenerating model could not be forced
+    // to close (#1104, same defect as JsonConstrainer's IN_NUMBER).
     bool num_frac = false;        // a '.' has been consumed
     bool num_exp = false;         // an 'e'/'E' has been consumed
     bool num_sign_ok = false;     // '+'/'-' legal only right after 'e'/'E'
@@ -128,12 +123,10 @@ public:
     // Initialize with tokenizer (classifies all tokens) and schema.
     [[nodiscard]] bool init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema);
 
-    // Grammar-only init for the CPU FSM tests: installs the schema and the
-    // frame stack, skipping the tokenizer classification and the device
-    // buffers that only apply_mask needs. Lets the generative battery run in
-    // the `unit` lane — the grammar bugs this surface has shipped (#761, #850,
-    // #1014) all escaped CI, which has no GPU runner. Not for engine use:
-    // apply_mask/update by token id require the full init above.
+    // Grammar-only init for CPU FSM tests: installs the schema + frame stack, skipping
+    // tokenizer classification and the device buffers apply_mask needs. Runs the generative
+    // battery in the `unit` lane (no GPU runner in CI); the grammar bugs it surfaces have
+    // shipped before (#761, #850, #1014). Not for engine use.
     bool init_grammar_for_test(std::unique_ptr<SchemaNode> schema);
 
     // Apply logit mask before sampling.
@@ -142,24 +135,17 @@ public:
     // Update state with sampled token.
     void update(int32_t token);
 
-    // Jump-ahead (#844): appends to `out` the characters every schema-legal
-    // continuation must spell next (the schema skeleton — braces, quotes,
-    // single-candidate keys, colons, literals, unambiguous enum prefixes).
-    // Pure probe: never advances the FSM. Returns the char count.
-    //
-    // CHAR level, not token level: on a real BPE vocab a "forced" state
-    // almost always admits several tokens spelling the same forced text
-    // (':' vs ':"' vs ':{"'), so exactly-one-legal-token forcing never
-    // fires. The caller drafts the canonical tokenization of this text and
-    // verifies by sampling (see the constrained-pipeline jump-ahead).
+    // Jump-ahead (#844): appends every schema-legal continuation's forced next characters
+    // (braces, quotes, single-candidate keys, colons, literals, unambiguous enum prefixes) to
+    // `out`. Pure probe, never advances the FSM.
+    // CHAR level, not token level: a BPE vocab usually admits several tokens spelling the same
+    // forced text, so exactly-one-legal-token forcing rarely fires; the caller drafts the
+    // canonical tokenization and verifies by sampling.
     int forced_text(std::string& out, int max_chars) const;
 
-    // True iff emitting the whole token keeps the schema satisfiable: every
-    // char is a legal transition and nothing trails past the root close. This
-    // catches multi-char tokens that span phase transitions (`{}`, `":"`,
-    // `"Why`, integer `0.98`) which the first-char category mask misses.
-    // Public for the FSM unit tests; apply_mask uses it for whole-token
-    // validation.
+    // True iff emitting the whole token keeps the schema satisfiable: every char is a legal
+    // transition and nothing trails past the root close. Catches multi-char tokens spanning
+    // phase transitions (`{}`, `":"`, `0.98`) that the first-char category mask misses.
     bool token_legal(const std::string& text) const;
 
     // Reset for a new generation with the same schema.
@@ -173,21 +159,16 @@ public:
         envelope_close_ = std::move(close);
     }
 
-    // Strict OPTIONAL tool call (#1002, OpenAI `strict: true` with a model-chosen
-    // call): the envelope is emitted freely by the model — the preamble gate
-    // detects the opener and hands off to the TOOL_CALL body FSM (which enforces
-    // the arguments, then forces the close literal + EOS). Unlike set_envelope's
-    // forced mode, no tool call is forced: if the model answers in text, the
-    // constraint never engages. Requires set_envelope (for the close literal)
-    // and a tool-aware preamble configured with strict_tool=true. Configure
-    // BEFORE reset().
+    // Strict OPTIONAL tool call (#1002, OpenAI strict:true with a model-chosen call): envelope
+    // emitted freely; preamble gate detects the opener and hands off to the TOOL_CALL body FSM
+    // (enforces args, forces close literal + EOS). Unlike set_envelope's forced mode, no call
+    // is forced. Requires set_envelope + a tool-aware preamble with strict_tool=true. Configure
+    // before reset().
     void set_strict_optional_envelope(bool v) { strict_optional_envelope_ = v; }
 
-    // parallel_tool_calls (#1002, strict optional mode only): when true, the gate
-    // re-arms after each tool-call body completes instead of forcing EOS, so the
-    // model may emit several tool calls (each body FSM-enforced) or stop. When
-    // false, EOS is forced after the first call (at most one). Configure BEFORE
-    // reset().
+    // parallel_tool_calls (#1002, strict optional mode only): true = gate re-arms after each
+    // tool-call body instead of forcing EOS, allowing several tool calls; false = EOS forced
+    // after the first. Configure before reset().
     void set_allow_parallel(bool v) { allow_parallel_ = v; }
 
     bool is_initialized() const { return initialized_; }
@@ -198,10 +179,9 @@ public:
         preamble_.configure(close_token, max_tokens, thinking_open);
     }
 
-    // Tool-aware preamble: when configured, the gate stays "no-mask" through
-    // a tool-call body (delimited by open_tokens/close_tokens or the
-    // open_prefix/close_suffix char fallback) and never re-enables the mask
-    // after the tool closes. See PreambleGate::configure_with_tools.
+    // Tool-aware preamble: when configured, the gate stays no-mask through a tool-call body
+    // (delimited by open_tokens/close_tokens or the open_prefix/close_suffix char fallback)
+    // and never re-enables the mask after the tool closes. See PreambleGate::configure_with_tools.
     void set_preamble_with_tools(int32_t close_token, int max_tokens, std::vector<int32_t> open_tokens,
                                  std::vector<int32_t> close_tokens, std::string open_prefix,
                                  std::string close_suffix, bool thinking_open = true,
@@ -259,10 +239,9 @@ private:
 
     void push_value_frame(const SchemaNode* node);
 
-    // Strict optional tool call (#1002): the preamble gate has just seen the
-    // opener, so install the TOOL_CALL body frame with the close literal armed
-    // (the post-ENVELOPE_OPEN state) — the FSM now enforces the body, then the
-    // forced close literal, then EOS.
+    // Strict optional tool call (#1002): preamble gate just saw the opener, so install the
+    // TOOL_CALL body frame with the close literal armed (post-ENVELOPE_OPEN state) - FSM now
+    // enforces the body, then the forced close literal, then EOS.
     void engage_tool_body();
 
     uint16_t compute_category_mask() const;
@@ -270,10 +249,9 @@ private:
     // the kernel anyway, so their (expensive) per-token simulation is skipped.
     void compute_token_allow_mask(uint16_t cat_mask);
 
-    // Single-char transition over a frame stack. Returns false when c is not a
-    // legal transition for the current phase. Drives both the real update path
-    // (on stack_) and per-token mask simulation (on a cloned stack), so there
-    // is one source of truth for the schema grammar.
+    // Single-char transition over a frame stack; false if c is not legal for the current
+    // phase. Drives both the real update path (stack_) and per-token mask simulation (cloned
+    // stack) - one source of truth for the schema grammar.
     bool sim_advance(std::vector<SchemaFrame>& stk, char c) const;
 
     // Find property schema by key name

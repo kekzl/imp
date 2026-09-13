@@ -15,20 +15,9 @@
 
 namespace imp {
 
-// Constrain generation to a regular expression.
-//
-// imp could pin JSON (schema or free-form) and the tool dialects, but nothing
-// else — an agent needing a diff header, an SQL statement, an ID format or a
-// small DSL had to prompt and hope (docs/roadmap.md gap 4). A regex is the
-// smallest surface covering those, and it is what vLLM and SGLang expose too.
-//
-// The engine is NOT new: `RegexNfa` (compute/json_schema.h) already backs
-// JSON-Schema `pattern`. This class is the decode-time wrapper around it, with
-// the same apply_mask contract as JsonConstrainer / SchemaConstrainer.
-//
-// The pattern is implicitly anchored: the whole output must match, which is
-// what "constrain the output to this format" means. EOS is allowed only from an
-// accepting state, so generation cannot stop half-way through the format.
+// Constrain generation to a regular expression. Decode-time wrapper around
+// RegexNfa (compute/json_schema.h), same apply_mask contract as
+// JsonConstrainer/SchemaConstrainer. Anchored: whole output must match; EOS only from an accepting state.
 
 class RegexConstrainer {
 public:

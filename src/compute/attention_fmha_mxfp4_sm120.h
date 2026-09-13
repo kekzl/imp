@@ -6,72 +6,30 @@
 
 namespace imp {
 
-// MXFP4 Flash Attention for sm_120 (Blackwell): tiled FP4 E2M1 Q·K^T with
-// online softmax, P·V in FP16 WMMA.  O(n) memory — no S matrix materialization.
-//
-// Uses bare FP4 MMA (mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e2m1.e2m1.f32)
-// with per-row scale correction:  S_true[i,j] = q_scale[i] * k_scale[j] * S_mma[i,j].
-// Q and K are quantized to FP4 E2M1 per-tile in shared memory with per-row absmax.
-//
-// Compared to the CUTLASS-based attention_mxfp4_prefill.cu, this kernel:
-//   - Uses tiled flash attention (O(n) memory, not O(seq²))
-//   - Is a single fused kernel (no separate quant + GEMM + softmax + P·V launches)
-//   - Supports sliding window and softcap
-//
-// Requirements:
-//   - sm_120+ (__CUDA_ARCH__ >= 1200, f8f6f4 MMA instructions)
-//   - head_dim % 32 == 0 (FP4 MMA k-dim = 32)
-//   - Supported head_dim: 64, 96, 128, 256
-//
-// Returns false if config unsupported (caller falls back to FP8/FP16 FMHA).
-// When use_blockscale=true, swaps the Phase 1 MMA from
-//   mma.sync.kind::f8f6f4.m16n8k32   (legacy, 2× K-chunks per issue)
-// to
-//   mma.sync.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64  (half MMA count)
-// with REAL per-16-element UE4M3 scales (per-(row, k_group) absmax) applied by
-// the hardware — finer quantization granularity than the legacy per-row path.
-// head_dim must be a multiple of 64 (legacy path requires only multiple of
-// 32); unsupported head_dim 96 falls through to the legacy path.
-//
-// #846 SageAttention3-recipe knobs (read from process_diag, blockscale only):
-//   mxfp4_ksmooth: K per-channel mean smoothing — a pre-pass computes the
-//     per-(batch, kv_head, channel) mean of K over seq_kv and the kernel
-//     subtracts it before quantization. The dropped Q·mean^T score term is
-//     constant per query row, so softmax is invariant. Auto-disabled when
-//     softcap > 0 (tanh breaks the shift invariance).
-//   mxfp4_pv_fp4: P·V in NVFP4 too — P quantized per-row two-level (rescaled
-//     to the full E4M3 scale range before 1x16 microscaling to prevent
-//     scale-factor collapse on the post-softmax long tail), V per-16-block
-//     along the KV dim, PV via the same block-scaled MMA.
-//   mxfp4_promote_budget: ThriftAttention-style outlier promotion (arXiv
-//     2605.23081). A pre-pass scores every (q_tile, kv_tile) pair by the
-//     block-mean dot Q̄·K̄^T and promotes the top budget-fraction of visible
-//     KV tiles (sink + diagonal always included) to exact compute: FP32
-//     scores from global FP16, FP16 WMMA P·V. Requires blockscale; head_dim
-//     64/128 only. INVARIANT: with ksmooth active, the promoted score path
-//     subtracts the same K channel mean — mixing shifted (FP4) and unshifted
-//     (promoted) columns inside one softmax row would corrupt the result.
-//
-// q_offset: global position of Q row 0 (chunked-prefill continuation) —
-// causal/sliding-window masks use q_offset + local row.
+// MXFP4 flash attention for sm_120: tiled FP4 E2M1 Q.K^T with online softmax, FP16 WMMA P.V.
+// O(n) memory, no S materialization. mma.sync.aligned.kind::f8f6f4.m16n8k32.e2m1.e2m1.f32 with
+// per-row scale correction: S_true[i,j] = q_scale[i]*k_scale[j]*S_mma[i,j].
+// Requires sm_120+ (__CUDA_ARCH__>=1200), head_dim%32==0. Supported head_dim: 64,96,128,256.
+// Returns false if unsupported (caller falls back to FP8/FP16 FMHA).
+// use_blockscale swaps Phase 1 to kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64 (half the
+// MMA count, real per-16-elem UE4M3 scales via HW); requires head_dim % 64 == 0, else falls
+// through to the legacy (%32) path.
+// #846 knobs (process_diag, blockscale only): mxfp4_ksmooth subtracts per-(batch,kv_head,
+// channel) K mean before quant (dropped Q.mean^T term cancels under softmax; auto-disabled when
+// softcap>0). mxfp4_pv_fp4 runs P.V in NVFP4 too (P two-level per-row quant, V per-16-block).
+// mxfp4_promote_budget (ThriftAttention, arXiv 2605.23081): promotes the top budget-fraction of
+// visible KV tiles (sink+diagonal always included) to exact FP32 scores + FP16 WMMA P.V.
+// INVARIANT: with ksmooth active, promoted tiles must subtract the same K mean, or mixed
+// shifted/unshifted columns corrupt the softmax row.
+// q_offset: global position of Q row 0 (chunked-prefill continuation); masks use q_offset+row.
 bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
                               bool use_blockscale = false, int q_offset = 0);
 
-// #846 KV-append-quant path: chunked-prefill attention that reads K and V
-// DIRECTLY from the paged NVFP4 KV cache (packed E2M1 nibbles + per-16 UE4M3
-// scales, layout of write_kv_cache_nvfp4_kernel) — no gather→FP16 pre-pass,
-// no in-kernel quantization. The current chunk must already be appended to
-// the cache (call write_kv_cache BEFORE attention). K feeds the block-scaled
-// mxf4nvf4 MMA as-is; V is dequantized to FP16 smem for the WMMA P·V phase.
-// promote_budget > 0 enables ThriftAttention outlier promotion — promoted
-// PAST tiles compute exact FP32 dots over the dequantized cache K. The
-// CURRENT chunk (k_fresh/v_fresh, rows [q_offset, seq_kv)) is always read
-// exactly as FP16 — quantizing the recency window is where the quality
-// damage lives (measured: stored-FP4 current chunk +3.7-5.4% NLL even with
-// exact compute, stored-FP4 past ≈ free). Requirements: batch 1 (flat block
-// table), head_dim 128, tile-aligned q_offset, Q FP16 [1, seq_q, nh, hd].
-// Returns false if the config is unsupported (caller falls back to gather).
+// #846 KV-append-quant: chunked-prefill attention reading K/V directly from the paged NVFP4 KV
+// cache (current chunk must already be appended before calling). promote_budget>0 promotes PAST
+// tiles to exact FP32 dots over dequantized cache K; the CURRENT chunk is always exact FP16
+// (quantizing the recency window is where quality damage lives). Requires batch=1, hd=128, Q FP16.
 bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh,
                                     const half* v_fresh, const uint8_t* k_data,
                                     const uint8_t* k_scales, const uint8_t* v_data,

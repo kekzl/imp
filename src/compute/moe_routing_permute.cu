@@ -7,12 +7,7 @@
 
 namespace imp {
 
-// ============================================================================
-// Kernel 5: Gather -- reorder tokens by expert assignment
-//
-// For each position i in sorted_token_ids:
-//   gathered[i, :] = input[sorted_token_ids[i], :]
-// ============================================================================
+// Gather: reorder tokens by expert assignment. gathered[i,:] = input[sorted_token_ids[i],:].
 
 template <typename T>
 __global__ void moe_gather_kernel_impl(const T* __restrict__ input,
@@ -31,35 +26,6 @@ __global__ void moe_gather_kernel_impl(const T* __restrict__ input,
     }
 }
 
-// ============================================================================
-// Kernel 6: Scatter -- weighted scatter-add of expert outputs back to tokens
-//
-// For each position i in sorted_token_ids:
-//   token_id = sorted_token_ids[i]
-//   weight   = expert_weights[<corresponding index>]
-//   output[token_id, :] += weight * expert_output[i, :]
-//
-// We need to figure out which (token, j) pair position i corresponds to.
-// Since sorted_token_ids[i] = token, and a token may appear top_k times,
-// we need the weight for this specific assignment.
-//
-// Approach: store a parallel array "sorted_weights" during the scatter
-// phase of the routing, or recompute.  For simplicity, we build a
-// sorted_weights array alongside sorted_token_ids during routing.
-// But the MoeRoutingResult struct doesn't have this field.
-//
-// Alternative: for each sorted position i, we know the token_id and the
-// expert.  We can look up the weight from expert_weights by scanning
-// expert_indices for the matching (token_id, expert) pair.
-//
-// Better: during the scatter_token_ids_kernel, also write the weight to a
-// parallel "sorted_weights" array, and store it as auxiliary data alongside
-// sorted_token_ids.  We'll extend the approach by writing the flat index
-// (idx = token*top_k + j) into a parallel "sorted_flat_idx" array.
-// Then we can look up expert_weights[sorted_flat_idx[i]].
-//
-// We'll store this auxiliary array right after sorted_token_ids in memory.
-// ============================================================================
 
 // Scatter-add kernel using the flat index to look up weights.
 // Reads from T* expert output (float or half), always accumulates into float* output.
@@ -89,21 +55,11 @@ __global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
     }
 }
 
-// Deterministic scatter-add: one block per OUTPUT token. Each block gathers the
-// sorted rows belonging to its token, accumulates them (in FP32 registers, in
-// ascending row order) and writes once. Avoids the FP atomicAdd of
-// moe_scatter_kernel_impl whose accumulation order is scheduling-dependent
-// (non-reproducible). Opt-in only (deterministic mode); the default path keeps
-// the faster atomic scatter.
-//
-// The gather used to sit INSIDE the column loop, so the O(total_rows) row scan
-// ran ceil(d_model / blockDim) times per token rather than once: 8 times over
-// 4096 rows for a 2048-wide model at 512 tokens, to find the same 8 rows every
-// time (#1546). It runs once now, and the column loop reads a shared-memory
-// list of length top_k.
-//
-// `cap` is the caller's upper bound on rows per token (0 = unknown). Exceeding
-// it falls back to the original scan, which produces the same numbers.
+// Deterministic scatter-add: one block per output token; gathers its sorted rows and
+// accumulates in FP32 registers (ascending row order), avoiding the scheduling-dependent
+// FP atomicAdd of moe_scatter_kernel_impl. Opt-in (deterministic mode only).
+// `cap`: caller's upper bound on rows/token (0=unknown); exceeding it falls back to the
+// original per-column scan, producing identical numbers.
 constexpr int kMaxDetRowsPerToken = 64;
 
 template <typename T>
@@ -132,10 +88,9 @@ __global__ void moe_scatter_deterministic_kernel_impl(const T* __restrict__ expe
                 s_rows[slot] = row;
         }
         __syncthreads();
-        // Ascending row order IS the contract of this kernel: it is what makes
-        // the FP32 accumulation reproducible. atomicAdd appended in scheduling
-        // order, so sort the handful of entries back. top_k is 4-8 on every
-        // shipped MoE checkpoint, so one thread insertion-sorting beats a
+        // Ascending row order is the contract: it makes FP32 accumulation reproducible.
+        // atomicAdd appends in scheduling order, so sort the handful of entries back; top_k is
+        // 4-8 on every shipped MoE checkpoint, so single-thread insertion sort beats a
         // barrier-heavy parallel sort.
         if (threadIdx.x == 0 && s_count <= cap) {
             for (int i = 1; i < s_count; ++i) {
@@ -237,14 +192,10 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, T
     float* d_output = static_cast<float*>(output.data);
 
     if (process_diag_deterministic_gemm()) {
-        // Deterministic mode: one block per output token, fixed-order FP32
-        // accumulation over its rows. Writes output directly (no atomics, no
-        // pre-zero needed). total_tokens here is the number of expanded rows.
-        //
-        // Rows per token is exactly top_k: top-k gating gives every token that
-        // many assignments and the permute assigns each one a slot, so the
-        // division is exact. Anything else (a routing path that drops or
-        // duplicates) leaves cap at 0 and the kernel takes its fallback scan.
+        // Deterministic mode: one block per output token, fixed-order FP32 accumulation over its
+        // rows; writes output directly (no atomics, no pre-zero). total_tokens = expanded rows.
+        // Rows per token is exactly top_k (top-k gating assigns each token that many slots);
+        // anything else (drop/duplicate routing) leaves cap=0, taking the fallback scan.
         int cap = 0;
         if (n_tokens > 0 && total_tokens % n_tokens == 0) {
             const int rows_per_token = total_tokens / n_tokens;
@@ -287,10 +238,8 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, T
     }
 }
 
-// ============================================================================
-// Fused weighted sum + FP16 output + optional residual add.
-// Eliminates the FP32 intermediate buffer and fp32_to_fp16 conversion kernel.
-// ============================================================================
+// Fused weighted sum + FP16 output + optional residual add; avoids an FP32 intermediate
+// buffer and separate fp32_to_fp16 conversion kernel.
 
 __global__ void moe_weighted_sum_residual_kernel(const half* __restrict__ expert_outputs,
                                                  const float* __restrict__ expert_weights,
@@ -322,14 +271,9 @@ void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_w
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ============================================================================
-// Fused token-centric scatter + FP32->FP16 + residual add (prefill).
-//
-// One block per output token. Each block reads top_k expert output rows via
-// token_to_expanded inverse map, accumulates weighted sum in FP32 registers,
-// converts to FP16, optionally adds residual, writes to output.
-// No atomicAdd, no output zeroing, no intermediate FP32 buffer.
-// ============================================================================
+// Fused token-centric scatter + FP32->FP16 + residual add (prefill): one block per output
+// token reads its top_k expert rows via token_to_expanded, accumulates weighted sum in
+// FP32 registers, converts to FP16, optionally adds residual. No atomics, no pre-zero.
 
 __global__ void moe_scatter_fused_residual_kernel(
     const half* __restrict__ expert_output,         // [expanded, d_model]

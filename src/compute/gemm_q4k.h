@@ -21,12 +21,10 @@ void gemm_q5k_dp4a_moe_fused(const void* packed_weight, const block_q8_1* q8_bas
                               cudaStream_t stream = nullptr);
 
 
-// Dense Q4_K/Q5_K × Q8_1 dp4a GEMM for non-MoE prefill.
-// Quantizes FP16 activations [M, K] to Q8_1, then computes directly from
-// Q4_K/Q5_K blocks via dp4a — avoids the FP16 weight cache intermediate
-// (0.55 B/elem vs 2.0 B/elem, 2.5× bandwidth reduction).
-// q8_scratch: [M * ceil(K/32)] block_q8_1, d8_scratch: [M * ceil(K/32)] float.
-// beta must be 0 (no residual accumulation).
+// Dense Q4_K/Q5_K x Q8_1 dp4a GEMM for non-MoE prefill: quantizes FP16 activations [M,K] to
+// Q8_1, then computes directly from Q4_K/Q5_K blocks via dp4a, avoiding the FP16 weight cache
+// intermediate (0.55 B/elem vs 2.0 B/elem). q8_scratch: [M*ceil(K/32)] block_q8_1, d8_scratch:
+// [M*ceil(K/32)] float. beta must be 0 (no residual accumulation).
 void gemm_q4k_dp4a_dense(const void* packed_q4k, const half* activations, half* output,
                           void* q8_scratch, float* d8_scratch,
                           int M, int N, int K, cudaStream_t stream = nullptr);

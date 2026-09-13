@@ -1,18 +1,11 @@
-// Factored conv window for the batched speculative verify.
-//
-// Companion to compute/gdn_factor.cuh, which does the same for the recurrent
-// state. A slot is one contiguous block holding every GDN layer's conv window
-// AND h_state (memory/ssm_state_size.h), and the verify's spare slot exists
-// because accept swaps whole slots, so dropping the spare needs BOTH halves
-// carried compactly. docs/plans/2026-09-12-factored-verify-spare.md.
-//
-// The conv half is cheaper than the recurrent half: the drafted row shifts the
-// kernel_size window by exactly one, so the carried form is the single new tap
-// (channels halfs) rather than the whole window (channels * kernel_size
-// floats) - 20 KiB against 160 per layer at 10240 channels.
-//
-// Separate translation unit because ssm.cu sits at 596 of the 600-code-LOC
-// kernel ceiling.
+// Factored conv window for the batched speculative verify. Companion to
+// compute/gdn_factor.cuh (does the same for the recurrent state); a slot holds every GDN
+// layer's conv window AND h_state (memory/ssm_state_size.h), so dropping the verify's
+// spare slot needs both halves carried compactly (docs/plans/2026-09-12-factored-verify-spare.md).
+// Conv half is cheaper: the drafted row shifts the kernel_size window by one, so the
+// carried form is the single new tap (channels halfs) vs the whole window
+// (channels*kernel_size floats) - 20 KiB vs 160 per layer at 10240 channels.
+// Separate TU because ssm.cu sits at 596 of the 600-code-LOC kernel ceiling.
 
 #include "compute/ssm.h"
 #include "core/logging.h"

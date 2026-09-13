@@ -7,20 +7,13 @@ namespace imp {
 
 static constexpr int kWarpSize = 32;
 
-// Order-preserving atomic max on a float stored as raw bits (#1305).
-//
-// `atomicMax((int*)addr, __float_as_int(v))` is only correct when every
-// candidate is non-negative. IEEE-754 negatives have the sign bit set, so
-// larger magnitude means larger unsigned pattern and MORE negative as int32:
-// a signed atomicMax over negatives selects the float MINIMUM, and the usual
-// -FLT_MAX sentinel (0xFF7FFFFF -> -9 437 185 as int32) beats every ordinary
-// negative logit (-20.7f -> -1 046 326 805) and survives the reduction. The
-// sampler's softmax then computed expf(x - (-FLT_MAX)) = inf for every entry.
-//
-// The standard fix: signed atomicMax for non-negative candidates, unsigned
-// atomicMin for negative ones. The two are safe against each other because a
-// negative float is >= 0x80000000 unsigned while a positive float is below it,
-// so a negative can never displace a positive and vice versa.
+// Order-preserving atomic max on a float via raw bits (#1305). Signed atomicMax over
+// negatives selects the float MINIMUM (larger magnitude = more negative as int32), so the
+// -FLT_MAX sentinel (0xFF7FFFFF -> -9437185) beat every ordinary negative logit and
+// survived reduction, making the softmax's expf(x-(-FLT_MAX)) = inf everywhere.
+// Fix: signed atomicMax for non-negative candidates, unsigned atomicMin for negative ones -
+// safe against each other since a negative float is >= 0x80000000 unsigned and a positive
+// one is below it.
 __device__ __forceinline__ void atomic_max_float(float* addr, float value) {
     if (value >= 0.0f)
         atomicMax(reinterpret_cast<int*>(addr), __float_as_int(value));
@@ -42,11 +35,8 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
     return val;
 }
 
-// ---------------------------------------------------------------------------
-// Block-level reductions using warp shuffle + shared memory.
-// Requires `float s_buf[32]` in shared memory (declared by the caller).
-// All threads in the block must participate.
-// ---------------------------------------------------------------------------
+// Block-level reductions via warp shuffle + shared memory. Requires `float s_buf[32]` in
+// shared memory (caller-declared); all threads in the block must participate.
 __device__ __forceinline__ float block_reduce_sum(float val, float* s_buf) {
     val = warp_reduce_sum(val);
     int warp_id = threadIdx.x / kWarpSize;

@@ -9,25 +9,13 @@
 
 namespace imp {
 
-// ===========================================================================
-// MMVQ: dp4a-accelerated quantized GEMV
-// ===========================================================================
-//
-// Instead of dequantizing weights to FP16 and doing float*float per element,
-// we quantize the input vector to Q8_1 (INT8 + scale) and use dp4a (native
-// INT8x4 dot product) for accumulation. This processes 4 elements per
-// instruction and halves input bandwidth (INT8 vs FP16).
-//
-// Q8_1 block: 32 values quantized to INT8 with per-block scale (d) and sum (s).
-// ===========================================================================
+// MMVQ dp4a-accelerated quantized GEMV: quantizes the input vector to Q8_1 (INT8+scale) and
+// uses dp4a (native INT8x4 dot product) for accumulation, processing 4 elements/instruction
+// and halving input bandwidth vs FP16. Q8_1 block: 32 values, per-block scale (d) and sum (s).
 
-// ---------------------------------------------------------------------------
-// Activation functors for fused activation + Q8_1 quantization kernels.
-//
-// Each functor computes the activated value for one element. Gated variants
-// (SwiGLU, GeGLU) read from both a gate and an up projection. Non-gated
-// variants (Identity, ReLU²) use a single input.
-// ---------------------------------------------------------------------------
+// Activation functors for fused activation + Q8_1 quantization kernels: each computes the
+// activated value for one element. Gated variants (SwiGLU, GeGLU) read gate+up; non-gated
+// (Identity, ReLU^2) use a single input.
 
 struct IdentityAct {
     __device__ __forceinline__ static float operator()(const half* input, const half* /*unused*/, int idx,
@@ -81,12 +69,9 @@ struct ReLUSqrAct {
     static constexpr bool kClampQuantize = true;
 };
 
-// ---------------------------------------------------------------------------
-// Fused activation + Q8_1 quantization kernel (templated).
-//
-// Each block handles 32 contiguous elements (one Q8_1 block), 32 threads/block.
-// The activation functor determines which activation is applied before quantization.
-// ---------------------------------------------------------------------------
+// Fused activation + Q8_1 quantization kernel (templated): each block handles 32 contiguous
+// elements (one Q8_1 block), 32 threads/block. The activation functor determines which
+// activation is applied before quantization.
 template <typename Act>
 __global__ void fused_act_quantize_q8_1_kernel(
     const half* __restrict__ input,         // primary input (or gate for gated acts)
@@ -148,10 +133,9 @@ void quantize_fp16_to_q8_1(const half* x, block_q8_1* q8_1_out, float* d8_out, i
                                                                 IdentityAct{});
     IMP_CUDA_CHECK_LAUNCH();
 
-    // Pad to the next Q6_K block boundary (256 elements = 8 Q8_1 blocks).
-    // When K is not a multiple of 256, the dp4a GEMV reads ceil(K/256)*8
-    // Q8_1 blocks but only K/32 exist. Zero-fill the gap to prevent
-    // out-of-bounds garbage causing NaN (Nemotron: K=2688=10.5*256).
+    // Pads to the next Q6_K block boundary (256 elements = 8 Q8_1 blocks). When K is not a
+    // multiple of 256, the dp4a GEMV reads ceil(K/256)*8 Q8_1 blocks but only K/32 exist;
+    // zero-fills the gap to prevent out-of-bounds garbage causing NaN (e.g. K=2688=10.5*256).
     int padded_blocks = ((K + 255) / 256) * 8;  // ceil(K/256) * (256/32)
     if (padded_blocks > n_blocks) {
         int pad_count = padded_blocks - n_blocks;
@@ -173,10 +157,8 @@ void swiglu_quantize_q8_1(const half* gate, const half* up, block_q8_1* q8_out, 
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Fused GEGLU + Q8_1 quantization.
-// Computes gelu_tanh(gate) * up and quantizes the result to Q8_1 in one pass.
-// Eliminates the intermediate FP16 activation buffer write+read for GEGLU models
-// (Gemma-3).
+// Fused GEGLU + Q8_1 quantization: computes gelu_tanh(gate)*up and quantizes to Q8_1 in one
+// pass, eliminating the intermediate FP16 activation buffer write+read (Gemma-3).
 void geglu_quantize_q8_1(const half* gate, const half* up, block_q8_1* q8_out, float* d8_out,
                          int total_elements, cudaStream_t stream) {
     int n_blocks = total_elements / 32;
@@ -187,10 +169,9 @@ void geglu_quantize_q8_1(const half* gate, const half* up, block_q8_1* q8_out, f
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Fused relu² + Q8_1 quantization.
-// Reads FP16 input, applies relu²(x) = max(0, x)², quantizes to Q8_1.
-// Replaces 3 separate operations (memcpy + relu_sqr_inplace + quantize).
-// Used by non-gated MoE experts (Nemotron).
+// Fused relu^2 + Q8_1 quantization: reads FP16 input, applies relu^2(x)=max(0,x)^2, quantizes
+// to Q8_1, replacing 3 separate ops (memcpy + relu_sqr_inplace + quantize). Non-gated MoE
+// experts (Nemotron).
 void relu_sqr_quantize_q8_1(const half* input, block_q8_1* q8_out, float* d8_out, int total_elements,
                             cudaStream_t stream) {
     int n_blocks = total_elements / 32;
@@ -201,20 +182,12 @@ void relu_sqr_quantize_q8_1(const half* input, block_q8_1* q8_out, float* d8_out
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// Fused RMSNorm + Q8_1 quantization kernel.
-//
-// Combines RMSNorm (with weight) and FP16→Q8_1 quantization in one kernel,
-// eliminating the intermediate norm_out FP16 buffer write+read.
-//
-// Single-row only (n=1 decode). One CUDA block, 256 threads.
-// Phase 1: Load hidden, compute sum of squares, block-reduce for RMS.
-// Phase 2: Normalize (multiply by inv_rms * weight), write to shared memory.
-// Phase 3: Quantize from shared memory to Q8_1 blocks (32 elements per warp).
-//
-// Also writes the FP16 norm_out if norm_out_ptr is non-null (needed when
-// the GEMV path doesn't consume Q8_1, e.g. non-quantized weights).
-// ---------------------------------------------------------------------------
+// Fused RMSNorm + Q8_1 quantization: combines RMSNorm(weight) and FP16->Q8_1 in one kernel,
+// eliminating the intermediate norm_out FP16 write+read. Single-row only (n=1 decode), one
+// CUDA block, 256 threads. Phase 1: sum of squares + block-reduce for RMS. Phase 2: normalize,
+// write to shared memory. Phase 3: quantize from shared memory to Q8_1 (32 elements/warp).
+// Also writes FP16 norm_out if norm_out_ptr is non-null (needed when the GEMV path doesn't
+// consume Q8_1, e.g. non-quantized weights).
 __global__ void rmsnorm_quantize_q8_1_kernel(
     const half* __restrict__ x,       // [d_model] input hidden state
     const half* __restrict__ weight,  // [d_model] RMSNorm weight
@@ -232,11 +205,9 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
     const int n_warps = blockDim.x >> 5;
     const int n_q8_blocks = d_model >> 5;  // d_model / 32
 
-    // Phase 1: Load x values with warp-aligned Q8_1 block access (coalesced),
-    // cache in registers, and compute sum of squares.
-    // Each warp handles blocks in stride-n_warps order.
-    // Max blocks per warp = d_model / (32 * n_warps) = d_model / 256.
-    // For d_model=8192, that's 32 — fits in registers easily.
+    // Phase 1: loads x with warp-aligned Q8_1 block access (coalesced), caches in registers,
+    // computes sum of squares. Each warp handles blocks in stride-n_warps order. Max blocks/warp
+    // = d_model/(32*n_warps) = d_model/256 (32 for d_model=8192, fits registers).
     float x_cache[32];
     float sum_sq = 0.0f;
     int n_cached = 0;
@@ -302,10 +273,8 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight, block_q8_1* q8_out
                                                             weight_offset);
     IMP_CUDA_CHECK_LAUNCH();
 }
-// ===========================================================================
-// dp4a GEMV template instantiations (consolidated from 33 hand-written kernels)
-// See gemv_dp4a_traits.cuh for DequantTraits<QType> and 6 template kernels.
-// ===========================================================================
+// dp4a GEMV template instantiations, consolidated from 33 hand-written kernels. See
+// gemv_dp4a_traits.cuh for DequantTraits<QType> and the 6 template kernels.
 
 // ---------------------------------------------------------------------------
 // Basic + Residual wrappers (14 functions = 7 quant types × 2 variants)
@@ -656,18 +625,12 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                               d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
                                               q8_1_stride, d8_stride, top_k, stream);
 }
-// ---------------------------------------------------------------------------
-// L1 carveout for the dp4a GEMV kernel template instantiations. Called from
-// GraphExecutor::init() next to mxfp4_gemv_set_l1_carveout(), PDL or not.
-//
-// This was gemv_pdl_register(): pdl::enable_kernel + SET_MAXL1 per kernel.
-// #1833 withdrew the call because these kernels carry no pdl_wait() and
-// registering them raced (DegenerationTest.GreedyDeterminism), and the
-// carveout went with it (AUDIT_arch_2026 A1-3 / A2-1). Registration stays
-// out until the kernels wait; the carveout is a scheduler hint and stays.
-// ---------------------------------------------------------------------------
-// GEMV kernels are bandwidth-bound with minimal SMEM: maximize L1 cache.
-// Variadic to handle template commas: SET_MAXL1(kernel<A, B, C>)
+// L1 carveout for the dp4a GEMV template instantiations, called from GraphExecutor::init()
+// next to mxfp4_gemv_set_l1_carveout(), PDL or not. Was gemv_pdl_register()
+// (pdl::enable_kernel + SET_MAXL1); #1833 withdrew the PDL registration because these kernels
+// carry no pdl_wait() and registering them raced (DegenerationTest.GreedyDeterminism,
+// AUDIT_arch_2026 A1-3/A2-1). Registration stays out until the kernels wait; the L1 carveout
+// (a scheduler hint) stays: GEMV kernels are bandwidth-bound with minimal SMEM.
 #define SET_MAXL1(...)                                                                \
     cudaFuncSetAttribute(__VA_ARGS__, cudaFuncAttributePreferredSharedMemoryCarveout, \
                          cudaSharedmemCarveoutMaxL1)

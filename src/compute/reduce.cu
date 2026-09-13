@@ -11,10 +11,7 @@ namespace imp {
 static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
 
-// ============================================================================
-// Reduce LAST dimension  --  input [outer, inner] -> output [outer]
-// One block per outer row.
-// ============================================================================
+// Reduce last dimension: [outer,inner] -> [outer]. One block per outer row.
 
 __global__ void reduce_sum_last_dim_kernel(const float* __restrict__ input, float* __restrict__ output,
                                            int inner_size) {
@@ -146,23 +143,11 @@ __global__ void reduce_max_last_dim_fp16_kernel(const half* __restrict__ input, 
     }
 }
 
-// ============================================================================
-// Reduce along an ARBITRARY dimension (strided access)
-//
-// For input shape [d0, d1, ..., d_{n-1}] reducing along dimension `dim`:
-//   outer_size = product of dims before `dim`
-//   reduce_size = shape[dim]
-//   inner_size = product of dims after `dim`
-//
-// Output has shape with dimension `dim` removed; total elements = outer * inner.
-//
-// Each output element output[outer_idx * inner_size + inner_idx] =
-//     reduce over r: input[outer_idx * (reduce_size * inner_size)
-//                          + r * inner_size + inner_idx]
-//
-// We launch one block per output element for reduce_size >= BLOCK_SIZE, or
-// a grid of threads covering (outer * inner) with per-thread serial reduction.
-// ============================================================================
+// Reduce along an arbitrary dimension `dim` (strided access). For shape [d0..d_{n-1}]:
+// outer_size = prod(dims before dim), reduce_size = shape[dim], inner_size = prod(dims after).
+// output[outer_idx*inner_size+inner_idx] = reduce_r input[outer_idx*(reduce_size*inner_size)
+// + r*inner_size + inner_idx]. One block per output element (reduce_size>=BLOCK_SIZE), or
+// a grid over (outer*inner) with per-thread serial reduction otherwise.
 
 __global__ void reduce_sum_general_kernel(const float* __restrict__ input, float* __restrict__ output,
                                           int outer_size, int reduce_size, int inner_size) {

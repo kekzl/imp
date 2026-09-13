@@ -16,10 +16,9 @@ __device__ __forceinline__ float silu_f(float x) {
     return x / (1.0f + __expf(-x));
 }
 
-// One CUDA block builds the entire mask for one (gate, up) pair.
-// Each thread covers multiple K elements via strided loop; per-q8-block
-// amax is accumulated into shared memory via atomicMax on float-bit
-// patterns (safe for non-negative floats due to IEEE 754 ordering).
+// One CUDA block builds the entire mask for one (gate,up) pair. Each thread covers multiple K
+// elements via a strided loop; per-q8-block amax accumulates into shared memory via atomicMax
+// on float-bit patterns (safe for non-negative floats, IEEE 754 ordering).
 template <int THREADS>
 __global__ void build_swiglu_block_mask_kernel(const __half* __restrict__ gate,
                                                const __half* __restrict__ up,

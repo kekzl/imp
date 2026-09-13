@@ -12,28 +12,15 @@ namespace imp {
 static constexpr int Q6K_BLOCK_BYTES = 210;
 static constexpr int Q6K_BLOCK_ELEMS = 256;
 
-// ---------------------------------------------------------------------------
-// Fused Q6_K × Q8_1 dp4a GEMM kernel for MoE prefill — v3 (smem-tiled).
-//
-// Weight-stationary, register-based Q6K dequant, dp4a integer accumulation.
-// Each warp handles 1 output column, all 32 lanes split K.
-//
-// Key optimization: Q8_1 activation data is loaded into shared memory once
-// per CTA, then shared across all warps. This eliminates the L2 bandwidth
-// amplification (768x replay factor) that killed v1/v2 performance.
-//
-// The WMMA approach failed because it put DEQUANTIZED weights into smem
-// (expensive per-element FP16 dequant + syncthreads). Here, smem holds
-// already-quantized Q8_1 data (just a memcpy, no dequant), and Q6K
-// dequant happens in registers per-warp.
-//
-// Grid:  (ceil(N / WARPS_PER_CTA), n_experts)
-// Block: WARPS_PER_CTA * 32 threads
-//
-// Shared memory: TILE_M × q8_per_row × sizeof(block_q8_1) +
-//                TILE_M × q8_per_row × sizeof(float)
-// For K=2048, TILE_M=32: 32 × 64 × (36 + 4) = 80 KB
-// ---------------------------------------------------------------------------
+// Fused Q6_K x Q8_1 dp4a GEMM for MoE prefill (v3, smem-tiled): weight-stationary, register-
+// based Q6K dequant, dp4a integer accumulation. Each warp handles 1 output column, all 32
+// lanes split K. Q8_1 activation data is loaded into shared memory once per CTA and shared
+// across warps, avoiding the L2 bandwidth amplification that killed v1/v2. The WMMA approach
+// failed because dequantized weights in smem cost an expensive per-element FP16 dequant +
+// syncthreads; here smem holds already-quantized Q8_1 (a memcpy, no dequant), Q6K dequant
+// happens in registers per warp.
+// Grid (ceil(N/WARPS_PER_CTA), n_experts), block WARPS_PER_CTA*32 threads. Shared memory:
+// TILE_M*q8_per_row*(sizeof(block_q8_1)+sizeof(float)); e.g. K=2048,TILE_M=32: 80 KB.
 
 static constexpr int FUSED_WARPS_PER_CTA = 4;
 static constexpr int FUSED_BLOCK_SIZE = FUSED_WARPS_PER_CTA * 32;  // 128 threads
@@ -69,10 +56,9 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
     const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
                            static_cast<size_t>(n_col) * row_bytes;
 
-    // Shared memory layout:
-    //   smem_qs: [TILE_M][q8_per_row][32] int8_t  — Q8_1 quantized values
-    //   smem_d8: [TILE_M][q8_per_row] float       — Q8_1 block scales
-    // We store qs as flat int8_t arrays (not full block_q8_1) to save smem.
+    // Shared memory layout: smem_qs[TILE_M][q8_per_row][32] int8_t (Q8_1 quantized values),
+    // smem_d8[TILE_M][q8_per_row] float (Q8_1 block scales). Stored as flat int8_t arrays, not
+    // full block_q8_1, to save smem.
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
     // smem_qs: TILE_M * q8_per_row * 32 bytes

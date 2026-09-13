@@ -1,25 +1,5 @@
-// =============================================================================
-// attention_blackwell.cu -- Optimized WMMA attention for sm_120 (Blackwell)
-// =============================================================================
-//
-// Flash Attention 2 kernel using WMMA tensor cores with 8 warps (256 threads),
-// double-buffered KV tiles, and adaptive Q tile height.
-//
-// Key improvements over an older 64x64 / 4-warp WMMA layout:
-//   - 8 warps: 2x WMMA parallelism, each warp handles fewer tiles
-//   - Double-buffered KV: overlaps next-K prefetch with current-tile computation
-//   - S/P union shared memory: float S and half P share the same region
-//   - Adaptive Br: 128-row Q tiles when shared memory allows (head_dim <= 64),
-//     64-row Q tiles otherwise — both with 8 warps for better utilisation
-//   - Fast math __expf: direct SFU instruction for softmax exp (~2x vs expf)
-//   - Parallel softmax: all 256 threads cooperate on row max/exp/sum/rescale
-//     (was: only Br threads active, 50-75% idle)
-//   - Fused softmax + float→half: single pass over SP_tile
-//
-// The RTX 5090 (sm_120) has 100 KB shared memory per SM with 99 KB opt-in max.
-// Layout for Br=128, Bc=64, HD=64: ~96.5 KB (fits)
-// Layout for Br=64, Bc=64, HD=128:  ~96.3 KB (fits)
-// =============================================================================
+// FA2 WMMA attention for sm_120: 8 warps (256 threads), double-buffered KV tiles, adaptive Br.
+// sm_120 has 100 KB smem/SM, 99 KB opt-in max. Br=128,Bc=64,HD=64: ~96.5 KB. Br=64,Bc=64,HD=128: ~96.3 KB.
 
 #include "compute/attention_tc.h"
 #include "compute/attention_paged_common.cuh"
@@ -209,12 +189,8 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
                           softcap, causal, sliding_window, q_offset);
         __syncthreads();
 
-        // ============================================================
-        // Phase 2+3: Parallel online softmax + rescale O + SP→half
-        //
-        // All 256 threads participate. TPR threads per row cooperate
-        // using warp shuffle for reductions.
-        // ============================================================
+        // Phase 2+3: parallel online softmax + rescale O + SP->half. All 256 threads participate;
+        // TPR threads per row cooperate via warp shuffle reductions.
         {
             const int r = sm_row;
             const bool row_valid = (r < Br) && (q_start + r < seq_q);
@@ -272,13 +248,10 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
                 }
             }
 
-            // Step 6: Convert SP_float → SP_half with 1/l_new baked in.
-            // SP_half aliases SP_float COMPACTLY: half row r lives in the
-            // bytes of float row r/2, so in-place stores clobber float scores
-            // other threads have not read yet (deterministic even intra-warp;
-            // padding rows skip Steps 1-5 and race ahead zero-filling valid
-            // rows' scores — issue #528). Stage this thread's halves in
-            // registers, barrier, then store.
+            // Step 6: SP_float -> SP_half in place. SP_half aliases SP_float COMPACTLY (half row r lives in
+            // float row r/2's bytes): unsynced stores clobber float scores other threads haven't read yet
+            // (padding rows race ahead zero-filling valid rows, #528). Stage in registers, barrier, then
+            // store.
             constexpr int CPT = BW_Bc / TPR;  // columns per thread
             float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
             half hbuf[CPT];
@@ -467,13 +440,8 @@ bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
     } else if (smem_64 <= (size_t)max_smem) {
         launched = launch(64, smem_64);
     }
-    // Unsupported head_dim or smem too small (e.g. hd=256: Br=64 needs ~176 KB
-    // vs the 99 KB sm_120 opt-in) → DECLINE so the dispatcher can fail loudly.
-    // The old silent fallback to a generic WMMA prefill kernel (since removed)
-    // was the #654 bug: that kernel also exceeded smem at hd=256, nobody checked
-    // the launch error, and O kept garbage (teacher-forced PPL ~1e10) — and it
-    // had no q_offset, so chunked continuations would mask wrongly even when it
-    // ran.
+    // Unsupported head_dim or insufficient smem (hd=256 needs ~176 KB vs 99 KB opt-in): DECLINE loudly
+    // rather than silently falling back (#654 caused garbage output when nobody checked launch errors).
     if (launched) {
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {

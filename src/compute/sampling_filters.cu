@@ -167,12 +167,10 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
         float dev = fabsf(surprise - H);
         int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
         float p = expf(logits[i] - gmax) / sum_exp;
-        // TODO(determinism): this shared-memory FP atomicAdd accumulates bucket
-        // mass in scheduling-dependent order, so the cumulative cutoff bucket
-        // can flip when typical_p lands near a bucket boundary. typical_p is a
-        // sampling FILTER (not the greedy / top-k core covered by the
-        // deterministic flag); make this an ordered per-bucket reduction if
-        // typical_p ever needs bit-exact reproducibility.
+        // TODO(determinism): shared-memory FP atomicAdd accumulates bucket mass in
+        // scheduling-dependent order, so the cumulative cutoff can flip near a bucket boundary.
+        // typical_p is a filter (not covered by the deterministic flag); make this an ordered
+        // per-bucket reduction if bit-exact reproducibility is ever needed here.
         atomicAdd(&s_buckets[bucket], p);
     }
     __syncthreads();

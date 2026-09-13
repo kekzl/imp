@@ -5,11 +5,10 @@
 
 namespace imp {
 
-// ggml-compatible MMVQ kernels for exact numerical parity with llama.cpp.
-// Compute y[M, N] = x[M, K] @ W[N, K]^T
-// where W is Q4_K or Q5_1 packed, x is FP16 or FP32.
-// Internally quantizes x to Q8_1 using scratch buffer and uses ggml vec_dot.
-// scratch: GPU buffer for Q8_1 temp data, must be at least M*K/32*36 bytes
+// ggml-compatible MMVQ kernels for exact numerical parity with llama.cpp. Compute
+// y[M,N] = x[M,K] @ W[N,K]^T, W is Q4_K or Q5_1 packed, x is FP16 or FP32. Internally
+// quantizes x to Q8_1 using a scratch buffer and uses ggml vec_dot. scratch must be
+// >= M*K/32*36 bytes.
 
 void ggml_mmvq_q4k(const void* W,  // [N, K/256*144] raw Q4_K bytes
                    const half* x,  // [M, K] FP16 input

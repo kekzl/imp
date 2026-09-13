@@ -54,10 +54,8 @@ bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     return true;
 }
 
-// --- FP32 fast path using cublasSgemm ---
-// B is [N,K] row-major = [K,N] col-major. We need B transposed → CUBLAS_OP_T.
-// A is [M,K] row-major = [K,M] col-major. We need A as-is    → CUBLAS_OP_N.
-// Returns true if handled.
+// FP32 fast path via cublasSgemm: B[N,K] row-major = [K,N] col-major -> CUBLAS_OP_T; A[M,K]
+// row-major = [K,M] col-major -> CUBLAS_OP_N.
 bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                     cudaStream_t stream) {
     if (A.qtype != QType::F32 || B.qtype != QType::F32 || C.qtype != QType::F32)
@@ -283,12 +281,8 @@ __global__ void gemv_bf16_kernel(const __nv_bfloat16* __restrict__ A, const __nv
     }
 }
 
-// ---------------------------------------------------------------------------
-// gemv:  y = A @ x
-//   A [M, K],  x [K] or [K, batch],  y [M] or [M, batch]
-//   Custom CUDA kernels for the memory-bandwidth-bound case.
-//   For batched case (x has 2 dims), we loop over batch columns.
-// ---------------------------------------------------------------------------
+// gemv: y = A@x. A[M,K], x[K] or [K,batch], y[M] or [M,batch]. Custom CUDA kernels for the
+// memory-bandwidth-bound case; batched case (x has 2 dims) loops over batch columns.
 void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
     const int M = (int)A.shape[0];
     const int K = (int)A.shape[1];
@@ -358,13 +352,10 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FP8 E4M3 GEMV kernel -- 16 FP8 values per load (16 bytes)
-// Each warp handles one row. Dequant on-the-fly; ROWSCALE selects a per-row
-// (output-channel) scale lookup instead of the single per-tensor scale (the
-// fp8_ssm_proj sidecar quantizes heterogeneous packed rows, where one tensor
-// scale wastes e4m3 range).
-// ---------------------------------------------------------------------------
+// FP8 E4M3 GEMV: 16 FP8 values per load (16 bytes), each warp handles one row, dequant
+// on-the-fly. ROWSCALE selects a per-row (output-channel) scale instead of one per-tensor
+// scale (the fp8_ssm_proj sidecar quantizes heterogeneous packed rows, where one tensor scale
+// wastes e4m3 range).
 template <bool ROWSCALE>
 __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* __restrict__ x,
                                      half* __restrict__ y, int M, int K, float scale,
@@ -437,11 +428,8 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fused Q6_K GEMV kernel -- dequant-and-dot in one pass.
-// Q6_K block = 210 bytes for 256 elements: ql[128] + qh[64] + scales[16] + d[2].
-// Each warp computes one output row's dot product.
-// ---------------------------------------------------------------------------
+// Fused Q6_K GEMV, dequant-and-dot in one pass. Q6_K block = 210 bytes for 256 elements:
+// ql[128]+qh[64]+scales[16]+d[2]. Each warp computes one output row's dot product.
 __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
                                 half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
@@ -508,12 +496,9 @@ void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t 
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// Fused Q8_0 GEMV kernel -- dequant-and-dot in one pass.
-// Q8_0 block = 34 bytes for 32 elements: d[2] + qs[32].
-// Each warp computes one output row's dot product. Each thread handles one
-// element per block (32 threads = 32 elements = 1 block).
-// ---------------------------------------------------------------------------
+// Fused Q8_0 GEMV, dequant-and-dot in one pass. Q8_0 block = 34 bytes for 32 elements:
+// d[2]+qs[32]. Each warp computes one output row; each thread handles one element per block
+// (32 threads = 32 elements = 1 block).
 __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
                                  half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;

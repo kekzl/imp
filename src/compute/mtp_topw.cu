@@ -1,23 +1,10 @@
-// =============================================================================
-// mtp_topw.cu — top-W selection over MTP draft logits
-// =============================================================================
-//
-// Two implementations behind one contract (ids in descending-logit order into
-// ws.d_topk, device-only, no sync; the serving kernel also leaves the values
-// in ws.d_topk_val when allocated):
-//
-//   - mtp_topw_reference: the Stage 0 probe's single-CTA kernel — one scan of
-//     the whole vocabulary per width (713 us on a 248k vocab, measured on
-//     Qwen3.8-27B). Measurement-grade; also the in-tree oracle the GPU test
-//     compares against.
-//   - mtp_topw_fast: the serving kernel for the multi-candidate draft
-//     (speculative.mtp_tree_width > 1) — pass 1 splits the vocabulary across
-//     kMtpTopWBlocks blocks, pass 2 merges the partial (value, id) pairs in
-//     one block.
-//
-// Own TU: one logical unit, and mtp_forward.cu was already at its pinned
-// size — a kernel edit here must not re-ptxas the whole draft forward.
-// =============================================================================
+// Top-W selection over MTP draft logits.
+// Contract: ids in descending-logit order into ws.d_topk, device-only, no sync; mtp_topw_fast also writes
+// ws.d_topk_val when allocated.
+// mtp_topw_reference: single-CTA oracle kernel, one full scan per width; the GPU test's oracle.
+// mtp_topw_fast (speculative.mtp_tree_width > 1): pass 1 splits vocab across kMtpTopWBlocks blocks, pass 2
+// merges partials in one block.
+// Own TU: kernel edits here must not re-ptxas mtp_forward.cu (pinned size).
 
 #include "compute/mtp_forward.h"
 #include "core/logging.h"
@@ -32,10 +19,9 @@ namespace imp {
 __device__ __forceinline__ float mtp_logit_to_float(__half v) { return __half2float(v); }
 __device__ __forceinline__ float mtp_logit_to_float(float v) { return v; }
 
-// Top-W over an FP16/FP32 vector [vocab_size]. Single CTA; top_w (≤ kMtpMaxTopW)
-// sequential argmax passes, masking previously selected indices. Writes the W
-// descending-logit indices to out_idx[0..top_w). W is tiny relative to the
-// lm_head GEMM that produced the logits, so the extra passes are cheap.
+// Top-W over an FP16/FP32 vector [vocab_size]. Single CTA, top_w (≤ kMtpMaxTopW) sequential
+// masked argmax passes; writes descending-logit indices to out_idx[0..top_w).
+// W is tiny vs the lm_head GEMM producing the logits, so the extra passes are cheap.
 template <typename T>
 __global__ void mtp_topk_kernel(const T* __restrict__ logits, int vocab_size,
                                 int top_w, int* __restrict__ out_idx) {
@@ -78,12 +64,9 @@ __global__ void mtp_topk_kernel(const T* __restrict__ logits, int vocab_size,
 }
 
 
-// Two-pass serving top-W. Pass 1: each block owns a contiguous vocab slice
-// and runs top_w masked argmax-reduce passes over it (the probe kernel's
-// selection, restricted to the slice), writing (value, id) into the partial
-// arrays at [blockIdx.x * kMtpMaxTopW + w]. A slice of ~4k entries costs
-// top_w * slice/256 strided reads per thread — micro against the lm_head
-// GEMV that produced the logits.
+// Two-pass serving top-W. Pass 1: each block masked-argmax-reduces top_w passes over its
+// contiguous vocab slice, writing (value, id) to partial arrays at [blockIdx.x * kMtpMaxTopW + w].
+// Cost is top_w * slice/256 strided reads per thread, micro vs the lm_head GEMV.
 template <typename T>
 __global__ void mtp_topw_pass1_kernel(const T* __restrict__ logits, int vocab_size, int top_w,
                                       float* __restrict__ part_val, int* __restrict__ part_idx) {

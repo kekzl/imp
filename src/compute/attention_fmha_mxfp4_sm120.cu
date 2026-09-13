@@ -1,24 +1,6 @@
-// =============================================================================
-// attention_fmha_mxfp4_sm120.cu -- FP4 E2M1 Flash Attention for sm_120
-// =============================================================================
-//
-// Tiled flash attention with FP4 E2M1 Q·K^T score compute and FP16 P·V.
-// Uses inline PTX mma.sync.aligned.kind::f8f6f4.m16n8k32 with E2M1 operands.
-// Same k-dim as FP8, but 2x faster TC dispatch (halved register count).
-//
-// Per-row scale quantization: Q and K are quantized per-tile with per-row
-// absmax scales.  After MMA, scores are corrected:
-//   S_true[i,j] = q_scale[i] * k_scale[j] * S_mma[i,j]
-//
-// Pipeline per KV tile:
-//   1. Load K tile → quantize to FP4 with per-row scale
-//   2. FP4 MMA: S = Q_fp4 · K_fp4^T  (m16n8k32, E2M1)
-//   3. Scale correction + softcap + causal mask + online softmax
-//   4. Load V tile as FP16
-//   5. FP16 WMMA: O += P · V
-//
-// Q is quantized once at kernel start and reused across all KV tiles.
-// =============================================================================
+// FP4 E2M1 flash attention for sm_120: mma.sync.aligned.kind::f8f6f4.m16n8k32 QK^T, FP16 WMMA PV.
+// Per-row scale: S_true[i,j] = q_scale[i] * k_scale[j] * S_mma[i,j]. Q quantized once at kernel
+// start (per-tile, per-row absmax) and reused across all KV tiles.
 
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_paged_common.cuh"
@@ -57,29 +39,18 @@ static constexpr int MX_WMMA_M = 16;
 static constexpr int MX_WMMA_N = 16;
 static constexpr int MX_WMMA_K = 16;
 
-// PVFP4 two-level P scaling (#846 / SageAttention3 §3.2): each P row is
-// rescaled so its max lands at 448·6 before 1x16 microscaling — the largest
-// value an E2M1 nibble (max 6) times the largest UE4M3 scale (448) can carry.
-// Tail blocks (post-softmax P spans 6+ orders of magnitude) then map to
-// mid-range UE4M3 scales instead of collapsing to zero, which is the measured
-// failure mode of single-level per-16 quantization (fp4_pv_bench, p99=797%).
+// PVFP4 two-level P scaling (#846, SageAttention3 3.2): rescale each P row so its max lands at
+// 448*6 (largest E2M1*UE4M3 product) before 1x16 microscaling. Without this, post-softmax tail
+// blocks (6+ orders of magnitude) collapse to zero under single-level per-16 quantization.
 static constexpr float MX_PV_LEVEL1 = 448.0f * 6.0f;
 
 // =============================================================================
 // Device helpers: FP4 E2M1 quantization
 // =============================================================================
 
-// Pack two FP32 values into one FP4 E2M1 byte via hardware instruction.
-// Layout: low nibble = v0, high nibble = v1. Values must already be scaled
-// so that |v| ≤ 6 (values outside saturate to ±6).
-//
-// Uses the PTX hardware conversion on sm_120+ (works on CUDA 13.2+; the
-// `f16x2` variant is broken per dead_ends.md, but the `f32` variant is
-// correct — see sageattention3_study_2026_04_24 memory). Single PTX
-// instruction replaces the former branchless cascade (14 compares +
-// sign handling per call). Rounding is RNE (IEEE round-to-nearest-even)
-// vs the software midpoint cascade — tiny output divergence on boundary
-// values is acceptable (validated via A/B test against legacy path).
+// Packs two FP32 values into one FP4 E2M1 byte (low nibble=v0, high=v1); values must be
+// pre-scaled so |v| <= 6 (saturates outside). Uses the PTX f32 hardware conversion (CUDA 13.2+):
+// the f16x2 variant is broken on this target (dead_ends.md); f32 is correct.
 __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 #if __CUDA_ARCH__ >= 1200
     uint32_t out;
@@ -121,12 +92,9 @@ __device__ __forceinline__ half2 unpack_fp4_pair(uint8_t byte) {
 #endif
 }
 
-// Paged NVFP4 KV cache pointers for the PagedKV kernel variant (#846
-// KV-append-quant path). Layouts match write_kv_cache_nvfp4_kernel:
-//   data:   [num_blocks, block_size, nkv, hd/2]  uint8 (2 nibbles/byte,
-//           even d = low nibble)
-//   scales: [num_blocks, block_size, nkv, hd/16] uint8 UE4M3 (absmax/6, RAW —
-//           no attention-scale fold; the kernel applies `scale` post-MMA)
+// Paged NVFP4 KV cache pointers (#846 KV-append-quant). data: [num_blocks,block_size,nkv,hd/2]
+// uint8, 2 nibbles/byte (even d=low nibble). scales: [..., hd/16] uint8 UE4M3 = absmax/6, RAW
+// (no attention-scale fold; kernel applies `scale` post-MMA).
 struct MxPagedKVArgs {
     const uint8_t* k_data = nullptr;
     const uint8_t* k_scales = nullptr;
@@ -140,51 +108,22 @@ struct MxPagedKVArgs {
 // Kernel template
 // =============================================================================
 
-// UseBlockScaleMma=false: legacy kind::f8f6f4.m16n8k32 (2× K-chunks, padded regs).
-// UseBlockScaleMma=true:  kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64 with
-//                         per-16-element UE4M3 scales applied in the MMA instruction.
-//                         Quantization uses per-k_group (16 elements) absmax,
-//                         preserving local precision vs per-row. Post-MMA manual
-//                         scaling is dropped — HW scales during the dot product.
-// PVFP4 (#846, requires UseBlockScaleMma): P·V also runs on the block-scaled
-//                         MMA. P is quantized per-row TWO-LEVEL: each row is
-//                         rescaled so its max hits the full E4M3-scale range
-//                         (448·6) before 1x16 microscaling — small-magnitude
-//                         tail blocks then get representable UE4M3 scales
-//                         instead of collapsing to zero. The inverse row factor
-//                         is applied when accumulating the MMA output into
-//                         O_acc. V is quantized per-16-block along the KV dim
-//                         into a transposed smem tile (B-operand layout).
-// d_kmean (#846 K-smoothing): per-(batch, kv_head, channel) mean of K,
-//                         subtracted before quantization (nullptr = off). The
-//                         dropped Q·mean^T term is constant per query row and
-//                         cancels under softmax (launcher gates softcap == 0).
-// Promote (#846 ThriftAttention, arXiv 2605.23081): d_promote is a per-
-//                         (batch_head, q_tile, kv_tile) uint8 mask from the
-//                         block-mean top-k pre-pass. Promoted KV tiles skip FP4
-//                         quantization entirely: S is computed exactly in FP32
-//                         from global-memory FP16 Q/K, and P·V takes the FP16
-//                         WMMA path even under PVFP4. The promotion flag is
-//                         uniform per (block, kv tile), so phase-level branches
-//                         are __syncthreads()-safe. Quality spike — the FP32
-//                         dot path is not a perf path.
-// PagedKV (#846 KV-append-quant): K and V are read DIRECTLY from the paged
-//                         NVFP4 KV cache (MxPagedKVArgs) — no in-kernel
-//                         quantization at all. K's packed nibbles + UE4M3
-//                         scales are byte-compatible with the blockscale-MMA
-//                         smem layout (per-16-along-hd groups, even d = low
-//                         nibble), so the K phase is a pure copy. V is
-//                         dequantized FP16 into smem for the WMMA PV phase.
-//                         Cache scales carry no attention-scale fold — Q is
-//                         quantized with RAW absmax/6 scales and `scale` is
-//                         applied post-MMA in the fused store. Promoted tiles
-//                         compute FP32 dots over the DEQUANTIZED cache K
-//                         (exact arithmetic over FP4-stored values). The K/V
-//                         global-pointer args carry the FRESH FP16 current
-//                         chunk (rows [q_offset, seq_kv)) — current-chunk
-//                         tiles are force-promoted and read it exactly (the
-//                         recency window is where FP4 storage hurts; the
-//                         past is read FP4 from the cache).
+// UseBlockScaleMma=false: legacy kind::f8f6f4.m16n8k32 (2x K-chunks, padded regs).
+// UseBlockScaleMma=true: kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64, per-16-elem UE4M3
+// scales in the MMA (per-k_group absmax, finer than per-row); no post-MMA scaling needed.
+// PVFP4 (#846, needs UseBlockScaleMma): P quantized per-row two-level (rescaled to the full
+// E4M3 range before 1x16 microscaling, avoids tail collapse); inverse factor applied at O_acc.
+// V quantized per-16-block along KV into a transposed smem tile (B-operand layout).
+// d_kmean (#846 K-smoothing): per-(batch,kv_head,channel) K mean subtracted pre-quant
+// (nullptr=off); dropped Q.mean^T term is constant per row, cancels under softmax (needs softcap==0).
+// Promote (#846 ThriftAttention): per-(batch_head,q_tile,kv_tile) mask from a block-mean top-k
+// pre-pass. Promoted tiles skip FP4 quant: exact FP32 S from global FP16, FP16 WMMA P.V.
+// Uniform per tile, so branches stay syncthreads-safe.
+// PagedKV (#846 KV-append-quant): K/V read directly from the paged NVFP4 cache (MxPagedKVArgs),
+// no in-kernel quant. K nibbles/scales are byte-compatible with the blockscale layout (pure
+// copy); V dequantized to FP16 for WMMA. Cache scales carry no attention-scale fold; Q uses RAW
+// absmax/6, `scale` applied post-MMA. Current-chunk K/V (fresh FP16) force-promoted and read
+// exact; only the past reads FP4 from cache.
 template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false, bool Promote = false,
           bool PagedKV = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
@@ -199,10 +138,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     constexpr int Bkv = MX_Bkv;
     constexpr int head_dim = HD;
     constexpr int hd_half = HD / 2;  // packed FP4 data bytes per row
-    // Pad FP4 row stride by 4 bytes to avoid SMEM bank conflicts.
-    // Without padding: stride=64 bytes for HD=128 → rows 0,2,4,6 map to same
-    // bank set (64 = 16 banks, period 2). With +4: stride=68 → coprime with 32
-    // banks, all rows unique.
+    // Pads FP4 row stride by 4 bytes to avoid SMEM bank conflicts: HD=128 unpadded stride=64B (16
+    // banks, period 2) aliases rows 0,2,4,6; +4 -> stride=68B, coprime with 32 banks, all unique.
     constexpr int hd_half_padded = hd_half + 4;
 
     // Threads-per-row for parallel softmax and quantization
@@ -283,10 +220,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                              ? d_kmean + ((int64_t)batch_idx * n_kv_heads + kv_head) * head_dim
                              : nullptr;
 
-    // Pre-compute sqrt(attention_scale) to absorb into Q and K scales (Opt 3).
-    // S_true[i,j] = q_scale[i] * k_scale[j] * mma[i,j], and we want the result
-    // pre-multiplied by attention_scale.  Split sqrt evenly: q_scales *= sqrt_scale,
-    // k_scales *= sqrt_scale, so the product gives q*k*scale automatically.
+    // Precomputes sqrt(attention_scale) to fold into Q and K scales: S_true = q_scale[i]*k_scale[j]*
+    // mma[i,j]. Split sqrt evenly (q_scales *= sqrt_scale, k_scales *= sqrt_scale) so the product
+    // yields q*k*scale automatically.
     const float sqrt_scale = sqrtf(scale);
     // PagedKV: cache K scales are raw (absmax/6) — quantize Q raw too and
     // apply the full attention scale post-MMA in the fused store instead.
@@ -352,10 +288,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         }
         __syncthreads();
 
-        // Quantize from shared → Q_fp4 (vectorized: 8 halves = 4 bytes/iter, uint32 store)
-        // In blockscale mode: each 8-halves chunk (b4) falls in exactly one k_group
-        // (kg = b4/2), so we dequant one UE4M3 byte per chunk and apply the resulting
-        // inverse scale to all 8 values.
+        // Quantizes shared -> Q_fp4 vectorized (8 halves = 4 bytes/iter, uint32 store). In blockscale
+        // mode each 8-half chunk falls in exactly one k_group (kg = b4/2): dequant one UE4M3 byte per
+        // chunk and apply its inverse scale to all 8 values.
         {
             const int total_packed_u32 = (Bq * hd_half) / 4;
             for (int idx = tid; idx < total_packed_u32; idx += MX_BLOCK_THREADS) {
@@ -483,12 +418,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bkv;
 
-        // #846 promotion: block-uniform per-tile flag. Promoted tiles skip the
-        // K-quant phase and the FP4 QK MMA; Phase 1' computes exact scores.
-        // PagedKV force-promotes CURRENT-CHUNK tiles (kv_start >= q_offset):
-        // their K/V exist as fresh FP16 and quantizing the recency window is
-        // where the quality damage lives (B-arm finding) — the past reads FP4
-        // from the cache, the own chunk stays exact.
+        // #846 promotion: block-uniform per-tile flag. Promoted tiles skip K-quant and the FP4 QK MMA;
+        // Phase 1' computes exact scores. PagedKV force-promotes current-chunk tiles (kv_start>=q_offset)
+        // since their K/V are fresh FP16 and the recency window is where FP4 quality damage lives.
         bool promoted = false;
         if constexpr (Promote) {
             if (d_promote != nullptr)
@@ -501,13 +433,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         if (promoted) {
             // Promoted tile: no K-side quantization work.
         } else if constexpr (PagedKV) {
-            // Paged-FP4 K (#846): copy packed nibbles + UE4M3 scales straight
-            // from the NVFP4 KV cache into the blockscale-MMA smem layout —
-            // the cache format is bit-compatible with what the in-kernel
-            // quantizer produces, so this phase is pure data movement (the
-            // 3.3× quant instruction overhead measured on the dense path
-            // disappears). Zero bytes/scales for out-of-range rows: scale 0
-            // makes the HW MMA contribute 0 and the fused store masks them.
+            // Paged-FP4 K (#846): copies packed nibbles + UE4M3 scales straight from the NVFP4 KV cache into
+            // the blockscale-MMA smem layout (bit-compatible, pure data movement). Zero bytes/scales for
+            // out-of-range rows: scale 0 makes the MMA contribute 0 and the fused store masks them.
             constexpr int kRowU32 = hd_half / 4;
             const int kv_row_bytes = n_kv_heads * hd_half;
             const int sc_row_bytes = n_kv_heads * n_k_groups;
@@ -709,35 +637,21 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             __syncthreads();
         }
 
-        // ============================================================
-        // Phase 1: S = Q_fp4 · K_fp4^T  using FP4 m16n8k32 MMA
-        // ============================================================
-        // kind::f8f6f4 m16n8k32 ALWAYS uses 4 A regs + 2 B regs (uniform encoding).
-        // For E2M1 (FP4): a0/a1 hold real data (8 bytes = 16 FP4 per pair of rows),
-        // a2/a3 = 0 (padding). b0 holds real data, b1 = 0 (padding).
-        // Thread mapping: groupID = lane/4 (0-7), threadID = lane%4 (0-3).
-        //   A: row = groupID (+8 for a1), k_offset = threadID * 4 bytes (8 FP4)
-        //   B: col = groupID (0-7 for n=8), k_offset = threadID * 4 bytes
-        // Iteration strategy:
-        //   UseBlockScaleMma=true:  outer iterates over (ri, ci_meta) where each
-        //     meta covers 4 consecutive ci values (16x32 output via 4 MMAs).
-        //     A operand + sfa loaded once per k iteration and reused across the
-        //     4 MMAs. Quarters Q_fp4 SMEM-A bandwidth in Phase 1.
-        //   UseBlockScaleMma=false: original single-tile distribution.
+        // Phase 1: S = Q_fp4.K_fp4^T via FP4 m16n8k32 MMA. kind::f8f6f4 m16n8k32 always uses 4 A regs +
+        // 2 B regs; E2M1 real data in a0/a1 (16 FP4/pair of rows) and b0, a2/a3/b1 are padding.
+        // Thread map: groupID=lane/4 (0-7), threadID=lane%4 (0-3). A: row=groupID(+8 for a1),
+        // k_offset=threadID*4B. B: col=groupID(0-7), k_offset=threadID*4B.
+        // UseBlockScaleMma=true: outer loop iterates (ri,ci_meta), each meta = 4 ci values (16x32 via
+        // 4 MMAs), A operand+sfa loaded once per k and reused, quartering Q_fp4 SMEM-A bandwidth.
         constexpr int CI_PER_META = 4;
         const int s_col_tile_metas = s_col_tiles_half / CI_PER_META;
         const int s_meta_total_tiles = s_row_tiles * s_col_tile_metas;
         const int outer_total = UseBlockScaleMma ? s_meta_total_tiles : s_total_tiles;
 
         if (Promote && promoted) {
-            // ============================================================
-            // Phase 1' (#846 promotion): exact FP32 scores from global FP16.
-            // Scalar dots are slower than the MMA but exact — this is the
-            // quality arm, not a perf path. With ksmooth active the FP4
-            // tiles score Q·(K−mean)^T; the promoted tile MUST apply the
-            // same shift, otherwise its columns sit on a different additive
-            // offset inside the same softmax row (silent corruption).
-            // ============================================================
+            // Phase 1' (#846 promotion): exact FP32 scores from global FP16 (quality arm, not perf). With
+            // ksmooth active the FP4 tiles score Q.(K-mean)^T; promoted tiles MUST apply the same shift or
+            // their columns sit on a different offset inside the softmax row (silent corruption).
             const int r = sm_row;  // TPR lanes cooperate per Q row
             const int lq = q_start + r;
             const int gq = q_offset + lq;
@@ -760,10 +674,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                             acc = fmaf(__half2float(qh.y), __half2float(kh.y), acc);
                         }
                       } else {
-                        // Past key: exact FP32 arithmetic over the FP4-STORED
-                        // cache K (dequant nibbles × UE4M3 group scale) — the
-                        // best available K; storage quantization already
-                        // happened at append time.
+                        // Past key: exact FP32 arithmetic over the FP4-stored cache K (dequant nibbles x
+                        // UE4M3 group
+                        // scale) - the best available K, since storage quantization already happened at
+                        // append time.
                         const int blk = pkv.block_table[gk / pkv.block_size];
                         const int slot = gk % pkv.block_size;
                         const uint8_t* krow = pkv.k_data +
@@ -827,19 +741,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             const int byte_offset = thread_in_group * 4;  // 4 bytes = 8 FP4 nibbles
 
             if constexpr (UseBlockScaleMma) {
-                // New path: kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
-                // Each issue consumes 64 K-elements (2× legacy). With uniform
-                // scale=1.0 (sfa=sfb=0x38383838), the block-scale MMA reduces
-                // to a plain E2M1 × E2M1 dot product — output is bit-equivalent
-                // to two legacy m16n8k32 issues summed.
-                // Register distribution (per CUTLASS ALayout/BLayout in
-                // mma_traits_sm120.hpp:136, column-major (M,K) / (N,K)):
-                //   a0: row[group_id],   k-stripe 2k
-                //   a1: row[group_id+8], k-stripe 2k
-                //   a2: row[group_id],   k-stripe 2k+1
-                //   a3: row[group_id+8], k-stripe 2k+1
-                //   b0: col[group_id],   k-stripe 2k
-                //   b1: col[group_id],   k-stripe 2k+1
+                // kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64: consumes 64 K-elements per issue (2x
+                // legacy). Uniform scale=1.0 (sfa=sfb=0x38383838) reduces to a plain E2M1 dot product, bit-
+                // equivalent to two legacy m16n8k32 issues summed.
+                // Register layout (mma_traits_sm120.hpp:136, column-major M,K / N,K):
+                //   a0: row[gid] k-stripe 2k; a1: row[gid+8] k-stripe 2k; a2: row[gid] k-stripe 2k+1;
+                //   a3: row[gid+8] k-stripe 2k+1; b0: col[gid] k-stripe 2k; b1: col[gid] k-stripe 2k+1.
                 const int k_pairs = hd_chunks_fp4 / 2;
                 const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
                 const int n_sfb = lane_id / 4;
@@ -1012,13 +919,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         }
         __syncthreads();
 
-        // ============================================================
-        // Prefetch V tile via cp.async (overlaps with softmax below).
-        // KV_fp16 and S_tile are separate SMEM regions, so V writes
-        // don't conflict with softmax reads/writes on S_tile.
-        // PagedKV: V is dequantized FP16 into KV_fp16 from the paged
-        // cache instead (indirect addressing — no cp.async).
-        // ============================================================
+        // Prefetches V tile via cp.async, overlapping with softmax below (KV_fp16 and S_tile are
+        // separate SMEM regions). PagedKV: V is dequantized FP16 from the paged cache instead
+        // (indirect addressing, no cp.async).
         if constexpr (PagedKV) {
             const int total_bytes = Bkv * hd_half;  // one packed byte = 2 V elems
             for (int c = tid; c < total_bytes; c += MX_BLOCK_THREADS) {
@@ -1065,10 +968,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             cp_async_commit();
         }
 
-        // ============================================================
-        // Phase 2+3: Online softmax + convert P to FP16
-        // (runs concurrently with V prefetch above)
-        // ============================================================
+        // Phase 2+3: online softmax + convert P to FP16, runs concurrently with the V prefetch above.
         {
             half* SP_half = reinterpret_cast<half*>(S_tile);
             const int r = sm_row;
@@ -1090,10 +990,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             float m_new = fmaxf(m_old, m_ij);
             float alpha = __expf(m_old - m_new);
 
-            // Step 3: Exp + sum. Sentinel guard: fully-masked rows (m_new
-            // stuck at -FLT_MAX) would turn every masked score into
-            // expf(0) = 1 — map masked scores to 0 explicitly (mirrors the
-            // guard in fmha_sm120_kernel / the FA2 kernel).
+            // Step 3: exp+sum. Sentinel guard: fully-masked rows (m_new stuck at -FLT_MAX) would turn masked
+            // scores into expf(0)=1; map masked scores to 0 explicitly.
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
@@ -1128,11 +1026,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             // the FP16 WMMA Phase 3 below, even under PVFP4). The condition
             // folds to a compile-time constant unless Promote is instantiated.
             if (!PVFP4 || (Promote && promoted)) {
-                // Step 6: Normalize + float→half for P.
-                // In-place float→half compaction: stage in registers + barrier
-                // (SP_half row r aliases the bytes of float row r/2 — unsynced
-                // stores clobber float scores other threads have not read yet,
-                // issue #528; see attention_fmha_sm120.cu).
+                // Step 6: normalize + float->half for P, in place. SP_half row r aliases float row r/2's
+                // bytes;
+                // unsynced stores clobber float scores other threads haven't read (#528). Stage in registers,
+                // barrier, then store.
                 constexpr int CPT = Bkv / TPR;
                 float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
                 half hbuf[CPT];
@@ -1146,13 +1043,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 for (int i = 0; i < CPT; i++)
                     SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
             } else {
-                // Step 6' (#846): two-level FP4 quantization of P.
-                // Level 1: the row's tile-local max p is exp(m_ij - m_new);
-                // rescale the row so that max lands at MX_PV_LEVEL1 (448·6).
-                // Level 2: per-16 absmax → UE4M3 scale, nibbles vs dequantized
-                // scale (mirrors the Q/K blockscale quant above). The inverse
-                // row factor (including the 1/l_new normalization the legacy
-                // path folds into P) is applied post-MMA via p_rowf.
+                // Step 6' (#846): two-level FP4 quantization of P. Level 1: rescale the row so its tile-local
+                // max (exp(m_ij-m_new)) lands at MX_PV_LEVEL1 (448*6). Level 2: per-16 absmax -> UE4M3 scale.
+                // Inverse row factor (incl. 1/l_new normalization) applied post-MMA via p_rowf.
                 float rowmax_p = (m_ij <= -FLT_MAX * 0.5f) ? 0.0f : __expf(m_ij - m_new);
                 if (sm_lane == 0 && r < Bq) {
                     const bool ok = row_valid && l_new > 0.0f && rowmax_p > 0.0f;
@@ -1193,12 +1086,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         // Promoted tiles fall through to the FP16 WMMA Phase 3 (V is already
         // FP16 in KV_fp16); constant-folds unless Promote is instantiated.
         if (PVFP4 && !(Promote && promoted)) {
-            // ============================================================
-            // Phase 3' (#846): V^T per-16-block quant + FP4 P·V MMA
-            // ============================================================
-            // V^T quant: one (hd_col, kv_group) block = 16 consecutive KV
-            // rows at one head_dim column; packed transposed so the PV
-            // B-operand reads k-consecutive nibbles (KV is the MMA k-dim).
+            // Phase 3' (#846): V^T per-16-block quant + FP4 P.V MMA. One (hd_col,kv_group) block = 16
+            // consecutive KV rows at one head_dim column, packed transposed so PV's B-operand reads
+            // k-consecutive nibbles (KV is the MMA k-dim).
             {
                 const int total_groups = head_dim * n_kv_groups;
                 for (int idx = tid; idx < total_groups; idx += MX_BLOCK_THREADS) {
@@ -1369,12 +1259,8 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim, bool pv_fp4 = fa
     return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax + scales_fp8 + pv;
 }
 
-// =============================================================================
-// K per-channel mean pre-pass (#846 smoothing)
-// =============================================================================
-// One block per (batch, kv_head); threads stride over head_dim channels, each
-// summing seq_kv rows (consecutive threads read consecutive channels →
-// coalesced per row). Output: mean[batch * n_kv_heads + kv_head][head_dim].
+// K per-channel mean pre-pass (#846 smoothing). One block per (batch, kv_head); threads stride
+// head_dim channels, each summing seq_kv rows (coalesced). Output: mean[batch*n_kv_heads+kv_head][hd].
 __global__ void mxfp4_k_channel_mean_kernel(const half* __restrict__ K, float* __restrict__ mean,
                                             int seq_kv, int n_kv_heads, int head_dim) {
     const int bh = blockIdx.x;
@@ -1390,13 +1276,9 @@ __global__ void mxfp4_k_channel_mean_kernel(const half* __restrict__ K, float* _
     }
 }
 
-// =============================================================================
-// Promotion pre-pass (#846 ThriftAttention outlier selection)
-// =============================================================================
-// Generic per-tile channel mean over [batch, seq, heads, head_dim] FP16 input.
-// One block per (tile, batch*head); threads stride head_dim (coalesced per
-// row). Output: mean[(bh * gridDim.x + tile) * head_dim + d]. Serves both Q̄
-// (tile_rows = Bq) and K̄ (tile_rows = MX_Bkv).
+// Promotion pre-pass (#846 ThriftAttention): generic per-tile channel mean over
+// [batch,seq,heads,head_dim] FP16. One block per (tile, batch*head), coalesced per row.
+// Output: mean[(bh*gridDim.x+tile)*head_dim+d]. Serves both Qbar (tile_rows=Bq) and Kbar (=MX_Bkv).
 __global__ void mxfp4_tile_mean_kernel(const half* __restrict__ X, float* __restrict__ mean, int seq,
                                        int n_heads_x, int head_dim, int tile_rows) {
     const int tile = blockIdx.x;
@@ -1417,10 +1299,9 @@ __global__ void mxfp4_tile_mean_kernel(const half* __restrict__ X, float* __rest
     }
 }
 
-// Paged variant of the K̄ tile mean: decodes FP4 nibbles × UE4M3 group scales
-// straight from the NVFP4 KV cache (single sequence, batch = 1). One block
-// per (kv_tile, kv_head); output layout matches mxfp4_tile_mean_kernel with
-// bh = kv_head.
+// Paged Kbar tile mean: decodes FP4 nibbles x UE4M3 group scales directly from the NVFP4 KV
+// cache (batch=1). One block per (kv_tile, kv_head); layout matches mxfp4_tile_mean_kernel
+// with bh=kv_head.
 __global__ void mxfp4_tile_mean_paged_kernel(const uint8_t* __restrict__ k_data,
                                              const uint8_t* __restrict__ k_scales,
                                              const int* __restrict__ block_table, int block_size,
@@ -1452,12 +1333,9 @@ __global__ void mxfp4_tile_mean_paged_kernel(const uint8_t* __restrict__ k_data,
     }
 }
 
-// Top-k KV-tile selection per (batch_head, q_tile): importance score
-// Ŝ_j = Q̄_i · K̄_j (ThriftAttention block-mean heuristic), budget = fraction
-// of the causally visible tiles, sink tile (j=0) and diagonal tile (j=last)
-// force-included within the budget. Sliding-window occlusion is ignored here
-// (a promoted-but-masked tile is wasted work, never wrong). Dynamic smem:
-// head_dim + n_kv_tiles floats. Writes a uint8 mask row [n_kv_tiles].
+// Top-k KV-tile selection per (batch_head,q_tile): importance Shat_j = Qbar_i.Kbar_j
+// (ThriftAttention). Budget = fraction of causally visible tiles; sink tile (j=0) and diagonal
+// tile force-included. SWA occlusion ignored (wasted work, never wrong). Writes uint8 mask[n_kv_tiles].
 __global__ void mxfp4_promote_select_kernel(const float* __restrict__ qmean,
                                             const float* __restrict__ kmean_tiles,
                                             uint8_t* __restrict__ mask, int n_heads, int n_kv_heads,
@@ -1563,21 +1441,11 @@ static size_t s_means_paged_cap = 0;
 static uint8_t* s_d_promote_paged = nullptr;
 static size_t s_promote_paged_cap = 0;
 
-// All five come from the engine-persistent (T2) arena (A7 step 8). This is the
-// third and last of AUDIT B13's grow-on-demand families: each pointer can be a
-// kernel parameter inside an instantiated CUDA graph, and the cudaFree the grow
-// used to perform made a later replay read freed memory. A bump arena never
-// frees, so a grow hands out a new slice and the old one stays valid.
-//
-// Deliberately NOT charged in exec_t2_demand: the promotion pre-pass needs
-// `attention.mxfp4 = "always"` plus a non-zero promote budget, both off by
-// default, so a charge would reserve for a path almost nobody takes. They draw
-// on the arena's slack and degrade the way the pre-arena code already did — a
-// null scratch means "skip the promotion pre-pass", which the call sites
-// already test for.
-// The arena generation the five pointers below were taken at. close()/reset()
-// bumps it, so a model swap re-takes instead of leaving a capacity guard armed
-// over a released region.
+// Engine-persistent (T2) arena pointers (AUDIT B13 grow-on-demand family): a bump arena never
+// frees, so a grow hands a new slice while the old stays valid inside a captured graph. Not
+// charged in exec_t2_demand (promotion is opt-in, off by default); null scratch = skip the pass.
+// s_mxfp4_scratch_gen: arena generation at allocation; close()/reset() bumps it so a model swap
+// re-takes instead of leaving a stale capacity guard armed.
 static uint64_t s_mxfp4_scratch_gen = 0;
 
 static void mxfp4_scratch_check_generation() {
@@ -1710,10 +1578,9 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
     const int num_q_tiles = (seq_q + Bq - 1) / Bq;
 
-    // #846 ThriftAttention promotion pre-pass: block means → top-k mask.
-    // Grow-only static scratch (process lifetime), same pattern as s_d_kmean.
-    // Promote instantiations exist only for head_dim 64/128 (bounds ptxas
-    // time; the PPL target Qwen3-14B is hd=128).
+    // #846 ThriftAttention promotion pre-pass: block means -> top-k mask. Grow-only static scratch
+    // (process lifetime), same pattern as s_d_kmean. Instantiated only for head_dim 64/128 (ptxas
+    // time bound; PPL target Qwen3-14B is hd=128).
     const float promote_budget = use_blockscale ? process_diag_mxfp4_promote_budget() : 0.0f;
     const int n_kv_tiles = (seq_kv + MX_Bkv - 1) / MX_Bkv;
     const uint8_t* d_promote = nullptr;
@@ -1875,13 +1742,9 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     return false;
 }
 
-// =============================================================================
-// Paged-FP4-K launcher (#846 KV-append-quant path)
-// =============================================================================
-// Q: fresh chunk [1, seq_q, n_heads, hd] FP16 (post-RoPE). K/V come straight
-// from the NVFP4 paged cache covering [0, seq_kv) — the current chunk must
-// already be appended (write_kv_cache BEFORE attention). hd=128 only (the
-// only instantiated PagedKV head_dim; the PPL target Qwen3-14B).
+// Paged-FP4-K launcher (#846 KV-append-quant). Q: fresh chunk [1,seq_q,n_heads,hd] FP16
+// (post-RoPE). K/V read from the NVFP4 paged cache [0,seq_kv); current chunk must already be
+// appended (write_kv_cache before attention). hd=128 only (PPL target Qwen3-14B).
 bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh,
                                     const half* v_fresh, const uint8_t* k_data,
                                     const uint8_t* k_scales, const uint8_t* v_data,

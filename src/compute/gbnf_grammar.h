@@ -7,42 +7,17 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// GBNF (llama.cpp's grammar dialect) -> rule table + nondeterministic pushdown
-// simulator, for token-level constrained decoding (docs/roadmap.md gap 8).
-//
-// WHY A SECOND ENGINE. imp already pins JSON (free-form and schema), the tool
-// dialects and — since #1091 — a regular expression. A regex covers the formats
-// agents actually pin most often (IDs, enums, dates, diff headers), but it is
-// regular by definition: a nested expression language, a balanced DSL, an
-// indent-free grammar with recursion cannot be written as one. That needs a
-// context-free grammar, and a context-free grammar needs a STACK, which is the
-// one thing RegexNfa structurally cannot have.
-//
-// Supported GBNF surface (the subset llama.cpp grammars in the wild use):
-//   root ::= alternatives          entry rule; `root` must exist
-//   name ::= a | b                 alternation
-//   "literal"                      string literal (escapes below)
-//   [a-z0-9_] [^\n]                character class, ranges, negation
-//   .                              any character
-//   rule-ref                       reference to another rule
-//   ( ... )                        grouping
-//   x* x+ x?                       repetition
-//   x{m} x{m,} x{m,n}              bounded repetition
-//   # comment                      to end of line
-// Escapes: \n \r \t \" \' \\ \[ \] \xNN \uNNNN \UNNNNNNNN, and any escaped
-// metacharacter is its literal self.
-//
-// NOT supported, refused at compile time rather than mis-enforced: left
-// recursion (`a ::= a "x"` — it has no finite expansion in this simulator and
-// llama.cpp does not accept it either), undefined rule references, and a
-// missing `root`. compile() returns false with a message; the caller then
-// declines constrained decoding instead of enforcing a grammar nobody wrote.
-//
-// The simulator works on UNICODE CODEPOINTS; token text is bytes and can end
-// mid-character. GbnfMatcher (below) does the UTF-8 assembly and carries the
-// partial codepoint across tokens, so callers feed it raw token text.
-// ---------------------------------------------------------------------------
+// GBNF (llama.cpp grammar dialect) -> rule table + nondeterministic pushdown simulator for
+// token-level constrained decoding (docs/roadmap.md gap 8). A context-free grammar needs a
+// STACK, which RegexNfa (#1091) structurally cannot have.
+// Supported syntax: root ::= alternatives (entry rule); name ::= a | b; "literal"; [a-z0-9_]
+// [^\n] classes/ranges/negation; . (any char); rule-ref; ( ... ) grouping; x* x+ x?;
+// x{m} x{m,} x{m,n}; # comment to EOL. Escapes: \n \r \t \" \' \\ \[ \] \xNN \uNNNN \UNNNNNNNN.
+// NOT supported, refused at compile time: left recursion, undefined rule refs, missing `root`.
+// compile() returns false with a message; caller declines constrained decoding rather than
+// enforcing an ungrammar.
+// Works on UNICODE CODEPOINTS; GbnfMatcher does UTF-8 assembly and carries a partial codepoint
+// across tokens, so callers feed it raw token text.
 
 // Inclusive codepoint ranges; `negated` flips membership ([^...]).
 struct GbnfCharSet {
@@ -83,21 +58,16 @@ struct GbnfPos {
     bool operator==(const GbnfPos& o) const { return rule == o.rule && alt == o.alt && idx == o.idx; }
 };
 
-// The live state: every parse continuation still alive, as INTERNED STACK IDS
-// (indices into the grammar's arena), sorted and deduplicated. -1 is the empty
-// stack, i.e. the derivation is complete and stopping here is legal.
-//
-// Why ids and not vectors of frames: computing one token mask simulates the
-// whole vocabulary, and the first cut of this engine — which copied a
-// vector-of-vectors per byte — spent 333 ms on a single mask inside a JSON
-// string. Hash-consing the stacks makes a step an integer operation, and the
-// state set a flat vector that is cheap to copy, compare and cache.
+// Live state: every parse continuation still alive, as INTERNED STACK IDS (arena indices),
+// sorted/deduplicated; -1 = empty stack (derivation complete, stopping here is legal).
+// Ids not vectors of frames: computing one token mask simulates the whole vocabulary, so
+// hash-consing stacks makes a step an integer op and the state set a cheap flat vector to
+// copy/compare/cache.
 using GbnfStackSet = std::vector<int32_t>;
 
-// Parse GBNF source into a rule table and report the index of `root`. Returns
-// false with a one-line reason on any syntax error, an undefined rule, or a
-// missing `root`. Implemented in gbnf_parser.cpp — kept a separate translation
-// unit from the simulator, since the two share nothing but these structs.
+// Parses GBNF source into a rule table, reporting root's index. Returns false with a one-line
+// reason on syntax error, undefined rule, or missing root. Implemented in gbnf_parser.cpp,
+// kept a separate TU since it shares nothing with the simulator but these structs.
 bool parse_gbnf(const std::string& src, std::vector<GbnfRule>& rules, int32_t& root, std::string* err);
 
 class GbnfGrammar {
@@ -153,10 +123,9 @@ private:
     };
 
     int32_t intern(GbnfPos pos, int32_t parent) const;
-    // Where a stack goes once its pending character is consumed. This does NOT
-    // depend on which character it was — the charset only decides *whether* the
-    // transition happens — so the expansion is computed once per stack and
-    // reused for every codepoint and every token afterwards.
+    // Where a stack goes once its pending character is consumed - independent of which character it
+    // was (the charset only decides whether the transition happens), so it is computed once per
+    // stack and reused for every codepoint and token afterwards.
     const GbnfStackSet& successors(int32_t stack) const;
     // Starts a new visited-marking generation for expand(); O(1), no clearing.
     void begin_visit() const;
@@ -187,24 +156,18 @@ private:
     mutable std::vector<uint8_t> next_ready_;
 };
 
-// A codepoint that is only half-decoded: the last token ended mid-character.
-// `min` is the smallest value the sequence may legally encode (0x80 / 0x800 /
-// 0x10000) — without it an overlong encoding would be accepted as a shorter
-// codepoint the grammar allows, which is a way to smuggle a forbidden
-// character past the mask.
+// A codepoint only half-decoded (last token ended mid-character). `min` is the smallest value
+// the sequence may legally encode (0x80/0x800/0x10000) - without it an overlong encoding would
+// smuggle a forbidden character past the mask as a shorter, allowed codepoint.
 struct GbnfPartial {
     uint32_t value = 0;
     uint32_t min = 0;
     int remaining = 0;
 };
 
-// Byte-level matcher over a compiled grammar: carries the live stack set and
-// the partial codepoint, so callers can feed it raw token text.
-//
-// This is deliberately CUDA-free and lives next to the grammar rather than in
-// the constrainer: every past constrained-decoding bug in this tree escaped CI
-// because its test needed a GPU. GrammarConstrainer adds only the tokenizer,
-// the device mask and the preamble gate on top.
+// Byte-level matcher over a compiled grammar: carries the live stack set and partial codepoint
+// so callers can feed it raw token text. Deliberately CUDA-free - every past constrained-decoding
+// bug in this tree escaped CI because its test needed a GPU.
 class GbnfMatcher {
 public:
     bool compile(const std::string& src, std::string* err = nullptr);

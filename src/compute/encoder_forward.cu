@@ -1,10 +1,6 @@
-// =============================================================================
-// encoder_forward.cu — encoder-only embedder forward (#836, nomic-bert)
-// =============================================================================
-// See header for the pass structure. Everything runs on one stream; the only
-// syncs are the final D2H of the pooled vector (encoder_embed) and the
-// one-time dequant in encoder_workspace_init.
-// =============================================================================
+// Encoder-only embedder forward (#836, nomic-bert). See header for the pass structure. Runs on
+// one stream; only syncs are the final D2H of the pooled vector and the one-time dequant in
+// encoder_workspace_init.
 
 #include "compute/encoder_forward.h"
 #include "compute/activation.h"

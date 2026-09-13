@@ -1,9 +1,6 @@
-// CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM for MoE (SM120).
-// Based on Example 79d: Blackwell GeForce NVFP4 Grouped GEMM.
-//
-// Zero D2H sync during execution — per-expert device pointer arrays are
-// pre-built once per call on the host (no problem-shape lookup on GPU),
-// which CUTLASS then indexes directly for its GroupProblemShape scheduler.
+// CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM for MoE (SM120), based on Example 79d.
+// Zero D2H sync during execution: per-expert device pointer arrays are pre-built once
+// per call on the host, which CUTLASS indexes directly for its GroupProblemShape scheduler.
 
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "core/cuda_static_reset.h"
@@ -106,12 +103,11 @@ static size_t s_staging_sz = 0;
 static void* s_workspace = nullptr;
 static size_t s_workspace_sz = 0;
 
-// Persistent CUTLASS adapter — first call uses initialize() to do the
-// (sticky) cudaFuncSetAttribute(MaxDynamicSharedMemorySize) + workspace init;
-// every subsequent call uses the lightweight update() path which only
-// recomputes params_ from new args (per-group pointers/strides), skipping
-// the CUDA driver roundtrip and re-init kernels. Plus a (N,K)-keyed
-// can_implement memo — alignment checks don't depend on per-group M.
+// Persistent CUTLASS adapter: first call uses initialize() (sticky
+// cudaFuncSetAttribute + workspace init); every later call uses the lightweight
+// update() (only recomputes params_ from new per-group pointers/strides), skipping the
+// CUDA driver roundtrip. Plus a (N,K)-keyed can_implement memo since alignment checks
+// don't depend on per-group M.
 static GrpGemm* s_gemm = nullptr;
 static bool s_gemm_initialized = false;
 static int s_can_impl_N = -1;
@@ -119,12 +115,11 @@ static int s_can_impl_K = -1;
 
 static size_t align128(size_t x) { return (x + 127) & ~size_t(127); }
 
-// Both buffers come from the engine-persistent (T2) arena (A7 step 8). The
-// growth path stays — unlike the cudaMalloc it replaces, a bump-arena take is
-// pointer arithmetic and not a CUDA call, so it is legal under stream capture,
-// which is the property the 512 MiB pre-reservation existed to buy. Growing
-// still strands the previous slab (a bump arena has no free), so the prewarm
-// takes the measured requirement up front and growth should never happen.
+// Both buffers come from the engine-persistent (T2) arena (A7 step 8). The growth path
+// stays: unlike the cudaMalloc it replaces, a bump-arena take is pointer arithmetic,
+// legal under stream capture. Growing strands the previous slab (a bump arena has no
+// free), so the prewarm takes the measured requirement up front and growth should
+// never happen.
 static void* take_t2(size_t need, const char* what) {
     auto slab = engine_arena().take_bytes(need);
     if (slab.empty()) {
@@ -151,10 +146,9 @@ static void ensure_workspace(size_t need) {
     if (need <= s_workspace_sz)
         return;
     if (s_workspace_sz > 0) {
-        // The prewarm's measured reserve went stale — a CUTLASS bump, or a
-        // shape class the 2026-07-31 sweep did not cover. Recoverable (the
-        // take below serves it out of the arena's slack) but it strands the
-        // old slab, so it must not pass silently.
+        // The prewarm's measured reserve went stale (a CUTLASS bump, or an uncovered shape
+        // class): recoverable (the arena's slack serves it) but strands the old slab, so it
+        // must not pass silently.
         IMP_LOG_WARN(
             "CUTLASS 3x grouped: workspace grew %zu -> %zu B past the measured reserve "
             "— re-measure kGrouped3xWorkspaceBytes",
@@ -168,19 +162,11 @@ static void ensure_workspace(size_t need) {
 
 void gemm_grouped_3x_nvfp4_prewarm() {
     if (!cutlass_grouped_3x_nvfp4_available()) return;
-    // Staging: the per-group struct-of-arrays block, ~200 B per expert against
-    // a hard n_experts <= 256 — 1 MiB is 20x the worst case.
-    //
-    // Workspace: MEASURED, not guessed. This used to reserve 512 MiB "to cover
-    // CUTLASS scratch even for very large grouped problems"; instrumenting
-    // GrpGemm::get_workspace_size() across three MoE geometries
-    // (ne=128 N=768 K=2048, ne=256 N=512 K=2048, ne=128 N=1856 K=2688) and
-    // prefills from 130 to 2800 tokens returned the same 152 320 B every time
-    // — 170 SMs x 896 B of persistent-scheduler state, which is a property of
-    // the CHIP and not of the problem. The old number was 3500x the real one
-    // and it was resident for the life of every MoE process (AUDIT B73).
-    // 1 MiB keeps ~7x headroom for a CUTLASS bump; more than that and
-    // ensure_workspace() grows into the arena's alignment slack and says so.
+    // Staging: ~200 B/expert against a hard n_experts<=256 cap; 1 MiB is 20x worst case.
+    // Workspace: MEASURED at 152320 B across MoE geometries (170 SMs x 896 B
+    // persistent-scheduler state, a property of the chip not the problem), not the old
+    // 512 MiB guess (AUDIT B73). 1 MiB keeps ~7x headroom for a CUTLASS bump; more and
+    // ensure_workspace() grows into the arena's alignment slack and logs it.
     ensure_staging(kGrouped3xStagingBytes);
     ensure_workspace(kGrouped3xWorkspaceBytes);
 }
@@ -206,10 +192,9 @@ bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int 
     using ElemC = typename GrpGemm::ElementC;
     using ElemD = typename GrpGemm::EpilogueOutputOp::ElementOutput;
 
-    // Single-allocation device staging: all per-expert arrays packed with 128B
-    // alignment between sections. A matching host buffer is built, then copied
-    // in ONE cudaMemcpyAsync (instead of 15 separate calls — saves launch overhead
-    // on every prefill chunk).
+    // Single-allocation device staging: all per-expert arrays packed with 128B alignment
+    // between sections. Matching host buffer built then copied in ONE cudaMemcpyAsync
+    // instead of 15 separate calls, saving launch overhead per prefill chunk.
     const size_t n = static_cast<size_t>(n_experts);
     struct Offs {
         size_t shape, stA, stB, stC, stD, lSFA, lSFB;
@@ -347,10 +332,9 @@ bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int 
     size_t needed = GrpGemm::get_workspace_size(arguments);
     ensure_workspace(needed);
 
-    // First call: full initialize() — sticky cudaFuncSetAttribute on the kernel
-    //             function symbol + (no-op) workspace init + params_ build.
-    // Subsequent: update() — just rebuilds params_ from new args. Skips the
-    //             CUDA driver roundtrip, which is the per-call CPU cost.
+    // First call: full initialize() (sticky cudaFuncSetAttribute on the kernel symbol +
+    // no-op workspace init + params_ build). Later calls: update() rebuilds params_ from
+    // new args only, skipping the CUDA driver roundtrip (the per-call CPU cost).
     cutlass::Status st;
     if (!s_gemm_initialized) {
         st = s_gemm->initialize(arguments, s_workspace, stream);
@@ -402,12 +386,10 @@ static_assert(sizeof(GrpGemm) > 0, "GrpGemm type must instantiate");
 
 }  // namespace imp
 
-// ===========================================================================
-// Phase 3b: device-args wrapper. Same kernel call (s_gemm->run) as the host-
-// args variant, but the staging buffer is filled by a device kernel reading
-// d_M_per / d_expert_offsets / d_sfa_offsets / d_alpha — no host loop, no
-// D2H or H2D copies on the dispatch path. Graph-capturable.
-// ===========================================================================
+// Phase 3b device-args wrapper: same kernel call (s_gemm->run) as the host-args
+// variant, but the staging buffer is filled by a device kernel reading
+// d_M_per/d_expert_offsets/d_sfa_offsets/d_alpha directly, no host loop or D2H/H2D
+// copies. Graph-capturable.
 
 namespace imp {
 
@@ -467,11 +449,10 @@ __global__ void build_grouped_3x_staging_kernel(
     // 1. Per-expert problem shape {M_e, N, K}.
     shapes[e] = GrpUnderlyingShape{M_e, N, K};
 
-    // 2. Packed strides via CUTLASS helper (CUTLASS_HOST_DEVICE).
-    //    The relevant Stride types ignore M_i in the body and only set
-    //    get<0|1>(stride) = get<0|1>(shape), so the result is constant
-    //    across experts in practice. Writing them inline keeps the kernel
-    //    self-contained (no separate pre-bake step).
+    // Packed strides via CUTLASS helper (CUTLASS_HOST_DEVICE): the relevant Stride types
+    // ignore M_i in the body and only set get<0|1>(stride)=get<0|1>(shape), so the result
+    // is constant across experts. Written inline to keep the kernel self-contained (no
+    // separate pre-bake step).
     stA[e] = cutlass::make_cute_packed_stride(GrpStrideA{}, {M_e, K, 1});
     stB[e] = cutlass::make_cute_packed_stride(GrpStrideB{}, {N,   K, 1});
     stC[e] = cutlass::make_cute_packed_stride(GrpStrideC{}, {M_e, N, 1});
@@ -660,15 +641,13 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
         s_can_impl_K = K;
     }
 
-    // Withhold the host shapes from initialize/run: real per-expert M lives
-    // ONLY in d_shapes (device). When host shapes are present the group tile
-    // scheduler sizes its grid from them — the M=128 dummy UNDERSIZED the
-    // tile count, so experts with M_e above the tile height silently lost
-    // their upper row tiles (MoE long-prefill corruption at n ≳ 900, where
-    // hot experts cross the tile boundary; found 2026-06-11). With
-    // host_problem_shapes == nullptr CUTLASS launches the fully persistent
-    // grid (sm_count) and walks the device-side group shapes dynamically —
-    // correct for any routing distribution.
+    // Host shapes withheld from initialize/run: real per-expert M lives only in d_shapes
+    // (device). With host shapes present the group tile scheduler sizes its grid from
+    // them; an M=128 dummy undersized the tile count so experts with M_e above the tile
+    // height silently lost their upper row tiles (MoE long-prefill corruption at n >=
+    // ~900). host_problem_shapes=nullptr makes CUTLASS launch the fully persistent grid
+    // (sm_count) and walk device-side group shapes dynamically instead, correct for any
+    // routing distribution.
     arguments.problem_shape.host_problem_shapes = nullptr;
 
     size_t needed = GrpGemm::get_workspace_size(arguments);
