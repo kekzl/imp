@@ -1,20 +1,11 @@
-// Which MoE expert placements depend on the NVFP4 host-offload path (2026-08-13).
-//
-// History: an NVFP4-prequant expert that stayed on host used to reach the
-// generic cuBLAS path with scales == nullptr, where gemm() logged an ERROR and
-// returned WITHOUT multiplying. The forward continued, the missing experts
-// contributed zero, and the process exited 0 with a wrong answer. Reproduced on
-// Qwen3-30B-A3B-NVFP4-Modelopt: 8 of 48 layers on host answered "the capital of
-// France is the city of the same name, France itself"; all 48 repeated "ftp".
-// #1403 refused that placement outright.
-//
-// The path exists now (see exec/nvfp4_expert_offload.h), so this predicate no
-// longer decides servability — it decides whether the placement DEPENDS on that
-// path. The refusal moved to verify_host_expert_placement(), which runs once
-// the expert cache is sized, because that is the fact this cannot see.
-//
-// These tests pin the predicate. CPU-only by construction: it is pure, and
-// takes the placement as data rather than reading a checkpoint.
+// MoE expert placements depending on the NVFP4 host-offload path (2026-08-13): an NVFP4-
+// prequant expert left on host used to reach the generic cuBLAS path with scales==nullptr,
+// where gemm() logged an ERROR and returned WITHOUT multiplying - missing experts
+// contributed zero and the process exited 0 with a wrong answer (Qwen3-30B-A3B-NVFP4-
+// Modelopt: 8/48 host layers answered garbage, all 48 repeated "ftp"). #1403 refused that
+// placement outright.
+// The path now exists (exec/nvfp4_expert_offload.h), so this predicate decides only whether
+// a placement DEPENDS on it; the refusal moved to verify_host_expert_placement(). CPU-only.
 
 #include <gtest/gtest.h>
 
@@ -24,11 +15,10 @@ using namespace imp;
 
 namespace {
 
-// A 4-layer model whose layers 1 and 3 carry experts (0 and 2 are dense).
-// Interleaving matters: a predicate that scans `experts_upload_layer` alone,
-// without gating on "is this an MoE layer at all", reads the dense layers'
-// false and claims every model needs the path. That mutant passes a
-// uniform-layer fixture.
+// 4-layer fixture with experts on layers 1 and 3 (0,2 dense): a predicate that scans
+// experts_upload_layer without gating on "is this an MoE layer" would read dense layers
+// false and wrongly claim every model needs the path - a mutant a uniform-layer fixture
+// would miss.
 constexpr size_t kExpertBytes = 512ull * 1024 * 1024;
 
 std::vector<size_t> interleaved_costs() { return {0, kExpertBytes, 0, kExpertBytes}; }
@@ -73,10 +63,9 @@ TEST(ExpertPlacement, DenseNvfp4ModelNeedsNoHostPath) {
     EXPECT_EQ(expert_placement_host_layers(costs, upload), 0);
 }
 
-// Callers build the two vectors separately (`compute_expert_layer_costs_`
-// sizes one, the caller sizes the other from n_layers). A predicate that
-// indexed by the longer of the two would read out of bounds; pin that it
-// stops at the shorter.
+// Callers build the two cost vectors separately (compute_expert_layer_costs_ sizes one, the
+// caller sizes the other from n_layers): a predicate indexing by the longer would read out
+// of bounds; pins that it stops at the shorter.
 TEST(ExpertPlacement, MismatchedLengthsStopAtTheShorter) {
     const std::vector<size_t> costs = {0, kExpertBytes, kExpertBytes};
     const std::vector<bool> upload = {false, true};

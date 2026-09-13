@@ -1,9 +1,6 @@
-// The M=1 GDN fused input GEMV (quant/nvfp4_gemv_gdn_input.cu) against the
-// four launches it replaces at Qwen3.8-27B dims (K=5120: in_proj 10240 rows,
-// gate 6144, alpha/beta 48 each). in_proj takes the multirow kernel at these
-// rows, the gate the 128-thread K-par kernel, alpha/beta the gemv_fp16 sum:
-// all four reproduced bit-for-bit. Plus an fp32 host reference for every
-// segment and the K-shape declines.
+// M=1 GDN fused input GEMV vs the four launches it replaces at Qwen3.8-27B dims (K=5120:
+// in_proj 10240 rows multirow, gate 6144 128-thread K-par, alpha/beta 48 each gemv_fp16 sum):
+// all four reproduced bit-for-bit, plus an fp32 host reference per segment.
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"

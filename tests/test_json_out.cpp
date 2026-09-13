@@ -1,9 +1,6 @@
-// tools/common/json_out.h - the writer behind `--json` (#1583).
-//
-// The escaping is what makes the contract real: `--prompt --json` puts model
-// output into a JSON string, and model output contains quotes, backslashes and
-// newlines. A writer that emits those raw produces a document jq rejects,
-// which is the failure the mode exists to remove.
+// tools/common/json_out.h, the writer behind --json (#1583): escaping is the contract -
+// model output contains quotes, backslashes, newlines, and a writer emitting them raw
+// produces a document jq rejects.
 
 #include <gtest/gtest.h>
 

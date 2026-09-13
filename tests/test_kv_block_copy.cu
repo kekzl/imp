@@ -1,7 +1,6 @@
-// GPU tests for KVCache::copy_blocks_device — whole-block D2D copy across
-// all layers (+ scale regions), used by the multi-candidate spec verify
-// (speculative.token_recycling route (a)): each candidate gets a private
-// copy of the committed partial block; the winner's block is copied back.
+// KVCache::copy_blocks_device: whole-block D2D copy across all layers (+scale regions),
+// used by multi-candidate spec verify (speculative.token_recycling route a) - each candidate
+// gets a private copy of the committed partial block, the winner's block copied back.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

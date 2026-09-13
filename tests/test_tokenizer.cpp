@@ -11,28 +11,13 @@ namespace {
 
 // ---- Helpers to build synthetic vocabularies ----
 
-// Build a minimal SPM tokenizer with proper BPE merge chain and byte fallback.
-// SPM BPE merges pairs of adjacent symbols bottom-up, so the vocab must contain
-// all intermediate merge tokens (not just final words).
-//
-// Merge chains:
-//   H + e → He → He + llo → Hello → ▁ + Hello → ▁Hello
-//   l + l → ll → ll + o → llo
-//   o + r → or → w + or → wor → wor + ld → world → ▁ + world → ▁world
-//   l + d → ld
-//   t + h → th → ▁ + th → ▁th → ▁th + e → ▁the
-//   c + a → ca → ▁ + ca → ▁ca → ▁ca + t → ▁cat
+// SPM BPE merges pairs bottom-up, so the vocab must contain all intermediate merge tokens,
+// not just final words (chains: H+e->He->Hello, l+l->ll->llo, o+r->or->wor->world, t+h->th->the,
+// c+a->ca->cat).
 static Tokenizer make_spm_tokenizer() {
-    // Token indices:
-    //  0: <unk>  1: <s>  2: </s>  3: ▁  (U+2581 space symbol)
-    //  4-14: individual ASCII chars (H, e, l, o, w, r, d, t, h, c, a)
-    //  15-20: pair merges (He, ll, or, ld, th, ca)
-    //  21-22: triple merges (llo, wor)
-    //  23-24: ▁-prefixed pairs (▁th, ▁ca)
-    //  25-26: full words (Hello, world)
-    //  27-28: ▁-prefixed words (▁the, ▁cat)
-    //  29-30: ▁-prefixed full words (▁Hello, ▁world)
-    //  31-286: byte fallback <0x00>..<0xFF>
+    // Token id layout: 0-3 special/prefix, 4-14 ASCII chars, 15-20 pair merges, 21-22 triple
+    // merges, 23-24 prefixed pairs, 25-26 full words, 27-28 prefixed words, 29-30 prefixed full
+    // words, 31-286 byte fallback.
     std::vector<std::string> tokens = {
         "<unk>",
         "<s>",
@@ -456,17 +441,9 @@ TEST(TokenizerDispatchTest, MaxLength) {
 
 // ---- Gemma-4 Tokenizer Tests ----
 
-// Synthetic Gemma-4 tokenizer reproducing the byte-fallback bug on "Linus".
-// merge_ranks contains "Lin u" → "Linu" as an intermediate rule whose output
-// is NOT in the vocabulary. Buggy code applies the merge unconditionally,
-// producing an unknown symbol that byte-falls-back the entire word.
-//
-// Layout:
-//   0: <unk>  1: <s>  2: </s>
-//   3: ▁
-//   4-14: individual ASCII chars (L, i, n, u, s, ...)
-//   15: "Li"  16: "Lin"  17: "us"
-//   18-273: byte fallback <0x00>..<0xFF>
+// Synthetic Gemma-4 tokenizer reproducing the byte-fallback bug on "Linus": merge_ranks
+// has "Lin u"->"Linu" as an intermediate rule whose output is NOT in the vocabulary; buggy
+// code applies it unconditionally, byte-falling-back the whole word.
 static Tokenizer make_gemma4_tokenizer() {
     std::vector<std::string> tokens = {
         "<unk>",
@@ -536,10 +513,8 @@ TEST(TokenizerGemma4Test, MergeSkippedWhenResultNotInVocab) {
     ASSERT_GE(us_id, 0);
     ASSERT_LT(tok.find_token("Linu"), 0);  // sanity: "Linu" must NOT be in vocab
 
-    // "Linus": buggy code merges all the way to "Linu" (intermediate) then
-    // byte-fallbacks the unknown symbol, producing 5 byte-fallback tokens.
-    // Correct behavior: skip the "Lin u" merge, apply "u s → us" instead,
-    // yielding [Lin, us] — 2 tokens.
+    // "Linus": buggy code merges to "Linu" (not in vocab) then byte-falls-back to 5 tokens.
+    // Correct: skip "Lin u", apply "u s"->"us" instead, yielding [Lin, us] - 2 tokens.
     auto ids = tok.encode("Linus");
     ASSERT_EQ(ids.size(), 2u) << "expected [Lin, us], got byte-fallback";
     EXPECT_EQ(ids[0], Lin_id);
@@ -566,12 +541,9 @@ TEST(TokenizerGemma4Test, TruncatedUTF8AtEndDoesNotCrash) {
 }
 
 TEST(TokenizerGemma4Test, DecodeByteFallbackFormsValidUTF8) {
-    // Bytes 0xE2 0x96 0x81 in sequence form the UTF-8 of ▁ (U+2581). After
-    // Gemma-4 decode, ▁ must be replaced by ASCII space — even when the
-    // three bytes arrive as three separate byte-fallback tokens.
-    //
-    // Before fix: decode_spm_token runs SPIECE_SPACE replacement per-token,
-    // fails to stitch the 3 bytes together, returns literal "▁Linus".
+    // 0xE2 0x96 0x81 forms UTF-8 for U+2581 (SPM space marker); after Gemma-4 decode it must
+    // become an ASCII space even split across three separate byte-fallback tokens. Before fix,
+    // decode_spm_token replaced per-token and failed to stitch, returning literal "_Linus".
     Tokenizer tok = make_gemma4_tokenizer();
     int byte_base = tok.find_token("<0x00>");
     ASSERT_GE(byte_base, 0);
@@ -633,13 +605,9 @@ TEST(TokenizerControlTest, PreservesExistingTypes) {
     EXPECT_FALSE(tok.is_control_token(4));  // 'H' still normal
 }
 
-// ---- Qwen2 pre-tokenizer (#657) ----
-//
-// Expected segmentations derived from the canonical Qwen2 regex and verified
-// against llama.cpp `llama-tokenize` on Qwen3-8B (the listed chunks correspond
-// 1:1 to the canonical token ids on these probes). The old gpt2 fallback
-// split every punctuation char individually, making canonical merges
-// ("->", "://", "(x", ".com") impossible.
+// #657: expected segmentations derived from the canonical Qwen2 regex, verified against
+// llama.cpp llama-tokenize on Qwen3-8B. The old gpt2 fallback split every punctuation char
+// individually, making canonical merges ("->", "://", "(x", ".com") impossible.
 
 using Chunks = std::vector<std::string>;
 
@@ -683,11 +651,9 @@ TEST(Qwen2PreTokenizeTest, TrailingWhitespace) {
     EXPECT_EQ(qwen2_pre_tokenize("abc   "), (Chunks{"abc", "   "}));
 }
 
-// Qwen3.5/3.6 GGUFs declare tokenizer.ggml.pre = "qwen35" (qwen2 rules plus
-// \p{M} in the letter run — identical on ASCII). The routing used to fall
-// through to the gpt2 per-char-punct fallback, over-splitting symbol runs
-// (+13% tokens on the 35B hero corpus) and making canonical merges
-// unreachable.
+// Qwen3.5/3.6 GGUFs declare tokenizer.ggml.pre="qwen35" (qwen2 rules + \p{M} in the letter
+// run, identical on ASCII); routing used to fall through to the gpt2 per-char-punct fallback,
+// over-splitting symbol runs (+13% tokens on the 35B hero corpus).
 TEST(Qwen2PreTokenizeTest, Qwen35RoutesToQwen2NotGpt2) {
     Tokenizer tok = make_gpt2_tokenizer();
     tok.set_pre_tokenizer("qwen2");
@@ -700,10 +666,8 @@ TEST(Qwen2PreTokenizeTest, Qwen35RoutesToQwen2NotGpt2) {
     EXPECT_NE(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
 }
 
-// ---- o200k pre-tokenizer (gpt-oss / GPT-4o, #657) ----
-//
-// Expected chunks verified against HF tokenizers `pre_tokenize_str` on the
-// gpt-oss-20b tokenizer.json (Ġ/Ċ rendered as plain space/newline here).
+// #657: expected chunks verified against HF tokenizers pre_tokenize_str on the gpt-oss-20b
+// tokenizer.json (rendered as plain space/newline here).
 
 TEST(O200kPreTokenizeTest, CodeLine) {
     EXPECT_EQ(o200k_pre_tokenize("def foo(x): return x"),
@@ -745,10 +709,9 @@ TEST(O200kPreTokenizeTest, SymbolRunTrailingNewlinesAndSlashes) {
 }
 
 TEST(O200kPreTokenizeTest, NonAsciiSymbolsAreSymbolsNotLetters) {
-    // → (U+2192) and — (U+2014) are \p{S}/\p{P}, NOT letters: they take the
-    // symbol-run rule (which absorbs trailing newlines). With the old
-    // ≥0x80=letter approximation, " →\n" became [" →", "\n"] and diverged
-    // from canonical (the 4 residual corpus diffs in #657).
+    // -> and -- (U+2192/U+2014) are \p{S}/\p{P}, not letters, so they take the symbol-run rule
+    // (absorbing trailing newlines). The old >=0x80=letter approximation split them wrong,
+    // diverging from canonical (#657's 4 residual corpus diffs).
     EXPECT_EQ(o200k_pre_tokenize("a \xe2\x86\x92\nb"), (Chunks{"a", " \xe2\x86\x92\n", "b"}));
     EXPECT_EQ(o200k_pre_tokenize("x \xe2\x80\x94 y"), (Chunks{"x", " \xe2\x80\x94", " y"}));
     // Non-ASCII LETTERS keep working: "Käse" stays one chunk.
@@ -760,10 +723,8 @@ TEST(Qwen2PreTokenizeTest, NonAsciiSymbolsAreSymbolsNotLetters) {
     EXPECT_EQ(qwen2_pre_tokenize("K\xc3\xa4se"), (Chunks{"K\xc3\xa4se"}));
 }
 
-// ---- cl100k pre-tokenizer (GPT-4/tiktoken lineage, Phi-4; #657) ----
-//
-// qwen2 rules with digit triples. Chunk truths verified against HF
-// tokenizers pre_tokenize_str on Phi-4-reasoning-plus.
+// #657: qwen2 rules with digit triples. Chunk truths verified against HF tokenizers
+// pre_tokenize_str on Phi-4-reasoning-plus.
 
 TEST(Cl100kPreTokenizeTest, DigitTriplesCaseBlindStandaloneContractions) {
     EXPECT_EQ(cl100k_pre_tokenize("17 + 12345"),
@@ -777,13 +738,10 @@ TEST(Cl100kPreTokenizeTest, DigitTriplesCaseBlindStandaloneContractions) {
               (Chunks{"a", "->", "b", " https", "://", "x", ".com", "/y"}));
 }
 
-// ---- Added-token atomic matching: `normalized=false` regardless of `special` ----
-//
-// HF matches an added token atomically against the raw input iff normalized=false
-// (special only governs decode-skipping). Qwen3 ships <think>/</think> and
-// <tool_call> as special=false, normalized=false — they MUST tokenize to their
-// single atomic id, not BPE-split into "<","think",">". A regression here breaks
-// the <think>-as-stop-token guard and no-think suppression.
+// HF matches an added token atomically iff normalized=false (special only governs decode
+// -skipping). Qwen3's <think>/</think>/<tool_call> ship special=false, normalized=false and
+// MUST tokenize atomically, not BPE-split; a regression breaks the <think>-as-stop-token
+// guard and no-think suppression.
 
 static std::string write_temp_tokenizer_json(const std::string& body) {
     std::string path = std::string("/tmp/imp_tok_test_") + std::to_string(::getpid()) +

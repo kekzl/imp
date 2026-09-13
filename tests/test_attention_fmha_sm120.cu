@@ -90,12 +90,9 @@ protected:
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
-        // NOTE: the int cast before the -6 is load-bearing (#525/#528). With
-        // size_t i, `(i*7+3)%13 - 6` underflows unsigned whenever %13 < 6 —
-        // ~46% of fills became ±inf, the reference went NaN and the NaN-
-        // dropping comparator passed vacuously. Also: the old V multiplier 13
-        // made V CONSTANT (i*13 % 13 == 0), so P@V was insensitive to the
-        // attention weights entirely; 17 (coprime to 13) restores coverage.
+        // int cast before -6 is load-bearing (#525/#528): size_t underflow in (i*7+3)%13-6 made
+        // ~46% of fills +-inf, silently passing via a NaN-dropping comparator. V multiplier 17
+        // (coprime to 13, replacing the constant-valued 13) restores coverage of attention weights.
         for (size_t i = 0; i < q_elems; i++)
             Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
@@ -250,10 +247,8 @@ TEST_F(FmhaSm120Test, ChunkedCausalHD256) {
     run_test(1, 64, 512, 16, 8, 256, true, 0, 0.0f, 2e-2f, /*q_offset=*/448);
 }
 
-// --- #566 residue: WMMA fallback at hd=256, production-like sizes ---
-// gemma-3-12b (hd=256) read teacher-forced PPL ~10.5 through this chain at
-// n~2.3k even WITHOUT a window (vs 1.7 via cuBLAS) and catastrophic WITH the
-// 1024 window. These cases probe the kernel at those shapes directly.
+// #566 residue: gemma-3-12b (hd=256) read PPL ~10.5 through this chain at n~2.3k even
+// without a window (vs 1.7 via cuBLAS), catastrophic with a 1024 window.
 TEST_F(FmhaSm120Test, HD256_LongSeq) {
     run_test(1, 1536, 1536, 16, 8, 256, true, 0, 0.0f, 2e-2f);
 }
@@ -289,11 +284,9 @@ TEST_F(FmhaSm120Test, DispatchSelectsSm120FMHA) {
 }
 
 TEST_F(FmhaSm120Test, DispatchManual) {
-    // RESOLVED 2026-06-05 (#528): the 2026-05-14 "NaN mystery" (this manual
-    // path produced NaN while run_test() 'worked' on the same shape) was the
-    // size_t underflow in the %13 fills — ~46% of inputs were ±inf, so NaN
-    // output was CORRECT; run_test() only looked green because its comparator
-    // silently dropped NaNs via std::max. With the int cast both paths agree.
+    // RESOLVED (#528): the size_t underflow (~46% of inputs +-inf) made NaN output CORRECT here;
+    // run_test() only looked green because its comparator silently drops NaN via std::max.
+    // The int cast fix makes both paths agree.
     const int B = 1, S = 64, NH = 4, HD = 128;
     size_t bytes = B * S * NH * HD * sizeof(half);
 

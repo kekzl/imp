@@ -1,36 +1,15 @@
-// Chained hybrid restores must not drift (recurrent prefix cache).
-//
-// PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh covers ONE restore. A
-// chat session chains them: every turn's prompt is the whole history, so turn
-// N restores the snapshot turn N-1 saved and prefills only the new tail. This
-// file measures what 30 of those in a row cost, against a cold prefill of the
-// same final prompt.
-//
-// Tokens are the wrong instrument on their own: two runs that differ in the
-// state agree on tokens until the difference crosses an argmax, and then
-// disagree completely. So the comparison is the STATE (the per-layer recurrent
-// slab of the live slot after the prompt), reported as max-abs and relative L2
-// per layer. The table is the evidence; the assertions are the noise floor and
-// a bound calibrated against the control, not against a constant.
-//
-// What the table showed when it was written (2026-09-09, both models, both
-// state dtypes, 30 turns, 28 restores):
-//
-//   Qwen3.5-4B-mxfp4    chain 0.219 vs chunked-cold 0.224 (BF16), 0.213/0.217 (FP32)
-//   Qwen3.8-27B-NVFP4   chain 0.337 vs chunked-cold 0.329 (BF16), 0.340/0.356 (FP32)
-//
-// i.e. a chained restore costs no more than a cold prefill split at the same
-// boundaries, and the state dtype does not change that. The absolute figure is
-// large because the recurrent state is CHAOTIC in the prefill chunk shape: on
-// the 27B, going from one 2048-token chunk to 1024 already reads 0.338
-// relative L2 and flips the greedy continuation, and the drift then stays flat
-// from 1024 down to 32 rather than growing with the chunk count. Two cold runs
-// of the same prompt are bit-identical, which is what makes the rest readable.
-//
-// The campaign that produced those numbers, including what it refuted:
-// docs/audit/SETTLED.md (2026-09-09).
-//
-// Needs IMP_TEST_MODEL_GDN (a hybrid checkpoint). Runs from `make test-e2e`.
+// Chained hybrid restores must not drift (recurrent prefix cache): a chat session restores
+// turn N-1's snapshot and prefills only the new tail every turn. This measures 30 chained
+// restores against a cold prefill of the same final prompt.
+// Tokens are the wrong instrument (two runs differing in state agree until an argmax flips,
+// then disagree completely), so the comparison is the STATE itself (per-layer recurrent slab,
+// max-abs and relative L2). Assertions are the noise floor and a bound calibrated against a
+// cold-prefill control, not a constant.
+// Finding: a chained restore costs no more than a cold prefill split at the same boundaries,
+// independent of state dtype; the recurrent state is CHAOTIC in prefill chunk shape (the
+// absolute drift is large and does not grow with chunk count) but two cold runs of the same
+// prompt are bit-identical, which is what makes the comparison readable. Full campaign:
+// docs/audit/SETTLED.md (2026-09-09). Needs IMP_TEST_MODEL_GDN; runs from make test-e2e.
 
 #include <gtest/gtest.h>
 
@@ -63,12 +42,10 @@
 namespace imp {
 namespace {
 
-// ── the chain's text ─────────────────────────────────────────────────────
-// A turn must be long enough to cross a KV block and short enough that the
-// continuation stays under the chunk-parallel scan's 128-row minimum, which
-// is what a real chat turn looks like (the 27B session measured 90 +- 20
-// tokens per turn). Distinct per turn: a repeated tail would collapse the
-// block hashes onto each other and the chain would restore the wrong turn.
+// A turn must be long enough to cross a KV block and short enough to stay under the
+// chunk-parallel scan's 128-row minimum (~90+-20 tokens/turn, matching a measured 27B
+// session). Distinct per turn: a repeated tail would collapse block hashes and restore the
+// wrong turn.
 constexpr const char* kSentences[] = {
     "A paged block cache stores keys and values once and hands the same physical page to every "
     "sequence whose prefix matches it.",
@@ -244,12 +221,9 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
             << "turn " << t << " is shorter than one KV block, the chain would not advance";
     }
 
-    // ── one run through the engine loop ──────────────────────────────────
-    // finish_request registers the block hashes, so every step must FINISH or
-    // the next step has no cached prefix to restore from. The state is copied
-    // out the moment the prompt is through (first sampled token present):
-    // after that the decode steps advance it and it is no longer "the state
-    // this prompt produced".
+    // finish_request registers block hashes, so every step must FINISH or the next step has no
+    // cached prefix to restore from. State is copied out the moment the prompt is through (first
+    // sampled token present); after that, decode steps advance it further.
     auto run = [&](const std::vector<int32_t>& tokens, int max_tokens, std::vector<uint8_t>* out_state,
                    int* out_cached) {
         auto req = std::make_shared<Request>();
@@ -285,10 +259,9 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
         return req->output_tokens;
     };
 
-    // Drop every cached block and every snapshot. imp_context_reset() only does
-    // this when a C-API request is live, and this test drives the engine
-    // directly, so calling it here would be a no-op and the "cold" arm would
-    // silently restore the chain's own snapshot.
+    // Drops every cached block and snapshot directly: imp_context_reset() only does this when a
+    // C-API request is live, and this test drives the engine directly, so calling it would be a
+    // no-op and the "cold" arm would silently restore the chain's own snapshot.
     auto go_cold = [&]() {
         while (engine->kv_manager()->evict_cached_block()) {}
         engine->clear_recurrent_snapshots();
@@ -318,11 +291,9 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
         return std::pair<int, double>(idx, best);
     };
 
-    // ── the chain ────────────────────────────────────────────────────────
-    // Every turn appends fixed text, never the model's own output, so a turn
-    // may generate its comparison tokens without changing what the next turn
-    // prefills. Checkpoints keep the warm state and the prompt that produced
-    // it; the cold references are run afterwards, once the cache is dropped.
+    // Every turn appends fixed text, never the model's own output, so a turn can generate its
+    // comparison tokens without changing what the next turn prefills. Checkpoints keep the warm
+    // state and its prompt; cold references run afterward, once the cache is dropped.
     struct Checkpoint {
         int turns = 0;
         std::vector<int32_t> prompt;
@@ -381,10 +352,9 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
     std::vector<uint8_t> cold2_state(per_seq);
     const std::vector<int32_t> cold2_tok = run(last.prompt, kGreedy, &cold2_state, nullptr);
 
-    // Control 2, the boundary count. Cold again, but chunked at the chain's
-    // turn length: the same token path as the cold reference and the same
-    // number of state round trips as the chain. It separates "the restore is
-    // wrong" from "one more state store per turn is what costs the precision".
+    // Control 2 (boundary count): cold again but chunked at the chain's turn length - same token
+    // path as the cold reference, same number of state round trips as the chain. Separates "the
+    // restore is wrong" from "one more state store per turn costs the precision".
     go_cold();
     const int saved_chunk = engine->mutable_runtime_config().runtime.prefill_chunk_size;
     engine->mutable_runtime_config().runtime.prefill_chunk_size =
@@ -433,23 +403,18 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
                     rows[l].h_max, rows[l].h_rel);
     std::fflush(stdout);
 
-    // ── the assertions ───────────────────────────────────────────────────
-    // 1. The instrument. Two cold runs of the same prompt under
-    //    runtime.deterministic are the same run; if they are not, the drift
-    //    numbers above measure the engine's own jitter and nothing else.
+    // The instrument: two cold runs of the same prompt under runtime.deterministic must be the
+    // same run, or the drift numbers above measure only the engine's own jitter.
     EXPECT_EQ(cold2_tok, cold_toks.back())
         << "two cold runs of the same prompt disagreed: every number in this table is noise";
     EXPECT_LT(noise, 1e-9) << "cold-vs-cold state drift " << noise
                            << " - the reference is not reproducible, so nothing is being measured";
 
-    // 2. The property. A chained restore is a prefill split at the snapshot
-    //    boundaries, so it must cost no more than a cold prefill split at the
-    //    same places. The bound is that control plus its own margin, not a
-    //    constant: the ABSOLUTE drift is a property of the checkpoint (the
-    //    recurrent state is chaotic in the chunk shape - measured 2026-09-09
-    //    on Qwen3.8-27B-NVFP4, chunk 2048 -> 1024 alone reads 0.34 relative
-    //    L2 and the drift does not grow with the chunk count), so only the
-    //    RATIO is a property of the restore.
+    // The property: a chained restore is a prefill split at snapshot boundaries, so it must cost
+    // no more than a cold prefill split at the same places. Bound is the control plus its own
+    // margin, not a constant - the ABSOLUTE drift is a property of the checkpoint (the recurrent
+    // state is chaotic in chunk shape, measured on Qwen3.8-27B-NVFP4: 2048->1024 alone reads 0.34
+    // relative L2 and does not grow with chunk count), so only the RATIO is a property of the restore.
     EXPECT_LE(chain_rel.back(), 2.0 * chunked + 1e-9)
         << "the chained restore drifted further than a cold prefill chunked at the same boundaries: "
         << chain_rel.back() << " vs " << chunked << " relative L2 (h dtype " << qtype_name(h_dtype)

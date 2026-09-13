@@ -1,27 +1,8 @@
-// =============================================================================
-// test_nvfp4_merged_scale_spread.cu: siblings keep their OWN global scale
-// =============================================================================
-//
-// A compressed-tensors checkpoint gives every quantized Linear its own
-// `weight_global_scale`, and sibling projections that ride in one small-M launch
-// (FFN gate|up, GDN in|z, attention q|k|v) are separate tensors with separate
-// scales. Their amax spread is real: 3.7x measured across fused-layer siblings,
-// and the whole point of NOT requantizing them onto a shared scale.
-//
-// Every other NVFP4 test builds its siblings from one distribution, so all the
-// tensor scales come out within rounding of each other and a kernel that used
-// sibling 0's scale for all of them would pass. This one gives the two weights
-// a 4x amax spread, hence 4x different global scales, and checks each output
-// block against a reference that uses that block's OWN scale.
-//
-// MUTANT (documented, must fail): add `W1.q.tensor_scale = W0.q.tensor_scale;`
-// right before the gemm_nvfp4_smallm_v2_multi_a4 call, i.e. make sibling 1 read
-// sibling 0's global scale.
-// Sibling 1's block then comes out 4x small and the second EXPECT_LT fires.
-// A shared-scale kernel is exactly this mutation.
-//
-// GPU required, skips cleanly without one.
-// =============================================================================
+// Sibling projections in one small-M launch (FFN gate|up, GDN in|z, q|k|v) keep separate
+// weight_global_scale per compressed-tensors tensor (3.7x measured spread); requantizing
+// onto a shared scale is the bug this guards. Test gives siblings a 4x amax spread on purpose.
+// MUTANT (must fail): alias W1.q.tensor_scale to W0.q.tensor_scale -> sibling 1's block
+// comes out 4x small.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -43,11 +24,9 @@ bool gpu_available() {
     return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
 }
 
-// One element of a plain packed NVFP4 buffer, decoded per the OCP spec:
-// low nibble = even k, E2M1 magnitude set, UE4M3 micro-scale per 16 values.
-// Same formula as the spec reference in test_nvfp4_compressed_tensors_ref.cu
-// (e2m1_nibble_to_f32_ref x fp8_e4m3_to_f32_ref), independent of the device
-// decoder so a paired bug cannot hide.
+// Plain packed NVFP4 element per OCP spec (low nibble=even k, E2M1 + UE4M3 micro-scale per
+// 16 values), same formula as test_nvfp4_compressed_tensors_ref.cu but independent of the
+// device decoder so a paired bug cannot hide.
 float host_dequant_spec(const std::vector<uint8_t>& packed, const std::vector<uint8_t>& scales, int n, int k,
                         int K) {
     static const float mag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};

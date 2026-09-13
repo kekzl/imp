@@ -1,21 +1,12 @@
-// test(P2.7): gpt-oss YaRN long-sequence RoPE parity — kernel vs fp64 ref.
-//
-// gpt-oss-20b uses YaRN RoPE (factor=32, original_max_position=4096, extended
-// to 131072). #547 carried a latent rope_freq_scale INVERSION bug: the HF
-// config provides a YaRN `factor` (32); imp stores the factor and the kernel
-// applies 1/factor. Storing 1/factor instead double-inverts the scale — the
-// interpolated dims rotate factor^2 = 1024x too fast and the mscale flips
-// sign. The error is invisible at small positions but enormous beyond the
-// original context, exactly where the YaRN extension matters.
-//
-// This test reimplements the YaRN math in fp64 (independently, from the
-// YaRN/HF semantics), cross-checks it against a COMMITTED numpy golden
-// (tests/refs/yarn_rope_golden.h, 1e-9 rel), then runs imp's rope_forward
-// kernel with the gpt-oss YaRN params at positions sampled across the range
-// INCLUDING > original_ctx (up to 131071) and asserts the rotated Q/K match
-// the verified fp64 reference at the f16 tolerance class. A final guard
-// proves the test is SENSITIVE to the inversion: the kernel output must NOT
-// match the 1024x-wrong reference.
+// gpt-oss-20b YaRN RoPE (factor=32, orig_max_pos=4096, extended to 131072). #547's latent
+// rope_freq_scale INVERSION bug: HF provides factor (32); imp storing 1/factor made the
+// kernel's own 1/factor application double-invert, rotating interpolated dims factor^2=1024x
+// too fast and flipping mscale's sign - invisible at small positions, enormous beyond the
+// original context.
+// Reimplements YaRN math in fp64 independently, cross-checked against a committed numpy
+// golden (tests/refs/yarn_rope_golden.h, 1e-9 rel), then runs imp's rope_forward at positions
+// up to 131071 and asserts f16-class agreement, plus a sensitivity guard that the kernel does
+// NOT match the 1024x-wrong reference.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -39,11 +30,9 @@ namespace {
         ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err); \
     } while (0)
 
-// ---------------------------------------------------------------------------
-// Independent fp64 YaRN cos/sin reference (mirrors imp's rope_yarn device
-// helper + rope_yarn_corr_dims). `factor` is the HF YaRN factor (32); the
-// kernel applies 1/factor, so inv_scaling = 1/factor here too.
-// ---------------------------------------------------------------------------
+// Independent fp64 YaRN cos/sin reference (mirrors imp's rope_yarn device helper +
+// rope_yarn_corr_dims). factor is the HF YaRN factor (32); the kernel applies 1/factor, so
+// inv_scaling=1/factor here too.
 double yarn_corr_dim(int n_dims, int n_ctx_orig, double n_rot, double base) {
     return n_dims * std::log(n_ctx_orig / (n_rot * 2.0 * M_PI)) / (2.0 * std::log(base));
 }
@@ -79,10 +68,8 @@ constexpr double BETA_FAST = 32.0;
 constexpr double BETA_SLOW = 1.0;
 constexpr int N_CTX_ORIG = 4096;
 
-// ---------------------------------------------------------------------------
-// 1. Reference vs committed golden: proves the in-test fp64 math equals the
-//    independent numpy generator (no magic constants — README §4 rule).
-// ---------------------------------------------------------------------------
+// Reference vs committed golden: proves the in-test fp64 math equals the independent numpy
+// generator (no magic constants, README SS4 rule).
 TEST(GptOssYarnRef, ReferenceMatchesGolden) {
     using namespace yarn_golden;
     ASSERT_EQ(kHeadDim, HD);
@@ -111,11 +98,8 @@ void ref_rotate(double q0, double q1, double cos_v, double sin_v, double& o0, do
     o1 = q0 * sin_v + q1 * cos_v;
 }
 
-// ---------------------------------------------------------------------------
-// 2. GPU kernel parity at long positions. We rotate a known Q/K vector at each
-//    golden position and compare against the fp64 reference applied to the
-//    f16-rounded inputs.
-// ---------------------------------------------------------------------------
+// GPU kernel parity at long positions: rotates a known Q/K vector at each golden position,
+// compared against the fp64 reference applied to the f16-rounded inputs.
 TEST(GptOssYarnRef, KernelMatchesReferenceLongSeq) {
     using namespace yarn_golden;
     const int n_heads = 1, n_kv_heads = 1, n_pairs = HD / 2;
@@ -168,16 +152,11 @@ TEST(GptOssYarnRef, KernelMatchesReferenceLongSeq) {
     CUDA_CHECK(cudaMemcpy(Ko.data(), dK, Ko.size() * sizeof(half), cudaMemcpyDeviceToHost));
     cudaFree(dQ); cudaFree(dK); cudaFree(dPos);
 
-    // fp64 reference from the f16-rounded inputs, interleaved pairs.
-    //
-    // Error metric: PER-PAIR vector error ||got-ref|| / max(floor, ||ref||).
-    // A RoPE pair is a 2D rotation; per-ELEMENT relative error explodes
-    // spuriously when the rotated vector has a near-zero component (a tiny
-    // phase error in the f32 __sinf/__cosf rotates a ~0 component to a
-    // small-but-not-tiny value → huge relative error on a physically correct
-    // rotation). The vector metric is rotation-magnitude-aware: it stays
-    // small for the correct rotation yet still explodes for the 1024×-wrong
-    // angle (which sends the vector to a completely different direction).
+    // fp64 reference from f16-rounded inputs, interleaved pairs. Error metric: PER-PAIR vector
+    // error ||got-ref||/max(floor,||ref||), not per-element - a RoPE pair is a 2D rotation, and
+    // per-element relative error explodes spuriously when a component is near-zero (a tiny phase
+    // error rotates it to a small-but-not-tiny value). The vector metric stays small for a
+    // correct rotation yet still explodes for the 1024x-wrong angle.
     double worst = 0.0, worst_long = 0.0;
     for (int t = 0; t < T; t++) {
         for (int p = 0; p < n_pairs; p++) {
@@ -201,19 +180,16 @@ TEST(GptOssYarnRef, KernelMatchesReferenceLongSeq) {
             }
         }
     }
-    // f16 tolerance class: inputs/outputs are f16; the device __cosf/__sinf
-    // argument reduction loses ~a few ULPs of phase at the largest angles
-    // (pos/32 ~4096 rad at pos=131071). Per-pair vector envelope 3e-2
-    // (ASSERTED) — measured ~1e-2 below pos 100k, ~2-3e-2 at 131071.
+    // f16 tolerance class: device __cosf/__sinf argument reduction loses a few ULPs of phase at
+    // the largest angles (pos/32~4096 rad at pos=131071). Per-pair vector envelope 3e-2 asserted;
+    // measured ~1e-2 below pos 100k, ~2-3e-2 at 131071.
     EXPECT_LT(worst, 3e-2) << "YaRN rope kernel vs fp64 ref per-pair vector rel err " << worst;
     printf("[yarn] kernel-vs-ref max per-pair vec rel = %.2e (all positions), %.2e (pos > %d)\n", worst,
            worst_long, N_CTX_ORIG);
 
-    // Sensitivity guard: if rope_freq_scale were inverted (scaling=1/factor
-    // passed in -> kernel applies 1/(1/factor)=factor), the interpolated dims
-    // would rotate factor^2=1024x too fast. Build that WRONG reference and
-    // confirm the kernel does NOT match it at a deep position — i.e. the test
-    // would catch the #547 inversion bug.
+    // Sensitivity guard: builds the WRONG reference an inverted rope_freq_scale would produce
+    // (factor^2=1024x too fast) and confirms the kernel does NOT match it at a deep position -
+    // proving the test would catch the #547 inversion bug.
     {
         int t_deep = -1;
         for (int t = 0; t < T; t++)

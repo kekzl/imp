@@ -1,30 +1,7 @@
-// Synthetic repro attempt for the gemv_nvfp4_kpar M>1 per-row-loop pathology
-// that corrupted Gemma-4-26B-A4B NVFP4 legacy-MoE prefill (memo
-// llm_compressor_phase2_item2_2026_04_26 + PR #65 fix).
-//
-// Bug context: src/exec/executor_forward_moe.cu had a manual M loop calling
-// gemv_nvfp4_kpar once per row for M>1 prefill on per-expert NVFP4 weights.
-// At Gemma-4 expert dims (N=704, K=2816 for gate/up; N=2816, K=704 for down),
-// this produced garbage output empirically while the dequant→cuBLAS path
-// (gemm_nvfp4) was correct on identical weights. Fix shipped: route M>1 to
-// gemm_nvfp4 in the legacy MoE branch.
-//
-// What this test pins down — NEGATIVE RESULT:
-//   The per-row gemv_kpar loop is mathematically equivalent to gemm_nvfp4 in
-//   isolation. Both Gemma-4 expert aspect ratios pass with max_abs_diff well
-//   below the 0.5 threshold. So the bug is NOT a defect of gemv_nvfp4_kpar
-//   itself at these shapes — it must come from something the synthetic case
-//   doesn't reproduce: launch-queue interaction at MoE scale (8 experts × 30
-//   layers × 3 projections × M kernels), PDL cross-contamination from
-//   neighboring MoE-routing kernels, or numerical edge cases triggered by
-//   real weight/activation distributions.
-//
-// Value: this test is a regression gate ensuring per-row gemv_kpar stays
-// numerically equivalent to the dequant fallback at the affected shapes —
-// any future "fix" that breaks the kernel in isolation will fail here. The
-// real bug remains open; restoring native NVFP4 GEMV for legacy MoE prefill
-// (avoiding the dequant→FP16 overhead) needs an end-to-end repro that does
-// capture the actual launch context.
+// Repro attempt for the Gemma-4-26B-A4B NVFP4 legacy-MoE prefill corruption (PR #65 routed
+// M>1 to gemm_nvfp4 in legacy MoE as the fix). NEGATIVE RESULT: gemv_nvfp4_kpar's per-row
+// loop IS mathematically equivalent to gemm_nvfp4 at these dims in isolation, so the real bug
+// needs launch-queue/PDL context this synthetic case can't reproduce; it stays open.
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"

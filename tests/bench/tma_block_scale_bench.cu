@@ -1,30 +1,7 @@
-// =============================================================================
-// tma_block_scale_bench.cu — Block-scale-aware TMA descriptor microbench (SM120)
-// =============================================================================
-//
-// Validates the NVFP4 small-M kernel spec's assumption:
-// "single TMA descriptor for data + scales is +10-20% faster than two separate
-//  descriptors".
-//
-// Both variants use REAL Hopper/Blackwell TMA via `cp.async.bulk.tensor.2d`
-// (driver API CUtensorMap descriptors built with cuTensorMapEncodeTiled, mirrors
-// the pattern in src/compute/gemm_cutlass_grouped_3x.cu / cute's make_tma_copy).
-//
-// Variant SEPARATE  : two CUtensorMap descriptors (FP4 data tile + UE4M3 scale
-//                     tile), two cp.async.bulk.tensor.2d issues per iter,
-//                     single mbarrier covering both transactions.
-// Variant FUSED     : one CUtensorMap descriptor over a packed contiguous gmem
-//                     tile (FP4 data + UE4M3 scales packed as a single 2-D
-//                     tile), one cp.async.bulk.tensor.2d issue per iter, single
-//                     mbarrier.
-//
-// This is the apples-to-apples version of the spec question. CUTLASS itself
-// always uses two TMA descriptors for NVFP4 (TMA_A + TMA_SFA in
-// sm120_blockscaled_mma_tma.hpp:298-311) — the "fused" path is hypothetical and
-// must be benched against real TMA, not against per-thread cp.async.cg.
-//
-// Hardware: RTX 5090 sm_120a, CUDA 13.2.1.
-// =============================================================================
+// Validates the NVFP4 small-M kernel spec assumption: one TMA descriptor for data+scales is
+// +10-20% faster than two separate descriptors (real TMA via cp.async.bulk.tensor.2d).
+// CUTLASS always uses two descriptors for NVFP4 (sm120_blockscaled_mma_tma.hpp:298-311);
+// the FUSED variant here is hypothetical and benched against real TMA, not per-thread cp.async.
 
 #include "bench/tma_block_scale_bench.h"
 #include <cuda.h>
@@ -33,10 +10,9 @@
 #include <cstdio>
 #include <cstring>
 
-// Resolve cuTensorMapEncodeTiled via cudaGetDriverEntryPointByVersion (runtime API,
-// no DT_NEEDED on libcuda.so.1) to keep test discovery working in CI builders
-// without GPU drivers installed. Same trick CUTLASS uses
-// (cutlass/cuda_host_adapter.hpp).
+// Resolves cuTensorMapEncodeTiled via cudaGetDriverEntryPointByVersion (no DT_NEEDED on
+// libcuda.so.1) so test discovery works in CI builders without GPU drivers. Same trick as
+// CUTLASS cuda_host_adapter.hpp.
 using PFN_cuTensorMapEncodeTiled_t = CUresult (*)(
     CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*, const cuuint64_t*,
     const cuuint64_t*, const cuuint32_t*, const cuuint32_t*,
@@ -45,17 +21,9 @@ using PFN_cuTensorMapEncodeTiled_t = CUresult (*)(
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Tile geometry. TMA on SM120 requires the innermost gmem stride to be a
-// multiple of 16 bytes, so all tiles use 128-byte rows.
-//
-//   FP4 data tile:    128 rows × 128 cols = 16 KiB  (16384 B FP4 nibble-packed)
-//   UE4M3 scale tile:  16 rows × 128 cols =  2 KiB  (2048 B UE4M3, realistic
-//                     ratio 1 SF per 16 FP4 elements ≈ 1/16th of data bytes,
-//                     rounded up to TMA-legal box geometry)
-//   Combined tile:    144 rows × 128 cols = 18 KiB  (data + scales packed
-//                     contiguously row-by-row; loaded by one TMA descriptor)
-// ---------------------------------------------------------------------------
+// TMA on SM120 needs the innermost gmem stride a multiple of 16B, so all tiles use 128-byte
+// rows. FP4 data 128x128=16KiB; UE4M3 scale 16x128=2KiB (1 SF per 16 FP4 elems); combined
+// 144x128=18KiB packed row-by-row for the single-descriptor variant.
 static constexpr int kRowBytes       = 128;     // bytes per row, all tiles
 static constexpr int kDataRows       = 128;
 static constexpr int kScaleRows      = 16;
@@ -125,11 +93,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d(
         : "memory");
 }
 
-// ---------------------------------------------------------------------------
-// Separate variant: two TMA descriptors (FP4 data + UE4M3 scales).
-// Each iteration issues two cp.async.bulk.tensor loads, a single mbarrier
-// covers both transactions.
-// ---------------------------------------------------------------------------
+// Separate variant: two TMA descriptors (FP4 data + UE4M3 scales), two
+// cp.async.bulk.tensor loads per iter, single mbarrier covers both.
 __global__ void __launch_bounds__(128) bench_separate(
     int iters,
     const __grid_constant__ CUtensorMap desc_data,
@@ -174,10 +139,8 @@ __global__ void __launch_bounds__(128) bench_separate(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fused variant: ONE TMA descriptor over a packed combined gmem tile (FP4 +
-// UE4M3 packed contiguously). Single cp.async.bulk.tensor issue per iter.
-// ---------------------------------------------------------------------------
+// Fused variant: ONE TMA descriptor over a packed combined tile (FP4+UE4M3 contiguous),
+// single cp.async.bulk.tensor issue per iter.
 __global__ void __launch_bounds__(128) bench_fused(
     int iters,
     const __grid_constant__ CUtensorMap desc_combined,
@@ -223,11 +186,8 @@ __global__ void __launch_bounds__(128) bench_fused(
 // Host-side helpers
 // ---------------------------------------------------------------------------
 static bool make_tma_2d_u8(CUtensorMap* desc, void* gmem, int rows, int cols, int row_stride_bytes) {
-    // Build a 2-D TMA descriptor over a uint8 buffer:
-    //   gmem shape:     [cols, rows]    (innermost = cols)
-    //   gmem stride[0]: implicit 1 byte
-    //   gmem stride[1]: row_stride_bytes
-    //   smem box:       [cols, rows]
+    // 2-D TMA descriptor over a uint8 buffer: gmem shape [cols,rows] (innermost=cols), stride[0]
+    // implicit 1 byte, stride[1]=row_stride_bytes, smem box [cols,rows].
     cuuint64_t gmem_shape[2]  = { static_cast<cuuint64_t>(cols),
                                    static_cast<cuuint64_t>(rows) };
     // cuTensorMapEncodeTiled stride array starts at element [1]; dim0 is implicit 1.

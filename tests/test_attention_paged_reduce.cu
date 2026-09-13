@@ -1,35 +1,8 @@
-// Split-K reduce (paged_attention_reduce_kernel) — numeric oracle + a
-// path-equivalence test for the shared-memory staging.
-//
-// The kernel merges the per-split (m, l, O_unnormalised-at-m) partials that
-// every split-K paged decode kernel writes. It is 8.2 % of the decode step at
-// 8k context on Qwen3-Coder-30B-A3B (48 layers x 5.3 us), and it had no direct
-// numeric test: the paged oracle covers the attention kernels, not the merge.
-//
-// Two things are checked, for two different reasons:
-//
-//  1. CORRECTNESS vs an independent fp64 reference computed on the host from
-//     the same partials, over num_splits ∈ {1, 4, 40, 85} (85 is what the GQA
-//     path actually launches at 4 KV heads). The reference is rounded to f16
-//     before comparing, because that is the precision the kernel stores at; the
-//     residual is f32-vs-f64 accumulation over num_splits terms. Tolerance is
-//     stated and justified at the assert.
-//
-//  2. PATH EQUIVALENCE, which is the actual claim behind the staging change.
-//     The kernel stages the (m, l) pairs into shared memory when
-//     num_splits <= 256 and reduces them in the SAME serial order; above that
-//     it reads them straight from global. Both paths must produce BIT-IDENTICAL
-//     output, otherwise "only the memory latency is parallel" is false.
-//     Getting both paths onto the same data is possible because an empty split
-//     is exactly neutral: the kernels write m = -FLT_MAX, l = 0 for a split
-//     with no work, expf(-FLT_MAX - gmax) is 0, and adding 0 changes neither
-//     the denominator nor the numerator. So the same 64 real splits are run
-//     once at num_splits=64 (staged) and once padded to 300 (unstaged), and the
-//     outputs are compared as raw bits.
-//
-// Data is the repo's heavy-tailed LCG regime (tests/refs/README.md §3), not
-// sin/cos: a benign fill hides ordering effects behind values that are all the
-// same magnitude, which is exactly what this test is looking for.
+// Split-K reduce (paged_attention_reduce_kernel) merges per-split (m,l,O_unnorm) partials;
+// 8.2% of the decode step at 8k ctx on Qwen3-Coder-30B-A3B, previously untested directly.
+// Checks: (1) correctness vs an fp64 host ref over num_splits {1,4,40,85} (85=GQA @4 KV
+// heads); (2) staged (<=256 splits) vs unstaged paths must be BIT-IDENTICAL (empty-split
+// sentinel m=-FLT_MAX,l=0 is exactly neutral, so both reduce the same real splits).
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -156,30 +129,16 @@ TEST(PagedAttentionReduce, MatchesFp64Reference) {
             const double denom = std::max(1e-3, std::fabs(static_cast<double>(w)));
             worst = std::max(worst, std::fabs(g - w) / denom);
         }
-        // 2e-2: f16 storage is ~5e-4 relative, but the merge accumulates
-        // num_splits products in f32 against an f64 reference, and the LCG data
-        // is heavy-tailed on purpose so cancellation is real. Measured worst
-        // case over these shapes was well inside this; it is a ceiling, not a
-        // fit.
+        // 2e-2: f16 storage is ~5e-4 relative, but merging num_splits products in f32 against an
+        // f64 ref hits real cancellation on heavy-tailed LCG data. Ceiling, not a tight fit.
         EXPECT_LT(worst, 2e-2) << "splits=" << num_splits;
     }
 }
 
-// The staging claim: staged and unstaged paths must agree BIT-EXACTLY.
-// num_splits <= 256 stages into shared memory; 300 does not. Padding with the
-// empty-split sentinel is exactly neutral, so both runs merge the same 64 real
-// splits and any difference is the staging changing arithmetic.
-// The output is f16, so a few f32 ulp between the two paths get swallowed by the
-// 10-bit mantissa. Mutation-validated, both directions:
-//   * reversing the accumulation order in the staged path only -> CAUGHT
-//     (seed 7, element 4753). That is the property this test exists for.
-//   * swapping expf for __expf in the staged path -> SURVIVES, across all 49152
-//     elements below. Not a hole in the test: at these magnitudes the ~1 vs ~2
-//     ulp difference never reaches the f16 mantissa, so on this output type the
-//     two are equivalent. Do not "fix" the test for it; it would only be
-//     measurable if the kernel started storing f32.
-// The sweep is what gives the order check its resolution: each element is an
-// independent chance to land near an f16 rounding boundary.
+// Staged (<=256 splits) vs unstaged (300) paths must agree BIT-EXACTLY; the empty-split
+// sentinel makes padding neutral so both merge the same 64 real splits.
+// Mutation-validated: reversing staged accumulation order -> CAUGHT (seed 7, elem 4753);
+// expf -> __expf in the staged path -> SURVIVES (below f16 mantissa) - not a test hole.
 TEST(PagedAttentionReduce, StagedAndUnstagedPathsAreBitIdentical) {
     SKIP_IF_NO_CUDA();
     constexpr int kHeads = 64, kHeadDim = 128, kReal = 64;

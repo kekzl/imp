@@ -266,11 +266,9 @@ TEST(ChatTemplateInitTest, ChatMLSuccess) {
 }
 
 TEST(ChatTemplateInitTest, ToolXmlDialectDetected) {
-    // Qwen-Coder / Qwen3.6 templates teach <function=NAME>/<parameter=KEY>
-    // tool bodies — the XML grammar must be selected for enforcement there,
-    // and ONLY there. Detection is a probe RENDER with a dummy tool: the
-    // rendered prompt must actually teach the dialect (a template that merely
-    // mentions the markers in a comment must not arm the XML grammar).
+    // Qwen-Coder/Qwen3.6 templates teach <function=NAME>/<parameter=KEY> tool bodies; the XML
+    // grammar must arm ONLY there. Detection is a probe RENDER with a dummy tool: a template
+    // that merely mentions the markers in a comment must not arm the grammar.
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate xml_tpl;
     EXPECT_TRUE(xml_tpl.init(
@@ -399,12 +397,10 @@ TEST(ChatTemplateApplyTest, ChatMLBasicStructure) {
     EXPECT_GT(last_im_start, 0);
 }
 
-// Author-driven flag: when tokenizer ships use_default_system_prompt=false,
-// apply() must inject an empty system message before the user message so that
-// any chat template (Jinja or hardcoded) which has a "no system → default
-// system" branch instead sees an explicit system slot. Mistral-Small-3.2's
-// chat_template.jinja line 158 otherwise injects a 600-token default that
-// triggers the model's long-context regression.
+// tokenizer use_default_system_prompt=false: apply() must inject an empty system message so
+// a template's "no system -> default system" branch sees an explicit slot instead. Otherwise
+// Mistral-Small-3.2's chat_template.jinja:158 injects a 600-token default triggering the
+// model's long-context regression.
 TEST(ChatTemplateApplyTest, UseDefaultSystemPromptFalseInjectsSystem) {
     Tokenizer tok = make_chat_tokenizer();
     tok.set_use_default_system_prompt(false);
@@ -741,13 +737,9 @@ TEST(ChatTemplateVisionTest, GemmaImageTokens) {
     EXPECT_GT(eoi_pos, boi_pos);
 }
 
-// A system message must not cost the image its tokens (#1246).
-//
-// The block used to be keyed on "message index 0 is a user message", so any
-// request that opened with a system prompt — the normal shape for a pipeline —
-// silently produced a text-only prompt. The picture was still decoded and
-// encoded, and the model answered fluently that it could not see an image, which
-// is the hardest kind of failure to attribute.
+// A system message must not cost the image its tokens (#1246): the block was keyed on
+// "message index 0 is a user message", so a request opening with a system prompt silently
+// produced a text-only prompt while the model answered fluently that it saw no image.
 TEST(ChatTemplateVisionTest, SystemMessageDoesNotDropTheImage) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
@@ -962,11 +954,10 @@ TEST_F(HFChatTemplateTest, MissingField) {
 }
 
 
-// A tool's `parameters` schema comes off the request body, and a JSON number
-// between INT64_MAX and UINT64_MAX reaches the template renderer as an integer
-// string: nlohmann keeps 9223372036854775808 verbatim and only normalises past
-// ~1e19. std::stoll threw std::out_of_range on it, in a file with no other
-// catch, and the request answered 500. Same class as the GBNF bound (#1972).
+// A tool parameters JSON number between INT64_MAX and UINT64_MAX reaches the template
+// renderer as an integer string (nlohmann keeps values like 9223372036854775808 verbatim);
+// std::stoll threw std::out_of_range with no catch, answering 500. Same class as the GBNF
+// bound (#1972).
 TEST(ChatTemplateTools, AToolParameterPastInt64MaxRendersInsteadOfThrowing) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;

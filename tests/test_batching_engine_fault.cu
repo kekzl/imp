@@ -1,12 +1,8 @@
-// AUDIT_arch_2026 D-1: a device fault inside a step must reach the server as
-// a host signal. The in-flight request finishes "internal_error" (the handler
-// maps it to 500), faulted() flips so /health reports engine_faulted, and a
-// later submit is refused at once instead of parking on a queue nobody drains.
-//
-// Death test in threadsafe style: the child is a fresh process with its own
-// CUDA context, and the poisoned context dies with it. Requires a real model
-// on disk: IMP_TEST_MODEL or the default /models/Qwen3-8B-Q8_0.gguf, matching
-// test_engine_relaunch.cpp.
+// AUDIT_arch_2026 D-1: a device fault inside a step must reach the server as a host signal:
+// request finishes internal_error (500), faulted() flips /health to engine_faulted, later
+// submits refuse immediately instead of parking on an undrained queue.
+// Death test: child is a fresh process with its own CUDA context, so the poisoned context
+// dies with it. Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-Q8_0.gguf.
 #include <gtest/gtest.h>
 #include "imp/imp.h"
 #include "api/imp_internal.h"

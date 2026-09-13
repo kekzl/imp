@@ -1,8 +1,7 @@
-// gemm_f16_narrow_smallm: the one-launch alpha/beta projection of batched GDN
-// decode. Checks against a double CPU reference at the Qwen3.8-27B shape
-// (K = 5120, N = 48 per pair) for M = 1, 5, 16, 17, 32, the single-pair form,
-// bitwise determinism across launches (split-K reduce in fixed order), and
-// that unsupported shapes are refused rather than computed wrong.
+// gemm_f16_narrow_smallm: one-launch alpha/beta projection of batched GDN decode. Checks
+// vs a double CPU reference at the Qwen3.8-27B shape (K=5120, N=48/pair) for M=1,5,16,17,32,
+// the single-pair form, bitwise determinism (fixed-order split-K reduce), and that
+// unsupported shapes are refused rather than computed wrong.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -181,10 +180,9 @@ TEST(GemmF16NarrowSmallM, RefusesUnsupportedShapes) {
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 }
 
-// Informational: per-launch wall inside a replayed CUDA graph (the regime the
-// kernel runs in: batched-decode graphs), narrow kernel vs the two cuBLAS
-// gemm() calls it replaces. No threshold (timing anchors flake in the full
-// suite); read the numbers. WSL2 host launch cost would dominate an eager loop.
+// Informational: per-launch wall time inside a replayed CUDA graph (the kernel's actual
+// regime) vs the two cuBLAS gemm() calls it replaces. No threshold (timing anchors flake in
+// the full suite); WSL2 host launch cost would dominate an eager loop.
 TEST(GemmF16NarrowSmallM, BenchQwen38Shape) {
     Case c(32, 48, 48, 5120, 11u);
     cudaStream_t s;

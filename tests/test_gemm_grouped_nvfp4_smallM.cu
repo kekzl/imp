@@ -1,12 +1,5 @@
-// tests/test_gemm_grouped_nvfp4_smallM.cu
-//
-// This file used to carry a note explaining why the CuTe TMA descriptor
-// builders (build_tma_a/b/sfa/sfb) had no test — "exercised indirectly by the
-// kernel-level tests in later tasks". They were not: nothing called them, and
-// the note in their own source claimed the opposite, that the *test* file
-// referenced them. Two comments citing each other, neither true. Removed with
-// the builders themselves; the production launcher uses build_tma_2d_u8 via
-// the driver API and is covered here.
+// Production launcher uses build_tma_2d_u8 via the driver API, covered here (the unused
+// CuTe TMA descriptor builders build_tma_a/b/sfa/sfb were removed, not tested).
 #include <gtest/gtest.h>
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
@@ -130,14 +123,8 @@ TEST(SmallMScheduler, WorkQueueOrderedByTileSize) {
     for (auto& wi : q) EXPECT_NE(wi.expert_id, 3);
 }
 
-// ---------------------------------------------------------------------------
-// Helper: run a single-expert smallM GEMM and validate correctness.
-//
-// Builds random FP16 A[M,K] and B[N,K], quantizes both to NVFP4, runs the
-// smallM kernel, and checks the output against a dequantized FP32 reference.
-// The acceptance criterion is: kernel output vs. post-quantize ideal (CTRL)
-// has a relative RMSE below `ctrl_rmse_tol`.
-// ---------------------------------------------------------------------------
+// Single-expert smallM GEMM: random FP16 A[M,K]/B[N,K] quantized to NVFP4, kernel output
+// checked against a dequantized FP32 reference (CTRL) at relative RMSE < ctrl_rmse_tol.
 static void run_smallm_single_expert(int M, int N, int K,
                                      double ctrl_rmse_tol = 1e-2) {
     // ----- Build FP16 weights B[N, K] and quantize via reference quantize_fp16_to_nvfp4
@@ -204,10 +191,8 @@ static void run_smallm_single_expert(int M, int N, int K,
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    // ----- Reference: FP32 matmul on the dequantized FP16 inputs.
-    //   ref[m, n] = sum_k A_fp16[m, k] * B_fp16[n, k]
-    // (This is the high-precision reference. The kernel's NVFP4 output is
-    // expected to deviate from this by the FP4 quantization noise floor.)
+    // High-precision reference: ref[m,n] = sum_k A_fp16[m,k]*B_fp16[n,k] on dequantized FP16
+    // inputs; the kernel's NVFP4 output is expected to deviate by the FP4 quant noise floor.
     std::vector<float> ref((size_t)M * N, 0.f);
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
@@ -220,10 +205,9 @@ static void run_smallm_single_expert(int M, int N, int K,
         }
     }
 
-    // ----- Control reference: dequantize NVFP4 A and B back to FP16, then
-    // matmul. This is the "ideal" output the kernel SHOULD produce (modulo
-    // FP16 vs FP32 accumulation differences). Comparing kernel-output to
-    // this `ctrl` isolates kernel correctness from quantization noise.
+    // Control reference: dequantize NVFP4 A/B back to FP16, then matmul - the "ideal" output the
+    // kernel should produce (modulo FP16 vs FP32 accumulation). Comparing to this isolates
+    // kernel correctness from quantization noise.
     std::vector<__half> h_A_dq((size_t)M * K), h_B_dq((size_t)N * K);
     {
         // Dequantize A (per moe_native): each row m, micro-block kb has
@@ -297,11 +281,9 @@ static void run_smallm_single_expert(int M, int N, int K,
     std::vector<__half> got((size_t)M * N);
     cudaMemcpy(got.data(), d_D, (size_t)M * N * sizeof(__half), cudaMemcpyDeviceToHost);
 
-    // ----- Tolerance: NVFP4 noise floor — accept 5% relative max error.
-    // We measure relative error against a noise floor scaled to the typical
-    // magnitude of the result (fixed denominator `eps * max|ref|`), which
-    // is the standard NVFP4 reference-comparison metric. A naive
-    // |g-r|/max(|r|,small) blows up at near-zero ref cells.
+    // NVFP4 noise floor: 5% relative max error, measured against eps*max|ref| (not
+    // |g-r|/max(|r|,small), which blows up at near-zero ref cells) - the standard NVFP4
+    // reference-comparison metric.
     float max_abs_ref = 0.f;
     for (int i = 0; i < M * N; ++i) max_abs_ref = std::max(max_abs_ref, std::fabs(ref[i]));
     const float floor_v = std::max(max_abs_ref * 1e-2f, 1e-3f);
@@ -333,10 +315,9 @@ static void run_smallm_single_expert(int M, int N, int K,
     }
     double rmse_rel_ctrl = std::sqrt(sum_sq_err_ctrl / std::max(sum_sq_ctrl, 1e-12));
 
-    // Acceptance criterion: kernel output must match the post-quantize ideal
-    // (CTRL) to within ctrl_rmse_tol relative RMSE. CTRL itself differs from
-    // the FP32 reference by ~10-15% RMSE (NVFP4 noise floor), which is
-    // fundamental to 4-bit quantization and not a kernel correctness issue.
+    // Acceptance: kernel output must match the post-quantize ideal (CTRL) within ctrl_rmse_tol
+    // relative RMSE. CTRL itself differs from the FP32 reference by ~10-15% RMSE (the NVFP4
+    // noise floor, inherent to 4-bit quantization, not a kernel bug).
     EXPECT_LT(rmse_rel_ctrl, ctrl_rmse_tol)
         << "kernel vs post-quantize ideal:"
         << " rmse_rel_ctrl=" << rmse_rel_ctrl
@@ -353,22 +334,16 @@ static void run_smallm_single_expert(int M, int N, int K,
     imp::free_nvfp4_result(B_q);
 }
 
-// ---------------------------------------------------------------------------
-// First end-to-end smallM kernel correctness test (Task 1.7).
-// Single expert, M=N=K=128, single CTA per (expert, n_tile).  Produces FP16
-// output that must match an FP32 host matmul of the original (pre-quant) FP16
-// inputs to within 5% relative error (NVFP4 noise floor).
-// ---------------------------------------------------------------------------
+// First end-to-end smallM kernel test (Task 1.7): single expert, M=N=K=128, single CTA per
+// (expert, n_tile). FP16 output must match an FP32 host matmul of the original FP16 inputs
+// within 5% relative error (NVFP4 noise floor).
 TEST(SmallMKernel, SingleExpert128x128x128) {
     if (!has_sm120()) GTEST_SKIP() << "SM120 required";
     run_smallm_single_expert(/*M=*/128, /*N=*/128, /*K=*/128);
 }
 
-// ---------------------------------------------------------------------------
-// Small-TILE_M correctness (Tasks 2.1-2.3).
-// Each test exercises a distinct kernel instantiation by choosing M_e to
-// land in the corresponding pick_m_tile bucket.
-// ---------------------------------------------------------------------------
+// Small-TILE_M correctness (Tasks 2.1-2.3): each test picks M_e to land in a distinct
+// pick_m_tile bucket, exercising that kernel instantiation.
 TEST(SmallMKernel, SingleExpertM16) {
     if (!has_sm120()) GTEST_SKIP() << "SM120 required";
     // M=12 → pick_m_tile = 16.
@@ -393,11 +368,8 @@ TEST(SmallMKernel, M16BucketK256Mod) {
     run_smallm_single_expert(/*M=*/8, /*N=*/128, /*K=*/2048, /*ctrl_rmse_tol=*/5e-2);
 }
 
-// ---------------------------------------------------------------------------
-// K-tile loop test (Task 1.8).
-// Single expert, M=N=128, K=2048 (Qwen3-Coder-30B-A3B hidden_dim).
-// Exercises 16 K-tile iterations of the outer loop added in T1.8.
-// ---------------------------------------------------------------------------
+// K-tile loop (Task 1.8): single expert, M=N=128, K=2048 (Qwen3-Coder-30B-A3B hidden_dim),
+// exercising 16 K-tile iterations of the T1.8 outer loop.
 TEST(SmallMKernel, SingleExpertK2048) {
     if (!has_sm120()) GTEST_SKIP() << "SM120 required";
     // Allow slightly looser tolerance than K=128: longer K-reduction chain
@@ -406,13 +378,9 @@ TEST(SmallMKernel, SingleExpertK2048) {
     run_smallm_single_expert(/*M=*/128, /*N=*/128, /*K=*/2048, /*ctrl_rmse_tol=*/5e-2);
 }
 
-// ---------------------------------------------------------------------------
-// Multi-expert test (Task 1.9).
-// 4 experts with varying M_e: {128, 128, 64, 32}, N=256, K=512.
-// All M_e ≤ 128 (Phase A constraint). Smaller experts (M_e=64, 32) round up
-// to TILE_M=128 internally — padding rows do useless compute but the actual
-// M_e output rows must be numerically correct.
-// ---------------------------------------------------------------------------
+// Multi-expert (Task 1.9): 4 experts, M_e={128,128,64,32}, N=256, K=512, all M_e<=128
+// (Phase A constraint). Smaller experts round up to TILE_M=128 (padding rows do useless
+// compute) but the actual M_e output rows must be numerically correct.
 TEST(SmallMKernel, FourExpertsVaryingM) {
     if (!has_sm120()) GTEST_SKIP() << "SM120 required";
 
@@ -629,12 +597,9 @@ TEST(SmallMKernel, FourExpertsVaryingM) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostic cross-check: run the production HW MMA kernel and the software
-// reference kernel on the SAME quantized inputs, then compare element-wise.
-// Compiled only with SMALLM_SOFTWARE_REF — not part of the default suite,
-// purely a debug guard for the layout-mapping work in T1.7b.
-// ---------------------------------------------------------------------------
+// Diagnostic cross-check: HW MMA kernel vs the software reference kernel on the SAME
+// quantized inputs, element-wise. Compiled only with SMALLM_SOFTWARE_REF, not in the
+// default suite - a debug guard for the T1.7b layout-mapping work.
 #ifdef SMALLM_SOFTWARE_REF
 TEST(SmallMKernel, HwMatchesSoftwareReference) {
     if (!has_sm120()) GTEST_SKIP() << "SM120 required";

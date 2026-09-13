@@ -1,20 +1,8 @@
-// Tokenizer robustness / round-trip tests — TEST_AUDIT (retired) Phase 2, risk #10.
-//
-// The #510 class (NUL string terminators leaking into SSE deltas) lived in the
-// special-token / byte rendering paths. These tests pin the contract that
-// matters there: for a byte-level (GPT2) tokenizer, encode∘decode is the
-// IDENTITY on arbitrary byte content — including embedded NUL, lone surrogate
-// bytes (invalid UTF-8), 2/3/4-byte UTF-8, emoji + ZWJ, and long runs — and
-// that boundary token ids (negative, 0, vocab_size, vocab_size-1) decode to ""
-// without faulting.
-//
-// Why GPT2 for the identity assertions: byte-level BPE has a total byte→token
-// mapping (every one of 256 bytes is a token), so the round-trip is exact by
-// construction. SPM with a tiny synthetic vocab only round-trips via byte
-// fallback and applies documented normalization (▁→space), so for SPM we assert
-// the WEAKER, documented contract (no crash + non-empty decode), matching the
-// existing suite's stance. Special-token-as-text behavior is asserted as the
-// actual contract (CONTROL pre-split), not a wished-for one.
+// Tokenizer robustness/round-trip (TEST_AUDIT retired Phase 2, risk #10): the #510 NUL-leak
+// class lived in special-token/byte-rendering paths. For byte-level GPT2, encode.decode is
+// the IDENTITY on arbitrary bytes (NUL, invalid UTF-8, multi-byte, emoji+ZWJ) since every
+// byte is a token by construction; SPM with a tiny vocab only round-trips via byte fallback,
+// so it gets the weaker documented contract (no crash + non-empty decode).
 
 #include "model/tokenizer.h"
 #include <gtest/gtest.h>
@@ -29,11 +17,9 @@
 namespace imp {
 namespace {
 
-// ---- Full byte-level GPT2 fixture (256 byte tokens, no merges) ----
-//
-// With every byte mapped to its own token and no merge rules, encode produces
-// one token per byte and decode reverses it exactly. This makes the round-trip
-// the cleanest possible identity oracle for "any bytes in → same bytes out".
+// Full byte-level GPT2 fixture (256 byte tokens, no merges): one token per byte with no
+// merge rules makes encode/decode the cleanest possible identity oracle for any-bytes-in
+// same-bytes-out.
 
 static std::string codepoint_to_utf8(uint32_t cp) {
     std::string s;
@@ -159,10 +145,9 @@ TEST(TokenizerRobustness, RoundtripAllNULRun) {
 }
 
 TEST(TokenizerRobustness, RoundtripLoneSurrogateBytes) {
-    // Invalid UTF-8: bytes 0xED 0xA0 0x80 are the encoding of a lone high
-    // surrogate (U+D800), which is NOT valid UTF-8. A byte-level tokenizer has
-    // no notion of validity — it must pass the raw bytes through unchanged and
-    // not crash on the malformed sequence. Defined behavior = identity.
+    // 0xED 0xA0 0x80 encodes a lone high surrogate (U+D800), not valid UTF-8. A byte-level
+    // tokenizer has no notion of validity: it must pass raw bytes through unchanged without
+    // crashing. Defined behavior = identity.
     Tokenizer tok = make_byte_gpt2_tokenizer();
     std::string s("x\xed\xa0\x80y", 5);
     auto ids = tok.encode(s);
@@ -232,16 +217,13 @@ TEST(TokenizerRobustness, DecodeMixedValidInvalidIds) {
     EXPECT_EQ(back, "ABA");
 }
 
-// ---- Special-token strings as TEXT input (contract pinning) ----
-//
-// These pin the ACTUAL behavior (audit §4: characterize, don't wish). The
-// contract differs by whether token_types_ marks a literal as CONTROL.
+// Special-token-as-text contract pins ACTUAL behavior (characterize, don't wish): whether a
+// literal is promoted to a control token depends on token_types_ marking it CONTROL.
 
 TEST(TokenizerRobustness, LiteralMarkerWithoutControlIsPlainText) {
-    // No token_types loaded → special_pieces_ is empty → no pre-split. A
-    // literal "<think>" typed by a user is encoded as ordinary bytes and
-    // round-trips as text. CONTRACT: without CONTROL metadata, markers are
-    // NOT promoted to control tokens.
+    // No token_types loaded -> special_pieces_ empty -> no pre-split. A literal "<think>" typed
+    // by a user encodes as ordinary bytes and round-trips as text: without CONTROL metadata,
+    // markers are NOT promoted to control tokens.
     Tokenizer tok = make_byte_gpt2_tokenizer();
     EXPECT_FALSE(tok.has_token_types());
     std::string s = "say <think> literally";
@@ -251,11 +233,9 @@ TEST(TokenizerRobustness, LiteralMarkerWithoutControlIsPlainText) {
 }
 
 TEST(TokenizerRobustness, LiteralMarkerWithControlIsPreSplit) {
-    // When "<think>" exists in the vocab AND is tagged CONTROL, the encoder
-    // pre-splits on it and emits its single control-token id for the literal
-    // substring. CONTRACT: this IS the documented behavior — a user who types
-    // the literal marker gets the control token. (Whether that is desirable is
-    // a policy question above the tokenizer; we pin the mechanism.)
+    // When "<think>" is in the vocab AND tagged CONTROL, the encoder pre-splits on it and emits
+    // the single control-token id for the literal substring - documented mechanism, whether
+    // desirable is a policy question above the tokenizer.
     std::vector<std::string> tokens;
     std::vector<float> scores;
     tokens.push_back("<unk>");
@@ -297,11 +277,9 @@ TEST(TokenizerRobustness, LiteralMarkerWithControlIsPreSplit) {
 // ---- SPM weaker contract (documented normalization, no crash) ----
 
 TEST(TokenizerRobustness, SpmByteFallbackNoCrashOnArbitraryBytes) {
-    // SPM with a byte-fallback vocab: arbitrary bytes (incl. NUL and invalid
-    // UTF-8) must encode without crashing. We assert the documented weaker
-    // contract: round-trip reproduces the original bytes via byte fallback
-    // (SPM applies ▁→space normalization only to the space marker, absent here
-    // because add_space_prefix is off and the input has no ▁).
+    // SPM with a byte-fallback vocab: arbitrary bytes (incl. NUL, invalid UTF-8) must encode
+    // without crashing. Weaker documented contract: round-trip reproduces bytes via byte
+    // fallback (no-U+2581 normalization applies here since add_space_prefix is off).
     std::vector<std::string> tokens = {"<unk>", "<s>", "</s>"};
     std::vector<float> scores = {0.0f, 0.0f, 0.0f};
     int byte_base = static_cast<int>(tokens.size());
@@ -325,13 +303,10 @@ TEST(TokenizerRobustness, SpmByteFallbackNoCrashOnArbitraryBytes) {
     EXPECT_EQ(back, s) << "SPM byte fallback must reconstruct raw bytes";
 }
 
-// ---- #1606: tokenizer.json ids are bounded on the load path ----
-//
-// Ids arrive as JSON doubles, are narrowed to int, and index vocab_/scores_/
-// token_types_/added_token_ids_ directly. `max_id` only ever grew from 0, so a
-// negative id never widened the vector and the write landed at size_t(-1) - a
-// heap write during load, before any inference. The decode side of the same
-// file has always range-checked; the load side did not.
+// #1606: ids arrive as JSON doubles narrowed to int and index vocab_/scores_/token_types_/
+// added_token_ids_ directly; max_id only ever grew from 0, so a negative id never widened the
+// vector and the write landed at size_t(-1) - a heap write during load. Decode always
+// range-checked; load did not.
 
 static std::string write_temp_tokenizer_json(const std::string& body) {
     char tmpl[] = "/tmp/imp_test_tok_XXXXXX";
@@ -363,11 +338,10 @@ TEST(TokenizerJsonHostileIds, NegativeVocabIdIsDroppedNotWritten) {
     std::remove(path.c_str());
 
     EXPECT_TRUE(ok);
-    // The drop has to be reported. Without the bound check the entry is not
-    // dropped at all - it is written at vocab_.data()[-1] and this line is
-    // absent, which is what makes this assertion the detector outside ASan.
-    // find_token("a") cannot tell the two apart: the corrupt path stores -1 in
-    // token_to_id_, which reads back exactly like "not found".
+    // The drop must be reported: without the bound check the entry is written at
+    // vocab_.data()[-1] and this log line is absent, which is the only detector outside ASan
+    // (find_token("a") can't distinguish it from "not found" since the corrupt path also
+    // stores -1 in token_to_id_).
     EXPECT_NE(captured.find("out-of-range id"), std::string::npos) << captured;
     // Only b(0) and c(1) survive; the vector is sized for those two.
     EXPECT_EQ(tok.vocab_size(), 2);
@@ -393,10 +367,9 @@ TEST(TokenizerJsonHostileIds, HugeVocabIdDoesNotSizeTheVocabulary) {
 }
 
 TEST(TokenizerJsonHostileIds, NegativeAddedTokenIdIsDropped) {
-    // The added_tokens path has its own copy of the same narrowing, and its
-    // "ensure vectors are large enough" guard is a >= test that a negative id
-    // passes without resizing. added_token_ids_[id] = true is a vector<bool>
-    // proxy write at a negative bit index.
+    // The added_tokens path has its own copy of the same narrowing: its "ensure vectors are
+    // large enough" guard is a >= test a negative id passes without resizing, so
+    // added_token_ids_[id]=true becomes a vector<bool> proxy write at a negative bit index.
     const std::string body = R"({"model":{"type":"BPE","vocab":{"a":0},"merges":[]},)"
                              R"("added_tokens":[{"id":-5,"content":"<bad>","special":1},)"
                              R"({"id":1,"content":"<good>","special":1}]})";

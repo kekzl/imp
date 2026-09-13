@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Engine integration tests for KV block pre-allocation, async graph loop,
-# and multi-turn chat.
-#
+# Engine integration tests: KV block pre-allocation, async graph loop, multi-turn chat.
 # Usage: ./tests/test_engine_chat.sh [build_dir]
-#
-# MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT (retired) §7).
-# Run by hand before releases or after engine/KV/graph changes.
+# MANUAL tool, not wired into ctest/CI/verify.sh - run by hand before releases or after
+# engine/KV/graph changes.
 
 set -eo pipefail
 
@@ -29,10 +26,9 @@ fail() { FAIL=$((FAIL+1)); echo -e "  ${RED}FAIL${NC}  $1 — $2"; }
 skip() { SKIP=$((SKIP+1)); echo -e "  ${YELLOW}SKIP${NC}  $1 — $2"; }
 
 has_model() { [ -e "$1" ]; }
-# Herestrings, not `echo "$OUT" | grep -q`: grep -q leaves at the first match and
-# closes the pipe, echo dies of EPIPE, and `set -o pipefail` makes the pipeline
-# non-zero although grep MATCHED. $OUT is a whole engine run, far past a single
-# write. Here that reads as "no crash" on a run that DID crash.
+# Herestrings, not `echo | grep -q`: grep -q closes the pipe early causing EPIPE, and
+# pipefail then marks a matching run as failed. $OUT is a whole engine run, so this would
+# read "no crash" on a run that DID crash.
 has_crash() { grep -qi "segmentation fault\|SIGSEGV\|core dumped\|SIGABRT\|Aborted" <<< "$OUT"; }
 has_text()  { grep -qi "$1" <<< "$OUT"; }
 has_exact() { grep -q "$1" <<< "$OUT"; }

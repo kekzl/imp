@@ -1,16 +1,6 @@
-// =============================================================================
-// test_nvfp4_smallm.cu — the small-M NVFP4 GEMM: correctness and bandwidth
-// =============================================================================
-//
-// Correctness: y[m,n] must match a straightforward per-element dequant
-// reference (same W4A16 numerics family as the M=1 decode GEMVs). Bandwidth:
-// on the batched-decode shape (M=32, N=5120, K=5120) the kernel exists to
-// beat the CUTLASS 128x128 tile's measured 41.4 us / 19% of the weight floor
-// (docs/plans/2026-08-24-qwen38-port.md); the test asserts it stays above
-// 40% of the floor so a regression that re-introduces starvation fails loud.
-//
-// GPU required — skips cleanly without one.
-// =============================================================================
+// Small-M NVFP4 GEMM: correctness vs per-element dequant reference (W4A16 family, same as
+// M=1 decode GEMVs); bandwidth must beat CUTLASS's measured 41.4us/19% of weight floor at
+// M=32,N=5120,K=5120 (docs/plans/2026-08-24-qwen38-port.md), asserted above 40% of floor.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -141,27 +131,20 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
     }
     cudaFree(d_w);
 
-    // The read is bimodal in the ADDRESSES cudaMalloc hands out: the x tile
-    // and the once-only weight stream can land on the same L2 sets, and then
-    // the same kernel reads 250-310 GB/s instead of 580-615 (both measured
-    // 2026-08-31 in consecutive fresh processes, warm clocks, persisting
-    // window on). That is a placement artifact, not the kernel, so the gate
-    // measures up to three placements (fresh buffers each) and judges the
-    // best one - the same "defeat the artifact, keep the bar" rule the
-    // benchmark-cuda skill applies to L2-served isolated benches.
+    // Bimodal read speed from cudaMalloc address placement: x tile and weight stream can land
+    // on the same L2 sets, dropping 580-615 GB/s to 250-310 GB/s (a placement artifact, not the
+    // kernel). Gate measures up to three placements and judges the best, per benchmark-cuda's
+    // "defeat the artifact, keep the bar" rule.
     const double bytes = (double)N * K / 2 + (double)N * K / 16;  // packed + scales
     const double floor_us = bytes / 1792e9 * 1e6;
-    // 0.25, not 0.30: under full-suite load the healthy reading itself
-    // drifts ~15% (529/513 GB/s where an isolated run reads 580-620), and
-    // 537.6 sat inside that drift - the bar's job is to catch the starved
-    // CUTLASS mode (253 GB/s, a 2x regression), not suite-load noise.
+    // 0.25, not 0.30: under full-suite load the healthy reading itself drifts ~15% (529/513
+    // GB/s vs an isolated 580-620), so the bar must clear suite noise while still catching the
+    // starved CUTLASS mode (253 GB/s, a 2x regression).
     const double bar = 0.25 * 1792.0;
     double best_gbs = 0.0;
-    // 8 attempts, not 3: the per-window dropouts on this box reach 4x (the
-    // measurement is in test_smallm_dense_bench.cu) and three were not enough -
-    // this test went red in one of three full-suite runs on 2026-09-10. The
-    // loop exits on the first attempt that clears the bar, so a healthy card
-    // still pays for one.
+    // 8 attempts, not 3: per-window dropouts on this box reach 4x, and three attempts were not
+    // enough (this test went red once in a full-suite run). Loop exits on the first attempt that
+    // clears the bar, so a healthy card still pays for only one.
     for (int attempt = 0; attempt < 8 && best_gbs < bar; ++attempt) {
         void *d_x = nullptr, *d_y = nullptr, *d_ws = nullptr;
         ASSERT_EQ(cudaMalloc(&d_x, (size_t)M * K * sizeof(__half)), cudaSuccess);
@@ -169,10 +152,9 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
         ASSERT_EQ(cudaMemset(d_x, 0x3c, (size_t)M * K * sizeof(__half)), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&d_ws, imp::gemm_nvfp4_smallm_workspace_bytes(N)), cudaSuccess);
 
-        // Pin the x tile persisting in L2: without it the run is bimodal 23/43 us
-        // depending on where cudaMalloc lands the buffers relative to the L2 sets
-        // the once-only weight stream walks through (evict-first/evict-last hints
-        // removed the worst 60 us mode but not the set-conflict one).
+        // Pins the x tile in L2: without it the run is bimodal 23/43 us depending on where
+        // cudaMalloc lands buffers relative to the L2 sets the once-only weight stream walks
+        // (evict-first/evict-last hints removed the worst 60us mode, not this set-conflict one).
         cudaStream_t bench_stream = nullptr;
         ASSERT_EQ(cudaStreamCreate(&bench_stream), cudaSuccess);
         {
@@ -323,10 +305,9 @@ TEST_F(NvFP4SmallMTest, A4BandwidthStableWithoutWindow) {
     const double bytes = (double)N * K / 2 + (double)N * K / 16;
     printf("smallm-a4 M=%d N=%d K=%d: %.2f us/GEMM, %.0f GB/s weight read (no policy window)\n",
            M, N, K, us, bytes / (us * 1e-6) / 1e9);
-    // MEASURED 2026-08-25: still bimodal without the window (25.6-27.1 vs
-    // 44-45 us across processes) — the split-K bimodality is not the x
-    // working set. Anchor on the slow mode; the fast mode is the same 26 us
-    // the FP16 variant reads with the window.
+    // Still bimodal without the persisting window (25.6-27.1 vs 44-45 us): the split-K
+    // bimodality is not the x working set. Anchors on the slow mode; the fast mode matches the
+    // FP16 variant with the window.
     EXPECT_LT(us, 70.0);
 
     cudaFree(d_y); cudaFree(d_ws);

@@ -669,19 +669,15 @@ TEST(PagedAttentionTest, GQALongContext) {
     cudaFree(d_ctx);
 }
 
-// =========================================================================
-// gpt-oss decode shape (#547): split-K + hd=64 + GQA 8:1 (+ learned sinks).
-// The split-K branch only activates when scratch is set — none of the older
-// tests set it, so the hd=64 split-K path was never covered (gpt-oss is the
-// first hd=64 model; the rest of the zoo is hd>=128).
-// =========================================================================
+// gpt-oss decode shape (#547): split-K + hd=64 + GQA 8:1 (+ learned sinks). Split-K only
+// activates with scratch set, which no older test did, so hd=64 split-K was never covered
+// (gpt-oss is the first hd=64 model; the rest of the zoo is hd>=128).
 
 void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_scratch = true) {
     constexpr int batch = 1, n_heads = 64, n_kv_heads = 8, head_dim = 64;
-    // seq_len 256 = 16 blocks >= 4 → split-K heuristics fire (compute_splitk_splits).
-    // seq_len  48 =  3 blocks  < 4 → they do not, which is the ONLY way to reach
-    // crosswarp_reduce_and_write's sink term; the split-K reduction handles sinks
-    // in a different function entirely.
+    // seq_len 256 = 16 blocks >= 4 fires split-K heuristics; seq_len 48 = 3 blocks < 4 does not,
+    // which is the only way to reach crosswarp_reduce_and_write's sink term (split-K handles
+    // sinks in a separate function).
     const int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const int max_blocks = num_blocks;
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
@@ -697,13 +693,9 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
     }
     std::vector<float> h_sinks(n_heads);
     for (int h = 0; h < n_heads; h++) {
-        // The sink logit has to compete with the SUM of seq_len score
-        // exponentials, so a value near the score range contributes almost
-        // nothing. At the original -1.0 + 0.05h the sink carried 0-13% of the
-        // mass and deleting it moved the output by at most 0.0017 — under the
-        // tolerance this test compared with, which is why mutant M31 (#1303)
-        // survived a test written to catch it. At 4.0 + 0.05h it carries
-        // 0.5-96% and deleting it moves the output by up to 0.057.
+        // Sink logit must compete with the sum of seq_len score exponentials: at -1.0+0.05h it
+        // carried 0-13% of the mass and deleting it moved output by <=0.0017, under tolerance
+        // (mutant M31 #1303 survived). At 4.0+0.05h it carries 0.5-96%, moving output up to 0.057.
         h_sinks[h] = 4.0f + 0.05f * static_cast<float>(h);
     }
 
@@ -761,10 +753,9 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    // Split-K needs scratch: with it and >=4 blocks the split path takes over,
-    // without it num_splits stays 1 and the dispatch falls through to the GQA
-    // branch — which is how the cluster kernel becomes reachable (see the test
-    // list at the bottom of this block).
+    // Split-K needs scratch: with it and >=4 blocks the split path takes over; without it
+    // num_splits stays 1 and dispatch falls through to the GQA branch, which is how the cluster
+    // kernel becomes reachable.
     constexpr int kMaxSplits = 64;
     size_t scratch_size = static_cast<size_t>(batch) * n_heads * kMaxSplits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
@@ -796,11 +787,9 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
         for (int d = 0; d < head_dim; d++) {
             int idx = qh * head_dim + d;
             max_err = std::max(max_err, static_cast<double>(std::abs(result[idx] - h_O[idx])));
-            // 2e-3, not the 0.05 this used to allow: measured max error against
-            // the fp32 host reference is 1.7e-4 (seq_len 48) / 7.1e-5 (256), so
-            // 0.05 was ~300x looser than the kernel needs and swallowed the
-            // whole sink term. 2e-3 keeps a 12x margin over the kernel and still
-            // catches a dropped sink by 4.7x (seq_len 256) to 28x (seq_len 48).
+            // 2e-3, not the old 0.05: measured max error vs the fp32 host reference is 1.7e-4 (seq_len
+            // 48) / 7.1e-5 (256), so 0.05 was ~300x looser than needed and swallowed the sink term
+            // entirely. 2e-3 keeps a 12x margin over the kernel and still catches a dropped sink.
             EXPECT_NEAR(result[idx], h_O[idx], 2e-3f)
                 << "hd64 decode mismatch at Q-head " << qh << " dim " << d << " (with_sinks=" << with_sinks
                 << ", seq_len=" << seq_len << ", splitk_scratch=" << with_scratch << ", max_err=" << max_err
@@ -824,10 +813,9 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
 TEST(PagedAttentionTest, GQA_SplitK_HD64) { run_gptoss_shape_splitk_case(/*with_sinks=*/false); }
 TEST(PagedAttentionTest, GQA_SplitK_HD64_Sinks) { run_gptoss_shape_splitk_case(/*with_sinks=*/true); }
 
-// Same shape, short enough that split-K does NOT fire, so the decode goes
-// through crosswarp_reduce_and_write. Without this the sink term in that
-// function can be deleted with the whole suite still green (mutant M31, #1303):
-// both cases above are sized so the split-K path takes over.
+// Same shape, short enough that split-K does not fire, so decode goes through
+// crosswarp_reduce_and_write. Without this the sink term there can be deleted with the
+// whole suite green (mutant M31, #1303); the split-K cases above can't reach it.
 TEST(PagedAttentionTest, GQA_NoSplitK_HD64_Sinks) {
     run_gptoss_shape_splitk_case(/*with_sinks=*/true, /*seq_len=*/48);
 }
@@ -835,18 +823,10 @@ TEST(PagedAttentionTest, GQA_NoSplitK_HD64) {
     run_gptoss_shape_splitk_case(/*with_sinks=*/false, /*seq_len=*/48);
 }
 
-// Third sink implementation, third test. `crosswarp_reduce_and_write` in
-// attention_paged_common.cuh is shared by the cluster kernel and every
-// quantised-KV decode (int4/int8/nvfp4/nvfp4_tc/fp8) — but only the cluster
-// kernel passes it a sink pointer; the others leave the argument at its nullptr
-// default. So the sink branch in that helper is reachable through exactly one
-// launch configuration: no split-K scratch (num_splits stays 1), n_q_per_kv in
-// {2,4,8}, >=8 context blocks and head_dim in {64,96,128,256}.
-//
-// That is what mutant M31 (#1303) deletes. The two cases above cannot reach it:
-// 48 tokens is 3 blocks (< 8, so the plain GQA kernel runs, which handles sinks
-// inline) and 256 tokens with scratch goes split-K (its own reduction, also
-// inline). Both stayed green with the term removed.
+// crosswarp_reduce_and_write (attention_paged_common.cuh) is shared by the cluster kernel
+// and every quantised-KV decode, but only the cluster kernel passes a sink pointer. Reachable
+// only via: no split-K scratch, n_q_per_kv in {2,4,8}, >=8 context blocks, head_dim in
+// {64,96,128,256} - exactly what mutant M31 (#1303) deletes; the two cases above can't reach it.
 TEST(PagedAttentionTest, GQA_Cluster_HD64_Sinks) {
     run_gptoss_shape_splitk_case(/*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/false);
 }
@@ -854,28 +834,10 @@ TEST(PagedAttentionTest, GQA_Cluster_HD64) {
     run_gptoss_shape_splitk_case(/*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/false);
 }
 
-// =========================================================================
-// Learned attention sinks on the INT8 KV decode path (#1345)
-// =========================================================================
-//
-// gpt-oss is the only architecture shipping learned sinks, and its KV cache is
-// the one under the most long-context pressure — so "use fp16 KV for this
-// model" was an expensive guard. INT8 has two decode implementations and the
-// sink term enters each in a different place: the split-K path applies it in
-// the shared reduce kernel, the non-split-K fallback in
-// `crosswarp_reduce_and_write`. Both are covered below; either one left unwired
-// serves a softmax denominator short one column.
-//
-// The reference is built from the DEQUANTIZED K/V, not the original FP16. That
-// is deliberate and is the opposite of what tests/test_attention_paged_oracle.cu
-// wants: the property under test here is the sink term, not the quantizer, and
-// referencing the quant grid removes INT8 noise from the comparison so a 2e-3
-// tolerance can see a sink term that INT8 error would otherwise swallow. The
-// quantizer itself is held to account in the oracle test.
-//
-// Tolerance alone is not trusted: each case also asserts the result is far
-// CLOSER to the sink-aware reference than to the sink-free one. A dropped sink
-// then fails on the ratio even if someone later loosens the tolerance.
+// Learned sinks on INT8 KV decode (#1345): sink enters the split-K and non-split-K
+// (crosswarp_reduce_and_write) paths separately; either left unwired serves a softmax
+// denominator short one column. Reference built from DEQUANTIZED K/V so INT8 noise doesn't
+// swallow a 2e-3 tolerance; each case must also be closer to the sink-aware ref than the sink-free one.
 enum class QuantKV { INT8, INT4 };
 
 void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_scratch) {
@@ -893,11 +855,9 @@ void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_s
     std::vector<float> h_V(seq_len * n_kv_heads * head_dim);
     for (size_t i = 0; i < h_K.size(); i++) {
         h_K[i] = 0.5f * cosf(static_cast<float>(i) * 0.013f);
-        // V carries a DC component on purpose. With a zero-mean V the softmax
-        // average over 256 tokens cancels to ~0.002, and the sink term — which
-        // scales the whole output by the mass it takes — then moves it by 4e-4,
-        // below any tolerance a quantised path can hold. The vacuity guard
-        // below catches that; the offset is what makes the case non-vacuous.
+        // V carries a DC component on purpose: zero-mean V cancels the 256-token softmax average to
+        // ~0.002, so the sink term would move output by only 4e-4, below any quantised tolerance.
+        // The offset makes the vacuity guard non-vacuous.
         h_V[i] = 0.5f + 0.4f * sinf(static_cast<float>(i) * 0.017f + 0.5f);
     }
 
@@ -907,10 +867,9 @@ void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_s
     for (int h = 0; h < n_heads; h++)
         h_sinks[h] = 4.0f + 0.05f * static_cast<float>(h);
 
-    // Host quantize into the INT8 cache layout the kernel reads:
-    //   data   [num_blocks, BLOCK_SIZE, n_kv_heads, head_dim] int8
-    //   scales [num_blocks, BLOCK_SIZE, n_kv_heads]           half
-    // Mirrors write_kv_cache_int8_kernel (per-head absmax / 127, round-to-nearest).
+    // Host-quantizes into the INT8 cache layout the kernel reads: data[blocks,BLOCK_SIZE,
+    // n_kv_heads,head_dim] int8, scales[blocks,BLOCK_SIZE,n_kv_heads] half; mirrors
+    // write_kv_cache_int8_kernel (per-head absmax/127, round-to-nearest).
     const size_t cache_elems = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads *
                                (is_int4 ? head_dim / 2 : head_dim);
     const size_t row_elems = is_int4 ? head_dim / 2 : head_dim;
@@ -1104,10 +1063,9 @@ TEST(PagedAttentionTest, INT8_NoSplitK_HD64) {
     run_quant_sink_case(QuantKV::INT8, /*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/false);
 }
 
-// INT4 runs the same oracle. gpt-oss answers EMPTY on INT4 KV end to end, which
-// is exactly the signature of a dropped sink — these cases are what separate
-// "the sink term is missing" from "4 bits per value on a 64-wide head is too
-// coarse for this model". They pass, so it is the latter.
+// INT4 answers EMPTY on gpt-oss end to end, the signature of a dropped sink; passing here
+// separates "the sink term is missing" from "4 bits on a 64-wide head is too coarse" -
+// it's the latter.
 TEST(PagedAttentionTest, INT4_SplitK_HD64_Sinks) {
     run_quant_sink_case(QuantKV::INT4, /*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/true);
 }
@@ -1216,10 +1174,8 @@ TEST(PagedAttentionTest, GQA_HD256) {
     cudaFree(d_ctx);
 }
 
-// =========================================================================
-// Gemma-4 Global layer geometry: GQA with hd=512, nkv=2, nh=16, short ctx
-// (reproduces decode config at the 7th token of "The capital of France is").
-// =========================================================================
+// Gemma-4 Global layer geometry: GQA hd=512, nkv=2, nh=16, short ctx (reproduces the decode
+// config at the 7th token of "The capital of France is").
 TEST(PagedAttentionTest, GQA_HD512_Gemma4Global) {
     constexpr int batch = 1, n_heads = 16, n_kv_heads = 2, head_dim = 512;
     constexpr int seq_len = 7;  // context after prefill(6) + decode token

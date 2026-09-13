@@ -1,8 +1,5 @@
-// Phase 2A correctness test for the Q4_K → symmetric-s8 reorder kernel.
-// Verifies that for every element of every row of every super-block,
-//   α[r, k/32] * w_sym_s8[r, k] + β[r, k/32]   ==   d * sc[j] * q - dmin * m[j]
-// — i.e. the IMMA epilogue identity α · q_sym + β reconstructs the same FP16
-// value as the ggml dequant.
+// Phase 2A: Q4_K -> symmetric-s8 reorder. Per element/superblock:
+// alpha[r,k/32]*w_sym_s8[r,k] + beta[r,k/32] == d*sc[j]*q - dmin*m[j] (IMMA epilogue identity).
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -130,15 +127,9 @@ void check_reorder(int N, int K, unsigned seed) {
     cudaMemcpy(host_beta.data(), dev_beta, host_beta.size() * sizeof(__half),
                cudaMemcpyDeviceToHost);
 
-    // Verify: for every (r, k), α[r, k/32] * w_sym[r, k] + β[r, k/32] ≈ ref[r, k].
-    //
-    // Reconstruction goes through FP16 α and β. Per-element error budget is
-    // bounded by:
-    //   |recon - ref|  ≤  ulp(α)·|w| + ulp(β)
-    // Worst case (d=0.05, sc=63, w=±8, dmin=0.05, m=63): |α|≈3.15, |β|≈25,
-    // |α·w| ≤ 25, ulp at magnitude 25 ≈ 25·2^-10 ≈ 0.025 per term, summed
-    // worst case ~0.05. Cap at 0.1 to be safe (relative gates blow up near
-    // ref≈0 which is fine — we check abs there).
+    // Reconstruction error bound: |recon-ref| <= ulp(alpha)*|w| + ulp(beta).
+    // Worst case (d=0.05,sc=63,w=+-8,dmin=0.05,m=63): ~0.05; cap at 0.1 since relative error
+    // blows up near ref=0.
     float max_abs_err = 0.0f;
     int worst_r = 0, worst_k = 0;
     for (int r = 0; r < N; ++r) {

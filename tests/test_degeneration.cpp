@@ -1,11 +1,6 @@
-// Test for output degeneration detection.
-//
-// Detects repetition loops, empty outputs, and gibberish that indicate
-// broken inference pipelines (wrong state management, quantization errors,
-// numerical instability).
-//
-// These tests require a real model and GPU. Skip via IMP_TEST_MODEL env var
-// or run with: imp-tests --gtest_filter="DegenerationTest.*"
+// Detects repetition loops, empty outputs, and gibberish from broken state management,
+// quantization errors, or numerical instability. Requires a real model and GPU: skip via
+// IMP_TEST_MODEL, or filter --gtest_filter="DegenerationTest.*".
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -23,10 +18,9 @@ static const char* get_model_path() {
     return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
 }
 
-// A path that doesn't end in .gguf is a SafeTensors directory (NVFP4 hero models
-// ship as dirs). Without this the battery hard-coded IMP_FORMAT_GGUF and could
-// not load any NVFP4 model — leaving the priority quant with zero degeneration
-// coverage (see the #790 NVFP4 prefill crash, which shipped undetected).
+// A path not ending in .gguf is a SafeTensors directory (NVFP4 hero models ship as dirs);
+// without this the battery hard-coded IMP_FORMAT_GGUF and had zero degeneration coverage for
+// NVFP4 (the #790 prefill crash shipped undetected).
 static ImpModelFormat detect_format(const char* p) {
     std::string s = p ? p : "";
     return (s.size() >= 5 && s.substr(s.size() - 5) == ".gguf") ? IMP_FORMAT_GGUF
@@ -199,19 +193,11 @@ TEST_F(DegenerationTest, LongGenerationStability) {
     EXPECT_LT(rep5, 0.3f) << "5-gram repetition at " << (rep5 * 100) << "%: " << out.substr(0, 300);
 }
 
-// Test 4: Greedy (temp=0) should be deterministic across calls
-// Greedy (temp=0) should be deterministic across context resets.
-//
-// Fixed 2026-05-14: set CUBLAS_WORKSPACE_CONFIG=:4096:8 in the test process
-// before the cuBLAS handle is created (via setenv in the test body). On
-// Blackwell sm_120 without this, cuBLAS picks different algorithms on
-// successive calls within the same process, producing FP16 rounding drift
-// that cascades into divergent greedy output. The env var pins the
-// workspace size and forces deterministic algo selection.
-//
-// Note: the env var must be set BEFORE any cuBLAS call in this process.
-// Test class SetUp() builds the engine which creates the cuBLAS handle, so
-// setenv must run before that. We use SetUpTestSuite (once per fixture).
+// Greedy (temp=0) must be deterministic across context resets: on Blackwell sm_120, cuBLAS
+// picks different algorithms across calls in the same process without
+// CUBLAS_WORKSPACE_CONFIG=:4096:8, producing FP16 rounding drift that cascades into
+// divergent greedy output. Must be set (via SetUpTestSuite) before the first cuBLAS call,
+// i.e. before the engine's SetUp() creates the handle.
 TEST_F(DegenerationTest, GreedyDeterminism) {
     auto gen_greedy = [&](const std::string& prompt) {
         imp_context_reset(ctx_);

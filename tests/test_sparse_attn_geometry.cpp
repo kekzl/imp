@@ -1,11 +1,6 @@
-// Sparse decode attention token -> block geometry (#1819).
-//
-// The defect this pins: every conversion used the compile-time kKVBlockSize
-// (16) while a model with n_kv_heads <= 4 runs a 32-token block. On such a
-// model `attention.sparse_topk_tokens=4096` bought 8192 tokens of budget and
-// `sparse_min_ctx=12288` engaged at 24576. The knob is documented in TOKENS,
-// so the invariant is: budget_blocks * block_size == the configured tokens,
-// at every block size.
+// #1819: every conversion used the compile-time kKVBlockSize (16) while n_kv_heads<=4 models
+// run a 32-token block, so attention.sparse_topk_tokens=4096 bought 8192 tokens of budget.
+// Invariant: budget_blocks * block_size == the configured tokens, at every block size.
 
 #include <gtest/gtest.h>
 #include "exec/sparse_attn_geometry.h"

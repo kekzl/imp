@@ -1,12 +1,6 @@
-// =============================================================================
-// test_fmha_v_load_bench.cu — gtest harness for fmha_v_load_bench
-// =============================================================================
-// Phase 1 gate for the LDGSTS→TMA conversion lever. The bench runs both
-// variants on the FMHA V-load shapes (HD=64/128, Bkv=64/128) and prints
-// per-variant bandwidth + speedup. Test passes if both variants run cleanly.
-// The threshold for committing to the multi-week integration is in the memo —
-// not enforced as a gate here so we can see all data even on a regression.
-// =============================================================================
+// gtest harness for fmha_v_load_bench, Phase 1 gate for the LDGSTS->TMA lever: runs both
+// variants on FMHA V-load shapes (HD=64/128, Bkv=64/128), passes if both run cleanly. The
+// multi-week-integration threshold lives in the design memo, not enforced here as a gate.
 
 #include "bench/fmha_v_load_bench.h"
 #include <gtest/gtest.h>

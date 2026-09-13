@@ -12,18 +12,15 @@
 
 #include "test_cuda_skip.h"
 
-// Schema-FSM side of constrained decoding: RegexNfa (`pattern`),
-// SchemaConstrainer masking/update, $ref/$defs, and the jump-ahead
-// forced_text probe (#844). The any-JSON constrainer + preamble gate live
-// in test_json_constrain.cu.
+// Schema-FSM side of constrained decoding: RegexNfa (pattern), SchemaConstrainer
+// masking/update, $ref/$defs, jump-ahead forced_text (#844). The any-JSON constrainer +
+// preamble gate live in test_json_constrain.cu.
 
 namespace imp {
 namespace {
 
-// ---------------------------------------------------------------------------
-// RegexNfa — direct unit tests for JSON-schema `pattern` enforcement.
-// Isolated from the model / preamble gate to pinpoint over-masking.
-// ---------------------------------------------------------------------------
+// RegexNfa direct unit tests for JSON-schema pattern, isolated from the model/preamble gate
+// to pinpoint over-masking.
 
 // Feed a whole string; return final state set ({} if it died).
 static std::vector<int> nfa_run(const RegexNfa& n, const std::string& s) {
@@ -118,11 +115,10 @@ TEST(SchemaConstrainTest, PatternEnforcementMasksCorrectly) {
     EXPECT_FALSE(allowed(10)) << "'abc' (lowercase) must be masked by the pattern";
 }
 
-// At OBJECT_OPEN, a multi-char token that begins with the opening quote
-// (`"code`, `"Why`) opens the key string AND fills key chars in one step.
-// Such tokens must be narrowed to valid key prefixes — otherwise a non-key
-// token (`"Why`) slips through on its CAT_QUOTE bit and the FSM gets stuck
-// mid-key, degenerating into "!!!!". No model / preamble gate involved.
+// At OBJECT_OPEN, a multi-char token starting with the opening quote ("code, "Why) opens
+// the key string AND fills key chars in one step; such tokens must be narrowed to valid key
+// prefixes, or a non-key token slips through on its CAT_QUOTE bit and the FSM sticks mid-key,
+// degenerating into "!!!!".
 TEST(SchemaConstrainTest, ObjectOpenQuotePrefixedKeyMasked) {
     SKIP_IF_NO_CUDA();
 
@@ -160,10 +156,9 @@ TEST(SchemaConstrainTest, ObjectOpenQuotePrefixedKeyMasked) {
     EXPECT_FALSE(allowed(4)) << "'}' must be masked: required key 'code' not yet emitted";
 }
 
-// Key order in a JSON object is not significant: {"type":"string","enum":[...]}
-// and the alphabetically-reordered {"enum":[...],"type":"string"} (what a
-// request round-trip through a JSON library produces) must both parse to ENUM.
-// A later "type":"string" must not demote the node back to a free string.
+// JSON object key order is not significant: {"type":...,"enum":...} and its
+// alphabetically-reordered form (what a JSON-library round-trip produces) must both parse to
+// ENUM; a later "type":"string" must not demote the node back to a free string.
 TEST(SchemaConstrainTest, EnumPrecedenceIsOrderIndependent) {
     auto a = parse_json_schema(R"({"type":"string","enum":["en","de","fr"]})");
     ASSERT_TRUE(a != nullptr);
@@ -213,13 +208,10 @@ TEST(SchemaConstrainTest, PrematureObjectCloseRejected) {
     EXPECT_FALSE(a[5]) << "'{}' combined token must be rejected — required 'code' unmet";
 }
 
-// #850: a backslash inside an object KEY was accepted and silently dropped
-// (no phase change, no buffer append), so the NEXT char matched the property
-// prefix while the emitted text carried the escape — `{"\number_x":5}`-style
-// schema-invalid keys observed live on Qwen3-8B json_schema. Property names
-// are matched on raw chars (escape sequences were never decoded), so no
-// legal key needs an escape: reject `\` in keys outright, single-char and
-// smuggled inside a multi-char token alike.
+// #850: a backslash inside an object KEY was accepted and silently dropped (no phase change,
+// no buffer append), so the next char matched the property prefix while emitted text carried
+// the escape, producing schema-invalid keys observed live on Qwen3-8B json_schema. Property
+// names match raw chars (no escape decoding), so reject \ in keys outright.
 TEST(SchemaConstrainTest, BackslashInKeyRejected) {
     SKIP_IF_NO_CUDA();
     //                                 0       1      2      3    4     5    6     7      8
@@ -363,12 +355,9 @@ TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// minItems / maxItems (#1014) — the degeneration guard: a budget-force-closed
-// reasoning model loops enum array items (`["tech","tech",...`) to max_tokens.
-// Explicit maxItems must hard-stop the array; an enum-items array without one
-// is capped at the enum's cardinality; minItems blocks premature close.
-// ---------------------------------------------------------------------------
+// #1014: degeneration guard - a budget-force-closed reasoning model loops enum array items
+// to max_tokens. Explicit maxItems hard-stops the array; an enum-items array without one caps
+// at the enum's cardinality; minItems blocks premature close.
 
 namespace {
 // Shared vocab for the array-bounds tests:
@@ -458,10 +447,8 @@ TEST(SchemaConstrainTest, MinItemsBlocksPrematureClose) {
     EXPECT_TRUE(two[kTokCloseBracket]) << "minItems satisfied — close must be legal";
 }
 
-// ---------------------------------------------------------------------------
-// $ref / $defs (issue #555) — pydantic/zod emit $defs+$ref for EVERY nested
-// model, so this is the agent-framework path, not an exotic corner.
-// ---------------------------------------------------------------------------
+// #555: pydantic/zod emit $defs+$ref for every nested model - the agent-framework path, not
+// an exotic corner.
 
 // Parse-level: $defs collected, $ref resolves, unsupported/unresolvable refs
 // fail the parse (decline constrained decoding instead of enforcing a wrong
@@ -575,27 +562,16 @@ TEST(SchemaConstrainTest, RecursiveSchemaEnforced) {
     }
 }
 
-// ===========================================================================
-// Vocab-mismatch regression (SIGBUS 2026-06-09): SafeTensors models have
-// MORE logits than tokenizer entries (Qwen3-8B-NVFP4: lm_head vocab 151936
-// vs tokenizer.json 151669). apply_mask receives the LOGITS vocab size; the
-// constrainer classified only the TOKENIZER vocab. The host validation loop
-// then read token_texts_[i] out of bounds (SIGBUS — killed imp-server on the
-// first json_mode request), and the mask kernels read the category/allow
-// device buffers out of bounds. Contract under test: apply_mask with a
-// larger vocab_size must (a) not crash and (b) mask every logit in the
-// padding range [tokenizer_vocab, model_vocab) — padding ids are unknown to
-// the grammar and untrained in the model, so they must never be sampleable.
-// ===========================================================================
+// SIGBUS: SafeTensors models have MORE logits than tokenizer entries (Qwen3-8B-NVFP4: lm_head
+// 151936 vs tokenizer.json 151669); apply_mask got the LOGITS vocab size but the constrainer
+// classified only the TOKENIZER vocab, so host validation read token_texts_[i] out of bounds
+// and killed imp-server on the first json_mode request. Contract: apply_mask with a larger
+// vocab_size must not crash and must mask every logit in [tokenizer_vocab, model_vocab).
 
-// ===========================================================================
-// Raw-control-char regression (2026-06-10): JSON forbids unescaped U+0000–
-// U+001F inside strings, but both FSMs accepted "any content char" there.
-// Multi-char tokens whose FIRST char passes the category mask (`"<newline>`
-// opens a string and smuggles a raw newline in one step) produced output that
-// json.loads() rejects ("Invalid control character"). Observed live on
-// Qwen3-8B-NVFP4 json_schema generation.
-// ===========================================================================
+// JSON forbids unescaped U+0000-U+001F in strings, but both FSMs accepted "any content
+// char" there. A multi-char token whose FIRST char passes the category mask ("<newline>
+// opens a string and smuggles a raw newline in one step) produced output json.loads() rejects.
+// Observed live on Qwen3-8B-NVFP4 json_schema.
 
 TEST(SchemaConstrainTest, RawControlCharInStringMasked) {
     SKIP_IF_NO_CUDA();
@@ -654,10 +630,8 @@ TEST(SchemaConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Jump-ahead (#844): forced_text — the characters every schema-legal
-// continuation must spell next. Pure probe: never advances the FSM.
-// ---------------------------------------------------------------------------
+// #844: forced_text is the characters every schema-legal continuation must spell next.
+// Pure probe: never advances the FSM.
 
 //                                                0        1      2      3    4     5    6    7    8    9 10
 //                                                11   12

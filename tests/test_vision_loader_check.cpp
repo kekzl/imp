@@ -1,15 +1,8 @@
-// The mmproj GGUF loader's two refusals.
-//
-// The failure they guard is silent. A checkpoint in a dialect this loader does
-// not read still parses: the names it shares land in their slots, the rest are
-// dropped at DEBUG, and the model comes back looking loaded — then the encoder
-// hands a null slot to vision_gemm. Qwen3-VL's mmproj did exactly that: 247 of
-// 316 tensors assigned, no error, no output worth anything.
-//
-// Oracle: the tensor inventories of the three mmproj files this box actually
-// has — gemma-3-4b (projector_type `gemma3`), gemma-4-26b (`gemma4v`) and
-// Qwen3-VL-4B (`qwen3vl_merger`) — read off the GGUF headers and reproduced
-// here as slot sets, so the test needs neither the files nor a GPU.
+// A checkpoint in a dialect the loader doesn't read still parses silently: shared names land
+// in their slots, the rest drop at DEBUG, the model looks loaded, then the encoder hands a
+// null slot to vision_gemm (Qwen3-VL's mmproj: 247/316 tensors assigned, no error, no useful
+// output). Oracle: the three mmproj tensor inventories this box has (gemma3, gemma4v,
+// qwen3vl_merger), reproduced as slot sets, no files or GPU needed.
 
 #include "vision/vision_loader_check.h"
 
@@ -23,10 +16,9 @@ namespace {
 constexpr int kLayers = 4;   // shape of the walk, not of any real tower
 constexpr int kHidden = 32;  // any non-zero shape: only ndim is read
 
-// Shaped but not uploaded — which is precisely the probe pass, where the loader
-// counts bytes instead of taking arena slabs and every slot's data stays null.
-// A test that handed out real pointers would not notice `filled()` regressing
-// to a null-pointer test, and the probe would then reject every model.
+// "Shaped but not uploaded" is precisely the probe pass (loader counts bytes instead of
+// taking arena slabs, every slot's data stays null). Real pointers here would hide filled()
+// regressing to a null-pointer test, rejecting every model.
 Tensor shaped(int64_t n = kHidden) {
     Tensor t;
     t.data = nullptr;
@@ -60,10 +52,9 @@ VisionModel gemma3_model() {
     return m;
 }
 
-// gemma-4v: RMSNorm (no LN biases), no attention biases, no patch_embd bias and
-// no post_ln at all — but per-head q/k/v norms, sandwich post-norms and a GeGLU
-// gate. Its inventory is a poor subset of gemma-3's, which is the whole reason
-// the required set has to branch on is_gemma4v.
+// gemma-4v: RMSNorm (no LN biases), no attention biases, no patch_embd bias, no post_ln -
+// but per-head q/k/v norms, sandwich post-norms and a GeGLU gate. Its inventory is a poor
+// subset of gemma-3's, hence the required set branches on is_gemma4v.
 VisionModel gemma4v_model() {
     VisionModel m;
     m.config.is_gemma4v = true;
@@ -148,12 +139,9 @@ TEST(VisionLoaderCheck, CatchesMissingGemma4vBlockTensors) {
     EXPECT_EQ(vision_model_missing_slot(m), "v.blk.1.ffn_gate.weight");
 }
 
-// ---- Not over-reaching ----
-//
-// Every slot below is absent from a real mmproj this box loads today, or is
-// guarded by an `if (.data)` in the encoder. Requiring any of them would turn a
-// working model into a hard failure, which is a worse bug than the one being
-// fixed.
+// Every slot here is absent from a real mmproj this box loads today, or guarded by an
+// `if (.data)` in the encoder; requiring any would turn a working model into a hard failure -
+// worse than the bug being fixed.
 
 TEST(VisionLoaderCheck, OptionalSlotsDoNotBlockLoad) {
     VisionModel m = gemma3_model();

@@ -1,12 +1,7 @@
-// imp-quantize's export report: the per-tensor error, the summary line, the
-// JSON an operator diffs between two exports, and the provenance banner.
-//
-// The numbers this file checks are the ones the tool had already computed and
-// discarded (awq.cu's err_rtn / err_best) plus the one it never computed at
-// all: what a round-to-nearest export actually cost per tensor. A report that
-// silently reads zero everywhere would look exactly like a perfect export, so
-// the decode is checked against hand-built format bytes rather than against
-// imp's own dequant kernel.
+// Export report: per-tensor error, summary line, diffable JSON, provenance banner. Checks
+// numbers the tool had computed and discarded (awq.cu err_rtn/err_best) plus one never
+// computed: RTN export cost per tensor, decoded against hand-built format bytes so a
+// silent-zero report can't look like a perfect export.
 
 #include "../tools/imp-quantize/quant_report.h"
 

@@ -1,16 +1,8 @@
 #pragma once
 
-// Opens the engine-persistent (T2) arena for tests that exercise a tenant of it
-// directly.
-//
-// Production opens the arena in Engine::init, before the first tenant runs
-// (docs/internals/MEMORY.md A3.3). A GPU test that calls into a T2 tenant
-// without an Engine — the CUTLASS grouped GEMM and the IMMA prefill scratches
-// are the cases that needed this — would otherwise find no arena, take nothing,
-// and fail for a reason that has nothing to do with what it is testing.
-//
-// Idempotent: if something already opened the arena, this leaves it alone and
-// does not close it, so nesting two of these is safe.
+// Opens the engine-persistent (T2) arena (docs/internals/MEMORY.md A3.3) for tests exercising
+// a T2 tenant without an Engine - CUTLASS grouped GEMM and IMMA prefill scratch needed this.
+// Idempotent: does not close an already-open arena, so nesting is safe.
 
 #include "memory/backend.h"
 #include "memory/engine_arena.h"
@@ -41,16 +33,9 @@ private:
     bool owned_ = false;
 };
 
-// Keeps the arena open for a whole test binary AND rewinds it between tests.
-//
-// The rewind is not tidiness, it is required. A bump arena never reclaims, so
-// without it every test that grows a file-scope scratch permanently consumes
-// capacity and a later test in the same binary finds 0 MiB free — which is
-// exactly how the first version of this failed: the IMMA shape sweep drained
-// the arena and the CUTLASS grouped test two files later produced garbage.
-// ArenaAllocator::reset() is the phase-boundary operation for this, and it
-// bumps generation(), so the tenants notice their cached slice is gone and
-// re-take instead of using a rewound address.
+// Rewinds the arena between tests: a bump arena never reclaims, so one test's scratch growth
+// would starve capacity for later tests in the same binary.
+// ArenaAllocator::reset() bumps generation() so tenants re-take instead of reusing a stale slice.
 class EngineArenaEnvironment : public ::testing::Environment {
 public:
     explicit EngineArenaEnvironment(size_t capacity) : capacity_(capacity) {}

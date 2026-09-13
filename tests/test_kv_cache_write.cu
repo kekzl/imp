@@ -57,13 +57,9 @@ struct MockPagedCache {
     }
 };
 
-// =========================================================================
-// Paged slot resolution — multiple tokens, flat block table, crossing a
-// block boundary. Exercised through write_kv_cache_fused_kernel: the
-// non-fused write_kv_cache_kernel was removed once it had no production
-// caller, so the shared kv_resolve_slot() logic is asserted on the kernel
-// the engine actually launches.
-// =========================================================================
+// Paged slot resolution across a block boundary, multiple tokens, flat block table:
+// exercised through write_kv_cache_fused_kernel since the non-fused write_kv_cache_kernel was
+// removed once it had no production caller.
 
 TEST(KVCacheWriteTest, BasicPagedWrite) {
     // Setup: 2 tokens at positions 3 and 19 (block 0 slot 3, block 1 slot 3)
@@ -199,12 +195,9 @@ TEST(KVCacheWriteTest, FusedKVWrite) {
     cudaFree(d_bt);
 }
 
-// =========================================================================
-// Batched block table (n_sequences > 1) — the 2-D indexing
-// bt[seq * max_blocks_per_seq + block_idx] that every paged write kernel
-// shares. This is the only direct assertion on it in the write path, so it
-// rides the fused kernel now that the non-fused one is gone.
-// =========================================================================
+// Batched block table (n_sequences>1): the 2-D indexing bt[seq*max_blocks_per_seq+
+// block_idx] every paged write kernel shares - the only direct assertion on it in the write
+// path, now riding the fused kernel.
 
 TEST(KVCacheWriteTest, BatchedBlockTable) {
     const int n_kv_heads = 2, head_dim = 64;

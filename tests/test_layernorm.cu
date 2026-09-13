@@ -82,11 +82,7 @@ void free_gpu_tensor(Tensor& t) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CPU reference: RMSNorm
-//   out[r][c] = (x[r][c] / rms) * weight[c]
-//   rms = sqrt( mean(x[r][:]^2) + eps )
-// ---------------------------------------------------------------------------
+// CPU reference RMSNorm: out = (x / rms) * weight, rms = sqrt(mean(x^2) + eps).
 void cpu_rmsnorm(const float* x, const float* weight, float* out, int rows, int cols, float eps) {
     for (int r = 0; r < rows; r++) {
         float ss = 0.0f;
@@ -101,12 +97,8 @@ void cpu_rmsnorm(const float* x, const float* weight, float* out, int rows, int 
     }
 }
 
-// ---------------------------------------------------------------------------
-// CPU reference: RMSNorm with residual
-//   tmp[r][c] = x[r][c] + residual[r][c]
-//   out[r][c] = (tmp[r][c] / rms) * weight[c]
-//   rms = sqrt( mean(tmp[r][:]^2) + eps )
-// ---------------------------------------------------------------------------
+// CPU reference RMSNorm with residual: tmp = x + residual, out = (tmp/rms)*weight,
+// rms = sqrt(mean(tmp^2) + eps).
 void cpu_rmsnorm_residual(const float* x, const float* residual, const float* weight, float* out, int rows,
                           int cols, float eps) {
     for (int r = 0; r < rows; r++) {
@@ -300,10 +292,6 @@ TEST(LayerNormTest, RMSNormLargeRow) {
     free_gpu_tensor(d_out);
 }
 
-// ===========================================================================
-// Test 5: EpsilonEffect -- different eps values produce different results
-//         for near-zero inputs
-// ===========================================================================
 TEST(LayerNormTest, EpsilonEffect) {
     constexpr int rows = 1;
     constexpr int cols = 4;
@@ -377,11 +365,8 @@ TEST(LayerNormTest, EpsilonEffect) {
     free_gpu_tensor(d_out_l);
 }
 
-// ===========================================================================
-// RMSNormRowBlockDecodeShapes -- the batched-decode row-block kernel
-// (2 <= rows <= 64): real decode shapes incl. the kVecs=2 instantiation
+// Batched-decode row-block kernel, 2 <= rows <= 64: covers the kVecs=2 instantiation
 // (d_vec > 512) and both edges of the row gate.
-// ===========================================================================
 TEST(LayerNormTest, RMSNormRowBlockDecodeShapes) {
     constexpr float eps = 1e-5f;
     const int shapes[][2] = {{2, 2048}, {32, 5120}, {64, 8192}};
@@ -415,13 +400,9 @@ TEST(LayerNormTest, RMSNormRowBlockDecodeShapes) {
     }
 }
 
-// ===========================================================================
-// RMSNormNvfp4ProducerBitIdentity -- the fused rmsnorm + NVFP4 quantize
-// producer kernel must emit (a) the same FP16 bytes as rmsnorm() and (b) the
-// same packed nibbles + FP8 micro-scales as quantize_fp16_to_nvfp4_into()
-// run on that FP16 output. Inputs include near-zero rows (low scale clamp)
-// and +/-3000-range rows (micro_scale > 448 clamp).
-// ===========================================================================
+// Fused rmsnorm+NVFP4 quantize producer must match rmsnorm() FP16 bytes and
+// quantize_fp16_to_nvfp4_into() packed nibbles and FP8 micro-scales bit-for-bit.
+// Covers near-zero rows (low scale clamp) and +-3000-range rows (micro_scale > 448 clamp).
 TEST(LayerNormTest, RMSNormNvfp4ProducerBitIdentity) {
     constexpr float eps = 1e-5f;
     const int shapes[][2] = {{2, 2048}, {32, 5120}, {64, 8192}};

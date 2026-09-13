@@ -1,35 +1,13 @@
-// Batched GDN scan: N independent sequences in one launch.
-//
-// Concurrent GDN decode used to run one sequence per step
-// (`engine_scheduler.cpp`: "the recurrent scan kernels are single-sequence"),
-// which forced the whole decode step — including the FFN and attention
-// projections that are ordinary GEMMs — onto the M=1 path. Profiled 2026-08-24
-// under 32-way load: CUTLASS GEMM was 1.0 % of GPU time on a GDN model against
-// 71.8 % on a dense one, while M=1 GEMV kernels were ~82 % against ~7 %. The
-// scan that genuinely cannot batch was 3.8 % of that profile.
-//
-// Tokens within a sequence really are sequential. Separate sequences are not:
-// each owns its own recurrent-state slot and they share nothing but weights, so
-// they parallelise across blockIdx.y exactly like heads do across blockIdx.x.
-//
-// What this asserts, and why it is a tolerance and not a bit-compare:
-//
-// The batched path uses SPLIT=2 at the 128/128 shape — two threads per state
-// column — because one-thread-per-column needs 128 registers for the state
-// alone and made ptxas spill (255 registers, 88 B stack frame). Splitting it
-// removed the spill and bought 18 % on the kernel at n_seq=32. The single
-// sequence path keeps SPLIT=1, where that shape is faster.
-//
-// Two threads summing halves of a dot product and combining them is a DIFFERENT
-// ORDER of floating-point additions than one thread summing all of it, so the
-// results differ in the last bits. Measured: 2 of 1024 FP16 outputs and ~7 % of
-// the FP32 state words differ, all at the rounding level.
-//
-// A slot mix-up — the failure this file exists to catch — does not look like
-// that. It puts a whole sequence's state in the wrong place, so the tolerance
-// below (1e-3 relative on outputs, 1e-4 on state) separates the two cleanly:
-// rounding passes it by orders of magnitude, a wrong slot fails it by orders of
-// magnitude.
+// Batched GDN scan (N independent sequences in one launch): concurrent GDN decode used to
+// run one sequence per step, forcing the WHOLE decode step (including ordinary FFN/attention
+// GEMMs) onto the M=1 path. Profiled under 32-way load: CUTLASS GEMM 1.0% of GPU time on a
+// GDN model vs 71.8% dense; M=1 GEMV ~82% vs ~7%; the scan itself only 3.8%.
+// Sequences parallelise across blockIdx.y (each owns its own recurrent-state slot, shares
+// only weights). Tolerance not bit-compare: SPLIT=2 (two threads/state column, vs SPLIT=1
+// single-sequence) sums in a different FP order (measured: 2/1024 FP16 outputs, ~7% of FP32
+// state words differ at rounding level). A slot mix-up instead misplaces a whole sequence's
+// state, so 1e-3 rel (output) / 1e-4 (state) separates rounding from a wrong slot by orders
+// of magnitude.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -150,14 +128,10 @@ void run_and_compare(const ScanShape& s, const std::vector<int>& slots) {
     cudaMemcpy(pool_batched.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(y_batched.data(), d_y, y_batched.size() * sizeof(half), cudaMemcpyDeviceToHost);
 
-    // ---- compare within rounding tolerance (see the header comment)
-    //
-    // Measured against the RMS of the tensor, not against each element: the
-    // state contains values arbitrarily close to zero, and an elementwise
-    // relative error there reports 1e-3 for an absolute difference of 1e-9.
-    // Scale-relative is the meaningful question — "did this drift compared to
-    // how big the numbers are" — and it is still orders of magnitude away from
-    // what a wrong slot does.
+    // Compared via RMS of the tensor, not per-element: state values can be arbitrarily close to
+    // zero, where elementwise relative error reports 1e-3 for a 1e-9 absolute difference.
+    // Scale-relative answers "did this drift relative to the numbers' size" and still separates
+    // rounding from a wrong slot by orders of magnitude.
     auto rms = [](const auto& v, auto conv) {
         double ss = 0.0;
         for (const auto& x : v) {
@@ -339,10 +313,8 @@ TEST_F(GdnBatchedScanTest, MultiTokenRowsStayCausalPerSequence) {
     run_and_compare(ScanShape{4, 6}, {3, 1, 2, 0});
 }
 
-// ---------------------------------------------------------------------------
-// The conv1d half. The scan is useless batched if the depthwise causal conv in
-// front of it still runs one sequence per launch — both are per-sequence state.
-// ---------------------------------------------------------------------------
+// The scan is useless batched if the depthwise causal conv in front of it still runs one
+// sequence per launch - both are per-sequence state.
 
 TEST_F(GdnBatchedScanTest, Conv1dDecodeBatchedMatchesPerSequence) {
     const int n_seq = 32, channels = 10240, ksize = 4;
@@ -414,13 +386,10 @@ TEST_F(GdnBatchedScanTest, Conv1dDecodeBatchedMatchesPerSequence) {
     cudaFree(d_pool); cudaFree(d_out); cudaFree(d_w); cudaFree(d_b); cudaFree(d_x); cudaFree(d_slots);
 }
 
-// ---------------------------------------------------------------------------
-// The grouped verify chunk (multi-candidate speculation on a hybrid): W
-// candidates as W uniform sequences of T rows each, every group committing
-// its state at d_real_n rows (the pads past it only define discarded y), and
-// the row-0 snapshot written from group 0 only. The reference is the shipped
+// Grouped verify chunk (multi-candidate speculation on a hybrid): W candidates as W uniform
+// sequences of T rows, each group committing state at d_real_n rows (pads past it only
+// define discarded y), row-0 snapshot from group 0 only. Reference: the shipped
 // single-sequence launcher run on the first real_n rows of each group.
-// ---------------------------------------------------------------------------
 
 TEST_F(GdnBatchedScanTest, GroupedChunkCommitsAtRealRowAndSnapshotsGroupZero) {
     const ScanShape s{/*n_seq=*/3, /*n_tokens=*/5};
@@ -545,10 +514,9 @@ TEST_F(GdnBatchedScanTest, GroupedChunkCommitsAtRealRowAndSnapshotsGroupZero) {
 }
 
 TEST_F(GdnBatchedScanTest, GroupedConvCommitsPerSlotAndSnapshotsGroupZero) {
-    // The conv half of the grouped verify chunk: n_seq groups of n_tokens
-    // rows, each on the window of slot seq_slots[z], committed at real_n rows;
-    // the snapshot (window after snap_rows rows, leading values from the
-    // PRE-chunk copy) from group 0 only. Reference: the single-sequence
+    // Conv half of the grouped verify chunk: n_seq groups of n_tokens rows on the window of
+    // slot seq_slots[z], committed at real_n rows; snapshot (window after snap_rows rows,
+    // leading values from the PRE-chunk copy) from group 0 only. Reference: single-sequence
     // prefill conv per group over its first real_n rows.
     const int n_seq = 3, n_tokens = 5, real_n = 3, snap_rows = 1, channels = 2048, ksize = 4;
     const std::vector<int> slots{4, 1, 2};
@@ -648,11 +616,9 @@ TEST_F(GdnBatchedScanTest, GroupedConvCommitsPerSlotAndSnapshotsGroupZero) {
     cudaFree(d_x); cudaFree(d_slots); cudaFree(d_lens);
 }
 
-// Batched speculative verify geometry: N groups of 2 rows (last token +
-// draft), group z reads slot L_z, commits the 2-row state into spare slot
-// P_z (out_slots) and the 1-row state in place into L_z (snap_slots ==
-// seq_slots). Reference: the single launcher per group over 2 rows (-> P_z)
-// and over 1 row (-> L_z). No slab, no copies.
+// Batched speculative verify geometry: N groups of 2 rows (last token + draft), group z
+// reads slot L_z, commits the 2-row state into spare slot P_z and the 1-row state in place
+// into L_z. Reference: the single launcher per group over 2 rows (->P_z) and 1 row (->L_z).
 TEST_F(GdnBatchedScanTest, VerifyGroupsCommitToSpareAndSnapshotInPlace) {
     const ScanShape s{/*n_seq=*/4, /*n_tokens=*/2};
     const std::vector<int> live{5, 1, 3, 0};
@@ -855,13 +821,11 @@ TEST_F(GdnBatchedScanTest, VerifyGroupsConvCommitsToSpareAndSnapshotsInPlace) {
 }
 
 
-// The factored spare (compute/gdn_factor.cuh). The verify carried the drafted
-// row as a second FULL state slot per batch slot - an exact duplicate of the
-// pool. The delta rule's per-token update is g*H + k (x) delta, so the row is
-// a (g, k, delta) triple instead: 48 KiB against 1.5 MiB per layer on
-// Qwen3.8-27B. What must hold is that the next step cannot tell the two apart,
-// so this runs the real accept sequence both ways and compares the state AFTER
-// the following token, not the factors themselves.
+// Factored spare (compute/gdn_factor.cuh): the verify used to carry the drafted row as a
+// second FULL state slot (an exact duplicate of the pool); the delta rule's per-token update
+// is g*H + k(x)delta, so the row is a (g,k,delta) triple instead (48KiB vs 1.5MiB/layer on
+// Qwen3.8-27B). Runs the real accept sequence both ways and compares state AFTER the
+// following token, not the factors themselves - what must hold is indistinguishability.
 TEST_F(GdnBatchedScanTest, FactoredSpareReproducesTheFullSpareAfterTheNextToken) {
     const ScanShape s{/*n_seq=*/3, /*n_tokens=*/2};
     const std::vector<int> live{4, 0, 2};

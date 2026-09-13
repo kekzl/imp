@@ -1,17 +1,10 @@
-// =============================================================================
-// GBNF grammar engine tests (CPU lane — no GPU, no tokenizer).
-//
-// WHY THIS EXISTS: a grammar constraint that is merely *usually* right is worse
-// than none, because the caller stops checking. The failures that matter are
-// (a) accepting a token that leaves the language, (b) declaring a half-written
-// derivation finished, and (c) accepting a grammar the engine cannot actually
-// enforce. All three are asserted here.
-//
-// This covers GbnfMatcher — the parser, the pushdown simulator and the UTF-8
-// assembly, i.e. everything except the device mask. It runs CPU-only on
-// purpose: every past constrained-decoding bug in this tree escaped CI because
-// its test needed a GPU.
-// =============================================================================
+// GBNF grammar engine (CPU lane, no GPU/tokenizer). A grammar constraint that is merely
+// usually right is worse than none: asserts against accepting a token that leaves the
+// language, declaring a half-written derivation finished, and accepting a grammar the engine
+// cannot enforce.
+// Covers GbnfMatcher (parser, pushdown simulator, UTF-8 assembly), everything except the
+// device mask; CPU-only because every past constrained-decoding bug here escaped CI needing
+// a GPU.
 
 #include <gtest/gtest.h>
 
@@ -47,16 +40,11 @@ std::string compile_error(const std::string& src) {
 // Pathological nesting
 // -----------------------------------------------------------------------------
 
-// expand() drops a continuation once it is kMaxStackDepth (128) rule references
-// deep, because a self-referential grammar otherwise grows the work list without
-// bound. No test in this file nested anything, so removing that cap left the
-// whole suite green while turning a recursive grammar into a hang.
-//
-// A grammar that recurses on every open bracket, driven past the cap: the
-// matcher must stay responsive and simply stop accepting deeper opens, never
-// spin. `would_accept` returning either answer is fine — the assertion is that
-// it returns at all, with a bounded amount of work, and that shallow nesting
-// still behaves.
+// expand() drops a continuation past kMaxStackDepth (128) rule-reference depth so a
+// self-referential grammar can't grow the work list unbounded; no nested test existed before
+// this, so removing the cap left the suite green while turning a recursive grammar into a
+// hang. Deep self-recursion must stay responsive (bounded work) and simply stop accepting
+// deeper opens; either would_accept answer is fine, hanging is not.
 TEST(GbnfGrammarTest, DeepSelfRecursionStaysBounded) {
     GbnfMatcher m = make("root ::= \"[\" root \"]\" | \"x\"\n");
     ASSERT_TRUE(m.compiled());
@@ -111,11 +99,9 @@ TEST(GbnfGrammar, RefusesAbsurdRepetitionBounds) {
     EXPECT_TRUE(compile_error("root ::= \"a\"{0,8}").empty());
 }
 
-// A bound past INT_MAX reached std::stoi before the check above ran. On the
-// server that surfaced as 500 {"message":"stoi"} instead of a 400; anywhere
-// without an exception handler (the fuzz harness) it aborted. Found by
-// fuzz_gbnf on the first nightly run that built (2026-09-10), reduced from
-// `1::=--_1k{24444444044444444}...`.
+// A repetition bound past INT_MAX reached std::stoi before the range check ran: 500 on the
+// server, abort anywhere without an exception handler (the fuzz harness). Found by fuzz_gbnf
+// on its first buildable nightly run (2026-09-10).
 TEST(GbnfGrammar, ARepetitionBoundPastIntMaxIsRefusedNotThrown) {
     for (const char* g : {"root ::= \"a\"{24444444044444444}",
                           "root ::= \"a\"{0,24444444044444444}",
@@ -284,10 +270,7 @@ TEST(GbnfGrammar, GroupsAndNestedAlternation) {
     EXPECT_TRUE(m.is_done());
 }
 
-// -----------------------------------------------------------------------------
-// UTF-8: the grammar simulates codepoints, tokens are bytes, and a BPE token
-// can end mid-character.
-// -----------------------------------------------------------------------------
+// The grammar simulates codepoints, tokens are bytes, and a BPE token can end mid-character.
 
 TEST(GbnfGrammar, MultiByteCharactersSplitAcrossTokens) {
     GbnfMatcher m = make("root ::= \"ä\"+");
@@ -300,10 +283,9 @@ TEST(GbnfGrammar, MultiByteCharactersSplitAcrossTokens) {
     EXPECT_FALSE(m.would_accept("a"));
 }
 
-// The discriminating case for the partial-codepoint guard: the STACKS accept
-// here, so only the pending half-character keeps is_done() false. Without that
-// check the server would report a finished reply whose last character is
-// truncated — and the truncation only shows up in the client.
+// Discriminating case for the partial-codepoint guard: the STACKS accept here, so only the
+// pending half-character keeps is_done() false. Without it the server would report a
+// finished reply whose last character is truncated.
 TEST(GbnfGrammar, HalfWrittenCharacterIsNotDoneEvenWhenTheStacksAccept) {
     GbnfMatcher star = make("root ::= \"ä\"*");
     EXPECT_TRUE(star.is_done()) << "zero repetitions accepts";
@@ -404,10 +386,9 @@ TEST(GbnfGrammar, RecursiveJsonGrammar) {
     EXPECT_FALSE(unclosed.would_accept("}")) << "the array has to close first";
 }
 
-// The pooled-manager hazard: a ConstraintManager is reused across requests, so
-// a second grammar is compiled into the SAME matcher. Everything derived from
-// the first one — the interned stacks and their memoised transitions — indexes
-// a rule table that no longer exists.
+// Pooled-manager hazard: a ConstraintManager is reused across requests, so a second grammar
+// compiles into the SAME matcher - everything derived from the first (interned stacks, their
+// memoised transitions) then indexes a rule table that no longer exists.
 TEST(GbnfGrammar, RecompilingReplacesTheLanguageCompletely) {
     GbnfMatcher m;
     std::string err;

@@ -1,9 +1,6 @@
-// RecurrentSnapshotStore — hybrid (SSM/GDN) prefix-cache snapshots.
-//
-// The store is plain LRU bookkeeping over fixed-size device buffers; what
-// needs guarding is the lifetime contract: an entry handed out to a request
-// (shared_ptr) must keep its device buffer valid across eviction, and the
-// buffer must be recycled — not leaked — once the holder releases it.
+// RecurrentSnapshotStore (hybrid SSM/GDN prefix-cache snapshots): plain LRU over fixed-size
+// device buffers, but an entry handed to a request (shared_ptr) must keep its device buffer
+// valid across eviction, and be recycled, not leaked, once the holder releases it.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -165,11 +162,10 @@ TEST(RecurrentSnapshotStoreTest, HeldEntrySurvivesEvictionThenRecycles) {
     EXPECT_EQ(ReadEntry(*e2), std::vector<uint8_t>(kEntryBytes, 0x22));
 }
 
-// Concurrent multi-turn sessions hold their restore entry for the whole
-// generation, so with more sessions than device slabs every device slab is
-// held while the next prefill wants to save. Without a host tier that save
-// fails (the test above); with one it must land in the host tier, byte-exact,
-// and be served by find() like any evicted entry.
+// Concurrent multi-turn sessions hold their restore entry for the whole generation, so with
+// more sessions than device slabs every slab can be held while the next prefill wants to
+// save; without a host tier that save fails, with one it must land byte-exact and be served
+// by find() like any evicted entry.
 TEST(RecurrentSnapshotStoreTest, SaveLandsInHostTierWhileEveryDeviceSlabIsHeld) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;

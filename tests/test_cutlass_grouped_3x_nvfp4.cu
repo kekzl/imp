@@ -200,11 +200,8 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
     cudaFree(d_grp_out);
 }
 
-// ---------------------------------------------------------------------------
-// Phase 3b: device-args wrapper must produce bit-identical output to the
-// host-args wrapper on the same per-expert problem (both call the same
-// underlying CUTLASS adapter; only the staging buffer build differs).
-// ---------------------------------------------------------------------------
+// Phase 3b: device-args wrapper must be bit-identical to the host-args wrapper on the same
+// per-expert problem - both call the same CUTLASS adapter, only the staging buffer build differs.
 TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
     if (sm_ < 120) {
         GTEST_SKIP() << "SM120 required";

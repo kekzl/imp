@@ -1,7 +1,6 @@
-// Host-side tests for the suffix-indexed draft matcher
-// (src/runtime/suffix_draft.cpp) used by speculative decoding
-// (speculative.suffix). Mirrors the ngram_draft battery where semantics
-// coincide, plus the vote/adaptive-length/incremental behaviors that differ.
+// Host-side suffix-indexed draft matcher (suffix_draft.cpp, speculative.suffix). Mirrors the
+// ngram_draft battery where semantics coincide, plus vote/adaptive-length/incremental
+// behaviors that differ.
 
 #include "runtime/suffix_draft.h"
 

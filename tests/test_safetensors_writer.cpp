@@ -1,13 +1,7 @@
-// =============================================================================
-// SafeTensors writer tests.
-//
-// The writer is what lets imp produce checkpoints instead of only consuming
-// them (docs/roadmap.md gap 1: the NVFP4 path otherwise depends on a third
-// party publishing an export). A checkpoint that writes "successfully" but
-// round-trips wrong is a silent corruption of model weights, so these tests
-// pin the wire layout byte for byte, and pin that a REJECTED write leaves no
-// file behind at all.
-// =============================================================================
+// Writer lets imp produce checkpoints, not just consume them (roadmap gap 1: NVFP4 export
+// otherwise needs a third party). A checkpoint that writes "successfully" but round-trips
+// wrong silently corrupts weights, so these pin the wire layout byte for byte and pin that a
+// REJECTED write leaves no file behind.
 
 #include "model/safetensors_writer.h"
 #include "model/safetensors_raw.h"

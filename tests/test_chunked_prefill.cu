@@ -1,22 +1,11 @@
-// E2E logits-equality battery for chunked prefill.
-//
-// Verifies that chunked prefill (prefill_chunk_size > 0) is logit-equivalent
-// to single-chunk prefill (prefill_chunk_size = 0) via teacher-forced
-// perplexity over the probe prompt (imp_perplexity applies the LM head to
-// every position — any positional/KV-corruption bug in the chunked path
-// shifts the mean NLL massively).
-//
-// Greedy TEXT byte-equality (the original form of these tests) is
-// deliberately NOT asserted anymore: chunk=0 vs chunk>0 legitimately route
-// through different attention kernels (cuBLAS S-matrix vs FA2, threshold-
-// dependent per chunk), whose few-ULP logit differences flip greedy argmax
-// on near-tied prompts. That made the suite a function of the exact quant
-// file it was calibrated on (#543) — re-downloaded quants of the SAME model
-// broke it while teacher-forced PPL was bit-identical to 0.15% relative.
-//
-// Tests skip cleanly when model files are absent — no crash, GTest reports SKIP.
-//
-// Run subset: build/test-e2e --gtest_filter="ChunkedPrefillTest.*"
+// E2E logits-equality: chunked prefill (prefill_chunk_size>0) must match single-chunk via
+// teacher-forced PPL (imp_perplexity hits every position, so positional/KV corruption shifts
+// mean NLL massively).
+// Greedy TEXT byte-equality is deliberately not asserted: chunk boundaries legitimately route
+// through different attention kernels whose few-ULP logit diffs flip greedy argmax on
+// near-tied prompts, making the suite a function of the exact quant file (#543) - a
+// re-downloaded quant of the SAME model broke it while teacher-forced PPL stayed
+// bit-identical. Skips cleanly when model files are absent.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -42,14 +31,8 @@ static bool model_exists(const char* path) {
     return false;
 }
 
-// Run greedy generation with a given prefill_chunk_size.
-// Returns the generated text (greedy, temp=0, max_tokens tokens).
-// Returns empty string on any API failure.
-//
-// Uses imp_generate (the high-level API) which uses the well-tested
-// tokenize→prefill→decode path via imp_generate_streaming internally.
-// This avoids having to manage the low-level imp_prefill_with_params
-// + imp_decode_step loop manually in tests.
+// Wraps imp_generate (uses the well-tested tokenize->prefill->decode path via
+// imp_generate_streaming) instead of manually driving imp_prefill_with_params+imp_decode_step.
 static std::string generate_greedy(const char* model_path, const std::string& prompt,
                                    int chunk_size, int max_tokens,
                                    bool use_fp8_kv = false) {
@@ -152,11 +135,9 @@ static int count_unique_words(const std::string& text) {
     return static_cast<int>(unique_words.size());
 }
 
-// Chunk-invariance tolerances on teacher-forced PPL, relative to chunk=0.
-// Measured cross-kernel-path noise (2026-06-06, Qwen3-8B + Llama-3.2-3B,
-// 3.3-3.4k-token forcing): |dPPL| <= 0.15% relative. A positional or
-// KV-corruption bug in the chunked path shifts PPL by >= 50%. 1% keeps a
-// 6x noise margin while catching real bugs with > 50x margin.
+// Chunk-invariance PPL tolerance vs chunk=0: cross-kernel-path noise measured at |dPPL| <=
+// 0.15% relative (Qwen3-8B + Llama-3.2-3B, ~3.3-3.4k tokens); a positional/KV-corruption bug
+// shifts PPL by >= 50%. 1% keeps 6x noise margin with >50x margin on real bugs.
 static constexpr double kFp16RelTol = 0.01;
 // FP8-KV adds dequant noise on the chunk-continuation KV reads.
 static constexpr double kFp8RelTol = 0.03;
@@ -167,14 +148,10 @@ static constexpr double kFp8RelTol = 0.03;
 
 class ChunkedPrefillTest : public ::testing::Test {
 protected:
-    // Model paths: env var override → /models absolute path (Docker bind-mount).
-    // IMP_TEST_MODEL_QWEN4B=path overrides the Qwen3-4B path. Deliberately NOT
-    // the generic IMP_TEST_MODEL: suite runs set that to whatever model is
-    // under test (e.g. Qwen3-8B for the prefix-cache/greedy-lock gates), and
-    // these chunk-equality expectations are calibrated for Qwen3-4B — on other
-    // models chunk=0 vs chunk>0 cross the attention-kernel threshold into
-    // DIFFERENT kernel paths, where greedy logit ties may legitimately flip.
-    // IMP_TEST_MODEL_LLAMA=path overrides Llama-3B path.
+    // IMP_TEST_MODEL_QWEN4B / IMP_TEST_MODEL_LLAMA override the model paths, deliberately not the
+    // generic IMP_TEST_MODEL (suite runs repurpose that for other gates): these chunk-equality
+    // tolerances are calibrated for Qwen3-4B, where other models could cross the attention-kernel
+    // threshold into a different kernel path with legitimately flippable greedy ties.
     static const char* qwen3_4b_path() {
         const char* p = std::getenv(imp_test::kEnvModelQwen4b);
         if (p) return p;
@@ -186,19 +163,11 @@ protected:
         return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
     }
 
-    // Long prompt: 120 numbered items × ~27 tokens/item ≈ 3240 tokens total.
-    //
-    // Size rationale (bisected 2026-05-08):
-    //   - Each item tokenizes to ~27 tokens with Qwen3 BPE (Llama similar).
-    //   - max_seq_len=4096 → blocks_per_seq=256 (block_size=16).
-    //     At 120 items: ~200 KV blocks needed, safely below the 256-block buffer
-    //     allocated for d_pf_block_tables_.
-    //   - 200 items → ~5312 tokens > max_seq_len=4096: engine spills into a
-    //     second prefill chunk of 1216 tokens that needs 332 KV blocks, which
-    //     overflows the 256-block d_pf_block_tables_ buffer (cudaMemcpy
-    //     "invalid argument"). The cliff is between 154 and 155 items (~4096 tokens).
-    //   - 120 items sits safely above 2049 tokens (≥4 chunks at chunk=512,
-    //     ≥2 chunks at chunk=1024) and well below the 4096-token cliff.
+    // 120 items (~27 tokens/item, ~3240 tokens) sits safely between two failure cliffs: below
+    // ~154-155 items (~4096 tokens) the engine spills into a second prefill chunk needing 332 KV
+    // blocks, overflowing the 256-block d_pf_block_tables_ buffer (cudaMemcpy invalid argument);
+    // 120 items needs only ~200 KV blocks and stays above the 2049-token threshold needed for
+    // >=2 chunks at chunk=1024.
     static std::string long_prompt() {
         std::string p = "Summarize the following list:\n";
         for (int i = 0; i < 120; i++) {
@@ -210,15 +179,11 @@ protected:
         return p;
     }
 
-    // Probe prompt for the NLL-equivalence tests: ~1.4k tokens, deliberately
-    // BELOW the attn_scores s_cap clamp (~1984 @ max_seq_len 4096) so that
-    // chunk=0 is a genuinely single-shot reference forward. Measured
-    // 2026-06-06 (post fa2_fp16qk continuation-decline): Qwen3-4B is
-    // BIT-IDENTICAL across chunk={64,128,512,1024}; Llama-3.2-3B is within
-    // 0.01% (continuation chunks route through cuBLAS, first chunk through
-    // FA2-f16qk). Above ~2.5k context the late chunks route through the
-    // fp8/e4m3 FMHA family and drift up to ~25% NLL — that remains an open
-    // issue (no dedicated regression test exists in this file yet).
+    // ~1.4k-token probe, deliberately below the attn_scores s_cap clamp (~1984 @ max_seq_len
+    // 4096) so chunk=0 is a genuine single-shot reference. Qwen3-4B is bit-identical across
+    // chunk={64,128,512,1024}; Llama-3.2-3B within 0.01% (continuation chunks route cuBLAS, first
+    // chunk FA2-f16qk). Above ~2.5k context late chunks route fp8/e4m3 FMHA and drift up to ~25%
+    // NLL - open issue, no dedicated regression test here yet.
     static std::string probe_prompt() {
         std::string p = "Summarize the following list:\n";
         for (int i = 0; i < 54; i++) {
@@ -231,12 +196,8 @@ protected:
     }
 };
 
-// ---------------------------------------------------------------------------
-// Test 1: FP16 KV — token-for-token equality across chunk sizes
-//
-// Greedy (temp=0) generation with FP16 KV must produce identical text for
-// chunk=0 (single-chunk) vs chunk=64/128/512/1024 (chunked prefill).
-// ---------------------------------------------------------------------------
+// FP16 KV: greedy (temp=0) generation must produce identical text for chunk=0 vs
+// chunk=64/128/512/1024.
 
 TEST_F(ChunkedPrefillTest, Qwen3_4B_Q8_0_FP16_KV_LogitsEqual) {
     const char* path = qwen3_4b_path();
@@ -257,10 +218,8 @@ TEST_F(ChunkedPrefillTest, Qwen3_4B_Q8_0_FP16_KV_LogitsEqual) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: FP8 KV — chunk continuation reads FP8-quantized KV of previous
-// chunks; allow the extra dequant noise on top of the FP16 tolerance.
-// ---------------------------------------------------------------------------
+// FP8 KV: chunk continuation reads FP8-quantized KV of prior chunks; allow extra dequant
+// noise on top of the FP16 tolerance.
 
 TEST_F(ChunkedPrefillTest, Qwen3_4B_Q8_0_FP8_KV_LogitsEqual) {
     const char* path = qwen3_4b_path();
@@ -301,19 +260,11 @@ TEST_F(ChunkedPrefillTest, Llama_3_2_3B_Chunk_64_LogitsEqual) {
            "from single-chunk prefill";
 }
 
-// ---------------------------------------------------------------------------
-// Test 3b (#548 gate — ENABLED): LONG-context chunk invariance.
-//
-// History: chunked continuations above fmha_prefill_threshold used to route
-// through the fp8/e4m3 FMHA family, drifting teacher-forced NLL up to ~25%;
-// below the threshold the f16-QK fast path produced CATASTROPHIC NLL on the
-// Llama family (0.29 -> 7.13). Root cause of the latter was never the
-// kernel: the pinned prefill staging (h_pf_token_ids_/h_pf_positions_) was
-// rewritten by the host while earlier chunks' H2D copies were still queued
-// (#548, fixed via pf_staging_evt_). With the race fixed, chunked
-// continuations now route through the FP16-QK FA2 kernel at every ctx_len
-// (no e4m3 score noise, no S-matrix), and this gate holds.
-// ---------------------------------------------------------------------------
+// #548 gate: chunked continuations above fmha_prefill_threshold used to drift teacher-forced
+// NLL up to ~25% (fp8/e4m3 FMHA) or CATASTROPHICALLY on Llama below it (0.29->7.13, f16-QK
+// fast path). Root cause was a host race: pinned prefill staging
+// (h_pf_token_ids_/h_pf_positions_) was rewritten while earlier chunks' H2D copies were still
+// queued, fixed via pf_staging_evt_. Continuations now route FP16-QK FA2 at every ctx_len.
 
 TEST_F(ChunkedPrefillTest, LongContext_Chunk_Invariance) {
     const char* path = llama_3b_path();
@@ -333,13 +284,10 @@ TEST_F(ChunkedPrefillTest, LongContext_Chunk_Invariance) {
     }
 }
 
-// Same invariance with CUDA graphs ON (FP16 KV). Guards the prefill-graph
-// replay path (#981): the captured chunk forward bakes ctx_len/q_offset as
-// host args, so replaying an earlier chunk's graph for a continuation chunk
-// attends with stale geometry and silently truncates long context — the
-// scheduler must not reuse a prefill graph across chunk offsets. Whether the
-// graph actually captures depends on the model's capturability gates; the
-// invariance must hold either way.
+// Same invariance with CUDA graphs ON (#981): the captured chunk forward bakes
+// ctx_len/q_offset as host args, so replaying an earlier chunk's graph for a continuation
+// chunk attends with stale geometry and silently truncates long context. Invariance must
+// hold whether or not the model's capturability gates actually let this chunk capture.
 TEST_F(ChunkedPrefillTest, LongContext_Chunk_Invariance_GraphsOn) {
     const char* path = llama_3b_path();
     if (!model_exists(path))
@@ -391,11 +339,9 @@ TEST_F(ChunkedPrefillTest, Qwen3_4B_GenerationCoherent) {
     if (!model_exists(path))
         GTEST_SKIP() << "model not present: " << path;
 
-    // Baseline first: greedy continuation quality on the synthetic list
-    // prompt is a property of the model FILE, not of chunking — some quants
-    // of the same model collapse to repetition even with chunk=0 (observed
-    // 2026-06-06 with a re-downloaded Qwen3-4B-Instruct-2507 Q8_0). Only
-    // judge the chunked run against a baseline that is itself coherent.
+    // Check baseline coherence first: greedy continuation quality on the synthetic list prompt
+    // is a property of the model FILE, not chunking - some quants collapse to repetition even at
+    // chunk=0. Only judge the chunked run against a baseline that is itself coherent.
     std::string single = generate_greedy(path, long_prompt(), 0, 32);
     ASSERT_FALSE(single.empty()) << "single-chunk run produced no output";
     if (count_unique_words(single) < 4)

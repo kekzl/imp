@@ -1,12 +1,6 @@
-// The persisted library-reserve measurement (AUDIT B41/B42/B49).
-//
-// CPU lane: it is a keyed text file and nothing else, which is deliberate — the
-// number it carries decides how much VRAM the plan hands out, so the thing that
-// stores it should be boring and testable without a GPU.
-//
-// What matters here is the failure behaviour. A cache miss, a truncated file or
-// an unwritable directory must all read as "no entry, charge the constant and
-// measure again"; refusing to serve a model over a cache file would be absurd.
+// Persisted library-reserve measurement (AUDIT B41/B42/B49): keyed text file, CPU-only.
+// Cache miss, truncated file, or unwritable dir must all read as no-entry: charge the
+// constant and measure again.
 
 #include <gtest/gtest.h>
 

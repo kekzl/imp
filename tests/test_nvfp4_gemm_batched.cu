@@ -1,14 +1,7 @@
-// gemm_nvfp4_batched: batched-M FP16-output NVFP4 GEMM for spec-verify chunks
-// (#998). The verify chunk forward (M = 2..33 rows) previously took the M>1
-// prefill dispatch, which on GGUF-with-NVFP4-overlay dequantizes the full
-// quantized source per GEMM — measured 52% of the tg window at ctx 2048 on
-// Qwen3-14B Q6_K (dequant_q6k_v2 329 ms of a 634 ms window, tg −39% vs
-// spec-off). The batched kernel reads each NVFP4 weight row once and reuses
-// it across up to 4 activation rows per pass (same MR tiling as the LM-head
-// gemv_nvfp4_kpar_batched_fp32).
-//
-// Reference path: gemm_nvfp4 (dequant → cuBLAS) on identical quantized
-// weights — the two paths must agree within FP16 accumulation-order noise.
+// gemm_nvfp4_batched (#998): verify chunks (M=2..33) previously took the M>1 prefill
+// dispatch, which on GGUF+NVFP4-overlay dequantizes the full source per GEMM (measured 52%
+// of the tg window at ctx 2048 on Qwen3-14B Q6_K, tg -39% vs spec-off). Reference: gemm_nvfp4
+// (dequant->cuBLAS) on identical weights, must agree within FP16 accumulation-order noise.
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -172,23 +165,10 @@ TEST_F(GemmNvfp4Batched, AccumulateAddsIntoOutput) {
     cudaFree(d_y_ref);
 }
 
-// ---------------------------------------------------------------------------
-// Bit-parity between the verify chunk and the M=1 decode GEMV
-// (speculative.verify_row_parity).
-//
-// These two paths compute the same projections and, until 2026-08-21, did not
-// agree on the answer. Both inner loops are instruction-for-instruction
-// identical; they differed only in how wide the K reduction is - decode groups
-// the products into 32 partial sums (one per warp lane), the batched verify
-// kernel into 128 (one per block thread). Same mathematics, different float
-// rounding, and it reached the STOP decision: at speculative.mtp_k=1 on
-// Qwen3.8-27B-NVFP4 it truncated answers after ~40 tokens
-// (docs/LIMITATIONS.md).
-//
-// "Close enough" is not the property under test. Row m of the batched result
-// must be BIT-identical to a standalone decode GEMV on activation row m, so
-// the comparison is on the raw uint16 bits, not a tolerance.
-// ---------------------------------------------------------------------------
+// speculative.verify_row_parity: decode GEMV and batched verify kernel differ only in K
+// reduction width (32-wide per warp lane vs 128-wide per block thread), same math, different
+// rounding. Until fixed this hit the STOP decision at mtp_k=1 on Qwen3.8-27B-NVFP4, truncating
+// after ~40 tokens (docs/LIMITATIONS.md). Row m must be BIT-identical, not merely close.
 class Nvfp4VerifyRowParity : public ::testing::Test {
 protected:
     void SetUp() override { cudaStreamCreate(&stream_); }
@@ -201,13 +181,9 @@ protected:
     int mismatching_bits(int N, int K, int M, bool parity_on) {
         std::vector<half> h_w(static_cast<size_t>(N) * K);
         std::vector<half> h_a(static_cast<size_t>(M) * K);
-        // The input has to be able to SHOW the difference. A first version of
-        // this test used small evenly-spaced integers scaled by 0.01/0.02, and
-        // the 32-wide and 128-wide reductions came out bit-identical on it -
-        // the control passed for the wrong reason and would have blessed a
-        // no-op kernel. Real activations after RMSNorm span orders of
-        // magnitude and cancel; that is what makes the grouping matter, so the
-        // data here does too.
+        // Input must be able to show the divergence: small evenly-spaced integers made the 32-wide
+        // and 128-wide reductions bit-identical, passing for the wrong reason. Real post-RMSNorm
+        // activations span orders of magnitude and cancel, which is what makes grouping matter.
         uint32_t rng = 0x9E3779B9u;
         auto next = [&rng]() {
             rng ^= rng << 13;
@@ -280,19 +256,16 @@ TEST_F(Nvfp4VerifyRowParity, MultirowShapeIsBitIdenticalToDecodeWhenOn) {
     }
 }
 
-// The control that makes the test above mean something: with the knob off the
-// same shape DOES diverge. If this ever reads 0, the two paths have converged
-// for some other reason and the parity kernel is no longer what is being
-// measured.
+// Control: with the knob off, the same shape must diverge. If this reads 0, the two paths
+// converged for another reason and the parity kernel is no longer what is being measured.
 TEST_F(Nvfp4VerifyRowParity, MultirowShapeDivergesWhenOff) {
     EXPECT_GT(mismatching_bits(8192, 8192, 4, /*parity_on=*/false), 0)
         << "expected the 128-wide kpar reduction to differ from the 32-wide decode one";
 }
 
-// The real down-projection shape: n_mb = 17408/16 = 1088 > 512, so use_multirow
-// is false and BOTH paths take the 128-wide reduction. Asserted rather than
-// assumed, because the whole point of this exercise is that "the same width"
-// was inferred once and turned out to be only half the story.
+// Real down-projection shape: n_mb=17408/16=1088 > 512, so use_multirow is false and both
+// paths take the 128-wide reduction. Asserted, not assumed: "same width" was inferred once
+// and was only half the story.
 TEST_F(Nvfp4VerifyRowParity, DownProjectionShapeAgreesWithoutTheKnob) {
     EXPECT_EQ(mismatching_bits(5120, 17408, 2, /*parity_on=*/false), 0)
         << "5120x17408 should already reduce K the same way on both paths";

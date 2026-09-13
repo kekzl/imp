@@ -1,11 +1,6 @@
-// On-disk warm weight cache (GPU, real model): a fully-cold load persists the
-// transformed uploads next to the model; the next load restores them (warm
-// hits > 0) and must produce token-identical greedy output. A corrupted cache
-// is ignored (clean cold load). See memory/weight_cache_file.h.
-//
-// Requires a real model on disk: IMP_TEST_MODEL or /models/Qwen3-8B-Q8_0.gguf.
-// The cache is redirected to a scratch [warm_cache] dir (the model mount is
-// read-only for the container user), which also exercises the dir override.
+// On-disk warm weight cache (GPU, real model): a cold load persists transformed uploads next
+// to the model; the next load restores them (warm hits > 0) with token-identical greedy
+// output. A corrupted cache is ignored (clean cold load). See memory/weight_cache_file.h.
 
 #include <gtest/gtest.h>
 
@@ -125,11 +120,10 @@ TEST(WarmCacheTest, ColdLoadWritesCacheWarmBootTokenIdentical) {
     warm.down();
 }
 
-// AUDIT_arch_2026 F1-3: a record whose data_alloc indexes past the alloc
-// table must not restore. Layout (weight_cache_file.cpp, version 1):
-// FileHeader is 48 bytes, RecordHeader follows, data_alloc is its int32 at
-// byte 24. The value read back before the flip is asserted to look like an
-// alloc index, so a layout change fails here instead of passing vacuously.
+// AUDIT_arch_2026 F1-3: a record whose data_alloc indexes past the alloc table must not
+// restore. Layout (weight_cache_file.cpp v1): FileHeader 48 bytes, RecordHeader follows,
+// data_alloc is its int32 at byte 24; asserts the pre-flip value looks like a valid alloc
+// index so a layout change fails here, not vacuously.
 TEST(WarmCacheTest, HostileAllocIndexFallsBackToColdLoad) {
     SKIP_IF_NO_MODEL();
     const std::string cache = imp::weight_cache_path_for(get_model_path(), kCacheDir);

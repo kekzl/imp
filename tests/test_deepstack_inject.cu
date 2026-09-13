@@ -1,9 +1,6 @@
-// DeepStack injection: add visual features at image-token positions.
-//
-// Two mistakes this guards, both of which leave a running model:
-//   - adding at the wrong positions (text tokens, or the wrong occurrence);
-//   - replacing instead of adding, which throws away everything the first
-//     layers computed for those positions.
+// DeepStack visual-feature injection at image-token positions guards two silent-but-running
+// mistakes: adding at the wrong positions (text tokens or wrong occurrence), and replacing
+// instead of adding (discards what earlier layers computed there).
 
 #include "vision/deepstack_inject.h"
 

@@ -1,8 +1,5 @@
 // Tier allocators: arena (T1/T2), block pool (T3), scratch stack (T4).
-// docs/internals/MEMORY.md A2/A3.3/A3.4/A6, invariants V3-V6.
-//
-// CPU-only: every allocator runs over FakeBackend, so the whole stack is
-// exercised in the lane CI actually runs (`ctest -L unit`).
+// MEMORY.md A2/A3.3/A3.4/A6, invariants V3-V6. CPU-only, exercised over FakeBackend.
 
 #include <gtest/gtest.h>
 
@@ -47,12 +44,9 @@ TEST(Arena, TakesAlignedAndTracksUsage) {
     EXPECT_EQ(arena.used() + arena.remaining(), arena.capacity());
 }
 
-// The property that closes AUDIT B13, and the reason the grow-on-demand
-// scratches in compute/ could move here (A7 step 8). Those pointers are kernel
-// PARAMETERS baked into instantiated CUDA graphs. Their old cudaFree+cudaMalloc
-// grow made a replayed graph read a freed address; an arena grow must leave the
-// previous slice both valid and untouched, because the graph is still using it
-// at the size it was captured for.
+// AUDIT B13: arena-grow scratch pointers in compute/ are kernel PARAMETERS baked into
+// captured CUDA graphs; the old cudaFree+cudaMalloc grow left a replayed graph reading a
+// freed address. A grow must leave the previous slice valid and untouched.
 TEST(Arena, GrowingATenantLeavesThePreviousSliceValidAndIntact) {
     FakeBackend be;
     ArenaAllocator arena;
@@ -435,11 +429,9 @@ TEST(Span, StableWidensToDeviceSpanAndSubspansInheritTheGuarantee) {
     EXPECT_EQ(s.first(8).size(), 8u);
 }
 
-// The I3 mechanism itself. There is no DeviceSpan -> StableSpan conversion and
-// no public StableSpan(T*, size_t): a relocatable buffer cannot be handed to a
-// graph-capturable kernel wrapper. Compile-time properties, asserted here so a
-// future refactor that adds an escape hatch fails this test rather than
-// silently reopening the hole.
+// I3: no DeviceSpan->StableSpan conversion and no public StableSpan(T*,size_t) exist, so a
+// relocatable buffer cannot reach a graph-capturable kernel wrapper. Compile-time guard
+// against a future refactor silently reopening this.
 static_assert(!std::is_convertible_v<DeviceSpan<int>, StableSpan<int>>,
               "a relocatable view must never convert to a stability guarantee");
 static_assert(std::is_convertible_v<StableSpan<int>, DeviceSpan<int>>,
@@ -496,10 +488,8 @@ TEST(ArenaLazy, ExhaustionAtTheReservationIsAValue) {
     arena.close();
 }
 
-// ── Lazy SSM/GDN state slab ───────────────────────────────────────────
-//
-// Geometry chosen so the payload (4608 B) is not a granule multiple: the
-// stride must pad to 8192 while per_seq_bytes() stays the payload.
+// Lazy SSM/GDN state slab: payload (4608 B) is not a granule multiple, so the stride pads
+// to 8192 while per_seq_bytes() stays the payload.
 
 namespace {
 struct LazySsm {

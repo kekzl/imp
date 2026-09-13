@@ -192,10 +192,8 @@ TEST(LlmCompressorKeepVision, EmitsVisualPrefixVerbatim) {
     EXPECT_EQ(c.vision_skipped, 0);
 }
 
-// The rename steps run after the vision check on purpose. A vision tensor whose
-// name happens to end in a translated suffix must still come out untouched —
-// otherwise a quantized tower would load with every slot missing and only the
-// "tower incomplete" warning to show for it.
+// Rename runs after the vision check: a vision tensor whose name ends in a translated
+// suffix must stay untouched, or a quantized tower loads with every slot missing.
 TEST(LlmCompressorKeepVision, DoesNotRenameSuffixesOnVisionTensors) {
     TranslationCounters c{};
     auto t = translate_name("model.visual.blocks.0.attn.qkv.weight_packed", c, /*keep_vision=*/true);
@@ -225,10 +223,8 @@ TEST(LlmCompressorKeepVision, LeavesTextTensorsIdentical) {
     EXPECT_EQ(off.prefix_strips, on.prefix_strips);
 }
 
-// The shard-drop in load_sharded() calls name_is_skipped() while load_shard()
-// calls translate_name(). If the two ever disagree, the shard carrying the
-// tower is discarded before a single tensor is translated — the exact failure
-// this pair of functions exists to prevent.
+// load_sharded() uses name_is_skipped(), load_shard() uses translate_name(); if they
+// disagree the tower's shard is discarded before a single tensor is translated.
 TEST(LlmCompressorKeepVision, PredicateAgreesWithTranslate) {
     const char* names[] = {
         "model.visual.blocks.0.attn.qkv.weight",
@@ -444,10 +440,8 @@ TEST(LlmCompressorFormatDetect, ReturnsFalseWhenNoConfigPresent) {
     std::filesystem::remove_all(dir, ec);
 }
 
-// ---- MIXED_PRECISION (Modelopt): a per-tensor algorithm table ----
-//
-// Nemotron-3.5-Lightning exports one: the Mamba in/out projections are FP8 and
-// the MoE experts NVFP4, so there is no single top-level `quant_algo` to match.
+// MIXED_PRECISION (Modelopt): per-tensor algorithm table. Nemotron-3.5-Lightning has Mamba
+// in/out projections FP8 and MoE experts NVFP4, so no single top-level quant_algo applies.
 
 namespace {
 std::string write_quant_config(const std::string& tag, const std::string& json) {
@@ -540,12 +534,8 @@ TEST(ModeloptMixedPrecision, PlainNvfp4Unchanged) {
     std::filesystem::remove_all(dir, ec);
 }
 
-// ---- compressed-tensors declared in config.json --------------------------
-//
-// recipe.yaml is llm-compressor's record of the run, not the checkpoint's
-// declaration: plenty of published exports carry only the config.json block,
-// and imp used to read those as Modelopt — whose tensor scale is the
-// RECIPROCAL of this format's.
+// compressed-tensors can be declared only in config.json (no recipe.yaml); imp used to read
+// those as Modelopt, whose tensor scale is the RECIPROCAL of this format's.
 
 TEST(LlmCompressorFormatDetect, DetectsCompressedTensorsFromConfigJson) {
     std::string dir = tmpdir() + "/fmt_ctcfg_" + std::to_string(::getpid());
@@ -604,10 +594,8 @@ TEST(LlmCompressorFormatDetect, IgnoresAConfigJsonWithoutAQuantizationBlock) {
 }
 
 TEST(LlmCompressorFormatDetect, RecipeYamlDecidesTheFormatAndConfigJsonTheIgnoreList) {
-    // Both present is the normal llm-compressor upload. The recipe path is the
-    // one with history behind it, so it stays first for the FORMAT. The ignore
-    // list is the other way round: the recipe holds the run's patterns, and
-    // `re:.*router` does not cover the `...router.proj` a checkpoint carries.
+    // Format detection prefers recipe.yaml (has history); ignore-list prefers config.json because
+    // recipe pattern re:.*router misses the router.proj name a checkpoint actually carries.
     std::string dir = tmpdir() + "/fmt_ctboth_" + std::to_string(::getpid());
     std::filesystem::create_directories(dir);
     std::ofstream(dir + "/recipe.yaml") << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n"
@@ -630,13 +618,9 @@ TEST(LlmCompressorFormatDetect, RecipeYamlDecidesTheFormatAndConfigJsonTheIgnore
     std::filesystem::remove_all(dir, ec);
 }
 
-// ---- the drop predicate is a different question from the skip predicate ----
-//
-// translate_name() SKIPs `mtp.*` because those tensors do not belong in the
-// main tensor map — and load_shard() then diverts them into the MTP map. They
-// are skipped and still used. The shard-drop asked "is it skipped", so on a
-// sharded llm-compressor checkpoint the draft head was discarded before any
-// tensor was read, and the only symptom was spec-decode never engaging.
+// translate_name() SKIPs mtp.* (routed into the MTP map by load_shard()); the shard-drop
+// predicate asked is-skipped instead of is-unused, so a sharded checkpoint's draft head was
+// discarded silently and spec-decode never engaged.
 
 TEST(LlmCompressorUnused, MtpIsSkippedButNotUnusedWhenWanted) {
     const char* mtp[] = {"mtp.fc.weight", "model.mtp.layers.0.self_attn.q_proj.weight"};
@@ -692,12 +676,9 @@ TEST(LlmCompressorUnused, DropOnlyWhenNeitherConsumerTakesIt) {
     }
 }
 
-// ---- ignore list: recipe patterns vs config.json names (#1969 follow-up) ----
-//
-// recipe.yaml records the run's patterns, config.json the module names they
-// expanded to. `re:.*router` full-matches `...router`, not the `...router.proj`
-// Gemma-4 carries, so reading the list from the recipe left 30 routers
-// unclassified and the inventory refused the checkpoint.
+// Ignore list: recipe.yaml patterns vs config.json names (#1969 follow-up). re:.*router
+// full-matches only "...router", not Gemma-4's "...router.proj", so 30 routers went
+// unclassified and the checkpoint was refused.
 
 namespace {
 

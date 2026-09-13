@@ -1,7 +1,6 @@
-// KVCache / KVCacheManager tests that need a real pool: they read or write
-// KV bytes, resolve device pointers, pack SWA snapshots or persist the cache.
-// GPU lane (test-kv). The bookkeeping over KVCache::for_accounting() is in
-// test_kv_cache.cpp and runs in `ctest -L unit`, which has no skips.
+// KVCache/KVCacheManager tests needing a real pool (KV bytes, device pointers, SWA
+// snapshots, persistence): GPU lane (test-kv). Bookkeeping over
+// KVCache::for_accounting() is in test_kv_cache.cpp and runs in ctest -L unit, which has no skips.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -34,11 +33,9 @@ static std::unique_ptr<KVCacheManager> MakeManagerWithMemory(int max_blocks, int
     return std::make_unique<KVCacheManager>(std::move(cache));
 }
 
-// Same helper as test_kv_cache.cpp: a prefix-cached sequence of distinct full
-// blocks, hashes registered, optionally pinned, then freed.
-// Helper: allocate a prefix-cached sequence of `n_full_blocks` distinct full
-// blocks, register hashes, optionally pin the whole prompt, then free it —
-// the cache_control lifecycle (pin happens at finish, before free_sequence).
+// Allocates a prefix-cached sequence of n_full_blocks distinct full blocks, registers
+// hashes, optionally pins the whole prompt, then frees it - the cache_control lifecycle (pin
+// happens at finish, before free_sequence).
 static void MakePinnedFreedSeq(KVCacheManager* mgr, int seq_id, int n_full_blocks, int token_base,
                                bool pin = true) {
     std::vector<int32_t> tokens(n_full_blocks * 16);
@@ -86,11 +83,8 @@ TEST(KVCacheTest, KVCachePointers) {
     ptrdiff_t kv_diff = static_cast<char*>(v0_l0) - static_cast<char*>(k0_l0);
     EXPECT_EQ(static_cast<size_t>(kv_diff), static_cast<size_t>(max_blocks) * bb);
 
-    // Expected offsets (K and V contiguous within layer):
-    //   K(layer, block) = (layer * 2 * max_blocks + block) * bb
-    //   V(layer, block) = (layer * 2 * max_blocks + max_blocks + block) * bb
-    // Verify layer=1, block=0 K pointer is at the expected offset from
-    // layer=0, block=0 K pointer.
+    // Expected offsets (K/V contiguous within layer): K(layer,block) = (layer*2*max_blocks +
+    // block)*bb, V(layer,block) = (layer*2*max_blocks + max_blocks + block)*bb.
     ptrdiff_t layer_diff = static_cast<char*>(k0_l1) - static_cast<char*>(k0_l0);
     size_t expected_layer_stride = static_cast<size_t>(max_blocks) * 2 * bb;
     EXPECT_EQ(static_cast<size_t>(layer_diff), expected_layer_stride);
@@ -286,10 +280,9 @@ TEST(KVCacheManagerTest, PersistedCacheFingerprintGate) {
     std::remove(path.c_str());
 }
 
-// 52. CacheHitOnCachedBlockKeepsReclaimableCountExact — a prefix HIT on an
-// unreferenced cached block removes it from the cached LRU; the reclaimable
-// counter must follow. An inflated counter makes can_allocate() drift
-// optimistic and lets reclaim_cached_block() spin on a pinned-only LRU.
+// A prefix HIT on an unreferenced cached block removes it from the cached LRU; the
+// reclaimable counter must follow, or can_allocate() drifts optimistic and
+// reclaim_cached_block() can spin on a pinned-only LRU.
 TEST(KVCacheManagerTest, CacheHitOnCachedBlockKeepsReclaimableCountExact) {
     SKIP_IF_NO_CUDA();
 
@@ -351,10 +344,9 @@ TEST(KVCacheManagerTest, SwaRollback) {
     EXPECT_EQ(static_cast<int>(mgr.block_table(0).size()), 5);
 }
 
-// SWA window snapshots (kv_cache.swa_snapshot_mb): pack the live window of a
-// sequence into a slab, restore it into a fresh sequence with a reused
-// global prefix — the restored blocks must be byte-identical, private, and
-// placed at the same positional slots with holes before the window.
+// SWA window snapshots (kv_cache.swa_snapshot_mb): packs a sequence's live window into a
+// slab, restores it into a fresh sequence with a reused global prefix - restored blocks must
+// be byte-identical, private, and placed at the same positional slots with holes before the window.
 TEST(KVCacheManagerTest, SwaSnapshotPackRestoreRoundtrip) {
     SKIP_IF_NO_CUDA();
 
@@ -419,10 +411,9 @@ TEST(KVCacheManagerTest, SwaSnapshotPackRestoreRoundtrip) {
     EXPECT_EQ(mgr.kv_cache()->num_free_swa_blocks(), 16);
 }
 
-// Generation-end saves pack at the block-FLOOR of the live context; with a
-// non-block-aligned slack the lowest slack block can already be trimmed.
-// The pack must tolerate holes below the read-relevant boundary (zero-fill)
-// and the restore must reproduce the live blocks byte-identically.
+// Generation-end saves pack at the block-FLOOR of live context; with non-block-aligned slack
+// the lowest slack block may already be trimmed. Pack must tolerate holes below the
+// read-relevant boundary (zero-fill), and restore must reproduce the live blocks byte-identically.
 TEST(KVCacheManagerTest, SwaSnapshotFinishPackToleratesTrimmedSlack) {
     SKIP_IF_NO_CUDA();
 
@@ -436,10 +427,9 @@ TEST(KVCacheManagerTest, SwaSnapshotFinishPackToleratesTrimmedSlack) {
     mgr.enable_swa_sizing(/*window*/ 2 * bs, /*slack*/ 17);  // slack NOT block-aligned
     ASSERT_TRUE(mgr.enable_swa_snapshots());
 
-    // Live context 170 tokens (11-block table): live span starts at block
-    // (170-49)/16 = 7. The finish save packs at floor(170/16)*16 = 160,
-    // where first_live(160) = (160-49)/16 = 6 — slot 6 is a trimmed hole
-    // below the read boundary (160-32)/16 - 1 = 7.
+    // Live context 170 tokens (11-block table): live span starts at block (170-49)/16=7. Finish
+    // save packs at floor(170/16)*16=160, where first_live(160)=(160-49)/16=6 - slot 6 is a
+    // trimmed hole below the read boundary (160-32)/16-1=7.
     ASSERT_TRUE(mgr.allocate_blocks(0, 11));
     ASSERT_TRUE(mgr.swa_prepare(0, 170));
     std::vector<int> swa0 = mgr.swa_block_table(0);
@@ -541,12 +531,11 @@ TEST(KVCacheManagerGrowTest, GrowsBeforeReclaimingCachedBlocks) {
     mgr.free_sequence(1);
 }
 
-// Growth is priced against free VRAM above the allocator headroom, not
-// against the ceiling: the ceiling was sized before the library reserve and
-// the forward scratch were claimed, and a VMM commit past what is free spills
-// silently on WDDM. A 4 MiB virtual card (vram_budget) with 32 KiB blocks
-// (2 layers x K+V x 16 tokens x 4 heads x 64 dims x 2 bytes) affords 121
-// blocks above its 5 % headroom (3.8 MiB / 32 KiB).
+// Growth is priced against free VRAM above the allocator headroom, not the ceiling (the
+// ceiling was sized before the library reserve and forward scratch were claimed, and a VMM
+// commit past what's free spills silently on WDDM). A 4MiB virtual card with 32KiB blocks
+// (2 layers x K+V x 16 tokens x 4 heads x 64 dims x 2 bytes) affords 121 blocks above its 5%
+// headroom (3.8MiB/32KiB).
 TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
     SKIP_IF_NO_CUDA();
     KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
@@ -562,14 +551,12 @@ TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
     EXPECT_LT(got, 512) << "growth must stop at the headroom, not at the ceiling";
 }
 
-// The residency probe (AUDIT_arch_2026 B-6). A pool the WDDM driver spilled
-// into host memory cannot be produced on demand, so the falsifier is the
-// copy routine itself over memory that IS host-resident: mapped pinned host
-// memory, reached over PCIe. The same routine over the device pool has to
-// read far above the spill threshold, and the host reading far below it,
-// or the probe could not tell the two apart on a real spill either.
-// What a lazy pool was charged for and has not committed is not spare, even
-// though cudaMemGetInfo reports it free (vram.lazy_commit).
+// Residency probe (AUDIT_arch_2026 B-6): a pool WDDM spilled into host memory can't be
+// produced on demand, so the falsifier is the copy routine itself over memory that IS
+// host-resident (mapped pinned host memory over PCIe) vs the device pool, which must read far
+// above the spill threshold - or the probe couldn't tell a real spill apart either. What a
+// lazy pool was charged for but hasn't committed is not spare, even though cudaMemGetInfo
+// reports it free (vram.lazy_commit).
 TEST(KVCacheGrowTest, GrowthLeavesChargedButUncommittedBytesAlone) {
     SKIP_IF_NO_CUDA();
     KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
@@ -702,14 +689,11 @@ TEST(KVCacheTest, ResidencyProbeReadsZeroWithoutMemory) {
 
 TEST(KVCacheTest, ResidencyProbeCoversTheCommittedPrefixOfAGrowablePool) {
     SKIP_IF_NO_CUDA();
-    // 4096 of 8192 blocks committed: the probe may only touch the committed
-    // prefix of each layer region, 128 MiB of the 256 MiB reserved per
-    // region (a copy past the prefix would fault). Committed that much on
-    // purpose: at 512 blocks the four copies moved 32 MiB in total, which is
-    // four launches' worth of latency, and the pre-push gate read 429.9 GB/s
-    // on resident VRAM after 170 FA2 tests had run in the same process
-    // (2026-09-08). A set past the 96 MB L2 and past launch latency is what
-    // the probe is specified for (kv_cache.cu probe_residency).
+    // 4096 of 8192 blocks committed: the probe may only touch the committed prefix of each layer
+    // region (128MiB of 256MiB reserved; a copy past it would fault). Committed this much on
+    // purpose to clear the 96MB L2 and launch-latency noise (512 blocks moved only 32MiB total,
+    // four launches' worth of latency); pre-push gate read 429.9 GB/s on resident VRAM after 170
+    // FA2 tests had run in the same process (kv_cache.cu probe_residency).
     KVCache cache(2, 8, 128, QType::F16, 4096, 16, nullptr, 8192);
     if (!cache.growable())
         GTEST_SKIP() << "no VMM backend on this device";

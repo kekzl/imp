@@ -1,16 +1,8 @@
-// =============================================================================
-// Vision CPU preprocessing tests (issue #557 item 1).
-//
-// The 5 vision source files previously had zero unit coverage — validation was
-// manual E2E only, requiring a local VL model. The CPU half (stb decode →
-// resize → mean/std normalize → FP16 CHW) needs no GPU and no weights: this
-// file synthesizes a 24-bit BMP in memory byte-by-byte (independent of stb's
-// writers) and checks the produced tensor against hand-computed values.
-//
-// What is covered: CHW layout, channel order, normalization arithmetic,
-// resize, the memory- and file-entry points, and clean failure on garbage
-// input. The GPU half (SigLIP encoder, projector) stays E2E-only by design.
-// =============================================================================
+// #557 item 1: the 5 vision source files had zero unit coverage (manual E2E only). CPU half
+// (stb decode -> resize -> mean/std normalize -> FP16 CHW) needs no GPU/weights: synthesizes
+// a 24-bit BMP in memory and checks against hand-computed values. Covers CHW layout, channel
+// order, normalization, resize, memory/file entry points, clean failure on garbage input; the
+// GPU half stays E2E-only.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -79,10 +71,8 @@ float px(const ImageData& img, int c, int y, int x) {
 float norm_ref(uint8_t v, float mean, float stdv) { return (v / 255.0f - mean) / stdv; }
 
 TEST(VisionPreprocess, ChwLayoutChannelOrderAndNormalization) {
-    // 2x2 image with per-corner primary colors: layout errors (HWC-vs-CHW,
-    // RGB-vs-BGR, row flip) each produce a distinct wrong tensor.
-    //   top-left  RED    top-right  GREEN
-    //   bot-left  BLUE   bot-right  WHITE
+    // 2x2 image, per-corner primary colors: layout errors (HWC-vs-CHW, RGB-vs-BGR, row flip)
+    // each produce a distinct wrong tensor.
     auto bmp = make_bmp24({
         {{{255, 0, 0}}, {{0, 255, 0}}},
         {{{0, 0, 255}}, {{255, 255, 255}}},
@@ -215,12 +205,9 @@ TEST(VisionPreprocess, FileEntryPointMatchesMemoryPath) {
     EXPECT_FALSE(load_and_preprocess_image("/nonexistent/imp_no_such_image.bmp", 2, mean, stdv, from_file));
 }
 
-// ---------------------------------------------------------------------------
-// qwen_smart_resize — the dynamic-resolution target size (Qwen3-VL).
-// Oracle: transformers' smart_resize (qwen2_vl image processing), reproduced by
-// hand below for each case. factor 32 = patch_size 16 * merge_size 2; the pixel
-// bounds are the staged Qwen3-VL-4B preprocessor_config.json (65536 / 16777216).
-// ---------------------------------------------------------------------------
+// qwen_smart_resize (Qwen3-VL dynamic resolution): oracle is transformers' smart_resize
+// (qwen2_vl), reproduced by hand per case. factor 32 = patch_size 16 * merge_size 2; pixel
+// bounds from the staged Qwen3-VL-4B preprocessor_config.json (65536/16777216).
 constexpr int kFactor = 32;
 constexpr int64_t kMinPx = 65536;     // 256^2
 constexpr int64_t kMaxPx = 16777216;  // 4096^2
@@ -253,12 +240,9 @@ TEST(QwenSmartResize, AboveMaxPixelsScalesDown) {
     EXPECT_LE(static_cast<int64_t>(r.height) * r.width, kMaxPx);
 }
 
-// The one case where Python's round() and std::round() disagree and it CHANGES
-// THE RESULT, not just an intermediate. 16/32 is exactly 0.5: ties-to-even
-// gives 0, ties-away gives 1.
-//   ties-to-even (correct): h_bar 0 -> product 0 < min -> min branch -> 32x2912
-//   ties-away  (wrong):     h_bar 32 -> product 65536 == min, no branch -> 32x2048
-// A silent one-step difference here changes the image's token count.
+// 16/32 == 0.5 exactly: Python's round() (ties-to-even) gives 0 -> 32x2912 via the min
+// branch; std::round() (ties-away) gives 1 -> 32x2048 with no branch taken. A silent one-step
+// rounding difference here changes the image's token count.
 TEST(QwenSmartResize, TiesRoundToEvenLikePython) {
     auto r = qwen_smart_resize(16, 2048, kFactor, kMinPx, kMaxPx);
     ASSERT_TRUE(r.ok);
@@ -287,13 +271,9 @@ TEST(QwenSmartResize, OutputIsAlwaysFactorAligned) {
         }
 }
 
-// ---------------------------------------------------------------------------
-// qwen_patchify — layout, not values. The two orderings below are the ones the
-// encoder silently depends on and that guessing gets wrong:
-//   - tokens are grouped by 2x2 MERGE BLOCK, not raster;
-//   - inside a token the layout is (C, T, ph, pw), and T is a REPEAT.
-// Oracle: the reshape/permute in Qwen2VLImageProcessorFast.
-// ---------------------------------------------------------------------------
+// qwen_patchify pins layout, not values: tokens are grouped by 2x2 MERGE BLOCK, not raster,
+// and within a token the layout is (C, T, ph, pw) with T a REPEAT. Oracle: the
+// reshape/permute in Qwen2VLImageProcessorFast.
 
 // An RGB image where every patch-sized tile carries a distinct constant, so a
 // token's content identifies which patch it came from.
@@ -329,10 +309,9 @@ TEST(QwenPatchify, GridAndShape) {
     EXPECT_EQ(out.data.size(), static_cast<size_t>(out.tokens) * out.features);
 }
 
-// Token k must be the k-th patch in MERGE-BLOCK order, not raster order. For a
-// 4x4 patch grid with merge 2 the block order is:
-//   block(0,0): patches 0,1,4,5    block(0,1): patches 2,3,6,7
-//   block(1,0): patches 8,9,12,13  block(1,1): patches 10,11,14,15
+// Token k must be the k-th patch in MERGE-BLOCK order, not raster: for a 4x4 grid with
+// merge 2, block(0,0)=patches{0,1,4,5}, block(0,1)={2,3,6,7}, block(1,0)={8,9,12,13},
+// block(1,1)={10,11,14,15}.
 TEST(QwenPatchify, TokensAreGroupedByMergeBlockNotRaster) {
     const int side = 64, P = 16;
     auto img = patch_id_image(side, P);

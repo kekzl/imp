@@ -1,16 +1,6 @@
-// =============================================================================
-// attention_mxf4nvf4_probe.cu -- Feasibility probe for mxf4nvf4.block_scale MMA
-// =============================================================================
-//
-// Tests whether the SageAttention3-style hardware block-scale MMA compiles
-// and runs on imp's sm_120f + CUDA 13.2 toolchain. Does NOT integrate into
-// the real attention path — this is only a compile + link gate.
-//
-// Upgrade target (vs existing kind::f8f6f4.m16n8k32):
-//   mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
-//
-// Reference: SageAttention3, thu-ml/SageAttention, cute_extension.h
-// =============================================================================
+// Compile + link gate for mxf4nvf4.block_scale MMA on sm_120f + CUDA 13.2 (SageAttention3-style).
+// Does NOT integrate into the real attention path.
+// Reference: SageAttention3, thu-ml/SageAttention, cute_extension.h.
 
 #include "bench/attention_mxf4nvf4_probe.h"
 #include <cuda_runtime.h>
@@ -19,17 +9,9 @@
 
 namespace imp {
 
-// Minimal kernel: runs one block-scaled MMA instance with canned inputs.
-// Not correctness-validated against a reference — only exercises the PTX.
-//
-// Inputs:
-//   a[4]  — NVFP4 A operand (m16k64 tile: 16*64*4 bit = 128 bytes = 4 uint32 per lane)
-//   b[2]  — NVFP4 B operand (single m16n8k64 sub-tile: 8*64*4 bit = 64 bytes = 2 uint32 per lane)
-//   sfa   — FP8 UE4M3 A scale packed in uint32
-//   sfb   — FP8 UE4M3 B scale packed in uint32
-// Output:
-//   d[4]  — FP32 accumulator, written to global out
-//
+// Minimal kernel: one block-scaled MMA instance, canned inputs, not correctness-validated.
+// a[4] NVFP4 A (m16k64 tile), b[2] NVFP4 B (m16n8k64 subtile), sfa/sfb FP8 UE4M3 scales.
+// d[4] FP32 accumulator output.
 __global__ void probe_mxf4nvf4_blockscale_kernel(const uint32_t* __restrict__ a_in,  // [4]
                                                  const uint32_t* __restrict__ b_in,  // [2]
                                                  uint32_t sfa_in, uint32_t sfb_in,

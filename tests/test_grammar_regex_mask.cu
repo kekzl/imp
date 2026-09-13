@@ -13,21 +13,13 @@
 namespace imp {
 namespace {
 
-// The allow list is sized from the TOKENIZER vocabulary at init, but apply_mask
-// is handed the width of the logits, which is the MODEL vocabulary. On every
-// checkpoint whose lm_head is padded the second number is larger. Qwen3-8B
-// ships 151936 rows against 151669 tokenizer entries, and the upload of the
-// allow list then wrote past its own buffer.
-//
-// The failure was not visible as a failure: cudaMemcpyAsync returned
-// `invalid argument`, the device allow list kept whatever it held, and the mask
-// kernel masked everything. Greedy argmax over an all -FLT_MAX row picks id 0,
-// so every regex- and grammar-constrained request answered "!!!!..." until it
-// hit max_tokens. JsonConstrainer and SchemaConstrainer size both sides from
-// the tokenizer and were never affected; they are also the only two of the four
-// that had a GPU test.
-//
-// Mirrors JsonConstrainTest.ModelVocabLargerThanTokenizerMasksPadding.
+// The allow list sizes from the TOKENIZER vocabulary at init, but apply_mask is handed the
+// MODEL vocabulary width (larger on a padded lm_head, e.g. Qwen3-8B: 151936 rows vs 151669
+// tokenizer entries), so the allow-list upload wrote past its own buffer.
+// Silent failure: cudaMemcpyAsync returned invalid argument, the device allow list kept its
+// old contents, the mask kernel masked everything, and greedy argmax over an all -FLT_MAX row
+// picked id 0 - every constrained request answered "!!!!..." to max_tokens.
+// JsonConstrainer and SchemaConstrainer size both sides from the tokenizer and were unaffected.
 
 // Builds a tokenizer whose vocabulary is deliberately narrower than the logits
 // row the constrainer will be asked to mask.

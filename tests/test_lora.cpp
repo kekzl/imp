@@ -1,19 +1,6 @@
-// =============================================================================
-// LoRA hot-swap E2E (issue #522) — C-API level, real model.
-//
-// Strategy: synthetic PEFT adapters crafted in-test (full control, no
-// network):
-//   1. zero-B adapter      → delta is exactly 0 → greedy output must be
-//      BIT-IDENTICAL to base. This catches every wiring bug (wrong x, wrong
-//      buffer, wrong layer) because any misapplied delta breaks identity.
-//   2. nonzero-B adapter   → greedy output must DIFFER (the delta reaches
-//      the logits) while the engine stays healthy (no abort, non-empty).
-//   3. swap back to base   → bit-identical to the original base output
-//      (graph re-capture path; a stale capture would reproduce the adapter).
-//
-// Default model: Llama-3.2-3B (q_proj/v_proj adapters, r=8) — the classic
-// PEFT target set. Skips when the model file is absent.
-// =============================================================================
+// LoRA hot-swap E2E (#522), C-API, real model: zero-B adapter -> bit-identical to base;
+// nonzero-B adapter -> output differs, engine stays healthy; swap back -> bit-identical to
+// original (graph re-capture path). Default Llama-3.2-3B q_proj/v_proj r=8, skips if absent.
 
 #include <gtest/gtest.h>
 
@@ -109,10 +96,8 @@ std::string make_adapter(int d_model, int kv_rows, bool zero_B, const char* dirn
     return dir;
 }
 
-// Teacher-forced PPL is the project's bit-stable A/B instrument under
-// deterministic mode (#542) — greedy TEXT comparison is invalid here because
-// dense greedy logit ties flip across runs (docs/determinism.md), which a
-// pre-LoRA control run confirmed on this exact model/prompt.
+// Teacher-forced PPL is the bit-stable A/B instrument under IMP_DETERMINISTIC (#542); greedy
+// text comparison is invalid since dense greedy logit ties flip across runs (docs/determinism.md).
 double ppl(ImpModel model, ImpContext ctx, const char* text) {
     std::vector<int32_t> toks(512);
     int n = 0;
@@ -141,10 +126,8 @@ TEST(LoraHotSwap, ZeroAdapterIdentity_EffectAdapterDiffers_SwapBack) {
     if (!std::filesystem::exists(model_path()))
         GTEST_SKIP() << "model not present: " << model_path();
 
-    // The identity assertions need bit-stable greedy across runs — dense
-    // greedy logit ties otherwise flip mid-sequence (documented determinism
-    // boundary, docs/determinism.md). Same env-seed mechanism as
-    // DetEvalE2ETest: must be set BEFORE model/engine creation.
+    // Identity assertions need bit-stable greedy (logit ties flip otherwise, docs/determinism.md);
+    // IMP_DETERMINISTIC=1 must be set before model/engine creation, same as DetEvalE2ETest.
     setenv("IMP_DETERMINISTIC", "1", 1);
 
     ImpModel model = nullptr;
@@ -200,10 +183,8 @@ TEST(LoraHotSwap, ZeroAdapterIdentity_EffectAdapterDiffers_SwapBack) {
     imp_model_free(model);
 }
 
-// ---------------------------------------------------------------------------
-// AUDIT_arch_2026 dispatch #6 (E-1, F1-6): the adapter is checked against the
-// model at load, is a prefix-cache key, and is an admission barrier.
-// ---------------------------------------------------------------------------
+// AUDIT_arch_2026 dispatch #6 (E-1, F1-6): the adapter is checked against the model at load,
+// is a prefix-cache key, and is an admission barrier.
 
 // q_proj/v_proj adapter with caller-chosen widths (a wrong one must be refused).
 std::string make_adapter_dims(int k_in, int q_out, int kv_out, const char* dirname) {
@@ -363,10 +344,8 @@ TEST(LoraHotSwap, AdapterIsAPrefixCacheKeyAndAnAdmissionBarrier) {
     ASSERT_TRUE(drain(r4, 60000));
     EXPECT_GT(r4.sr->request->cached_tokens, 0);
 
-    // 5. Barrier: an A request and a B request submitted back to back are
-    //    served one after the other, never in one batch (max_batch_size is 2,
-    //    so without the barrier the worker steps both rows together and
-    //    decode_batch_max reads 2), and the switch happens between them.
+    // Barrier: A and B requests submitted back to back serve sequentially, never batched
+    // (max_batch_size is 2; without the barrier decode_batch_max would read 2).
     EXPECT_EQ(be.decode_batch_max.load(), 1);
     Served r5{make_server_request(ctx, prompt, 48, a)};
     Served r6{make_server_request(ctx, prompt, 4, b)};

@@ -1,14 +1,9 @@
-// Tile-shape bench for the CUTLASS 3.x NVFP4 grouped GEMM on the Qwen3.6-35B
-// MoE prefill geometry (256 experts, gate/up N=512 K=2048, down N=2048
-// K=512, ~16 rows per expert at pp512). The shipped 128x128x128 cooperative
-// tile pads a 16-row expert to 128 rows (8x the MMA work) and holds one CTA
-// per SM; roofline run 1d5b9230 reads the class at 55% of DRAM bandwidth.
-// Local instantiations below try smaller N tiles, a deeper K tile and the
-// pingpong schedule against the production entry point (the builder rejects
-// M=64 tiles: the SF atom is 128 rows). The 32-row-tile v2 grouped kernel
-// measured here too lives on branch perf/moe-smallm-v2-grouped (refuted in
-// situ by the routing skew, docs/roadmap.md). Weights total 134 MB per launch, so every launch reads DRAM.
-// GPU required - skips without one. Decision data, not a gate.
+// Tile-shape bench for CUTLASS 3.x NVFP4 grouped GEMM at Qwen3.6-35B MoE prefill geometry
+// (256 experts, gate/up N=512 K=2048, down N=2048 K=512, ~16 rows/expert): the shipped
+// 128x128x128 cooperative tile pads a 16-row expert to 128 rows (8x MMA work), roofline
+// 1d5b9230 reads 55% of DRAM bandwidth. Tries smaller N tiles, deeper K, pingpong schedule
+// (builder rejects M=64: SF atom is 128 rows); the 32-row-tile v2 kernel is refuted by
+// routing skew (docs/roadmap.md). GPU required, skips without one; decision data, not a gate.
 
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_cutlass_sm120.h"

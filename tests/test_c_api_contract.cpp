@@ -1,9 +1,7 @@
-// C-API contract: hostile ImpConfig values through imp_context_create
-// (AUDIT_arch_2026 G-3 / G-4). The public header is the ABI-stable boundary and
-// neither shipping binary drives its config fields through it, so this file
-// does. CPU-only by construction: every case is refused before a model or the
-// GPU is looked at, so the model handle is an empty ImpModel_T and the process
-// never touches CUDA.
+// C-API contract: hostile ImpConfig values through imp_context_create (AUDIT_arch_2026
+// G-3/G-4). Public header is the ABI-stable boundary and neither shipping binary drives its
+// config fields through it directly, so this file does. CPU-only: every case refuses before
+// a model or the GPU is touched.
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 

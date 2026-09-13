@@ -1,25 +1,13 @@
-// Regression tests for engine relaunch — the imp-server model auto-swap path.
-//
-// Two production bugs (server [auto-swap] Qwen3.6-35B → Gemma-4-31B, 2026-06):
-//
-//  1. SIGSEGV on engine re-init after inference: the process-global
-//     attention-cuBLAS handle kept the destroyed engine's stream bound
-//     (cublasSetStream in the batched-attention path). The next engine's
-//     attention_cublas_prewarm() issued its dummy GemmBatchedEx on that
-//     dangling stream → cuBLAS algo heuristics → cuStreamGetGreenCtx →
-//     segfault inside libcuda. The server died with no error output
-//     (exit 139); docker restart-policy masked it as connection drops.
-//
-//  2. VRAM starvation on swap: weights are allocated via cudaMallocAsync from
-//     the device default mempool, whose release threshold Engine init raises
-//     to UINT64_MAX. Freeing model+context parked ~weights-sized memory in
-//     the pool instead of returning it to the driver — the next model load
-//     (plain-cudaMalloc paths, cudaMemGetInfo-based sizing and the upload
-//     oversubscription gate) saw ~1.5 GB free on a 32 GB card and failed
-//     ("Failed to upload token embedding").
-//
-// Requires a real model on disk: IMP_TEST_MODEL or the default
-// /models/Qwen3-8B-Q8_0.gguf, matching test_api_generate.cpp.
+// Engine relaunch (imp-server model auto-swap) regression tests, from two production bugs
+// (server auto-swap Qwen3.6-35B -> Gemma-4-31B, 2026-06):
+// (1) SIGSEGV on re-init: the process-global attention-cuBLAS handle kept the destroyed
+// engine's stream bound, so the next engine's attention_cublas_prewarm() issued a dummy GEMM
+// on a dangling stream, segfaulting inside libcuda with exit 139 and no error output.
+// (2) VRAM starvation on swap: weights allocate via cudaMallocAsync from the device default
+// mempool (release threshold raised to UINT64_MAX at init), so freeing model+context parked
+// memory in the pool instead of returning it, and the next load's cudaMemGetInfo-based
+// sizing saw ~1.5GB free on a 32GB card and failed.
+// Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-Q8_0.gguf.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -100,13 +88,9 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
     size_t free_before = device_free_mib();
     ASSERT_GT(free_before, 0u);
 
-    // Pool "used" is a PROCESS-wide counter, so an absolute bound on it is only
-    // true when this test runs first. It did not: in the full test-e2e run
-    // earlier tests leave blocks in the default pool and the figure read 1792
-    // MiB against a 1024 MiB bound, while the same test passed in isolation.
-    // That is the same category error the comment below rejects for the DEVICE
-    // figure, one level down — so take a baseline and assert on the delta,
-    // which is the part this cycle actually owns.
+    // Pool "used" is a PROCESS-wide counter: an absolute bound only holds if this test runs
+    // first (measured: 1792 MiB vs a 1024 MiB bound in the full test-e2e run, passing in
+    // isolation). Take a baseline and assert on the delta instead.
     unsigned long long pool_used_before = 0;
     {
         cudaMemPool_t p0 = nullptr;
@@ -120,36 +104,23 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
     if (::testing::Test::HasFatalFailure())
         return;
 
-    // Teardown must hand the weights back to the default mempool rather than
-    // parking them there — that is #507's actual regression, and #834's fix
-    // (cudaFreeAsync, not cudaFree) is what makes the trim able to reclaim
-    // them. Assert it at POOL level, which is the level at which it is true.
-    //
-    // This used to assert at device level instead, by cudaMalloc'ing the
-    // apparently-missing amount and treating success as proof that the memory
-    // was merely under-reported. That check is unsound on WSL2/WDDM: the
-    // driver oversubscribes into host memory and returns cudaSuccess, so the
-    // probe passes whether or not the memory is really there (AUDIT G18).
-    // Measured: a 28 GiB allocation succeeds on a 32 GB card with 22.6 GiB
-    // reported free, and runs at 237 GB/s against 1531 GB/s resident.
-    //
-    // The device-level figure genuinely does not return here — WSL2/WDDM keeps
-    // a process's peak commitment for the process lifetime, no matter what the
-    // pool does (AUDIT B36) — so asserting on it would encode a platform
-    // property as a leak. What still guards #507 is the second full cycle
-    // below: the next load must succeed.
+    // Teardown must hand weights back to the default mempool, not park them (#507); #834's fix
+    // (cudaFreeAsync, not cudaFree) is what lets the trim reclaim them - asserted at POOL level,
+    // where it's true.
+    // A device-level assert here is unsound on WSL2/WDDM: the driver oversubscribes into host
+    // memory and returns cudaSuccess regardless (measured: a 28GiB alloc succeeds on a 32GB card
+    // with 22.6GiB reported free, running at 237 GB/s vs 1531 GB/s resident, AUDIT G18); WSL2/WDDM
+    // also keeps a process's peak commitment for its lifetime regardless of pool state (AUDIT
+    // B36). What still guards #507 is the second full cycle below: the next load must succeed.
     size_t free_between = device_free_mib();
     cudaMemPool_t pool = nullptr;
     int dev = 0;
     cudaGetDevice(&dev);
     if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess) {
-        // UsedMemCurrent, not ReservedMemCurrent. Reserved drops to 0 on the
-        // trim even when the blocks were never returned — verified by
-        // reverting #834 (cudaFree instead of cudaFreeAsync): reserved still
-        // reads 0 while used stays at the full weight footprint and climbs to
-        // 16600 MiB on the second cycle, which is the exact signature #834
-        // recorded. Asserting on reserved would have passed straight through
-        // that regression.
+        // UsedMemCurrent, not ReservedMemCurrent: reserved drops to 0 on trim even when blocks were
+        // never returned (verified by reverting #834 to plain cudaFree - reserved reads 0 while used
+        // stays at the full weight footprint and climbs to 16600 MiB on the second cycle, #834's
+        // exact signature). Asserting on reserved would pass straight through that regression.
         unsigned long long used = 0;
         ASSERT_EQ(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used), cudaSuccess);
         const unsigned long long retained = used > pool_used_before ? used - pool_used_before : 0;
@@ -162,13 +133,11 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
             << "on this platform (AUDIT B36) and is NOT what this assertion is about.";
     }
 
-    // The IMMA prefill planes are keyed by SOURCE POINTER and were never freed
-    // outside tests (#1899): the first model's planes — up to 8.6 GiB — stayed
-    // charged against the second model's budget, which then declined every take
-    // and ran its prefill GEMMs through dequant. Worse in principle: a recycled
-    // allocation with the same (N, K) would have been served the previous
-    // model's weights. Teardown runs the cuda_static_reset hooks, and this is
-    // the property that says the hook is wired.
+    // The IMMA prefill planes are keyed by SOURCE POINTER and were never freed outside tests
+    // (#1899): the first model's planes (up to 8.6 GiB) stayed charged against the second
+    // model's budget, declining every take and forcing dequant fallback - or worse, serving a
+    // recycled (N,K) allocation with the previous model's weights. This pins that the
+    // cuda_static_reset teardown hook is wired.
     EXPECT_EQ(imp::mmq_q8_imma_plane_bytes_used(), 0u)
         << "teardown left " << (imp::mmq_q8_imma_plane_bytes_used() >> 20)
         << " MiB of Q8_0 IMMA planes behind; the next model in this process pays for them";
@@ -178,13 +147,11 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
     run_one_cycle(get_model_path());
 }
 
-// #830: a SECOND engine on the SAME model handle (load once, create/free/create
-// context) must not CUDA-IMA. Some models free their source weight tensors for
-// VRAM during the first engine's pre-dequant (Phase-4b), leaving dangling
-// pointers a second build would read. The engine now rejects that up front
-// (clean error), while models that never drop sources (dense Q8_0) still support
-// create/free/create. Either outcome is acceptable here — the invariant is "no
-// illegal access / no crash", and the process stays usable afterward.
+// #830: a SECOND engine on the SAME model handle (load once, create/free/create context)
+// must not CUDA-IMA. Some models free their source weight tensors during pre-dequant
+// (Phase-4b), leaving dangling pointers for a second build; the engine now rejects that up
+// front with a clean error, while models that keep sources (dense Q8_0) still support
+// create/free/create. Either outcome is fine; the invariant is no illegal access/crash.
 TEST(EngineRelaunchTest, SecondEngineOnSameModelHandleNeverIMAs) {
     SKIP_IF_NO_MODEL();
 

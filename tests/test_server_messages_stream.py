@@ -64,11 +64,9 @@ def stream_events():
     the socket timeout. A timeout is treated as end-of-stream (the gate then
     fails on the missing message_stop rather than crashing on a traceback).
     """
-    # `thinking:disabled` is best-effort: imp's underlying /no_think suppression
-    # is model/prompt-dependent (a think-model may still reason), so we don't rely
-    # on it — the budget is large enough for a full think+answer to finish with a
-    # clean message_stop, and the assertions below tolerate a thinking block. The
-    # prompt is trivial so any reasoning stays short.
+    # thinking:disabled is best-effort (imp's /no_think suppression is model/prompt-dependent), so
+    # the budget is sized for a full think+answer to finish with a clean message_stop, and
+    # assertions tolerate a thinking block.
     body = {"model": M, "max_tokens": 512, "stream": True,
             "thinking": {"type": "disabled"},
             "messages": [{"role": "user", "content": "What is 2+2? Reply with just the number."}]}

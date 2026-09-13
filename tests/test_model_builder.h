@@ -271,11 +271,8 @@ struct MoETestModel {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Q8_0 weight creation (for FP8/NVFP4 pre-dequant tests)
-// Q8_0 format: 34 bytes per 32 elements = half(scale) + int8_t[32]
-// cols must be divisible by 32.
-// ---------------------------------------------------------------------------
+// Q8_0 weight creation for FP8/NVFP4 pre-dequant tests: 34 bytes per 32 elements
+// (half scale + int8_t[32]); cols must be divisible by 32.
 inline Tensor make_q8_0_weight(int64_t rows, int64_t cols, std::mt19937& rng, float scale = 0.5f) {
     assert(cols % 32 == 0);
     std::normal_distribution<float> dist(0.0f, scale);
@@ -321,11 +318,8 @@ inline Tensor make_q8_0_weight(int64_t rows, int64_t cols, std::mt19937& rng, fl
     return t;
 }
 
-// ---------------------------------------------------------------------------
-// Dense model with Q8_0 weights (for testing FP8/NVFP4 pre-dequant paths)
-// Embedding, norms, and output projection stay FP16 (like real models).
-// Attention and FFN weights are Q8_0.
-// ---------------------------------------------------------------------------
+// Dense model with Q8_0 attention/FFN weights (FP8/NVFP4 pre-dequant path tests);
+// embedding, norms and output projection stay FP16 like real models.
 struct Q8DenseTestModel {
     std::shared_ptr<Model> model;
     std::vector<Tensor> all_tensors;

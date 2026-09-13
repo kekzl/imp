@@ -1,17 +1,6 @@
-// =============================================================================
-// test_gemm_capture_fp16_sm120.cu — correctness + microbench for the
-// capture-safe sm_120 FP16 WMMA GEMM kernel.
-// =============================================================================
-//
-// Validates:
-//   1. Bit-stable correctness vs CPU reference for representative shapes.
-//   2. Same numerics as cuBLAS gemm() (within FP16 tolerance) for the cases
-//      where the WMMA path replaces cuBLASLt under capture.
-//   3. Per-shape kernel timing alongside cuBLASLt for cross-validation.
-//      Bench result is printed; not gated, so a regression doesn't fail the
-//      suite but is visible to the operator.
-//
-// =============================================================================
+// Capture-safe sm_120 FP16 WMMA GEMM: validates bit-stable correctness vs a CPU reference,
+// same numerics as cuBLAS gemm() (FP16 tolerance) where WMMA replaces cuBLASLt under
+// capture, and prints per-shape timing alongside cuBLASLt (informational, not gated).
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -29,10 +18,8 @@
 namespace imp {
 namespace {
 
-// CPU reference: D = alpha * A @ B^T + beta * D
-//   A [M, K] row-major
-//   B [N, K] row-major  (semantic B^T)
-//   D [M, N] row-major
+// CPU reference: D = alpha * A @ B^T + beta * D, A[M,K] row-major, B[N,K] row-major
+// (semantic B^T), D[M,N] row-major.
 void cpu_gemm_ref(const std::vector<float>& A, const std::vector<float>& B, std::vector<float>& D,
                   int M, int N, int K, float alpha, float beta) {
     for (int i = 0; i < M; ++i) {

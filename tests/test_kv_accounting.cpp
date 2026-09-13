@@ -1,28 +1,14 @@
-// Prefix-cache and block-accounting behaviour, WITHOUT a GPU.
-//
-// Why this file exists, and why it is not more tests in test_kv_cache.cpp:
-// that file's manager tests build a real KVCache, whose constructor allocates
-// VRAM and throws without a device, so every one of them opens with
-// SKIP_IF_NO_CUDA() and lives in `test-kv` - a binary CI never runs, because
-// there is no GPU runner (docs/DESIGN_DECISIONS.md, "No GPU runner in CI").
-//
-// Mutation testing on 2026-09-02 measured what that costs. Of the 21 host-side
-// mutants, the merge gate caught 15; all five survivors were in
-// kv_cache_manager.cpp, and four of them are real faults with a plain
-// failure mode:
-//
-//   M35  content_salt dropped from the chain: two prompts with identical token
-//        ids but different images share KV.
-//   M36  reuse no longer stops at the first miss: a hit after a hole is shared,
-//        leaving uncomputed KV inside the range prefill was told to skip.
-//   M38  the probe reports one block more than the chain reaches.
-//   M40  reclaiming a cached block leaves its hash entry pointing at a block
-//        that is back in the free list.
-//
-// KVCache::for_accounting() removes the only obstacle: the id space, the free
-// list and the ref counts never needed the pool (BlockPool's open_slots mode
-// is documented as "the caller owns the memory"). Each test below fails on one
-// of those four mutants and runs in `ctest -L unit`.
+// Prefix-cache and block-accounting behavior WITHOUT a GPU: test_kv_cache.cpp's manager
+// tests build a real KVCache (allocates VRAM, throws without a device), so they SKIP_IF_NO_
+// CUDA and live in test-kv, a binary CI never runs (no GPU runner).
+// Mutation testing (2026-09-02): of 21 host-side mutants, the merge gate caught 15; the 5
+// survivors were all in kv_cache_manager.cpp, 4 real faults: M35 content_salt dropped (images
+// with identical token ids share KV), M36 reuse doesn't stop at the first miss (a hit past a
+// hole shares uncomputed KV), M38 the probe overcounts reachable blocks by one, M40
+// reclaiming a cached block leaves its hash pointing at a freed block.
+// KVCache::for_accounting() removes the pool requirement (BlockPool's open_slots mode is
+// documented as "the caller owns the memory"), so each test below runs GPU-free in
+// ctest -L unit and fails on one of those four mutants.
 
 #include "core/tensor.h"
 #include "memory/kv_cache.h"
@@ -83,11 +69,10 @@ TEST(KVAccounting, ForAccountingHasTheSameGeometryAndNoMemory) {
     EXPECT_EQ(cache->num_free_blocks(), 8);
 }
 
-// M35. content_salt seeds the hash chain, and allocate_blocks_with_prefix has
-// to seed from the SAME value register_block_hashes used. Dropping it there
-// (parent_hash = 0) is invisible to a text-only test, because 0 is the text
-// salt: it only shows up when a salt is actually in play, which is every
-// multimodal request (identical image-token ids, different pictures).
+// M35: content_salt seeds the hash chain; allocate_blocks_with_prefix must seed from the
+// SAME value register_block_hashes used. Dropping it (parent_hash=0) is invisible to a
+// text-only test since 0 is the text salt - it only shows up on a real multimodal salt
+// (identical image-token ids, different pictures).
 TEST(KVAccounting, SaltSeedsTheChainOnLookupToo) {
     auto mgr = MakeAccountingManager(16);
     constexpr size_t kSaltA = 0xA1A1A1A1ull;
@@ -131,12 +116,10 @@ TEST(KVAccounting, ProbeCountsTheCachedChainExactly) {
     }
 }
 
-// M36. Reuse must stop at the first miss. A hole in the middle is not
-// hypothetical: LRU reclaims the OLDEST cached block, which is the first block
-// of the oldest sequence, so the surviving tail is exactly the shape that
-// tempts a non-contiguous reuse. The caller skips prefill for
-// reused * block_size tokens, so sharing block 1 after missing block 0 leaves
-// uncomputed KV inside the skipped range.
+// M36: reuse must stop at the first miss. A middle hole is not hypothetical: LRU reclaims
+// the OLDEST cached block (the first block of the oldest sequence), leaving a tail shape that
+// tempts non-contiguous reuse; the caller skips prefill for reused*block_size tokens, so
+// sharing block 1 after missing block 0 leaves uncomputed KV inside the skipped range.
 TEST(KVAccounting, ReuseStopsAtTheFirstMiss) {
     auto mgr = MakeAccountingManager(16);
     auto tokens = CacheOneSequence(*mgr, 0, /*blocks=*/3, /*first=*/300);

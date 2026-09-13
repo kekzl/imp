@@ -1,25 +1,9 @@
-// Qwen3.8-27B chat template: the `reasoning_effort` control field.
-//
-// Qwen3.8's chat_template.jinja (tests/fixtures/qwen38_chat_template.jinja,
-// embedded verbatim in tests/refs/qwen38_template_jinja.h) branches on
-// `reasoning_effort` and injects a different system-prompt preamble for each
-// of its three supported values:
-//
-//   xhigh (its own default)  long "think carefully / validate assumptions" text
-//   low                      short "keep your thinking brief" text
-//   medium                   NO preamble at all
-//   anything else            raise_exception
-//
-// Before this test existed, imp accepted `reasoning_effort` on the wire and
-// never stamped it into the Jinja context, so every request rendered the
-// template's `default('xhigh')` branch. Measured on Qwen3.8-27B-NVFP4 through
-// /v1/chat/completions: `low` and `xhigh` both produced 67 prompt_tokens and
-// identical output. The field was inert.
-//
-// This asserts on the RENDERED PROMPT, which is what the model actually sees,
-// via ChatTemplate::render_jinja() — the production context builder, not a
-// hand-rebuilt parallel one (the same reason the Harmony golden moved onto it
-// in #1572). No vocabulary and no model needed, so it runs in the CPU lane.
+// Qwen3.8-27B chat_template.jinja branches on reasoning_effort: xhigh (default, long
+// preamble), low (short), medium (none), else raise_exception. Before this test, imp never
+// stamped reasoning_effort into the Jinja context, so every request rendered the xhigh
+// default (measured: low and xhigh both gave 67 prompt_tokens, identical output).
+// Asserts on the RENDERED PROMPT via ChatTemplate::render_jinja() (production path), not a
+// hand-rebuilt parallel one. CPU lane: no vocab/model needed.
 
 #include "model/chat_template.h"
 #include "refs/qwen38_template_jinja.h"
@@ -160,10 +144,9 @@ TEST(Qwen38ReasoningEffort, SuppressedThinkingDropsThePreamble) {
 TEST(Qwen38ReasoningEffort, UnsupportedValueYieldsNoPreamble) {
     Tokenizer tok = make_tokenizer();
     ChatTemplate tpl = make_template(tok);
-    // The template calls raise_exception for anything outside its three values.
-    // imp's Jinja logs that and keeps rendering, so the observable contract is:
-    // the prompt carries NEITHER preamble. What must not happen is silently
-    // getting the xhigh text, which would make a typo look like it worked.
+    // Template raise_exception's for anything outside its three values; imp's Jinja logs and
+    // keeps rendering, so the contract is NEITHER preamble, not silently falling back to xhigh
+    // (which would make a typo look like it worked).
     const std::string out = render_with(tpl, tok, "ludicrous");
     EXPECT_EQ(out.find(kXhighPreamble), std::string::npos)
         << "an unsupported effort must not render as the default";

@@ -1,10 +1,6 @@
-// Which tensors imp-quantize touches, and which checkpoints it refuses.
-//
-// This rule has already been wrong in the direction that ships a working-looking
-// model: #1159 quantized MLA latent projections and MoE routers because they are
-// 2-D and K-aligned, producing a checkpoint that loaded and then emitted
-// garbage. Nothing here is a shape assertion for its own sake — each case is a
-// tensor role that must or must not survive.
+// Which tensors imp-quantize touches/refuses. Already wrong once in the ship-a-working-
+// looking-model direction: #1159 quantized MLA latent projections and MoE routers because
+// they are 2-D and K-aligned, producing a checkpoint that loaded and emitted garbage.
 
 #include "../tools/imp-quantize/tensor_policy.h"
 
@@ -76,10 +72,9 @@ TEST(QuantizePolicy, RefusesMisalignedKAndNonFloatDtypes) {
     EXPECT_FALSE(quantizes(tensor("model.layers.0.mlp.up_proj.weight", {4096, 4096}, "U8")));
 }
 
-// The rank check has to come BEFORE the name check. With the other order a
-// stacked tensor was diagnosed as "not a .weight tensor" — which produced no
-// SKIP line, no counter and no exclusion entry, so it was copied through in
-// silence. Real stacked checkpoints never use the `.weight` suffix.
+// Rank check must come BEFORE the name check: in the other order a stacked tensor was
+// diagnosed as "not a .weight tensor" (no SKIP line, no counter, no exclusion) and was
+// copied through silently. Real stacked checkpoints never use the .weight suffix.
 TEST(QuantizePolicy, DiagnosesAStackWhateverItIsNamed) {
     EXPECT_NE(reason(tensor("model.layers.0.mlp.experts.gate_up_proj", {128, 1408, 2048})).find("3-D"),
               std::string::npos);
@@ -123,12 +118,9 @@ TEST(StackedExperts, IgnoresNonFloatStacks) {
     EXPECT_TRUE(find_stacked_expert_tensors(tensors).empty());
 }
 
-// ── fused Q + gate projections ───────────────────────────────────────
-//
-// #1273's root cause. A Qwen3.5 / Qwen3-Next `attn_output_gate` layer emits Q
-// and the sigmoid gate from ONE q_proj, so the tensor carries two roles with
-// very different sensitivity to NVFP4. Detection is by shape rather than by a
-// config flag: a gated q_proj emits twice what the layer's o_proj consumes.
+// #1273 root cause: a Qwen3.5/Qwen3-Next attn_output_gate layer emits Q and the sigmoid gate
+// from ONE q_proj, two roles with very different NVFP4 sensitivity. Detected by shape: a
+// gated q_proj emits twice what the layer's o_proj consumes.
 
 // A gated hybrid attention layer: 16 heads x 256, so o_proj consumes 4096 and
 // q_proj emits 8192 (Q + gate). Matches Qwen3.6-35B-A3B.
@@ -156,14 +148,9 @@ TEST(FusedGateQProj, FindsTheGatedProjectionAndLeavesADenseOneAlone) {
 }
 
 TEST(FusedGateQProj, MatchesPerLayerRatherThanAcrossTheCheckpoint) {
-    // Two gated layers with DIFFERENT head counts: 16x256 (o_proj takes 4096)
-    // and 24x256 (o_proj takes 6144). Pairing a q_proj against some other
-    // layer's o_proj finds only one of them.
-    //
-    // Written this way after a mutation run: the first version used a gated
-    // layer plus a DENSE one, and replacing the per-layer lookup with "any
-    // o_proj" left all four tests green — the dense layer failed to match under
-    // both the right rule and the wrong one, so it could not tell them apart.
+    // Two gated layers with different head counts (16x256 -> o_proj 4096, 24x256 -> o_proj
+    // 6144): pairing a q_proj against another layer's o_proj finds only one. Written after a
+    // mutation run: a gated+dense pairing let "any o_proj" pass both the right and wrong rule.
     std::vector<RawTensor> ts = gated_layer("model.layers.3");
     ts.push_back(tensor("model.layers.7.self_attn.q_proj.weight", {12288, 2048}));
     ts.push_back(tensor("model.layers.7.self_attn.o_proj.weight", {2048, 6144}));
@@ -217,11 +204,9 @@ TEST(Nvfp4OutputBytes, CountsPackedNibblesMicroScalesAndTensorScale) {
     EXPECT_NEAR(ratio, 32.0 / 9.0, 0.01) << "BF16 against packed+micro is 2 / (0.5 + 0.0625)";
 }
 
-// An FP8 source pairs each E4M3 weight with a block-scale grid, and the grid is
-// consumed whatever happens to the weight. So "leave this one alone" cannot mean
-// "copy its bytes": E4M3 without its scales is still valid E4M3 that means
-// something else, and nothing downstream can tell. Every refusal here must be a
-// widen.
+// An FP8 source pairs each E4M3 weight with a block-scale grid consumed regardless of the
+// weight; "leave alone" cannot mean "copy raw bytes" since E4M3 without its scales is still
+// valid E4M3 meaning something else. Every refusal here must be a widen.
 TEST(Fp8SourceAction, RefusedWeightsAreWidenedRatherThanCopiedRaw) {
     std::string why;
     const RawTensor lm_head = tensor("lm_head.weight", {248320, 5120}, "F8_E4M3");

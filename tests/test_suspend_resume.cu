@@ -1,16 +1,9 @@
-// Suspend-to-RAM roundtrip (GPU, real model): capture a weight snapshot,
-// tear everything down, verify VRAM is allocatable again, resume with the
-// snapshot armed, and require (a) warm hits, (b) byte-identical weight
-// buffers, (c) token-identical greedy output. A second case force-drops one
-// snapshot key to prove warm and cold uploads mix byte-safely.
-//
-// Modeled on tests/test_engine_relaunch.cpp. Requires a real model on disk:
-// IMP_TEST_MODEL or the default /models/Qwen3-8B-Q8_0.gguf.
-//
-// Deliberately does NOT exercise imp_gpu_release(device_reset=1): a
-// cudaDeviceReset inside this shared gtest process would invalidate state
-// owned by sibling tests. The device-reset path is covered by the manual
-// server recipe (POST /admin/suspend with [suspend] device_reset=true).
+// Suspend-to-RAM roundtrip (GPU, real model): capture a weight snapshot, tear down, verify
+// VRAM reallocatable, resume with the snapshot armed; requires warm hits, byte-identical
+// weight buffers, token-identical greedy output. A second case force-drops one snapshot key
+// to prove warm/cold uploads mix byte-safely. Does NOT exercise
+// imp_gpu_release(device_reset=1): a cudaDeviceReset would invalidate sibling tests' state
+// (covered by the manual POST /admin/suspend recipe instead).
 
 #include <gtest/gtest.h>
 

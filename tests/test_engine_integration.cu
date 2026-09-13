@@ -54,14 +54,10 @@ TEST(EngineIntegrationTest, InitSucceeds) {
     tm.cleanup();
 }
 
-// ---------------------------------------------------------------------------
-// runtime.cuda_graphs = "never" on a model WITHOUT experts.
-//
-// The check used to sit inside the MoE branch of weight upload, so a dense
-// model read the value and never acted on it. Asserting on the reason rather
-// than on use_cuda_graphs is deliberate: other inputs also turn graphs off, and
-// only the reason tells "honoured" apart from "off anyway".
-// ---------------------------------------------------------------------------
+// runtime.cuda_graphs="never" on a model WITHOUT experts: the check used to sit inside the
+// MoE branch of weight upload, so a dense model never acted on it. Asserts on the REASON
+// rather than use_cuda_graphs, since other inputs also disable graphs and only the reason
+// distinguishes "honoured" from "off anyway".
 TEST(EngineIntegrationTest, ConfigNeverIsHonouredWithoutExperts) {
     SKIP_IF_NO_CUDA();
 
@@ -316,26 +312,17 @@ TEST(EngineIntegrationTest, FP8PrefillNVFP4Decode) {
     tm.cleanup();
 }
 
-// ---------------------------------------------------------------------------
-// Test 8: pipelined batched decode (runtime.decode_pipeline) vs per-step.
-//
-// Both variants run four concurrent requests with CUDA graphs ON (the
-// pipeline requires a captured decode graph), mixed greedy + seeded top-k
-// rows, ignore_eos (removes token-dependent early stops), and generations
-// long enough to cross a KV block boundary (exercising the device-side
+// Pipelined batched decode (runtime.decode_pipeline) vs per-step: 4 concurrent requests with
+// CUDA graphs ON (pipeline requires a captured decode graph), mixed greedy+seeded top-k
+// rows, ignore_eos, long enough to cross a KV block boundary (exercises the device-side
 // block-table patch of the chain-advance kernel).
-// ---------------------------------------------------------------------------
 namespace {
 
-// Run one concurrent batch on an EXISTING engine and return per-request
-// outputs. Both A/B legs of the pipeline identity tests run on the SAME
-// engine after a warm batch: a fresh engine's graph captures pick cuBLAS
-// algorithms from instance-local autotune state, and cross-instance captures
-// can differ by ±ulp in the logits — enough to flip a top-k draw at a
-// near-tie even though both paths are individually correct (observed as a
-// build-dependent 175↔3 mirror flip at one index). After the warm batch
-// raised the pow2-ctx bucket HWM, both legs replay the SAME captured execs
-// for every step, so tokens must match bit-for-bit.
+// Both A/B legs run on the SAME warmed engine: a fresh engine's graph captures pick cuBLAS
+// algorithms from instance-local autotune state, and cross-instance captures can differ by
+// +-ulp, enough to flip a top-k draw at a near-tie (observed as a build-dependent 175<->3
+// mirror flip). After the warm batch raises the pow2-ctx bucket HWM, both legs replay the
+// SAME captured execs every step, so tokens must match bit-for-bit.
 std::vector<std::vector<int32_t>> run_pipelined_batch(Engine& engine, bool pipeline,
                                                       const std::vector<int>& max_tokens) {
     engine.mutable_runtime_config().runtime.decode_pipeline = pipeline;
@@ -387,12 +374,10 @@ std::vector<std::vector<int32_t>> run_pipelined_batch(Engine& engine, bool pipel
 
 }  // namespace
 
-// Uniform max_tokens: the batch composition never changes mid-run, so every
-// step of both variants runs at the same batch size — tokens must match
-// bit-for-bit (same kernels, same seeds, same filters; the chained steps
-// only move the token/position/ctx feed device-side). A warm batch raises
-// the pow2-ctx graph buckets first so both legs replay identical execs
-// (see run_pipelined_batch).
+// Uniform max_tokens: batch composition never changes mid-run, so every step of both
+// variants runs at the same batch size, same kernels/seeds/filters - tokens must match
+// bit-for-bit. A warm batch first raises the pow2-ctx graph buckets so both legs replay
+// identical execs.
 TEST(EngineIntegrationTest, PipelinedBatchedDecodeMatchesPerStep) {
     SKIP_IF_NO_CUDA();
 
@@ -418,12 +403,11 @@ TEST(EngineIntegrationTest, PipelinedBatchedDecodeMatchesPerStep) {
     tm.cleanup();
 }
 
-// Staggered max_tokens: rows finish while a chained step is in flight —
-// exercises deferred KV release, pipeline drain, and re-entry at n-1.
-// Tokens produced while the composition is identical must match; after the
-// first row leaves, the pipelined run's boundary step legitimately computes
-// at the old batch size (FP reduction order may differ at near-ties), so
-// only lengths are asserted beyond the common prefix.
+// Staggered max_tokens: rows finish while a chained step is in flight, exercising deferred
+// KV release, pipeline drain, and re-entry at n-1. Tokens must match up to the common
+// prefix; after the first row leaves, the pipelined run's boundary step legitimately
+// computes at the old batch size (FP reduction order may differ at near-ties), so only
+// lengths are asserted beyond it.
 TEST(EngineIntegrationTest, PipelinedBatchedDecodeStaggeredFinish) {
     SKIP_IF_NO_CUDA();
 

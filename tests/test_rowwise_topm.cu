@@ -81,13 +81,10 @@ TEST(RowwiseTopM, M1MatchesArgmax) {
 }  // namespace
 }  // namespace imp
 
-// An exhausted arena must DEGRADE, not corrupt. This is the contract the
-// attention_cublas pointer array turned out not to have (A7 step 8): migrating
-// a buffer whose caller dereferences it unconditionally turns "no arena" into a
-// null-pointer kernel launch, a sticky CUDA error, and every later test in the
-// binary failing on a device query that returns zero. rowwise_topm has the
-// contract — it returns without writing — and this pins it, because the whole
-// argument for leaving this tenant UNCHARGED is that running out is survivable.
+// An exhausted arena must DEGRADE, not corrupt - the contract attention_cublas's pointer
+// array lacked (A7 step 8): migrating a buffer whose caller dereferences it unconditionally
+// turns "no arena" into a null-pointer launch and a sticky CUDA error for every later test.
+// rowwise_topm returns without writing; leaving this tenant UNCHARGED relies on that.
 TEST(RowwiseTopM, AnExhaustedArenaLeavesTheOutputAloneInsteadOfCorruptingTheContext) {
     // Take the standing arena down and put up one far too small for the ask.
     const bool had_arena = imp::engine_arena().is_open();

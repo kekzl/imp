@@ -1,13 +1,7 @@
-// Truth table for which speculation sources are live.
-//
-// Regression: `speculative.ngram=false` used to disable MTP outright, because
-// the entry gate to the shared verify step asked the n-gram question. With
-// mtp_k=2 the head drafted nothing at all and nothing in the logs said so; two
-// nsys profiles taken with the flag set came back with identical kernel
-// instance counts to the unit, which is what finally exposed it.
-//
-// These are CPU tests on purpose: the rule was previously an inline method on
-// Engine, so no CI lane could reach it, and CI has no GPU.
+// Regression: speculative.ngram=false used to disable MTP outright, because the shared
+// verify-step entry gate asked the n-gram question; with mtp_k=2 the head drafted nothing and
+// nothing logged it (found via nsys kernel-instance-count comparison). CPU tests on purpose:
+// the rule was an inline Engine method unreachable from any CI lane.
 
 #include "runtime/spec_gates.h"
 

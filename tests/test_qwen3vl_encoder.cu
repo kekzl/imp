@@ -1,23 +1,10 @@
-// Qwen3-VL vision encoder forward, against an independent CPU reference.
-//
-// The end-to-end oracle for this encoder ("the model describes the picture")
-// only exists once the LM side is wired, and it does not localise a fault. So
-// this test builds a small synthetic tower, runs it through the GPU encoder and
-// through a from-scratch double-precision reimplementation of the reference
-// semantics, and compares. Mutation-checked — each of these fails this test:
-// swapping the two RoPE axes, halving the RoPE frequency exponent, reading the
-// fused QKV in the wrong order, flattening the merger-norm placement, dropping
-// the position embedding, dropping the attention scale, dropping a residual.
-// (The merge-block token order is NOT covered here: the grid is an input to both
-// sides, so it cancels. `test_qwen3vl_vision_grid.cpp` owns that one.)
-//
-// One thing it does NOT cover, measured rather than assumed: the block MLP's
-// tanh-GELU and the mergers' erf-GELU differ by at most 4.7e-4, which is below
-// one FP16 ulp at magnitude 1 (9.8e-4). Swapping them is invisible at this
-// precision, so the code follows upstream on the strength of the reference, not
-// of a test.
-//
-// The reference is written from `modeling_qwen3_vl.py`, not from the kernels.
+// Qwen3-VL vision encoder vs an independent from-scratch double-precision CPU reference (no
+// e2e oracle exists before the LM side is wired, and it wouldn't localise a fault anyway).
+// Mutation-checked: swapped RoPE axes, halved RoPE frequency, wrong QKV order, flattened
+// merger-norm placement, dropped position embedding/attention scale/residual each fail.
+// Merge-block token order not covered here (shared input, cancels; see
+// test_qwen3vl_vision_grid.cpp). tanh-GELU vs erf-GELU differ <=4.7e-4 (below 1 FP16 ulp),
+// invisible at this precision, so that choice follows upstream, not a test.
 
 #include "memory/vram_allocator.h"
 #include "vision/qwen3vl_encoder.h"
@@ -73,12 +60,9 @@ std::vector<float> randoms(Rng& rng, size_t n, float scale = 1.0f, float centre 
     return v;
 }
 
-// Magnitudes matter here, and not for realism's sake. With small random gains
-// the LayerNorms shrink every activation, the attention logits land within
-// +-0.01, softmax comes out near-uniform, and the whole rotary embedding stops
-// influencing the output — a mutation that swaps the two RoPE axes then passes.
-// So norms get a gain near 1 and linears get Xavier-scaled weights, which puts
-// the logits in a range where attention actually chooses.
+// Small random gains would shrink every activation, land attention logits within +-0.01,
+// make softmax near-uniform and neutralize RoPE (a swapped-axis mutation then passes). Norms
+// get gain ~1, linears get Xavier-scaled weights, keeping logits where attention discriminates.
 enum class Init { NormWeight, NormBias, Linear, Bias, Table };
 
 std::vector<float> init_values(Rng& rng, Init kind, size_t n, int64_t fan_in) {

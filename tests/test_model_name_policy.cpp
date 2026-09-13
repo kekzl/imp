@@ -1,12 +1,8 @@
-// The request `model` field is a name, never a path (AUDIT_arch_2026 F2-1).
-//
-// Until 2026-09-05 find_model_path() fell through to resolve_model_auto() for
-// any name containing '/', whose first step is fs::exists: a request body
-// naming any readable .gguf (or a directory holding model.safetensors) loaded
-// it and evicted the resident model. The policy that stops it is two pure
-// functions in tools/imp-server/model_name_policy.h; this pins them in the CPU
-// lane. Mutation: drop the leading-'/' rule and AbsolutePathIsRejected fails;
-// drop the trailing-slash normalisation and TrailingSlashBase fails.
+// Request `model` field is a name, never a path (AUDIT_arch_2026 F2-1); find_model_path()
+// used to fall through to resolve_model_auto() for any name containing '/', so a request
+// naming a readable .gguf loaded it and evicted the resident model.
+// Mutation: drop the leading-'/' rule -> AbsolutePathIsRejected fails; drop trailing-slash
+// normalization -> TrailingSlashBase fails.
 
 #include "model_name_policy.h"
 

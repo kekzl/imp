@@ -1,32 +1,9 @@
-// Prefix-cache equivalence — TEST_AUDIT (retired) risk #7 (Phase 2.6).
-//
-// "Prefix cache ships off-by-default BECAUSE its determinism is unvalidated —
-//  the test IS the enabler."
-//
-// The existing KVCacheManager suite (tests/test_kv_cache.cpp) already covers
-// the BLOCK-ID BOOKKEEPING of prefix caching (reuse counts, partial match,
-// cached-block eviction, pool integrity). What it does NOT cover — and what
-// Risk #7 actually names — is the part that makes the feature *correct*:
-//
-//   (a) KV-DATA equivalence: a "reused" block must hand back the SAME physical
-//       block carrying the SAME KV bytes that were computed for the prefix.
-//       A correct reuse *count* with stale/wrong KV bytes is exactly the
-//       silent-correctness failure that keeps the feature off-by-default.
-//   (b) eviction+refill stability: once a cached prefix is EVICTED, re-allocating
-//       the identical prefix must come back as NEW (0 reuse) — never a false
-//       hit on a recycled/stale block (hash-collision / stale-block guard).
-//   (c) ref-count keep-alive: a block shared by two live sequences must survive
-//       one of them being freed, with its KV bytes intact (no use-after-free).
-//
-// These assert against the REAL KVCacheManager wrapping a REAL KVCache pool;
-// the content checks use a fp32-independent oracle — bytes we wrote ourselves
-// into device memory, read back via cudaMemcpy. The pool is zero-initialized
-// on construction, so a stale/wrong-block hit reads zeros, not our pattern:
-// the content assert cannot pass tautologically.
-//
-// block_size = kKVBlockSize = 16 throughout; expectations are derived from the
-// documented hashing semantics (FNV-1a parent-chained per full block; partial
-// blocks are NOT cacheable) and stated per case.
+// Prefix-cache equivalence (TEST_AUDIT retired risk #7): existing KVCacheManager tests cover
+// block-ID bookkeeping only. This covers correctness: (a) KV-DATA equivalence (reused block
+// carries the SAME bytes), (b) eviction+refill never false-hits a stale block, (c) ref-count
+// keep-alive survives one sharer freeing. Content oracle: bytes written directly to device
+// memory against a zero-initialized pool, so a stale/wrong hit reads zeros and can't pass
+// tautologically.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -92,12 +69,9 @@ static std::vector<uint8_t> ExpectedPattern(size_t bb, int layer, int k_or_v, ui
     return e;
 }
 
-// ── (1) Full-prefix reuse count ───────────────────────────────────────────
-// Two sequences with IDENTICAL ≥2-block prefixes. After seq A is registered +
-// freed (cached), seq B's allocate_blocks_with_prefix must report exactly the
-// number of FULL blocks as reused. Derivation: each full block's FNV-1a hash
-// chains through its parent; identical tokens ⇒ identical chain ⇒ every full
-// block matches. 48 tokens / 16 = 3 full blocks ⇒ 3 reused.
+// Two sequences with identical >=2-block prefixes: after seq A is cached, seq B's
+// allocate_blocks_with_prefix must report exactly the FULL blocks as reused (FNV-1a chain
+// through parent). 48 tokens / 16 = 3 full blocks -> 3 reused.
 TEST(PrefixEquivTest, FullPrefixReuseCount) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(16);
@@ -160,17 +134,9 @@ TEST(PrefixEquivTest, NoCommonPrefixZeroReuse) {
     mgr->free_sequence(1);
 }
 
-// ── (4) KV-DATA equivalence: reused block carries the same bytes ──────────
-// The heart of risk #7. Reuse is only correct if the reused physical block
-// holds the KV data computed for that prefix. We:
-//   1. allocate the prefix for seq A,
-//   2. write a known byte pattern into A's blocks' K/V device memory
-//      (standing in for "prefill computed these KV"),
-//   3. register + free A (blocks cached, ref=1, data retained),
-//   4. reuse the prefix for seq B,
-//   5. read B's reused blocks back and assert byte-identical to what A wrote.
-// The pool was zero-initialized, so a stale/wrong-block hit would read zeros:
-// passing requires the SAME physical block with intact KV bytes.
+// Heart of risk #7: write a known byte pattern into A's blocks, register+free A (cached),
+// reuse the prefix for B, read B's blocks back. Pool is zero-initialized, so passing requires
+// the SAME physical block with intact KV bytes, not just a matching reuse count.
 TEST(PrefixEquivTest, ReusedBlockKVContentPreserved) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(16);
@@ -214,10 +180,8 @@ TEST(PrefixEquivTest, ReusedBlockKVContentPreserved) {
     mgr->free_sequence(1);
 }
 
-// ── (5) ref-count keep-alive: freeing A must not corrupt B's shared block ──
-// A and B both hold the shared prefix CONCURRENTLY (B reuses A's registered
-// blocks; ref_count goes to 2). Freeing A must leave the shared block alive
-// (ref_count back to 1, NOT returned to the pool) with KV bytes intact — the
+// A and B hold the shared prefix concurrently (ref_count=2). Freeing A must leave the block
+// alive (ref_count back to 1, not returned to the pool) with KV bytes intact: the
 // use-after-free / premature-free guard.
 TEST(PrefixEquivTest, RefCountKeepsSharedBlockAliveForB) {
     SKIP_IF_NO_CUDA();
@@ -261,13 +225,9 @@ TEST(PrefixEquivTest, RefCountKeepsSharedBlockAliveForB) {
     mgr->free_sequence(1);
 }
 
-// ── (6) eviction+refill: an evicted prefix must re-allocate as NEW ────────
-// Cache a prefix, free it (cached, ref=1), then force the cached blocks out of
-// the pool via NEW unrelated sequences that need the space. Re-allocating the
-// ORIGINAL prefix must then report 0 reuse — its hash entries were removed on
-// eviction, so it must not falsely hit a recycled/stale block. This is the
-// hash-collision / stale-block guard that risk #7 names as the determinism
-// blocker.
+// Cache a prefix, free it, force it out of the pool via new unrelated sequences, then
+// re-allocate the ORIGINAL prefix: must report 0 reuse. Hash entries are removed on eviction,
+// so it must not falsely hit a recycled/stale block.
 TEST(PrefixEquivTest, EvictionThenRefillIsNewNotStaleHit) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(4);  // tiny pool: 4 blocks total
@@ -301,10 +261,9 @@ TEST(PrefixEquivTest, EvictionThenRefillIsNewNotStaleHit) {
     mgr->free_sequence(2);
 }
 
-// ── (7) non-block-aligned prefix length ───────────────────────────────────
-// 40 tokens at block_size 16 = 2 full blocks + 1 partial (8 tokens). Only full
-// blocks are cacheable, so re-requesting the identical 40 tokens reuses exactly
-// the 2 full blocks; the partial tail is always re-allocated fresh.
+// 40 tokens at block_size 16 = 2 full blocks + 1 partial (8 tokens). Only full blocks are
+// cacheable, so re-requesting reuses exactly the 2 full blocks; the partial tail is always
+// re-allocated fresh.
 TEST(PrefixEquivTest, NonAlignedPrefixReusesFullBlocksOnly) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(16);
@@ -325,10 +284,8 @@ TEST(PrefixEquivTest, NonAlignedPrefixReusesFullBlocksOnly) {
     mgr->free_sequence(1);
 }
 
-// ── (8) chain hole must not count as reused prefix ────────────────────────
-// LRU eviction removes cached blocks front-first, so an EARLY block of a
-// cached chain can be gone while LATER chain blocks survive. Reuse must stop
-// at the first miss: counting later hits would make the caller skip prefill
+// LRU eviction removes cached blocks front-first, so an early chain block can be gone while
+// later ones survive. Reuse must stop at the first miss, or the caller would skip prefill
 // across a hole with uncomputed KV (silent garbage attention reads).
 TEST(PrefixEquivTest, ChainHoleStopsReuse) {
     SKIP_IF_NO_CUDA();
@@ -355,10 +312,8 @@ TEST(PrefixEquivTest, ChainHoleStopsReuse) {
     mgr->free_sequence(1);
 }
 
-// ── (9) max_reuse_blocks caps reuse (hybrid snapshot boundary) ────────────
-// Hybrid models can only skip prefill up to the recurrent-snapshot position;
-// blocks past the cap must be freshly allocated (never shared), because the
-// continuation prefill will WRITE them.
+// Hybrid models can only skip prefill up to the recurrent-snapshot position; blocks past the
+// cap must be freshly allocated, never shared, because the continuation prefill will WRITE them.
 TEST(PrefixEquivTest, MaxReuseBlocksCapsSharing) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(16);
@@ -434,18 +389,10 @@ TEST(PrefixEquivTest, RollbackOfPartialAllocationDropsItsHashes) {
     mgr->free_sequence(2);
 }
 
-// ── (9d) content_salt separates prompts that share token ids ──────────────
-// A multimodal prompt's image is not in its token ids — every image token
-// carries the same placeholder id — so two requests with the same text and
-// DIFFERENT pictures produce byte-identical token sequences. `content_salt`
-// seeds the hash chain with the image content so the two chains diverge at
-// block 0; both production call sites pass `req->vision_content_hash`
-// (engine_scheduler.cpp:567, scheduler.cpp:64).
-//
-// Nothing exercised it: no test in the suite passed a non-zero salt, so the
-// parameter could be dropped entirely and the suite stayed green — the second
-// request would have inherited the first one's KV, i.e. answered about the
-// wrong picture.
+// A multimodal image is not in its token ids (placeholder id repeats), so two requests with
+// the same text and different pictures produce identical token sequences. content_salt seeds
+// the hash chain with image content (vision_content_hash) so the chains diverge at block 0;
+// untested before, so dropping it would answer the second request about the wrong picture.
 TEST(PrefixEquivTest, ContentSaltSeparatesIdenticalTokenPrefixes) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(16);
@@ -485,27 +432,11 @@ TEST(PrefixEquivTest, ContentSaltSeparatesIdenticalTokenPrefixes) {
     EXPECT_NE(chain_a[0], chain_text[0]);
 }
 
-// ── (9c) randomised invariants over the whole manager ─────────────────────
-// The cases above each pin one hand-built scenario. This one hammers the
-// manager with a seeded pseudo-random workload — overlapping prefixes, frees,
-// evictions, sequences sized around the block boundary — and asserts three
-// invariants that must hold in EVERY state:
-//
-//   (a) probe == reuse. longest_cached_prefix_blocks() is a read-only oracle
-//       the hybrid snapshot lookup uses to pick a restore boundary BEFORE
-//       allocating (engine_sampling_stop.cpp:302/405). It checks only the hash
-//       table; allocate_blocks_with_prefix() additionally rejects an entry
-//       whose block is ref-0-and-not-cached (:509). If those two ever disagree,
-//       the snapshot boundary is chosen for a prefix that is not actually
-//       reused.
-//   (b) no double ownership. A physical block may appear in two live
-//       sequences only when it was legitimately shared as a prefix; it must
-//       never appear twice within ONE sequence's table.
-//   (c) no leak. Free every sequence, drain the cache, and the pool must be
-//       whole again — the shape of #1115, where exactly one block per request
-//       never came back.
-//
-// Seeded and fixed-iteration, so a failure reproduces exactly.
+// Seeded pseudo-random workload over overlapping prefixes/frees/evictions, asserting three
+// invariants: (a) probe==reuse (longest_cached_prefix_blocks vs allocate_blocks_with_prefix
+// must agree, or the hybrid snapshot boundary is chosen for a prefix not actually reused);
+// (b) no block appears twice within one sequence's table; (c) no leak (#1115 shape) after
+// draining. Seeded and fixed-iteration: a failure reproduces exactly.
 TEST(PrefixEquivTest, RandomisedWorkloadKeepsProbeAllocationAndPoolConsistent) {
     SKIP_IF_NO_CUDA();
     constexpr int kPool = 12;
@@ -586,10 +517,8 @@ TEST(PrefixEquivTest, RandomisedWorkloadKeepsProbeAllocationAndPoolConsistent) {
         << "pool did not come back whole after every sequence was freed and the cache drained";
 }
 
-// ── (10) longest_cached_prefix_blocks probe ───────────────────────────────
-// Read-only probe used by the hybrid snapshot lookup: reports the contiguous
-// cached chain length without allocating, and fills the per-block chain
-// hashes for all full blocks.
+// Read-only probe used by the hybrid snapshot lookup: reports the contiguous cached chain
+// length without allocating, filling per-block chain hashes for all full blocks.
 TEST(PrefixEquivTest, LongestCachedPrefixProbe) {
     SKIP_IF_NO_CUDA();
     auto mgr = MakeManager(16);
@@ -615,15 +544,10 @@ TEST(PrefixEquivTest, LongestCachedPrefixProbe) {
     EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, hashes), 0);
 }
 
-// ── (N) Persistence carries the KV SCALES, not just the KV bytes ──────────
-// A quantized KV block is meaningless without its scales: the values are
-// indices into a scale, so restoring the bytes alone yields a block that loads
-// and then decodes against whatever scales happen to sit in the pool. Nothing
-// errors — the attention is simply wrong.
-//
-// NVFP4 (like INT8/INT4/MXFP4_KV) allocates a SEPARATE scale pool, so the
-// scales are not covered by copying k_ptr/v_ptr. FP16 and FP8_E4M3 carry no
-// scale pool, which is why the gap stayed invisible on the default KV dtype.
+// A quantized KV block is meaningless without its scales (values are indices into a scale);
+// restoring bytes alone decodes against whatever scales sit in the pool, with no error. NVFP4
+// (like INT8/INT4/MXFP4_KV) uses a SEPARATE scale pool; FP16/FP8_E4M3 have none, which is why
+// the gap stayed invisible on the default KV dtype.
 TEST(PrefixPersistTest, QuantizedKvRestoresItsScales) {
     SKIP_IF_NO_CUDA();
     // head_dim must be a multiple of 16 for the NVFP4 scale geometry.

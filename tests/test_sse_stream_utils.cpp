@@ -1,20 +1,8 @@
-// =============================================================================
-// Server streaming-pipeline unit tests (issue #557 item 2).
-//
-// The SSE chunk envelopes, the reasoning/think split and the Gemma-4 channel
-// split were only exercised indirectly via degen_suite against a live server —
-// the NUL-leak (#510) and the think-leak classes lived exactly here. These
-// tests pin the pure text-level contracts on the CPU:
-//
-//   * sse_chunk / sse_completion_chunk emit `data: <valid JSON>\n\n`
-//   * SSEChunkWriter's hand-built envelope is byte-compatible with the
-//     json-built sse_chunk (the writer exists as a hot-path optimization —
-//     if the two drift, streaming silently changes shape)
-//   * json_escape_into handles quotes/backslash/control chars/UTF-8
-//   * no NUL byte ever reaches a delta (the #510 regression class)
-//   * extract_reasoning: closed, unclosed, missing and multiple think blocks
-//   * strip_think_block / strip_channel_headers / split_channel_segments
-// =============================================================================
+// SSE envelopes, reasoning/think split, Gemma-4 channel split (#557 item 2): previously only
+// exercised indirectly via degen_suite against a live server, where the NUL-leak (#510) and
+// think-leak classes lived. Pins pure text-level contracts on CPU: sse_chunk byte-compatible
+// with SSEChunkWriter's hot-path envelope, json_escape_into, no NUL byte ever reaches a delta,
+// extract_reasoning, strip_think_block/strip_channel_headers/split_channel_segments.
 
 #include <gtest/gtest.h>
 
@@ -266,25 +254,18 @@ TEST(HarmonySplit, CommentaryCountsAsReasoning) {
     EXPECT_EQ(seg.content, "ans");
 }
 
-// ---------------------------------------------------------------------------
-// Streaming reasoning-split (BUGREPORT-qwen36-reasoning-leaks-into-content)
-//
-// StreamReasoningSplitter (reasoning_split.h) is the shared, pure demux used by
-// both streaming handlers. These tests drive the REAL splitter (no copy) and
-// check it against the non-streaming oracle extract_reasoning (LastCloseTagWins
-// above). The bug: a model that re-deliberates after closing its first <think>
-// block leaked that second reasoning pass into `content` on the streaming path,
-// because the CONTENT-phase re-entry was a token-id compare that never fires for
-// Qwen3.6's multi-BPE markers (request.h:78-84). The fix adds a text-scan
-// re-entry + overlap holdback so the second pass is re-routed to reasoning.
+// StreamReasoningSplitter (reasoning_split.h) is the shared pure demux for both streaming
+// handlers, checked against the non-streaming oracle extract_reasoning. Bug: a model
+// re-deliberating after closing its first <think> leaked the second pass into content,
+// because CONTENT-phase re-entry was a token-id compare that never fires for Qwen3.6's
+// multi-BPE markers (request.h:78-84); fix adds a text-scan re-entry + overlap holdback.
 
 using imp::server::StreamReasoningSplitter;
 using imp::server::ThinkPhase;
 
-// Drive the splitter over a piece sequence (start phase REASONING, mirroring an
-// enable_thinking request whose <think> opener lives in the prompt). token id
-// is -1 throughout — the realistic Qwen3.6 case where markers are decoded text,
-// not single special tokens, so only the text-scan paths fire.
+// Drives the splitter starting in REASONING phase (mirrors an enable_thinking request whose
+// <think> opener lives in the prompt); token id is -1 throughout, the realistic Qwen3.6 case
+// where markers are decoded text, so only text-scan paths fire.
 struct SplitDrive {
     std::string reasoning, content;
     void run(const std::vector<std::string>& pieces, ThinkPhase start = ThinkPhase::REASONING) {
@@ -300,10 +281,9 @@ struct SplitDrive {
     }
 };
 
-// The report scenario: a clean first think block, then the model re-deliberates
-// ("The user wants…/I should…") inside a SECOND block before the real answer.
-// Delivered whole (one burst). Non-streaming keeps the deliberation in
-// reasoning_content; the splitter must too.
+// Report scenario: a clean first think block, then the model re-deliberates inside a SECOND
+// block before the real answer, delivered in one burst. Non-streaming keeps the deliberation
+// in reasoning_content; the streaming splitter must too.
 TEST(StreamReasoningSplit, SecondThinkPassDoesNotReachContent) {
     const std::string out =
         "<think>weather is 18C cloudy</think>"
@@ -382,10 +362,8 @@ TEST(StreamReasoningSplit, PassThroughInContentPhase) {
 }
 
 
-// ---------------------------------------------------------------------------
-// OpenAI compliance helpers (utils.cpp): max_completion_tokens precedence and
-// the 16-entry stop-sequence cap used by parse_chat_request_params.
-// ---------------------------------------------------------------------------
+// OpenAI compliance helpers (utils.cpp): max_completion_tokens precedence and the 16-entry
+// stop-sequence cap used by parse_chat_request_params.
 
 TEST(ParseMaxTokensField, DefaultWhenAbsent) {
     EXPECT_EQ(parse_max_tokens_field(json::object(), 8192), 8192);
@@ -462,12 +440,9 @@ TEST(ParseStopField, NonStringEntriesSkipped) {
     EXPECT_EQ(out[1], "b");
 }
 
-// -----------------------------------------------------------------------------
-// Split multi-byte characters. A BPE vocabulary cuts "größer" into a piece
-// ending in 0xC3 and one starting with 0xB6; each delta is serialized alone, so
-// without stitching dump_safe turns the halves into U+FFFD and the client reads
-// "gr??ßer" — while the same generation is correct over the non-streaming path.
-// -----------------------------------------------------------------------------
+// A BPE vocabulary can cut "grosser" into a piece ending 0xC3 and one starting 0xB6; each
+// delta serialized alone turns the halves into U+FFFD without stitching, corrupting the
+// client's text while the non-streaming path is correct.
 
 TEST(Utf8Stitch, RejoinsCharacterSplitAcrossTwoPieces) {
     Utf8Stitch st;
@@ -491,15 +466,10 @@ TEST(Utf8Stitch, ReassemblesFourByteCharacterOneByteAtATime) {
 }
 
 TEST(Utf8Stitch, InvalidLeadFollowedByContinuationsIsNotHeldBackForever) {
-    // feed()'s `<= 3` bound exists because utf8_complete_len parks on an invalid
-    // lead byte, and an invalid lead followed by continuation bytes parks
-    // arbitrarily far back - without the bound those bytes are carried forever
-    // and the stream stalls.
-    //
-    // DoesNotStallOrLoseBytesOnInvalidInput below cannot reach that: its input
-    // "\xFF\xFE\xFD\xFC\xFB" contains no continuation byte (0x80-0xBF), so the
-    // walk-back stops at the last byte, the tail is 1, and the bound never
-    // binds. Widening the bound leaves that test green.
+    // feed()'s <=3 bound exists because utf8_complete_len parks arbitrarily far back on an
+    // invalid lead byte followed by continuation bytes; without the bound those bytes are carried
+    // forever and the stream stalls. DoesNotStallOrLoseBytesOnInvalidInput can't reach this case
+    // (its input has no continuation byte, so the walk-back stops at 1 and the bound never binds).
     Utf8Stitch st;
     const std::string in1 = "\xFF\x80\x80\x80";  // invalid lead + 3 continuations
     const std::string in2 = "ok";
@@ -526,10 +496,9 @@ TEST(Utf8Stitch, DoesNotStallOrLoseBytesOnInvalidInput) {
 }
 
 TEST(HoldbackDecision, FlushCutLandsOnCharacterBoundary) {
-    // Even with well-formed input the byte-offset cut can fall inside a
-    // character; the flushed prefix must still be decodable on its own.
-    // "größer" is 8 bytes (ö and ß are 2 each); max_stop_len 4 puts the raw cut
-    // at byte 5 — the first half of ß.
+    // Even well-formed input can have its byte-offset cut fall inside a character; the flushed
+    // prefix must still decode on its own. "grosser" (8 bytes, o and s each 2) with
+    // max_stop_len 4 cuts at byte 5, the first half of a multi-byte char.
     const std::string pending = "größer";
     auto d = imp::stream::holdback_decision(pending, 4, {"</tool>"});
     EXPECT_FALSE(d.complete_match);
@@ -547,19 +516,11 @@ TEST(HoldbackDecision, StopMatchStillCutsExactlyAtTheMatch) {
 
 }  // namespace
 
-// ---- the empty-answer diagnostic -----------------------------------------
-//
-// An empty `content` beside a full `reasoning_content` is not a defect: the
-// reply shares the token budget with the thinking, and on a long conversation
-// the thinking can consume it before the answer starts. The server logs a line
-// saying so, because the alternative is a caller bisecting an engine that did
-// what it was asked (measured on Qwen3.8-27B: empty replies at max_tokens 260,
-// 74/74 clean at 600).
-//
-// Covered here rather than by a live run because the state depends on how long
-// the model chooses to think: it showed up repeatedly across 74-turn sessions
-// and could not be produced on demand with a short prompt, a tiny budget or a
-// stop sequence. A rule that fires rarely is the one that needs a test.
+// Empty content beside full reasoning_content is not a defect: the reply shares the token
+// budget with thinking, which can consume it all first. Logged rather than silent (measured
+// on Qwen3.8-27B: empty replies at max_tokens 260, 74/74 clean at 600). Tested here, not live,
+// because the state depends on how long the model chooses to think and could not be forced
+// with a short prompt/tiny budget/stop sequence.
 
 TEST(AnswerLostToReasoning, FiresOnlyWhenThinkingAteTheWholeReply) {
     EXPECT_TRUE(answer_lost_to_reasoning(false, "", "the model was still thinking"));
@@ -584,12 +545,9 @@ TEST(AnswerLostToReasoning, StaysQuietOnAToolCall) {
     EXPECT_FALSE(answer_lost_to_reasoning(true, "", ""));
 }
 
-// nonstream_reasoning_tokens: usage.completion_tokens_details.reasoning_tokens
-// on the NON-streaming path. It used to be reported by the streaming path only,
-// so the same request answered two different numbers depending on the transport
-// and /v1/responses non-stream always said 0.
-//
-// Fixtures: think_start_id 100, think_end_id 200, matching test_think_stop_logic.
+// usage.completion_tokens_details.reasoning_tokens used to be reported only by the streaming
+// path, so the same request answered two different numbers by transport, and
+// /v1/responses non-stream always said 0. Fixtures: think_start_id 100, think_end_id 200.
 
 TEST(NonStreamReasoningTokens, CountsBetweenTheMarkers) {
     // [open, r, r, r, close, c] -> the 3 tokens strictly inside the block.
@@ -614,10 +572,9 @@ TEST(NonStreamReasoningTokens, NoReasoningTextReportsNothing) {
 }
 
 TEST(NonStreamReasoningTokens, WithoutAThinkEndIdChargesTheDecodedPrefix) {
-    // Tokenizers that ship </think> split across BPE pieces have no id to count
-    // on (think_end_id < 0). Reasoning is a prefix of the output, so the leading
-    // tokens whose decoded bytes cover it are charged. 4 bytes per token here,
-    // 10 reasoning chars -> 3 tokens (8 bytes is short, 12 covers it).
+    // Tokenizers shipping </think> split across BPE pieces have no id to count (think_end_id<0):
+    // reasoning is a prefix of the output, so leading tokens whose decoded bytes cover it are
+    // charged. 4 bytes/token, 10 reasoning chars -> 3 tokens (8 bytes short, 12 covers it).
     std::vector<int32_t> out = {1, 2, 3, 4, 5};
     auto four_bytes = [](int32_t) -> size_t { return 4; };
     EXPECT_EQ(nonstream_reasoning_tokens(out, -1, -1, true, /*reasoning_chars=*/10, four_bytes), 3);
@@ -628,20 +585,18 @@ TEST(NonStreamReasoningTokens, WithoutAThinkEndIdChargesTheDecodedPrefix) {
 }
 
 TEST(NonStreamReasoningTokens, FallsBackWhenTheIdScanFindsNothing) {
-    // Harmony and friends: think ids exist but the output carries neither
-    // marker and the request did not start in-think, so the id scan returns 0
-    // while reasoning_content is not empty. Charging the prefix beats reporting
-    // a zero the streaming path would not report.
+    // Harmony-style: think ids exist but the output carries neither marker and the request
+    // didn't start in-think, so the id scan returns 0 while reasoning_content is non-empty.
+    // Charging the prefix beats reporting a zero the streaming path would not report.
     std::vector<int32_t> out = {1, 2, 3};
     auto one_byte = [](int32_t) -> size_t { return 1; };
     EXPECT_EQ(nonstream_reasoning_tokens(out, 100, 200, false, /*reasoning_chars=*/2, one_byte), 2);
 }
 
-// The exhaustion signal, both directions. The three handler TUs that emit it
-// (handlers_chat_core.cpp, handlers_chat_stream.cpp, handlers_messages.cpp) are
-// in NO CPU test target, so the decision and the write were moved into utils.h
-// where these tests reach them. A mutant that emits the field unconditionally
-// has to get past exactly this.
+// The three handler TUs emitting the exhaustion signal (handlers_chat_core/stream.cpp,
+// handlers_messages.cpp) are in NO CPU test target, so the decision and write moved into
+// utils.h where these tests reach them; a mutant emitting the field unconditionally must get
+// past this.
 
 TEST(ReasoningFinishDetail, FiresOnlyWhenTheAnswerWasLostToReasoning) {
     EXPECT_STREQ(reasoning_finish_detail(/*has_tool_calls=*/false, /*content_empty=*/true,
@@ -691,10 +646,9 @@ TEST(SseChunk, OmitsTheFinishDetailWhenThereIsNone) {
     EXPECT_FALSE(got["choices"][0].contains("imp_finish_detail"));
 }
 
-// A floored KV pool is not "the last request failed", it is "this process
-// cannot serve". Reported from production: `docker compose restart` while the
-// previous process still held the card came up with 16 blocks against a planned
-// 3066, and /health said ok throughout.
+// A floored KV pool means "this process cannot serve", not "the last request failed".
+// Production: docker compose restart while the previous process still held the card came up
+// with 16 blocks against a planned 3066, and /health said ok throughout.
 TEST(HealthUnservable, FlooredPoolIsUnservableAndNamesThePool) {
     const std::string why = health_unservable_reason(false, true, 16, 32);
     EXPECT_FALSE(why.empty());
@@ -726,13 +680,10 @@ TEST(HealthUnservable, UnknownCapacityIsNotAVerdict) {
     EXPECT_STREQ(health_unservable_code(false, false), "");
 }
 
-// ---- #1554: tool-argument chunks end on codepoint boundaries ----
-//
-// Buffered tool calls were sliced every 48 BYTES and each slice JSON-encoded on
-// its own, so a multi-byte character straddling a boundary was cut in half and
-// dump_safe replaced each half with U+FFFD. The client concatenates the pieces
-// and gets a corrupt argument. Two of the three dialects did this; /v1/responses
-// does not chunk and was immune.
+// #1554: buffered tool calls were sliced every 48 BYTES and JSON-encoded per slice, so a
+// multi-byte char straddling a boundary was cut in half and dump_safe replaced each half with
+// U+FFFD, corrupting the concatenated argument. Two of three dialects did this;
+// /v1/responses doesn't chunk and was immune.
 
 TEST(Utf8ChunkLen, NeverSplitsAMultiByteCharacter) {
     // "ü" is 2 bytes. With max=5 over "aaaaü", a byte slice takes 5 bytes and

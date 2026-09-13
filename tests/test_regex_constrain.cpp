@@ -1,15 +1,7 @@
-// =============================================================================
-// RegexConstrainer FSM tests (CPU lane — no GPU, no tokenizer).
-//
-// WHY THIS EXISTS: regex-constrained decoding is what an agent uses to pin a
-// format the JSON FSMs cannot express (a diff header, an ID, a small DSL). The
-// failure that matters is not "rejects a bad token" — it is accepting one, or
-// declaring a half-written format finished. Both are asserted here.
-//
-// The regex engine itself (RegexNfa) is shared with JSON-Schema `pattern`; this
-// covers the decode-time wrapper: prefix acceptance, is_done() semantics, and
-// that unsupported patterns are refused instead of silently mis-enforced.
-// =============================================================================
+// Regex-constrained decoding pins formats the JSON FSMs cannot express. The failure that
+// matters is accepting a bad token or declaring a half-written format finished, not rejecting
+// a good one. Shares RegexNfa with JSON-Schema pattern; covers the decode-time wrapper:
+// prefix acceptance, is_done(), and refusing unsupported patterns instead of mis-enforcing.
 
 #include <gtest/gtest.h>
 
@@ -107,11 +99,9 @@ TEST(RegexConstrain, RefusesPatternsItCannotEnforce) {
     }
 }
 
-// `^...$` used to sit in the list above. It is the most natural way to write a
-// pattern, and refusing it meant a client asking for `^[0-9]{3}$` got free-form
-// text back with HTTP 200 — the constraint it asked for silently absent. Under
-// whole-output matching the anchors are redundant, so they are stripped and the
-// pattern is enforced.
+// ^...$ used to be refused, so a client requesting ^[0-9]{3}$ got free-form text back at
+// HTTP 200 with the constraint silently absent. Under whole-output matching the anchors are
+// redundant, so they are stripped and the pattern enforced.
 TEST(RegexConstrain, EdgeAnchorsAreRedundantAndAccepted) {
     auto rc = make("^[0-9]{3}$");
     EXPECT_TRUE(rc->is_initialized());
@@ -155,11 +145,9 @@ TEST(RegexConstrain, InteriorAnchorsStillRefused) {
     }
 }
 
-// `(?:…)` passed the support check ("a plain non-capturing group and is fine")
-// but the engine had no `?:` form: `?` was read as a quantifier with no atom and
-// `:` as a literal, so `(?:a|b)c` compiled to `(:a|b)c` — it accepted "bc",
-// rejected "ac", and reported a successful compile throughout. Accepted AND
-// enforced as something else is the one outcome this layer exists to prevent.
+// (?:...) passed the support check but the engine had no ?: form: ? read as a quantifier
+// with no atom, : as a literal, so (?:a|b)c compiled to (:a|b)c - accepted "bc", rejected
+// "ac", reported a successful compile throughout.
 TEST(RegexConstrain, NonCapturingGroupIsHonoured) {
     auto plain = make("(?:abc)");
     EXPECT_TRUE(plain->would_accept("abc"));
@@ -183,10 +171,9 @@ TEST(RegexConstrain, NonCapturingGroupIsHonoured) {
     EXPECT_FALSE(partial->is_done()) << "half a repetition is not a complete match";
 }
 
-// Documented tolerance rather than a silent surprise: the shared engine reads a
-// reversed bound as the lower one instead of rejecting it, so `a{2,1}` enforces
-// exactly two. Pinned so a future engine change that starts rejecting it is a
-// visible decision, not a mystery.
+// Documented tolerance, not a silent surprise: the shared engine reads a reversed bound
+// (a{2,1}) as the lower one instead of rejecting it, enforcing exactly two. Pinned so a
+// future engine change to reject it is a visible decision.
 TEST(RegexConstrain, ReversedRepetitionBoundIsTreatedAsExact) {
     auto rc = make("a{2,1}");
     EXPECT_FALSE(rc->is_done());
@@ -214,15 +201,9 @@ TEST(RegexConstrain, ResetReturnsToTheStart) {
     EXPECT_FALSE(rc->would_accept("b"));
 }
 
-// =============================================================================
-// Cost bounds on the shared engine (#1608, #1609).
-//
-// A pattern is request-supplied text on an endpoint that is unauthenticated by
-// default, and it is compiled at admission, on the HTTP worker thread, before
-// the engine lock. Both of these were unbounded. Driving RegexNfa directly
-// rather than through the constrainer, because the JSON-Schema `pattern` path
-// calls the compiler with no construct screen in front of it.
-// =============================================================================
+// A regex pattern is unauthenticated request-supplied text compiled at admission on the HTTP
+// worker thread, before the engine lock - both were unbounded (#1608, #1609). Drives RegexNfa
+// directly since the JSON-Schema pattern path has no construct screen in front of it.
 
 TEST(RegexNfaCostBounds, LargeRepeatCountIsRefused) {
     // {n} is built by cloning the atom n times, so n is an allocation count.

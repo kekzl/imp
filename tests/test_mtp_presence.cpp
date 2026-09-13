@@ -1,11 +1,6 @@
-// The MTP name rule, and the presence probe that reads it.
-//
-// Why this exists: the rule lives in three call sites (the divert in
-// load_shard, the modelopt harvest, and the probe that tells the operator
-// about a head it is not loading). They used to carry three literal copies of
-// the prefixes. A checkpoint whose head one copy sees and another misses is
-// exactly the "two places, same question, different answer" defect that
-// produced #1384 and #1443, so the rule is one function and this pins it.
+// MTP name rule lives in three call sites (load_shard divert, modelopt harvest, presence
+// probe); they used to carry three literal prefix copies. A checkpoint one copy sees and
+// another misses is the #1384/#1443 defect class; now one function, pinned here.
 #include "model/mtp_head.h"
 #include <filesystem>
 #include <cstdlib>

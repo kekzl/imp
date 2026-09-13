@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# docker-entrypoint.sh: env -> CLI argv translation.
-#
-# Runs the real script against a stub binary on PATH that prints its argv, so
-# this needs no Docker, no GPU and no build. Wired into scripts/ci_static_gates.sh
-# (group `entrypoint`), where the required `Build` check runs it.
-#
-# What it guards: the container env surface is the only place a compose
-# deployment configures imp, it is hand-written, and until 2026-08-31 nothing
-# ran it at all. One name (IMP_KV_FP8) had already inverted its meaning
-# unnoticed - docs/plans/2026-08-29-qwen38-long-context-posture.md, trap 1.
+# docker-entrypoint.sh env->CLI argv translation, run against a stub binary on PATH (no
+# Docker/GPU/build needed). Wired into scripts/ci_static_gates.sh (group entrypoint), a
+# required Build check.
+# The container env surface is hand-written and untested until 2026-08-31; IMP_KV_FP8 had
+# already inverted its meaning unnoticed
+# (docs/plans/2026-08-29-qwen38-long-context-posture.md, trap 1).
 set -uo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")/.."
@@ -142,13 +138,9 @@ run IMP_MODEL=/models/m.gguf IMP_SET="a.b=1" -- echo hello
 check "foreign command is not rewritten" 'hello' present "$OUT"
 check "foreign command gets no flags"    '--set' absent  "$OUT"
 
-# --- compose surface vs translation ----------------------------------------
-#
-# The 27 cases above check the names the entrypoint DOES translate. #1619 was
-# the other shape: docker-compose.yml offered IMP_API_KEY, the entrypoint had no
-# branch for it, and a compose deployment could not turn authentication on at
-# all. Nothing noticed, because every existing case passed. So compare the two
-# surfaces instead of enumerating one of them.
+# #1619: docker-compose.yml offered IMP_API_KEY with no entrypoint branch for it, so a
+# compose deployment could not turn on authentication at all, and every existing translation
+# case still passed. Compare the two surfaces instead of enumerating only one.
 COMPOSE="$PWD/docker-compose.yml"
 if [ -f "$COMPOSE" ]; then
     # IMP_* names offered in the imp-server environment block, minus the two

@@ -1,7 +1,6 @@
-// AUDIT_arch_2026 D-1: a device fault must reach the host as a throw, not a
-// "Cleared stale error" warning. Death test in threadsafe style: the child is
-// a fresh process with its own CUDA context, so the poisoned context dies with
-// it and the parent (and every later test in this binary) stays clean.
+// AUDIT_arch_2026 D-1: a device fault must reach the host as a throw, not a "Cleared stale
+// error" warning. Death test: child is a fresh process with its own CUDA context, so the
+// poisoned context dies with it and later tests in this binary stay clean.
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include "core/cuda_errors.h"

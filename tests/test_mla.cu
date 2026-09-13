@@ -1,19 +1,6 @@
-// tests/test_mla.cu — GPU numeric test for MLA materialized KV projection (Task 2.3)
-//
-// Tests that the MLA two-step projection:
-//   kv_a  = norm_out @ kv_a_proj^T          [n, 576]
-//   latent = kv_a[:, :kv_lora_rank]         [n, 512]
-//   k_rope = kv_a[:, kv_lora_rank:]         [n, 64]  shared across all heads
-//   latent = rmsnorm(latent, kv_a_layernorm) [n, 512]
-//   kv_b   = latent @ kv_b_proj^T            [n, n_heads*(k_nope + v_dim)]
-//   K[h]   = [pe(64) | nope(128)]  with pe = k_rope (replicated), nope = kv_b first 128 dims
-//   V[h]   = kv_b second 128 dims
-//
-// RoPE layout choice: (b) — pe FIRST in each head so existing rope kernel
-// (which rotates first rope_dim=64 dims) works unchanged.
-// Q also reordered from [nope(128)|pe(64)] to [pe(64)|nope(128)] for consistency.
-//
-// Registered in test-compute module (CMakeLists.txt).
+// MLA two-step KV projection (Task 2.3): kv_a = norm_out@kv_a_proj^T; latent =
+// rmsnorm(kv_a[:lora]); k_rope = kv_a[lora:] shared across heads; kv_b = latent@kv_b_proj^T
+// -> K=[pe|nope], V. RoPE layout: pe first in each head, matching the existing rope kernel.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -105,10 +92,8 @@ static void ref_rmsnorm(const float* x, const float* w, float* out, int rows, in
     }
 }
 
-// ---------------------------------------------------------------------------
-// CPU reference: FP16-precision MatMul C = A @ B^T  (all [rows_A,K] @ [rows_B,K])
-// Uses float accumulator (matches half-precision GEMM).
-// ---------------------------------------------------------------------------
+// CPU reference: FP16-precision matmul C = A@B^T with float accumulator (matches
+// half-precision GEMM).
 static void ref_gemm_fp16(const std::vector<float>& A, int rowsA,
                            const std::vector<float>& B, int rowsB,
                            int K, std::vector<float>& C) {
@@ -124,15 +109,8 @@ static void ref_gemm_fp16(const std::vector<float>& A, int rowsA,
         }
 }
 
-// ---------------------------------------------------------------------------
-// CPU reference for the full MLA KV-projection pipeline
-//   Input:  norm_out [n, d_model]
-//           kv_a_w   [kv_a_out, d_model]  (kv_a_proj weight)
-//           kv_a_norm_w [kv_lora_rank]   (kv_a_layernorm weight)
-//           kv_b_w   [kv_b_out, kv_lora_rank] (kv_b_proj weight)
-//   Output: K [n, n_heads, head_dim]  layout [pe|nope]
-//           V [n, n_heads, v_head_dim]
-// ---------------------------------------------------------------------------
+// CPU reference for the MLA KV projection: inputs norm_out, kv_a_w, kv_a_norm_w, kv_b_w;
+// outputs K[n,heads,head_dim] layout [pe|nope], V[n,heads,v_head_dim].
 static void ref_mla_kv(
         const std::vector<float>& norm_out,  // [n, D]
         const std::vector<float>& kv_a_w,    // [kv_a_out, D]
@@ -197,10 +175,8 @@ static void ref_mla_kv(
     }
 }
 
-// NOTE: the GPU scatter kernels (mla_assemble_kv / mla_reorder_q) are the
-// PRODUCTION implementations from src/compute/mla_kv_assemble.cu, included via
-// compute/mla_kv_assemble.h. This test exercises the real kernels so a
-// regression in production code is caught — it does NOT define shadow copies.
+// mla_assemble_kv/mla_reorder_q are the PRODUCTION kernels (src/compute/mla_kv_assemble.cu),
+// not shadow copies: a regression in production code is caught here.
 
 // ---------------------------------------------------------------------------
 // Full MLA projection on GPU using gemm() + rmsnorm() + scatter kernel
@@ -232,13 +208,8 @@ static void run_mla_kv_gpu(
 
     gemm(norm_out, kv_a_w, kv_a, 1.f, 0.f, stream);
 
-    // Step 2: split latent [n, kv_lora_rank] and k_rope [n, rope_dim]
-    //   latent = kv_a[:, :kv_lora_rank]
-    //   k_rope = kv_a[:, kv_lora_rank:]
-    // We'll point into kv_a buffer directly (contiguous layout).
-    // kv_a is [n, kva_out] row-major: latent is first kv_lora_rank cols.
-    // Create a strided view of latent: [n, kv_lora_rank] with stride kva_out.
-    // Since rmsnorm() reads row-major, we need to extract latent into a compact buffer.
+    // latent = kv_a[:, :kv_lora_rank], k_rope = kv_a[:, kv_lora_rank:], kv_a is row-major.
+    // rmsnorm() needs contiguous rows, so latent is extracted into a compact buffer first.
     Tensor latent;
     latent.qtype = QType::F16; latent.ndim = 2;
     latent.shape[0] = n_tokens; latent.shape[1] = kv_lora_rank;
@@ -379,11 +350,8 @@ TEST(MLAProjection, TwoStepKVMatchesCPUReference) {
     free_gpu(g_kv_b_w);  free_gpu(g_K);       free_gpu(g_V);
 }
 
-// ---------------------------------------------------------------------------
-// Test: MLAProjection.RMSNormAppliedToLatent
-//   Isolate: if kv_a_norm_w is all-ones, latent after norm should be
-//   unit-length (l2-norm per row = sqrt(kv_lora_rank)).
-// ---------------------------------------------------------------------------
+// If kv_a_norm_w is all-ones, latent after norm must be unit-length
+// (l2-norm per row = sqrt(kv_lora_rank)).
 TEST(MLAProjection, RMSNormAppliedToLatent) {
     SKIP_IF_NO_CUDA();
 
@@ -418,16 +386,9 @@ TEST(MLAProjection, RMSNormAppliedToLatent) {
     free_gpu(g_in); free_gpu(g_out); free_gpu(g_w);
 }
 
-// ---------------------------------------------------------------------------
-// Test: MLAAttnOutput.VHeadDimWidth
-//
-// Verifies that paged_attention_decode with v_head_dim != head_dim (MLA asymmetric
-// QK/V dims) produces an output of width n_heads * v_head_dim, not n_heads * head_dim,
-// and that the V values are correctly accumulated.
-//
-// Geometry: qk_hd=12, v_hd=8, n_heads=2, n_kv_heads=2, block_size=4, n_ctx=2
-// V layout in cache: over-allocated at qk_hd=12 per slot; only first v_hd=8 are valid.
-// ---------------------------------------------------------------------------
+// paged_attention_decode with v_head_dim != head_dim (MLA asymmetric QK/V) must output width
+// n_heads*v_head_dim, not n_heads*head_dim, with V correctly accumulated.
+// Geometry: qk_hd=12, v_hd=8, n_heads=2, n_kv_heads=2, block_size=4, n_ctx=2.
 TEST(MLAAttnOutput, VHeadDimWidth) {
     SKIP_IF_NO_CUDA();
 
@@ -456,12 +417,8 @@ TEST(MLAAttnOutput, VHeadDimWidth) {
     cudaMemset(d_k_cache, 0, cache_elems * sizeof(half));
     cudaMemset(d_v_cache, 0, cache_elems * sizeof(half));
 
-    // Fill K: all-ones (12 elements per head per slot)
-    // Fill V: pattern — slot 0 head 0: [1,2,...,8, junk, junk, junk]
-    //                    slot 0 head 1: [10,20,...,80, junk, junk, junk]
-    //                    slot 1 head 0: [2,4,...,16, ...]
-    //                    slot 1 head 1: [20,40,...,160, ...]
-    // "junk" elements at positions v_hd..qk_hd-1 should NOT appear in output.
+    // K all-ones; V per slot/head is a distinct scaled sequence. Junk values at positions
+    // v_hd..qk_hd-1 must not appear in the output.
     std::vector<half> h_k(cache_elems), h_v(cache_elems, __float2half(0.f));
     for (int i = 0; i < cache_elems; i++)
         h_k[i] = __float2half(1.0f);  // K = 1 everywhere (uniform attention weights)
@@ -552,11 +509,8 @@ TEST(MLAAttnOutput, VHeadDimWidth) {
         << "Output width must be n_heads * v_hd (" << n_heads * v_hd
         << "), got " << o_elems << " — expected MLA asymmetric dim";
 
-    // Compute expected output.
-    // With K=1, Q=1, scale=1/sqrt(qk_hd), all tokens get uniform softmax weight 1/n_ctx.
-    // output[head h, dim d] = (1/n_ctx) * sum_t(V[t, h, d])
-    //   head 0: val = (t+1)*(d+1), sum over t=0..1 = (d+1)*3, /2 = (d+1)*1.5
-    //   head 1: val = 10*(t+1)*(d+1), sum = 10*(d+1)*3, /2 = (d+1)*15
+    // Expected: uniform softmax (K=1, Q=1, scale=1/sqrt(qk_hd)) over n_ctx tokens, so
+    // output[h,d] = mean_t(V[t,h,d]).
     for (int h = 0; h < n_heads; h++) {
         float head_scale = (h == 0) ? 1.0f : 10.0f;
         for (int d = 0; d < v_hd; d++) {
@@ -586,15 +540,9 @@ TEST(MLAAttnOutput, VHeadDimWidth) {
     cudaFree(d_cl);
 }
 
-// ---------------------------------------------------------------------------
-// Test: MLAAttnOutput.PrefillCompaction
-//
-// Verifies the prefill V-output compaction path: the prefill attention kernels
-// accumulate V at head_dim (V is zero-padded to head_dim), producing an output
-// of [n, n_heads, head_dim] with real values in the first v_head_dim dims and
-// zeros in the tail. mla_compact_attn_output must compact this to
-// [n, n_heads, v_head_dim] correctly (per-head, not a naive contiguous slice).
-// ---------------------------------------------------------------------------
+// Prefill V-output compaction: kernels accumulate V zero-padded to head_dim, producing
+// [n,heads,head_dim]; mla_compact_attn_output must compact to [n,heads,v_head_dim] per-head,
+// not a naive contiguous slice.
 TEST(MLAAttnOutput, PrefillCompaction) {
     SKIP_IF_NO_CUDA();
 
@@ -645,13 +593,9 @@ TEST(MLAAttnOutput, PrefillCompaction) {
     free_gpu(g_dst);
 }
 
-// ---------------------------------------------------------------------------
-// Test: MLAAttnOutput.PaddedVAssembleZeroesTail
-//
-// Verifies mla_assemble_kv with v_dst_head_dim > v_head_dim writes the real V
-// values into the first v_head_dim dims of each hd-wide head slot and zeroes the
-// tail. This is the over-allocation that lets prefill kernels accumulate V at hd.
-// ---------------------------------------------------------------------------
+// mla_assemble_kv with v_dst_head_dim > v_head_dim must write V into the first v_head_dim
+// dims of each hd-wide head slot and zero the tail; this over-allocation lets prefill
+// kernels accumulate V at head_dim.
 TEST(MLAAttnOutput, PaddedVAssembleZeroesTail) {
     SKIP_IF_NO_CUDA();
 
@@ -695,27 +639,9 @@ TEST(MLAAttnOutput, PaddedVAssembleZeroesTail) {
     free_gpu(g_kvb); free_gpu(g_rope); free_gpu(g_K); free_gpu(g_V);
 }
 
-// ---------------------------------------------------------------------------
-// Test: MLAAttnOutput.RealGeometryNkv16
-//
-// Exercises MLA Stage A (materialized) with the REAL DeepSeek-V2-Lite geometry:
-//   n_heads = n_kv_heads = 16, head_dim = 192, v_head_dim = 128
-//
-// This is the critical regression test: an nkv==1 assumption (e.g. from the
-// removed IMP_CHECK in executor_kv_write.cu) would have aborted on this model.
-// The test drives the end-to-end MLA kernel path that is actually called during
-// inference:
-//   1. mla_assemble_kv with v_dst_head_dim=192: V zero-padded to head_dim.
-//   2. paged_attention_decode with nkv=16, head_dim=192, v_head_dim=128:
-//      reads 128 V dims per head, outputs [batch, 1, 16, 128].
-//   3. mla_compact_attn_output (prefill path): compacts [n, 16, 192] → [n, 16, 128].
-//
-// Numeric correctness:
-//   - K = uniform (all-ones), Q = uniform: softmax weights are all 1/n_ctx.
-//   - V[t][h][d] = (h+1)*(d+1)*(t+1) for d < v_head_dim, 0 for tail.
-//   - Expected output[h][d] = (1/n_ctx) * sum_t(V[t][h][d])
-//                           = (h+1)*(d+1) * (n_ctx*(n_ctx+1)/2) / n_ctx
-// ---------------------------------------------------------------------------
+// Real DeepSeek-V2-Lite geometry: n_heads=n_kv_heads=16, head_dim=192, v_head_dim=128.
+// Regression guard: an nkv==1 assumption (removed IMP_CHECK in executor_kv_write.cu) would
+// have aborted here. Exercises mla_assemble_kv -> paged_attention_decode -> mla_compact_attn_output.
 TEST(MLAAttnOutput, RealGeometryNkv16) {
     SKIP_IF_NO_CUDA();
 
@@ -810,10 +736,8 @@ TEST(MLAAttnOutput, RealGeometryNkv16) {
     cudaMemcpy(d_k_cache, k_cache_h.data(), cache_total * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_v_cache, v_cache_h.data(), cache_total * sizeof(half), cudaMemcpyHostToDevice);
 
-    // Q: [batch=1, 1, n_heads, head_dim] — all zeros (K has nope=0.5, rope=0 → any
-    // uniform Q gives equal softmax weights via the scale factor)
-    // Use Q = all-ones for simplicity; with K nope=0.5 and rope=0 the dot products
-    // are equal across tokens (uniform attention).
+    // Q all-ones: with K nope=0.5 and rope=0, dot products are equal across tokens
+    // (uniform attention via the scale factor).
     const int q_elems = batch * n_heads * head_dim;
     std::vector<half> h_q_dec(q_elems, __float2half(1.0f));
     half* d_q_dec = nullptr;
@@ -878,10 +802,8 @@ TEST(MLAAttnOutput, RealGeometryNkv16) {
         }
     }
 
-    // ---- Part 3: mla_compact_attn_output (prefill path) ---
-    // Simulate prefill attention output: [n_ctx, n_heads, head_dim] with real values
-    // in first v_head_dim dims and 0 in the tail (already assembled in g_V_pad).
-    // Use g_V_pad as the hd-strided "attention output" (correct shape for this test).
+    // Part 3: mla_compact_attn_output on simulated prefill output (real values in the first
+    // v_head_dim dims, zero tail), reusing g_V_pad as the hd-strided attention output.
     const int compact_elems = n_ctx * n_heads * v_head_dim;
     half* d_compact = nullptr;
     cudaMalloc(&d_compact, compact_elems * sizeof(half));
@@ -918,20 +840,9 @@ TEST(MLAAttnOutput, RealGeometryNkv16) {
     cudaFree(d_compact);
 }
 
-// ---------------------------------------------------------------------------
-// Test: MLAAbsorb.MatchesMaterializedReference
-//
-// Phase 3 equivalence gate. The absorbed decode (mla_absorbed_decode) must
-// produce the SAME attention output as the materialized formulation, since it
-// is a mathematically-equivalent reformulation:
-//   materialized: k_nope[t] = latent[t] @ W_UK^T; v[t] = latent[t] @ W_UV^T;
-//                 score[t] = scale*(q_nope.k_nope[t] + q_pe.k_rope[t]);
-//                 out = softmax(score) . v
-//   absorbed:     q_abs = q_nope @ W_UK; score[t] = scale*(q_abs.latent[t] +
-//                 q_pe.k_rope[t]); ctx = softmax(score).latent; out = ctx @ W_UV^T
-// We compute the materialized reference on the CPU (fp32) and compare to the
-// GPU absorbed kernel (cosine similarity > 0.999 per head).
-// ---------------------------------------------------------------------------
+// Phase 3 equivalence: mla_absorbed_decode must match the materialized formulation
+// (a mathematically equivalent reformulation). CPU fp32 materialized reference vs GPU
+// absorbed kernel, cosine similarity > 0.999 per head.
 TEST(MLAAbsorb, MatchesMaterializedReference) {
     SKIP_IF_NO_CUDA();
 

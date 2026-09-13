@@ -330,27 +330,11 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
     cudaFree(d_b1);
 }
 
-// =========================================================================
-// Test 3b: Chunk-boundary handoff equivalence
-// -------------------------------------------------------------------------
-// Phase 1a of the chunkwise SSD scan refactor (design plan retired with
-// docs/plans/). Establishes the precondition for Phase 1b:
-// splitting a sequential GDN scan at any token boundary, saving the H state
-// at the split, and resuming with that saved state must produce bit-
-// equivalent output to a single monolithic scan.
-//
-// This isn't just a sanity test — it's the regression gate for the Phase 1b
-// parallel-within-chunk SSD kernel. ANY chunkwise replacement must preserve
-// the same chunk-end-state and intra-chunk-y semantics. If this test passes
-// for two implementations (sequential and chunkwise), they're functionally
-// interchangeable at the dispatch layer.
-//
-// Setup: n_tok=16 (= 2 chunks of 8), n_heads=4, head_dim=128, state=128.
-//   Run A: gdn_scan_fused_f32(tokens[0..16], state=zeros)  → Y_full, state_full
-//   Run B: gdn_scan_fused_f32(tokens[0..8],  state=zeros)  → Y_chunk1, state_mid
-//          gdn_scan_fused_f32(tokens[8..16], state=state_mid) → Y_chunk2, state_end
-// Assert: Y_full[0..8] ≈ Y_chunk1, Y_full[8..16] ≈ Y_chunk2, state_full ≈ state_end.
-// =========================================================================
+// Phase 1a chunkwise SSD scan precondition: splitting a sequential GDN scan at any token
+// boundary, saving H state, and resuming must produce bit-equivalent output to one
+// monolithic scan - the regression gate for the Phase 1b parallel-within-chunk kernel.
+// n_tok=16 (2 chunks of 8), n_heads=4, head_dim=128, state=128; compares a single full run
+// against two chained chunk runs on Y and final state.
 
 TEST(GDNScanTest, ChunkBoundaryHandoff) {
     constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
@@ -487,10 +471,9 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
     }
     std::printf("  ChunkBoundaryHandoff: max_diff Y_chunkwise = %.6e\n", max_diff_cw_y);
     std::printf("  ChunkBoundaryHandoff: max_diff state_chunkwise = %.6e\n", max_diff_cw_state);
-    // Same tolerance budgets as Run B (chunkwise scaffold is a chunk-iterating
-    // wrapper around gdn_scan_fused_f32, so for now this should also be bit-
-    // exact 0.0; once Phase 1b.1 ships the SSD matmul kernel, FMA-order
-    // differences may push the FP16 output toward the 1e-3 budget).
+    // Same tolerance as Run B: chunkwise scaffold is a chunk-iterating wrapper around
+    // gdn_scan_fused_f32, so bit-exact 0.0 for now; Phase 1b.1's SSD matmul kernel may push FP16
+    // output toward the 1e-3 budget via FMA-order differences.
     EXPECT_LT(max_diff_cw_y, 1e-3f);
     EXPECT_LT(max_diff_cw_state, 1e-5f);
 
@@ -508,21 +491,9 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
     cudaFree(d_y_cw);
 }
 
-// =========================================================================
-// Test 3c: Chunkwise SSD prototype matches sequential fused scan
-// -------------------------------------------------------------------------
-// Phase 1b.1 of the chunkwise SSD scan refactor (design plan retired with
-// docs/plans/). Exercises the chunked-shared-memory kernel
-// path inside gdn_scan_chunkwise_f32 (chunk_size=64), which is structurally
-// distinct from the existing per-token sequential kernel.
-//
-// Phase 1b's wrapper path (chunk_size != 64) is covered by ChunkBoundary
-// Handoff above. This test specifically validates the new
-// gdn_scan_chunkwise_kernel<128, 128, 64> at the production GDN shape
-// (Qwen 3.5 / 3.6: HD=SS=128). Tolerance budgets from Phase 1a:
-//   - FP16 y:   1e-3 max-abs-diff
-//   - FP32 H state: 1e-5 max-abs-diff
-// =========================================================================
+// Phase 1b.1: gdn_scan_chunkwise_f32 (chunk_size=64), structurally distinct from the
+// per-token sequential kernel, validated at the production GDN shape (Qwen3.5/3.6:
+// HD=SS=128). Tolerances from Phase 1a: FP16 y 1e-3, FP32 H state 1e-5.
 
 TEST(GDNScanTest, ChunkwiseProtoMatchesFused) {
     constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
@@ -616,15 +587,10 @@ TEST(GDNScanTest, ChunkwiseProtoMatchesFused) {
     cudaFree(d_y_cw);
 }
 
-// =========================================================================
-// Test 3e: Phase 2a WY-rep prototype matches sequential
-// -------------------------------------------------------------------------
-// Validates the new `gdn_scan_chunkwise_wy_f32` kernel — factorises the
-// chunk-internal sequential dependency into a forward triangular solve +
-// matrix-matrix products (WY representation, Yang et al. 2024). Same math
-// as the sequential kernel but reorganised; expected to be numerically
-// close (FMA-order may differ → ~5e-3 FP16 tolerance, ~1e-2 FP32 state).
-// =========================================================================
+// Phase 2a: gdn_scan_chunkwise_wy_f32 factorises the chunk-internal sequential dependency
+// into a forward triangular solve + matrix-matrix products (WY representation, Yang et al.
+// 2024), same math as sequential but reorganised. FMA-order differs so tolerance widens to
+// ~5e-3 FP16 / ~1e-2 FP32 state.
 
 TEST(GDNScanTest, ChunkwiseWyMatchesFused) {
     constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
@@ -699,11 +665,9 @@ TEST(GDNScanTest, ChunkwiseWyMatchesFused) {
     std::printf("\n  ChunkwiseWy: max_diff Y = %.6e\n", max_diff_y);
     std::printf("  ChunkwiseWy: max_diff state = %.6e\n", max_diff_state);
 
-    // The WY reformulation differs from the sequential FMA order, but the
-    // chunk-internal matmuls + log-space cumulative decay land within FP32
-    // reordering noise: ~4e-6 max-abs on Y (FP16 quantisation floor),
-    // ~6e-8 max-abs on FP32 state at 2 chunks of 32 tokens. These are well
-    // inside Phase 1a's FP16 1e-3 / FP32 1e-5 budgets.
+    // WY reformulation's FMA order differs from sequential, but the chunk-internal matmuls +
+    // log-space cumulative decay land within FP32 reordering noise: ~4e-6 max-abs on Y (FP16
+    // floor), ~6e-8 on FP32 state at 2 chunks of 32 tokens - well inside Phase 1a's 1e-3/1e-5 budgets.
     EXPECT_LT(max_diff_y, 1e-3f);
     EXPECT_LT(max_diff_state, 1e-5f);
 
@@ -718,18 +682,12 @@ TEST(GDNScanTest, ChunkwiseWyMatchesFused) {
     cudaFree(d_y_wy);
 }
 
-// =========================================================================
-// Test 3e.2: chunk-PARALLEL scan matches the sequential fused scan.
-// -------------------------------------------------------------------------
-// Validates `gdn_scan_chunkpar_{f32,bf16}` (gdn.chunkpar_scan): per-chunk WY
-// factors on grid (chunks x heads) + a sequential state pass. Nonzero initial
-// state (the state-linearity split u = u_A - W H_0 is the novel part), 1200
-// tokens = 2 full strips + a tail strip with a partial chunk, asymmetric
-// heads (n_groups=2), both state dtypes.
-// =========================================================================
-// Shared body: n_heads = 4 keeps the state pass on its whole-block staging
-// (16 CTAs), n_heads = 48 puts it on the half-block two-CTAs-per-SM form
-// (192 CTAs > SM count), the Qwen3.8-27B geometry.
+// Phase 2a.2: gdn_scan_chunkpar_{f32,bf16} (gdn.chunkpar_scan) - per-chunk WY factors on grid
+// (chunks x heads) + a sequential state pass, validated with nonzero initial state (the
+// state-linearity split u = u_A - W H_0), 1200 tokens (2 full strips + a tail partial
+// chunk), asymmetric heads (n_groups=2), both state dtypes.
+// n_heads=4 keeps the state pass on whole-block staging (16 CTAs); n_heads=48 uses the
+// half-block two-CTAs-per-SM form (192 CTAs > SM count), the Qwen3.8-27B geometry.
 static void chunkpar_matches_fused(const int n_heads) {
     constexpr int head_dim = 128, state_size = 128, n_groups = 2;
     const int inner = n_heads * head_dim, BC_size = n_groups * state_size;
@@ -739,10 +697,9 @@ static void chunkpar_matches_fused(const int n_heads) {
     srand(23);
     std::vector<float> conv_f32(static_cast<size_t>(n_tok) * conv_channels);
     std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
-    // Half the heads decay mildly (D over a 64-token chunk ~0.7), half hard
-    // (~e-16). With hard decay everywhere the cross-chunk state coupling
-    // term (u = u_A - W H_0) is ~1e-7 and a mutant that drops W passes the
-    // tolerances — the mild heads are what make that mutant visible.
+    // Half the heads decay mildly (D~0.7 over a 64-token chunk), half hard (~e-16): with hard
+    // decay everywhere the cross-chunk coupling term (u = u_A - W H_0) is ~1e-7 and a mutant
+    // dropping W passes tolerance - the mild heads are what makes that mutant visible.
     std::vector<float> h_A_log(n_heads), h_dt_bias(n_heads, 0.5f);
     for (int hh = 0; hh < n_heads; hh++)
         h_A_log[hh] = (hh % 2 == 0) ? -0.005f : -0.5f;
@@ -807,10 +764,9 @@ static void chunkpar_matches_fused(const int n_heads) {
         max_diff_state = std::max(max_diff_state, std::abs(state_ref[i] - state_cp[i]));
     std::printf("\n  Chunkpar: max_diff Y = %.6e\n", max_diff_y);
     std::printf("  Chunkpar: max_diff state = %.6e\n", max_diff_state);
-    // The state pass runs its three chunk GEMMs on tensor cores: the y GEMM as
-    // plain tf32 (Y 6.1e-5 here; the scalar form read 3.1e-5), the two GEMMs
-    // that feed the carried state as 3xTF32 (FP32 state 8.9e-7; plain tf32
-    // there read 3.4e-4 and PPL +0.13%). The W mutant reads 3.7e-2 / 3.9e-1.
+    // State pass runs its three chunk GEMMs on tensor cores: the y GEMM as plain tf32 (Y 6.1e-5;
+    // scalar form read 3.1e-5), the two state-feeding GEMMs as 3xTF32 (FP32 state 8.9e-7; plain
+    // tf32 there read 3.4e-4 and PPL +0.13%). The W-drop mutant reads 3.7e-2/3.9e-1.
     EXPECT_LT(max_diff_y, 1e-3f);
     EXPECT_LT(max_diff_state, 1e-4f);
 
@@ -845,10 +801,9 @@ static void chunkpar_matches_fused(const int n_heads) {
             mds = std::max(mds, std::abs(__bfloat162float(sref[i]) - __bfloat162float(scp[i])));
         std::printf("  Chunkpar BF16: max_diff Y = %.6e, max_diff state = %.6e\n", mdy, mds);
         EXPECT_LT(mdy, 1e-3f);
-        // Both arms round to BF16 once at commit; a ~1e-6 FP32 difference can
-        // still flip the rounding, so the floor is one BF16 ulp at the state
-        // magnitude (~2e-3 at |H|~0.5 after 1200 mild-decay tokens). The W
-        // mutant this test exists for reads 3.9e-1.
+        // Both arms round to BF16 once at commit; a ~1e-6 FP32 difference can still flip the
+        // rounding, so the floor is one BF16 ulp at the state magnitude (~2e-3 at |H|~0.5 after 1200
+        // mild-decay tokens). The W-drop mutant this test exists for reads 3.9e-1.
         EXPECT_LT(mds, 4e-3f);  // 9.8e-4 measured with the 3xTF32 state path (1 ulp at |H|~0.5)
         cudaFree(d_sref);
         cudaFree(d_scp);
@@ -866,17 +821,10 @@ static void chunkpar_matches_fused(const int n_heads) {
     cudaFree(d_y_cp);
 }
 
-// =========================================================================
-// Test 3f: Phase 2b Tensor-Core WY-rep prototype matches sequential
-// -------------------------------------------------------------------------
-// Validates `gdn_scan_chunkwise_wy_tc_f32` — Phase 2a's WY-rep math with
-// the four chunk-internal matmuls (KK, QK, KH, QH) replaced by WMMA TC
-// dispatches. FP16 storage of K̃/Q̃/H_0 introduces a small precision drop
-// vs Phase 2a's FP32 storage; outputs land within FP16 1e-2 (output) /
-// FP32 1e-2 (state) — the looser tolerance covers the FP16 truncation
-// on K̃/Q̃ (each ~3-4 mantissa bits lost vs FP32) and the cumulative
-// effect on the rank-L state update.
-// =========================================================================
+// Phase 2b: gdn_scan_chunkwise_wy_tc_f32 replaces Phase 2a's four chunk-internal matmuls
+// (KK, QK, KH, QH) with WMMA TC dispatches. FP16 storage of K~/Q~/H_0 (vs Phase 2a's FP32)
+// loses ~3-4 mantissa bits, so tolerance widens to FP16 1e-2 (output) / FP32 1e-2 (state) to
+// cover the truncation and its cumulative effect on the rank-L state update.
 
 TEST(GDNScanTest, ChunkparMatchesFused) { chunkpar_matches_fused(4); }
 
@@ -961,13 +909,9 @@ TEST(GDNScanTest, ChunkwiseWyTcMatchesFused) {
     std::printf("\n  ChunkwiseWyTc: max_diff Y = %.6e\n", max_diff_y);
     std::printf("  ChunkwiseWyTc: max_diff state = %.6e\n", max_diff_state);
 
-    // FP16 storage of K̃ / Q̃ / H_0 (vs Phase 2a's FP32) costs ~3-4 mantissa
-    // bits on the operands. WMMA accumulates in FP32 so the per-matmul
-    // result keeps full precision, but the round-trip through FP16 storage
-    // does cap the achievable accuracy. Phase 1a's FP16 1e-3 budget for Y
-    // may or may not be met — the looser 1e-2 / 1e-2 tolerance lets the
-    // test catch outright wrong outputs without forcing rebalancing the
-    // FP16 storage choices now (Phase 2c could revisit).
+    // FP16 storage of K~/Q~/H_0 costs ~3-4 mantissa bits; WMMA accumulates in FP32 so each
+    // matmul keeps full precision, but the FP16 round-trip caps achievable accuracy. The looser
+    // 1e-2/1e-2 tolerance catches outright wrong output without forcing storage rebalancing now.
     EXPECT_LT(max_diff_y, 1e-2f);
     EXPECT_LT(max_diff_state, 1e-2f);
 
@@ -982,13 +926,9 @@ TEST(GDNScanTest, ChunkwiseWyTcMatchesFused) {
     cudaFree(d_y_tc);
 }
 
-// =========================================================================
-// Test 3g: Phase 2c fully-tuned WY-TC-MMA matches sequential
-// -------------------------------------------------------------------------
-// CHUNK=32, all 5 chunk-internal matmuls (KK, QK, KH, QH, H_L) on WMMA.
-// Same tolerance as Phase 2b — FP16 storage costs ~3-4 mantissa bits but
-// FP32 WMMA accumulation preserves per-matmul precision.
-// =========================================================================
+// Phase 2c: CHUNK=32, all 5 chunk-internal matmuls (KK, QK, KH, QH, H_L) on WMMA. Same
+// tolerance as Phase 2b: FP16 storage costs ~3-4 mantissa bits but FP32 WMMA accumulation
+// preserves per-matmul precision.
 
 TEST(GDNScanTest, ChunkwiseWyTc2MatchesFused) {
     constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
@@ -1083,14 +1023,9 @@ TEST(GDNScanTest, ChunkwiseWyTc2MatchesFused) {
     cudaFree(d_y_tc2);
 }
 
-// =========================================================================
-// Test 3d: Chunkwise prototype microbench (Phase 1b.1).
-// -------------------------------------------------------------------------
-// Times the chunkwise SSD prototype vs the sequential fused scan at the
-// Qwen 3.6 prefill shape (n_tokens=4096, n_heads=32, HD=SS=128, n_groups=16).
-// Gated behind IMP_GDN_MICROBENCH=1 because it's a perf probe, not a
-// correctness gate — only useful when explicitly comparing the two kernels.
-// =========================================================================
+// Chunkwise SSD prototype vs sequential fused scan at the Qwen3.6 prefill shape
+// (n_tokens=4096, n_heads=32, HD=SS=128, n_groups=16). Gated behind IMP_GDN_MICROBENCH=1: a
+// perf probe, not a correctness gate.
 
 TEST(GDNScanTest, ChunkwiseProtoMicrobench) {
     if (!std::getenv("IMP_GDN_MICROBENCH")) {
@@ -1360,13 +1295,9 @@ TEST(GDNScanTest, RMSNormGatedSiLU) {
     cudaFree(d_weight);
 }
 
-// ===========================================================================
-// Test: Padded verify chunk (#847), GDN scans — with d_real_n set, y is
-// produced for every row but h_state must stop advancing after the real
-// last row (bit-equal to a plain run over the real rows). Covers the fused
-// kernel, the chunkwise entry (routes padded chunks through one fused call)
-// and the reference kernel.
-// ===========================================================================
+// #847 padded verify chunk: with d_real_n set, y is produced for every row but h_state must
+// stop advancing after the real last row (bit-equal to a plain run over real rows). Covers
+// the fused kernel, the chunkwise entry, and the reference kernel.
 TEST(GDNScanTest, PaddedChunkDeviceLength) {
     constexpr int n_heads = 4;
     constexpr int n_groups = 2;
@@ -1466,14 +1397,9 @@ TEST(GDNScanTest, PaddedChunkDeviceLength) {
     cudaFree(d_beta);
 }
 
-// ===========================================================================
-// BatchedDecodeScanMicrobench -- per-launch cost and achieved bandwidth of
-// the batched decode scan at Qwen3.8-27B shapes (48 v-heads, HD=SS=128,
-// 16 groups, 32 sequences, n_tokens=1). Cycles through 8 distinct state
-// slabs (~1 GB) so consecutive reps cannot serve the state from L2 — the
-// serving steady state walks 48 different layers' slabs.
-// Set IMP_GDN_MICROBENCH=1 to run.
-// ===========================================================================
+// Per-launch cost and bandwidth of the batched decode scan at Qwen3.8-27B shapes (48
+// v-heads, HD=SS=128, 16 groups, 32 sequences, n_tokens=1). Cycles through 8 distinct state
+// slabs (~1GB) so consecutive reps can't serve state from L2. Set IMP_GDN_MICROBENCH=1.
 TEST(GDNScanTest, BatchedDecodeScanMicrobench) {
     if (!std::getenv("IMP_GDN_MICROBENCH")) {
         GTEST_SKIP() << "Set IMP_GDN_MICROBENCH=1 to run the batched decode scan probe";
@@ -1591,15 +1517,10 @@ TEST(GDNScanTest, BatchedDecodeScanMicrobench) {
     cudaEventDestroy(e1);
 }
 
-// ===========================================================================
-// BF16StateTracksFP32State -- gdn.state_bf16 correctness: 256 DECODE steps
-// (one launch per token, so the state round-trips through storage at every
-// step — the case where BF16 precision actually bites), FP32-state arm vs
-// BF16-state arm on identical inputs. Asserts the y trajectory stays close
-// and the final states are finite and close. Catches layout/stride bugs
-// (garbage) and runaway error growth; the fine-grained quality gate is the
-// e2e battery (degen + long-context drift).
-// ===========================================================================
+// gdn.state_bf16 correctness: 256 DECODE steps (state round-trips through storage every
+// step, where BF16 precision actually bites), FP32-state vs BF16-state arm on identical
+// inputs. Catches layout/stride bugs and runaway error growth; fine-grained quality gate is
+// the e2e battery (degen + long-context drift).
 TEST(GDNScanTest, BF16StateTracksFP32State) {
     constexpr int n_heads = 48, head_dim = 128, state_size = 128, n_groups = 16;
     constexpr int steps = 256;
@@ -1682,12 +1603,9 @@ TEST(GDNScanTest, BF16StateTracksFP32State) {
     cudaFree(d_y_bf16arm);
 }
 
-// ===========================================================================
-// RaggedBatchedScanMatchesSequential -- the seq_row_offsets path (prefill
-// batching groundwork): a ragged batch of 3 sequences (lengths 5/1/9) must
-// produce bit-identical y and final states to three sequential single-
-// sequence calls. Same kernel, same order per sequence, so exact equality.
-// ===========================================================================
+// seq_row_offsets path (prefill batching groundwork): a ragged batch of 3 sequences
+// (lengths 5/1/9) must produce bit-identical y and final states to three sequential
+// single-sequence calls.
 TEST(GDNScanTest, RaggedBatchedScanMatchesSequential) {
     constexpr int n_heads = 8, head_dim = 128, state_size = 128, n_groups = 4;
     constexpr int n_seq = 3;

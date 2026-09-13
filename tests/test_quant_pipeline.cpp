@@ -1,30 +1,9 @@
-// QuantPipeline build post-condition test (D2 extraction proof).
-//
-// QuantPipeline (src/exec/quant_pipeline.h) is the init-time weight-
-// quantization pipeline extracted out of GraphExecutor. Its build() runs
-// once during engine init and populates the long-lived decode caches
-// (FP16 / FP8 / NVFP4) that the forward hot path reads. The whole point of
-// the extraction is that this stage is now a separable, testable component.
-//
-// FALLBACK PATH (sanctioned by the QuantPipeline design memo, "Testing"
-// — archived: docs/archive/README.md): we drive the pipeline through the
-// normal engine / C-API path and assert its observable post-condition — the
-// model decodes coherent, non-degenerate output — which only happens because
-// build() successfully populated the decode caches. A truly standalone unit
-// test (construct QuantPipeline directly, hand it a bare Model +
-// VRAMAllocator + empty caches, call build(), assert the caches filled) is
-// the preferred proof, but it is currently impractical: a bare imp::Model is
-// only reachable via the opaque ImpModel C-API handle, VRAMAllocator is owned
-// by the Engine and constructed inside engine->init(), and
-// the VRAMBudget that drives which phases run is computed during KV-cache
-// init. Standing all of that up in a test means reproducing ~half of engine
-// init.
-//
-// FOLLOW-UP: replace this with a true bare-QuantPipeline unit test once a
-// lightweight Model + VRAMAllocator fixture exists (no full engine init).
-//
-// Requires a real model and GPU. Run with:
-//   imp-tests --gtest_filter="QuantPipelineTest.*"
+// QuantPipeline build() post-condition (D2 extraction): drives the pipeline through the real
+// engine/C-API path and asserts the observable result (coherent, non-degenerate decode),
+// since a standalone unit test would need reproducing ~half of engine init (bare Model only
+// reachable via the opaque C-API handle, VRAMAllocator owned by Engine::init()).
+// FOLLOW-UP: replace with a true bare-QuantPipeline unit test once a lightweight
+// Model+VRAMAllocator fixture exists. Requires a real model and GPU.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"

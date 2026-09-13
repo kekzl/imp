@@ -1,9 +1,6 @@
-// Prefill pacing under decode (runtime.prefill_cap_fairness).
-//
-// runtime/prefill_pacing.h is free of CUDA, RuntimeConfig and Engine so the
-// cap-by-ratio table runs in the unit lane. The row that matters most is the
-// protection scenario: many decoders, one ingest, the #1643 schedule must come
-// out unchanged at every shipped weight.
+// Prefill pacing (runtime.prefill_cap_fairness): runtime/prefill_pacing.h is CUDA/Config/Engine
+// -free, so the cap-by-ratio table runs in the unit lane. Key row: many decoders, one ingest,
+// the #1643 schedule must stay unchanged at every shipped weight.
 #include "runtime/prefill_pacing.h"
 
 #include <gtest/gtest.h>

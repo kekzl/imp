@@ -22,10 +22,9 @@ protected:
     cudaStream_t stream_ = nullptr;
 };
 
-// Independent host decode of an OCP/NVIDIA E4M3 byte (1 sign, 4 exp bias-7,
-// 3 mantissa). e=15&m=7 = NaN; e=15&m<=6 are normal finite up to 448; e=0 is
-// subnormal (2^(1-7)=2^-6). Deliberately NOT __nv_fp8_e4m3 — this is the
-// ground-truth oracle the GPU kernel ((float)__nv_fp8_e4m3) is checked against.
+// Independent host decode of an OCP/NVIDIA E4M3 byte (1 sign, 4 exp bias-7, 3 mantissa):
+// e=15&m=7=NaN, e=15&m<=6 normal finite to 448, e=0 subnormal (2^-6). Deliberately not
+// __nv_fp8_e4m3 - this is the ground-truth oracle the GPU kernel is checked against.
 double e4m3_decode_ref(uint8_t b, bool& is_nan) {
     is_nan = false;
     int sign = (b >> 7) & 1;
@@ -123,13 +122,11 @@ TEST_F(FP8GemmTest, GemvFP8Basic) {
     cudaFree(d_y);
 }
 
-// gemv_fp8 with NONZERO weights vs an independent fp64 reference. The all-zero
-// GemvFP8Basic above cannot catch a wrong E4M3 decode or scale application; this
-// fills A with real (non-NaN) E4M3 bytes and checks y = sum_k decode(A)*scale*x
-// against a host fp64 dot using the independent e4m3_decode_ref LUT.
-// Tolerance: fp8 values decode exactly (LUT-exact, all E4M3 values fit f16), so
-// the only spread is fp32-GPU vs fp64-host accumulation over K + one f16 output
-// round = fp16-class. Normalized by rms(ref) (cancellation-robust), asserted 1e-2.
+// gemv_fp8 with NONZERO weights vs an independent fp64 reference (the all-zero GemvFP8Basic
+// test can't catch a wrong E4M3 decode or scale application): fills A with real E4M3 bytes,
+// checks y=sum_k decode(A)*scale*x against a host fp64 dot using e4m3_decode_ref. fp8
+// decodes exactly (LUT-exact, fits f16), so the only spread is fp32-GPU vs fp64-host
+// accumulation + one f16 output round; normalized by rms(ref), 1e-2.
 TEST_F(FP8GemmTest, GemvFP8NonzeroMatchesReference) {
     const int M = 96, K = 256;  // M non-round (row-stride bug surfaces); K%16==0
     const float scale = 0.05f;  // realistic per-tensor weight scale
@@ -205,15 +202,12 @@ TEST_F(FP8GemmTest, GemvFP8NonzeroMatchesReference) {
     cudaFree(d_y);
 }
 
-// The GGUF branch of the fp8_ssm_proj decode sidecar: a Q8_0-source GDN
-// projection is dequanted (dequant_gpu) at init, per-row FP8-quantized
-// (quantize_fp8_rows_async), and decoded via gemv_fp8_rowscale. This chains
-// those three kernels exactly as pre_dequant_phase2b does and checks the GEMV
-// against an fp64 dot over the format-derived Q8_0 dequant reference. The
-// only spread vs that reference is the E4M3 re-quantization (per-row scale =
-// row_absmax/448) plus accumulation order, so a wrong block layout, scale
-// application, or row indexing shows up as O(1) error against the ~1e-2-class
-// rounding floor.
+// GGUF branch of the fp8_ssm_proj decode sidecar: a Q8_0-source GDN projection is
+// dequanted, per-row FP8-quantized, and decoded via gemv_fp8_rowscale - chaining the same
+// three kernels pre_dequant_phase2b does, checked against an fp64 dot over the
+// format-derived Q8_0 dequant reference. Only spread vs that reference is the E4M3
+// re-quantization (row_absmax/448) plus accumulation order, so a layout/scale/indexing bug
+// shows as O(1) error against the ~1e-2 rounding floor.
 TEST_F(FP8GemmTest, RowscaleGemvFromQ8SourceMatchesReference) {
     const int M = 192, K = 2048;  // K % 32 == 0 (Q8_0 blocks), K % 16 == 0 (sidecar gate)
     constexpr int kQ8BlockBytes = 34;  // [ d:f16 | qs:int8[32] ]
@@ -298,11 +292,10 @@ TEST_F(FP8GemmTest, RowscaleGemvFromQ8SourceMatchesReference) {
            "(row=%d gpu=%.4f ref=%.4f)\n",
            M, K, max_rel, rms_rel, ref_rms, worst, __half2float(h_y[worst]), yref[worst]);
     EXPECT_FALSE(any_nan_inf) << "sidecar chain produced NaN/Inf on finite weights";
-    // E4M3 rounding floor for this input: dot error rms ≈ √K·rms(w·x)·2⁻⁴/√3
-    // ≈ 2.0 against ref_rms ≈ 61 (random signs cancel the reference ~25× below
-    // Σ|w·x|, which amplifies the normalized error) → expected rms_rel ≈ 3e-2;
-    // measured 2.5e-2 / max 6.4e-2. Layout/scale/indexing bugs produce O(1)
-    // errors — orders above these gates.
+    // E4M3 rounding floor for this input: dot error rms ~ sqrt(K)*rms(w*x)*2^-4/sqrt(3) ~ 2.0
+    // against ref_rms~61 (random signs cancel the reference ~25x, amplifying normalized error) ->
+    // expected rms_rel~3e-2, measured 2.5e-2/max 6.4e-2. Layout/scale/indexing bugs are O(1),
+    // orders above this gate.
     EXPECT_LT(max_rel, 1.2e-1) << "rowscale GEMV diverges from Q8_0 dequant reference";
     EXPECT_LT(rms_rel, 4e-2) << "rowscale GEMV rms error above the E4M3 rounding floor";
 

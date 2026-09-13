@@ -1,8 +1,6 @@
-// The three shipped samplers that had no test in any lane (AUDIT_arch_2026
-// I-4): DRY, mirostat v2 and logit_bias. Each one is driven at the kernel
-// entry point sampling.h exposes, against a host copy of the same arithmetic,
-// on small vocabularies where the expected outcome can be written down.
-// GPU lane (test-compute).
+// Three shipped samplers with no test in any lane (AUDIT_arch_2026 I-4): DRY, mirostat v2,
+// logit_bias. Each driven at the kernel entry point (sampling.h) against a host copy of the
+// same arithmetic on small vocabularies. GPU lane (test-compute).
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include "compute/sampling.h"
@@ -80,11 +78,8 @@ TEST(SamplingAdvancedTest, LogitBiasIgnoresOutOfRangeIds) {
     free_gpu(d);
 }
 
-// ---------------------------------------------------------------------------
-// DRY: a token that would extend a repeated n-gram is penalised by
-// multiplier * base^(match_len - allowed_length); tokens that would not
-// extend any repetition stay put.
-// ---------------------------------------------------------------------------
+// DRY: a token extending a repeated n-gram is penalised by multiplier*base^(match_len -
+// allowed_length); tokens not extending any repetition stay put.
 TEST(SamplingAdvancedTest, DryPenalisesTheTokenThatWouldExtendARepeat) {
     sampling_preallocate_dry(64);
     // History "1 2 3 4 1 2 3": the suffix "1 2 3" already occurred, followed
@@ -137,10 +132,8 @@ TEST(SamplingAdvancedTest, DryLeavesShortMatchesAndDisabledMultiplierAlone) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// mirostat v2: returns a token of the vocabulary, follows the argmax when the
-// distribution is a spike, and moves mu toward the target surprise tau.
-// ---------------------------------------------------------------------------
+// Mirostat v2: returns a token of the vocabulary, follows the argmax on a spike distribution,
+// and moves mu toward the target surprise tau.
 TEST(SamplingAdvancedTest, MirostatPicksTheSpikeAndMovesMuTowardTau) {
     std::vector<float> spike(16, 0.0f);
     spike[9] = 40.0f;  // p(9) ~ 1, surprise ~ 0

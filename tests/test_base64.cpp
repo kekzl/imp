@@ -1,8 +1,6 @@
-// CPU unit tests for the base64 codec in tools/imp-server/utils.cpp.
-// base64_encode was added for the OpenAI `encoding_format: "base64"` embeddings
-// response (the little-endian float32 array encoded as bytes) and had no
-// coverage; base64_decode backs the image-data path. These assert the RFC 4648
-// vectors, padding at every residue, and a bytes round-trip.
+// base64 codec (tools/imp-server/utils.cpp): encode backs encoding_format=base64 embeddings
+// responses, decode backs image-data input. Asserts RFC 4648 vectors, every padding residue,
+// and a bytes round-trip.
 
 #include "utils.h"
 

@@ -15,12 +15,9 @@
 
 using namespace imp;
 
-// ---------------------------------------------------------------------------
-// GemmKernel registry tests: the three live producers (generic dequant
-// catch-all, GGUF small-M, CUTLASS_NVFP4 prefill) against their direct
-// paths, plus the pin that the table holds exactly the produced keys
-// (AUDIT_arch_2026 A1-1, dispatch #8).
-// ---------------------------------------------------------------------------
+// GemmKernel registry: the three live producers (generic dequant catch-all, GGUF small-M,
+// CUTLASS_NVFP4 prefill) against their direct paths, plus the pin that the table holds
+// exactly the produced keys (AUDIT_arch_2026 A1-1, dispatch #8).
 
 namespace {
 
@@ -40,10 +37,9 @@ TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     EXPECT_EQ(reg.dispatch(unregistered, args), GemmDispatchResult::NoMatch);
 }
 
-// AUDIT_arch_2026 A1-1 (dispatch #8): the table holds exactly the keys the
-// three dispatch sites in executor_gemm_dispatch.cu construct. A registration
-// without a producer is dead code; a producer without a registration falls
-// through to gemm_via_handle_ silently. Either moves this count.
+// AUDIT_arch_2026 A1-1 (dispatch #8): the table must hold exactly the keys the three
+// dispatch sites in executor_gemm_dispatch.cu construct - a registration without a producer
+// is dead code, a producer without a registration falls through to gemm_via_handle_ silently.
 TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
     const auto& reg = GemmKernelRegistry::instance();
     EXPECT_EQ(reg.size(), 10u) << "1 generic dequant + 8 GGUF small-M qtypes + 1 CUTLASS_NVFP4";
@@ -63,13 +59,11 @@ TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
             << " m_is_one=" << s.m_is_one;
 }
 
-// The CUTLASS_NVFP4 adapter rejects loud when the activation scratch is
-// missing — refuses to silently fall through to legacy. Mirrors the FP8
-// missing-scratch test (Slice 2 pattern). Returns PreconditionFail so the
-// dispatch site can fall back to the Slice 4 dequant kernel. Note: the
-// GEMM workspace (cutlass_workspace) is intentionally NOT a precondition —
-// gemm_nvfp4_cutlass_sm120 has its own static-fallback alloc — so this
-// test specifically exercises the act_data null path.
+// CUTLASS_NVFP4 adapter must refuse loud (PreconditionFail) when activation scratch is
+// missing, not fall through to legacy silently (mirrors the FP8 missing-scratch test, Slice
+// 2 pattern). Note: the GEMM workspace is NOT a precondition since
+// gemm_nvfp4_cutlass_sm120 has its own static-fallback alloc - this exercises only the
+// act_data null path.
 TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     constexpr int M = 4;
     constexpr int N = 16;
@@ -85,10 +79,9 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
     Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
 
-    // Build a dummy CutlassNvFP4Weight — payload pointer is non-null but the
-    // kernel returns PreconditionFail before dereferencing it (workspace
-    // check fires first). We never invoke gemm_nvfp4_cutlass_sm120 here so
-    // the dummy payload is safe.
+    // Dummy CutlassNvFP4Weight payload pointer is non-null but the kernel returns
+    // PreconditionFail before dereferencing it (workspace check fires first), so the dummy is
+    // safe without ever invoking gemm_nvfp4_cutlass_sm120.
     CutlassNvFP4Weight dummy{};
     dummy.N = N;
     dummy.K = K;
@@ -108,19 +101,13 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     cudaFree(d_out);
 }
 
-// End-to-end smoke: registry CUTLASS_NVFP4 GEMM dispatch runs to Ok and
-// produces non-zero output for a small toy problem. We deliberately do NOT
-// do a back-to-back direct-vs-registry parity comparison the way the FP16 /
-// FP8 / NVFP4-dequant slices do, because gemm_nvfp4_cutlass_sm120 bails out
-// (returns false) on any sticky CUDA error from a prior call in the same
-// test process — meaning the second invocation in a parity test
-// PreconditionFails not on its own merits but on the residue of Path 1. The
-// adapter is a verbatim wrap of `quantize_fp16_to_nvfp4_cutlass` +
-// `gemm_nvfp4_cutlass_sm120` (executor_kernels.cu:2147 + 2179-2181); parity
-// is enforced structurally by the wrap, and the dispatch-site call site is
-// covered by the existing engine smoke tests (verify-fast). A single
-// invocation here is sufficient to pin that the adapter wires through to a
-// successful CUTLASS run.
+// End-to-end smoke: registry CUTLASS_NVFP4 dispatch runs Ok with non-zero output. No
+// direct-vs-registry parity comparison (unlike FP16/FP8/NVFP4-dequant slices) because
+// gemm_nvfp4_cutlass_sm120 bails on any sticky CUDA error from a prior call in the same
+// process, so a second invocation would PreconditionFail on residue, not its own merits. The
+// adapter is a verbatim wrap of quantize_fp16_to_nvfp4_cutlass + gemm_nvfp4_cutlass_sm120
+// (executor_kernels.cu:2147,2179-2181); parity is structural, and dispatch-site coverage
+// comes from verify-fast's engine smoke tests.
 TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     constexpr int M = 128;
     constexpr int N = 128;
@@ -206,11 +193,10 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     cudaFree(d_out);
 }
 
-// Off-axis m_is_one (M>1 prefill) is NoMatch: the GGUF handlers register only
-// the M==1 decode side and no per-qtype M>1 key exists; the M>1 GGUF path is
-// the generic-dequant key `{FP16, NONE, false}`. Until dispatch #8 this test
-// read PreconditionFail because the retired `{FP16, Q4_K, false}` Q4_K-IMMA
-// registration answered it - a key no dispatch site ever constructed.
+// Off-axis m_is_one (M>1 prefill) is NoMatch: GGUF handlers register only the M==1 decode
+// side; the M>1 GGUF path is the generic-dequant key {FP16,NONE,false}. Until dispatch #8
+// this read PreconditionFail because the retired {FP16,Q4_K,false} Q4_K-IMMA registration
+// answered it - a key no dispatch site ever constructed.
 TEST_F(GemmKernelRegistryTest, GgufWrongMIsOneReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
     GemmStrategy m_gt_one{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/false};
@@ -229,10 +215,9 @@ TEST_F(GemmKernelRegistryTest, GgufUnsupportedQtypeReturnsNoMatch) {
     EXPECT_EQ(reg.dispatch(q4_1, args), GemmDispatchResult::NoMatch);
 }
 
-// When neither backend can run (mmvq disabled via force_mmvq=false AND dp4a
-// scratch missing), the handler returns PreconditionFail so the dispatch
-// site falls back to legacy. Q6_K is dp4a-only (no mmvq backend) — with
-// q8_1_buf/d8_buf null and force_mmvq=false, neither path matches.
+// When neither backend can run (force_mmvq=false AND dp4a scratch missing), the handler
+// returns PreconditionFail so the dispatch site falls back to legacy. Q6_K is dp4a-only (no
+// mmvq backend) - with q8_1_buf/d8_buf null and force_mmvq=false, neither path matches.
 TEST_F(GemmKernelRegistryTest, GgufQ6kRejectsMissingDp4aScratch) {
     constexpr int M = 1;
     constexpr int N = 16;
@@ -268,12 +253,9 @@ TEST_F(GemmKernelRegistryTest, GgufQ6kRejectsMissingDp4aScratch) {
     cudaFree(d_out);
 }
 
-// dp4a backend smoke: provide q8_1_buf + d8_buf, build a real Q8_0 weight,
-// and verify the registry dispatch produces the same output as calling
-// quantize_fp16_to_q8_1 + dispatch_dp4a_gemv directly (the legacy code path
-// at executor_kernels.cu:2249-2251). Q8_0 is the simplest qtype to set up:
-// the block layout is `block_q8_0 { half d; int8_t qs[32]; }` = 34 bytes,
-// and we can quantize an FP16 tensor on the host.
+// dp4a backend smoke: with q8_1_buf+d8_buf provided, registry dispatch must match calling
+// quantize_fp16_to_q8_1 + dispatch_dp4a_gemv directly (executor_kernels.cu:2249-2251). Q8_0
+// is the simplest qtype to host-quantize (block_q8_0{half d; int8_t qs[32]} = 34 bytes).
 TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     constexpr int M = 1;
     constexpr int N = 32;
@@ -341,10 +323,9 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     dispatch_dp4a_gemv(QType::Q8_0, d_weight, static_cast<const block_q8_1*>(d_q8_1), d_d8,
                        reinterpret_cast<half*>(d_out_direct), N, K, stream_);
 
-    // Path 2: registry dispatch through the GGUF Q8_0 kernel adapter. The
-    // handler reads `args.force_mmvq` (Phase 5 Track A: per-model override
-    // forwarded via GemmKernelArgs); leave it false so the dp4a backend
-    // wins (legacy precedence: mmvq wins when both eligible).
+    // Path 2: registry dispatch through the GGUF Q8_0 adapter. args.force_mmvq (Phase 5 Track A
+    // per-model override) left false so dp4a wins per legacy precedence (mmvq wins only when
+    // both are eligible).
     __half* d_out_registry = nullptr;
     cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
     Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
@@ -380,12 +361,10 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     cudaFree(d_out_registry);
 }
 
-// mmvq backend smoke: provide weight + scratch + force_mmvq=true, verify
-// the registry handler picks mmvq (not dp4a) and produces a non-zero
-// output. We don't do bit-identical parity here because the mmvq scratch
-// is single-global and re-used between paths, which mucks with synchronous
-// invocation expectations; the dp4a parity test above is enough to pin
-// the args plumbing. This test only checks "Ok + non-zero output".
+// mmvq backend smoke: weight+scratch+force_mmvq=true must make the registry pick mmvq (not
+// dp4a) with non-zero output. No bit-identical parity here: the mmvq scratch is
+// single-global and reused between paths, which mucks with synchronous invocation
+// expectations; the dp4a parity test above already pins the args plumbing.
 TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
     constexpr int M = 1;
     constexpr int N = 32;
@@ -468,22 +447,14 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
     cudaFree(d_out);
 }
 
-// ---------------------------------------------------------------------------
-// R5 Slice 8.2 — fused gemv Q6_K/Q8_0 fallback (3rd branch inside the
-// existing Slice 7 handlers).
-//
-// When mmvq is disabled AND dp4a scratch is unavailable, Q6_K and Q8_0 now
-// route to the fused-dequant-and-dot kernel (`gemv_q6k` / `gemv_q8_0`) via
-// the same {FP16, <qtype>, m_is_one=true} strategy key Slice 7 registered.
-// `dequant_scratch != nullptr` is the engine-ready sentinel matching legacy
-// gemm_dispatch_impl:2267 / :2272 (the fused kernel itself does not consume
-// the scratch).
-// ---------------------------------------------------------------------------
+// R5 Slice 8.2: when mmvq is disabled AND dp4a scratch is unavailable, Q6_K/Q8_0 route to
+// the fused-dequant-and-dot kernel (gemv_q6k/gemv_q8_0) via the same
+// {FP16,<qtype>,m_is_one=true} key Slice 7 registered. dequant_scratch != nullptr is the
+// engine-ready sentinel matching legacy gemm_dispatch_impl:2267/:2272 (the fused kernel
+// itself does not consume the scratch).
 
-// Q8_0 fused-gemv parity: with force_mmvq=false and dp4a scratch absent, the
-// handler MUST take the fused-gemv branch and produce bit-identical output
-// to calling gemv_q8_0 directly (the legacy code path at executor_kernels.cu
-// :2275-2276).
+// Q8_0 fused-gemv parity: with force_mmvq=false and dp4a scratch absent, the handler MUST
+// take the fused-gemv branch and match gemv_q8_0 directly (executor_kernels.cu:2275-2276).
 TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
     constexpr int M = 1;
     constexpr int N = 32;
@@ -582,15 +553,10 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
     cudaFree(d_out_registry);
 }
 
-// Q6_K fused-gemv parity: same shape as the Q8_0 test, but Q6_K has a more
-// complex block layout (256 elements / block, 16 sub-blocks with 6-bit
-// quants). We can't trivially host-quantize Q6_K, so this test focuses on
-// dispatch-correctness only: build a zeroed Q6_K weight, run both paths,
-// and check that registry result matches direct path. With zero weight,
-// both paths produce zero output → bit-identical "noop" check that the
-// handler actually invoked the right branch (an mmvq/dp4a path would also
-// produce zero, so we additionally instrument with a non-null
-// dequant_scratch and zero scratch, then verify Ok was returned).
+// Q6_K fused-gemv parity: dispatch-correctness only (Q6_K's 256-elem/16-subblock 6-bit
+// layout is not trivially host-quantized) - a zeroed weight gives zero output on any path, so
+// this also runs with a non-null dequant_scratch to confirm Ok is returned, not just a
+// coincidental zero match.
 TEST_F(GemmKernelRegistryTest, GgufQ6kFusedGemvFallbackReturnsOk) {
     constexpr int M = 1;
     constexpr int N = 16;
@@ -688,10 +654,9 @@ TEST_F(GemmKernelRegistryTest, GgufQ6kFusedGemvRequiresDequantScratchSentinel) {
     cudaFree(d_out);
 }
 
-// The generic-dequant handler refuses loud when the dequant scratch is
-// missing. The dispatch site provides `qs->dequant`; without it the kernel
-// cannot stage the FP16 weight and must PreconditionFail so the caller
-// falls through to legacy `gemm_dispatch_impl`.
+// Generic-dequant handler refuses loud when dequant scratch is missing: without qs->dequant
+// the kernel cannot stage the FP16 weight, so it must PreconditionFail and fall through to
+// legacy gemm_dispatch_impl.
 TEST_F(GemmKernelRegistryTest, GenericDequantRejectsMissingScratch) {
     constexpr int M = 4;
     constexpr int N = 8;
@@ -730,10 +695,8 @@ TEST_F(GemmKernelRegistryTest, GenericDequantRejectsMissingScratch) {
     cudaFree(d_weight_q8_0);
 }
 
-// Off-axis qtype (a qtype that `dequant_gpu_supported` rejects, e.g. raw
-// F16/BF16 which are not block-quantized) must surface as PreconditionFail
-// — the dispatch site falls back to legacy `gemm_dispatch_impl`, which has
-// a final raw `gemm()` arm for the FP16/BF16-no-dequant case.
+// An off-axis qtype dequant_gpu_supported rejects (e.g. raw F16/BF16, not block-quantized)
+// must surface PreconditionFail so the dispatch site falls back to legacy's raw gemm() arm.
 TEST_F(GemmKernelRegistryTest, GenericDequantRejectsUnsupportedQtype) {
     constexpr int M = 4;
     constexpr int N = 8;
@@ -775,11 +738,9 @@ TEST_F(GemmKernelRegistryTest, GenericDequantRejectsUnsupportedQtype) {
     cudaFree(d_scratch);
 }
 
-// End-to-end parity: registry generic-dequant dispatch produces the same
-// output as the legacy `dequant_gpu → gemm` sequence for a Q8_0 weight.
-// Mirrors the Slice 8.1 FP8 cache-miss parity test — both adapters share
-// the same dequant_gpu + cuBLAS gemm sequence; only the strategy key and
-// the outer registration differ.
+// End-to-end parity: registry generic-dequant dispatch matches the legacy dequant_gpu->gemm
+// sequence for a Q8_0 weight (mirrors the Slice 8.1 FP8 cache-miss parity test; both share
+// the same sequence, only the strategy key and outer registration differ).
 TEST_F(GemmKernelRegistryTest, GenericDequantMatchesDirectPath) {
     constexpr int M = 8;
     constexpr int N = 16;

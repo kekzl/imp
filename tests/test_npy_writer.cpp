@@ -1,15 +1,6 @@
-// write_npy_fp32: the .npy the diagnostic dumps are read back through.
-//
-// Untested until now, and everything downstream of it is a measurement: the
-// reference-parity harness compares imp's logits against HF by loading these
-// files in numpy. A header this writer got subtly wrong (a shape written
-// column-major, a header length not padded to the 64-byte boundary) would not
-// crash — numpy would either refuse the file or, worse, read it transposed, and
-// the resulting "parity failure" would be in the writer, not in the engine.
-//
-// So this asserts the format against the NPY v1.0 spec by hand: magic, version,
-// the little-endian header length, the padding rule, the dict fields, and the
-// payload laid out row-major.
+// write_npy_fp32 backs the reference-parity harness (imp logits vs HF via numpy). A subtly
+// wrong header (column-major shape, unpadded 64-byte header) would not crash: numpy would
+// refuse or read transposed, misattributing a writer bug as a parity failure in the engine.
 
 #include "exec/executor_debug.h"
 

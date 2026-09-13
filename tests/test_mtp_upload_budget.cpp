@@ -8,11 +8,9 @@
 namespace imp {
 namespace {
 
-// mtp_upload_peak_bytes decides whether the MTP head is uploaded at all. The
-// upload is 272 allocations on a per-expert checkpoint and the allocator
-// decides per allocation, so running out partway leaves everything already
-// uploaded stranded until the process exits. Under-estimating here is what
-// lets that happen.
+// mtp_upload_peak_bytes decides whether the MTP head is uploaded at all. Upload is 272
+// allocations on a per-expert checkpoint; running out partway strands everything already
+// uploaded until process exit. Under-estimating here is what lets that happen.
 
 // A stand-in expert weight. The estimator reads shape and the non-null data
 // pointer only, so no device memory is involved.

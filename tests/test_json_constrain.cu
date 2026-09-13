@@ -94,12 +94,9 @@ TEST(JsonConstrainTest, ClassifyNumbers) {
     EXPECT_TRUE(classify_token(".") & CAT_NUMBER_CONT);
 }
 
-// ===========================================================================
-// FSM grammar tests (#1067) — a container close must restore the continuation
-// pushed at its matching opener. The old code popped it and *peeked the
-// grandparent's* continuation instead, so after `[..., {"k": [..]` the `]`
-// left the FSM in array context and it accepted `,"bare-string"` + `]]`.
-// ===========================================================================
+// #1067: a container close must restore the continuation pushed at its matching opener. The
+// old code popped it and peeked the GRANDPARENT's continuation instead, so after
+// `[...,{"k":[..]` the `]` left the FSM in array context and it accepted `,"bare-string"` + `]]`.
 TEST(JsonConstrainFsmTest, Issue1067NestedArrayCloseKeepsObjectContext) {
     JsonConstrainer c;
     // Exact shape from the degen_suite repro: object inside array, whose last
@@ -190,13 +187,8 @@ TEST(JsonConstrainTest, MaskAllowsValidTokens) {
     cudaFree(d_logits);
 }
 
-// ===========================================================================
-// PreambleGate tests — reasoning-model thinking pass-through
-// ===========================================================================
-//
-// Token IDs used in these tests are fictitious — the gate only cares about
-// matching the configured close_token id and inspecting token text for a JSON
-// start char.
+// PreambleGate tests: token IDs are fictitious - the gate only matches the configured
+// close_token id and inspects token text for a JSON start char.
 
 constexpr int32_t TOK_THINK_OPEN = 100;
 constexpr int32_t TOK_THINK_CLOSE = 101;
@@ -495,11 +487,10 @@ TEST(PreambleGateTest, LegacyConfigureKeepsBinaryBehavior) {
 }
 
 TEST(PreambleGateTest, ToolModeReasoningCloseStaysActiveForToolDetection) {
-    // Reasoning models (Qwen3.6, Gemma-4 thinking) emit <think>...</think>
-    // before any structured output. With tools+schema both set, the gate
-    // must stay ACTIVE after </think> so a subsequent <tool_call> opener
-    // is recognised. In legacy (non-tool) mode, </think> still exits to
-    // OFF — see ResetReactivatesGate / AbsorbsThinkingTokensThenTransitionsOnClose.
+    // Reasoning models (Qwen3.6, Gemma-4 thinking) emit <think>...</think> before structured
+    // output. With tools+schema both set, the gate must stay ACTIVE after </think> so a
+    // subsequent <tool_call> opener is recognised; in legacy (non-tool) mode </think> still exits
+    // to OFF.
     PreambleGate g;
     g.configure_with_tools(TOK_THINK_CLOSE, /*budget=*/64,
                            /*open_tokens=*/{TOK_TOOL_OPEN},
@@ -641,20 +632,13 @@ TEST(JsonConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     }
 }
 
-// Issue #1104: a constrainer that cannot mask must never decode SILENTLY
-// unconstrained.
-//
-// The device allow list used to be allocated lazily inside apply_mask() — on
-// the serving path, mid-decode. On a model that loads with no free VRAM left
-// (#1103) that allocation failed and apply_mask returned without masking and
-// without logging, so the first constrained request per process came back as
-// prose where JSON was promised: deterministic, byte-identical across restarts,
-// and invisible in `imp_constrained_eager_fallback_total` because no fallback
-// was taken. The three sibling constrainers (regex, grammar, schema) have
-// always allocated this at init and failed the load loudly.
-//
-// This pins the property that makes the failure impossible rather than
-// unlikely: after init() reports success, the allow list is already resident.
+// #1104: a constrainer that cannot mask must never decode SILENTLY unconstrained. The device
+// allow list used to allocate lazily inside apply_mask() mid-decode; on a model loading with
+// no free VRAM (#1103) that allocation failed and apply_mask returned without masking or
+// logging, so the first constrained request per process came back as prose - deterministic,
+// byte-identical across restarts, and invisible in imp_constrained_eager_fallback_total since
+// no fallback was taken. Pins that the allow list is already resident right after init()
+// reports success, making the failure impossible rather than unlikely.
 TEST(JsonConstrainTest, InitReservesTheAllowListSoApplyMaskNeverAllocates) {
     SKIP_IF_NO_CUDA();
 

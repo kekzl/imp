@@ -1,13 +1,7 @@
-// exec_t2_demand / exec_max_tokens — the arithmetic the T2 arena is sized from
-// (docs/internals/MEMORY.md A7 step 4b).
-//
-// This is the #1103 failure class in miniature: under-reserve here and the
-// pre-dequant cache build expands into the space the arena should have held,
-// the card reaches 0.0 MiB free, and WSL2/WDDM starts spilling to host memory
-// at a 6.5x bandwidth penalty. The header has claimed since it was written that
-// this code is "pure and CUDA-free so it can be unit-tested on the CPU lane" —
-// which was true and untested. These pin the three behaviours that were each
-// discovered the expensive way.
+// exec_t2_demand/exec_max_tokens size the T2 arena (MEMORY.md A7 step 4b): the #1103 failure
+// class in miniature - under-reserve here and the pre-dequant cache build expands into the
+// arena's space, VRAM hits 0.0 MiB free, and WSL2/WDDM spills to host memory at a 6.5x
+// bandwidth penalty. Pins three behaviors each found the expensive way.
 
 #include <gtest/gtest.h>
 
@@ -45,11 +39,10 @@ TEST(ExecMaxTokens, FallsBackToTheConfigWhenNoOverrideIsGiven) {
     EXPECT_EQ(exec_max_tokens(s, 0), 4096) << "a zero on both sides must not size the arena at 0";
 }
 
-// AUDIT B18. executor_workspace.cu reads has_gdn_ before it is assigned, so the
-// 2048 cap fires for SSM+MoE and never for pure GDN. This test pins the
-// AS-BUILT behaviour deliberately: "fixing" it to the intended condition would
-// reserve at T=2048 while the executor still allocates at T=4096 — a 2x
-// under-reservation, i.e. exactly the bug this file exists to prevent.
+// AUDIT B18: executor_workspace.cu reads has_gdn_ before assignment, so the 2048 cap fires
+// for SSM+MoE and never for pure GDN. Pins the AS-BUILT behavior deliberately: fixing it to
+// the intended condition would reserve at T=2048 while the executor allocates at T=4096 - a
+// 2x under-reservation, exactly the bug this file exists to prevent.
 TEST(ExecMaxTokens, ReplicatesTheAsBuiltGdnCapAndNotTheIntendedOne) {
     ExecShape ssm_moe = dense_shape();
     ssm_moe.is_ssm = true;
@@ -107,20 +100,18 @@ TEST(ExecT2Demand, PicksTheLargestTargetThatStillFitsTheCap) {
     EXPECT_EQ(d.nvfp4_dequant, 32 * kMiB);
 }
 
-// AUDIT B23, the gpt-oss case. Its experts arrive pre-upload as a 4D U8
-// expert_gate_up_packed_blocks slot, so a tensor scan sees nothing resembling
-// the dequant target and the reservation came out 22.5 MiB where 31.64 was
-// needed. The real target is one expert's FUSED gate_up (2*expert_d_ff x
-// d_model), which only the config knows before the upload.
+// AUDIT B23, gpt-oss: experts arrive pre-upload as a 4D U8 expert_gate_up_packed_blocks
+// slot, so a tensor scan sees nothing dequant-shaped and reserved 22.5 MiB where 31.64 was
+// needed. Real target is one expert's FUSED gate_up (2*expert_d_ff x d_model), known only
+// from config before upload.
 TEST(ExecT2Demand, ConfigDerivedFusedExpertShapeIsChargedWhenTensorsCannotShowIt) {
     ExecShape s;
     s.max_seq_len_cfg = 4096;
     s.d_model = 2880;
     s.n_experts = 32;
-    // expert_d_ff MUST differ from d_ff here, or the dense `2*d_ff x d_model`
-    // term produces the same number and the assertion below passes without the
-    // expert term contributing anything. Mutation-checked: with d_ff == 2880
-    // this test survived deleting the fused-expert charge outright.
+    // expert_d_ff must differ from d_ff here, or the dense 2*d_ff x d_model term produces the
+    // same number and the assertion passes without the expert term contributing. Mutation
+    // -checked: with d_ff==2880 this test survived deleting the fused-expert charge outright.
     s.expert_d_ff = 2880;
     s.d_ff = 512;
     // Only a small attention weight is visible pre-upload — the experts are not.
@@ -158,10 +149,9 @@ TEST(ExecT2Demand, MoeArraysAreChargedOnlyForMoeAndScaleWithExperts) {
     EXPECT_LT(at128, 64u * 1024) << "these are pointer and scale arrays, a few KiB at most";
 }
 
-// The FP8 reduction scratch is charged only when FP8 prefill is on — which on
-// sm_120 it never is ("FP8 prefill: auto -> DISABLED on sm_120"). So the RUNTIME
-// path is unreachable on the target and only this arithmetic is verifiable; the
-// test exists so the term cannot drift unnoticed against the site it mirrors.
+// FP8 reduction scratch is charged only when FP8 prefill is on, which on sm_120 it never is
+// ("FP8 prefill: auto -> DISABLED"); the runtime path is unreachable on target, so only the
+// arithmetic is verifiable, pinned so the term can't drift against the site it mirrors.
 TEST(ExecT2Demand, Fp8ReductionIsChargedOnlyWhenFp8PrefillIsOn) {
     ExecShape s = dense_shape();
     s.n_heads = 32;
@@ -205,10 +195,9 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     EXPECT_GT(d.total(), 0u);
 }
 
-// The small-M NVFP4 scratch (#1897): the largest split-K workspace over the
-// dense projections plus the packed 32-row activation for the widest K. The
-// LM head is excluded (it has its own batched paths and would dominate at
-// vocab x 32 floats), and the charge is independent of batch and context.
+// #1897: small-M NVFP4 scratch is the largest split-K workspace over dense projections plus
+// the packed 32-row activation for the widest K. LM head excluded (own batched paths, would
+// dominate at vocab x 32 floats); charge is independent of batch and context.
 TEST(ExecT2Demand, SmallMScratchCoversTheWidestProjectionNotTheLmHead) {
     ExecShape s = dense_shape();
     s.vocab_size = 151936;
@@ -232,10 +221,9 @@ TEST(ExecT2Demand, SmallMScratchCoversTheWidestProjectionNotTheLmHead) {
     EXPECT_EQ(exec_t2_demand(big, 8192).smallm_scratch, d.smallm_scratch);
 }
 
-// The CUTLASS grouped staging + workspace. engine.cpp gates the prewarm on
-// profile().is_moe, so the charge has to carry the same gate — charging it for
-// every model would reserve 2 MiB a dense model can never reach, and NOT
-// charging it for a MoE model is the #1103 failure class.
+// CUTLASS grouped staging+workspace: engine.cpp gates the prewarm on profile().is_moe, so
+// the charge must carry the same gate - charging every model reserves 2 MiB a dense model
+// never reaches; not charging a MoE model is the #1103 failure class.
 TEST(ExecT2Demand, Grouped3xIsChargedForMoeModelsOnly) {
     ExecShape dense = dense_shape();
     EXPECT_EQ(exec_t2_demand(dense, 1024).grouped3x, 0u);
@@ -255,11 +243,10 @@ TEST(ExecT2Demand, Grouped3xIsChargedForMoeModelsOnly) {
     EXPECT_LT(charged, 8ull * 1024 * 1024);
 }
 
-// The IMMA prefill activation scratch (A7 step 8 / AUDIT B13). Two things are
-// worth pinning: it is charged only for models whose weights the IMMA routes
-// can actually take, and it takes the LARGER of the two routes rather than the
-// product of their maxima — dense runs max_tokens rows against a dense K, MoE
-// runs max_tokens * top_k rows against an expert K, and they never co-occur.
+// IMMA prefill activation scratch (A7 step 8/AUDIT B13): charged only for models whose
+// weights the IMMA routes can take, and takes the LARGER of the dense (max_tokens rows x
+// dense K) and MoE (max_tokens*top_k rows x expert K) routes, not their product, since the
+// two never co-occur.
 TEST(ExecT2Demand, ImmaScratchIsZeroWithoutImmaWeightsAndTakesTheLargerRoute) {
     ExecShape none = dense_shape();
     EXPECT_EQ(exec_t2_demand(none, 1024).imma_scratch, 0u)
@@ -289,10 +276,9 @@ TEST(ExecT2Demand, ImmaScratchIsZeroWithoutImmaWeightsAndTakesTheLargerRoute) {
     EXPECT_LT(exec_t2_demand(moe, 1024).imma_scratch, product);
 }
 
-// The cuBLASLt workspace and the algo-bench scratch (A7 step 8). Unlike every
-// other tenant these are NOT derived from the shape — cuBLASLt is handed a
-// ceiling and picks algos that fit under it — so the thing worth pinning is
-// that the charge exists for every model and does not quietly track something.
+// cuBLASLt workspace + algo-bench scratch (A7 step 8): unlike other tenants these are NOT
+// derived from shape (cuBLASLt is handed a ceiling and picks algos under it); pins that the
+// charge exists for every model and doesn't quietly track something else.
 TEST(ExecT2Demand, CublasWorkspaceIsChargedAndShapeIndependent) {
     const ExecT2Demand dense = exec_t2_demand(dense_shape(), 1024);
     EXPECT_GE(dense.cublas_workspace, kExecCublasWorkspaceBytes + kExecBenchScratchBytes);
@@ -357,10 +343,9 @@ TEST(ExecT2Demand, QuantScratchTakesTheMoeDownProjectionWhenItIsLarger) {
     EXPECT_LT(exec_t2_demand(s, 1024).quant_scratch, with_moe);
 }
 
-// The prefill pair only exists for a model with Q4_K/Q5_K dense weights (the
-// only quants the dp4a dense-prefill GEMM reads directly), and it is sized from
-// kDp4aDenseMaxM=64, NOT from max_tokens — the kernel is not taken above M=64,
-// so sizing it from the context would reserve 64x too much at ctx 4096.
+// The prefill pair exists only for Q4_K/Q5_K dense weights (the only quants the dp4a
+// dense-prefill GEMM reads directly) and is sized from kDp4aDenseMaxM=64, not max_tokens: the
+// kernel is never taken above M=64, so sizing from context would reserve 64x too much at ctx 4096.
 TEST(ExecT2Demand, PrefillPairIsChargedOnlyForSub5BitDenseAndCapsAtM64) {
     ExecShape s = dense_shape();
     s.mmvq_max_k = 4096;
@@ -402,10 +387,9 @@ TEST(ExecT2Demand, MlaQuartetIsChargedOnlyForAnMlaShapeAndFollowsMaxTokens) {
     EXPECT_GT(exec_t2_demand(wide, 1024).mla_scratch, exec_t2_demand(s, 1024).mla_scratch * 4);
 }
 
-// The absorbed latent cache is the term that can reach a GiB, and it is sized from
-// mla_absorb_max_seq_ — the FULL sequence length, deliberately uncapped where
-// max_tokens_ clamps at 4096. Charging it from max_tokens would under-reserve 8x
-// at a 32k context, which is the #1103 failure class.
+// The absorbed latent cache can reach a GiB and is sized from mla_absorb_max_seq_ (the FULL
+// sequence length), deliberately uncapped where max_tokens_ clamps at 4096; charging from
+// max_tokens would under-reserve 8x at a 32k context (#1103 failure class).
 TEST(ExecT2Demand, MlaAbsorbCacheIsOptInAndSizedFromTheFullSequenceNotMaxTokens) {
     ExecShape s = dense_shape();
     s.n_heads = 16;
@@ -452,10 +436,9 @@ TEST(ExecT2Demand, SplitkFollowsHeadsBatchAndContextAndCapsAt128Splits) {
     EXPECT_EQ(exec_t2_demand(s, 1024).splitk_scratch, expect * 2 - 256);
 }
 
-// The split count is a block count, so the term reads the RESOLVED block size
-// (n_kv_heads <= 4 models run 32, kv_cache.block_size can set any multiple of
-// 16), not a replicated kKVBlockSize. Before B-7 it was sized for 16 whatever
-// the executor allocated with (AUDIT_arch_2026 B-7).
+// The split-count term reads the RESOLVED kv block size (n_kv_heads<=4 models run 32,
+// kv_cache.block_size can set any multiple of 16), not a replicated kKVBlockSize. Before B-7
+// it was sized for 16 regardless of what the executor allocated (AUDIT_arch_2026 B-7).
 TEST(ExecT2Demand, SplitkReadsTheResolvedKvBlockSize) {
     ExecShape s = dense_shape();
     s.n_heads = 32;
@@ -474,10 +457,9 @@ TEST(ExecT2Demand, SplitkReadsTheResolvedKvBlockSize) {
     EXPECT_EQ(exec_t2_demand(headless, 1024).splitk_scratch, 0u);
 }
 
-// The sampling scratch is sized from max_logit_tokens = max(max_batch, 8), which
-// is the BATCH and not the context. I mistook it for the context once and wrongly
-// ruled the tenant out as ~115 MiB when it is ~1 MiB (AUDIT B52 corrected by
-// B53), so this pins which quantity it follows.
+// Sampling scratch is sized from max_logit_tokens=max(max_batch,8), the BATCH, not the
+// context; mistaking it for context once wrongly ruled the tenant at ~115 MiB when it is
+// ~1 MiB (AUDIT B52, corrected by B53).
 TEST(ExecT2Demand, SampleScratchFollowsTheBATCHNotTheContext) {
     constexpr size_t kSample =
         sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
@@ -506,16 +488,12 @@ TEST(ExecT2Demand, SampleScratchFollowsTheBATCHNotTheContext) {
     EXPECT_LT(exec_t2_demand(long_ctx, 131072).sample_scratch, 4ull * 1024 * 1024);
 }
 
-// ── exec_ssm_z_cols ──────────────────────────────────────────────────
-//
-// The Qwen3.5-style attention output gate does not own a buffer. It splits the
-// gate half out of the fused q_proj into an allocation BORROWED from the SSM z
-// buffer, which is sized from ssm_inner_size alone. Every hybrid staged today
-// makes the two exactly equal — 4096 == 4096 on Qwen3.6-35B-A3B and
-// Ornith-1.0-35B, 6144 == 6144 on Qwen3.6-27B — so the borrow fits by
-// arithmetic coincidence rather than by construction. These pin the coupling so
-// the next checkpoint with a narrower recurrent path fails a test instead of
-// overrunning the neighbouring buffer, silently and only in prefill.
+// Qwen3.5-style attention output gate has no buffer of its own: it splits the gate half out
+// of the fused q_proj into an allocation BORROWED from the SSM z buffer (sized from
+// ssm_inner_size alone). Every staged hybrid today makes the two exactly equal by
+// coincidence, not construction (4096==4096 on Qwen3.6-35B-A3B/Ornith-1.0-35B,
+// 6144==6144 on Qwen3.6-27B); pins the coupling so a narrower recurrent path fails a test
+// instead of silently overrunning the buffer in prefill.
 
 // A gated hybrid: recurrent layers plus full-attention layers whose q_proj is
 // twice n_heads * head_dim (Q and gate fused).

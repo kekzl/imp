@@ -1,7 +1,5 @@
-// End-to-end test for `mmq_q4k_imma_gemm` — the high-level Phase 2C entry
-// that owns reorder + activation quant + tile dispatch internally. Verifies
-// that the IMMA path produces results algebraically equivalent to a full
-// Q4_K dequant + FP32 reference GEMM (within INT8/FP16 quantisation noise).
+// mmq_q4k_imma_gemm (Phase 2C, owns reorder+activation-quant+tile dispatch) vs full Q4_K
+// dequant + FP32 reference GEMM: algebraic equivalence within INT8/FP16 quant noise.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>

@@ -1,21 +1,7 @@
-// =============================================================================
-// test_nvfp4_smallm_v2.cu — the native mxf4nvf4 small-M GEMM: correctness + bw
-// =============================================================================
-//
-// Correctness: y[m,n] must match a host dequant walk over the ACTUAL packed
-// buffers of BOTH sides (W4A4 — the same numerics family as the CUTLASS
-// batched-decode path). The v2 kernel accumulates in FP32 with exact
-// FP4xUE4M3 products, so the tolerance is tight (1e-3 relative).
-//
-// Bandwidth: on the reference batched-decode shape (M=32, N=5120, K=5120)
-// the kernel exists to beat the grid-starved CUTLASS 128x128 tile (41.4 us /
-// 19% of the weight floor in-situ) AND the refuted W4A16 v1 (23.9 us
-// isolated, lost e2e). The bench asserts >= 40% of the weight floor so a
-// regression back into starvation fails loud; the M2 acceptance gate
-// (<= 15 us isolated) lives in the campaign doc, not here.
-//
-// GPU required — skips cleanly without one.
-// =============================================================================
+// Native mxf4nvf4 small-M GEMM: correctness vs a host dequant walk over the actual packed
+// buffers of both sides (W4A4, FP32 accumulate, 1e-3 relative tolerance). Bandwidth must beat
+// CUTLASS (41.4us/19% of floor in-situ) and the refuted W4A16 v1 (23.9us isolated); asserts
+// >= 40% of weight floor. M2's <=15us acceptance gate lives in the campaign doc, not here.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -308,10 +294,9 @@ TEST_F(NvFP4SmallMV2Test, F32OutputRoundsToTheHalfKernel) {
     EXPECT_FALSE(imp::gemm_nvfp4_smallm_v2_a4_f32(W.q, X.q, nullptr, M, 1024, K, nullptr));
 }
 
-// Three siblings in one launch (attention q|k|v: 80 + 16 + 16 tiles) must
-// be bit-identical to three single launches at stripes=1 (same CTA body,
-// same tile order); the striped single path for N=1024 (10 stripes + reduce)
-// is a different reduction order and is NOT the reference here.
+// Three siblings (q|k|v: 80+16+16 tiles) in one launch must be BIT-identical to three single
+// launches at stripes=1 (same CTA body/tile order); the striped single path for N=1024
+// (10 stripes + reduce) is a different reduction order and is not the reference.
 TEST_F(NvFP4SmallMV2Test, TripleMatchesSinglesBitwise) {
     const int M = 32, K = 5120;
     const int Ns[3] = {5120, 1024, 1024};
@@ -354,11 +339,9 @@ TEST_F(NvFP4SmallMV2Test, TripleMatchesSinglesBitwise) {
     EXPECT_FALSE(imp::gemm_nvfp4_smallm_v2_multi_a4(small, 2, X.q, M, K, nullptr));
 }
 
-// Per-shape bandwidth on the dense batched-decode shapes (Qwen3-14B geometry:
-// q/o 5120x5120, k/v 1024x5120, gate|up pair 2 x 17408x5120, down
-// 5120x17408) against an L2-defeating ring of weight copies (>= 4 copies,
-// >= 400 MB per shape) so the number is DRAM, not the 96 MB L2. Prints
-// us/call and GB/s of weight bytes; no assertion (a survey, not a gate).
+// Per-shape bandwidth on Qwen3-14B dense batched-decode shapes against an L2-defeating ring
+// (>=4 copies, >=400 MB/shape) so the number is DRAM, not the 96 MB L2. Survey only, no
+// assertion.
 TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
     if (getenv("IMP_SMALLM_V2_SHAPES") == nullptr)
         GTEST_SKIP() << "set IMP_SMALLM_V2_SHAPES=1 to run the shape survey";
@@ -471,21 +454,10 @@ TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
     cudaEventDestroy(t1);
 }
 
-// Run-to-run determinism: the same W, Xq and shape must produce bit-identical
-// y on every launch, single and multi (sibling) kernel alike. Nothing in the
-// kernel is order-dependent (fixed-order MMA, fixed-order stripe reduce), so
-// any mismatch is a pipeline race: a stage consumed before all of its copies
-// landed. BatchInvarianceTest caught exactly that on Qwen3-14B after #1954:
-// its 24-token prefill runs these shapes (q|k|v multi, gate|up multi, o and
-// down single at M=24), the KV cache came out different per run and the M=1
-// vs M=1 control arm flipped 1-3 of 64 greedy tokens (max |dlogp| 0.3-0.7).
-//
-// Two input sets alternate so a stage read too early sees the OTHER set's
-// bytes left in shared memory by the previous launch, never a stale copy of
-// the right ones. Each launch writes its own y slice; the run is repeated
-// synchronized per launch and back to back on one stream (the in-situ
-// condition: programmatic edge, the dependent's CTAs land while the primary
-// still streams, deep async queues).
+// Run-to-run determinism: same W/Xq/shape must give bit-identical y, single and multi alike
+// (fixed-order MMA/stripe reduce, so any mismatch is a pipeline race). Caught on Qwen3-14B
+// after #1954: KV cache differed per run, M=1 vs M=1 control flipped 1-3 of 64 greedy tokens
+// (max |dlogp| 0.3-0.7). Two input sets alternate so an early read sees the OTHER set's bytes.
 TEST_F(NvFP4SmallMV2Test, RepeatedLaunchesBitwiseStable) {
     struct Shape {
         int M, K, count, N[3];

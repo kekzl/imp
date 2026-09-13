@@ -1,7 +1,6 @@
-// AUDIT_arch_2026 C-6: the per-request speculation counters reach `usage`
-// under vendor-prefixed keys, and only when a verify step ran - plus the two
-// halves that were missing: the DECLINE (a request that asked for MTP and did
-// not get it), and the `"speculative"` request field in its object form.
+// AUDIT_arch_2026 C-6: per-request speculation counters reach usage under vendor-prefixed
+// keys, only when a verify step ran, plus the two missing halves: the DECLINE (asked for MTP,
+// did not get it) and the "speculative" request field's object form.
 #include <gtest/gtest.h>
 #include "handlers_internal.h"  // tools/imp-server/handlers_internal.h
 #include "runtime/request.h"
@@ -41,9 +40,8 @@ TEST(SpecUsage, CountersNextToTheExistingDetails) {
     EXPECT_FALSE(d.contains("imp_spec_declined"));
 }
 
-// A request that ASKED for MTP and did not get it must say so, even though no
-// verify step ran. Until now the refusal lived in one startup INFO line, so a
-// caller sending {"speculative": {"mtp_k": 2}} to a concurrent server got a
+// A request that asked for MTP and did not get it must say so even with no verify step: the
+// refusal previously lived in one startup INFO line, so a concurrent-server caller got a
 // plain decode indistinguishable from a served one.
 TEST(SpecUsage, DeclineIsReportedWithoutAnyVerifyStep) {
     auto req = std::make_shared<imp::Request>();
@@ -123,12 +121,10 @@ TEST(SpecField, WrongTypesAreRefusedRatherThanIgnored) {
 
 // ------------------------------------------------- the shared key table
 
-// The three surfaces must carry the same keys. Chat WRITES them; the Anthropic
-// and Responses shims COPY them, and they copied a hand-written list of three
-// names, so imp_spec_emitted and the decline reason existed on
-// /v1/chat/completions and nowhere else while the docs claimed all three.
-// This asserts the table is exactly what add_spec_usage_ produces, which is
-// what makes adding a seventh key red instead of invisible.
+// Chat WRITES the spec-usage keys; Anthropic/Responses shims COPY a hand-written list of
+// three names, so imp_spec_emitted and the decline reason existed only on
+// /v1/chat/completions despite docs claiming all three. Asserts the table matches
+// add_spec_usage_ exactly, so a seventh key is red, not invisible.
 TEST(SpecUsageKeys, TableIsExactlyWhatTheChatShapeWrites) {
     auto req = std::make_shared<imp::Request>();
     req->spec_verifies = 3;

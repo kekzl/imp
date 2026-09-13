@@ -1,15 +1,9 @@
-// CPU unit tests for core/fp_bits.h, the tree's single copy of the host
-// half/bf16 <-> float conversions.
-//
-// Two regressions live here. PR #808: the gpt-oss GGUF 2^-4 residual rescale
-// MUST be a float-domain multiply (correct for denormals/underflow), not the
-// old exponent-bit-subtract that left denormal scales 16x too large and
-// flushed small exponents to zero, which corrupted Q8_0 gpt-oss weights into
-// garbage. And the subnormal widening imp-quantize's FP8 reader used to do by
-// hand, which read all 2046 subnormal halves up to 1025x too large.
-//
-// The loops walk all 65536 patterns of a 16-bit format, so "for every fp16
-// value" is literal here, not a sample.
+// core/fp_bits.h host half/bf16<->float conversions. Two regressions: PR #808 - the gpt-oss
+// GGUF 2^-4 residual rescale must be a float-domain multiply (the old exponent-bit-subtract
+// left denormal scales 16x too large, flushing small exponents to zero and corrupting Q8_0
+// gpt-oss weights); and imp-quantize's hand-rolled FP8 subnormal widening read all 2046
+// subnormal halves up to 1025x too large.
+// Loops walk all 65536 patterns of a 16-bit format: "every fp16 value" is literal, not a sample.
 
 #include "core/fp_bits.h"
 
@@ -99,10 +93,9 @@ TEST(FpBits, Bf16RoundTripAndRescale) {
     }
 }
 
-// Subnormal halves must renormalise. imp-quantize's FP8 scale reader pasted the
-// subnormal mantissa under a normal exponent instead, so 0x0001 came out as
-// 6.1e-05 where the value is 5.96e-08, a factor of 1025, on every one of the
-// 2046 subnormal patterns, silently rescaling whole weight blocks.
+// Subnormal halves must renormalise: imp-quantize's FP8 scale reader pasted the subnormal
+// mantissa under a normal exponent, so 0x0001 decoded as 6.1e-05 instead of 5.96e-08
+// (1025x), on every one of the 2046 subnormal patterns, silently rescaling whole weight blocks.
 TEST(FpBits, HalfSubnormalsAreExact) {
     int checked = 0;
     for (uint32_t m : std::views::iota(1u, 0x400u)) {
@@ -115,11 +108,9 @@ TEST(FpBits, HalfSubnormalsAreExact) {
     EXPECT_EQ(checked, 1023);  // 2046 patterns counting both signs
 }
 
-// Narrowing must round to nearest even, not truncate. The round-trip test below
-// CANNOT see this: a float that came from a bf16 has 16 zero low bits, so both
-// rules agree on it. These inputs have the low bits set, which is the only way
-// the rounding rule is reachable at all. (Written after a truncating mutant
-// left the round-trip test green.)
+// Narrowing must round to nearest even, not truncate. The round-trip test cannot see this: a
+// float from a bf16 has 16 zero low bits where both rules agree; these inputs set the low
+// bits, the only way the rounding rule is reachable (a truncating mutant left round-trip green).
 TEST(FpBits, Bf16NarrowingRoundsToNearestEven) {
     struct Case {
         uint32_t f_bits;

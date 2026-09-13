@@ -1,12 +1,7 @@
-// AUDIT_arch_2026 dispatch #7 (C-1, C-5, C-6): the serving signals a client
-// or a scrape can act on, driven through the server's BatchingEngine on a
-// real model:
-//   - a decode that runs the KV pool dry finishes "capacity", never
-//     "cancelled" (the value that means "your client went away");
-//   - queue_ms is the wait behind max_batch_size / KV admission, and the
-//     waiting/running split is visible while it happens;
-//   - the per-request speculation counters reach the request object.
-// Requires IMP_TEST_MODEL (default /models/Qwen3-8B-Q8_0.gguf).
+// AUDIT_arch_2026 dispatch #7 (C-1,C-5,C-6), through the server's real BatchingEngine: a
+// decode that runs the KV pool dry must finish "capacity", never "cancelled" (client-gone);
+// queue_ms/waiting-running split are visible during max_batch_size/KV admission wait;
+// per-request speculation counters reach the request object. Requires IMP_TEST_MODEL.
 #include <gtest/gtest.h>
 #include "imp/imp.h"
 #include "api/imp_internal.h"
@@ -131,14 +126,10 @@ TEST(ServingSignalsTest, MidDecodeKvExhaustionFinishesAsCapacity) {
     be.stop();
 }
 
-// AUDIT_arch_2026 C-3: the KV-pressure valve used to be a latch. A 35-block
-// pool (560 tokens) holds one request of ~120 prompt + 400 generated tokens
-// (33 blocks); near its end the pool is under a tenth free, StreamingLLM arms
-// itself and graphs are demoted. Nothing is evicted (the eviction threshold
-// is sinks + window = 4100 tokens, above max_seq_len), so once the request is
-// gone the next decode step finds a fifth of the pool free and lifts both.
-// The second request then decodes with graphs back on, which is the replay
-// this recovery has to survive.
+// AUDIT_arch_2026 C-3: the KV-pressure valve used to be a latch. A 35-block pool near its
+// end arms StreamingLLM and demotes graphs with nothing evicted (eviction threshold is above
+// max_seq_len); once the request finishes, the next decode step must find the pool freed and
+// lift both, and the following request must decode correctly with graphs back on.
 TEST(ServingSignalsTest, GraphsComeBackWhenThePressureClearsWithoutEvictions) {
     if (!model_exists())
         GTEST_SKIP() << "Model not found: " << model_path();
@@ -207,11 +198,9 @@ TEST(ServingSignalsTest, SpeculationCountersReachTheRequest) {
     ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/0));
     BatchingEngine be;
     be.start(m.ctx);
-    // Greedy over a counting cycle that stops mid-cycle: the continuation is
-    // the cycle itself, so the n-gram drafter finds its proposals in the
-    // prompt from the first generated token on, verify steps run and the
-    // counters move. (A prompt whose continuation is NOT in the context
-    // misses a handful of times and the drafter gives up: 0 verify steps.)
+    // Greedy over a counting cycle that stops mid-cycle: the continuation IS the cycle, so the
+    // n-gram drafter finds proposals from the first generated token and verify steps run.
+    // A continuation not present in the context makes the drafter give up (0 verify steps).
     std::string prompt;
     for (int i = 0; i < 8; i++)
         prompt += "1 2 3 4 5 6 7 8 9 10 11 12 ";

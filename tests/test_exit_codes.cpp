@@ -1,8 +1,6 @@
-// The C API taxonomy reaching a process exit code (#1585).
-//
-// Before this the four binaries collapsed every failure onto 1, so a
-// supervisor had to parse English to tell "no such file" from "out of VRAM".
-// Exactly one of those is worth retrying.
+// C API failure taxonomy reaching a process exit code (#1585): before this all four binaries
+// collapsed every failure onto 1, so a supervisor could not distinguish "no such file" from
+// "out of VRAM" (exactly one of which is worth retrying).
 
 #include "common/exit_codes.h"
 

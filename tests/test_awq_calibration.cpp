@@ -1,10 +1,6 @@
-// AWQ calibration: the file format, and the invariance the whole transform
-// rests on.
-//
-// The interesting test here is not that the helpers run — it is that applying
-// a scale to a weight's columns and the reciprocal to its producer leaves the
-// product unchanged. If that ever stops holding, a "calibrated" checkpoint is
-// silently a different model, and no quantization metric would say so.
+// AWQ calibration: the invariant under test is that scaling a weight's columns and applying
+// the reciprocal to its producer leaves the product unchanged - if this breaks, a
+// "calibrated" checkpoint is silently a different model with no metric to catch it.
 
 #include <fstream>
 #include <iterator>
@@ -91,10 +87,8 @@ TEST(AwqCalibration, StatsRoundTrip) {
     std::filesystem::remove(path);
 }
 
-// The second moment (IMPCAL02). It is what weights the search's error, so it
-// has to survive the file, and a file written before it existed has to keep
-// loading with an EMPTY second moment rather than a fabricated one - the
-// search distinguishes those two cases.
+// IMPCAL02 second moment must round-trip and be ABSENT (not fabricated) when loading a file
+// written before it existed; the search must distinguish the two cases.
 TEST(AwqCalibration, SecondMomentRoundTripsAndIsAbsentFromOldFiles) {
     CalibrationStats in;
     in.model_id = "/models/Qwen3-0.6B";
@@ -211,10 +205,9 @@ TEST(AwqCalibration, ScaleAndFoldPreserveTheProduct) {
         pre2[static_cast<size_t>(j)] = x[static_cast<size_t>(j)] * g2[static_cast<size_t>(j)];
     const std::vector<double> got = matvec(w2, pre2);
 
-    // The only error source is re-rounding W*s back to FP16, which perturbs
-    // each PRODUCT by at most one ulp. So the bound is over the sum of term
-    // magnitudes, not over |y| — dividing by |y| would measure how much the
-    // dot product cancels, which has nothing to do with the invariant.
+    // The only error source is re-rounding W*s to FP16 (<=1 ulp per product), so the bound is
+    // over summed term magnitudes, not |y| - dividing by |y| would measure dot-product
+    // cancellation, not this invariant.
     for (int64_t i = 0; i < N; i++) {
         double term_mag = 0.0;
         for (int64_t j = 0; j < K; j++)

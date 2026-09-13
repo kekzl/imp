@@ -1,15 +1,8 @@
-// Graph-demotion reasons (audit finding F-14).
-//
-// Eight sites across four TUs can turn CUDA graphs off. They now route through
-// Engine::demote_graphs_(), which records the reason so the resolved-dispatch
-// summary can print `graphs=0(mamba2_ssm_layers)` instead of a bare `graphs=0`.
-//
-// That readback is only worth anything if every reason has a name: a new
-// enumerator without a switch arm prints "?" and turns the informative half of
-// the line back into noise. That is the failure this file catches.
-//
-// CPU-only by design — runtime/graph_eligibility.h is deliberately free of CUDA,
-// RuntimeConfig and Engine so this can run in the unit lane.
+// Graph-demotion reasons (audit F-14): eight sites across four TUs route through
+// Engine::demote_graphs_(), which records the reason so resolved-dispatch can print
+// graphs=0(mamba2_ssm_layers) instead of a bare graphs=0. A new enumerator without a switch
+// arm prints "?" and turns that informative line back into noise - the failure this file
+// catches. CPU-only: runtime/graph_eligibility.h is deliberately free of CUDA/RuntimeConfig/Engine.
 
 #include "runtime/graph_eligibility.h"
 #include "runtime/snapshot_boundary.h"
@@ -147,12 +140,11 @@ TEST(GraphEligibility, SnapshotBoundaryIsBlockAlignedAndSkipsShortPrompts) {
     EXPECT_EQ(snapshot_boundary(35, 0, 0), 0);
 }
 
-// The invariant both snapshot savers have to hold: what a save stores must be
-// something a restore can still admit. The restore caps at (n - 1) / bs blocks
-// and matches the stored length exactly, so a save one block too long is a
-// snapshot that is never found. The SWA saver floored the full length and lost
-// every block-aligned prompt that way until 2026-09-12; the hybrid one had the
-// same bug fixed in #1960.
+// Invariant both snapshot savers must hold: what a save stores must be admissible by a
+// restore. Restore caps at (n-1)/bs blocks and requires an exact length match, so a save one
+// block too long is never found. The SWA saver floored the full length and lost every
+// block-aligned prompt's snapshot until 2026-09-12; the hybrid saver had the same bug, fixed
+// in #1960.
 TEST(GraphEligibility, EverySnapshotBoundaryFitsUnderTheRestoreCap) {
     for (int bs : {16, 32}) {
         for (int n = 1; n <= 2100; ++n) {

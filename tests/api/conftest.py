@@ -11,12 +11,9 @@ from mock_server import MOCK_MODEL_ID, run_server
 BASE_URL = os.environ.get("IMP_TEST_URL", "http://localhost:8080")
 MODEL = os.environ.get("IMP_TEST_MODEL", "")
 
-# IMP_SERVER_BIN=<path to imp-server>: start the SHIPPING binary model-less and
-# test it directly. This is the lane a GPU-less runner can have (#1302) — the
-# server answers its whole request-validation surface before it ever looks for a
-# model, so every 4xx the mock claims can be checked against the real thing.
-# Generation needs a GPU and stays out: those tests are the ones NOT marked
-# `nomodel`, and the lane selects `-m nomodel`.
+# IMP_SERVER_BIN=<path>: run the shipping server model-less; -m nomodel selects this lane.
+# Server validates its whole 4xx surface before loading a model (#1302).
+# Tests needing generation (non-nomodel) require a GPU and are excluded.
 SERVER_BIN = os.environ.get("IMP_SERVER_BIN", "")
 SERVER_PORT = int(os.environ.get("IMP_SERVER_PORT", "9098"))
 

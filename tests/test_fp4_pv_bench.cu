@@ -1,12 +1,6 @@
-// Phase 3a FP4 PV microbench wrapper — see bench/fp4_pv_bench.h for context.
-//
-// Two GTests:
-//   - Fp4PvBenchTest.Accuracy: synthetic post-softmax accuracy, no gate
-//   - Fp4PvBenchTest.ThroughputBlockscaleBeatsHmma: raw MMA throughput,
-//     asserts the 2× theoretical speedup over HMMA m16n8k16 is at least
-//     ≥ 2.0× in practice (the "≥ 2.5× for Phase 3b proceed" gate in the
-//     design memo is informational here — printed but not enforced, so a
-//     marginal result still produces actionable data).
+// Phase 3a FP4 PV microbench wrapper (see bench/fp4_pv_bench.h). Accuracy test has no gate;
+// throughput test asserts >=2.0x speedup over HMMA m16n8k16 in practice (the design memo's
+// >=2.5x "proceed to Phase 3b" bar is informational only, printed not enforced).
 
 #include <gtest/gtest.h>
 #include "bench/fp4_pv_bench.h"

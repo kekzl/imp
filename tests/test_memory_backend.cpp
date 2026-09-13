@@ -1,10 +1,5 @@
-// L1 of the memory architecture: Backend, the allocation-phase guard, and the
-// FakeBackend test seam (docs/internals/MEMORY.md A3.1/A3.2/A6).
-//
-// CPU-only on purpose. imp has no GPU runner and the lane CI actually runs is
-// `ctest -L unit`; the whole point of the Backend interface is that the
-// allocator stack above it can be exercised on host memory. Nothing here calls
-// CUDA.
+// L1 of the memory architecture: Backend, allocation-phase guard, FakeBackend seam
+// (MEMORY.md A3.1/A3.2/A6). CPU-only: exercises the allocator stack without CUDA.
 
 #include <gtest/gtest.h>
 
@@ -136,11 +131,8 @@ TEST_F(PhaseFixture, ServingPhaseAcquisitionIsCounted) {
 #endif
 }
 
-// #1649: a growable pool committing pages on the request path acquires
-// physical memory exactly as acquire() does, and it used to be counted by none
-// of the three I2 instruments. commit() and commit_range() are non-virtual
-// wrappers around do_commit()/do_commit_range() now, for the same reason
-// acquire() wraps do_acquire(): a backend cannot forget the guard.
+// #1649: a growable pool committing pages on the request path must be counted like acquire().
+// commit()/commit_range() wrap do_commit()/do_commit_range() so a backend cannot skip the guard.
 TEST_F(PhaseFixture, ServingPhaseCommitIsCounted) {
 #ifdef NDEBUG
     FakeBackend be(/*capacity_bytes=*/0, /*growable=*/true);
@@ -396,11 +388,8 @@ TEST_F(PhaseFixture, TagNamesAndErrorNamesAreTotal) {
     EXPECT_STREQ(mem_error_name(MemError::NotGrowable), "not_growable");
 }
 
-// ── Slot growth: the id space grows without disturbing what is already out ──
-//
-// A KV block has several concurrent referents (the owning sequence's block
-// table, the prefix cache, the pin set). Growth that renumbered anything would
-// corrupt all of them at once and look like a model defect.
+// Slot growth must not renumber existing ids: a KV block has concurrent referents (owning
+// sequence's block table, prefix cache, pin set) that renumbering would corrupt at once.
 TEST_F(PhaseFixture, SlotGrowthAppendsIdsAndLeavesLiveOnesAlone) {
     BlockPool pool;
     ASSERT_EQ(pool.open_slots(4), MemError::Ok);

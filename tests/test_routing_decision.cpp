@@ -1,8 +1,7 @@
-// CPU unit tests for the host-side routing decisions extracted from the
-// attention-prefill dispatch (attention_dispatch.cu) and the MoE-prefill GEMM
-// dispatch (executor_forward_moe_cutlass.cu). R2 / P1.4 — the #493 regression
-// was a routing change covered only by E2E; the grouped-GEMM-vs-fallback path
-// (#574) was likewise E2E-only. These pin the tables as a cheap CPU diff.
+// Host-side routing decisions from attention-prefill (attention_dispatch.cu) and MoE-prefill
+// GEMM dispatch (executor_forward_moe_cutlass.cu), R2/P1.4: the #493 routing regression and
+// the #574 grouped-GEMM-vs-fallback path were both E2E-only. These pin the tables as a cheap
+// CPU diff.
 
 #include "compute/attention_dispatch_decision.h"
 #include "exec/moe_prefill_decision.h"
@@ -255,21 +254,11 @@ TEST(AttnDispatchTable, SinksWithFMHANeverIsNone) {
     EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true), AttnPrefillPath::NONE);
 }
 
-// --------------------------------------------------------------------------
-// The coupling that makes this file mean something (audit finding F-3)
-// --------------------------------------------------------------------------
-//
-// Until #1210 this model was TEST-ONLY: attention_dispatch.cu mentioned
-// select_attn_prefill_path() in a comment and never called it, so a reorder in
-// the dispatch left every test above green while the header described a routing
-// order that no longer existed.
-//
-// The dispatch now replays the model at the moment a tier wins, against the
-// booleans it observed on the way down, and logs a divergence. These tests pin
-// the invariant that replay depends on: for each tier, the observation pattern
-// the dispatch can actually produce when THAT tier wins must make the model
-// name the same tier. If it did not, the production check would cry wolf on a
-// correct dispatch and get muted.
+// Audit F-3: until #1210 select_attn_prefill_path() was TEST-ONLY (mentioned in a comment,
+// never called), so a dispatch reorder left every test green while the model described a
+// routing order that no longer existed. Dispatch now replays the model against observed
+// booleans and logs divergence; these pin that for each tier, its actual observation pattern
+// makes the model name that same tier - or the production check cries wolf and gets muted.
 namespace {
 
 // What attention_dispatch.cu has filled in by the time `winner` commits: every
@@ -337,22 +326,10 @@ TEST(AttnRoutingModelCoupling, NothingAcceptsReplaysToNone) {
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), AttnKernelSupport{}), AttnPrefillPath::NONE);
 }
 
-// --------------------------------------------------------------------------
-// Tier PRECEDENCE — the tests that actually catch a reorder
-// --------------------------------------------------------------------------
-//
-// The replay tests above cannot: each of their support patterns has exactly ONE
-// accepting tier, so swapping two tiers in the chain leaves every answer
-// unchanged. Verified by mutation — reordering FP8 ahead of FA2 in
-// select_attn_prefill_path() left all of them green.
-//
-// Neither could the sixteen AttnDispatchTable cases, for a different reason:
-// every one that involves FP8 sets fmha_fa2="never" first, so FA2 and FP8 are
-// never both live. The relative order of the chain — the thing a reorder breaks
-// and the thing attention_dispatch.cu is now checked against at runtime — was
-// not asserted anywhere.
-//
-// These pin it: both gates on, both kernels accepting, earlier tier must win.
+// Replay tests can't catch a reorder: each support pattern has exactly one accepting tier,
+// so swapping two tiers changes nothing (verified by mutation: FP8 ahead of FA2 stayed
+// green). The 16 AttnDispatchTable cases can't either (FP8 cases force fmha_fa2="never", so
+// FA2/FP8 are never both live). These pin actual chain order: both gates on, earlier wins.
 TEST(AttnTierPrecedence, Mxfp4BeatsFA2) {
     auto cfg = default_cfg();
     auto sup = all_accept();
@@ -390,19 +367,11 @@ TEST(AttnTierPrecedence, FmhaSm120BeatsBlackwellWhenBothAccept) {
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
 }
 
-// --------------------------------------------------------------------------
-// MoE model/dispatch COUPLING — the same treatment the attention half got
-// --------------------------------------------------------------------------
-//
-// executor_forward_moe_cutlass.cu now replays select_moe_prefill_path() against
-// what the chain observed and logs loudly on divergence
-// (verify_against_moe_routing_model). These pin the replay so the check cannot
-// fire on a *correct* dispatch.
-//
-// The observations mirror what the .cu records, which is what each tier DID —
-// not what its preconditions promised. Device-args and smallM can both pass
-// their gate and then fail inside, falling through to a later tier, so the
-// dispatch sets the flag only after the tier has actually completed.
+// executor_forward_moe_cutlass.cu replays select_moe_prefill_path() against what the chain
+// observed (verify_against_moe_routing_model), logging on divergence; these pin the replay so
+// it can't fire on a correct dispatch. Observations mirror what a tier DID, not what its
+// preconditions promised: device-args/smallM can pass their gate then fail inside and fall
+// through, so the flag is set only after the tier actually completed.
 
 namespace {
 
@@ -453,14 +422,9 @@ TEST(MoeRoutingModelCoupling, GptOssReplaysToGrouped) {
               MoePrefillPath::GROUPED);
 }
 
-// --------------------------------------------------------------------------
-// MoE tier PRECEDENCE — same reasoning as AttnTierPrecedence above
-// --------------------------------------------------------------------------
-//
-// The replay tests cannot catch a reorder: each observation pattern has exactly
-// one eligible tier, so swapping two tiers in select_moe_prefill_path() leaves
-// every answer unchanged. These make two tiers eligible at once and assert the
-// earlier one wins.
+// Same reasoning as AttnTierPrecedence: replay tests can't catch a reorder since each
+// observation pattern has exactly one eligible tier. These make two tiers eligible at once
+// and assert the earlier one wins.
 
 TEST(MoeTierPrecedence, DeviceArgsBeatsSmallM) {
     auto cfg = default_cfg();
@@ -499,11 +463,9 @@ TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
 }
 
 
-// ===========================================================================
-// #1548: max(M_e) per launch decides the grouped GEMM's M tile and the smallM
-// tier gate, and imp computed it on the host at three sites and dropped it.
-// The arithmetic lives here so it can be wrong in a place a CPU test reaches.
-// ===========================================================================
+// #1548: max(M_e) per launch decides the grouped GEMM's M tile and the smallM tier gate; imp
+// computed it on the host at three sites and dropped it. Arithmetic lives here so it can be
+// wrong in a place a CPU test reaches.
 
 TEST(MoeLaunchRows, OneHotExpertTakesEveryRow) {
     // The case the recorded max must not average away: expert 2 has all of it.

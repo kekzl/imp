@@ -303,10 +303,8 @@ class TestPerRequestCaps:
         assert r.status_code == 400
         assert "messages" in r.json()["error"]["message"]
 
-    # imp extension "speculative": true|false|{"mtp_k": N}. The object form is
-    # what lets a request turn the MTP head on and pick its depth; a depth
-    # outside the range must be a 400 that NAMES the range, not a field the
-    # server accepts and ignores (the #1384 class: parsed, then dropped).
+    # speculative object form ({"mtp_k": N}) with depth outside range must 400 and NAME the
+    # range, not be parsed and silently dropped (#1384 class).
     @pytest.mark.parametrize("value", [
         "yes",                  # wrong type entirely
         1,                      # a number is not a boolean

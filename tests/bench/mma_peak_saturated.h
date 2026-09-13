@@ -11,13 +11,10 @@ struct MmaPeakResult {
     double fp8_f32acc_tops;      // m16n8k32 f32.e4m3.e4m3.f32
 };
 
-// SATURATED tensor-core peak per dtype: 8 warps/SM x 4 independent
-// accumulator chains (vs. mxf4nvf4_mma_bench's 1 warp/SM serial chain,
-// which is latency-bound and reads ~7x low). This is the empirical
-// compute-roofline ceiling used to calibrate tools/roofline/config.json
-// (issues #595/#596): on GeForce sm_120, f32 accumulate runs at 1/4 the
-// f16-accumulate rate, and the FP4 block-scale path peaks at HALF the
-// 3354-TOPS datasheet number (~2019 TOPS measured at ~2.85 GHz boost).
+// SATURATED tensor-core peak per dtype (8 warps/SM x 4 indep accumulator chains), vs
+// mxf4nvf4_mma_bench's latency-bound 1-warp/SM serial chain (reads ~7x low).
+// Calibrates tools/roofline/config.json (#595/#596): f32-accumulate runs at 1/4 f16-accumulate
+// on GeForce sm_120; FP4 block-scale peaks at HALF the 3354-TOPS datasheet (~2019 measured).
 MmaPeakResult bench_mma_peak_saturated(cudaStream_t stream);
 
 }  // namespace imp

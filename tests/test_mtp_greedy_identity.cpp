@@ -1,38 +1,7 @@
-// =============================================================================
-// test_mtp_greedy_identity.cpp - MTP may only move greedy output at a near-tie
-// =============================================================================
-//
-// Speculative decoding is a SPEED optimisation: the verify step accepts a draft
-// token only when it equals the argmax of the verify forward's own logits.
-// Nothing in this tree asserted anything about the tokens that come out with
-// the head on.
-//
-// What existed instead: test_spec_capture_fidelity.cpp compares a CAPTURED
-// verify chunk against an EAGER forward of the same state - it gates the graph,
-// not the speculation - and test_e2e_greedy_lock.cpp freezes token sequences
-// without pinning `speculative.*` at all, so a lock recorded on one drafter
-// configuration is silently re-run on another (docs/LIMITATIONS.md: "Golden
-// tests must pin speculative.ngram and speculative.mtp_k"). Between them, an
-// MTP defect that changes output rather than crashing - a mis-consumed row, an
-// off-by-one in the accepted prefix, the banned-mask bug of #1796 - had no gate.
-//
-// Why this is NOT a token-identity test. The verify forward runs the chain at
-// M = 1 + mtp_k rows; plain decode runs M = 1. On this engine the batch SHAPE
-// moves the logits (docs/audit/SETTLED.md D-2, #1924: M=1 against M=32 on
-// Qwen3-14B-NVFP4, mean |dlogp| 0.242, max 1.636 nats, 7 of 64 greedy tokens
-// flip, both M=1/M=1 arms bit-identical). The first cut of this test demanded
-// identity and diverged on 3 of 3 prompts. So the oracle is the one the
-// batch-shape record allows: same prompt, same greedy params, both arms in
-// runtime.deterministic, mtp_k=0 against mtp_k=2 with ngram=false, 128 tokens.
-// Where the two sequences first part, the mtp_k=0 arm's own top-1/top-2 margin
-// at that step must lie inside the batch-shape envelope. A verify/accept defect
-// (an accepted draft the model would not have sampled) parts the sequences at
-// a WIDE margin and is red; a near-tie flip is the documented batch-shape class
-// and is not.
-//
-// GPU lane: needs the checkpoint and its MTP head (~0.79 GiB on top of the
-// model). Skips when either is absent.
-// =============================================================================
+// Speculative decoding may only move greedy output at a near-tie (batch-shape effect, SETTLED
+// D-2/#1924: M=32 vs M=1 mean|dlogp| 0.242, max 1.636 nats, 7/64 tokens flip); wider divergence
+// is a verify/accept defect. Oracle: mtp_k=0 vs mtp_k=2 (ngram=false), margin at the first
+// diverging token must lie inside the batch-shape envelope. GPU: needs checkpoint + MTP head.
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "runtime/config.h"
@@ -75,10 +44,9 @@ size_t device_free_mib() {
 imp::RuntimeConfig arm_config(int mtp_k) {
     imp::RuntimeConfig rc;
     rc.runtime.deterministic = true;
-    // A request that reaches max_tokens finishes naturally and registers its
-    // block hashes, so the second run of the same prompt would hit the prefix
-    // cache and prefill at a different chunk shape (AUDIT_qwen38_nvfp4.md P7:
-    // a chunk shape moves a near-tie). Every run here is cold.
+    // Prefix cache disabled: a request reaching max_tokens registers block hashes, so a second
+    // run of the same prompt would prefill at a different chunk shape, moving a near-tie
+    // (AUDIT_qwen38_nvfp4.md P7). Every run here must be cold.
     rc.server.prefix_cache = false;
     rc.speculative.ngram = false;
     rc.speculative.suffix = false;
@@ -91,10 +59,9 @@ imp::RuntimeConfig arm_config(int mtp_k) {
 
 constexpr int kGenTokens = 128;
 
-// SETTLED D-2: the batch shape moves a single token's logp by up to 1.636 nats
-// (M=32 against M=1). A flip needs the top-1 and top-2 logp to move towards
-// each other, so the margin a batch-shape flip can bridge is bounded by twice
-// that; anything wider is not the batch shape.
+// SETTLED D-2: batch shape moves a logp by up to 1.636 nats (M=32 vs M=1). A flip needs
+// top-1 and top-2 to move toward each other, so the bridgeable margin is twice that;
+// anything wider is not the batch shape.
 constexpr float kBatchShapeMarginNats = 2.0f * 1.636f;
 
 struct GreedyRun {
@@ -104,10 +71,9 @@ struct GreedyRun {
     std::vector<float> margin;
 };
 
-// want_margins asks for top-2 logprobs. The speculation gates refuse a request
-// that carries logprobs (engine_spec_ngram.cpp, 'constrained_decode'), so the
-// speculated arm never asks, and the margins come from a logprobs run of the
-// plain arm, valid as far as its tokens agree with the logprobs-free run.
+// Speculation gates refuse a request carrying logprobs (engine_spec_ngram.cpp,
+// constrained_decode), so margins come from a logprobs run of the plain arm, valid only
+// as far as its tokens agree with the logprobs-free run.
 GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_gen, bool want_margins) {
     ImpGenerateParams params = imp_generate_params_default();
     params.temperature = 0.0f;
@@ -190,11 +156,9 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
             const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
             GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
             const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
-            // Same engine, same params, deterministic, cold: neither a second
-            // run nor the logprobs flag may move a token. Each is a finding of
-            // its own (AUDIT_qwen38_nvfp4.md P7: a trajectory that depends on
-            // what the engine ran before), and this test cannot read margins
-            // off a different sequence.
+            // Same engine/params, deterministic, cold: neither a second run nor the logprobs flag may
+            // move a token (AUDIT_qwen38_nvfp4.md P7: trajectory depends on prior engine state).
+            // Margins cannot be read off a different sequence.
             const auto report = [&](const GreedyRun& x, const GreedyRun& y) {
                 size_t i = 0;
                 while (i < std::min(x.tokens.size(), y.tokens.size()) && x.tokens[i] == y.tokens[i])
@@ -211,11 +175,9 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
                 report(first, plain);
             ASSERT_EQ(first.tokens, plain.tokens)
                 << "prompt " << p << ": two cold deterministic runs of the plain arm differ";
-            // The logprobs run is a different LM-head/sampling path and parts
-            // from the plain run at a near-tie (measured 2026-09-09 on
-            // Qwen3.8-27B-NVFP4: token 81 of 127, 0.086 nats). Its margins are
-            // the plain run's margins exactly as far as the two agree, and
-            // unreadable past that point.
+            // Logprobs run is a different LM-head/sampling path and parts from the plain run at a
+            // near-tie (measured on Qwen3.8-27B-NVFP4: token 81 of 127, 0.086 nats). Its margins equal
+            // the plain run's exactly as far as the two agree, unreadable past that point.
             size_t lp_split = 0;
             while (lp_split < std::min(plain.tokens.size(), with_lp.tokens.size()) &&
                    plain.tokens[lp_split] == with_lp.tokens[lp_split])
@@ -263,10 +225,9 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     imp_context_free(ctx);
     imp_model_free(model);
 
-    // A green test proves nothing if the head never drafted: without this the
-    // arms are the non-speculative path compared against itself (#1321, the
-    // reason SpecStats exists at all). And a verify that accepts nothing is
-    // the plain path with extra work, which no token comparison can see.
+    // A green test proves nothing if the head never drafted (arms would be the non-speculative
+    // path vs itself, #1321, why SpecStats exists) or if verify accepts nothing (plain path with
+    // extra work, invisible to any token comparison).
     ASSERT_GT(stats.mtp.drafted, 0)
         << "the MTP head drafted nothing over " << (kGenTokens * 3)
         << " greedy tokens, so this test compared the plain decode path against itself";

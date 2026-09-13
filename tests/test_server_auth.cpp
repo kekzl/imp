@@ -1,15 +1,8 @@
-// =============================================================================
-// Unit tests for the server API-key (Bearer) auth check — TEST_AUDIT (retired) §7.
-//
-// WHY: the Bearer auth in main.cpp's pre-routing handler had NO test (mock_server
-// has no auth). An auth-bypass regression or a re-introduced early-out timing
-// leak would ship silently. The constant-time compare was extracted into
-// bearer_token_matches() (utils.cpp) precisely so it could be tested here, on the
-// CPU, in CI (where the real handler never runs). These assert the accept/reject
-// contract; the timing property is documented and structurally enforced by the
-// no-early-out implementation (a perf "optimization" back to operator== would
-// still pass these, so the comment in utils.cpp is the guard there).
-// =============================================================================
+// Bearer auth in main.cpp's pre-routing handler had NO test (mock_server has no auth); an
+// auth-bypass regression or a reintroduced early-out timing leak would ship silently.
+// bearer_token_matches() (utils.cpp) was extracted so it could be tested here, on the CPU, in
+// CI. Timing property is structurally enforced by the no-early-out implementation, not these
+// accept/reject assertions.
 
 #include <gtest/gtest.h>
 #include "utils.h"

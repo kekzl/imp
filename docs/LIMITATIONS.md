@@ -64,7 +64,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   prompts and by hand.
 - **No soak or endurance test** (#1642). Largest driven load: 10 concurrent requests
   (`tests/api/test_concurrency.py:37`). Three shipped comments describe what a soak would assert:
-  `tools/imp-server/metrics_memory.cpp:56`, `tests/test_memory_backend.cpp:223`,
+  `tools/imp-server/metrics_memory.cpp:56`, `tests/test_memory_backend.cpp:215`,
   `src/memory/alloc_interpose.cpp:111`. Leaks, KV-pool fragmentation and handle exhaustion surface
   in production.
 - **No device-memory checker has run against the kernels in any automated lane**

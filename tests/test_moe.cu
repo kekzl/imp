@@ -114,12 +114,8 @@ protected:
     static constexpr int kNExperts = 8;
     static constexpr int kTopK = 2;
 
-    // Gate logits designed so that the top-2 experts for each token are
-    // unambiguous:
-    //   token 0 -> experts 1 (10.0) and 3 (8.0)
-    //   token 1 -> experts 5 (12.0) and 7 (9.0)
-    //   token 2 -> experts 0 (11.0) and 2 (7.0)
-    //   token 3 -> experts 4 (15.0) and 6 (14.0)
+    // Top-2 experts unambiguous per token: t0->{1:10.0,3:8.0}, t1->{5:12.0,7:9.0},
+    // t2->{0:11.0,2:7.0}, t3->{4:15.0,6:14.0}.
     std::vector<float> gate_logits = {
         // token 0:  e0   e1    e2   e3   e4   e5   e6   e7
         1.0,
@@ -201,10 +197,8 @@ TEST_F(MoERoutingTest, TopKSelection) {
 
     auto h_indices = to_host<int32_t>(routing.expert_indices);
 
-    // For each token, the set of selected expert ids should match expectations.
-    // We compare as sets because the kernel may output them in a different
-    // relative order than our reference (e.g. sorted by index rather than by
-    // descending score).
+    // Compare selected expert ids as sets: the kernel's output order need not match the
+    // reference order (e.g. sorted by index vs by descending score).
     for (int t = 0; t < kNTokens; t++) {
         std::set<int> got_set(h_indices.begin() + t * kTopK, h_indices.begin() + (t + 1) * kTopK);
         std::set<int> exp_set(expected_indices.begin() + t * kTopK,
@@ -373,12 +367,8 @@ TEST_F(MoERoutingTest, GatherScatter) {
         }
     }
 
-    // ---- Scatter (identity expert output = gathered unchanged) ----
-    // The scatter should combine contributions for each token, weighted
-    // by expert_weights. Since we pass the gathered tensor directly as
-    // expert_output (identity transform), the expected output for token t is:
-    //   output[t] = sum_k  weight[t][k] * input[t]
-    //             = input[t]   (because weights sum to 1)
+    // Scatter combines contributions weighted by expert_weights; with an identity
+    // expert_output, output[t] = sum_k weight[t][k]*input[t] = input[t] (weights sum to 1).
     int64_t output_shape[2] = {kNTokens, kDModel};
     Tensor d_output = make_device_tensor_zeros(QType::F32, 2, output_shape);
 
@@ -518,13 +508,9 @@ TEST(MoERoutingEdgeTest, AllTokensSameExpert) {
 }
 
 
-// ===========================================================================
-// #1546: the deterministic combine gathered its token's rows inside the column
-// loop, so the O(total_rows) scan ran once per column chunk instead of once
-// per token. The gather is hoisted now. This path had no test at all, so these
-// pin its contract rather than the optimisation: same numbers as the atomic
-// path, and byte-identical across runs, which is the only reason it exists.
-// ===========================================================================
+// #1546: deterministic combine gathered a token's rows inside the column loop
+// (O(total_rows) work per column chunk instead of once per token); gather is now hoisted.
+// No prior test existed: pins the same numbers as the atomic path, byte-identical across runs.
 
 // RAII for the process-wide deterministic switch, so a failing assertion
 // cannot leave it set for the rest of the binary.
@@ -602,12 +588,9 @@ TEST_F(MoERoutingTest, DeterministicScatterIsByteIdenticalAcrossRuns) {
 }
 
 TEST(MoEDeterministicPermute, LayoutMatchesTheSerialRule) {
-    // The layout rule the single-threaded phase 4 implemented, and which the
-    // chunked version has to reproduce exactly: a flat index's slot inside its
-    // expert bucket is its rank among the EARLIER flat indices routed to that
-    // expert. Reference is that rule, written out serially on the host, so a
-    // mutation of the parallel rank (counting <= instead of <, or losing the
-    // chunk carry) fails here rather than showing up as a reordered bucket.
+    // A flat index's slot in its expert bucket equals its rank among earlier flat indices
+    // routed to that expert. Reference implements this serially on host so a mutated parallel
+    // rank (<= vs <, or a lost chunk carry) fails here instead of showing as a reordered bucket.
     const int n_tokens = 300;  // deliberately not a multiple of the block size
     const int top_k = 4;
     const int n_experts = 16;
@@ -654,12 +637,9 @@ TEST(MoEDeterministicPermute, LayoutMatchesTheSerialRule) {
     }
 }
 
-// ===========================================================================
-// #1548: the recorded max(M_e) is what an operator reads off /metrics to tell
-// a padding-bound layer from a bandwidth-bound one. These run the kernel that
-// actually ships against the host reference in moe_imbalance.h, because a
-// reference nothing executes proves nothing about the number in the gauge.
-// ===========================================================================
+// #1548: recorded max(M_e) is what /metrics uses to tell a padding-bound layer from a
+// bandwidth-bound one. Checked against moe_imbalance.h run through the real kernel, not an
+// inert reference.
 
 namespace {
 // Run the shipping kernel over one launch's offsets and read the counters back.

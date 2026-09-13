@@ -1,7 +1,5 @@
-// Correctness test for mmq_q4k_hmma_gemm — the Q4_K x FP16 tiled GEMM via
-// HMMA m16n8k16. Compares the custom kernel output against a CPU reference
-// (full Q4_K dequant + FP32 GEMM) to validate that the in-SMEM decode +
-// WMMA path produces bit-equivalent results within FP16 quantisation noise.
+// mmq_q4k_hmma_gemm (Q4_K x FP16 tiled GEMM, HMMA m16n8k16) vs CPU reference (full Q4_K
+// dequant + FP32 GEMM): validates the in-SMEM decode + WMMA path within FP16 quant noise.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>

@@ -1,7 +1,5 @@
-// Tests for the minimal Jinja2 template engine (src/model/jinja.h/.cpp).
-//
-// Validates rendering of real-world LLM chat templates from GGUF files.
-// Run with: imp-tests --gtest_filter="JinjaTest.*"
+// Minimal Jinja2 template engine (src/model/jinja.h/.cpp): validates rendering of
+// real-world LLM chat templates from GGUF files.
 
 #include <gtest/gtest.h>
 #include "model/jinja.h"
@@ -73,10 +71,9 @@ TEST(JinjaTest, VariableSubstitution) {
     EXPECT_EQ(tpl.render({{"name", Value(std::string("World"))}}), "Hello, World!");
 }
 
-// keep_trailing_newline=False (Jinja2/HF/vLLM default): a single trailing
-// newline in the template source is stripped. A Qwen3-Coder chat template ends
-// "...assistant\n' }}\n{%- endif %}\n"; without this, the generation prompt
-// renders "<|im_start|>assistant\n\n" and the model emits an immediate EOS.
+// keep_trailing_newline=False (Jinja2/HF/vLLM default): a single trailing newline in the
+// template source is stripped. Without this, Qwen3-Coder's template renders
+// "<|im_start|>assistant\n\n" and the model emits an immediate EOS.
 TEST(JinjaTest, StripsSingleTrailingNewline) {
     Template a;
     ASSERT_TRUE(a.parse("{{- 'assistant\\n' }}\n"));  // template file ends in a newline
@@ -785,12 +782,10 @@ TEST(JinjaTest, LstripBlocksOnlyStripsALineIndent) {
 }
 
 TEST(JinjaTest, IndentAfterAConsumedNewlineIsStillAnIndent) {
-    // The shape from Nemotron-3-Nano's template, and the one that made its
-    // render diverge by 20 spaces while the other eight families matched.
-    // trim_blocks eats the newline after `{% if %}` FIRST, so by the time the
-    // comment on the next line is reached the text token is bare indentation
-    // with no newline in it - deciding "is this a line indent" from the token's
-    // own contents says no, and the spaces reach the prompt.
+    // Nemotron-3-Nano's template shape: trim_blocks eats the newline after {% if %} first, so
+    // the comment on the next line becomes bare indentation with no newline - deciding "is this a
+    // line indent" from the token's own contents says no, and the spaces reach the prompt. This
+    // is what made its render diverge by 20 spaces while the other eight families matched.
     Template tpl;
     ASSERT_TRUE(tpl.parse("{% if true %}\n        {# c #}\nX{% endif %}"));
     EXPECT_EQ(tpl.render({}), "X");

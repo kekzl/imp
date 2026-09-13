@@ -1,33 +1,14 @@
-// =============================================================================
-// Decode-graph buckets on a GDN/SSM hybrid: does the token stream depend on how
-// many sequences happen to share the step?
-//
-// WHY THIS EXISTS
-//   The engine keeps ONE captured decode graph per batch size
-//   (`decode_graph_pool_[n_sequences - 1]`, engine.h). For a hybrid, each of
-//   those graphs also encodes how the GDN scan reaches its per-sequence
-//   recurrent state: at n == 1 the slot travels as a captured scalar and a slot
-//   change forces a recapture (engine_scheduler.cpp), at n > 1 it travels
-//   through the device slot table `d_ssm_seq_slots_`, which the graph reads by
-//   pointer. Two different mechanisms, one per bucket, and nothing in the tree
-//   exercised a capture-and-replay of bucket i against bucket 1 on a recurrent
-//   model: `test_gdn_batched.cu` covers the scan kernel, `test_graph_slots.cpp`
-//   covers a different pool (GraphSlotPool), `test_continuous_batching.cpp`
-//   runs the scheduler with no model at all.
-//
-//   The failure this catches is a bucket whose graph reads the wrong slab: the
-//   answer stays fluent, so no degeneration battery sees it, and it only
-//   differs from the single-stream answer that every benchmark measures.
-//
-// WHAT IT IS NOT
-//   Not a batch-invariance guarantee (imp deliberately has none,
-//   docs/determinism.md): bucket n is never compared with bucket 1. Each arm is
-//   compared with a PERMUTATION of itself (same prompts, same batch shape,
-//   reversed slot assignment), so the GEMM tiles and the per-row reduction
-//   order match and only the slot addressing can differ.
-//
-// GPU lane: needs a real hybrid checkpoint (IMP_TEST_MODEL with GDN layers).
-// =============================================================================
+// Decode-graph buckets on a GDN/SSM hybrid: does the token stream depend on how many
+// sequences share the step? The engine keeps one captured decode graph per batch size; for a
+// hybrid, each also encodes how the GDN scan reaches its per-sequence state - at n==1 the
+// slot travels as a captured scalar (a slot change forces recapture), at n>1 it travels
+// through the device slot table d_ssm_seq_slots_ read by pointer. Nothing else in the tree
+// exercised bucket i vs bucket 1 on a recurrent model.
+// Failure mode: a bucket reads the wrong slab, staying fluent (invisible to degen batteries)
+// and differing only from the single-stream answer every benchmark measures.
+// Not a batch-invariance guarantee (imp has none, docs/determinism.md): each arm compares
+// against a PERMUTATION of itself (same prompts/shape, reversed slot assignment), not bucket
+// n vs bucket 1. GPU lane: needs a real hybrid checkpoint.
 
 #include <gtest/gtest.h>
 
@@ -166,17 +147,11 @@ protected:
     std::vector<int32_t> tokens_;
 };
 
-// Every bucket must address each row's own recurrent slab. The oracle is a
-// permutation of the SAME n-way batch: n distinct prompts submitted in order
-// and then in reverse order share the batch shape (so the GEMM tiles and the
-// reduction order per row are the same) and differ only in which slot each
-// request lands in. A bucket whose captured graph reads the slab of a
-// neighbouring slot answers fluently and differently for one of the two
-// orders. Comparing bucket n against the n=1 run is NOT a valid oracle: the
-// batched GEMM path (M >= 2) is a different kernel from the M=1 GEMV and imp has
-// no batch-invariance guarantee (docs/determinism.md); measured on
-// Qwen3.5-4B-mxfp4 the n=4 and n=8 buckets leave the n=1 stream at token 16
-// while every row inside a bucket agrees.
+// Oracle is a permutation of the SAME n-way batch (n prompts submitted in order, then
+// reversed): same GEMM tiles and per-row reduction order, differing only in slot assignment.
+// Comparing bucket n against bucket 1 is NOT valid (different kernel, M>=2 vs M=1 GEMV, no
+// batch-invariance guarantee) - measured on Qwen3.5-4B-mxfp4, the n=4/n=8 buckets leave the
+// n=1 stream at token 16 while every row inside a bucket agrees.
 TEST_F(GdnGraphBucketTest, EveryBatchBucketAddressesItsOwnRecurrentSlot) {
     for (int n : {2, 4, 8}) {
         const auto prompts = distinct_prompts(n);

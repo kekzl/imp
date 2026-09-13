@@ -1,16 +1,11 @@
-// kv_blocks_from_residual — the arithmetic that sizes the KV pool from what is
-// left after the weight caches are built.
-//
-// This is a CPU-lane test on purpose. The decision it covers is pure integer
-// arithmetic, but until #1251 it lived inline in engine_kv_cache_init.cpp,
-// where nothing could reach it without a GPU and a 22 GB checkpoint — so the
-// one case that matters was never asserted anywhere.
-//
-// The case that matters: the caller subtracts the allocator headroom from the
-// measured residual. If whoever reserved room *for* this pool did not also
-// reserve the headroom, the residual is entirely headroom, `room` is 0, and the
-// pool silently falls to the floor. That is a rescue, not a size, and
-// `floored` is what tells the two apart.
+// kv_blocks_from_residual sizes the KV pool from what's left after weight caches are built.
+// CPU-lane on purpose: until #1251 this arithmetic lived inline in
+// engine_kv_cache_init.cpp, unreachable without a GPU and a 22GB checkpoint, so the one case
+// that matters was never asserted.
+// The case: the caller subtracts allocator headroom from the measured residual. If whoever
+// reserved room for this pool didn't also reserve the headroom, the residual is entirely
+// headroom, room is 0, and the pool silently floors - a rescue, not a size; `floored` is what
+// tells the two apart.
 
 #include <gtest/gtest.h>
 
@@ -108,11 +103,8 @@ TEST(KvResidualSizing, FreeBelowHeadroomDoesNotUnderflow) {
     EXPECT_TRUE(s.floored);
 }
 
-// ── kv_pool_verdict ───────────────────────────────────────────────────────
-//
-// The floor case has been loud since #1251. This covers the case that stayed
-// quiet: a pool that is a real size and still cannot admit one full-length
-// request, which the load reports as success.
+// Regression: a real-size pool can still be too small for one full-length request while
+// load() reports success (#1251 covered only the floor case).
 
 TEST(KvPoolVerdict, PoolHoldingAFullSequenceIsSufficient) {
     // 4096 blocks x 32 tokens = 131072 tokens against a 8192-token request.
@@ -121,10 +113,8 @@ TEST(KvPoolVerdict, PoolHoldingAFullSequenceIsSufficient) {
 }
 
 TEST(KvPoolVerdict, ClampedButStillShortOfOneSequenceIsReported) {
-    // 2416 MiB residual - 1630 MiB headroom = 786 MiB -> 1257 blocks, well
-    // above the 16-block floor, so `floored` is false and the pre-#1251 code
-    // said nothing. 1257 x 32 = 40224 tokens; a 65536-token max_seq_len needs
-    // 2048 blocks, so no full-length request can ever be admitted.
+    // 2416 MiB residual, 1630 MiB headroom -> 786 MiB -> 1257 blocks, above the 16-block floor.
+    // 1257 blocks x 32 tokens < what a 65536-token max_seq_len needs (2048 blocks): never admits one.
     const auto s = kv_blocks_from_residual(2416 * kMiB, 1630 * kMiB, k35bPerBlock, 4096, 16);
     ASSERT_TRUE(s.clamped);
     ASSERT_FALSE(s.floored) << "this case must not be the floor, or it is the other message";
@@ -171,10 +161,7 @@ TEST(KvPoolVerdict, UnsetRequirementIsNotAFault) {
     EXPECT_EQ(kv_pool_verdict(s, 2048, 0), KvPoolVerdict::Sufficient);
 }
 
-// ── upload_exceeds_checkpoint ─────────────────────────────────────────────
-//
-// The measured pair this exists for (MEMORY.md B8): the same 3263 MiB
-// checkpoint consumed 3264 MiB of device free VRAM on an idle card and
+// Measured pair (MEMORY.md B8): a 3263 MiB checkpoint costs 3264 MiB of device free VRAM idle,
 // 8446 MiB beside a process holding 23.4 GiB.
 
 TEST(UploadExceedsCheckpoint, TheMeasuredPair) {

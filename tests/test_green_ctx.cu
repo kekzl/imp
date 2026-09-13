@@ -284,14 +284,8 @@ TEST(CudaGraphRunnerTest, FullLifecycle) {
 
     cudaStreamSynchronize(stream);
 
-    // Total: 1 warmup + 1 capture + 4 replays = value should be 5.0
-    // Wait: warmup executes the function, capture records but doesn't execute,
-    // then capture also replays once, plus 3 more replays = 1 + 0 + 4 = 5 runs
-    // Actually let me re-check the CudaGraphRunner implementation:
-    // - warmup: decode_fn_(stream) -> data += 1 (value = 1)
-    // - capture: begin_capture, decode_fn_(stream) [recorded, not executed], end_capture, replay -> data += 1
-    // (value = 2)
-    // - replay x3 -> data += 3 (value = 5)
+    // Total: 1 warmup + 1 capture (records only, then replays once) + 3 more replays = 5 runs,
+    // each adding 1 to data (warmup=1, capture-replay=2, +3 replays=5).
     std::vector<float> result(N);
     cudaMemcpy(result.data(), d_data, N * sizeof(float), cudaMemcpyDeviceToHost);
     EXPECT_FLOAT_EQ(result[0], 5.0f);

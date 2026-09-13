@@ -1,29 +1,7 @@
-// =============================================================================
-// mxf4nvf4_mma_bench.cu -- Raw MMA instruction throughput microbench
-// =============================================================================
-//
-// Compares two MMA variants head-to-head on sm_120f:
-//
-// (A) LEGACY — kind::f8f6f4.m16n8k32.f32.e2m1.e2m1.f32
-//     imp's current MXFP4 FMHA path. 16*8*32*2 = 8192 FMA-equivalent ops.
-//
-// (B) BLOCKSCALE — kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
-//     SageAttention3's 5×-speedup path. 16*8*64*2 = 16384 ops. 2× raw
-//     ops per instruction and HW handles per-16-elem scale.
-//
-// Method: each warp issues N iterations of the target MMA in a tight
-// loop with dependency on the accumulator. Measures wall time, computes
-// effective TOPS per warp. Scales to per-GPU estimate by 170 SMs.
-//
-// Expected relative outcome:
-//   - Instruction rate (cycles/MMA): similar if both are ~12-cycle pipeline
-//   - Ops per instruction: 2× for BLOCKSCALE (k=64 vs k=32)
-//   - Effective TOPS: 2× for BLOCKSCALE
-//
-// This is NOT a full attention kernel benchmark — it isolates the MMA
-// pipeline and answers "is this instruction swap worth the integration
-// effort?" (Project B Stage 4 gate.)
-// =============================================================================
+// Compares kind::f8f6f4.m16n8k32 (legacy, 8192 ops/instr) vs kind::mxf4nvf4.block_scale
+// vec::4X.m16n8k64 (SageAttention3, 16384 ops/instr, 2x raw ops) on sm_120f.
+// Isolates the MMA pipeline only (not a full attention kernel); answers the Project B Stage 4
+// integration-effort gate.
 
 #include "bench/mxf4nvf4_mma_bench.h"
 #include <cuda_runtime.h>

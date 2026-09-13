@@ -1,14 +1,8 @@
-// CPU unit tests for the Anthropic /v1/messages transforms (anthropic.cpp) —
-// cache_control mapping and cache usage accounting (issue #522 item 1).
-//
-// cache_control contract: ANY cache_control marker in the request (system
-// blocks, message content blocks, tool definitions) sets the internal
-// "cache_prompt" flag on the converted OpenAI body, which the server maps to
-// prompt-KV pinning. Since #1046 the LAST marked system/message block also
-// emits "cache_prefix_messages" (count of leading converted messages forming
-// the cacheable prefix) so the pin covers only the tokens before the
-// breakpoint; a marker on tools keeps the whole-prompt pin. TTL tiers are
-// accepted but not modeled (no billing distinction locally).
+// CPU unit tests for Anthropic /v1/messages transforms (anthropic.cpp): cache_control
+// mapping and usage accounting (#522 item 1).
+// Any cache_control marker sets cache_prompt; since #1046 the last marked block also emits
+// cache_prefix_messages (leading-message count) so the pin covers only the pre-breakpoint
+// prefix; a marker on tools pins the whole prompt. TTL tiers accepted, not billed locally.
 
 #include "anthropic.h"
 #include "spec_usage_keys.h"
@@ -203,12 +197,9 @@ TEST(AnthropicCacheUsage, SpecCountersPassThrough) {
     EXPECT_FALSE(plain["usage"].contains("imp_spec_drafted"));
 }
 
-// Every key the chat shape writes, not a hand-copied subset of them. This shim
-// carried a literal three-name list, so the day `imp_spec_emitted` and the
-// decline reason were added they reached /v1/chat/completions and nowhere else
-// - while docs/API.md said all three dialects carried them. The list is now
-// one shared table (tools/imp-server/spec_usage_keys.h) and this asserts the
-// whole of it survives the transform.
+// Asserts every key the chat shape writes survives the shim, not a hand-copied subset: a
+// 3-name literal list once missed imp_spec_emitted and the decline reason on non-chat
+// endpoints. Now driven by one shared table, tools/imp-server/spec_usage_keys.h.
 TEST(AnthropicCacheUsage, EverySpecUsageKeyPassesThrough) {
     json details = json::object();
     for (const char* k : imp_server::kSpecUsageKeys)
@@ -241,10 +232,8 @@ TEST(AnthropicCacheUsage, DeclineReachesTheAnthropicUsage) {
     EXPECT_EQ(anth["usage"].value("imp_spec_emitted", -1), 0);
 }
 
-// The reasoning budget's two report fields cross the dialect boundary here: the
-// converter reads the OpenAI body the chat handler produced. Both directions,
-// because "the detail appears exactly when the answer was lost" is the half a
-// mutant that emits it unconditionally would break.
+// Reads the OpenAI body the chat handler produced (both directions): guards against a mutant
+// that emits the exhaustion detail unconditionally instead of only when the answer was lost.
 TEST(AnthropicReasoningReport, ReasoningTokensBecomeOutputTokensDetails) {
     json oai = oai_response_with_usage(json{
         {"prompt_tokens", 10},
@@ -303,20 +292,13 @@ TEST(AnthropicCacheUsage, NoDetailsMeansZeroCacheFields) {
     EXPECT_EQ(u.value("cache_creation_input_tokens", -1), 0);
 }
 
-// --- extended-thinking control ---------------------------------------------
-// Anthropic carries thinking in a `thinking` object
-// ({type:"enabled",budget_tokens:N} | {type:"disabled"}); imp's orchestrator
-// reads `enable_thinking` (bool) + `think_budget` on the OpenAI body. Note imp's
-// `think_budget` is a FRACTION of max_tokens (default 0.5), whereas Anthropic's
-// `budget_tokens` is absolute — so we map it to budget_tokens/max_tokens,
-// clamped to [0,1]. Without this mapping /v1/messages on a think-model could
-// never be told NOT to reason (the request's intent was silently dropped).
+// Anthropic `thinking` ({type, budget_tokens}) maps to imp's `enable_thinking`+`think_budget`
+// (fraction of max_tokens, default 0.5): budget_tokens/max_tokens clamped to [0,1].
+// Without this mapping, /v1/messages could never tell a think-model NOT to reason.
 
-// Extended thinking is opt-in on this dialect (#1541). This test used to assert
-// the opposite - that no `thinking` field left both keys unset - which meant the
-// server default (think_budget = 0.5) applied and a reasoning model reasoned on
-// every /v1/messages request. The answer then arrived at content[1] with
-// content[0].text empty, for a client that never asked for thinking.
+// Extended thinking is opt-in (#1541): no `thinking` field must mean no reasoning.
+// Previously the server default (think_budget=0.5) applied unconditionally, so a reasoning
+// model always reasoned and content[0].text came back empty.
 TEST(AnthropicThinking, NoFieldMeansNoThinking) {
     json oai = anthropic_to_openai_body(base_request());
     ASSERT_TRUE(oai.contains("enable_thinking"));
@@ -576,13 +558,10 @@ TEST(AnthropicMessages, ToolResultImageRehomedToUserTurn) {
     EXPECT_TRUE(has_image) << "the image must survive on the user turn";
 }
 
-// The marker counted the block, not the conversion. convert_message_content
-// pushes nothing for a source that is neither base64 nor url, so a `file`
-// source produced "[1 image(s) ... follow in the next user message]" with no
-// image following: the prompt asserted an input the model never received, which
-// is worse than the silent drop it sat next to. Such a request is refused at
-// admission now (anthropic_unreadable_block); this pins the counter itself, so
-// the marker cannot go back to over-promising if that allowlist widens first.
+// convert_message_content pushes nothing for a source that is neither base64 nor url, so a
+// `file` source produced an image marker with no image following - worse than a silent drop.
+// Now refused at admission (anthropic_unreadable_block); this pins the counter so the marker
+// cannot over-promise again if the allowlist widens.
 TEST(AnthropicMessages, ToolResultImageMarkerCountsOnlyWhatSurvives) {
     json img = json{{"type", "image"}, {"source", json{{"type", "file"}, {"file_id", "file_abc"}}}};
     json tr = json{{"type", "tool_result"},
@@ -729,13 +708,9 @@ TEST(AnthropicResponse, ChatcmplIdRewrittenToMsg) {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// The Messages API has no "system" role — sending one is an error there. imp
-// accepts it, and used to render it as a USER turn: the text reached the model
-// (measured: prompt_tokens 4 -> 74 with a 20-word marker, so never data loss)
-// but with user semantics, silently. Clients ported from the OpenAI dialect,
-// where the role IS legal, write their system prompt exactly this way.
-// ---------------------------------------------------------------------------
+// Messages API has no system role; imp accepts one but must render a leading system message
+// as the SYSTEM prompt, not a USER turn (previous behavior leaked user semantics to clients
+// ported from OpenAI's dialect, where system is a legal role).
 
 TEST(AnthropicSystemRole, LeadingSystemMessageBecomesTheSystemPrompt) {
     json req = {{"model", "m"},
@@ -820,13 +795,9 @@ TEST(AnthropicSystemRole, NoSystemRoleIsUnchanged) {
     EXPECT_EQ(oai["messages"][2]["role"], "user");
 }
 
-// ---------------------------------------------------------------------------
-// Constrained-decoding extensions have no Anthropic equivalent, and the shim
-// used to drop them: the same server honoured guided_regex on
-// /v1/chat/completions and ignored it on /v1/messages (measured: 'ZZZ6' vs
-// free-form prose). The silence was total — a malformed pattern was not
-// rejected either, because the admission check never saw the field.
-// ---------------------------------------------------------------------------
+// Constrained-decoding extensions (e.g. guided_regex) have no Anthropic equivalent but must
+// pass through unchanged: previously honored on /v1/chat/completions and silently dropped on
+// /v1/messages, so a malformed pattern there was never rejected either.
 
 TEST(AnthropicGuidedPassthrough, GuidedFieldsSurviveTheShim) {
     for (const char* key : {"guided_regex", "guided_grammar", "grammar"}) {

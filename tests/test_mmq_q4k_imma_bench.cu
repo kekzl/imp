@@ -1,10 +1,6 @@
-// Phase 1 INT8 IMMA throughput microbench wrapper. Outcome of the experiment:
-// docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
-//
-// Asserts that every IMMA variant launches without ptxas / runtime error and
-// prints the TOPS table to stderr. Does *not* gate on the perf ratio — that's
-// informational (a Phase 1 finding) and decided manually in the memo. The
-// test pass condition is "the hardware accepts the opcode".
+// Phase 1 INT8 IMMA throughput microbench (docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
+// Asserts every IMMA variant launches without a ptxas/runtime error; TOPS ratio is
+// informational, not gated.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

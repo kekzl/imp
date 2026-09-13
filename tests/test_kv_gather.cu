@@ -159,13 +159,11 @@ TEST(KVGatherTest, FP8_PagedToFlat_DequantMatchesReference) {
     cudaFree(d_src); cudaFree(d_bt); cudaFree(d_dst);
 }
 
-// INT8 gather, tested against the writer that produces the layout it reads.
-//
-// A standalone gather test would have to restate the INT8 cache layout, which
-// is exactly the thing that can drift; #1348 was the chunked-prefill path
-// aborting on INT8 KV for want of this kernel. So the oracle here is a real
-// round trip: quantize FP16 through `write_kv_cache_int8_kernel`, gather it
-// back, and require the result within one quantization step of the input.
+// INT8 gather tested against the writer producing the layout it reads (a standalone gather
+// test would restate the layout, which is exactly what can drift; #1348 was chunked-prefill
+// aborting on INT8 KV for want of this kernel): quantize FP16 through
+// write_kv_cache_int8_kernel, gather it back, require the result within one quantization step
+// of the input.
 TEST(KVGatherTest, INT8_WriteThenGather_RoundTrip) {
     const int num_blocks = 4;
     const int block_size = 16;

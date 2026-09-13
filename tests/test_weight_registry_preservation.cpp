@@ -17,10 +17,8 @@ static Tensor make_tensor_stub(TensorKind kind, int64_t rows, int64_t cols, uint
                                QType source_qtype = QType::Q6_K) {
     Tensor t;
     t.data = reinterpret_cast<void*>(ptr_sentinel);
-    // Default Q6_K matches the canonical nvfp4-beneficial source used by
-    // production benches (Qwen3-14B Q6_K etc.). Tests can override to
-    // exercise source-qtype-aware capability refinement
-    // (see Phase 5 PR #1 commit 5.1.1).
+    // Default Q6_K matches the canonical nvfp4-beneficial source used by production benches
+    // (Qwen3-14B Q6_K); tests can override to exercise source-qtype-aware capability refinement.
     t.qtype = source_qtype;
     t.ndim = 2;
     t.shape[0] = rows;
@@ -30,11 +28,8 @@ static Tensor make_tensor_stub(TensorKind kind, int64_t rows, int64_t cols, uint
     return t;
 }
 
-// ---------------------------------------------------------------------------
-// Critical regression test: NVFP4-only mode must NOT downgrade FP16-only kinds
-// This guards against the d0e9b03 bug class where SSM_IN/SSM_OUT were
-// incorrectly assigned NVFP4 tier in NVFP4-preferring mode.
-// ---------------------------------------------------------------------------
+// Regression guard for the d0e9b03 bug class: NVFP4-only mode must NOT downgrade FP16-only
+// kinds (SSM_IN/SSM_OUT were incorrectly assigned NVFP4 tier in NVFP4-preferring mode).
 
 TEST(WeightRegistryPreservation, NVFP4ModeDoesNotDowngradeSSMInOut) {
     Model m;
@@ -101,14 +96,10 @@ TEST(StoragePlanner, TinyBudgetReturnsFailure) {
     EXPECT_FALSE(plan.failure_reason.empty()) << "failed plan should carry a non-empty failure_reason";
 }
 
-// ---------------------------------------------------------------------------
-// Native-NVFP4 sources are priced at their INCREMENTAL cost (#1765): the
-// decode cache borrows the resident source storage (Phase 0b registers
-// zero-copy), so a plan that routes them to NVFP4 must not charge the full
-// tier bytes. Before the fix, every native-checkpoint load projected the
-// whole model as new demand and the budget check failed on every start,
-// making a real insufficiency indistinguishable from the normal case.
-// ---------------------------------------------------------------------------
+// #1765: native-NVFP4 sources are priced at INCREMENTAL cost - the decode cache borrows the
+// resident source storage (phase 0b zero-copy registration), so routing them to NVFP4 must
+// not charge full tier bytes. Before the fix every native-checkpoint load projected the whole
+// model as new demand and the budget check failed on every start.
 
 TEST(StoragePlanner, NativeNvfp4SourcesCostNothingAtNvfp4Tier) {
     Model m;
@@ -130,10 +121,9 @@ TEST(StoragePlanner, NativeNvfp4SourcesCostNothingAtNvfp4Tier) {
 
     PlanHints hints;
     hints.prefer_nvfp4_decode = true;
-    // Contrast pin: full-tier pricing of these 4 tensors is ~37.7 MB
-    // (4 * (4096*4096/2 + 4096*4096/16)), far above this budget - the
-    // pre-fix pricing MUST fail here, which TinyBudgetReturnsFailure shows
-    // for allocating (Q6_K) sources. Zero-copy sources must fit.
+    // Contrast pin: full-tier pricing of these 4 tensors is ~37.7 MB (4*(4096*4096/2 +
+    // 4096*4096/16)), far above this budget - pre-fix pricing MUST fail here (shown by
+    // TinyBudgetReturnsFailure for allocating Q6_K sources); zero-copy sources must fit.
     hints.vram_budget_bytes = size_t{1} * 1024 * 1024;
 
     StoragePlan plan = plan_storage(m, m.config_, hints);
@@ -230,12 +220,9 @@ TEST(StoragePlanner, DualPathHintRoutesCorrectly) {
     EXPECT_EQ(static_cast<int>(plan.entries.size()), 5);
 }
 
-// ---------------------------------------------------------------------------
-// GDN_GATE is intentionally excluded from overlay enumeration: the GDN scan
-// kernel consumes the raw weight pointer, never through gemm_dispatch, so an
-// overlay copy would burn VRAM without a consumer. Locking this decision
-// against accidental re-introduction.
-// ---------------------------------------------------------------------------
+// GDN_GATE is intentionally excluded from overlay enumeration: the GDN scan kernel consumes
+// the raw weight pointer directly, never through gemm_dispatch, so an overlay copy would burn
+// VRAM with no consumer.
 
 TEST(StoragePlanner, GDNGateIsNotEnumeratedForOverlay) {
     Model m;
@@ -263,12 +250,9 @@ TEST(StoragePlanner, GDNGateIsNotEnumeratedForOverlay) {
 // Byte accounting: projected_vram_bytes matches sum of entry bytes
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Shared-expert FFN enumeration (Nemotron / DeepSeek / Qwen3.5-MoE style).
-// A layer with BOTH regular FFN and a shared-expert FFN must produce plan
-// entries for BOTH — otherwise the storage flip silently drops the shared
+// A layer with BOTH a regular FFN and a shared-expert FFN (Nemotron/DeepSeek/Qwen3.5-MoE
+// style) must produce plan entries for BOTH, or the storage flip silently drops the shared
 // projection and inference produces garbage.
-// ---------------------------------------------------------------------------
 
 TEST(StoragePlanner, EnumeratesSharedExpertFFN) {
     Model m;
@@ -305,11 +289,9 @@ TEST(StoragePlanner, EnumeratesSharedExpertFFN) {
     EXPECT_EQ(down_count, 2) << "expected 2 W_DOWN entries (regular + shared)";
 }
 
-// ---------------------------------------------------------------------------
-// Top-level tensors (tok_emb, out_proj / LM head) must be enumerated.
-// For NVFP4-prequant models (Qwen3-Coder-30B), out_proj has a choice of tier
-// and would silently vanish from the plan if not enumerated.
-// ---------------------------------------------------------------------------
+// Top-level tensors (tok_emb, out_proj/LM head) must be enumerated: for NVFP4-prequant
+// models (Qwen3-Coder-30B), out_proj has a tier choice and would silently vanish from the
+// plan if not enumerated.
 
 TEST(StoragePlanner, EnumeratesTopLevelEmbeddingsAndLMHead) {
     Model m;
@@ -359,20 +341,14 @@ TEST(StoragePlanner, ProjectedVRAMMatchesEntrySum) {
     EXPECT_EQ(plan.projected_vram_bytes, manual_sum);
 }
 
-// ---------------------------------------------------------------------------
-// Phase 5 PR #1 — Commit 5.1.1 regression tests:
-// source-qtype-aware capability refinement
-//
-// Closes the 2026-05-24 Q4_K_M cache coverage gap by ensuring the planner
-// doesn't propose NVFP4 for sub-5-bit-source weights (where NVFP4 is a
-// representation change at similar bit-width, no compression win).
-// ---------------------------------------------------------------------------
+// Phase 5 PR #1 commit 5.1.1: closes the 2026-05-24 Q4_K_M cache-coverage gap by ensuring
+// the planner doesn't propose NVFP4 for sub-5-bit-source weights, where NVFP4 is a
+// representation change at similar bit-width with no compression win.
 
 TEST(StoragePlanner, Q4KSourceDoesNotPickNVFP4UnderPreferHint) {
-    // Q4_K-source W_GATE: even with prefer_nvfp4_decode=true, NVFP4 must NOT
-    // be picked (effective_capabilities strips NVFP4 from supported, raises
-    // floor to FP16). This is the structural fix for the Gemma-3-12B Q4_K_M
-    // bug where the runtime hit zero cache coverage.
+    // Q4_K-source W_GATE: even with prefer_nvfp4_decode=true, NVFP4 must NOT be picked
+    // (effective_capabilities strips NVFP4, raises the floor to FP16) - the structural fix for
+    // the Gemma-3-12B Q4_K_M bug that hit zero cache coverage at runtime.
     Model m;
     m.config_.n_layers = 1;
 
@@ -433,10 +409,8 @@ TEST(StoragePlanner, Q6KSourcePreservesNVFP4UnderPreferHint) {
 }
 
 TEST(StoragePlanner, F16SourceDoesNotPickNVFP4) {
-    // F16-source weights (typical: LM head, embeddings) do NOT get NVFP4
-    // overlay — matches runtime nvfp4_beneficial() policy. Documented as
-    // "no NVFP4 conversion for F16 sources" since the runtime has no
-    // dequant→quant path for raw FP16 weights anyway.
+    // F16-source weights (LM head, embeddings) do NOT get an NVFP4 overlay, matching runtime
+    // nvfp4_beneficial() policy: the runtime has no dequant->quant path for raw FP16 weights.
     Model m;
     m.config_.n_layers = 1;
 

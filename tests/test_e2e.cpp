@@ -371,10 +371,8 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
     // available or if the tiny model trips some validation. Either outcome is
     // acceptable — the key check is no crash.
     if (err != IMP_SUCCESS) {
-        // "Expected without GPU" is one reason context creation fails. A CUDA
-        // context left in an error state is a different one, and skipping on it
-        // is how this test poisoned the ~57 tests that run after it in test-e2e
-        // without ever going red. Distinguish the two before skipping.
+        // "No GPU" and "CUDA context left in an error state" are different skip reasons; conflating
+        // them let this test poison the ~57 tests that run after it in test-e2e without ever going red.
         cudaError_t sticky = cudaDeviceSynchronize();
         if (sticky == cudaSuccess)
             sticky = cudaGetLastError();
@@ -406,18 +404,13 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
     imp_context_free(ctx);
     imp_model_free(model);
 
-    // The contract used to be "no crash", and this test met it while leaving the
-    // CUDA context in an error state: every teardown free failed with an illegal
-    // memory access, the engine's #815 guard swallowed it, and the ~57 tests that
-    // run after this one in test-e2e died on a context they did not break.
-    // Root cause (fixed): ~Engine closed the T2 arena without re-arming the module
-    // statics holding a slice of it, so the SECOND engine in a process matmul'd
-    // into freed memory. Measured before/after, --gtest_repeat=1/2/3/4:
-    // 0/25/26/27 illegal-memory-access lines -> 0/0/0/0, and the full GPU suite
-    // 57 failures -> 1. The "cublasLtMatmul failed (status 14)" line that preceded
-    // the IMA was the same symptom, not a separate defect: it appears in every run
-    // that has the dangling pointer and in none that does not.
-    // This assertion stays because the class is silent by construction.
+    // ~Engine used to close the T2 arena without re-arming the module statics holding a slice of
+    // it, so a second engine in-process matmul'd into freed memory: every teardown free then
+    // failed with an illegal memory access under the #815 guard, poisoning the ~57 tests that
+    // run after this one. "cublasLtMatmul failed (status 14)" was the same symptom, not a
+    // separate defect - it appears exactly when the dangling pointer is present.
+    // This assertion stays because the class is silent by construction (contract used to be
+    // "no crash", which this met while leaving the CUDA context poisoned).
     {
         cudaError_t sticky = cudaDeviceSynchronize();
         if (sticky == cudaSuccess)
@@ -554,11 +547,8 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
     imp_model_free(model);
 }
 
-// ---------------------------------------------------------------------------
-// Multi-decode output isolation correctness test
-// Verifies that 2 requests running concurrently produce non-empty, distinct
-// output — proving that their KV caches and logit buffers are isolated.
-// ---------------------------------------------------------------------------
+// 2 concurrent requests must produce non-empty, distinct output, proving their KV caches and
+// logit buffers are isolated.
 
 TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
     const std::string path = test_model_path();
@@ -654,15 +644,11 @@ TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// In-think stop mask (AUDIT_qwen38_nvfp4 P3). A stop token the model wants
-// inside the think block must be masked BEFORE sampling, not suppressed after:
-// a suppressed <|endoftext|> stays in the context and the model continues as
-// a new document. logit_bias +100 on every stop id makes the stop the argmax
-// at every step, so the only way the output can contain a </think> and answer
-// content is the mask (the budget forces the close, the grace masks the stop
-// until content appears, then the model's own stop is honoured).
-// ---------------------------------------------------------------------------
+// In-think stop mask (AUDIT_qwen38_nvfp4 P3): a stop token wanted inside the think block
+// must be masked BEFORE sampling, not suppressed after - a suppressed <|endoftext|> stays in
+// context and the model continues as a new document. logit_bias +100 on every stop id forces
+// it as argmax every step, so only masking (not post-hoc suppression) lets output reach
+// </think> and answer content.
 
 TEST(EndToEndModelTest, InThinkStopMaskKeepsStopTokensOutOfTheContext) {
     const std::string path = imp_test::env_path(imp_test::kEnvModelGdn);

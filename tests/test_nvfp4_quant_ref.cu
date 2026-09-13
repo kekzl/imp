@@ -9,11 +9,9 @@
 namespace imp {
 namespace {
 
-// Round-trip validation: FP16 → NVFP4 (with FP8 UE4M3 scale) → FP16.
-// Measures relative error. E2M1 with 8 representable magnitudes
-// plus per-16-element scale should give worst-case ~1/8 = 12.5%
-// quantization step per group; averaged over a Gaussian input
-// distribution the RMSE should be a few percent of the std.
+// FP16->NVFP4(FP8 UE4M3 scale)->FP16 round-trip. E2M1's 8 magnitudes plus per-16-element
+// scale give a worst-case ~12.5% quantization step per group; RMSE over Gaussian input
+// should be a few percent of std.
 TEST(Nvfp4QuantRefTest, RoundTripGaussian1024) {
     constexpr int N = 1024;
 

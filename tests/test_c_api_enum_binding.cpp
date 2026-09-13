@@ -102,12 +102,9 @@ TEST(CApiEnumBinding, ArchNamesRoundTripThroughParse) {
     }
 }
 
-// An unrecognised architecture string resolves to GENERIC and LOADS — it does
-// not error. That is deliberate (the registry maps 30 strings onto known archs
-// and a Llama-shaped checkpoint usually works through it), but it means an
-// unsupported model looks supported, so parse_model_arch() warns since #1206.
-// Pinning the behaviour here so the fallback cannot be turned into a silent
-// hard error or a silent success again without a test saying so.
+// Unrecognised architecture strings resolve to GENERIC and LOAD (deliberate: the registry
+// maps 30 strings and a Llama-shaped checkpoint usually works); parse_model_arch() warns
+// since #1206. Pins the fallback so it can't silently become a hard error or silent success.
 TEST(CApiEnumBinding, UnknownArchFallsBackToGeneric) {
     EXPECT_EQ(parse_model_arch("definitely-not-an-architecture"), ModelArch::GENERIC);
     EXPECT_EQ(parse_model_arch(""), ModelArch::GENERIC);

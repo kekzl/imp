@@ -1,10 +1,6 @@
-// Qwen3-VL vision tensor-name mapping.
-//
-// This is tested exhaustively because a misrouted vision weight does not crash:
-// it yields an encoder that runs and returns embeddings unrelated to the image.
-// The oracle is the real name list from the staged Qwen3-VL-4B-Instruct
-// checkpoint (315 tensors under `model.visual.`), reconstructed here so the test
-// needs neither the checkpoint nor a GPU.
+// A misrouted vision weight does not crash: it yields an encoder that runs and returns
+// embeddings unrelated to the image, so this is exhaustive. Oracle: the real 315-tensor
+// model.visual. name list from the staged Qwen3-VL-4B-Instruct checkpoint (no GPU needed).
 
 #include "vision/qwen3vl_vision_map.h"
 

@@ -1,21 +1,8 @@
-// process_diag ↔ RuntimeConfig coupling (#1205).
-//
-// process_diag is a process-wide snapshot of the flags that leaf kernels read
-// when they have no RuntimeConfig to hand. Until #1205 process_diag_install()
-// ran ONLY in the tool mains, so a C-API embedding got the built-in defaults
-// for all mirrored flags while exec/ read the engine's own RuntimeConfig — the
-// same config producing different kernels depending on who started the engine.
-// Engine::init() now installs, which makes these two properties load-bearing:
-//
-//   1. install() must transfer EVERY mirrored field. A field added to
-//      ProcessDiag but forgotten in install() silently keeps its default
-//      forever; this test fails when that happens for any field it covers.
-//   2. The built-in defaults must equal the RuntimeConfig defaults, so the
-//      engine-less paths that still read process_diag before any install
-//      (standalone tools, unit tests) behave like a default engine.
-//
-// CPU-only: no CUDA, no Model, no Engine — this is the whole point of the
-// process_diag indirection and it keeps the check in the CI unit lane.
+// process_diag<->RuntimeConfig coupling (#1205): before this, process_diag_install() ran only
+// in tool mains, so a C-API embedding read built-in defaults while exec/ read the engine's
+// RuntimeConfig. install() must transfer EVERY mirrored field (a forgotten field silently
+// keeps its default forever), and built-in defaults must equal RuntimeConfig defaults for
+// engine-less callers. CPU-only: no CUDA/Model/Engine.
 
 #include "runtime/config.h"
 #include "core/logging.h"
@@ -199,15 +186,9 @@ TEST(ProcessDiag, DumpHiddenDirShorthandResolves) {
     EXPECT_EQ(std::string(process_diag_dump_hidden_dir()), "/tmp");
 }
 
-// --------------------------------------------------------------------------
-// Log level (2026-08-03)
-// --------------------------------------------------------------------------
-//
-// `log_set_level` was the only writer of g_log_level and NOTHING called it, so
-// the level was pinned at INFO and all 76 IMP_LOG_DEBUG sites in the engine
-// were unreachable — a debug facility that could not be switched on. The fix is
-// a config key applied here, in the one function that runs from both tool mains
-// AND Engine::init. These tests pin both halves: the parse and the transfer.
+// log_set_level was the only writer of g_log_level and nothing called it, so level was
+// pinned at INFO and all 76 IMP_LOG_DEBUG sites were unreachable. Fix runs from both tool
+// mains and Engine::init; pins the parse and the transfer separately.
 
 TEST(LogLevel, FromStringMapsEveryWordCaseInsensitively) {
     const std::pair<const char*, LogLevel> cases[] = {
@@ -221,10 +202,8 @@ TEST(LogLevel, FromStringMapsEveryWordCaseInsensitively) {
     }
 }
 
-// Rejection has to be explicit, not "falls back to INFO": a typo that silently
-// resolves to the default would restore exactly the state this key fixed.
-// "leaves out alone" is no longer a property that can fail: there is no out
-// parameter to leave alone, only a value that is absent.
+// Rejection must be explicit, not fall back to INFO: a silent fallback would restore exactly
+// the unreachable-debug-log state this key fixed.
 TEST(LogLevel, FromStringRejectsAnythingElse) {
     for (const char* bad : {"", "verbose", "dbg", "informational", "debug ", "0"})
         EXPECT_FALSE(log_level_from_string(bad).has_value()) << "'" << bad << "'";

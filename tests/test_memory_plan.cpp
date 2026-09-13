@@ -1,11 +1,5 @@
-// The planner (docs/internals/MEMORY.md A4), invariants V7 (determinism)
-// and V8 (sufficiency).
-//
-// CPU-only by construction: plan_memory() never queries the device, takes no
-// Model and no EngineConfig, and is a pure function of a plain struct. That is
-// the property under test as much as any individual number — the thing it
-// replaces, compute_vram_budget(), is driven by a live cudaMemGetInfo reading
-// and therefore cannot be tested at all without a GPU.
+// Planner (MEMORY.md A4), invariants V7 (determinism) and V8 (sufficiency). CPU-only:
+// plan_memory() is a pure function, unlike compute_vram_budget() which needs a live device.
 
 #include <gtest/gtest.h>
 
@@ -65,14 +59,9 @@ TEST(MemoryPlan, FitsTheDenseReferenceConfig) {
 }
 
 TEST(MemoryPlan, ChargesTheLibraryReserveAsAFirstClassLineItem) {
-    // A1.5: ~3.9 GiB is claimed on the first forward pass, after the old
-    // planner was already done. If the plan does not charge it, the KV pool is
-    // sized from a number that much too optimistic.
-    //
-    // The comparison only says anything where the residual actually binds. At
-    // the full 32 GiB budget KV stops at what it needs (2048 blocks) with room
-    // to spare, so both arms would be identical and the test would pass while
-    // proving nothing — squeeze the budget until KV is residual-bound.
+    // A1.5: ~3.9 GiB claimed on the first forward pass must be charged or the KV pool is sized
+    // too optimistically. Only binds when residual is scarce; at the full 32 GiB budget both
+    // arms hit KV's ceiling (2048 blocks) and the comparison proves nothing.
     auto in = dense_input();
     in.budget_bytes = 16 * kGiB;
     auto with = plan_memory(in);
@@ -120,10 +109,9 @@ TEST(MemoryPlan, KvShrinksToTheResidualWhenTheBudgetIsTight) {
 }
 
 TEST(MemoryPlan, ATooTightBudgetFailsInsteadOfServingAnUnusablePool) {
-    // 12 GiB: the fixed charges alone (context + library + weights + caches +
-    // workspaces) leave a residual of a few MiB. The old planner clamped KV to
-    // its 16-block floor and served anyway; every longer prompt then came back
-    // cancelled. Failing at load is the point of I4.
+    // At 12 GiB, fixed charges leave only a few MiB residual. The old planner clamped KV to its
+    // 16-block floor and served anyway; every longer prompt was then cancelled at runtime.
+    // I4: fail at load instead.
     auto in = dense_input();
     in.budget_bytes = 12 * kGiB;
     auto res = plan_memory(in);
@@ -211,11 +199,9 @@ TEST(MemoryPlan, FailsWithAnItemisedReportAndActionableLevers) {
 
 namespace {
 
-// The shadow probe of Qwen3.8-27B-NVFP4 at runtime.max_batch_size=64
-// (2026-09-08 server log): distributable 9683 MiB after the weights, SSM/GDN
-// state 4968 MiB for 64 slots, library reserve 3900, mandatory caches 1602,
-// engine-persistent 949. The plan rejected (over by 1735 MiB), the live pass
-// never charged the state, and the pool probe read 528 GB/s: spilled.
+// Shadow probe, Qwen3.8-27B-NVFP4 at max_batch_size=64: distributable 9683 MiB, SSM/GDN
+// state 4968 MiB, library 3900, mandatory caches 1602, engine-persistent 949. Live pass never
+// charged the state; pool probe read 528 GB/s (spilled).
 PlanInput hybrid_64_slots() {
     PlanInput in;
     in.model.n_layers = 64;
@@ -280,10 +266,8 @@ TEST(MemoryPlan, FittingBatchIsTheLargestThePlanAccepts) {
 }
 
 TEST(MemoryPlan, RefusesToServeAPoolBelowTheAdmissionFloor) {
-    // Observed on Qwen3.6-35B-A3B-NVFP4 at --max-batch 64: KV collapsed to 16
-    // blocks = 512 tokens and every longer prompt came back cancelled with no
-    // hint why, while /v1/models kept advertising max_seq_len. Failing at load
-    // is strictly better than serving a config that cannot answer.
+    // Qwen3.6-35B-A3B-NVFP4 at --max-batch 64: KV collapsed to 16 blocks (512 tokens), every
+    // longer prompt cancelled with no hint while /v1/models still advertised max_seq_len.
     auto in = dense_input();
     in.model.weight_bytes = 24 * kGiB;
     in.limits.min_kv_tokens = 16384;
@@ -345,16 +329,9 @@ TEST(MemoryPlan, NoKvLayersIsNotADivideByZero) {
 // ── Every FeatureSet field the plan reads must reach a line ───────────
 
 TEST(MemoryPlan, EveryFeatureFieldReachesALine) {
-    // plan_memory() reads five FeatureSet byte fields. Four of them were
-    // written by nobody: the only caller (shadow_plan_input) filled
-    // ssm_state_bytes and left the rest at 0, so the 256 MiB recurrent
-    // snapshot store, the speculative staging and the vision tower were
-    // charged to nothing and taken AFTER the KV pool was sized. A field that
-    // cannot appear as its own line cannot be reconciled against the log
-    // either, which is what made the 5088 MiB state invisible (MEMORY.md D14).
-    //
-    // Distinct values, so a field folded into another line cannot pass by
-    // coincidence.
+    // plan_memory() reads 5 FeatureSet byte fields; only ssm_state_bytes was ever written
+    // (shadow_plan_input), so the 256 MiB recurrent snapshot, spec staging and vision tower were
+    // uncharged and taken after KV sizing (MEMORY.md D14). Distinct values rule out coincidence.
     auto in = dense_input();
     in.features.ssm_state_bytes = 101 * kMiB;
     in.features.recurrent_snapshot_bytes = 102 * kMiB;
@@ -400,11 +377,9 @@ TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
 
 namespace {
 
-// Qwen3.8-27B-NVFP4 (the `Qwen3.8-27B-NVFP4-vllm` export, its `config.json`):
-// 64 layers of which 48 are linear_attention, linear_conv_kernel_dim 4,
-// linear_num_value_heads 48 x linear_value_head_dim 128 -> ssm_inner_size 6144,
-// linear_key_head_dim 128 -> ssm_state_size, linear_num_key_heads 16 -> groups.
-// conv_channels = 6144 + 2 * 16 * 128 = 10240.
+// Qwen3.8-27B-NVFP4 (Qwen3.8-27B-NVFP4-vllm export config.json): 64 layers, 48 linear_attention,
+// linear_conv_kernel_dim 4, 48 value heads x128 -> ssm_inner_size 6144, key_head_dim 128 ->
+// ssm_state_size, 16 key heads -> groups; conv_channels = 6144 + 2*16*128 = 10240.
 SsmStateGeometry qwen38_gdn(QType h_dtype) {
     return SsmStateGeometry{/*n_ssm_layers=*/48,   /*conv_channels=*/10240, /*conv_kernel=*/4,
                             /*n_heads=*/48,        /*head_dim=*/128,        /*state_size=*/128,
@@ -414,11 +389,9 @@ SsmStateGeometry qwen38_gdn(QType h_dtype) {
 }  // namespace
 
 TEST(SsmStatePool, PinsTheQwen38GeometryTheAllocatorTakes) {
-    // The two copies of this formula disagreed: vram_budget.cpp charged
-    // conv_channels * (conv_kernel - 1) * 4 unaligned, ssm_state.cu allocated
-    // align256(conv_channels * conv_kernel * 4) + align256(h). 4968 MiB planned
-    // against 5088 MiB taken at 64 slots (MEMORY.md D14) - short in the
-    // direction that oversubscribes the card.
+    // vram_budget.cpp charged conv_channels*(conv_kernel-1)*4 unaligned; ssm_state.cu allocated
+    // align256(conv_channels*conv_kernel*4)+align256(h). 4968 MiB planned vs 5088 MiB taken at
+    // 64 slots (MEMORY.md D14): short in the direction that oversubscribes the card.
     const auto g = qwen38_gdn(QType::F16);
     EXPECT_EQ(ssm_conv_bytes_per_layer(g), 10240ull * 4 * 4);          // already 256-aligned
     EXPECT_EQ(ssm_h_bytes_per_layer(g), 48ull * 128 * 128 * 2);        // already 256-aligned
@@ -440,10 +413,9 @@ TEST(SsmStatePool, PinsTheQwen38GeometryTheAllocatorTakes) {
 }
 
 TEST(SsmStatePool, AFailedPoolIsFatalOnlyForModelsThatHaveRecurrentLayers) {
-    // `Failed to init SSM state, continuing without it` served a hybrid whose
-    // GDN layers then read a null slab: fluent garbage for every request, one
-    // WARN at startup. The decision is pure, so the CPU lane pins it even
-    // though the allocation that triggers it needs a device.
+    // "Failed to init SSM state, continuing without it" served a hybrid whose GDN layers then
+    // read a null slab: fluent garbage every request, one WARN at startup. Decision is pure and
+    // pinned in the CPU lane even though the triggering allocation needs a device.
     EXPECT_TRUE(must_refuse_without_ssm_state(/*n_ssm_layers=*/48, /*pool_init_ok=*/false));
     EXPECT_FALSE(must_refuse_without_ssm_state(48, true)) << "a pool that came up is not a refusal";
     EXPECT_FALSE(must_refuse_without_ssm_state(0, false))
@@ -519,11 +491,9 @@ ShadowPlanProbe hybrid_probe() {
 // ── E1: the report states BOTH pool ceilings ──────────────────────────
 
 TEST(MemoryPlan, KvSeqCeilingIsBlocksOverBlocksPerSeq) {
-    // The KV pool's ceiling in sequences is what the plan already knows and
-    // never said: blocks / blocks_per_seq. On the hybrid the two pools are
-    // sized by different rules (state is a fixed pre-charge per slot, KV takes
-    // the residual), so nothing forces them to agree - and when they disagree
-    // the state was bought for slots the KV pool cannot serve.
+    // KV pool's ceiling in sequences (blocks/blocks_per_seq) is known but never reported. Hybrid
+    // sizes state (fixed pre-charge per slot) and KV (residual) by different rules, so they can
+    // disagree, and state ends up bought for slots KV cannot serve.
     const auto res = plan_memory(shadow_plan_input(hybrid_probe()));
     ASSERT_TRUE(res) << res.failure.report();
     ASSERT_GT(res.plan.kv.blocks_per_seq, 0);
@@ -579,11 +549,9 @@ TEST(ShadowPlan, NoCeilingWarningWhenBothPoolsServeTheBatch) {
 }
 
 TEST(ShadowPlan, CeilingAtZeroKvSeqsNamesTheContextThatFits) {
-    // The shipping shape: a 131072-token max_seq_len against a pool of a few
-    // thousand blocks makes blocks_per_seq exceed blocks, so M is 0. "KV 0 seqs"
-    // plus "lower runtime.max_batch_size or runtime.max_seq_len" named two knobs
-    // and no target for either. The pool DOES serve all N slots - at a shorter
-    // context - and that number is the answer.
+    // A 131072-token max_seq_len against a pool of a few thousand blocks makes blocks_per_seq
+    // exceed blocks, so M is 0. The pool still serves all N slots at a shorter context, and the
+    // error must name that answer, not just the two knobs that could change it.
     auto p = hybrid_probe();
     p.max_seq_len = 131072;
     const auto res = plan_memory(shadow_plan_input(p));
@@ -607,14 +575,9 @@ TEST(ShadowPlan, CeilingAtZeroKvSeqsNamesTheContextThatFits) {
 }
 
 TEST(ShadowPlan, ChargesTheRecurrentSnapshotStoreAgainstTheKvPool) {
-    // The headline of MEMORY.md D15: the snapshot store cudaMallocs
-    // server.recurrent_snapshot_mb AFTER the KV pool is sized. If the probe
-    // field does not reach the plan, the pool is sized over those bytes and
-    // nothing downstream notices - which is what shadow_plan_input did.
-    // 64 MiB rather than the 256 MiB default, and the budget carries the charge
-    // on top: both arms must FIT, or the comparison would be against a
-    // rejection instead of against a smaller pool. The mechanism is the same at
-    // either size.
+    // MEMORY.md D15: recurrent_snapshot_mb cudaMallocs AFTER the KV pool is sized; if the probe
+    // field does not reach the plan, the pool is sized over those bytes unnoticed. Uses 64 MiB
+    // instead of the 256 MiB default so both arms fit and compare pool size, not a rejection.
     const size_t snap = 64 * kMiB;
     auto base = hybrid_probe();
     base.distributable_bytes += snap;

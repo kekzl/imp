@@ -1,15 +1,9 @@
 #pragma once
 
-// CUDA-presence gate shared across the test suite.
-//
-// Before this header, `HasCudaDevice()` was re-defined in 6 files and the
-// `SKIP_IF_NO_CUDA()` macro in 11 — with three divergent bodies (a fully
-// qualified call, a raw cudaGetDevice check, an unqualified call). This is the
-// single source of truth.
-//
-// Kept separate from test_model_builder.h on purpose: that header pulls in
-// model/model.h + cuda_fp16/half, which host-compiled .cpp tests should not be
-// forced to include just to gate on a CUDA device. This header needs only
+// Single source of truth for the CUDA-presence gate: HasCudaDevice() was redefined in 6
+// files and SKIP_IF_NO_CUDA() in 11, with three divergent bodies.
+// Kept separate from test_model_builder.h: that header pulls in model.h + cuda_fp16/half,
+// which host-compiled .cpp tests shouldn't need just to gate on a device. Needs only
 // <cuda_runtime.h>.
 
 #include <cuda_runtime.h>

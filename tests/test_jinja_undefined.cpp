@@ -1,24 +1,11 @@
-// jinja: `is undefined` / `is not undefined`.
-//
-// These are standard Jinja2 tests and HF chat templates use them to decide
-// whether the CALLER expressed an opinion, which is a different question from
-// whether the value is falsy. Qwen3.8's template opens with
-//
-//     {%- if enable_thinking is undefined or enable_thinking is true %}
-//
-// to guard its whole reasoning-effort block.
-//
-// `undefined` was missing from the parser's known-test list, so `x is undefined`
-// fell through to the generic "is X = equality" branch and became
-// `x == undefined`, with `undefined` evaluating to none. That is accidentally
-// right when the variable is unset (none == none) and wrong the moment it is
-// set to anything falsy: `false == none` compares true here, so a template that
-// asked "did the caller say anything?" was told "no" while the caller was
-// explicitly saying false.
-//
-// Measured consequence before the fix: rendering Qwen3.8 with
-// suppress_thinking=true (which stamps enable_thinking=false) still emitted the
-// reasoning-effort preamble, because the guard read as undefined.
+// jinja `is undefined`/`is not undefined`: HF templates use these to ask whether the CALLER
+// expressed an opinion, distinct from falsiness (Qwen3.8's reasoning-effort guard: `enable_
+// thinking is undefined or enable_thinking is true`).
+// `undefined` was missing from the parser's known-test list, so `x is undefined` fell through
+// to generic equality (`x == undefined`, undefined==none) - accidentally right when unset,
+// wrong when set to any falsy value (`false==none` compares true). Measured: rendering
+// Qwen3.8 with suppress_thinking=true (enable_thinking=false) still emitted the
+// reasoning-effort preamble.
 
 #include "model/jinja.h"
 

@@ -20,14 +20,11 @@ namespace {
 // KVCache tests
 // ============================================================================
 
-// 7. KVCacheConstruction
-// Manager over an accounting-only cache: block ids, free list, ref counts and
-// geometry, no VRAM (KVCache::for_accounting). Everything the manager tests
-// assert - allocation, eviction, the prefix hash table, pinning, rollback - is
-// that bookkeeping, and it was gated on a device only because the cache
-// allocated a pool. Mutation testing on 2026-09-02 priced that: four real
-// faults in this exact layer were caught by test-kv and invisible to
-// `ctest -L unit`, the only suite CI runs.
+// Manager over an accounting-only cache (KVCache::for_accounting, no VRAM): allocation,
+// eviction, prefix hash table, pinning, rollback are all pure bookkeeping, gated on a device
+// only because the cache allocated a pool. Mutation testing (2026-09-02) priced that: four
+// real faults in this exact layer were caught by test-kv and invisible to ctest -L unit, the
+// only suite CI runs.
 static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks, int n_layers = 2, int n_kv_heads = 4,
                                                    int head_dim = 64, QType dtype = QType::F16) {
     auto cache = KVCache::for_accounting(n_layers, n_kv_heads, head_dim, dtype, max_blocks);
@@ -143,10 +140,9 @@ TEST(KVCacheTest, KVCacheNVFP4HeadDimReject) {
                  std::runtime_error);
 }
 
-// 13c. NVFP4 per-layer constructor (Gemma 4 dual head_dim 256 SWA / 512 global):
-// each layer's scale_block_bytes is its own (nkv * hd / 16), the scalar
-// fallbacks carry the max shape. Geometry only, so an accounting cache and
-// the CI lane; the pointer half is 13d.
+// NVFP4 per-layer constructor (Gemma-4 dual head_dim 256 SWA / 512 global): each layer's
+// scale_block_bytes is its own (nkv*hd/16), scalar fallbacks carry the max shape. Geometry
+// only, so an accounting cache and the CI lane; the pointer half is a separate test.
 TEST(KVCacheTest, KVCacheNVFP4PerLayer) {
     const int n_layers = 4;
     const int max_blocks = 2;
@@ -266,12 +262,10 @@ TEST(KVCacheManagerTest, ManagerLRUEviction) {
     EXPECT_EQ(static_cast<int>(mgr->block_table(2).size()), 2);
 }
 
-// Regression (audit F-A1/F-A1b): allocation under full-KV pressure must NEVER
-// evict a live sequence. Every lru_order_ entry is a live sequence and imp has
-// no recompute-on-resume path, so freeing one would corrupt it (use-after-free
-// once it runs). append_block/allocate_blocks reclaim *cached* (finished) blocks
-// only, then fail — the engine reject-newests on that failure rather than
-// preempting a live sequence. This locks the invariant the fix depends on.
+// Regression (audit F-A1/F-A1b): allocation under full-KV pressure must NEVER evict a live
+// sequence - imp has no recompute-on-resume path, so freeing one would corrupt it
+// (use-after-free once it runs). append_block/allocate_blocks reclaim only cached (finished)
+// blocks then fail; the engine reject-newests on that failure rather than preempting.
 TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
     auto mgr = MakeManager(8);
     (void)mgr->allocate_blocks(0, 5);  // seq 0: 5 live blocks
@@ -289,14 +283,9 @@ TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
     EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 3);
 }
 
-// 18. ManagerCanAllocate
-//
-// The contract changed with #1635: a LIVE sequence's blocks are not a source
-// of memory. They used to be - can_allocate() summed the LRU list on the
-// assumption that evict_lru() could hand them back, while evict_lru() has had
-// no production caller for exactly the reason that freeing a live sequence's
-// KV corrupts it. So this test used to assert that a full pool could still
-// allocate 8 more blocks.
+// #1635 changed the contract: a LIVE sequence's blocks are not a memory source. can_allocate()
+// used to sum the LRU list assuming evict_lru() could reclaim them, but evict_lru() has no
+// production caller (freeing a live sequence's KV corrupts it).
 TEST(KVCacheManagerTest, ManagerCanAllocate) {
     auto mgr = MakeManager(8);
 
@@ -380,13 +369,10 @@ TEST(KVCacheManagerTest, BlockHashChaining) {
     EXPECT_NE(h_parent0, h_parent1);
 }
 
-// 21b. BlockHashDiscriminatesEveryTokenPosition
-//
-// BlockHashDeterministic above proves "different tokens → different hash" by
-// changing tokens[0]. A hash that folds in every token EXCEPT the last passes
-// it unchanged — and a prefix cache that collides on a block differing only in
-// its final token hands one sequence's KV to another (the #1044/#1045 class).
-// This walks every position, so no partial window survives.
+// A hash folding in every token EXCEPT the last would pass BlockHashDeterministic's
+// single-token change unchanged, and a prefix cache colliding on a block differing only in
+// its final token hands one sequence's KV to another (#1044/#1045 class). This walks every
+// position so no partial window survives.
 TEST(KVCacheManagerTest, BlockHashDiscriminatesEveryTokenPosition) {
     std::vector<int32_t> base(16);
     std::iota(base.begin(), base.end(), 1);
@@ -892,10 +878,9 @@ TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
     EXPECT_EQ(mgr->num_free_blocks(), 8);  // All returned to free pool
 }
 
-// Leak-under-churn regression: sustained allocate / prefix-register / rollback /
-// free / evict cycles. After every full drain the pool must return EXACTLY to
-// baseline — any monotonic drift in free/cached/reclaimable/active counters is
-// a leak or double-free in the block bookkeeping.
+// Leak-under-churn: sustained allocate/prefix-register/rollback/free/evict cycles. After
+// every full drain the pool must return EXACTLY to baseline - any monotonic drift in
+// free/cached/reclaimable/active counters is a leak or double-free.
 TEST(KVCacheManagerTest, LeakUnderSustainedChurn) {
     constexpr int kPoolBlocks = 32;
     constexpr int kCycles = 200;
@@ -1062,10 +1047,9 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksKeepsSinksAndWindow) {
     // Snapshot the original block IDs so we can verify which survive.
     auto bt_before = mgr->block_table(0);
 
-    // Keep first 4 sink tokens (=> 1 sink block), last 64 window tokens
-    // (=> 4 window blocks) plus ONE extra boundary block (#963: the decode
-    // kernels' floor-aligned window start must stay readable for
-    // non-block-aligned ctx). Middle = 20 - 1 - 4 - 1 = 14 blocks freed.
+    // Keeps first 4 sink tokens (1 sink block), last 64 window tokens (4 window blocks), plus
+    // ONE extra boundary block (#963: the decode kernels' floor-aligned window start must stay
+    // readable for non-block-aligned ctx). Middle = 20-1-4-1 = 14 blocks freed.
     int freed = mgr->evict_middle_blocks(/*seq_id=*/0,
                                          /*n_sink_tokens=*/4,
                                          /*n_window_tokens=*/64);
@@ -1143,10 +1127,9 @@ static void MakePinnedFreedSeq(KVCacheManager* mgr, int seq_id, int n_full_block
     mgr->free_sequence(seq_id);
 }
 
-// 47. UnpinFreedSeqKeepsOtherFreedSeqPins — unpinning one already-freed owner
-// must not drop pins held by OTHER already-freed owners. (The old rebuild
-// path reconstructed pinned_blocks_ from seq_blocks_, which free_sequence
-// erases — so every freed owner's pins silently vanished.)
+// Unpinning one already-freed owner must not drop pins held by OTHER already-freed owners.
+// The old rebuild path reconstructed pinned_blocks_ from seq_blocks_, which free_sequence
+// erases - so every freed owner's pins silently vanished.
 TEST(KVCacheManagerTest, UnpinFreedSeqKeepsOtherFreedSeqPins) {
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
@@ -1254,15 +1237,12 @@ TEST(KVCacheManagerTest, SharedPinnedBlockSurvivesUnpinOfOneOwner) {
     EXPECT_TRUE(mgr->evict_cached_block());
 }
 
-// ============================================================================
-// SWA-aware KV sizing (kv_cache.swa_sizing) — dedicated block group + the
-// trailing-free positional table in the manager.
-// ============================================================================
+// SWA-aware KV sizing (kv_cache.swa_sizing): dedicated block group + the trailing-free
+// positional table in the manager.
 
-// Per-layer ctor with a SWA group: windowed layers draw from a separate,
-// smaller block-id space; global layers keep the full pool. Two id spaces
-// and no bytes, so an accounting cache and the CI lane; the pointer half
-// is the test after this one.
+// Per-layer ctor with a SWA group: windowed layers draw from a separate, smaller block-id
+// space; global layers keep the full pool. Two id spaces, no bytes, so an accounting cache
+// and the CI lane; the pointer half is the next test.
 TEST(KVCacheTest, SwaGroupCapacityAndIdSpace) {
     const int n_layers = 4;
     const int global_max = 64;
@@ -1353,15 +1333,12 @@ TEST(KVCacheManagerTest, SwaTrailingFreeTable) {
     EXPECT_EQ(mgr.kv_cache()->num_free_swa_blocks(), swa_max);
 }
 
-// Regression for #963: StreamingLLM middle-block eviction must retain the
-// block containing the decode kernels' window start. The paged decode
-// kernels compute window_start_block = floor((ctx_len - window) /
-// block_size); the eviction retained ceil-aligned from the sequence tail
-// (total_blocks - ceil(window / block_size)). For non-block-aligned
-// ctx_len those differ by one — the kernels' first window block held a -1
-// sentinel, and phys_block = -1 produced an out-of-bounds KV read (an
-// illegal memory access on a full-VRAM card, silent garbage attention
-// otherwise). The eviction must keep one extra boundary block.
+// #963: StreamingLLM middle-block eviction must retain the block containing the decode
+// kernels' window start. Paged decode computes window_start_block = floor((ctx_len-window)/
+// block_size); eviction retained ceil-aligned from the tail instead, which differs by one on
+// non-block-aligned ctx_len - the kernels' first window block held a -1 sentinel, producing
+// an OOB KV read (illegal access on full VRAM, silent garbage otherwise). Eviction must keep
+// one extra boundary block.
 TEST(KVCacheManagerTest, EvictMiddleBlocksRetainsKernelWindowStart) {
     auto mgr = MakeManager(64);
     const int bs = mgr->kv_cache()->block_size();

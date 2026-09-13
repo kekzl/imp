@@ -1,28 +1,11 @@
-// test(P2.7): gpt-oss attention-sink correctness — kernel vs fp64 reference.
-//
-// gpt-oss (#547) adds a per-head LEARNED attention sink: a virtual extra
-// softmax column whose logit `sink[h]` joins the row max and the denominator
-// but contributes NO value to the output. The probabilities over the real
-// keys therefore sum to < 1 (mass exp(sink-max)/denom is "parked" on the
-// sink and discarded). This is distinct from StreamingLLM *sink tokens*
-// (the `n_sinks` KV-slot range), which is exercised separately below.
-//
-// Coverage here:
-//   1. attention_cublas_prefill(..., sinks) end-to-end vs an fp64 reference
-//      that implements the exact sink semantics (sink in normalizer, not in
-//      the V-weighted sum). Sink=-inf (nullptr-equivalent) must reproduce
-//      plain softmax; large sink must visibly shrink the output norm.
-//   2. StreamingLLM sink-slot eviction geometry (compute_context_range /
-//      block_token_range) via a device probe — the two-range split and the
-//      gap-skip the paged decode loop relies on.
-//
-// Tolerance: f16-score-chain attention class per tests/refs/README.md —
-// cuBLAS materializes QK^T in FP32 (use_fp32_s) then softmax+downcast to f16
-// P, PV in f16. Bound: 1e-2 vs fp64 (inputs are f16-rounded), measured as
-// |got-ref| normalized by the RMS magnitude of the reference output (NOT a
-// per-element floor: diffuse-softmax outputs cluster near zero, where a
-// per-element ratio turns ordinary f16 P/V rounding into spurious large
-// relative errors). Measured ~4e-3..1e-2 across configs. ASSERTED.
+// gpt-oss (#547) per-head LEARNED attention sink: a virtual softmax column whose logit
+// sink[h] joins the row max and denominator but contributes NO value to the output (real-key
+// probabilities sum to <1). Distinct from StreamingLLM sink TOKENS (n_sinks KV-slot range).
+// Covers (1) attention_cublas_prefill(...,sinks) vs an fp64 reference with exact sink
+// semantics (sink=-inf must reproduce plain softmax; a large sink must shrink output norm),
+// and (2) StreamingLLM sink-slot eviction geometry via a device probe.
+// Tolerance: f16-score-chain class, 1e-2 vs fp64 normalized by RMS of the reference output
+// (not per-element, since diffuse-softmax outputs cluster near zero); measured ~4e-3..1e-2.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -47,10 +30,9 @@ namespace {
         ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err); \
     } while (0)
 
-// LCG fill identical to tests/refs/gen_attention_crosspath_golden.py: f32
-// multiply-only transforms then round to f16, so the reference is computed
-// from the exact bits the GPU sees. Heavy-tailed (cubed) to mimic QK-normed
-// activations.
+// LCG fill identical to tests/refs/gen_attention_crosspath_golden.py: f32 multiply-only,
+// rounded to f16, so the reference matches the exact bits the GPU sees. Heavy-tailed (cubed)
+// to mimic QK-normed activations.
 std::vector<half> lcg_fill_f16(uint32_t seed, size_t n, float amp) {
     std::vector<half> out(n);
     uint32_t x = seed;
@@ -234,12 +216,9 @@ std::vector<double> run_kernel_fmha(const std::vector<half>& Qh, const std::vect
 }
 
 double max_rel_err(const std::vector<double>& got, const std::vector<double>& ref) {
-    // Normalize by the RMS magnitude of the reference output, not per-element
-    // |ref[i]|. Diffuse-softmax attention outputs are V-averages clustered
-    // near zero; a per-element floor turns ordinary f16 P/V rounding on a
-    // ~0 element into a spurious "large" relative error. RMS-normalized abs
-    // error is the f16-score-chain class metric (matches the crosspath suite
-    // intent: error relative to the signal scale, not to a near-zero element).
+    // Normalized by RMS of the reference output, not per-element |ref[i]|: diffuse-softmax
+    // outputs cluster near zero, where a per-element floor turns ordinary f16 P/V rounding into
+    // a spurious large relative error.
     double sumsq = 0.0;
     for (double v : ref) sumsq += v * v;
     double rms = std::sqrt(sumsq / std::max<size_t>(1, ref.size()));
@@ -250,10 +229,9 @@ double max_rel_err(const std::vector<double>& got, const std::vector<double>& re
     return worst;
 }
 
-// (name, q_len, kv_len, n_heads, n_kv_heads, head_dim, causal, sliding_window)
-// gpt-oss-20b: head_dim=64, n_heads=64, n_kv_heads=8, sliding_window=128 on
-// half the layers. We use small GQA shapes (sink semantics are head_dim- and
-// count-agnostic) so the test runs everywhere and stays bounded.
+// gpt-oss-20b: head_dim=64, n_heads=64, n_kv_heads=8, sliding_window=128 on half the
+// layers. Uses small GQA shapes here since sink semantics are head_dim- and count-agnostic,
+// keeping the test fast and bounded.
 struct SinkCfg {
     const char* name;
     int q_len, kv_len, n_heads, n_kv_heads, head_dim, sliding_window;
@@ -288,10 +266,9 @@ TEST(GptOssSinkRef, NoSinkMatchesPlainSoftmax) {
 }
 
 TEST(GptOssSinkRef, SinkLogitShiftMatchesReference) {
-    // Per-head learned sink logits (heavy: spans the regime where the sink
-    // takes meaningful softmax mass). The kernel's exp(sink-max)/denom term
-    // must match the fp64 reference; the V-weighted sum must NOT include the
-    // sink. A wrong-sign or missing-denominator-term bug fails here.
+    // Per-head learned sink logits, heavy enough to take meaningful softmax mass: the kernel's
+    // exp(sink-max)/denom term must match the fp64 reference and the V-weighted sum must NOT
+    // include the sink. A wrong-sign or missing-denominator-term bug fails here.
     for (const auto& c : kCfgs) {
         auto Q = lcg_fill_f16(0x4001u, static_cast<size_t>(c.q_len) * c.n_heads * c.head_dim, 2.0f);
         auto K = lcg_fill_f16(0x5002u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
@@ -312,10 +289,9 @@ TEST(GptOssSinkRef, SinkLogitShiftMatchesReference) {
 }
 
 TEST(GptOssSinkRef, FmhaSinkMatchesReference) {
-    // #992: the WMMA FMHA folds the sink into its online-softmax init
-    // (m = sink, l = 1). Same fp64 reference and tolerance class as the
-    // cuBLAS test above — full-attention AND sliding-window configs (gpt-oss
-    // alternates SWA=128 layers, so the SWA×sink interaction is load-bearing).
+    // #992: WMMA FMHA folds the sink into its online-softmax init (m=sink, l=1). Same fp64
+    // reference and tolerance class as the cuBLAS test, across full-attention AND
+    // sliding-window configs (gpt-oss alternates SWA=128 layers, so SWA x sink is load-bearing).
     for (const auto& c : kCfgs) {
         auto Q = lcg_fill_f16(0x4001u, static_cast<size_t>(c.q_len) * c.n_heads * c.head_dim, 2.0f);
         auto K = lcg_fill_f16(0x5002u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
@@ -375,12 +351,9 @@ TEST(GptOssSinkRef, LargeSinkShrinksOutputNorm) {
     EXPECT_LT(std::sqrt(ns), 0.05 * std::sqrt(nb)) << "huge sink should collapse output norm";
 }
 
-// ---------------------------------------------------------------------------
-// StreamingLLM sink-SLOT eviction geometry (the paged-path `n_sinks` range).
-// compute_context_range/block_token_range are __device__ only; probe them via
-// a tiny kernel that records the attended token set, then check eviction
-// semantics on the host.
-// ---------------------------------------------------------------------------
+// StreamingLLM sink-SLOT eviction geometry (paged-path n_sinks range): compute_context_range
+// /block_token_range are __device__-only, probed via a tiny kernel recording the attended
+// token set, checked against eviction semantics on the host.
 __global__ void probe_streaming_mask(int ctx_len, int block_size, int sliding_window, int n_sinks,
                                       uint8_t* attended /*[ctx_len]*/, int* out_streaming) {
     if (threadIdx.x != 0 || blockIdx.x != 0)

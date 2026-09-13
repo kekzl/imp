@@ -1,44 +1,14 @@
-// E2E proof for [runtime] deterministic — issue #522 item 3.
-//
-// The deterministic kernel variants (MoE permute/scatter, top-k softmax sum,
-// cuBLASLt algo pinning) shipped with the audit-B9 work, gated on
-// process_diag_deterministic_gemm(), but nothing ever ASSERTED the resulting
-// guarantee. This test is that proof, against the model family where the
-// nondeterminism is documented (MoE/hybrid — Qwen3.6-35B is the known
-// temp=0 flipper; see memory/audit B-9):
-//
-//   deterministic=true  ⇒  greedy output and teacher-forced perplexity are
-//   byte-/bit-identical for repeated requests on one context (server eval
-//   steady state) and across fresh processes (CLI eval runs; verified
-//   manually, 2× identical on Qwen3.6-35B).
-//
-// KNOWN LIMIT (the DISABLED_ tests below are the gate): across FRESH
-// CONTEXTS in ONE process, output is only *usually* identical, for both
-// greedy decode and perplexity. PPL deltas run to a few percent, i.e.
-// state-sized, not rounding-sized. The varying input is per-context engine
-// state (VRAM layout, CUDA-graph capture, slot assignment); not yet pinned
-// down. Eval workloads don't hit this (server = one context; CLI = one
-// process).
-//
-// WHICH model carries it: docs/determinism.md §4, measured 2026-08-10, is
-// the source. Do not re-derive it here. This comment used to say GDN-hybrid,
-// which that measurement refutes: the MoE row fails 2/2 across fresh
-// contexts while the dense row passes. Historical note: SAME-context perplexity
-// drift had a separate root cause — imp_perplexity nulled active_request
-// before imp_context_reset, leaking the KV sequence + SSM/GDN slot per call
-// (fixed in imp_api.cpp alongside this test).
-//
-// Runs against EVERY model env var below that names something on disk:
-// IMP_TEST_MOE_MODEL (the MoE/hybrid case this suite was written for) and
-// IMP_TEST_MODEL (dense). The header used to claim "dense models pass
-// trivially since they skip the routed-expert kernels" — #1299 disproved that:
-// the dense half failed on its own root cause (a prefix-cache hit reaching a
-// test that had asked for none, #1337) and a single-model gate could not see
-// it. Parameterising is what makes the second row exist.
-//
-// The deterministic flag reaches the engine via the legacy IMP_DETERMINISTIC
-// env seed: library users without a tool-main RuntimeConfig::load() get
-// env-seeded defaults from take_pending_runtime_config() at engine init.
+// E2E proof for [runtime]deterministic (#522 item 3): deterministic kernel variants (MoE
+// permute/scatter, top-k softmax sum, cuBLASLt algo pinning) shipped gated on
+// process_diag_deterministic_gemm() with nothing asserting the guarantee until this test.
+// deterministic=true => greedy output and teacher-forced PPL are byte-/bit-identical for
+// repeats on one context and across fresh processes (Qwen3.6-35B is the documented flipper).
+// KNOWN LIMIT (DISABLED_ tests): across fresh CONTEXTS in one process output is only usually
+// identical (PPL deltas up to a few percent, state-sized); docs/determinism.md SS4 is the
+// source, not re-derived here.
+// Runs on every model env var naming a file on disk: IMP_TEST_MOE_MODEL (this suite's
+// target) and IMP_TEST_MODEL (dense) - #1299 showed the dense row fails independently
+// (#1337 prefix-cache hit), so a single-model gate would miss it.
 
 #include <gtest/gtest.h>
 
@@ -55,10 +25,9 @@ bool is_safetensors_dir(const std::string& p) {
     return p.size() < 5 || p.substr(p.size() - 5) != ".gguf";
 }
 
-// One row per model env var. A row whose variable is unset, or set to a path
-// that is not there, SKIPS — tests/README.md:5 promises they "never fail for a
-// missing prerequisite", and the old predicate only honoured that for an unset
-// variable: a wrong path produced hard failures.
+// One row per model env var; a row whose variable is unset OR points to a missing path
+// SKIPS (tests/README.md:5 promises "never fail for a missing prerequisite" - the old
+// predicate only honored the unset case, so a wrong path hard-failed).
 struct DetModel {
     const char* env;
     const char* label;
@@ -137,10 +106,9 @@ constexpr const char* kPrompts[] = {
 
 constexpr int kGen = 96;
 
-// 0. DIAGNOSTIC SPLIT: same-context repeats with CUDA graphs OFF. The first
-//    request on a context runs partially eager while the conditional graph
-//    captures; later requests replay the graph — a different kernel mix for
-//    the same step. Graphs-off isolates the underlying kernels from that mix.
+// Diagnostic split: same-context repeats with CUDA graphs OFF isolate the underlying
+// kernels from the mixed eager/replay kernel set the first vs later requests on a context
+// otherwise run.
 TEST_P(DetEvalE2ETest, GreedyReproducibleSameContextGraphsOff) {
     MakeContext(/*cuda_graphs=*/false);
     for (const char* prompt : kPrompts) {
@@ -191,10 +159,9 @@ TEST_P(DetEvalE2ETest, DISABLED_GreedyReproducibleAcrossFreshContexts) {
     }
 }
 
-// 3. Teacher-forced perplexity must be bit-identical for repeated scoring on
-//    one context — the eval number itself is the artifact agent evals
-//    compare. (Guards the per-position NLL reduction: the old cross-block
-//    double atomicAdd accumulated in scheduling-dependent order.)
+// Teacher-forced perplexity must be bit-identical for repeated scoring on one context - the
+// eval number itself is what agent evals compare. Guards the per-position NLL reduction: the
+// old cross-block double atomicAdd accumulated in scheduling-dependent order.
 TEST_P(DetEvalE2ETest, PerplexityBitIdenticalSameContext) {
     // Token IDs are model-agnostic small IDs; content doesn't matter for
     // reproducibility, only that the same sequence is scored twice.
