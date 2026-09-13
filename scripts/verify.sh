@@ -1,52 +1,25 @@
 #!/bin/bash
-# verify.sh — pre-commit/pre-push verification for imp.
-#
-# Four-step gate:
-#   1. Build (incremental)
-#   2. Tests (gtest filter or full suite)
-#   3. Perf vs. tests/perf_baseline.json (decode regression > 3% = fail)
-#   4. Smoke prompts on real models (degeneration detector)
-#
-# Steps 3 and 4, plus the peak-VRAM and CUDA-graph gates, need real checkpoints
-# under $MODELS and skip individually when one of them is absent. A missing
-# models/ directory, or a run in which no model-backed gate measured anything at
-# all, fails the gate instead of reporting OK.
-#
-# Modes:
-#   verify.sh fast    Unit tests + perf baseline + 1 smoke prompt   (~90s)
-#   verify.sh full    Full ctest + perf baseline + 2 smoke prompts  (~5min)
-#
-# Env overrides:
-#   IMP_VERIFY_BIN=build/imp-cli
-#   IMP_VERIFY_TESTS=build/imp-tests
-#   IMP_VERIFY_MODELS=models
-#   IMP_VERIFY_BASELINE=tests/perf_baseline.json
-#   IMP_VERIFY_CHUNK_SIZE=0   prefill chunk size for perf bench (0 = single-chunk,
-#                             default: 0 for legacy baseline, per-json for v1)
-#   IMP_VERIFY_SKIP_BUILD=1   skip cmake build step
-#   IMP_VERIFY_SKIP_PERF=1    skip perf-baseline regression check (use when the
-#                             baseline is known-stale; refresh with
-#                             scripts/gen_perf_baseline.sh)
-#   IMP_VERIFY_TRIALS=3       independent PROCESSES the perf gate medians over.
-#                             1 restores the old single-shot behaviour (fast,
-#                             but see the note at the gate itself).
-#   IMP_VERIFY_IN_DOCKER=1    sentinel set by the auto-re-exec block; do not set manually
-#
-# Auto-Docker fallback: if cmake is not on PATH (Clean-Host workflow), the
-# script re-execs itself inside the imp:test container, mounting the repo at
-# /src and using the prebuilt /usr/local/bin/imp-cli + imp-tests. Requires
-# 'make build' to have produced the imp:test image first.
-#
+# Pre-commit/pre-push verification for imp. Four-step gate: build (incremental), tests (gtest
+# filter or full suite), perf vs tests/perf_baseline.json (decode regression >3% fails), smoke
+# prompts on real models (degeneration detector). Steps 3/4 plus peak-VRAM/CUDA-graph gates need
+# real checkpoints under $MODELS and skip individually when absent; a run where no model-backed
+# gate measured anything fails rather than reporting OK.
+# Modes: verify.sh fast (unit tests + perf + 1 smoke, ~90s), verify.sh full (full ctest + perf +
+# 2 smoke, ~5min).
+# Env: IMP_VERIFY_BIN, IMP_VERIFY_TESTS, IMP_VERIFY_MODELS, IMP_VERIFY_BASELINE,
+# IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_PERF=1
+# (stale baseline; refresh via gen_perf_baseline.sh), IMP_VERIFY_TRIALS=3 (processes the perf
+# gate medians over), IMP_VERIFY_IN_DOCKER=1 (internal re-exec sentinel, do not set manually).
+# Auto-Docker fallback: re-execs inside imp:test when cmake is not on PATH (Clean-Host), using
+# the prebuilt /usr/local/bin binaries; requires make build first.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Auto re-exec in the imp:test container when cmake is unavailable on the host
-# (Clean-Host workflow: no language toolchains installed). The runtime image
-# has prebuilt binaries at /usr/local/bin/, so we skip the build step and point
-# IMP_VERIFY_BIN/TESTS at them. IMP_VERIFY_IN_DOCKER guards against infinite
-# re-exec if the runtime image somehow also lacks cmake.
+# Auto re-exec into imp:test when cmake is unavailable on the host (Clean-Host: no toolchains
+# installed); points IMP_VERIFY_BIN/TESTS at the runtime image's prebuilt /usr/local/bin binaries.
+# IMP_VERIFY_IN_DOCKER guards against infinite re-exec if the runtime image also lacks cmake.
 if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]; then
     if ! docker image inspect imp:test >/dev/null 2>&1; then
         echo "verify: cmake not found on host and imp:test image not built." >&2
@@ -73,23 +46,11 @@ fi
 
 MODE="${1:-fast}"
 
-# Wall clock, at the start and at the summary.
-#
-# Every measurement below is a throughput number, and this box is shared with
-# other sessions. Twice in one day a neighbouring GPU job overlapped a run and
-# the question "did that land inside my gate?" could not be answered from the
-# log: nothing in it carried a time. Reconstructing it from file mtimes cost
-# more than a repeat run, and the repeat is what settled it (283.35 against
-# 283.04 tok/s - the overlap turned out to be harmless, which is exactly what
-# could not be known beforehand).
-#
-# Two lines, so the next such question takes seconds. Suggested by the session
-# on the other side of that collision.
-#
-# UTC, with the Z: this script re-execs into the imp:test container on a
-# clean host, and the container's clock is UTC while the host runs local time.
-# A bare "07:55" from one side and "05:55" from the other is worse than no
-# timestamp, because it looks comparable.
+# Wall clock at start and summary: every measurement below is a throughput number on a card
+# shared with other sessions, and without a timestamp an overlapping neighbour job can't be
+# ruled in or out after the fact.
+# UTC with the Z: this script re-execs into the imp:test container, whose clock is UTC while
+# the host runs local time; a bare local time from one side is worse than none.
 VERIFY_T_START="$(date -u +%H:%M:%SZ)"
 echo "verify: started $VERIFY_T_START ($MODE)"
 
@@ -109,35 +70,20 @@ fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 skip()    { echo "${YLW}SKIP${RST} $*"; }
 warn()    { echo "${YLW}WARN${RST} $*"; }
 
-# Model-backed gates that actually measured something. Every gate that loads a
-# checkpoint degrades to SKIP when the file is absent, so a run can reach the
-# summary having put nothing in front of the GPU. The summary refuses to report
-# OK while this is still zero.
+# Model-backed gates that actually measured something. Every gate that loads a checkpoint
+# degrades to SKIP when the file is absent, so a run can reach the summary having put nothing
+# in front of the GPU; the summary refuses to report OK while this is still zero.
 MODEL_GATES_RUN=0
 model_gate_ran() { MODEL_GATES_RUN=$((MODEL_GATES_RUN+1)); }
 
-# --- Host-drift guard (#526) -------------------------------------------------
-# This WSL2 box has day-level "depressed host" states where decode reads 8-15%
-# low DESPITE full methodology (memory: q8_drift_host_artifact_2026_06_05). The
-# culprit is host/driver state, not code — but the perf gate cannot tell the two
-# apart from a single bench number. So we sample GPU clocks/power DURING the
-# decode bench and, if a regression coincides with the depressed-host signature,
-# we degrade FAIL→WARN (clearly labeled) instead of crying false-positive.
-#
-# Healthy under-load signature: ~2850 MHz SM / 13801 MHz mem / ~500 W.
-# Depressed         => mem-clock median < 13801 MHz, OR power max < 400 W,
-#                       OR SM-clock median < 2000 MHz (healthy decode load is
-#                       ~2850 MHz sustained; the 2026-07-11 episode pinned SM
-#                       at 285-367 MHz with mem partly still at 13801).
-#   - mem-clock is the cleanest tell (GDDR7 either P0-clocks or it doesn't).
-#   - power uses MAX over the run (a robust upper bound) with a conservative
-#     400 W floor so a healthy ~500 W run never trips it.
-#   - The SM clock ramps ~1s at bench start (cold-start artifact, audit §5), so
-#     we drop the first 2 samples before aggregating to avoid a false depressed
-#     classification from the ramp. A run with only 1-2 samples can't drop the
-#     ramp, so it's treated as no-data (gate fails open: plain FAIL).
-# Fail-open: if nvidia-smi is missing or errors, the sampler no-ops and the gate
-# behaves exactly as before (no degradation logic kicks in).
+# Host-drift guard (#526): this WSL2 box has day-level "depressed host" states where decode
+# reads 8-15% low despite full methodology (host/driver state, not code). Samples GPU
+# clocks/power during the decode bench; a regression coinciding with the depressed-host
+# signature degrades FAIL->WARN instead of a false positive.
+# Depressed: mem-clock median < 13801 MHz, OR power max < 400W, OR SM-clock median < 2000MHz
+# (healthy decode is ~2850MHz sustained). First 2 samples dropped (SM ramps ~1s at bench start);
+# a run with only 1-2 samples can't drop the ramp and is treated as no-data (fails open: plain
+# FAIL). Fail-open if nvidia-smi is missing: sampler no-ops, no degradation logic kicks in.
 GPU_DRIFT_MEM_FLOOR=13801   # mem clock (MHz) at/above which the host is healthy
 GPU_DRIFT_POWER_FLOOR=400   # power (W) max below which the host is depressed
 GPU_DRIFT_SM_FLOOR=2000     # SM clock (MHz) median below which the host is depressed
@@ -218,11 +164,9 @@ decode_regression() {
     fi
 }
 
-# Docker-only host (host has neither cmake nor a build/ directory): run
-# the canonical Docker build, then exit early — the test / perf / smoke
-# gates below need the host build artefacts and there's no clean way to
-# reach them from here. Override with IMP_VERIFY_SKIP_BUILD=1 if
-# cmake-on-host is preferred.
+# Docker-only host (no cmake, no build/ dir): run the canonical Docker build, then exit early;
+# the test/perf/smoke gates below need host build artifacts with no clean path from here.
+# Override with IMP_VERIFY_SKIP_BUILD=1 if cmake-on-host is preferred.
 if [ "${IMP_VERIFY_SKIP_BUILD:-0}" != "1" ] && ! command -v cmake >/dev/null 2>&1; then
     section "build (docker — host has no cmake)"
     if make build >/tmp/imp_verify_build.log 2>&1; then
@@ -238,15 +182,10 @@ if [ "${IMP_VERIFY_SKIP_BUILD:-0}" != "1" ] && ! command -v cmake >/dev/null 2>&
     exit 0
 fi
 
-# ------------------------------------------------- 0. model directory preflight
-# Every gate below that touches the GPU resolves its checkpoint under $MODELS and
-# degrades to SKIP when the file is not there. With the directory missing outright
-# there is nothing left to measure: perf, peak VRAM, graphs and the smoke prompts
-# all skip, and the summary used to print OK anyway. That is how a fresh worktree
-# produced a green pre-push gate that tested nothing: models/ is a gitignored
-# symlink farm, so it exists in the main checkout and in no other worktree.
-# Placed after the Docker-only early exit above, which returns 0 before it and is
-# therefore unaffected.
+# Every GPU-touching gate below resolves its checkpoint under $MODELS and degrades to SKIP
+# when absent; with the directory missing outright, everything skips and the summary used to
+# print OK anyway. models/ is a gitignored symlink farm present only in the main checkout, so a
+# fresh worktree produced a green pre-push gate that tested nothing.
 case "$MODELS" in
     /*) MODELS_ABS="$MODELS";        MODELS_IS_RELATIVE=0 ;;
     *)  MODELS_ABS="$ROOT/$MODELS";  MODELS_IS_RELATIVE=1 ;;
@@ -290,30 +229,16 @@ if [ ! -x "$TESTS_BIN" ]; then
     fail "$TESTS_BIN not found"
 else
     if [ "$MODE" = "fast" ]; then
-        # VramBudgetReserve is in here because CI structurally cannot run it:
-        # compute_vram_budget queries the device for total VRAM, so the suite is
-        # SKIP_IF_NO_CUDA and the GPU-less CI lane skips it. Three of its tests
-        # were red for three PRs before anyone looked (AUDIT B63). The pre-push
-        # gate is the only place that can catch that class.
-        # ForwardPassTest is here for the same reason: it is SKIP_IF_NO_CUDA, so
-        # CI cannot run it, and DecodeLogitsInvariantToBatchComposition (#1314)
-        # is the only assert in the tree that a sequence's logits do not depend
-        # on its batch neighbours — the class #1044/#1045 came from.
-        #
-        # `*Attention*` was `AttentionTest.*` from 2026-04-27 until #1586. That
-        # suite had already been renamed, so the pattern matched nothing and
-        # gtest reported success for it: the gate ran ZERO attention tests for
-        # four months, in the subsystem with the most kernel churn in the tree.
-        # check_verify_filter.sh now fails when any pattern here matches
-        # nothing.
-        # `*Attention*` covers the paged decode family and none of the FMHA
-        # prefill fixtures (AUDIT_arch_2026 I-2). The default-path FA2
-        # fixtures are added by name; measured on the RTX 5090 they cost
-        # ~40 s (FmhaFA2Test 36 tests 20.7 s, FmhaFA2Hd256Test 11.9 s,
-        # FmhaFA2PvF16Test 6.5 s, the rest under 1 s). Left out on purpose:
-        # FmhaSm120Test (legacy tier, 120 s), FmhaFP8Test (opt-in tier,
-        # 105 s), FmhaFA2Dense2CtaTest (40 s), FmhaFA2Hd256Bkv32Test (opt-in
-        # bkv=32, 12.5 s); `make test-gpu` runs them.
+        # VramBudgetReserve and ForwardPassTest are SKIP_IF_NO_CUDA, so CI structurally cannot run
+        # them; this pre-push gate is the only place that can (three VramBudgetReserve tests sat red
+        # for three PRs unnoticed, AUDIT B63). DecodeLogitsInvariantToBatchComposition (#1314) is the
+        # only assert that a sequence's logits don't depend on its batch neighbours.
+        # `*Attention*` matched a renamed-away suite for four months and gtest reported success (zero
+        # attention tests ran, #1586); check_verify_filter.sh now fails on any pattern matching nothing.
+        # `*Attention*` covers paged decode only, not FMHA prefill; default-path FA2 fixtures
+        # (FmhaFA2Test etc, ~40s total) are added by name. Left out on purpose (run via make test-gpu):
+        # FmhaSm120Test (legacy tier), FmhaFP8Test (opt-in), FmhaFA2Dense2CtaTest,
+        # FmhaFA2Hd256Bkv32Test (opt-in bkv=32).
         FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*:FmhaFA2Test.*:FmhaFA2Hd256Test.*:FmhaFA2PvF16Test.*:FmhaHd512Test.*:FmhaFA2HeavyFirstTest.*:FmhaFA2Fp8ScaledTest.*:FhmaMxFP4Test.*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
@@ -329,18 +254,14 @@ else
             grep -E "FAIL|fatal" /tmp/imp_verify_tests.log | head -20
         fi
 
-        # test-e2e unit/gpu lane-split guard (R5/#580): the unit lane is a
-        # gtest_filter, so a rename could silently move a CPU test into the GPU
-        # lane. This asserts the filter still resolves to the frozen CPU set.
-        # Fail-open: skips cleanly if the binary or script isn't locatable.
+        # test-e2e unit/gpu lane-split guard (R5/#580): the unit lane is a gtest_filter, so a rename
+        # could silently move a CPU test into the GPU lane. Asserts the filter resolves to the frozen
+        # CPU set. Fail-open: skips cleanly if the binary or script isn't locatable.
         _E2E_BIN="$(dirname "$TESTS_BIN")/test-e2e"
-        # DUPLICATE of _unit_e2e_filter in CMakeLists.txt — keep in sync. Can't
-        # source it here: the container path runs without a configured build/
-        # dir, so ctest/CMake variables are unreachable. Neither ctest guard
-        # reads THIS string, so it went stale for nine days after #1795 and
-        # every full `make verify` was red (AUDIT_arch_2026 I-3);
-        # guard_lane_filter_copy (scripts/check_lane_filter_copy.sh) now diffs
-        # the two literals in the CPU lane.
+        # DUPLICATE of _unit_e2e_filter in CMakeLists.txt, kept in sync: can't source CMake variables
+        # here (container path has no configured build/ dir). Went stale for nine days after #1795
+        # before anything diffed it (AUDIT_arch_2026 I-3); check_lane_filter_copy.sh now diffs the two
+        # literals in the CPU lane.
         _LANE_FILTER="BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
         if [ -x "$_E2E_BIN" ] && [ -x scripts/check_e2e_lane_split.sh ]; then
             if scripts/check_e2e_lane_split.sh "$_E2E_BIN" "$_LANE_FILTER" >/tmp/imp_verify_lane.log 2>&1; then
@@ -358,28 +279,14 @@ fi
 # --------------------------------------------------------------------- 3. perf
 section "perf vs baseline"
 
-# Age and provenance of the pin (#1624).
-#
-# AGENTS.md and docs/internals/BENCHMARKING.md both say a comparison is only
-# meaningful within one session on one host, and then the gate compares against
-# a number measured weeks earlier with nothing saying how old it is. The
-# threshold is not a correctness bound, it is the point past which "the host
-# moved" outweighs "the code moved": measured on this box, three runs back to
-# back spread 0.09 % and the same binary hours apart spread 4.01 %, against an
-# 8 % gate. A pin older than a month is comparing across a distance the gate
-# cannot see.
-#
-# A warning, not a failure: a stale pin still catches a 30 % regression, and
-# failing the gate on a calendar date would train people to regenerate the pin
-# to make it quiet, which is the opposite of the point.
-#
-# 90 days, not 30 (AUDIT_arch_2026 H-9): at 30 the line was on for every run
-# from 2026-08-25 and carried nothing. The re-pin it asks for is guarded
-# (scripts/repin_baselines_if_median.sh refuses top-range days: 2026-09-05 read
-# 291-294 against its 275-290 band), and the signal a fresh pin would buy back,
-# a few percent between sessions, is what the paired arm (make verify-ab) now
-# measures directly. This single arm is the coarse net; a quarter without a
-# re-pin is still worth a line.
+# Age/provenance of the perf pin (#1624): AGENTS.md/BENCHMARKING.md both say a comparison is
+# only meaningful within one session on one host, so a pin measured weeks earlier is comparing
+# across a distance the gate can't see. Warning, not a failure: a stale pin still catches a
+# 30% regression, and failing on a calendar date would train people to regenerate it just to
+# silence the warning.
+# 90 days, not 30 (AUDIT_arch_2026 H-9): 30 fired on every run for a month and carried nothing.
+# The paired arm (make verify-ab) now measures cross-session drift directly; this single arm is
+# the coarse net.
 if [ -f "$BASELINE" ]; then
     _pin_ts=$(grep -oE '"timestamp"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
               head -1 | sed 's/.*"\([^"]*\)"$/\1/')
@@ -411,10 +318,9 @@ elif [ ! -x "$BIN" ]; then
 elif ! command -v jq >/dev/null 2>&1; then
     skip "jq not installed (needed to parse $BASELINE)"
 else
-    # Detect baseline schema version (R4/#579: all three baselines now carry a
-    # common "schema_version" string — "legacy-v1" | "multi-model-v1"). Fall back
-    # to the historical numeric ".version" (multi-model == 1) for forward-tolerance
-    # if an older/regenerated file still lacks schema_version.
+    # Detects baseline schema version (R4/#579): all three baselines carry schema_version
+    # ("legacy-v1"|"multi-model-v1"). Falls back to the historical numeric .version (multi-model==1)
+    # for an older/regenerated file that still lacks schema_version.
     BL_SCHEMA=$(jq -r '.schema_version // empty' "$BASELINE")
     BL_VERSION=$(jq -r '.version // 0' "$BASELINE")
 
@@ -487,33 +393,15 @@ else
             model_gate_ran
             REPS=3
             ERR=$(mktemp)
-            # --prefill-chunk-size 0 forces single-chunk prefill so the baseline
-            # remains apples-to-apples with the pre-chunked-prefill measurements.
-            # speculative.ngram=false: the bench prompt is self-repetitive
-            # (~99.9% draft accept), so with speculation ON tg measures the
-            # batched spec-verify GEMMs — restart-volatile like cuBLAS prefill
-            # (observed 11% swing across healthy-clock restarts, 2026-07-15).
-            #
-            # MEDIAN OVER INDEPENDENT PROCESSES, not one shot. --bench-reps
-            # averages WITHIN a process; it cannot see the variance that lives
-            # BETWEEN them (cuBLASLt heuristic re-selection, allocator layout,
-            # clock/host state at load). Measured 2026-08-03 on an idle host,
-            # six runs of near-identical code: 278.59 … 289.77 tok/s — a 4.01 %
-            # spread against a 3.00 % threshold. A single-shot gate that tight
-            # reports its own noise: the same tree failed at -3.25 % and passed
-            # at +0.90 % on the same day.
-            #
-            # The line this replaces claimed "the decode GEMV hot path ... is
-            # stable (<1%)". That is true within a process and false across
-            # them, which is the number the gate actually compares.
-            #
-            # What the median does and does not buy: it drops single-run
-            # outliers, which is the failure that produced the -3.25 % scare.
-            # It does NOT flatten the hours-scale host drift — three runs taken
-            # back to back spread 0.09 %, the same binary hours apart spread
-            # 4.01 %. That is why the spread is PRINTED: a tight spread means
-            # the median is worth believing, a wide one means the host moved
-            # mid-gate and the verdict is about the box, not the diff.
+            # --prefill-chunk-size 0 forces single-chunk prefill so the baseline stays apples-to-apples.
+            # speculative.ngram=false: the bench prompt is self-repetitive (~99.9% draft accept), so
+            # spec-ON would measure the batched verify GEMMs instead (restart-volatile, ~11% swing).
+            # MEDIAN OVER INDEPENDENT PROCESSES, not one shot: --bench-reps averages WITHIN a process and
+            # can't see between-process variance (cuBLASLt heuristic reselection, allocator layout, clock
+            # state). Between-process spread measured up to ~4% against a 3% threshold, so a single-shot
+            # gate reports its own noise. The median drops single-run outliers but does NOT flatten
+            # hours-scale host drift; the spread is printed so a wide one reads as "host moved", not "diff
+            # regressed".
             TRIALS="${IMP_VERIFY_TRIALS:-3}"
             TG_ALL=""; PP_ALL=""
             gpu_sample_start
@@ -531,12 +419,9 @@ else
             gpu_sample_stop
             median() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR==0)exit 1; print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
             spread() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR<2)exit 0; printf "%.2f", (a[NR]-a[1])/a[1]*100}'; }
-            # Numbers come from `--bench --json` (#1583). They used to be regexed
-            # out of the stderr table, whose spacing inside the parens varies
-            # with the magnitude ("(13310.12 tok/s)" against "( 148.58 tok/s)")
-            # - a layout that was load-bearing for the gate and documented
-            # nowhere. An empty capture there produced a median over fewer
-            # samples than the header printed.
+            # Numbers come from --bench --json (#1583), not regexed out of the stderr table (whose paren
+            # spacing varies with magnitude and was undocumented, load-bearing formatting). An empty
+            # capture there used to produce a median over fewer samples than the header claimed.
             PP=$(median "$PP_ALL" || true)
             TG=$(median "$TG_ALL" || true)
             TG_SPREAD=$(spread "$TG_ALL")
@@ -570,15 +455,12 @@ else
                     pass "prefill within ${PRE_THR}% threshold"
                 fi
 
-                # ---- long-context prefill (single-chunk FA2): pp4096..pp65536 ----
-                # Crosses the cuBLAS→FMHA threshold so it exercises the
-                # register-resident FA2 kernel (attention.fmha_fa2=on default).
-                # Guards the FA2 prefill win AND the #1022 32K-64K TTFT band.
-                # Warn-only (prefill-noise convention) — though large-context
-                # prefill is actually stable (<0.5% cross-restart at 32K, measured
-                # 2026-07-16, unlike pp512's cuBLAS-algo jitter). Lengths past the
-                # model ctx or the 70K bench ceiling simply have no baseline key
-                # and are skipped. TTFT ms ≈ pp_len / pp_tps.
+                # Long-context prefill (single-chunk FA2), pp4096..pp65536: crosses the cuBLAS->FMHA threshold
+                # to exercise the register-resident FA2 kernel (attention.fmha_fa2=on default). Guards the FA2
+                # prefill win and the #1022 32K-64K TTFT band. Warn-only: large-context prefill is stable
+                # (<0.5% cross-restart at 32K) unlike pp512's cuBLAS-algo jitter. Lengths past model ctx or
+                # the
+                # 70K bench ceiling have no baseline key and are skipped.
                 for PPLEN in 4096 8192 16384 32768 65536; do
                     BL_PP=$(jq -r ".metrics.prefill_tps.pp${PPLEN} // empty" "$BASELINE")
                     [ -z "$BL_PP" ] && continue
@@ -604,32 +486,21 @@ else
     fi
 fi
 
-# ------------------------ 3.4. peak-VRAM gate (memory acceptance criterion 8)
-# The baseline has carried a `memory_mb` block and a `vram_increase_pct`
-# threshold since it was written, and nothing ever read them — a declared gate
-# that never existed. Peak VRAM is exactly the quantity that creeps silently:
-# every "just cache one more thing" lands here, and it is invisible in the perf
-# numbers until a model stops fitting (#1103 is that failure, and it cost 7x
-# decode).
-#
-# Gated on own_peak, NOT device peak_used: device-used also carries the CUDA
-# primary context (~1.7 GiB here) and anything a neighbour process holds, so it
-# moves for reasons that have nothing to do with the change under test.
-# own_peak is this process's allocations since engine init and nothing else.
-#
-# Its own short run rather than piggy-backing on the perf bench: --mem-report
-# starts a 2 ms sampler thread, and perturbing the number the perf gate reads
-# to save ten seconds is a bad trade.
+# Peak-VRAM gate (memory acceptance criterion 8): the baseline carried a memory_mb block and a
+# vram_increase_pct threshold that nothing ever read; peak VRAM creeps silently until a model
+# stops fitting (#1103, 7x decode cost).
+# Gated on own_peak, NOT device peak_used: device-used also carries the CUDA primary context
+# (~1.7 GiB) and any neighbour process. Runs its own short bench rather than piggy-backing on
+# the perf bench: --mem-report's 2ms sampler thread would perturb the number the perf gate reads.
 section "peak VRAM vs baseline"
 if [ "${IMP_VERIFY_SKIP_VRAM:-0}" = "1" ]; then
     skip "peak-VRAM gate (IMP_VERIFY_SKIP_VRAM=1)"
 elif [ ! -f "$BASELINE" ] || ! command -v jq >/dev/null 2>&1; then
     skip "peak-VRAM gate (no baseline or no jq)"
 else
-    # MODEL_PATH is set inside the perf gate above, which IMP_VERIFY_SKIP_PERF=1
-    # skips entirely — referencing it unguarded killed the whole script under
-    # `set -u`. Resolve it here instead of inheriting it, so this gate stands on
-    # its own whether or not the perf gate ran.
+    # MODEL_PATH is set inside the perf gate above, which IMP_VERIFY_SKIP_PERF=1 skips entirely;
+    # referencing it unguarded killed the script under `set -u`. Resolved here instead so this gate
+    # stands on its own regardless of whether the perf gate ran.
     VRAM_MODEL=$(jq -r '.model // empty' "$BASELINE")
     VRAM_MODEL_PATH="$MODELS/$VRAM_MODEL"
     if [ -z "$VRAM_MODEL" ] || [ ! -x "$BIN" ] || [ ! -f "$VRAM_MODEL_PATH" ]; then
@@ -646,10 +517,8 @@ else
     else
         model_gate_ran
         ERR_V=$(mktemp)
-        # BOTH streams: imp's INFO logs (which carry the VRAM audit table) go to
-        # STDOUT, only the bench result lines go to stderr. Capturing stderr
-        # alone — as the perf gate above correctly does for its own numbers —
-        # silently yields nothing here.
+        # BOTH streams: imp's INFO logs (VRAM audit table) go to STDOUT, only bench result lines go to
+        # stderr. Capturing stderr alone, correct for the perf gate's own numbers, yields nothing here.
         "$BIN" --model "$VRAM_MODEL_PATH" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
               --temperature 0 --set speculative.ngram=false --mem-report \
               >"$ERR_V" 2>&1
@@ -670,13 +539,11 @@ else
     fi
 fi
 
-# ------------------------ 3.5. graphs-ON vs graphs-OFF decode regression gate
-# Catches future PRs that silently break CUDA Graph capture in the decode loop.
-# Without graphs, decode is launch-overhead-bound (875-1170 launches/step on
-# dense Q8). Graphs-ON wins +95-376% (memo: cuda_graphs_moe_works_2026_05_07).
-# A graphs-ON improvement that drops below kMinSpeedupX = 1.5× signals a path
-# that fell out of capture (host sync inside captured region, malloc on hot
-# path, etc.). Skipped by IMP_VERIFY_SKIP_GRAPHS=1.
+# Graphs-ON vs graphs-OFF decode regression gate: catches a PR that silently breaks CUDA Graph
+# capture. Without graphs, decode is launch-overhead-bound (875-1170 launches/step on dense Q8);
+# graphs-ON wins +95-376%. A ratio dropping below kMinSpeedupX = 1.5x signals a path that fell
+# out of capture (host sync inside the region, malloc on the hot path). Skipped by
+# IMP_VERIFY_SKIP_GRAPHS=1.
 section "graphs ON vs OFF decode gate"
 if [ "${IMP_VERIFY_SKIP_GRAPHS:-0}" = "1" ]; then
     skip "graphs gate (IMP_VERIFY_SKIP_GRAPHS=1)"
@@ -688,29 +555,19 @@ else
     if [ ! -f "$GRAPHS_MODEL_PATH" ]; then
         skip "graphs gate model $GRAPHS_MODEL_PATH not present"
     else
-        # Threshold lowered from 1.5 → 1.3 after F1's warmup-pre-pass made
-        # graphs-OFF significantly faster on dense Q8 (compresses the ratio).
-        # Cross-model A/B (post-patches, reps=2, pp=256 tg=256):
-        #   Qwen3-4B Q8       1.90x
-        #   Qwen3.5-GDN Q8    2.23x
-        #   Llama-3.2-3B Q8   2.38x
-        #   Qwen3-8B Q8       1.20x   ← bigger model = larger kernel time =
-        #                                less launch-overhead share = lower ratio.
-        # 1.3 catches catastrophic graph failures (≈ 1.0x = full fallback to
-        # per-step decode) without rejecting healthy big-model decodes.
+        # Threshold lowered 1.5 -> 1.3 after F1's warmup-pre-pass made graphs-OFF faster on dense Q8
+        # (compresses the ratio). Cross-model A/B: Qwen3-4B 1.90x, Qwen3.5-GDN 2.23x, Llama-3.2-3B 2.38x,
+        # Qwen3-8B 1.20x (bigger model = larger kernel time = less launch-overhead share = lower ratio).
+        # 1.3 catches catastrophic graph failures (~1.0x = full fallback) without rejecting healthy
+        # big-model decodes.
         model_gate_ran
         MIN_SPEEDUP_X="${IMP_VERIFY_MIN_GRAPH_SPEEDUP:-1.3}"
         ERR_NG=$(mktemp); ERR_G=$(mktemp)
-        # Sample clocks/power across BOTH runs: a depressed host (#526 — SM
-        # pinned low / mem at half / power capped) makes kernels dominate and
-        # compresses the ON/OFF ratio toward 1.0x on ANY build (measured
-        # 0.85-1.0x on main and branches alike, 2 consecutive nights) — the
-        # ratio stops being attributable to code.
-        # NOTE: the power floor (400 W) is calibrated on 8B-class decode; the
-        # 4B gate model can draw less even when healthy, so this gate leans
-        # WARN. That is deliberate: a false WARN costs a re-run on a healthy
-        # host, a false FAIL blocks a push on host noise. The hard FAIL still
-        # fires whenever the signature reads healthy.
+        # Samples clocks/power across BOTH runs: a depressed host (#526) makes kernels dominate and
+        # compresses the ON/OFF ratio toward 1.0x on ANY build, so the ratio stops being attributable
+        # to code. Power floor (400W) is calibrated on 8B-class decode; the 4B gate model can draw less
+        # even when healthy, so this gate leans WARN (a false WARN costs a re-run, a false FAIL blocks
+        # a push on host noise). Hard FAIL still fires whenever the signature reads healthy.
         gpu_sample_start
         "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
               --max-tokens 256 --temperature 0 --no-cuda-graphs \
@@ -749,14 +606,10 @@ fi
 # ------------------------------------------------------------- 4. smoke prompts
 section "smoke prompts (degeneration check)"
 
-# Greedy decode on a known-deterministic prompt.
-# Quality gate: output must contain expected substring AND last 32 tokens must
-# have at least 8 distinct tokens (catches "own own own" stuck-token failures).
-# $5 (optional): minimum generated tokens. The skill's figure is 10, with its
-# own exception for "single-word factual" prompts - and this gate's own prompt
-# is one: "The capital of France is" answers in 11 tokens on the 4B model, so a
-# flat 10 would sit one token from a false red. Per-prompt, with the default
-# where the skill put it.
+# Greedy decode on a known-deterministic prompt. Quality gate: output must contain the
+# expected substring AND the last 32 tokens must have >=8 distinct tokens (catches "own own own"
+# stuck-token failures). $5 (optional): minimum generated tokens, default 10 with an exception
+# for single-word-factual prompts (this gate's own prompt answers in 11 tokens on the 4B model).
 smoke_prompt() {
     local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}"
     if [ ! -f "$MODELS/$model" ]; then
@@ -765,13 +618,10 @@ smoke_prompt() {
     fi
     model_gate_ran
     local ERR; ERR=$(mktemp)
-    # --token-trace is load-bearing, not cosmetic. Without it imp-cli caps the
-    # markers at the first ten decode steps (mode_oneshot.cpp), so this gate read
-    # eleven tokens out of a 64-token run and called them "the last 32": every
-    # check below ran on the OPENING of the generation, and a repetition loop
-    # starting at step 11 was invisible to the detector built to catch it. It
-    # also made the distinct-token count fail a correct short answer, which is
-    # what had `make verify` red on Qwen3.5-4B MXFP4 since 2026-08-27.
+    # --token-trace is load-bearing, not cosmetic: without it imp-cli caps markers at the first
+    # ten decode steps (mode_oneshot.cpp), so this gate would read eleven tokens of a 64-token run
+    # and call them "the last 32", missing any repetition loop starting at step 11. Also failed the
+    # distinct-token count on a correct short answer.
     OUT=$("$BIN" --model "$MODELS/$model" --prompt "$prompt" --token-trace \
           --max-tokens 64 --temperature 0 --chat-template none 2>"$ERR")
     # Token markers '[tok=NNNN ' word']' land on stderr.
@@ -779,24 +629,20 @@ smoke_prompt() {
     WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
     rm -f "$ERR"
 
-    # NaN/Inf first: it is a different failure from degeneration and the verdict
-    # script only sees ids, not pieces.
-    #
-    # Herestrings, not `echo ... | grep -q`: grep -q leaves at the first match and
-    # closes the pipe, echo dies of EPIPE, and `set -o pipefail` (:40) turns that
-    # into a non-zero pipeline even though grep MATCHED. Here that would swallow a
-    # NaN report; three lines down, where the test is negated, it fails a smoke
-    # run whose output was correct.
+    # NaN/Inf checked first: a different failure from degeneration, and the verdict script only
+    # sees ids, not pieces.
+    # Herestrings, not `echo ... | grep -q`: grep -q exits at the first match, echo dies of EPIPE,
+    # and set -o pipefail turns that into a non-zero pipeline even though grep MATCHED - which
+    # would swallow a NaN report here, or fail a correct smoke run where the test is negated.
     if grep -qiE ' (nan|inf|-inf|-nan) ' <<< " $WORDS "; then
         fail "$label — NaN/Inf token in output"
         echo "  words: $WORDS"
         return
     fi
 
-    # The thresholds live in scripts/degen_verdict.sh so the CPU lane can
-    # exercise them without a GPU (guard_degen_thresholds). They never had been:
-    # this gate used to judge the eleven markers imp-cli printed and call them
-    # "the last 32 tokens".
+    # Thresholds live in scripts/degen_verdict.sh so the CPU lane can exercise them without a GPU
+    # (guard_degen_thresholds). This gate used to judge the eleven markers imp-cli printed and call
+    # them "the last 32 tokens".
     local VERDICT
     VERDICT=$(printf '%s\n' "$ALL_TOKS" | bash "$ROOT/scripts/degen_verdict.sh" "$min_toks" 2>&1)
     if [ "${VERDICT#OK}" = "$VERDICT" ]; then
@@ -828,11 +674,9 @@ if [ "$MODE" = "full" ]; then
         5
 fi
 
-# ------------------------------------------------------------------- summary
-# A run in which every model-backed gate skipped measured nothing on the GPU, so
-# it is not a pass. A single absent checkpoint still only skips: the north-star
-# model or any other optional one can be missing and the gate stays green, as
-# long as at least one model-backed gate ran.
+# A run in which every model-backed gate skipped measured nothing on the GPU, so it is not a
+# pass. A single absent checkpoint still only skips: the gate stays green as long as at least
+# one model-backed gate ran.
 if [ "$MODEL_GATES_RUN" -eq 0 ]; then
     fail "no model-backed gate ran: perf, peak VRAM, graphs and smoke all skipped"
     echo "  Model directory in use: $MODELS_ABS"

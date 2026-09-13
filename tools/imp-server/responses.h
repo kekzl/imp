@@ -1,15 +1,7 @@
-// OpenAI Responses API (/v1/responses) <-> Chat Completions transforms.
-// The Responses API is what the OpenAI Agents SDK and Codex CLI speak by
-// default; imp-server exposes it by reusing the existing chat-completions
-// code path (same shim pattern as the Anthropic adapter, anthropic.h).
-//
-// Scope (v1, stateless): input string / item arrays (message,
-// function_call, function_call_output; reasoning items are skipped),
-// instructions, flat function tools + tool_choice, text.format
-// (json_object / json_schema), temperature / top_p / max_output_tokens,
-// reasoning.effort -> think_budget, stream. `previous_response_id` and
-// `store=true` are rejected — imp keeps no response store; agentic clients
-// (Codex, Agents SDK) send the full transcript with store=false.
+// OpenAI Responses API <-> Chat Completions transform (same shim pattern as anthropic.h). Scope
+// v1, stateless: input (string or item array: message/function_call/function_call_output;
+// reasoning items skipped), instructions, flat tools+tool_choice, text.format, temperature/top_p/
+// max_output_tokens, reasoning.effort->think_budget, stream. previous_response_id/store=true rejected.
 
 #pragma once
 
@@ -20,10 +12,8 @@ namespace imp_server::responses {
 
 using json = nlohmann::json;
 
-// Transform a /v1/responses request body into an equivalent
-// /v1/chat/completions body (feed straight into handle_chat_completions).
-// Throws std::invalid_argument with a client-facing message on unsupported
-// fields (previous_response_id, store=true, non-text input parts).
+// responses_to_openai_body: throws std::invalid_argument with a client-facing message on
+// unsupported fields (previous_response_id, store=true, non-text input parts).
 json responses_to_openai_body(const json& rsp);
 
 // Inverse: translate a non-streaming chat.completion response into a

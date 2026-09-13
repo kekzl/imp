@@ -1,17 +1,6 @@
-// /admin/suspend + /admin/resume — suspend the loaded model to host RAM so the
-// GPU is fully free for other workloads, then resume serving in seconds.
-//
-// Suspend: drain in-flight requests (BatchingEngine::pause, same exclusive-
-// access handshake as embeddings), D2H-snapshot the post-upload weight buffers
-// (imp_weights_snapshot_capture), tear down engine + model (all VRAM freed),
-// then imp_gpu_release() — with [suspend] device_reset (default) that includes
-// cudaDeviceReset, so nvidia-smi shows ~0 MiB for this process.
-//
-// Resume: arm the snapshot and run the normal load path
-// (load_model_into_state). The weight upload restores buffer bytes from the
-// snapshot instead of re-reading + re-converting; everything else (KV cache,
-// CUDA graphs, cuBLAS handles) is rebuilt fresh. Sessions/KV do not survive —
-// only the weights stay warm.
+// /admin/suspend: pause() drains in-flight, D2H-snapshots post-upload weight buffers, tears
+// down model+engine, then imp_gpu_release ([suspend] device_reset default resets the device).
+// /admin/resume: reload from the snapshot; only weights stay warm, KV/graphs/cuBLAS rebuild.
 
 #include "handlers.h"
 #include "utils.h"

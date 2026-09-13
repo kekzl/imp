@@ -68,11 +68,9 @@ MODEL_ENV = {
 BINARIES = ['test-core', 'test-text', 'test-kv', 'test-quant', 'test-moe-gdn',
             'test-compute', 'test-attention', 'test-e2e']
 
-# What GitHub CI actually executes on a PR: `ctest -L unit` — test-core,
-# test-text and the CPU-only slice of test-e2e, on a runner with no GPU.
-# Recorded separately from the local full-suite verdict, because "a mutant the
-# merge gate cannot see" and "a mutant nothing in the repo can see" are two
-# different findings and only the second is a missing test.
+# CI_UNIT_E2E_FILTER: what `ctest -L unit` actually runs on a PR (test-core, test-text, the
+# CPU-only test-e2e slice, no GPU). Recorded separately from the full-suite verdict: "the merge
+# gate can't see this mutant" and "nothing in the repo can see it" are different findings.
 CI_UNIT_E2E_FILTER = ('BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:'
                       'EndToEndTest.*:StubModelTest.LoadStubModel:'
                       'StubModelTest.TokenizeStub')
@@ -198,10 +196,8 @@ def run_one(m, log_dir, full_timeout, ci_only=False):
             res['status'] = 'BUILD_FAIL'
             return res
 
-        # --- CI lane first (always run in full; ~0.4 s) ------------------
-        # This answers "would the merge gate have caught it", which is a
-        # separate question from "does the repo contain a test that catches
-        # it". Never short-circuited, because both answers are wanted.
+        # CI lane always runs in full (~0.4s), never short-circuited: "would the merge gate have caught
+        # it" and "does the repo contain a test that catches it" are different questions, both wanted.
         res['ci_killed_by'] = None
         for b, extra in CI_LANES:
             rc, out = run_binary(b, timeout=full_timeout, extra_args=extra)

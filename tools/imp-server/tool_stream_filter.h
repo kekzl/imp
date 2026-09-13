@@ -1,31 +1,15 @@
 #pragma once
 
-// Streaming tool-call demux shared by the OpenAI (handlers_chat_stream.cpp)
-// and Anthropic (handlers_messages.cpp) SSE paths. Pure text-level state
-// machine (same pattern as reasoning_split.h): feed decoded token pieces in,
-// get back the user-visible content plus tool calls, in order.
-//
-// Dialects (see scan_tool_tag / parse_stream_tool_body in tool_call.h):
-//   ChatML  <tool_call>{json}</tool_call>          (JSON, Qwen3.6 XML fallback)
-//   Llama3  <function=NAME>{json}</function>
-//   Gemma-4 <|tool_call>call:NAME{...}<tool_call|> (plus the ChatML fallback)
-//
-// INCREMENTAL ARGUMENT STREAMING: for the JSON layouts (ChatML body starting
-// with '{', and Llama3 where the body IS the arguments object) the filter
-// emits CALL_BEGIN as soon as the function name and the start of the
-// arguments value are known, then CALL_ARGS_DELTA segments carrying the RAW
-// argument bytes as they arrive (JSON-nesting tracked), and CALL_END at the
-// close marker. Previously the whole body was buffered until the close tag —
-// a large code-edit tool call produced 20-60 s of zero SSE bytes. The
-// non-JSON layouts (Qwen3.6 XML fallback, Gemma-4 grammar) still buffer and
-// emit a single CALL segment: their wire format has to be transformed to
-// JSON, which needs the complete body.
-//
-// Unparseable buffered bodies are restored to the content stream verbatim
-// instead of being silently dropped. Once CALL_BEGIN has been emitted the
-// raw-restore option is gone (deltas are already on the wire) — that is why
-// CALL_BEGIN waits for a parsed name AND a '{'/'[' arguments value: a model
-// that got that far virtually always completes the call.
+// Streaming tool-call demux shared by OpenAI and Anthropic SSE paths: pure text-level state
+// machine (feed decoded pieces in, get content + tool calls out, in order). Dialects: ChatML
+// <tool_call>{json}</tool_call> (Qwen3.6 XML fallback), Llama3 <function=NAME>{json}</function>,
+// Gemma-4 <|tool_call>call:NAME{...}<tool_call|>.
+// JSON-layout calls stream incrementally (CALL_BEGIN once name+args start are known, then
+// CALL_ARGS_DELTA per raw byte, CALL_END at close) instead of buffering the whole body (which
+// cost 20-60s of zero SSE bytes on a large code edit); non-JSON layouts still buffer (their wire
+// format needs the complete body to transform to JSON). Unparseable buffered bodies restore to
+// content verbatim; once CALL_BEGIN fires that option is gone, so it waits for a parsed name AND
+// a '{'/'[' value first.
 
 #include "tool_call.h"
 #include "stream_pipeline.h"  // imp::stream::utf8_complete_len (#1554)
@@ -168,9 +152,8 @@ public:
         }
     }
 
-    // Stream ended mid-tag/mid-body: the held raw bytes (incomplete tool
-    // call). For a call whose arguments were already streamed (CALL_BEGIN
-    // emitted) nothing is restorable — the caller should close out the open
+    // finish(): returns held raw bytes for a stream that ended mid-tag/mid-body. Once CALL_BEGIN was
+    // emitted (arguments already streamed) nothing is restorable - the caller must close the open
     // call instead (see call_open()).
     std::string finish() const {
         if (call_open())
@@ -193,14 +176,9 @@ public:
 private:
     enum class Phase { CONTENT, TAG, BODY };
 
-    // Incremental-argument sub-state within BODY:
-    //   PROBE    — parsing the body prefix for the function name + the start
-    //              of a '{'/'[' arguments value (nothing emitted yet)
-    //   ARGS     — CALL_BEGIN emitted; streaming raw argument bytes,
-    //              JSON-nesting tracked
-    //   TAIL     — arguments value closed; swallowing the cosmetic remainder
-    //              (the ChatML "}" wrapper close / whitespace) until close tag
-    //   REJECTED — body is not a streamable JSON layout; buffer like before
+    // StreamState within BODY: PROBE (locating name + args-value start, nothing emitted), ARGS
+    // (CALL_BEGIN emitted, streaming raw arg bytes, JSON-nesting tracked), TAIL (value closed,
+    // swallowing the cosmetic remainder), REJECTED (not a streamable JSON layout, buffer as before).
     enum class StreamState { PROBE, ARGS, TAIL, REJECTED };
 
     static void append_text(Result& r, std::string text) {
@@ -226,13 +204,9 @@ private:
         streamed_args_.clear();
     }
 
-    // Advance the incremental scanner over body_buf_. Emits CALL_BEGIN once
-    // the name + arguments-value start are known, then CALL_ARGS_DELTA for
-    // every confirmed argument byte. Never streams at/past a (potential)
-    // close-marker occurrence: the tracker's limit stops at the first
-    // close_tag_ match and withholds a possible straddling prefix at the
-    // buffer tail, so behaviour stays identical to the buffered path when the
-    // marker appears mid-body (chunking-invariant).
+    // pump_streaming_: emits CALL_BEGIN once name+args-value start are known, then CALL_ARGS_DELTA
+    // per confirmed byte. Never streams at/past a potential close-marker occurrence (withholds a
+    // straddling prefix), so output matches the buffered path when the marker appears mid-body.
     void pump_streaming_(Result& r) {
         if (stream_state_ == StreamState::PROBE) {
             size_t args_start = 0;
@@ -282,19 +256,13 @@ private:
             size_t upto = (args_end_ != std::string::npos) ? args_end_ : i;
             if (upto > args_emitted_) {
                 std::string piece = body_buf_.substr(args_emitted_, upto - args_emitted_);
-                // #1554: `limit` above is pulled back by close_tag_.size() - 1
-                // BYTES so a partially arrived close tag cannot leak into the
-                // arguments. That cut lands mid-codepoint whenever a multi-byte
-                // character sits at the boundary, and each half is
-                // JSON-encoded into its own delta, where dump_safe turns it
-                // into U+FFFD. Measured on Qwen3-8B-Q8_0 with forced
-                // tool_choice: 10 replacement characters in one argument
-                // string. Hold the incomplete tail back for the next feed, the
-                // way the per-token content path has since #1310.
-                //
-                // Not when args_end_ is known: that is the real end of the
-                // value, there is no next feed to complete anything, and a tail
-                // there is genuinely ill-formed rather than split.
+                // #1554: the close-tag pullback (limit -= close_tag_.size()-1 bytes) can land mid-codepoint,
+                // each half JSON-encoded separately into U+FFFD (measured: 10 replacement chars in one arg
+                // string, Qwen3-8B-Q8_0 forced tool_choice). Holds the incomplete UTF-8 tail for the next
+                // feed
+                // (per-token path has done this since #1310) - except when args_end_ is already known, where
+                // a
+                // tail is genuinely ill-formed, not split.
                 if (args_end_ == std::string::npos) {
                     const size_t complete = imp::stream::utf8_complete_len(piece);
                     // Same 3-byte bound as Utf8Stitch::feed: a split codepoint
@@ -319,12 +287,9 @@ private:
         // cosmetic JSON-wrapper close (ChatML) / whitespace.
     }
 
-    // PROBE: decide whether this body is a streamable JSON layout and locate
-    // the arguments value. Llama3: the whole body is the arguments object
-    // (name came from the open tag). ChatML: {"name": "...", "arguments": <v>.
-    // Returns true once streaming can begin (sets args_start); sets
-    // stream_state_ = REJECTED when the layout is provably not streamable
-    // (the buffered path then handles it at close, exactly like before).
+    // try_open_streaming_: decides whether the body is a streamable JSON layout and locates the
+    // arguments value (Llama3: whole body; ChatML: "arguments" field). Sets REJECTED when the layout
+    // is provably not streamable, so the buffered path handles it at close as before.
     bool try_open_streaming_(size_t& args_start) {
         size_t first = body_buf_.find_first_not_of("\n\r\t ");
         if (first == std::string::npos)
@@ -371,10 +336,8 @@ private:
         return true;
     }
 
-    // Scan `"key" \s*:\s* "value"` at/after `pos` (skipping leading ws). On
-    // success advances pos past the value and returns the decoded value.
-    // Returns false when more bytes are needed; sets REJECTED on a definite
-    // mismatch.
+    // scan_json_key_string_: scans `"key": "value"` at/after `pos`. Returns false when more bytes
+    // are needed (not yet a mismatch); sets REJECTED only on a definite mismatch.
     bool scan_json_key_string_(size_t& pos, const char* key, std::string& out) {
         size_t p = body_buf_.find_first_not_of("\n\r\t ", pos);
         if (p == std::string::npos)
@@ -416,11 +379,9 @@ private:
         return false;  // string not terminated yet
     }
 
-    // Close marker found while a streamed call is open: CALL_END with the
-    // accumulated arguments (pump_streaming_'s limit already emitted every
-    // confirmed byte before the marker). If the JSON value never closed
-    // before the marker (model cut the object short), close with what was
-    // streamed — the deltas are already on the wire.
+    // finish_streaming_: close marker found while a call is open -> CALL_END with the accumulated
+    // arguments. If the JSON value never closed before the marker, closes with what was already
+    // streamed (those deltas are on the wire regardless).
     void finish_streaming_(Result& r, size_t /*close_pos*/) {
         Segment seg;
         seg.kind = Segment::Kind::CALL_END;

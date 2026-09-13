@@ -1,17 +1,9 @@
 #pragma once
 
-// Machine-readable output for the shipped binaries (#1583).
-//
-// Two pieces:
-//
-//  - `JsonOut`, a 60-line object writer. imp-cli does not link nlohmann/json
-//    and the documents here are flat maps of numbers and short strings, so a
-//    dependency would buy nothing.
-//  - `json_stdout_reserve()` / `json_emit()`, which make the "stdout carries
-//    EXACTLY one JSON document" promise structural. Rather than auditing every
-//    print site in a 1000-line main() - and every one added later - stdout is
-//    pointed at stderr for the whole run and the real stdout is kept on a
-//    private fd. A print site added tomorrow cannot break the contract.
+// Machine-readable output for the shipped binaries (#1583). JsonOut is a small flat-map
+// writer (imp-cli links no nlohmann/json). json_stdout_reserve()/json_emit() make "stdout
+// carries EXACTLY one JSON document" structural: stdout is redirected to stderr for the run
+// and the real stdout kept on a private fd, so a print site added later can't break the contract.
 
 #include <cstdio>
 #include <string>

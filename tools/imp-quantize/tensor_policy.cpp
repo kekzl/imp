@@ -17,20 +17,17 @@ bool is_float_dtype(const std::string& dtype) { return dtype == "BF16" || dtype 
 
 }  // namespace
 
-// A weight qualifies when it is a 2-D linear matrix the runtime reads through
-// the NVFP4 GEMM path. Everything else is copied through untouched: norms and
-// biases are 1-D, embeddings stay full precision (quantizing them costs quality
-// for no bandwidth win on the decode hot path), and K must be a multiple of 16
-// because that is the micro-block size.
+// A weight qualifies when it's a 2-D linear matrix the runtime reads through the NVFP4 GEMM
+// path. Norms/biases (1-D) and embeddings (full precision, no decode-hot-path bandwidth win)
+// are copied through untouched; K must be a multiple of 16 (the micro-block size).
 bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why_not) {
     if (!is_float_dtype(t.dtype)) {
         why_not = "dtype " + t.dtype + " (already quantized or unsupported)";
         return false;
     }
-    // Rank is checked BEFORE the name, so a 3-D stack is diagnosed as a stack
-    // whatever it is called. The other order made this branch unreachable for
-    // every real stacked checkpoint, since none of them name the tensor
-    // `.weight` — see find_stacked_expert_tensors.
+    // Rank checked BEFORE the name, so a 3-D stack is diagnosed as a stack regardless of name:
+    // the reverse order made this branch unreachable, since no real stacked checkpoint names the
+    // tensor `.weight` (see find_stacked_expert_tensors).
     if (t.shape.size() == 3) {
         why_not = "3-D stacked tensor — needs the per-expert 2-D layout, not supported yet";
         return false;
@@ -43,9 +40,8 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
         why_not = std::to_string(t.shape.size()) + "-D";
         return false;
     }
-    // The role exclusions live in src/model/nvfp4_module_policy.h, which the
-    // LOADER also calls to decide whether a module the checkpoint left plain is
-    // a Linear it should have found packed. One list, so the writer's silence
+    // Role exclusions live in src/model/nvfp4_module_policy.h, which the LOADER also calls to
+    // decide whether an unpacked module should have been packed. One list, so the writer's silence
     // and the reader's refusal cannot disagree about which roles are exempt.
     if (imp::nvfp4_policy::role_excluded(t.name, t.shape[1], quantize_lm_head, why_not))
         return false;

@@ -38,11 +38,10 @@ struct ServerRequest {
     // Track how many output tokens we have already delivered
     size_t notified_count = 0;
 
-    // Queue observability (#1580). t_submit is set by submit(); queue_ms is
-    // filled in when the worker moves this request from pending to active,
-    // i.e. it is the time spent waiting behind other requests and NOT the
-    // prefill. Nothing measured that before, so "the server is slow" and "the
-    // server is busy" looked the same from outside.
+    // Queue observability (#1580): t_submit set by submit(); queue_ms filled when the worker
+    // moves this request from pending to active, i.e. time waiting behind other requests, NOT
+    // prefill. Previously unmeasured, so "the server is slow" and "the server is busy" looked
+    // the same from outside.
     std::chrono::steady_clock::time_point t_submit{};
     std::atomic<double> queue_ms{-1.0};
 
@@ -79,10 +78,9 @@ struct ServerRequest {
     bool is_cancelled() const { return cancelled.load(std::memory_order_acquire); }
 };
 
-// Continuous batching engine that runs inference in a background thread.
-// HTTP handlers submit ServerRequest objects; the worker thread runs the
-// engine step loop, processing multiple requests simultaneously via the
-// scheduler.
+// Continuous batching engine running inference in a background thread: HTTP handlers submit
+// ServerRequest objects, the worker thread runs the engine step loop, processing multiple
+// requests simultaneously via the scheduler.
 class BatchingEngine {
 public:
     // Decode-batch observability (#1580): the knob that bounds batch size is
@@ -95,11 +93,10 @@ public:
     // decoding together right now. The counter pair above gives only the
     // windowed mean and decode_batch_max never resets.
     std::atomic<int64_t> decode_batch_last{0};
-    // Queue split for /metrics (AUDIT_arch_2026 C-5): waiting = submitted
-    // but not yet in a prefill or decode batch (still on pending_queue_, or
-    // handed to the engine and held behind max_batch_size / KV admission);
-    // running = in a batch. queue_depth() is their sum. Refreshed by the
-    // worker every loop, so a scrape never reads scheduler state itself.
+    // Queue split for /metrics (AUDIT_arch_2026 C-5): waiting = submitted but not yet in a
+    // prefill/decode batch (pending_queue_, or held behind max_batch_size/KV admission); running =
+    // in a batch. queue_depth() is their sum, refreshed by the worker every loop so a scrape never
+    // reads scheduler state directly.
     std::atomic<int64_t> queue_waiting{0};
     std::atomic<int64_t> queue_running{0};
 
@@ -110,22 +107,16 @@ public:
     // Starts the background worker thread.
     void start(ImpContext ctx);
 
-    // Stop the background worker thread. Must be called before destroying
-    // the ImpContext. Waits for the worker to finish. Cancels any in-flight
-    // requests — use pause()/resume() instead when the generations must
-    // survive (e.g. embeddings/vision exclusive-access windows).
+    // Stops the background worker thread; must be called before destroying the ImpContext, waits
+    // for the worker to finish. Cancels any in-flight requests - use pause()/resume() instead when
+    // generations must survive (e.g. embeddings/vision exclusive-access windows).
     void stop();
 
-    // Graceful exclusive-access handshake. pause() lets the worker FINISH all
-    // in-flight requests (it never cancels them), then parks the worker thread
-    // so the caller can drive engine->step() directly (embeddings / blocking
-    // vision) without racing the worker. resume() unparks it. The worker thread
-    // stays alive across the window (no thread churn, no cancellation).
-    //
-    // Caller MUST hold state.mtx so no new request is submitted during the
-    // window (chat submit also takes state.mtx). pause() blocks until the
-    // worker is idle and parked, bounded by timeout_ms (0 = no in-flight work
-    // to drain → returns immediately). Returns true once parked.
+    // Graceful exclusive-access handshake: pause() lets the worker FINISH in-flight requests
+    // (never cancels), then parks the worker thread so the caller can drive engine->step() directly
+    // without racing it; resume() unparks. Caller MUST hold state.mtx during the window (chat
+    // submit also takes it). pause() blocks until parked, bounded by timeout_ms (0 = no work to
+    // drain, returns immediately). Returns true once parked.
     bool pause(int timeout_ms = 60000);
     void resume();
 
@@ -138,31 +129,26 @@ public:
 
     bool is_running() const { return running_.load(std::memory_order_relaxed); }
 
-    // True after the worker declared the CUDA context poisoned and stopped
-    // (#874). /health reports unhealthy so an orchestrator can restart the
-    // process — before this the server answered "ok" while every request
-    // failed with internal_error.
+    // True after the worker declares the CUDA context poisoned and stops (#874): /health reports
+    // unhealthy so an orchestrator can restart the process, instead of answering "ok" while every
+    // request fails with internal_error.
     bool faulted() const { return faulted_.load(std::memory_order_relaxed); }
 
 private:
     void worker_loop();
-    // Cancel every active request with finish "internal_error", re-probe the
-    // device and, on an unrecoverable class, set faulted_ and stop the worker
-    // (#874, AUDIT_arch_2026 D-1). `observed` is the error the caller already
-    // holds (cudaSuccess when the trigger was a host throw).
+    // Cancels every active request with finish "internal_error", re-probes the device and, on
+    // an unrecoverable class, sets faulted_ and stops the worker (#874, AUDIT_arch_2026 D-1).
+    // `observed` is the error the caller already holds (cudaSuccess when the trigger was a host throw).
     void fail_active_requests_(const std::string& why, cudaError_t observed);
 
     ImpContext ctx_ = nullptr;  // non-owning
 
     std::thread worker_thread_;
-    // Deferred delivery (#step-timing 2026-08-25): every push_token's
-    // notify_one wakes an SSE handler that runs (detokenise + socket write)
-    // before the worker regains the core — at 32 streams that serialised
-    // ~6.4 ms of handler work per step INTO the GPU driver loop (19% of the
-    // step period). The worker now hands the step's events to this thread in
-    // one batch and proceeds to the next GPU step; the notifier does the
-    // wakeups while the GPU is busy. Per-request ordering is preserved (one
-    // notifier, FIFO).
+    // Deferred delivery: every push_token's notify_one used to wake an SSE handler that ran
+    // (detokenise + socket write) before the worker regained the core - at 32 streams that
+    // serialised ~6.4ms/step of handler work INTO the GPU driver loop (19% of the step period). The
+    // worker now hands the step's events to this thread in one batch and proceeds; the notifier
+    // wakes clients while the GPU is busy. Per-request ordering preserved (one notifier, FIFO).
     struct PendingDelivery {
         std::shared_ptr<ServerRequest> sr;
         int32_t token_id;

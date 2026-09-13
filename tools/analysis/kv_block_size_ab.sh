@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
-# KV block size A/B on ONE binary: kv_cache.block_size=<A> vs =<B>, alternating
-# arms, spec-off, tg128 per context length (AUDIT_arch_2026 B-5).
-#
-# The engine's auto rule (32 for n_kv_heads <= 4, else 16) dates from
-# 2026-03-23 and carried no measurement. Run this on a model of each class:
-# Qwen3-8B-Q8_0 (8 KV heads, auto 16) and Qwen3-14B-NVFP4 (8 KV heads) or
-# Qwen3.8-27B-NVFP4-vllm (4 KV heads, auto 32). Block size moves the split-K
-# count and the table-walk length, so the effect, if any, grows with context:
-# 2048 alone cannot see it (scripts/bench_longctx_ab.sh rule 1).
-#
-# Usage:
-#   tools/analysis/kv_block_size_ab.sh <bs-A> <bs-B> [ctx-list] [model-list] [image]
-#   tools/analysis/kv_block_size_ab.sh 16 32 "2048 8192 32768" /models/Qwen3-8B-Q8_0.gguf
+# KV block size A/B on one binary (kv_cache.block_size=A vs B), alternating arms, spec-off,
+# tg128 per context length (AUDIT_arch_2026 B-5). The engine's auto rule (32 for
+# n_kv_heads<=4, else 16) carried no measurement.
+# Block size moves the split-K count and table-walk length, so the effect grows with context:
+# 2048 alone can't see it. Run on a model of each GQA class.
+# Usage: tools/analysis/kv_block_size_ab.sh <bs-A> <bs-B> [ctx-list] [model-list] [image].
 set -euo pipefail
 BS_A="${1:?usage: $0 <bs-A> <bs-B> [ctx-list] [model-list] [image]}"
 BS_B="${2:?usage: $0 <bs-A> <bs-B> [ctx-list] [model-list] [image]}"

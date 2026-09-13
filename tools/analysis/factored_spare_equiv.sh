@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# Equivalence A/B for the factored verify spare (speculative.factored_spare).
-# One image, one model, greedy and deterministic: the slot-swapping verify and
-# the factored one must emit the SAME tokens. Also prints each arm's resolved
-# SSM/GDN state pool and batch, which is what the factored form is for.
-#
-# Usage: bash tools/analysis/factored_spare_equiv.sh [max_batch] [n_prompts]
+# Equivalence A/B for speculative.factored_spare: one image, one model, greedy and
+# deterministic; the slot-swapping verify and the factored one must emit the SAME tokens.
+# Also prints each arm's resolved SSM/GDN state pool and batch.
+# Usage: bash tools/analysis/factored_spare_equiv.sh [max_batch] [n_prompts].
 set -u
 
-# Both arms must run the SAME geometry. The factored arm frees ~2.5 GiB, so
-# left to itself it keeps a larger batch and a six times larger KV pool, and
-# greedy output then differs for batch-shape reasons alone (SETTLED D-2) - which
-# is what the first run of this A/B showed and what it must not (2026-09-12).
-# BATCH is pinned below the slot-swapping arm's clamp and the KV pool is pinned
-# outright, so the only difference left is how the drafted row is carried.
+# Both arms must run the SAME geometry: the factored arm frees ~2.5 GiB and left to itself
+# keeps a larger batch and KV pool, making greedy output differ for batch-shape reasons alone
+# (SETTLED D-2). BATCH is pinned below the slot-swapping arm's clamp and the KV pool is pinned
+# outright, so the only remaining difference is how the drafted row is carried.
 BATCH="${1:-16}"
 NPROMPT="${2:-8}"
 KVBLOCKS="${KVBLOCKS:-2000}"
@@ -49,11 +45,9 @@ run_arm() {
     wait
     cat "$OUT/$tag."*.part > "$OUT/$tag.txt"
     rm -f "$OUT/$tag."*.part
-    # Positive control, as a GATE. An arm that refused the batched verify emits
-    # the same tokens as any other dense arm, so "IDENTICAL" from a refused arm
-    # proves nothing - which is exactly what the first run of this A/B produced
-    # (2026-09-12: the factored arm reserved no spare slots, so the staging gate
-    # never built its buffers and every step refused with 'no_spare_slots').
+    # Positive control, as a GATE: an arm that refused the batched verify emits the same tokens as
+    # any dense arm, so "IDENTICAL" from a refused arm proves nothing. Guards against the factored
+    # arm silently reserving no spare slots and refusing every step with "no_spare_slots".
     local inits batched
     inits=$(docker logs "$NAME" 2>&1 | grep -c "speculative.factored_spare:")
     # The BATCHED verify's one-shot proof line. Its periodic counter only logs

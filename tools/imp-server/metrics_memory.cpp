@@ -1,11 +1,6 @@
-// Memory metrics for /metrics — invariant I7 (capacity is not occupancy,
-// docs/internals/MEMORY.md).
-//
-// Its own translation unit because handlers_misc.cpp is a grab-bag of unrelated
-// endpoints, and adding 44 lines to it pushed the file past the file-size warn
-// threshold (627 code LOC against a 600 warn for a normal TU). The gate is a
-// proxy for recompile blast radius, and "the misc file grew again" is exactly
-// the smell it is meant to surface — so this is a split, not an allowlist entry.
+// Memory metrics for /metrics (invariant I7, docs/internals/MEMORY.md). Own TU: adding these
+// lines pushed handlers_misc.cpp past the file-size warn threshold (627 vs 600 LOC) - a split,
+// not an allowlist entry (the gate is a recompile-blast-radius proxy).
 
 #include "handlers.h"
 #include "handlers_internal.h"
@@ -20,11 +15,9 @@
 #include <string>
 
 void append_memory_metrics(std::string& out, ServerState& state) {
-// Memory: capacity AND occupancy, per tier (invariant I7,
-// docs/internals/MEMORY.md). A single "VRAM used" gauge cannot tell a KV
-// pool that is 90 % full from one that is 90 % reserved and empty, and both
-// capacity questions an operator asks — "can this box take another
-// concurrent request?", "is the budget doing anything?" — need the split.
+// Reports memory capacity AND occupancy per tier (invariant I7): a single "VRAM used" gauge
+// cannot distinguish a KV pool that is 90% full from one that is 90% reserved and empty, and an
+// operator needs to ask both questions.
 out += "# HELP imp_memory_reserved_bytes Capacity held by a memory tier\n";
 out += "# TYPE imp_memory_reserved_bytes gauge\n";
 out += "# HELP imp_memory_live_bytes In use inside that tier\n";
@@ -38,15 +31,11 @@ for (const auto& t : imp::memory_tier_stats()) {
 // process-global snapshot. blocks, not bytes: it is the unit admission
 // control actually rations.
 if (state.ctx && state.ctx->engine) {
-    // MoE expert imbalance (#1548). max(M_e) per launch is what decides grouped
-    // GEMM cost: the kernel pads every expert to one M tile, so one hot expert
-    // sets it for all of them and the padding is the difference between this
-    // ratio and 1. It was computed on the host, used for tiling and dropped, so
-    // "would moe.nvfp4_smallM fire on my workload" could only be answered by
-    // enabling it and reading a once-per-process INFO line.
-    //
-    // Scraped live, not written at shutdown like the histogram file: a serving
-    // process is exactly the one that could not be asked before.
+    // MoE expert-imbalance ratio (#1548): max(M_e) per launch sets grouped-GEMM cost (kernel pads
+    // every expert to one M tile) - computed on the host for tiling and then dropped, so "would
+    // moe.nvfp4_smallM fire here" needed enabling it and reading a once-per-process INFO line.
+    // Scraped live (not written at shutdown): a serving process is exactly the one that couldn't be asked
+    // before.
     if (const auto* ex = state.ctx->engine->executor()) {
         const auto imb = ex->moe_imbalance();
         bool any = false;
@@ -85,14 +74,9 @@ if (state.ctx && state.ctx->engine) {
                "prefix cache, pins\n";
         out += "# TYPE imp_kv_blocks_used gauge\n";
         out += "imp_kv_blocks_used " + std::to_string(total_blocks - free_blocks) + "\n";
-        // The split matters more than the total, and its absence cost me a wrong
-        // bug report (#1115): `used` grew by one block per request and looked
-        // like a leak, but the server enables prefix caching by default, so
-        // free_sequence MOVES the last reference of a hashed block into the
-        // cache instead of dropping it. Such a block is occupied AND reclaimable
-        // — precisely the distinction invariant I7 exists to make, and a single
-        // "used" gauge cannot express it. imp_kv_blocks_live is the one a soak
-        // should assert returns to baseline.
+        // KV blocks: "used" growing per request can be prefix-cache reclaim, not a leak (#1115) - a
+        // freed sequence's last reference MOVES into the cache instead of being dropped (occupied AND
+        // reclaimable, invariant I7). A soak test should assert imp_kv_blocks_live returns to baseline.
         if (auto* mgr = state.ctx->engine->kv_manager()) {
             const int cached = mgr->num_cached_blocks();
             out += "# HELP imp_kv_blocks_cached KV blocks held by the prefix cache (occupied but "
@@ -121,10 +105,9 @@ if (state.ctx && state.ctx->engine) {
             out += "imp_kv_blocks_reserved " + std::to_string(mgr->outstanding_reserved_blocks()) + "\n";
         }
 
-        // Speculative decoding (#1321). Without these a spec-decoding test
-        // cannot tell whether the drafter ran: the n-gram matcher only fires on
-        // repetitive context, so on ordinary prompts drafted stays 0 and the
-        // test compares the non-speculative path against itself and passes.
+        // Speculative-decode metrics (#1321): without them a test can't tell whether the drafter ran -
+        // the n-gram matcher only fires on repetitive context, so on ordinary prompts drafted stays 0
+        // and a test silently compares the non-speculative path against itself.
         const auto& sp = state.ctx->engine->spec_stats();
         out += "# HELP imp_spec_drafted_total Draft tokens proposed by speculative decoding\n";
         out += "# TYPE imp_spec_drafted_total counter\n";
@@ -139,14 +122,10 @@ if (state.ctx && state.ctx->engine) {
         out += "# TYPE imp_spec_miss_steps_total counter\n";
         out += "imp_spec_miss_steps_total " + std::to_string(sp.miss_steps) + "\n";
 
-        // Per draft SOURCE. The aggregate above cannot price the MTP head: the
-        // n-gram/suffix matcher, the prompt prediction and token recycling fill
-        // the same verify chunk and land in the same totals, so a server
-        // running the documented MTP pair (mtp_k=2, ngram=false) reports the
-        // same four series as one running the matcher alone. accepted/drafted
-        // is the acceptance rate per source; emitted/verify_steps is what the
-        // step actually bought; verify_wall_ms is what it cost.
-        // `ngram` is every non-MTP drafter together.
+        // Per-draft-SOURCE stats: the aggregate can't price the MTP head alone (n-gram/prediction/
+        // recycling share the same verify chunk and totals). accepted/drafted = acceptance rate per
+        // source; emitted/verify_steps = what the step bought; verify_wall_ms = its cost. `ngram` covers
+        // every non-MTP drafter.
         auto spec_source = [&out](const char* name, const imp::Engine::SpecSourceStats& s) {
             const std::string p = std::string("imp_spec_") + name + "_";
             out += "# HELP " + p + "verify_steps_total Verify forwards this source drafted\n";

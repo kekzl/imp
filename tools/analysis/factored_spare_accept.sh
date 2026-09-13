@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# Acceptance-rate oracle for the factored verify spare.
-#
-# Byte equality is NOT available here: the batched verify needs concurrency, and
-# under concurrency which requests carry a draft on a given step is a timing
-# race, so two arms take different step sequences and greedy text diverges for
-# reasons that have nothing to do with the state (SETTLED D-2, and the P7
-# finding of 2026-09-10). What IS decisive is the acceptance rate: the verify
-# accepts a draft only when the model's own next token matches it, so a wrong
-# recurrent state or conv window collapses acceptance towards zero while a
-# correct one leaves it where the slot-swapping path has it.
-#
-# Usage: bash tools/analysis/factored_spare_accept.sh [batch] [streams] [tokens]
+# Acceptance-rate oracle for the factored verify spare: byte equality is not available since
+# batched verify concurrency makes which requests carry a draft a timing race (SETTLED D-2), so
+# greedy text diverges for reasons unrelated to state. Acceptance rate is decisive instead: the
+# verify accepts a draft only when it matches the model's own next token, so a wrong recurrent
+# state or conv window collapses acceptance toward zero.
+# Usage: bash tools/analysis/factored_spare_accept.sh [batch] [streams] [tokens].
 set -u
 
 BATCH="${1:-16}"

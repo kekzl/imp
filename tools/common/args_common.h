@@ -1,29 +1,18 @@
 #pragma once
 
-// The CLI flags imp-cli and imp-server both accept, in one place (#1209).
-//
-// 26 flags were parsed by two hand-written else-if chains that had to agree by
-// review alone — a fix applied to one binary and not the other is invisible
-// until someone hits it. Verified before consolidating: every one of the 26
-// handlers was byte-identical in both parsers, and every default matched except
-// `max_tokens` — 256 in imp-cli, 8192 in imp-server. That gap turned out to be
-// age, not intent (see the field), so both now use 8192 and the shared struct
-// needs no per-tool override at all.
-//
-// Structured as a BASE CLASS rather than a member so that `args.model_path`
-// keeps working at every existing use site in both binaries — the consolidation
-// touches the two parsers and nothing else. Should a per-tool default ever be
-// needed again, a derived struct just assigns it in its own initialiser.
+// CLI flags imp-cli and imp-server both accept, in one place (#1209): two hand-written
+// else-if chains had to agree by review alone, so a fix to one binary was invisible in the other.
+// Structured as a BASE CLASS (not a member) so `args.model_path` keeps working at every
+// existing use site; a per-tool default can still be added via a derived struct's initialiser.
 
 #include <string>
 #include <vector>
 
 // Flags shared by imp-cli and imp-server. Parsed by parse_common_flag().
 struct CommonArgs {
-    // imp.conf integration. --config overrides the search-path default; --set is
-    // a repeatable key=value (e.g. --set kv_cache.dtype=fp8) applied on top.
-    // Unknown keys are an ERROR for --set (a typo silently doing nothing is how
-    // three scoring runs once ran without the determinism they claimed).
+    // imp.conf integration: --config overrides the search-path default; --set is a repeatable
+    // key=value (e.g. --set kv_cache.dtype=fp8) applied on top. Unknown keys are an ERROR for
+    // --set: a silent no-op once let scoring runs claim determinism they didn't have.
     std::string config_path;
     std::vector<std::string> config_overrides;
 
@@ -32,11 +21,10 @@ struct CommonArgs {
 
     int device = 0;
     int gpu_layers = -1;  // -1 = all on GPU
-    // 8192 for both tools. imp-cli sat at 256 until #1209 — a default from
-    // before reasoning models, where the think block alone overruns it and the
-    // answer comes back empty with finish_reason=length. On a 32 GB card the
-    // output length is not the scarce resource; KV capacity is, and that is
-    // sized separately (max_seq_len auto + the planner's min_kv_tokens floor).
+    // 8192 for both tools: imp-cli's old default of 256 predates reasoning models, where the
+    // think block alone overruns it and the answer returns empty (finish_reason=length).
+    // Output length is not the scarce resource on a 32GB card; KV capacity is, sized separately
+    // (max_seq_len auto + the planner's min_kv_tokens floor).
     int max_tokens = 8192;
 
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
@@ -66,30 +54,13 @@ struct CommonArgs {
     bool dual_path_quant = false;  // --dual-path-quant: FP8 attention + NVFP4 FFN
 };
 
-// Consumes argv[i] if it is one of the shared flags, advancing `i` past any
-// value it takes, and returns true. Returns false (leaving `i` untouched) when
-// the flag is not one of ours, so the caller falls through to its own chain.
-//
-// Callers must invoke this BEFORE their tool-specific chain: the two binaries
-// must not be able to shadow a shared flag with a divergent local handler,
-// which is the failure this consolidation exists to prevent.
+// Consumes argv[i] if it's a shared flag (advancing i past any value), returns true;
+// returns false, leaving i untouched, otherwise. Callers must invoke this BEFORE their
+// tool-specific chain so a shared flag cannot be shadowed by a divergent local handler.
 bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i);
 
-// Where a calibration run writes its statistics.
-//
-// `imp_calibration_write()` takes the path as an argument, so imp-cli passed
-// `--calibrate <out>` straight through and NOTHING ever read
-// `[calibration] out_path`. The key was parsed (config.cpp), documented in
-// config.h ("Where imp_calibration_write() puts the file") and offered in
-// imp.conf.example - a promise to the operator that nothing kept: setting it
-// produced no file and no warning.
-//
-// Resolution order, flag first, because a flag is the more specific intent:
-//   1. `--calibrate <path>` if given
-//   2. `[calibration] out_path` from imp.conf
-//   3. empty, meaning no calibration run was asked for
-//
-// Pure and here rather than inline in main.cpp so it has a test: an unwired
-// knob is what this fixes, and wiring it untested would be the same defect one
-// step along.
+// imp_calibration_write() takes the path as an argument; --calibrate <out> passed it straight
+// through and NOTHING ever read [calibration] out_path, despite it being documented and
+// parsed. Resolution order: --calibrate <path> flag, then [calibration] out_path, then empty
+// (no calibration run asked for).
 std::string resolve_calibration_out(const std::string& flag_value, const std::string& config_value);

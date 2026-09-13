@@ -1,15 +1,7 @@
 #!/bin/bash
-# ab_base_image.sh - build the base arm of the paired perf gate.
-#
-# <ref> (default origin/main) is checked out into a throwaway git worktree and
-# built with the same Dockerfile arguments `make build` uses, tagged
-# imp:ab-<sha8> and imp:ab-base. The tag is reused when it exists, so one main
-# sha costs one build (~6 min cold, ~40 s from a warm ccache) however many
-# pushes are gated against it.
-# The worktree's own scripts/dep_build_args.sh supplies the dependency pins, so
-# the base arm is built with ITS pins, not this tree's.
-#
-# Usage: scripts/ab_base_image.sh [ref]      # prints the tag on the last line
+# ab_base_image.sh [ref] (default origin/main): builds the base arm of the paired perf gate
+# in a throwaway worktree, tagged imp:ab-<sha8>/imp:ab-base (reused if it exists, one build per sha).
+# Uses the worktree's own scripts/dep_build_args.sh pins, not this tree's. Prints the tag on the last line.
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"

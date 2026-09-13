@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# longctx_conc_client.py - N concurrent LONG prompts (~15.5k tokens from the
-# NIAH filler, unique head per stream) against a running imp-server.
-# Usage: longctx_conc_client.py PORT CONC GEN TAG
-# Prints: WAVE tag conc gen sum_completion wall_s
+# N concurrent LONG prompts (~15.5k tokens from the NIAH filler, unique head per stream)
+# against imp-server. Usage: longctx_conc_client.py PORT CONC GEN TAG. Prints: WAVE tag conc
+# gen sum_completion wall_s.
 import json
 import sys
 import threading

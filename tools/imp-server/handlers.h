@@ -28,10 +28,8 @@
 
 using json = nlohmann::json;
 
-// Observability endpoints (/health, /metrics, /v1/models) grab state.mtx with
-// this bounded timeout instead of blocking unbounded: a long /v1/embeddings
-// call holds the lock for its whole computation, and an unbounded wait here
-// would hang a liveness probe and get a healthy container killed (#889).
+// /health, /metrics, /v1/models take state.mtx with this bounded timeout, never unbounded: a
+// long /v1/embeddings call holds the lock for its whole computation (#889).
 inline constexpr std::chrono::milliseconds kObservabilityLockTimeout{250};
 
 // Per-request JSONL logger. Opt-in via --log-requests <path>; appends one
@@ -66,16 +64,8 @@ struct RequestLogger {
     }
 };
 
-// Prometheus-style latency histogram (cumulative buckets, in seconds).
-// Lock-free: each observation bumps the matching cumulative buckets + sum +
-// count.
-//
-// The ladder is per-instance because one ladder does not fit every quantity
-// (#1577). Request duration and TTFT are sub-second-to-minutes; inter-token
-// latency is single-digit MILLISECONDS - at imp's own documented decode rates
-// every ITL observation landed in the first bucket of the shared ladder
-// (le=0.005), so histogram_quantile returned a function of the bucket bounds
-// rather than of the data.
+// Prometheus-style cumulative-bucket histogram, lock-free (each observation bumps buckets+sum+count).
+// Ladder is per-instance (#1577): ITL is single-digit ms, request duration/TTFT is sub-second-to-minutes.
 struct LatencyHistogram {
     static constexpr int kNumBuckets = 11;
     // Sub-second-to-minutes: request duration, TTFT.
@@ -110,11 +100,8 @@ struct LatencyHistogram {
 
 // Server-wide metrics (atomics for lock-free reads from /metrics endpoint)
 struct ServerMetrics {
-    // Per-endpoint series (AUDIT_arch_2026 E-7): the same request counter and
-    // latency ladders as the totals below, emitted as
-    // `imp_endpoint_*{endpoint="..."}` so a dashboard can tell /v1/messages
-    // from /v1/completions and an error rate per dialect exists. The
-    // unlabelled totals stay what they are (the Grafana panels read them).
+    // Per-endpoint request/latency series (AUDIT_arch_2026 E-7): imp_endpoint_*{endpoint="..."}
+    // so a dashboard can separate error rate per dialect. Unlabelled totals kept for existing panels.
     enum Endpoint { kChat = 0, kCompletions, kMessages, kResponses, kEmbeddings, kRerank, kEndpointCount };
     static const char* endpoint_name(int e) {
         static const char* const names[kEndpointCount] = {"chat_completions", "completions", "messages",
@@ -191,54 +178,37 @@ struct ServerMetrics {
     std::atomic<int64_t> tokens_completion_total{0};
     std::atomic<int64_t> tokens_cached_total{0};  // Prefix cache hits
     std::atomic<int64_t> requests_cancelled{0};   // Client-disconnect cancellations
-    // Requests the SERVER gave up on at --request-timeout. Distinct from
-    // requests_cancelled, which is the client going away: this one is imp's
-    // own decision and the operator's to tune (#1640). Without it a timeout
-    // was invisible - the client saw finish_reason "length", the same value a
-    // completed token budget produces, and no counter moved.
+    // requests_timed_out: server-initiated --request-timeout, distinct from requests_cancelled
+    // (client gone). Without this counter a timeout was invisible (finish_reason "length" either way, #1640).
     std::atomic<int64_t> requests_timed_out{0};
-    // Requests that ended with EMPTY content beside a non-empty reasoning
-    // channel: the token budget went to thinking and the answer never started.
-    // Same shape of blind spot requests_timed_out closed - the client sees
-    // finish_reason "stop" or "length", both of which a completed answer also
-    // produces, and no counter moved. The per-request half is the
-    // `imp_finish_detail: "reasoning_budget_exhausted"` field on the choice.
+    // requests_reasoning_exhausted: empty content beside a non-empty reasoning channel (budget spent
+    // thinking). Same blind-spot class as requests_timed_out; per-request detail is imp_finish_detail.
     std::atomic<int64_t> requests_reasoning_exhausted{0};
-    // Constrained requests (json_schema/json_mode/enforced tools) that ALSO
-    // request logprobs: they silently leave the ConstrainedPipeline fast path
-    // for eager decode (~102 vs ~235 tok/s on the 8B reference) — surfaced
-    // here so the slowdown is diagnosable (#1006).
+    // constrained_eager_fallback: json_schema/json_mode/enforced-tools requests that also ask for
+    // logprobs drop the ConstrainedPipeline fast path for eager decode (~102 vs ~235 tok/s, 8B ref, #1006).
     std::atomic<int64_t> constrained_eager_fallback{0};
     std::atomic<int64_t> last_request_duration_ms{0};
     std::atomic<int64_t> last_ttft_ms{0};  // Time to first token (ms)
     std::atomic<int64_t> model_loads_total{0};
     LatencyHistogram request_duration;  // end-to-end request latency
     LatencyHistogram ttft;              // time to first token
-    // Per-TOKEN inter-token latency, on a millisecond ladder. It used to
-    // observe one per-request MEAN on the request-duration ladder, which
-    // answers neither "how long between tokens" nor "how does that vary"
-    // (#1577).
+    // inter_token: per-TOKEN latency on a millisecond ladder, not a per-request mean on the
+    // request-duration ladder (#1577), which cannot answer "how does it vary".
     LatencyHistogram inter_token{LatencyHistogram::kItlBounds};
     // Time from admission to the first decode step, i.e. how long a request
     // waited behind others. Nothing measured queueing before (#1580).
     LatencyHistogram queue_time;
-    // Queue wait of a request the handler gives up on (client gone, or the
-    // server's --request-timeout) before the worker admitted it. The wait is
-    // otherwise closed at the first token, so a queue that times requests out
-    // read as empty in imp_queue_time_seconds.
+    // Queue wait for a request given up on (client gone, or --request-timeout) before admission:
+    // otherwise wait is only closed at first token, so a timed-out request reads as 0 in
+    // imp_queue_time_seconds.
     void observe_unadmitted_queue_wait(std::chrono::steady_clock::time_point t_submit, double queue_ms) {
         if (queue_ms >= 0.0 || t_submit == std::chrono::steady_clock::time_point{})
             return;
         queue_time.observe(
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t_submit).count());
     }
-    // (Decode batch size lives on the BatchingEngine, where the batch is
-    // formed; /metrics reads it from there.)
-    // 4xx refusals. requests_failed counts 5xx only, and every rejection this
-    // server is designed to emit is a 4xx - so the error counter was blind to
-    // the whole designed error surface (#1579). Kept as its own series rather
-    // than folded in, because "the server broke" and "the server refused" are
-    // different alerts.
+    // requests_rejected counts 4xx refusals separately from requests_failed (5xx only, #1579):
+    // "the server broke" and "the server refused" are different alerts.
     std::atomic<int64_t> requests_rejected{0};
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
@@ -248,10 +218,8 @@ struct ServerState {
     // OTLP span exporter (server.otlp_endpoint); one span set per request.
     Tracer tracer;
     ImpContext ctx = nullptr;
-    // LoRA adapters loaded at startup (--lora NAME=PATH): name -> C-API id.
-    // Selected per request via the "lora" body field; empty/absent = base.
-    // Swaps re-capture decode graphs — single-user semantics (imp's mission),
-    // the active adapter is engine-global between requests.
+    // LoRA adapters loaded at startup (--lora NAME=PATH): name -> C-API id. Per-request "lora" field
+    // selects; empty/absent = base. Swap recaptures decode graphs; adapter is engine-global (single-user).
     std::map<std::string, int32_t> lora_ids;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
@@ -264,18 +232,12 @@ struct ServerState {
     std::timed_mutex mtx;
     int default_max_tokens = 8192;
     int max_seq_len = 0;
-    // The batch size the CURRENT load resolved to (flag > imp.conf > per-load
-    // override > 0 = engine auto). Recorded because two decisions outside
-    // build_config need it - whether speculative.mtp_k=auto engages, and what
-    // /health reports as the reason it did not - and both read the raw CLI
-    // flag before 2026-08-29, which made `runtime.max_batch_size=1` from
-    // imp.conf a single-stream server that auto still declined.
+    // resolved_max_batch_size: the CURRENT load's resolved batch size. Feeds speculative.mtp_k=auto
+    // and /health's decline reason; both read the raw CLI flag before 2026-08-29 (see id 465).
     int resolved_max_batch_size = 0;
-    // MTP head facts of the CURRENT load, published so the request path can
-    // read them without taking state.mtx: the per-request `"speculative":
-    // {"mtp_k": N}` field is validated against the armed depth on every
-    // request, and /health's lock contention is already known debt (#888).
-    // Written once per load (handlers.cpp), under the same lock a swap holds.
+    // armed_mtp_k: MTP depth armed by the CURRENT load (Engine::mtp_spec_decode_k()), read lock-free
+    // so /health and per-request validation avoid state.mtx (#888). Written once per load under the swap
+    // lock.
     std::atomic<int> armed_mtp_k{0};        // Engine::mtp_spec_decode_k()
     std::atomic<bool> mtp_head_present{false};  // checkpoint ships MTP tensors
     std::atomic<bool> mtp_head_loaded{false};   // ... and this process uploaded them
@@ -291,10 +253,9 @@ struct ServerState {
     bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
     int32_t think_start_id = -1;  // <think> token ID (-1 if not present)
     int32_t think_end_id = -1;    // </think> token ID (-1 if not present)
-    // Gemma-4 emits its reasoning/answer structure as "<|channel>NAME\n...<channel|>\n..."
-    // where NAME is one of {thought, analysis, final, ...}. The closing <channel|> is
-    // often omitted on short answers. We route these headers out of the user-facing
-    // content stream; see handlers.cpp for the state-machine filter.
+    // Gemma-4 emits reasoning/answer structure as "<|channel>NAME...<channel|>" (NAME: thought,
+    // analysis, final, ...; closing tag often omitted on short answers). Routed out of user content
+    // by the state-machine filter in handlers.cpp.
     int32_t channel_open_id = -1;       // <|channel>  (-1 if not a channel model)
     int32_t channel_close_id = -1;      // <channel|>
     int32_t channel_newline_id = -1;    // '\n' used to terminate a channel header
@@ -305,10 +266,8 @@ struct ServerState {
     // allowing multiple concurrent requests to be processed together.
     std::unique_ptr<BatchingEngine> batching;
 
-    // Suspend-to-RAM (/admin/suspend, /admin/resume): while suspended the
-    // model/engine are torn down (VRAM freed), the weights live in the host
-    // snapshot, and inference endpoints answer 503. Atomic so /health can
-    // read it without state.mtx. All writes happen under state.mtx.
+    // suspended: true while /admin/suspend has torn down model+engine (VRAM freed, weights in host
+    // snapshot); inference endpoints answer 503. Atomic so /health reads it lock-free; writes hold state.mtx.
     std::atomic<bool> suspended{false};
     // True while load_model_into_state() runs (startup load, auto-load, swap):
     // the old engine is gone and the new one is not up. GET /ready reads it
@@ -343,12 +302,8 @@ struct ServerState {
 
     bool model_loaded() const { return ctx != nullptr; }
 
-    // Lock-free-ish snapshot of {loaded, model_name} for the observability
-    // endpoints (/health, /metrics, /v1/models). Guarded by its own tiny mutex
-    // that is only ever held for a trivial copy — never across inference — so
-    // these endpoints can read model status without contending on `mtx`, which
-    // a long /v1/embeddings call deliberately holds for its whole computation
-    // (#889). Published under `mtx` at every (un)load; read on lock timeout.
+    // obs_mtx guards a {loaded, model_name} snapshot for observability endpoints, held only for a
+    // trivial copy (never across inference, #889). Published under state.mtx at every (un)load.
     std::mutex obs_mtx;
     bool obs_loaded = false;
     std::string obs_model_name;
@@ -370,10 +325,9 @@ struct ServerState {
 
 // Graceful shutdown
 extern std::atomic<httplib::Server*> g_server;
-// Set by the signal handler before the listener stops: requests httplib had
-// already accepted are answered 503 instead of being served into a teardown,
-// and main() drains the in-flight generations (server.model_swap_drain_ms)
-// before the batching engine is stopped (AUDIT_arch_2026 E-6).
+// g_draining: set by the signal handler before the listener stops. Already-accepted requests get
+// 503 instead of being served into teardown; main() then drains in-flight work
+// (server.model_swap_drain_ms) before stopping the batching engine (AUDIT_arch_2026 E-6).
 extern std::atomic<bool> g_draining;
 
 void signal_handler(int sig);
@@ -387,11 +341,9 @@ int64_t unix_timestamp();
 std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir);
 std::string find_model_path(const ServerState& state, const std::string& name);
 
-// Max batch size for one load: --max-batch > [runtime] max_batch_size from
-// imp.conf > 0 (engine auto-sizes). One place, because build_config is not the
-// only caller that has to agree with it. (A per-load JSON `overrides` object
-// sat between the two until AUDIT_arch_2026 G-12: 11 keys parsed, every caller
-// passed it empty, no request body ever produced it.)
+// resolve_max_batch_size: --max-batch > [runtime] max_batch_size (imp.conf) > 0 (auto). One
+// function because multiple callers must agree (AUDIT_arch_2026 G-12 removed a dead per-load
+// JSON overrides object: 11 keys parsed, no request body ever populated it).
 int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg);
 
 ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
@@ -406,10 +358,8 @@ void handle_ready(const httplib::Request& req, httplib::Response& res, ServerSta
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
                            const std::string& model_id);
-// Context-window probes for OpenAI-compatible clients that auto-detect the max
-// context length. /props follows llama.cpp (n_ctx), /info follows TGI
-// (max_total_tokens / max_input_tokens); /v1/models carries vLLM's
-// max_model_len + llama.cpp's meta.n_ctx_train on the model object.
+// Context-window auto-detect probes: /props (llama.cpp n_ctx), /info (TGI max_total_tokens /
+// max_input_tokens), /v1/models (vLLM max_model_len + llama.cpp meta.n_ctx_train).
 void handle_props(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_info(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
@@ -439,9 +389,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
 // in one forward. Requires a reranker model to be loaded; see handlers_rerank.cpp.
 void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
-// POST /admin/suspend — snapshot weights to host RAM, tear the model/engine
-// down, free (approximately) all VRAM. POST /admin/resume — reload the same
-// model with the snapshot armed (warm weight restore) and serve again.
-// Both idempotent; auth via the standard pre-routing API-key check.
+// POST /admin/suspend: snapshot weights to host RAM, tear down model/engine, free VRAM.
+// POST /admin/resume: reload with the snapshot armed (warm restore). Both idempotent; standard
+// api-key auth applies.
 void handle_suspend(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_resume(const httplib::Request& req, httplib::Response& res, ServerState& state);

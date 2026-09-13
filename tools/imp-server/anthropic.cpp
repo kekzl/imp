@@ -109,12 +109,10 @@ void push_assistant_turn(json& out, const json& anth_msg) {
             // reasoning_content so a prior assistant turn's chain of
             // thought round-trips through the OpenAI code path.
             std::string th = block.value("thinking", "");
-            // The signature is the digest of the text this server emitted
-            // with the block (thinking_signature). It was never read on the
-            // way back in, so an edited or fabricated chain of thought was
-            // replayed as the model's own (AUDIT_arch_2026 E-8). A block that
-            // carries one must still match it; a block without one is taken
-            // as-is (clients that strip the field lose nothing but the check).
+            // The signature is a digest of the text this server emitted with the block
+            // (thinking_signature); never read on the way back in, so an edited/fabricated chain of
+            // thought was replayed as the model's own (AUDIT_arch_2026 E-8). A block carrying one must
+            // match it; a block without one is taken as-is.
             const std::string sig = block.value("signature", "");
             if (!sig.empty() && sig != thinking_signature(th))
                 throw std::runtime_error(
@@ -156,13 +154,10 @@ void push_user_turn(json& out, const json& anth_msg) {
     for (const auto& block : content) {
         std::string type = block.value("type", "");
         if (type == "tool_result") {
-            // Anthropic tool_result.content can be string OR array of blocks
-            // (text and/or images — screenshot-returning tools). Text collapses
-            // to a string for the OpenAI tool turn; IMAGE blocks cannot ride a
-            // role:"tool" message, so they are re-homed onto the trailing user
-            // turn (the multimodal path the engine already serves) with a
-            // marker in the tool body tying them back to this result (#1006 —
-            // previously they were silently dropped).
+            // Anthropic tool_result.content can be string OR array of blocks (text and/or images).
+            // Text collapses to a string for the OpenAI tool turn; IMAGE blocks can't ride a
+            // role:"tool" message, so they're re-homed onto the trailing user turn with a marker tying them
+            // back to this result (#1006, previously silently dropped).
             std::string body;
             int n_images = 0;
             if (block.contains("content")) {
@@ -181,15 +176,14 @@ void push_user_turn(json& out, const json& anth_msg) {
                         } else if (ptype == "image" && p.contains("source")) {
                             json tmp = json::array({p});
                             auto converted = convert_message_content(tmp);
-                            // Count what was actually re-homed, not what was
-                            // offered. convert_message_content pushes nothing
-                            // for a source that is neither base64 nor url, so
-                            // counting the block announced "1 image(s) follow"
-                            // into the prompt with no image following: the
-                            // prompt asserted an input the model never got.
-                            // Such a block is refused at admission now
-                            // (anthropic_unreadable_block); this keeps the
-                            // count honest if the allowlist ever widens first.
+                            // Counts what was actually re-homed, not what was offered:
+                            // convert_message_content pushes
+                            // nothing for a source that's neither base64 nor url, so counting the block would
+                            // announce
+                            // "1 image(s) follow" with no image following. Such a block is now refused at
+                            // admission
+                            // (anthropic_unreadable_block); this keeps the count honest if the allowlist
+                            // widens.
                             if (converted.is_array())
                                 for (const auto& img : converted) {
                                     other_parts.push_back(img);
@@ -205,11 +199,9 @@ void push_user_turn(json& out, const json& anth_msg) {
                 body += "[" + std::to_string(n_images) +
                         " image(s) from this tool result follow in the next user message]";
             }
-            // is_error was read by nothing, so a tool that failed reached the
-            // model as an ordinary successful result and it went on as if the
-            // call had worked (#1557). OpenAI's role:"tool" turn has no field
-            // for this - the content IS the channel - so the failure is
-            // labelled in the text, which is what the model reads either way.
+            // is_error was read by nothing, so a failed tool call reached the model as an ordinary
+            // successful result and the model proceeded as if it worked (#1557). OpenAI's role:"tool"
+            // turn has no field for this - content IS the channel - so the failure is labelled in the text.
             if (block.value("is_error", false)) {
                 body = body.empty() ? "[tool error]" : "[tool error] " + body;
             }
@@ -313,10 +305,9 @@ std::string flatten_system(const json& system_field) {
 
 }  // namespace
 
-// Any cache_control marker in this block array? Anthropic allows markers on
-// system blocks, message content blocks, and tool definitions. The `ttl`
-// field ("5m"/"1h") is accepted but not modeled — pins recycle via the FIFO
-// pin budget; there is no billing distinction locally.
+// Any cache_control marker in this block array? Anthropic allows markers on system blocks,
+// message content blocks, and tool definitions. `ttl` ("5m"/"1h") is accepted but not
+// modeled: pins recycle via the FIFO pin budget, no local billing distinction.
 static bool blocks_have_cache_marker(const json& blocks) {
     if (!blocks.is_array())
         return false;
@@ -326,10 +317,9 @@ static bool blocks_have_cache_marker(const json& blocks) {
     return false;
 }
 
-// Any cache_control marker anywhere in the request? imp maps markers to
-// prompt-KV pinning (block-granular prefix cache). The LAST marked
-// system/message block additionally defines a per-breakpoint pin boundary
-// (see anthropic_to_openai_body, #1046).
+// Any cache_control marker anywhere in the request? imp maps markers to prompt-KV pinning
+// (block-granular prefix cache). The LAST marked system/message block additionally defines a
+// per-breakpoint pin boundary (anthropic_to_openai_body, #1046).
 static bool has_cache_control(const json& anth) {
     if (anth.contains("system") && blocks_have_cache_marker(anth["system"]))
         return true;
@@ -371,40 +361,27 @@ json anthropic_to_openai_body(const json& anth) {
     if (anth.contains("stop_sequences"))
         oai["stop"] = anth["stop_sequences"];
 
-    // Constrained decoding. These are imp/vLLM/llama.cpp extensions with no
-    // Anthropic equivalent, and the shim used to leave them behind — so the
-    // SAME server honoured `guided_regex` on /v1/chat/completions and ignored
-    // it on /v1/messages (measured: 'ZZZ6' vs free-form prose). Nothing
-    // documented was violated, but one server answering the same extension two
-    // ways is a trap, and the silence was total: a malformed pattern was not
-    // rejected here either, because the admission check never saw the field.
-    // Carrying them through fixes both halves at once.
+    // Constrained decoding (guided_regex, guided_grammar, grammar, response_format, ...): imp/
+    // vLLM/llama.cpp extensions with no Anthropic equivalent; the shim used to drop them, so the
+    // same server honoured guided_regex on /v1/chat/completions and ignored it on /v1/messages, and
+    // a malformed pattern went unrejected there too since admission never saw the field. Carried
+    // through to fix both.
     for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format",
                             "priority"})
         if (anth.contains(key))
             oai[key] = anth[key];
 
-    // Extended-thinking control. Anthropic uses a `thinking` object:
-    //   {"type":"enabled","budget_tokens":N}  |  {"type":"disabled"}
-    // imp's orchestrator (handlers.cpp) reads `enable_thinking` (bool) and
-    // `think_budget` on the OpenAI body. `think_budget` is a FRACTION of
-    // max_tokens (default 0.5), so map Anthropic's absolute budget_tokens to
-    // budget_tokens/max_tokens, clamped to [0,1]. Without this mapping a
-    // think-model always reasoned on /v1/messages regardless of the request.
-    //
-    // Extended thinking is OPT-IN on this dialect (#1541). Anything that is not
-    // a recognised opt-in - no `thinking` field, a non-object, an unknown type -
-    // maps to disabled, so the default cannot depend on a field the server did
-    // not understand. Before this, imp's server default of think_budget = 0.5
-    // made a reasoning model reason on every /v1/messages request, and the
-    // answer arrived at content[1] with content[0].text empty for a client that
-    // never asked for thinking. The block order itself is contract-correct -
-    // Anthropic puts thinking first too - so the fix is the default, not a
-    // reorder. One field turns it back on.
-    //
-    // Only this dialect moves. /v1/chat/completions is unchanged: there the
-    // reasoning is a separate `reasoning_content` field and nothing shifts an
-    // index.
+    // Extended-thinking control: Anthropic's `thinking` object ({"type":"enabled",
+    // "budget_tokens":N} | {"type":"disabled"}) maps to imp's enable_thinking (bool) and
+    // think_budget (a FRACTION of max_tokens, default 0.5): budget_tokens/max_tokens, clamped
+    // [0,1].
+    // Extended thinking is OPT-IN on this dialect (#1541): anything not a recognised opt-in (no
+    // `thinking` field, non-object, unknown type) maps to disabled, so the default can't depend on
+    // an unrecognised field. Before this, the server's think_budget=0.5 default made a reasoning
+    // model reason on every /v1/messages request unasked, with the answer landing at content[1]
+    // and content[0].text empty.
+    // Only this dialect moves; /v1/chat/completions is unaffected (reasoning is a separate
+    // reasoning_content field there).
     const bool thinking_requested = [&] {
         if (!anth.contains("thinking") || !anth["thinking"].is_object())
             return false;
@@ -412,30 +389,24 @@ json anthropic_to_openai_body(const json& anth) {
         return t == "enabled" || t == "adaptive";
     }();
     if (!thinking_requested) {
-        // Suppressing thinking on a think-model needs BOTH signals: the
-        // orchestrator only sets suppress_thinking (which injects /no_think so
-        // the template emits no <think>) when enable_thinking is false AND
-        // think_budget <= 0 (handlers.cpp). The server's default budget is 0.5,
-        // so without zeroing it the model would still reason.
+        // Suppressing thinking on a think-model needs BOTH signals: the orchestrator only sets
+        // suppress_thinking (injecting /no_think) when enable_thinking is false AND think_budget <= 0
+        // (handlers.cpp). The server's default budget is 0.5, so without zeroing it the model still reasons.
         oai["enable_thinking"] = false;
         oai["think_budget"] = 0.0;
     } else {
         const auto& think = anth["thinking"];
         {
-            // "adaptive" is what current SDKs send: it is the documented
-            // on-mode for the 4.6+ models, which reject budget_tokens outright.
-            // It used to fall through both branches and set nothing, so the
-            // request ran at the server's default think_budget while the client
-            // believed it had configured thinking (#1560).
+            // "adaptive" is what current SDKs send: the documented on-mode for 4.6+ models, which
+            // reject budget_tokens outright. It used to fall through both branches and set nothing, so the
+            // request silently ran at the server's default think_budget (#1560).
             oai["enable_thinking"] = true;
             if (think.contains("budget_tokens") && think["budget_tokens"].is_number()) {
                 double budget = think["budget_tokens"].get<double>();
-                // budget_tokens is an absolute token count upstream; imp's
-                // think_budget is a fraction of max_tokens. With max_tokens
-                // absent - which this server permits - the fraction had no
-                // denominator and the assignment was skipped silently, leaving
-                // the default in place. Fall back on the same default max the
-                // request itself will get, so the two are consistent.
+                // budget_tokens is an absolute token count upstream; imp's think_budget is a fraction of
+                // max_tokens. With max_tokens absent (this server permits it) the fraction had no denominator
+                // and the assignment was silently skipped. Falls back to the same default max the request
+                // itself gets, keeping the two consistent.
                 double max_tokens = anth.value("max_tokens", 0.0);
                 if (max_tokens <= 0.0)
                     max_tokens = anth.value("max_completion_tokens", 0.0);
@@ -449,10 +420,9 @@ json anthropic_to_openai_body(const json& anth) {
                     oai["think_budget"] = 0.0;
                 }
             }
-            // thinking.display is NOT a generation setting - it says whether
-            // the reasoning comes back - so it is not transformed here. Both
-            // /v1/messages paths read it off the request through
-            // thinking_display_omitted() and drop the block on the way out.
+            // thinking.display is NOT a generation setting (it says whether reasoning comes back), so
+            // it's not transformed here; both /v1/messages paths read it via thinking_display_omitted()
+            // and drop the block on the way out.
         }
     }
 
@@ -468,17 +438,11 @@ json anthropic_to_openai_body(const json& anth) {
     // field in Anthropic, not part of messages.
     std::string system_text = flatten_system(anth.value("system", json(nullptr)));
 
-    // The Messages API has no "system" role — it says so explicitly, and sending
-    // one is an error there. imp accepted it and, falling through to the
-    // not-assistant branch below, rendered it as a USER turn: the text reached
-    // the model (verified by prompt-token count, so this was never data loss),
-    // but with user semantics instead of system semantics, and nothing said so.
-    // Clients ported from the OpenAI dialect, where the role IS legal, write
-    // their system prompt exactly this way.
-    //
-    // Fold LEADING system messages into the system prompt, which is what the
-    // caller means. Only leading ones: a "system" role appearing mid-conversation
-    // is not a system prompt in any dialect, and keeps its existing handling.
+    // The Messages API has no "system" role and errors on one; imp accepted it and rendered it
+    // as a USER turn (text reached the model, but with user semantics and no indication). Clients
+    // ported from OpenAI (where the role is legal) write their system prompt exactly this way.
+    // Fold only LEADING system messages into the system prompt; one appearing mid-conversation
+    // keeps its existing handling.
     size_t leading_system = 0;
     if (anth.contains("messages") && anth["messages"].is_array()) {
         for (const auto& m : anth["messages"]) {
@@ -525,9 +489,8 @@ json anthropic_to_openai_body(const json& anth) {
     }
     if (anth.contains("tool_choice")) {
         oai["tool_choice"] = convert_tool_choice(anth["tool_choice"]);
-        // Anthropic expresses "one tool at a time" as
-        // tool_choice.disable_parallel_tool_use; map it to the OpenAI
-        // parallel_tool_calls flag the (non-)streaming tool loops honor so the
+        // Anthropic expresses "one tool at a time" as tool_choice.disable_parallel_tool_use; maps
+        // to the OpenAI parallel_tool_calls flag the (non-)streaming tool loops honor, so the
         // suppression actually reaches the /v1/messages path (#892).
         if (anth["tool_choice"].is_object() &&
             anth["tool_choice"].value("disable_parallel_tool_use", false)) {
@@ -535,13 +498,10 @@ json anthropic_to_openai_body(const json& anth) {
         }
     }
 
-    // cache_control → prompt-KV pinning (internal "cache_prompt" field,
-    // same name the OpenAI route accepts directly). Per-breakpoint
-    // granularity (#1046): the last marked system/message block bounds the
-    // pin to the prompt tokens before it ("cache_prefix_messages" = count of
-    // leading converted messages). A marker on tools keeps the whole-prompt
-    // pin — tools render into the system preamble, which is not expressible
-    // as a message boundary.
+    // cache_control -> prompt-KV pinning (internal "cache_prompt", same field the OpenAI route
+    // accepts directly). Per-breakpoint granularity (#1046): the last marked system/message block
+    // bounds the pin via "cache_prefix_messages" (count of leading converted messages); a marker
+    // on tools keeps the whole-prompt pin since tools render into the system preamble.
     if (has_cache_control(anth)) {
         oai["cache_prompt"] = true;
         bool tools_marked = anth.contains("tools") && blocks_have_cache_marker(anth["tools"]);
@@ -605,12 +565,10 @@ const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_se
     // unknown value.
     if (openai_finish == "content_filter")
         return "refusal";
-    // "cancelled" is a client disconnect and "capacity" an admission refusal.
-    // Neither is an Anthropic stop_reason, and "capacity" used to ship verbatim
-    // on the streaming path while the non-streaming path answered 503 for the
-    // same condition (#1552). The stream cannot change its status once
-    // message_start is out, so it ends the turn and reports the fault as an
-    // `error` event (#1553).
+    // "cancelled" is a client disconnect, "capacity" an admission refusal; neither is an
+    // Anthropic stop_reason. "capacity" used to ship verbatim on the streaming path while
+    // non-streaming answered 503 for the same condition (#1552). The stream can't change status
+    // once message_start is out, so it ends the turn and reports the fault as an `error` event (#1553).
     return "end_turn";
 }
 
@@ -638,12 +596,9 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     if (!omit_thinking && msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
         std::string thinking = msg["reasoning_content"].get<std::string>();
         if (!thinking.empty()) {
-            // signature: Anthropic's clients round-trip thinking blocks and
-            // their SDKs expect the field to exist. imp cannot produce an
-            // attestation - it is not the model vendor - so this is a stable
-            // digest of the text, which is what makes the block survive a
-            // round trip rather than being dropped as malformed (#1555). It
-            // proves the block came back unedited, and nothing more.
+            // signature: Anthropic clients round-trip thinking blocks and expect the field. imp cannot
+            // attest anything (not the model vendor), so this is a stable digest of the text (#1555):
+            // proves the block came back unedited, nothing more.
             content.push_back(
                 {{"type", "thinking"}, {"thinking", thinking}, {"signature", thinking_signature(thinking)}});
         }
@@ -695,10 +650,9 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         const auto& u = oai["usage"];
         int prompt_tokens = u.value("prompt_tokens", 0);
         usage_out["output_tokens"] = u.value("completion_tokens", 0);
-        // Anthropic splits the prompt token count: tokens served from the
-        // prefix cache are reported separately (cache_read_input_tokens) and
-        // excluded from input_tokens. imp surfaces the prefix-cache hit count
-        // via OpenAI's prompt_tokens_details.cached_tokens — pass it through.
+        // Anthropic splits the prompt token count: tokens served from the prefix cache are reported
+        // separately (cache_read_input_tokens) and excluded from input_tokens. imp surfaces this via
+        // OpenAI's prompt_tokens_details.cached_tokens; passed through here.
         int cached = 0;
         int creation = 0;
         int evicted = 0;
@@ -712,11 +666,10 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         usage_out["input_tokens"] = prompt_tokens - cached;
         usage_out["cache_read_input_tokens"] = cached;
         usage_out["cache_creation_input_tokens"] = creation;
-        // imp extension (C-6): per-request speculation counters ride along
-        // under the same vendor-prefixed keys the OpenAI shape carries. The key
-        // list is shared (spec_usage_keys.h), not copied: the hand-copied
-        // version here dropped imp_spec_emitted and the decline reason the day
-        // they were added, and only /v1/chat/completions reported them.
+        // imp extension (C-6): per-request speculation counters ride under the same vendor-prefixed
+        // keys the OpenAI shape carries. Key list is shared (spec_usage_keys.h), not copied: a
+        // hand-copied version once dropped imp_spec_emitted and the decline reason, reported only on
+        // /v1/chat/completions.
         if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
             imp_server::copy_spec_usage_keys(u["completion_tokens_details"], usage_out);
             // Anthropic's own name for the same number (their Responses-shaped

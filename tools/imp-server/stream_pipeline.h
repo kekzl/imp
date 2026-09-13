@@ -1,14 +1,8 @@
 #pragma once
 
-// Pure (no-engine, no-HTTP) decision logic for the streaming text pipeline.
-//
-// The streaming handlers in handlers.cpp hold text back until they can prove it
-// is not the prefix of a stop sequence, then flush the "safe" portion as an SSE
-// content delta. The buffering arithmetic — and its UTF-8-boundary cousin in
-// utils.cpp — is where the max_stop_len=0 NUL-terminator regression lived
-// (`size - max_stop_len + 1` flushed one byte PAST pending_text's end, emitting
-// the std::string '\0' terminator into every delta). Extracted here so the math
-// can be unit-tested on the CPU against hand-derived expectations.
+// Pure (no-engine, no-HTTP) decision logic for the streaming stop-sequence holdback pipeline -
+// the buffering arithmetic where the max_stop_len=0 NUL-terminator regression lived (see id 657).
+// Extracted so the math is unit-tested on the CPU against hand-derived expectations.
 
 #include <algorithm>
 #include <cstddef>
@@ -17,12 +11,9 @@
 
 namespace imp::stream {
 
-// Length of the longest prefix of `s` that ends on a UTF-8 codepoint boundary.
-// A token piece may split a multi-byte codepoint across token boundaries; the
-// streaming handlers must only emit complete codepoints (a half-codepoint in an
-// SSE delta corrupts the client's string). Returns s.size() when the buffer ends
-// cleanly, else the byte index at which the trailing incomplete sequence starts.
-// On an invalid lead byte, emits up to (not including) that byte.
+// utf8_complete_len: longest prefix of `s` ending on a codepoint boundary. A token piece can
+// split a multi-byte codepoint across boundaries, and streaming must only emit whole codepoints
+// (a half one corrupts the client's string). Invalid lead byte: emits up to (not including) it.
 inline size_t utf8_complete_len(const std::string& s) {
     size_t len = s.size();
     if (len == 0)
@@ -52,36 +43,22 @@ inline size_t utf8_complete_len(const std::string& s) {
 struct HoldbackDecision {
     bool complete_match = false;  // a full stop sequence is present in the buffer
     size_t flush_len = 0;         // bytes safe to emit now (always <= buffer size)
-    // Index into `stop_sequences` of the sequence that matched, or -1. The
-    // Anthropic wire format reports which stop ended the turn
-    // (`stop_reason: "stop_sequence"`, `stop_sequence: "<text>"`), and it had
-    // nothing to report because the match was a bool (#1550).
+    // matched_index: which stop_sequences entry matched, or -1. Anthropic reports which stop ended
+    // the turn; previously the match was a bare bool with nothing to report (#1550).
     int matched_index = -1;
 };
 
-// Decide how much of `pending` may be flushed.
-//
-// Contract (mirrors handlers.cpp):
-//   1. If any stop sequence occurs in `pending`, report a complete match and the
-//      flush length = byte offset of the FIRST such occurrence (text before the
-//      stop is user-visible; the stop and everything after is dropped).
-//   2. Otherwise hold back the last (max_stop_len - 1) bytes as a possible
-//      partial stop prefix and flush the rest — but ONLY when the buffer is
-//      longer than max_stop_len. flush_len = size - max_stop_len + 1.
-//      With max_stop_len == 0 (no stop sequences) this collapses to "flush
-//      everything"; the +1 must NOT escape the buffer (the bug), so flush_len
-//      is clamped to the buffer size.
-//
-// flush_len is guaranteed <= pending.size() so callers can erase(0, flush_len)
-// without ever touching the NUL terminator.
+// holdback_decision contract: (1) any stop sequence present in `pending` -> flush up to the
+// FIRST occurrence, drop the stop and everything after. (2) Otherwise hold back the last
+// (max_stop_len-1) bytes as a possible partial prefix, flushing only when the buffer exceeds
+// max_stop_len; flush_len = size-max_stop_len+1, clamped to buffer size (the NUL-terminator bug,
+// see id 657) so max_stop_len==0 safely collapses to "flush everything".
 inline HoldbackDecision holdback_decision(const std::string& pending, size_t max_stop_len,
                                           const std::vector<std::string>& stop_sequences) {
     HoldbackDecision d;
-    // The EARLIEST occurrence, not the first sequence in the list that happens
-    // to occur anywhere: with stops {"B", "A"} on "xAyB" the list order used to
-    // cut at "B" (offset 3) and report "B", while the text the model produced
-    // ended at "A" (offset 1). The contract above always said "first
-    // occurrence"; only the loop disagreed.
+    // Finds the EARLIEST occurrence in `pending`, not the first sequence in the caller's list order:
+    // stops {"B","A"} on "xAyB" used to cut at "B" (offset 3) though "A" (offset 1) occurs first -
+    // the contract always said first occurrence, only the loop disagreed.
     size_t best = std::string::npos;
     for (size_t i = 0; i < stop_sequences.size(); i++) {
         const std::string& stop = stop_sequences[i];
@@ -102,29 +79,17 @@ inline HoldbackDecision holdback_decision(const std::string& pending, size_t max
         size_t safe = pending.size() - max_stop_len + 1;
         if (safe > pending.size())
             safe = pending.size();  // max_stop_len == 0 -> never escape the buffer
-        // The cut is a byte offset, so it can land inside a multi-byte character
-        // even when `pending` itself is well-formed — pull it back to the last
-        // codepoint boundary, or the delta ships half a character (which
-        // dump_safe then turns into U+FFFD: "größer" -> "gr??ßer").
+        // The stop-match cut is a byte offset and can land mid-character even in well-formed input; pull
+        // it back to the last codepoint boundary or the delta ships half a character (dump_safe -> U+FFFD).
         d.flush_len = utf8_complete_len(pending.substr(0, safe));
     }
     return d;
 }
 
-// Which decoded token produced which bytes of a holdback buffer (#1588).
-//
-// The streaming paths buffer text before emitting it, so a flush boundary is
-// not a token boundary: the stop matcher decides how many bytes are safe, and
-// that cut can land in the middle of a token's contribution. A per-token
-// logprob therefore cannot be attached from a live "current token" counter -
-// by the time held-back bytes go out, the counter has moved on. That is why
-// the stop-sequence path shipped no logprobs at all rather than wrong ones.
-//
-// What is tracked is the bytes a token contributed AFTER the think-split and
-// tool-call filters, not the token's raw text, because those are the bytes the
-// client receives.
-//
-// Header-only and pure: no engine, no HTTP, no JSON. Tested in the CPU lane.
+// TokenSpans (#1588): tracks which decoded token produced which bytes of a holdback buffer,
+// since a flush boundary from the stop matcher is not a token boundary - a live token counter
+// can't attribute held-back bytes once it has moved on. Tracks post-filter bytes (what the
+// client receives), not raw token text. Header-only, pure, CPU-tested.
 class TokenSpans {
 public:
     struct Emit {

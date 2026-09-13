@@ -6,27 +6,13 @@
 #include <utility>
 #include <vector>
 
-// Gemma-4's tool-call dialect is its own value syntax, not JSON, so it needs a
-// small recursive-descent parser of its own. Split out of tool_call.cpp: that
-// file otherwise carries four unrelated concerns (prompt building, three parse
-// dialects, the streaming scanner, validation) in one translation unit, which
-// is what the file-size gate is actually measuring.
+// Gemma-4's tool-call dialect is its own value syntax, not JSON, needing its own recursive-
+// descent parser. Split out of tool_call.cpp, which otherwise mixed four unrelated concerns in
+// one TU (the file-size gate's actual target).
 
-// ---------------------------------------------------------------------------
-// Gemma-4 native tool-call format. Pipe-delimited markers + a
-// non-JSON value syntax matching chat_template.jinja's format_argument macro:
-//
-//   <|tool_call>call:NAME{key:value,key:value,...}<tool_call|>
-//
-// Values:
-//   string  -> <|"|>contents<|"|>            (Google's quote-escape sequence)
-//   bool    -> true | false
-//   number  -> bare digits / -/./e
-//   array   -> [v,v,...]
-//   object  -> {key:v,key:v,...}             (recursive; bare keys, no quoting)
-//
-// We re-emit args as JSON for the OpenAI-style ParsedToolCall.arguments field.
-// ---------------------------------------------------------------------------
+// Gemma-4 native tool-call format (matches chat_template.jinja's format_argument macro):
+// <|tool_call>call:NAME{key:value,...}<tool_call|>. Strings use <|"|>...<|"|>; bool/number/array/
+// object as bare tokens (object recursive, unquoted keys). Re-emitted as JSON for ParsedToolCall.arguments.
 
 namespace {
 

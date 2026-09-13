@@ -47,11 +47,9 @@ CONFIGS = {
     "fp8":          (["--kv-fp8"],                           {}),
     "nvfp4":        (["--kv-nvfp4"],                         {}),
     "mxfp4_kv":     (["--kv-mxfp4"],                         {}),
-    # Sparse decode attention (attention.sparse_topk_tokens): retrieval must
-    # survive the top-k page selection - decode attends at most N tokens.
-    # ngram=false in BOTH arms: prompt-lookup would draft the answer straight
-    # from the needle and verify it with FULL attention (spec verify chunks
-    # bypass the sparse path), masking a broken selection.
+    # Sparse decode attention (attention.sparse_topk_tokens): retrieval must survive top-k page
+    # selection. ngram=false in BOTH arms: prompt-lookup would draft the answer from the needle and
+    # verify with FULL attention (spec verify bypasses the sparse path), masking a broken selection.
     "fp8_ng":       (["--kv-fp8", "--set", "speculative.ngram=false"], {}),
     "fp8_sparse4k": (["--kv-fp8", "--set", "speculative.ngram=false",
                       "--set", "attention.sparse_topk_tokens=4096"], {}),
@@ -165,12 +163,8 @@ def run_prompt(prompt: Prompt, model_path: str, host_models_dir: str) -> Result:
         finally:
             shutil.rmtree(pdir, ignore_errors=True)
         wall = time.time() - t0
-        # imp-cli --prompt mode does NOT echo the prompt to stdout — only
-        # the model's generation (with some interleaved log lines). The
-        # needle "Dolores Park" appears in the prompt but never in stdout
-        # unless the model retrieves it. Score on the full stdout: this
-        # catches the needle whether the model surfaces it in <think>
-        # reasoning or in the final answer.
+        # imp-cli --prompt mode does NOT echo the prompt to stdout, only the generation. Score on the
+        # full stdout: catches the needle whether the model surfaces it in <think> or the final answer.
         score = 1 if ANSWER_KEY in proc.stdout.lower() else 0
         # For the JSON record's human-readable generated field, keep the
         # tail of stdout (last ~2 KB) so reviewers can spot-check.

@@ -1,24 +1,12 @@
 #!/usr/bin/env bash
-# Competitive decode sweep: imp against llama.cpp on the shared-quant hero GGUFs.
-#
-# The competitor image is pinned BY DIGEST, not by tag. `:full-cuda` moves, and
-# twice now a published lead was compared against a build nobody recorded. To
-# refresh deliberately: pull the tag, read `docker images --digests`, update
-# LLAMA_DIGEST here, and say which build it resolved to in the PROV block.
-#
-# Model files are required, not optional: a path that is set but unreadable is a
-# failure, never a silent skip. See docs/BENCHMARKS.md.
+# Competitive decode sweep: imp vs llama.cpp on shared-quant hero GGUFs.
+# Competitor image pinned BY DIGEST (LLAMA_DIGEST), not tag; update deliberately and record the
+# resolved build in the PROV block. Model files required: unreadable path is a failure, not a skip.
 set -euo pipefail
 
-# Run from a frozen copy of ourselves. This harness runs for the better part of
-# an hour, and bash reads a script incrementally from the file: an edit landing
-# mid-run is executed by the same process that started on the old text, and the
-# result is a number produced by a mixture of two versions with nothing in the
-# output to say so. It happened on 2026-08-21 and cost a re-run.
-#
-# The hash is printed so it can go in the PROV block beside the commit. "Which
-# tree" and "which script" are different questions and a commit only answers the
-# first.
+# Run from a frozen copy of ourselves: bash reads the script incrementally, so an edit landing
+# mid-run mixes two versions with nothing in the output to say so.
+# IMP_BENCH_FROZEN=1 skips the copy; the hash goes in the PROV block ("which script" != "which tree").
 if [ "${IMP_BENCH_FROZEN:-0}" != "1" ]; then
     _self=$(mktemp /tmp/bench_competitive.XXXXXX.sh)
     cp -- "$0" "$_self"
@@ -35,9 +23,8 @@ MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 OUT="${OUT:-/tmp/bench_competitive.tsv}"
 
 # name <TAB> gguf path relative to MODELS_DIR <TAB> hero|nonhero
-#
-# `hero` marks the rows GOAL.md's release blocker is defined over. RELEASE_BAR=1
-# fails on any of them under HERO_LEAD_PCT.
+# "hero" marks rows GOAL.md's release blocker is defined over; RELEASE_BAR=1 fails on any hero
+# under HERO_LEAD_PCT.
 read -r -d '' MATRIX <<'TSV' || true
 Qwen3-8B Q8_0	Qwen3-8B-Q8_0.gguf	hero
 Qwen3-14B Q6_K	Qwen3-14B-Q6_K.gguf	hero
@@ -89,12 +76,10 @@ imp_tg() {  # $1 = container path, $2 = extra args
         | grep -oP '^tg\s+128 tokens.*?\(\s*\K[0-9.]+(?= tok/s)'
 }
 
-# 20 s between arms, not 5. At 5 s the Qwen3-14B row read 5.3 % low against two
-# isolated re-measurements (154.77 against 162.08 / 162.04) - the first imp run
-# after a 16 GiB competitor model unloads is not on a settled card. The imp
-# default / spec-off pair doubles as this sweep's repeatability control: on every
-# model where speculation is inert the two columns must agree, and they agree to
-# 0.2 % on four of five. That is what caught this.
+# 20 s cooldown between arms, not 5: right after a large competitor model unloads the card
+# isn't settled yet.
+# The default/spec-off pair doubles as a repeatability control: when speculation is inert the
+# two columns should agree to ~0.2%.
 check_gpu
 : > "$OUT"
 printf 'model\timp_default\timp_spec_off\tllama_tg128\thero\n' >> "$OUT"
@@ -158,13 +143,9 @@ if [ -n "$BREACH" ] || [ -n "$MISSING" ]; then
     [ -z "$MISSING" ] || echo "  (and the absent models above)" >&2
     exit 1
 fi
-# The pass line carries its own scope. A bare "PASS" here would be read as
-# "the seven-hero blocker is satisfied" by everyone who does not open this
-# script, which is the same over-reading that let five heroes go unmeasured for
-# six weeks. The two uncontestable heroes are named at exactly the moment
-# somebody is deciding to ship.
-# awk on the tab-delimited field, not grep on a line suffix: 'hero$' also
-# matches 'nonhero' and counted 6 heroes where there are 5.
+# The PASS line names only the two uncontestable heroes it measured, not the full blocker
+# scope, so nobody over-reads it as "the seven-hero blocker is satisfied".
+# awk on the tab-delimited hero field, not grep on suffix ("hero$" also matches "nonhero").
 N_HERO_MATRIX=$(awk -F'\t' '$3=="hero" {n++} END {print n+0}' <<< "$MATRIX")
 N_UNCONTESTABLE=$(awk 'NF {n++} END {print n+0}' <<< "$UNCONTESTED")
 N_HERO_TOTAL=$(( N_HERO_MATRIX + N_UNCONTESTABLE ))

@@ -15,33 +15,21 @@
 
 using json = nlohmann::json;
 
-// Serialize `j` to a string that never throws on invalid UTF-8. nlohmann's
-// default dump() throws json::type_error.316 the moment it hits an ill-formed
-// UTF-8 byte; user- and model-derived strings (byte-truncated prompts, decoded
-// tokens) routinely contain those. Invalid bytes are replaced with U+FFFD. For
-// well-formed UTF-8 the output is byte-identical to dump(). Use this for ANY
-// response/SSE/error body that can carry client- or model-supplied text.
+// dump_safe: serializes without throwing on invalid UTF-8 (nlohmann's dump() throws
+// type_error.316 on ill-formed bytes, which client/model text routinely contains). Invalid bytes
+// become U+FFFD; well-formed input dumps byte-identical to dump(). Use for ANY body carrying
+// client- or model-supplied text.
 std::string dump_safe(const json& j);
 
 // Printable-ASCII, length-capped copy of a client-supplied string, for the
 // cases where one is echoed back into a response (#1618).
 std::string sanitize_for_echo(std::string_view in, size_t max_len);
 
-// Rejoins UTF-8 characters that a tokenizer split across two tokens.
-//
-// BPE vocabularies routinely cut a multi-byte character in half: "größer"
-// arrives as a piece ending in 0xC3 followed by a piece starting with 0xB6.
-// Each streamed delta is serialized on its own, so dump_safe() sees half a
-// character and replaces it with U+FFFD — the client receives "gr��ßer"
-// while the same generation is correct over the non-streaming path, which
-// decodes all tokens together. Any non-ASCII script hits this: German umlauts,
-// accents, CJK, emoji.
-//
-// feed() returns the part that is safe to emit and holds back a trailing
-// incomplete sequence until the next piece completes it. Bytes still held when
-// the stream ends are dropped: generation stopped inside a character, so there
-// is no character to show — emitting the fragment would reproduce the very
-// artifact this class removes.
+// Utf8Stitch rejoins a multi-byte character a BPE tokenizer split across two tokens: each
+// streamed delta is serialized alone, so dump_safe sees half a character and emits U+FFFD
+// (affects any non-ASCII script) while the non-streaming path, which decodes all tokens
+// together, is correct. feed() emits the safe part and holds an incomplete trailing sequence;
+// bytes still held when the stream ends are dropped (no character to show).
 class Utf8Stitch {
 public:
     std::string feed(const std::string& piece);
@@ -50,69 +38,34 @@ private:
     std::string carry_;
 };
 
-// Nesting depth of a JSON document, counted WITHOUT parsing it (#1607).
-//
-// The parsers on this surface are all recursive and none of them bounds depth,
-// nlohmann included: measured on this tree, 50 000 nested arrays parse and
-// dump() fine and 100 000 segfault, i.e. ~100 KB of body against a 100 MiB body
-// cap. The parse is where the stack dies, so the check has to happen before it,
-// on the raw bytes.
-//
-// Scans left to right, skipping string contents so a brace inside a string does
-// not count, and stops as soon as `stop_at` is exceeded - so a hostile body
-// costs only as many bytes as it takes to prove it hostile. Returns the depth
-// reached, capped at `stop_at + 1`.
+// json_nesting_depth (#1607): counts JSON nesting depth WITHOUT parsing (the parse itself is
+// where the stack dies - 50000 nested arrays parse fine, 100000 segfault, ~100KB vs a 100MiB body
+// cap). Scans left to right skipping string contents, stops once `stop_at` is exceeded so a
+// hostile body costs only as many bytes as needed to prove it hostile.
 int json_nesting_depth(const std::string& body, int stop_at);
 
-// Reject a request body that nests deeper than the cap, with the dialect's own
-// error envelope (#1607). Returns true when the request was answered and the
-// caller must stop.
-//
-// NOT in the pre-routing handler, where the other cross-cutting checks live:
-// httplib calls that handler from Server::routing() BEFORE the body has been
-// read, so `req.body` is empty there. Measured, after writing it there first -
-// a 10 000-level body still returned 200.
+// reject_body_too_deep (#1607): rejects an over-nested body with the dialect's own error
+// envelope. Cannot live in the pre-routing handler - httplib calls that before the body is read
+// (req.body is empty there); a 10000-level body measured 200 when tried there first.
 bool reject_body_too_deep(const httplib::Request& req, httplib::Response& res);
 
-// Length of a chunk starting at `off` that is at most `max` bytes AND ends on a
-// UTF-8 codepoint boundary (#1554).
-//
-// Tool arguments were sliced every 48 bytes and each slice JSON-encoded on its
-// own, so a multi-byte character straddling a boundary was cut in half and
-// dump_safe turned each half into U+FFFD. The per-token content path has
-// stitched for exactly this reason since #1310; the tool-argument path did not.
-//
-// Requires `off` to be on a boundary, which holds inductively when every chunk
-// comes from this function. Always returns at least 1 when bytes remain, so a
-// pathological input cannot stall the loop.
-//
-// `max` yields to a character: when no whole character fits, the single
-// character is returned even if it is longer than `max`. A chunk size is a hint
-// about frame size, and half a character is wrong at any size.
+// utf8_chunk_len (#1554): chunk length at most `max` bytes AND ending on a codepoint boundary.
+// Tool arguments were sliced every 48 bytes independently, splitting multibyte characters into
+// U+FFFD (the per-token path has stitched since #1310, this path did not). Always returns >=1
+// when bytes remain; `max` yields to a whole character when none fits within it.
 size_t utf8_chunk_len(const std::string& s, size_t off, size_t max);
 
-// Send an OpenAI-style error envelope {"error":{"message":..,"type":..}} with
-// the given HTTP status. Dumps via dump_safe so an invalid-UTF-8 byte echoed
-// into the message (e.g. a parse-error what() on byte-truncated input) can
-// never make the dump throw — that throw used to escape the handler and turn a
-// 400-class bad-input case into a bare 500.
-// The shared error envelope.
-//
-// `param` and `code` are optional and default to absent, which is what every
-// existing caller gets. They are what makes an error machine-readable: OpenAI
-// clients branch on `error.code`, and without it a context-window refusal, a
-// bad argument and an auth failure differ only in an English sentence (#1595).
-// Pass them wherever the answer is "this specific field, for this specific
-// reason".
+// send_json_error: sends the OpenAI error envelope via dump_safe, so an invalid-UTF-8 byte
+// echoed into the message (e.g. a parse-error what()) cannot throw and turn a 400 into a bare
+// 500. `param`/`code` are optional but make the error machine-readable (#1595) - without them a
+// context-window refusal, a bad argument, and an auth failure differ only in English prose.
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
                      const char* param = nullptr, const char* code = nullptr);
 
-// --max-input-tokens is checked after tokenizing, and tokenizing is the cost:
-// the BPE merge walk over a 100 MiB body runs on a worker thread before the
-// count exists (AUDIT_arch_2026 F2-9). This refuses a body that cannot pass
-// the token check anyway. 16 bytes per token is a bound, not an estimate:
-// English averages ~4, code ~3, and only a run of whitespace longer than a
-// vocabulary's longest whitespace token beats 16. Off when the flag is 0.
+// kMaxPromptBytesPerToken=16: --max-input-tokens is checked AFTER tokenizing, and tokenizing
+// itself is the cost (BPE walk over a 100MiB body on a worker thread, AUDIT_arch_2026 F2-9) -
+// this pre-refuses a body that cannot pass the token check anyway. 16 bytes/token is a bound, not
+// an estimate (English ~4, code ~3; only long whitespace runs beat it).
 inline constexpr size_t kMaxPromptBytesPerToken = 16;
 inline bool prompt_bytes_exceed_input_budget(size_t bytes, int max_input_tokens) {
     return max_input_tokens > 0 && bytes > static_cast<size_t>(max_input_tokens) * kMaxPromptBytesPerToken;
@@ -122,48 +75,33 @@ inline bool prompt_bytes_exceed_input_budget(size_t bytes, int max_input_tokens)
 bool prompt_within_input_budget(httplib::Response& res, size_t bytes, int max_input_tokens,
                                 const char* param);
 
-// What a client may actually send, in tokens: the smaller of what the resolver
-// planned and what the KV pool ended up holding. The two differ whenever the
-// pool is clamped after planning - 97204 against 52256 on Qwen3.8-27B-NVFP4 -
-// and /v1/models advertised the plan while /health reported the pool, so a
-// prompt between them was accepted as servable and was not (#1542).
-// kv_capacity_tokens <= 0 means "unknown", and the plan stands.
+// servable_context_tokens: the smaller of the resolver's plan and what the KV pool actually
+// holds - they can differ hugely once the pool is clamped after planning (97204 vs 52256,
+// Qwen3.8-27B-NVFP4 example), and a prompt between the two used to be accepted and then fail
+// (#1542). kv_capacity_tokens<=0 means unknown; the plan stands.
 int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_tokens);
 
-// The capacity a growable pool may reach, in tokens: the ceiling, not what is
-// committed right now. Since kv_cache.growable_initial_pct defaulted to 25 the
-// committed count is a moving floor (875 of a 13264-block ceiling on
-// Qwen3.8-27B-NVFP4, 14000 tokens advertised for a pool that served a
-// 16860-token prompt after one growth). A fixed pool has ceiling == total.
+// kv_capacity_ceiling_tokens: what a growable pool MAY reach (the ceiling), not what is
+// committed now - kv_cache.growable_initial_pct=25 makes the committed count a moving floor
+// (e.g. 875 of a 13264-block ceiling). A fixed pool has ceiling == total.
 long long kv_capacity_ceiling_tokens(int total_blocks, int ceiling_blocks, int block_size);
 
-// True for the endpoints that speak the Anthropic dialect, whose errors have a
-// different envelope: `{"type":"error","error":{...}}` rather than
-// `{"error":{...}}`. Four call sites in main.cpp used to spell this test out
-// and two more forgot it, so a 429 on /v1/messages came back in the OpenAI
-// shape and no Anthropic SDK could classify it (#1551).
+// is_anthropic_path: Anthropic endpoints use a different error envelope
+// ({"type":"error","error":{...}}). Four hand-spelled checks in main.cpp (two of them missing)
+// let a 429 on /v1/messages come back OpenAI-shaped, unclassifiable by an Anthropic SDK (#1551).
 bool is_anthropic_path(const std::string& path);
 
-// The Anthropic error envelope, with `request_id` when one is known.
-//
-// `type` must be one of Anthropic's error types - invalid_request_error,
-// authentication_error, billing_error, permission_error, not_found_error,
-// request_too_large, rate_limit_error, api_error, overloaded_error,
-// timeout_error. `server_error` and `capacity_error` are not among them and
-// were being emitted at seven sites (#1556).
-//
-// request_id is what support and log correlation are asked for first; no error
-// body carried one and no response carried a request-id header (#1561).
+// send_anthropic_error: `type` must be one of Anthropic's defined error types
+// (invalid_request_error, authentication_error, billing_error, permission_error,
+// not_found_error, request_too_large, rate_limit_error, api_error, overloaded_error,
+// timeout_error) - server_error/capacity_error are not among them and were emitted at seven
+// sites (#1556). request_id (#1561) is what support/log correlation asks for first.
 void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,
                           const std::string& request_id = {});
 
-// Translate an OpenAI-dialect `error.type` into the Anthropic one.
-//
-// The non-streaming /v1/messages path runs through the OpenAI handler and
-// forwards whatever it produced, so `server_error` and `capacity_error` - which
-// are not Anthropic error types - reached Anthropic SDK clients verbatim
-// (#1556). Anything unrecognised falls back on the status: 5xx is api_error,
-// everything else invalid_request_error.
+// anthropic_error_type_for: translates an OpenAI-dialect error.type to Anthropic's, since the
+// non-streaming /v1/messages path forwards the OpenAI handler's type verbatim otherwise (#1556).
+// Unrecognized types fall back on status: 5xx -> api_error, else invalid_request_error.
 const char* anthropic_error_type_for(std::string_view openai_type, int status);
 
 // Send whichever envelope `path` calls for. `openai_type` and `anthropic_type`
@@ -172,27 +110,16 @@ void send_dialect_error(httplib::Response& res, const std::string& path, int sta
                         const char* anthropic_type, const std::string& message,
                         const std::string& request_id = {});
 
-// Constant-time Bearer-token check. Returns true iff `authorization` equals
-// "Bearer " + api_key, compared without early-out so response timing cannot leak
-// the key prefix (std::string::operator== short-circuits on the first differing
-// byte — a timing oracle). The comparison runs over the full expected length
-// regardless of where (or whether) the input differs. Extracted from main.cpp's
-// pre-routing handler so the security-critical compare is unit-testable.
+// bearer_token_matches: constant-time compare (runs the full expected length regardless of where
+// the input differs - std::string::operator== short-circuits and would leak the key prefix via
+// timing). Extracted from main.cpp's pre-routing handler so the security-critical compare is
+// unit-testable.
 bool bearer_token_matches(const std::string& authorization, const std::string& api_key);
 
-// True when a reply came back with nothing to show and everything spent on
-// thinking: no tool calls, empty content, non-empty reasoning.
-//
-// Not a defect. The answer shares the token budget with the thinking, so on a
-// long conversation a small max_tokens can be consumed before the reply starts,
-// and the caller sees `content: ""` with `finish_reason: stop`, which reads
-// exactly like a broken engine. Measured on Qwen3.8-27B: a 74-turn session
-// returns empty replies at max_tokens 260 and is clean at 600
-// (docs/TROUBLESHOOTING.md).
-//
-// Split out because the state is real but not reliably reproducible on demand:
-// it depends on how long the model chooses to think. A rule that fires rarely
-// is exactly the one that has to be covered by a test rather than by a run.
+// answer_lost_to_reasoning: true when a reply has no tool calls, empty content, and non-empty
+// reasoning - not a defect, the reply shares the token budget with thinking (measured on
+// Qwen3.8-27B: empty at max_tokens 260, clean 74/74 at 600, docs/TROUBLESHOOTING.md). Split out
+// because the state depends on how long the model chooses to think, so it needs a dedicated test, not a run.
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning);
 
 // The same predicate over the three FACTS, so the streaming path (which never
@@ -211,59 +138,34 @@ inline const char* reasoning_finish_detail(bool has_tool_calls, bool content_emp
                : nullptr;
 }
 
-// The ONE site that writes the field onto a response object (an OpenAI choice,
-// an Anthropic `message_delta`). The write lives with the decision on purpose:
-// the handler TUs are in no CPU test target, so a mutant that emits the field
-// unconditionally has to get past this function, which is (test_sse_stream_utils).
+// attach_reasoning_finish_detail: the ONE site that writes imp_finish_detail onto a response
+// object. Kept with the decision on purpose - the handler TUs have no CPU test target, so a
+// mutant emitting the field unconditionally must get past this function (test_sse_stream_utils).
 inline void attach_reasoning_finish_detail(json& obj, bool has_tool_calls, bool content_empty,
                                            bool has_reasoning) {
     if (const char* detail = reasoning_finish_detail(has_tool_calls, content_empty, has_reasoning))
         obj["imp_finish_detail"] = detail;
 }
 
-// The same predicate, plus the server-side WARN that names which of the two
-// situations an empty `content` is. Returns what it decided, so the caller can
-// attach the wire signal (`imp_finish_detail`) and the metric without asking
-// twice.
+// report_answer_lost_to_reasoning: answer_lost_to_reasoning plus the server-side WARN naming
+// which situation applies. Returns the decision so the caller attaches the wire signal
+// (imp_finish_detail) and the metric without evaluating the predicate twice.
 bool report_answer_lost_to_reasoning(bool has_tool_calls, const std::string& content,
                                      const std::string& reasoning, const char* finish);
 
-// usage.completion_tokens_details.reasoning_tokens for the NON-streaming path.
-// The streaming path counts what its split state machine routed to the
-// reasoning sink; this one has only the finished text and the output token ids,
-// so it counts the same tokens two ways:
-//   think_end_id >= 0  -> the ENGINE's own recount over the ids, i.e. exactly
-//                         the number should_force_think_end acts on (exact).
-//   think_end_id <  0  -> tokenizers whose </think> is split across BPE pieces
-//                         have no id to count on. Reasoning is a prefix of the
-//                         output, so charge the leading tokens whose decoded
-//                         bytes cover `reasoning_chars` (an estimate).
-// `decoded_len` returns the byte length of one token's decoded text; it is only
-// called on the second path. Returns 0 when there is no reasoning to charge.
+// nonstream_reasoning_tokens: counts the same tokens two ways. think_end_id>=0 -> the engine's
+// own exact recount over output ids. think_end_id<0 (</think> split across BPE pieces, no single
+// id) -> charges the leading tokens whose decoded bytes cover reasoning_chars (an estimate).
 int nonstream_reasoning_tokens(const std::vector<int32_t>& output_ids, int32_t think_start_id,
                                int32_t think_end_id, bool started_in_think, size_t reasoning_chars,
                                const std::function<size_t(int32_t)>& decoded_len);
 
-// Why this server cannot serve, or "" when it can. Not the same question as
-// whether the last request failed.
-//
-// A transient OOM keeps /health at 200 on purpose: the server is alive, the
-// pressure passes, and an orchestrator restarting on it makes things worse. A
-// KV pool that fell back to its rescue floor is the opposite. The pool is sized
-// once at init, so the condition lasts as long as the process; every prompt
-// past a few hundred tokens is cancelled at admission with a message naming the
-// prompt; and /v1/models goes on advertising the full context. Restarting on a
-// card that has since been freed is the only fix, which is exactly what a 503
-// asks an orchestrator to do.
-//
-// Reported from production by a peer running imp behind an agent loop:
-// `docker compose restart` while the previous process still held the card came
-// up with 16 KV blocks against a planned 3066, /health saying ok throughout. It
-// cost two failures that looked like defects in another component.
-//
-// The string is the operator-facing detail; the machine-readable half is
-// health_unservable_code() below, because a client has to tell this apart from
-// a transient 503 to know not to retry it.
+// health_unservable_reason: why the server cannot serve, or "" when it can - distinct from
+// whether the last request failed. Transient OOM keeps /health at 200 on purpose (restarting
+// would make it worse); a KV pool floored at init stays unservable for the process's lifetime
+// (every prompt past a few hundred tokens is cancelled at admission) and only a restart on a
+// freed card fixes it, which is what 503 tells an orchestrator to do. health_unservable_code()
+// is the machine-readable half a client needs to know not to retry.
 std::string health_unservable_reason(bool engine_faulted, bool kv_pool_floored, int kv_blocks,
                                      int kv_block_size);
 
@@ -271,53 +173,31 @@ std::string health_unservable_reason(bool engine_faulted, bool kv_pool_floored, 
 // Values: "engine_faulted", "kv_pool_floored".
 const char* health_unservable_code(bool engine_faulted, bool kv_pool_floored);
 
-// Accepts EITHER the OpenAI-style `Authorization: Bearer <key>` header OR the
-// Anthropic-style `x-api-key: <key>` header (the official Anthropic SDK sends
-// the latter, so a Bearer-only check 401s real Anthropic clients on /v1/messages).
-// Both comparisons are constant-time. Pass the raw header values.
+// api_key_matches: accepts either OpenAI's `Authorization: Bearer` or Anthropic's `x-api-key`
+// header (the official Anthropic SDK sends the latter) - a Bearer-only check 401s real Anthropic
+// clients on /v1/messages. Both comparisons are constant-time.
 bool api_key_matches(const std::string& authorization, const std::string& x_api_key,
                      const std::string& api_key);
 
-// Map an engine finish reason onto the OpenAI `finish_reason` enum.
-//
-// The engine has two reasons OpenAI does not: "cancelled" (the request was
-// aborted) and "capacity" (the KV pool cannot hold it). Both used to ship
-// verbatim on a 200, so a client switching on the enum fell through its
-// default branch and treated a failed generation as a normal one (#1590).
-//
-// Both map to "length": the generation stopped before the model chose to stop,
-// which is exactly what "length" means to a client, and it is the value that
-// makes them retry or shorten rather than accept the text. The non-streaming
-// chat path answers "capacity" with 503 before it gets here; this is the
-// backstop for the paths that do not.
+// openai_finish_reason: maps the engine's "cancelled"/"capacity" (not in OpenAI's enum) onto
+// "length" - both used to ship verbatim on a 200, so a client switching on the enum fell to its
+// default branch and treated a failed generation as normal (#1590). "length" is what makes a
+// client retry/shorten rather than accept the text; non-streaming chat answers "capacity" with
+// 503 before reaching here, this is the backstop for paths that don't.
 const char* openai_finish_reason(const char* engine_finish);
 
-// `system_fingerprint`: what a client compares across calls to notice that the
-// backend changed under it. Emitted nowhere before #1602, so a model swap, a
-// quantisation change or a server upgrade was invisible in the response.
-//
-// The value is the engine version plus the loaded model, hashed: the two things
-// that change what the same request returns. Stable for the life of a
-// configuration, different across any change to either.
+// system_fingerprint: hash of engine version + loaded model, so a client can notice the backend
+// changed under it (model swap, quant change, server upgrade) - emitted nowhere before #1602.
+// Stable for the life of a configuration, different across any change to either input.
 std::string system_fingerprint(const std::string& model_name);
 
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
 
-// The two logprobs SHAPES, which are not the same object.
-//
-// Chat (`/v1/chat/completions`):
-//   {"content": [{"token","logprob","bytes","top_logprobs":[{...}]}]}
-// Completions (`/v1/completions`), a different shape entirely:
-//   {"tokens":[], "token_logprobs":[], "top_logprobs":[{tok: lp}], "text_offset":[]}
-//
-// /v1/completions returned the Chat object on a `text_completion` response
-// until #1589, so an OpenAI SDK reading `.logprobs.tokens` found nothing and
-// one reading `.logprobs.content` got a field its own type does not declare.
-//
-// `text` is the completion string the offsets index into; the offsets are byte
-// offsets from its start, which is what the OpenAI field means for ASCII and
-// the only defensible reading for anything else.
+// Chat and Completions logprobs are DIFFERENT shapes: Chat is
+// {"content":[{"token","logprob","bytes","top_logprobs"}]}, Completions is
+// {"tokens":[],"token_logprobs":[],"top_logprobs":[{tok:lp}],"text_offset":[]}.
+// /v1/completions returned the Chat shape until #1589. `text_offset` is byte offset from `text`'s start.
 json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit);
 json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
                                const std::string& text);
@@ -341,19 +221,16 @@ std::string base64_encode(const uint8_t* data, size_t len);
 void strip_think_block(std::string& text);
 std::pair<std::string, std::string> extract_reasoning(const std::string& text);
 
-// Strip Gemma-4 "<|channel>NAME\n..." and "<channel|>\n..." structural headers
-// from a content string. Only the header (up to and including the newline) is
-// removed; the body text is preserved. Model variants that never emit
-// <channel|> produce a single leading header that this function drops; ones
-// that emit both get both stripped, leaving only the body text concatenated.
+// strip_channel_headers: removes Gemma-4 "<|channel>NAME\n..." and "<channel|>\n..." structural
+// headers (up to and including the newline), preserving body text. Handles both single-header
+// and both-tags emission variants.
 void strip_channel_headers(std::string& text);
 
-// Channel-aware split: parses Gemma-4 style `<|channel>NAME[<channel|>]BODY...`
-// segments and returns the reasoning (= "thought" channel) separately from the
-// user-facing content (= "final" channel + any pre-channel text). Bodies are
-// preserved verbatim minus the markers/header names. Each segment is trimmed.
-// One Harmony tool call: `<|channel|>commentary to=functions.NAME ...
-// <|message|>{args}<|call|>`. Only split_harmony_channels() fills this.
+// Channel-aware split: parses Gemma-4 "<|channel>NAME[<channel|>]BODY..." segments into
+// reasoning ("thought" channel) and content ("final" channel plus any pre-channel text), each
+// trimmed, markers stripped.
+// HarmonyToolCall: one Harmony tool call (<|channel|>commentary to=functions.NAME
+// ...<|message|>{args}<|call|>); only split_harmony_channels() fills it.
 struct HarmonyToolCall {
     std::string name;       // the part after "functions."
     std::string arguments;  // the message body, verbatim
@@ -370,10 +247,9 @@ struct ChannelSegments {
 };
 ChannelSegments split_channel_segments(const std::string& text);
 
-// Harmony-aware split (gpt-oss): parses `<|channel|>NAME<|message|>BODY<|end|>`
-// blocks (and the `<|start|>role` plumbing between them) into reasoning
-// (analysis / commentary channels) vs content (final channel). All Harmony
-// control markup and role names are stripped. Each segment is trimmed.
+// split_harmony_channels (gpt-oss): parses "<|channel|>NAME<|message|>BODY<|end|>" blocks (and
+// the <|start|>role plumbing between them) into reasoning (analysis/commentary) vs content
+// (final). All Harmony markup and role names stripped, each segment trimmed.
 ChannelSegments split_harmony_channels(const std::string& text);
 
 // Effective max output tokens for an OpenAI-shaped body: current OpenAI SDKs
@@ -414,11 +290,9 @@ struct SSEChunkWriter {
         json_escape_into(esc_id, id.data(), id.size());
         json_escape_into(esc_model, model.data(), model.size());
 
-        // system_fingerprint is part of the envelope, so it has to be in BOTH
-        // builders or they drift; ContentFrameMatchesJsonBuiltChunk is the
-        // guard that caught exactly that when only sse_chunk() gained it
-        // (#1602). It is constant for the request, so it belongs in the
-        // pre-built prefix rather than the hot path.
+        // system_fingerprint must be emitted by BOTH response builders or they drift
+        // (ContentFrameMatchesJsonBuiltChunk caught exactly that when only sse_chunk() gained it, #1602).
+        // Constant for the request, so it belongs in the pre-built SSE prefix, not the hot path.
         std::string esc_fp;
         const std::string fp = system_fingerprint(model);
         json_escape_into(esc_fp, fp.data(), fp.size());

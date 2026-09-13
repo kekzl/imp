@@ -70,10 +70,9 @@ std::string json_escape(const std::string& s) {
     return out;
 }
 
-// ---- a scanner over one JSON object's top level -------------------------
-//
-// Enough of a parser to find where a key's VALUE starts and ends in the source
-// text, and no more. Everything outside that span is copied byte for byte.
+// Scanner over one JSON object's top level: enough of a parser to find where a key's VALUE
+// starts and ends in the source text, no more. Everything outside that span is copied byte for
+// byte.
 
 void skip_ws(const std::string& s, size_t& i) {
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
@@ -228,10 +227,9 @@ std::string fusion_group_key(const std::string& weight_name) {
 }
 
 std::string compressed_tensors_quant_config(const std::vector<std::string>& ignore, bool calibrated) {
-    // The weights entry mirrors what llm-compressor writes for
-    // `nvfp4-pack-quantized`, because that is what vLLM's _is_nvfp4_format()
-    // tests: tensor_group strategy, group_size 16, symmetric, float, 4 bits.
-    // Any one of those wrong and vLLM silently picks a different scheme.
+    // Weights entry mirrors what llm-compressor writes for nvfp4-pack-quantized, exactly what
+    // vLLM's _is_nvfp4_format() tests: tensor_group strategy, group_size 16, symmetric, float, 4
+    // bits. Any field wrong and vLLM silently picks a different scheme.
     std::string s;
     s += "{\n";
     s += "    \"config_groups\": {\n";
@@ -393,11 +391,9 @@ std::expected<void, std::string> copy_aux_files(const std::string& in_dir, const
             return copied_one;
     }
 
-    // Then every remaining `*_config.json`, by pattern rather than by name, so a
-    // preprocessor, video preprocessor or processor config travels without this
-    // list having to learn each one. Two are excluded on purpose: the shard
-    // index and hf_quant_config.json describe THIS write and are produced
-    // separately, so copying the source's would contradict what was written.
+    // Every remaining `*_config.json`, by pattern rather than by name, so a new preprocessor
+    // travels without this list learning it. Excluded on purpose: the shard index and
+    // hf_quant_config.json describe THIS write and are produced separately.
     for (const auto& e : fs::directory_iterator(in_dir, ec)) {
         if (!e.is_regular_file())
             continue;

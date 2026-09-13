@@ -1,53 +1,16 @@
 #!/usr/bin/env bash
-# Dependency-pin gate.
-#
-# Three failures this catches. The first two happened on 2026-08-14 and were
-# invisible until a Docker layer cache went cold:
-#
-#   1. DRIFT. The pins live in cmake/imp-deps.cmake and are injected into the
-#      Docker build by scripts/dep_build_args.sh, but the Dockerfile also
-#      carries ARG defaults for anyone running `docker build` directly. Those
-#      defaults had fallen a release behind (CUTLASS v4.6.2 vs the pinned
-#      4.7.0), so the same tree built two different dependency sets depending on
-#      how it was invoked. AGENTS.md says "bump both dep-pin sites together";
-#      nothing enforced it.
-#
-#   2. A TAG THAT DOES NOT EXIST UPSTREAM. The CUTLASS pin read `4.7.0` while
-#      every tag in that repo carries a `v` prefix. `git clone --branch 4.7.0`
-#      fails, so every build from a cold cache died -- while cached builds kept
-#      working and CI stayed green.
-#
-#   4. AN UNVERIFIED DOWNLOAD (AUDIT_arch_2026 H-6). The pins guard the four
-#      FetchContent deps and nothing else the build pulls: the CMake installer
-#      was fetched and executed with no checksum, git-clang-format came off a
-#      *branch* onto a runner holding GITHUB_TOKEN, base images floated on tags
-#      and pip resolved its transitive set fresh on every run. Every download
-#      now names the bytes it expects: image digests, sha256 for single files,
-#      hash-pinned lock files for pip.
-#
-#   3. UPSTREAM MUTATION (AUDIT_arch_2026 H-8). Every pin used to be a mutable
-#      ref: four tags, four `git clone --branch`, nine `uses:` action majors,
-#      zero commit SHAs. A re-tag or a compromised action release changed what
-#      the published image contains with nothing in this repo moving. Each dep
-#      now carries a TAG *and* a SHA, the build fetches the SHA, and --online
-#      asserts the tag still resolves to it -- that assertion failing is the
-#      re-tag alarm. Actions are pinned to 40-hex SHAs, checked offline.
-#
-# All checks read the real sources (cmake/imp-deps.cmake, the Dockerfile's own
-# ARG/fetch lines, the workflow files) rather than keeping a copy of the truth.
-#
-# usage: check_dep_pins.sh [--online]
-#   default : drift + form + download checks, no network
-#   --online: additionally resolve every tag against its upstream remote
-#   --selftest: run every check against a fixture tree with known violations
+# Dependency-pin gate, catches: (1) DRIFT between cmake/imp-deps.cmake and Dockerfile ARG
+# defaults; (2) a TAG that does not exist upstream; (3) UPSTREAM MUTATION (AUDIT_arch_2026 H-8):
+# every dep carries TAG+SHA, --online checks TAG still resolves to SHA; (4) UNVERIFIED DOWNLOADS
+# (AUDIT_arch_2026 H-6): image digests, sha256 for files, hash-pinned pip locks.
+# Reads the real sources, no copy of the truth. Usage: check_dep_pins.sh [--online|--selftest].
 set -uo pipefail
 
 # IMP_PINS_ROOT lets --selftest point the checks at a fixture tree.
 ROOT="${IMP_PINS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-# --selftest: run the checks against a fixture tree whose violations are known.
-# A gate that stops parsing (a renamed field, a reformatted line) goes quiet
-# rather than red, and this repo has caught five such tools that way. Each case
-# builds the fixture, plants one violation and asserts the gate names it.
+# Runs the checks against a fixture tree with known violations: a gate that stops parsing
+# (a renamed field, a reformatted line) goes quiet rather than red, and this repo has caught
+# five such tools that way.
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
@@ -241,24 +204,15 @@ else
     printf '  %d uses: lines\n' "$n_actions"
 fi
 
-# ---------------------------------------------------------------------------
-# What the build DOWNLOADS (AUDIT_arch_2026 H-6). The pins above cover the four
-# FetchContent deps; these three classes are everything else the build pulls off
-# the network: container base images, single files, Python packages. All checks
-# are textual and offline.
-#
-# Scope: Dockerfiles and .github/workflows/. Makefile dev targets that run a
-# throwaway `python:3.12-slim` (chat-goldens) are out: they generate goldens on
-# a developer box and reach neither CI nor the published image.
-# ---------------------------------------------------------------------------
+# What the build downloads (AUDIT_arch_2026 H-6) beyond the four FetchContent deps: container
+# base images, single files, Python packages. All checks are textual and offline.
+# Scope: Dockerfiles and .github/workflows/; developer-only throwaway containers are excluded.
 note ""
 note "downloads (source: Dockerfiles + .github/workflows/)"
 
-# Every Dockerfile except the developer harnesses: tools/Dockerfile.{agents,
-# agents-sdk,claude-code,ncu} and tools/analysis/* build on one operator box
-# (agent_external_smoke.sh, ncu profiling) and reach neither CI nor the
-# published image -- the same call .github/dependabot.yml makes. A new
-# Dockerfile anywhere else is in scope by default.
+# Developer harnesses excluded: tools/Dockerfile.{agents,agents-sdk,claude-code,ncu} and
+# tools/analysis/* build on one operator box, reach neither CI nor the published image.
+# A new Dockerfile anywhere else is in scope by default.
 DEV_HARNESS_RE='tools/(analysis/|Dockerfile\.(agents|agents-sdk|claude-code|ncu)$)'
 mapfile -t DOCKERFILES < <(find "$ROOT" -name 'Dockerfile*' -not -path '*/build*/*' \
                                 -not -path '*/.git/*' | grep -vE "$DEV_HARNESS_RE" | sort)
@@ -273,10 +227,9 @@ logical_lines() {
          END { if (buf != "") print start ":" buf }' "$1"
 }
 
-# 4a. Container images: a tag is a mutable ref (same class as H-8, one layer
-#     down). Every external image must carry an @sha256: digest, and the same
-#     tag must carry the same digest everywhere -- the Dockerfile and the five
-#     ci.yml `image:` lines are two copies of one decision.
+# 4a. Container images: a tag is a mutable ref (AUDIT_arch_2026 H-8, one layer down). Every
+# external image must carry @sha256:, and the same tag must carry the same digest everywhere
+# (Dockerfile and the five ci.yml image: lines are one decision, not two).
 declare -A IMG_DIGEST      # "repo:tag" -> digest, first sighting
 declare -A IMG_WHERE
 n_images=0
@@ -319,10 +272,9 @@ for f in "${WORKFLOWS[@]}"; do
 done
 printf '  %d image refs\n' "$n_images"
 
-# 4b. Remote files. Two of these are fetched and then executed (the CMake
-#     installer in the build image, git-clang-format on a runner that holds
-#     GITHUB_TOKEN). A branch ref is a moving target; an unverified download is
-#     whatever the network hands back that day.
+# 4b. Remote files: two are fetched then executed (the CMake installer in the build image,
+# git-clang-format on a runner holding GITHUB_TOKEN); a branch ref or unverified download is
+# whatever the network hands back that day.
 n_fetch=0
 for f in "${DOCKERFILES[@]}" "${WORKFLOWS[@]}"; do
     while IFS= read -r hit; do
@@ -352,10 +304,9 @@ for f in "${DOCKERFILES[@]}" "${WORKFLOWS[@]}"; do
 done
 printf '  %d remote file fetches\n' "$n_fetch"
 
-# 4c. Python. `pip install <pkg>==<ver>` still lets the index serve different
-#     bytes for that version and says nothing about the transitive set, so every
-#     install goes through a lock file in which every requirement carries a
-#     hash (one --hash puts pip into --require-hashes mode for the whole run).
+# 4c. Python: pip install pkg==ver still lets the index serve different bytes and says
+# nothing about the transitive set. Every install goes through a hash-locked requirements file
+# (one --hash puts pip in --require-hashes mode for the whole run).
 n_pip=0
 declare -A SEEN_LOCK
 for f in "${DOCKERFILES[@]}" "${WORKFLOWS[@]}"; do

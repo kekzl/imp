@@ -1,24 +1,10 @@
 #pragma once
 
-// What a request's `model` field may name (AUDIT_arch_2026 F2-1 = F1-4).
-//
-// Until 2026-09-05 `find_model_path` fell through to resolve_model_auto() for
-// any name containing '/', and that resolver's first step is `fs::exists`:
-// `{"model": "/any/readable/x.gguf"}` loaded that file, tearing down the
-// resident model (server.model_swap is on by default), with the comment above
-// the function promising the opposite. A request string never reaches the
-// filesystem as a path now. Two shapes are allowed:
-//
-//   Basename  - "Qwen3-8B-Q8_0.gguf": looked up among the entries of
-//               --models-dir and nowhere else.
-//   HfRepoId  - "org/repo": exactly one '/', neither side empty, no leading
-//               '/', '.' or '~', no model-file extension (the same shape
-//               src/model/hf_hub.cpp accepts); resolved from the HuggingFace
-//               cache only, and the resolved path must lie inside that cache.
-//
-// Everything else (absolute or relative paths, "..", multi-segment names) is
-// Rejected and answers 404 like an unknown name. Pure functions, no I/O, so
-// tests/test_model_name_policy.cpp pins them in the CPU lane.
+// Request `model` field allowlist (AUDIT_arch_2026 F2-1=F1-4): a name never reaches the
+// filesystem as a path. Basename - looked up only among --models-dir entries. HfRepoId -
+// "org/repo" (exactly one '/', no leading '/'/'.'/'~', no file extension), resolved only from
+// the HF cache and must resolve inside it. Everything else (paths, "..", multi-segment) is
+// rejected (404). Pure, tested in tests/test_model_name_policy.cpp.
 
 #include <filesystem>
 #include <string>

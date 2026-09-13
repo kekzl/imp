@@ -51,10 +51,9 @@ HEADER_EXTS = (".h", ".hpp", ".cuh")
 SEARCH_EXTS = (".cpp", ".cu", ".h", ".hpp", ".cuh")
 ALLOWLIST = ROOT / "tools" / "dead_inline_allowlist.txt"
 
-# An inline definition: optional specifiers, a return type, a name, an argument
-# list, optional trailing const/noexcept/override, then `{` on the SAME line.
-# Requiring the brace on the line is what separates a definition from a
-# declaration, and it is why this finds a class the decl+def sweep could not.
+# An inline definition: optional specifiers, return type, name, argument list, optional
+# trailing const/noexcept/override, then `{` on the SAME line. Requiring the brace on the line
+# is what separates a definition from a declaration.
 DEF_RE = re.compile(
     r"^[ \t]*"
     r"(?:\[\[nodiscard\]\][ \t]*)?"

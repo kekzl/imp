@@ -120,10 +120,9 @@ def run_arm(url, model, system, turns, turn_tokens, defeat_cache, label):
     print(f"  {'turn':>4} {'prompt_tok':>10} {'cached':>8} {'TTFT_ms':>9}  bar")
     ttfts = []
     for turn in range(turns):
-        # cache-ON: stable session head reused across turns (cache hits on the
-        #   unchanged transcript prefix; ON arm is warmed once below first).
-        # cache-OFF: novel head per turn so the prefix cache cannot match ->
-        #   full re-prefill of the whole growing transcript every turn.
+        # cache-ON: stable session head reused across turns (cache hits on the unchanged prefix).
+        # cache-OFF: novel head per turn so the prefix cache can't match, forcing full re-prefill of
+        # the whole growing transcript every turn.
         marker = session + (f"turn-nonce-{time.time_ns()}\n" if defeat_cache else "")
         msgs = build_messages(system, turn, marker)
         if not defeat_cache:

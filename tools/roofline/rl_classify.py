@@ -2,11 +2,9 @@
 math itself lives in rl_table (it joins multiple ncu metric groups). stdlib only."""
 import re
 
-# tensor ops-path counter -> dtype peak key.
-# dst_fp32 maps to a *_f32acc peak: GeForce sm_120 runs FP16/FP8 tensor cores
-# with FP32 accumulate at 1/4 of the f16-accumulate rate (measured 2026-06-07,
-# saturated mma.sync microbench: fp16 f16acc 1956 vs f32acc 253 TFLOPS,
-# fp8 f32acc 496 TOPS — see issue #595/#596 calibration).
+# dst_fp32 maps to a *_f32acc peak: sm_120 runs FP16/FP8 tensor cores at 1/4 the f16-accumulate
+# rate with FP32 accumulate (measured mma.sync microbench: fp16 f16acc 1956 vs f32acc 253 TFLOPS,
+# fp8 f32acc 496 TOPS, #595/#596).
 TC_OPS_METRICS = {
     "sm__ops_path_tensor_src_fp4_dst_fp32.sum": "tc_fp4",
     "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": "tc_fp4",

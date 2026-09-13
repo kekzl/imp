@@ -56,10 +56,8 @@ import urllib.request
 DEFAULT_CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "degen_corpus.jsonl")
 
-# ---------------------------------------------------------------------------
-# Markers that must NEVER appear in user-visible content. Covers ChatML,
-# Gemma channels/turns, Llama instruct, generic pads. (PR #442 regression
-# class: turn markers sampled at high temperature.)
+# Markers that must NEVER appear in user-visible content: ChatML, Gemma channels/turns, Llama
+# instruct, generic pads (PR #442 regression class: turn markers sampled at high temperature).
 SPECIAL_MARKERS = [
     "<|im_start|>", "<|im_end|>", "<|endoftext|>", "<pad>", "<unk>",
     "<|channel>", "<channel|>", "<start_of_turn>", "<end_of_turn>",
@@ -71,10 +69,9 @@ SPECIAL_MARKERS = [
     "\x00",
 ]
 
-# Meta-reasoning openers: if a *reasoning* model puts these at the start of
-# `content`, its think output leaked into the user-visible channel (e.g. the
-# truncated-think spill: max_tokens exhausted before </think>, non-stream
-# path dumps the whole buffer as content).
+# Meta-reasoning openers: if a reasoning model puts these at the start of `content`, its think
+# output leaked into the user-visible channel (e.g. truncated-think spill when max_tokens
+# exhausts before </think>).
 REASONING_OPENERS = [
     "the user wants", "the user is asking", "the user asks",
     "let me think", "let's think", "i should respond", "i need to figure",
@@ -291,10 +288,8 @@ def parses_as_json(text):
     return False
 
 
-# ---------------------------------------------------------------------------
-# Minimal JSON-Schema validator for the bounded shapes the constrained category
-# uses (object with typed/enum/required properties, arrays of enum strings).
-# Stdlib-only — no jsonschema dependency. Returns (ok, reason).
+# Minimal JSON-Schema validator for the bounded shapes the constrained category uses (typed
+# objects, enum arrays). Stdlib-only, no jsonschema dependency. Returns (ok, reason).
 
 def _extract_json(text):
     s = text.strip()
@@ -434,12 +429,10 @@ class Suite:
         self.record("repetition", "temp=1.2 finish_reason set",
                     r["finish"] in ("stop", "length"), f"finish={r['finish']}")
 
-        # Large top_k — the CUB sampler path (> SAMPLE_MAX_TOP_K = 128). It had
-        # NO coverage here, which is why issue #1142 shipped: DeviceTopK served
-        # STALE candidates from the previous decode step and the model emitted
-        # `Okay,,,,,,,,` for the whole budget, while every top_k the battery
-        # used stayed on the multiblock path and looked fine. Two values, one
-        # just past the boundary and one far past it.
+        # Large top_k (> SAMPLE_MAX_TOP_K=128) exercises the CUB sampler path, which had no coverage
+        # here: #1142 shipped when DeviceTopK served STALE candidates from the previous decode step,
+        # invisible because every top_k this battery used stayed on the multiblock path.
+        # Two values tested: one just past the boundary, one far past it.
         for k in (129, 2000):
             r = self.srv.chat(
                 [{"role": "user", "content": "Name three seas."}],
@@ -477,10 +470,9 @@ class Suite:
                     bool(r["reasoning"]) or op is None,
                     "no reasoning_content field but content looks like reasoning")
 
-        # 2. Truncated think: budget too small to reach </think>. The whole
-        #    buffer is reasoning — it must NOT be emitted as content.
-        #    (Production bug class: non-stream path dumped it into content
-        #    while the streaming path correctly labelled reasoning_content.)
+        # Truncated think: budget too small to reach </think>, so the whole buffer is reasoning and
+        # must NOT be emitted as content (production bug: non-stream path dumped it into content while
+        # streaming correctly labelled reasoning_content).
         r = self.srv.chat(q, max_tokens=24)
         op = reasoning_opener(r["content"])
         self.record("think-leak", "truncated think does not spill into content",
@@ -659,15 +651,11 @@ class Suite:
                     f"stream={s['content'][:80]!r} nonstream={ns['content'][:80]!r}")
 
 
-    # -- anthropic-thinking ---------------------------------------------------
-    # /v1/messages DEFAULT path (audit 2026-05-31 T8: thinking blocks were only
-    # ever confirmed WITH --reasoning-format; the default path was unconfirmed).
-    # -- constrained decoding: json_object / json_schema / tool calls --------
-    # Guards the "never breaks the JSON/schema contract" commitment (GOAL.md
-    # Agentic surface). imp's schema FSM is sampler-independent by construction,
-    # so the schema arms must hold under adversarial sampler state too — the
-    # high-temp and min_p arms guard the constrained-pipeline vs eager-path
-    # parity (min_p forces the eager path, per the server-api skill).
+    # anthropic-thinking: /v1/messages DEFAULT path, previously confirmed only with
+    # --reasoning-format.
+    # Constrained decoding (json_object/json_schema/tool calls) guards the "never breaks the
+    # JSON/schema contract" commitment (GOAL.md); imp's schema FSM is sampler-independent, so
+    # high-temp and min_p arms (min_p forces the eager path) guard constrained-vs-eager parity.
     def cat_constrained(self):
         # A bounded schema (enum + typed fields + required) — the shape the
         # FSM can actually enforce (free-form object would degrade to
@@ -751,10 +739,9 @@ class Suite:
                 self.record("constrained", "tool_call: required args present (informational)",
                             not missing, f"missing={missing} args={args}")
 
-        # 6. Strict OPTIONAL tool calling (#1002): strict:true + tool_choice auto.
-        # The call is NOT forced (a plain question stays text), but IF the model
-        # calls, the arguments are FSM-constrained — the enum value must be a
-        # member even when the prompt pushes an out-of-enum value.
+        # Strict OPTIONAL tool calling (#1002): strict:true + tool_choice auto. The call is NOT
+        # forced (a plain question stays text), but if the model calls, arguments are FSM-constrained
+        # even when the prompt pushes an out-of-enum value.
         strict_tool = {
             "type": "function",
             "function": {
@@ -801,10 +788,8 @@ class Suite:
                         f"text={r['text'][:80]!r}")
             return
 
-        # 1. Non-stream DEFAULT: extended thinking is opt-in upstream, so a
-        #    request that does not ask for it gets a text block and no thinking
-        #    block. imp returned one until #1560 made the surface match, which
-        #    is the behaviour this pair now pins from both sides.
+        # Non-stream DEFAULT: extended thinking is opt-in upstream, so a request that doesn't ask for
+        # it gets a text block and no thinking block (imp returned one until #1560).
         r = self.srv.messages(q, max_tokens=n)
         self.record("anthropic-thinking", "default non-stream: no thinking block (opt-in)",
                     not r["thinking"].strip(),
@@ -828,10 +813,8 @@ class Suite:
                     and "<think>" not in r["text"],
                     f"text={r['text'][:100]!r}")
 
-        # 3. Asked for: `thinking.type=enabled` is the on-switch, and it has to
-        #    produce the block on both transports. Nothing covered this before:
-        #    the default path was asserted to think, so the opt-in was never
-        #    distinguished from it.
+        # `thinking.type=enabled` is the on-switch and must produce the block on both transports; the
+        # opt-in path was never distinguished from the (previously always-thinking) default before this.
         think_on = {"type": "enabled", "budget_tokens": max(1024, n // 2)}
         r = self.srv.messages(q, max_tokens=n, thinking=think_on)
         self.record("anthropic-thinking", "thinking=enabled non-stream: thinking block present",
@@ -854,10 +837,9 @@ class Suite:
                     f"blocks={[b.get('type') for b in r['raw'].get('content', [])]}")
 
 
-    # -- data-driven corpus -------------------------------------------------
-    # Runs the large adversarial prompt battery in tools/analysis/degen_corpus.jsonl.
-    # Each record declares its own prompt/messages, params, and the checks to
-    # apply — so the battery grows by editing JSONL, not Python.
+    # Data-driven corpus: runs the adversarial prompt battery in degen_corpus.jsonl. Each record
+    # declares its own prompt/messages, params and checks, so the battery grows by editing JSONL,
+    # not Python.
     def _eval_checks(self, rec, content, reasoning, finish, stream_content):
         """Apply a record's declared checks to one response. Yields (ok, why)."""
         checks = rec.get("checks", [])

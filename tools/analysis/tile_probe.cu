@@ -1,7 +1,5 @@
-// CUDA Tile C++ viability probe for sm_120a (GOAL §5 investigation-first / §11).
-// Minimal tiled matmul C[M,N]=A[M,K]*B[K,N] via cuda::tiles. Verifies correctness
-// vs CPU and lets us inspect SASS (mma.sync/HMMA vs tcgen05). API mirrors the
-// official "Develop High-Performance GPU Kernels in C++ with NVIDIA CUDA Tile" blog.
+// CUDA Tile C++ viability probe for sm_120a: minimal tiled matmul via cuda::tiles, verified
+// vs CPU, SASS-inspectable (mma.sync/HMMA vs tcgen05).
 #include "cuda_tile.h"
 #include <cuda_runtime.h>
 #include <cstdio>

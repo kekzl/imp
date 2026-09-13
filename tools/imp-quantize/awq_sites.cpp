@@ -33,11 +33,10 @@ std::vector<std::string> strs(const std::vector<const char*>& in) {
 std::optional<NormConvention> arch_norm_convention(const std::string& model_type) {
     // Plain: out = norm(x) * g. The four this tool has always accepted.
     static const char* kPlain[] = {"qwen2", "qwen3", "llama", "mistral"};
-    // Unit offset: out = norm(x) * (1 + g). imp bakes the +1 in at load for
-    // these (src/model/weight_upload.cu arch_norm_offset), which is why the
-    // runtime norm_weight_offset stays 0 and the fold has to carry it instead.
-    // Spellings from src/model/hf_config_loader.cpp: a Qwen3.8 checkpoint
-    // declares qwen3_5 at the top level and qwen3_5_text under text_config.
+    // Unit offset: out = norm(x) * (1 + g). imp bakes the +1 at load for these
+    // (src/model/weight_upload.cu arch_norm_offset), so runtime norm_weight_offset stays 0 and the
+    // fold must carry it. Spellings from src/model/hf_config_loader.cpp: a Qwen3.8 checkpoint
+    // declares qwen3_5 top-level and qwen3_5_text under text_config.
     static const char* kUnitOffset[] = {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
                                         "qwen3_next"};
     for (const char* a : kPlain)
@@ -157,10 +156,9 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         out.push_back(std::move(s));
     }
 
-    // ---- E: out_proj into the GDN gated norm. PLAIN, and tied across heads. ----
-    // linear_attn.norm is [head_dim] and shared by every value head
-    // (src/compute/gdn_gated_norm.cu), so the divisor has to be constant over
-    // the heads. The z gate multiplies elementwise AFTER the norm, so dividing
+    // E: out_proj into the GDN gated norm, PLAIN and tied across heads. linear_attn.norm is
+    // [head_dim] and shared by every value head (src/compute/gdn_gated_norm.cu), so the divisor
+    // must be constant over heads; the z gate multiplies elementwise AFTER the norm, so dividing
     // the norm weight divides the product and the gate is untouched.
     if (wants(groups, 'E') && has(names, gdn + "out_proj.weight") && has(names, gdn + "norm.weight")) {
         FoldSite s;
@@ -197,10 +195,9 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         }
     }
 
-    // ---- G: the four GDN in-projections into the same input_layernorm. ----
-    // All four or none: folding the norm divides its output for every one of
-    // them, and a member left out is a consumer whose columns were never
-    // multiplied back up.
+    // G: the four GDN in-projections into the same input_layernorm, all-or-none: folding the norm
+    // divides its output for every one, so a member left out is a consumer whose columns were
+    // never multiplied back up.
     if (wants(groups, 'G') && has(names, in_norm)) {
         const std::vector<const char*> want = {"in_proj_qkv.weight", "in_proj_z.weight", "in_proj_a.weight",
                                                "in_proj_b.weight"};

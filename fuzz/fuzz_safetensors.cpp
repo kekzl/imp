@@ -1,8 +1,5 @@
-// SafeTensors shard loader against a real file (#1620).
-//
-// This surface carried four out-of-bounds accesses (#1603-#1606) and had no
-// fault-injection battery at all: tests/test_safetensors_loader.cpp drove two
-// extracted helpers, never load_safetensors() against a corrupt file.
+// SafeTensors shard loader against a real file (#1620): drives load_safetensors() directly,
+// not just the two extracted helpers tests/test_safetensors_loader.cpp covers.
 
 #include "fuzz_targets.h"
 #include "fuzz_common.h"
@@ -24,10 +21,8 @@ extern "C" int imp_fuzz_safetensors(const uint8_t* data, size_t size) {
         auto model = imp::load_safetensors(f.path());
         (void)model;
     } catch (const std::exception&) {
-        // The loader reports failure by returning nullptr, but the layers under
-        // it (mmap, JSON) may throw on input this hostile. Catching keeps the
-        // signal on memory errors, which is what ASan reports and what all four
-        // shipped defects were.
+        // Loader reports failure via nullptr, but mmap/JSON layers under it may throw on hostile input.
+        // Catching keeps the signal on memory errors, which is what ASan reports.
     }
     return 0;
 }

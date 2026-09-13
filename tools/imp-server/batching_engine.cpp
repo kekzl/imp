@@ -131,10 +131,9 @@ void BatchingEngine::notify_loop_() {
 }
 
 namespace {
-// Worker-side phase attribution (companion to diagnostics.step_timing, which
-// covers the engine's step): admission (steps 0-2), engine->step(), delivery
-// staging (step 4). Enabled by diagnostics.worker_timing (IMP_WORKER_TIMING=1
-// is seeded into that key at config load); logs every 256 loops.
+// Worker-side phase attribution (companion to diagnostics.step_timing): admission (steps
+// 0-2), engine->step(), delivery staging (step 4). Enabled by diagnostics.worker_timing
+// (IMP_WORKER_TIMING=1 seeds it); logs every 256 loops.
 struct WorkerTiming {
     double admit = 0, step = 0, stage = 0;
     int n = 0;
@@ -158,10 +157,9 @@ void BatchingEngine::fail_active_requests_(const std::string& why, cudaError_t o
         }
         sr->push_finish("internal_error");
     }
-    // Distinguish a host-side throw (device clean: recover) from a CUDA fault
-    // that poisoned the shared context (no recovery without a restart).
-    // Without this, a poisoned context is silently cleared at the next
-    // forward() and the server returns garbage on every request.
+    // Distinguishes a host-side throw (device clean: recover) from a CUDA fault that poisoned the
+    // shared context (no recovery without a restart). Without this, a poisoned context is silently
+    // cleared at the next forward() and the server returns garbage on every request.
     const cudaError_t sync_err = cudaDeviceSynchronize();
     const cudaError_t sticky = cudaGetLastError();
     if (imp::cuda_error_is_unrecoverable(observed) || imp::cuda_error_is_unrecoverable(sync_err) ||
@@ -180,12 +178,11 @@ void BatchingEngine::fail_active_requests_(const std::string& why, cudaError_t o
 }
 
 void BatchingEngine::worker_loop() {
-    // Best-effort scheduling boost for the ONE thread that drives the GPU.
-    // Step-phase timing at 32 streams put 6.4 ms per step OUTSIDE the engine
-    // (19% of the period): each step's token delivery wakes up to 32 SSE
-    // handler threads that detokenise and write between steps, and the OS
-    // preempts this thread among them. A higher priority keeps the GPU
-    // driver loop scheduled; EPERM (no CAP_SYS_NICE) is silently accepted.
+    // Best-effort scheduling boost for the ONE thread driving the GPU: token delivery at 32
+    // streams wakes up to 32 SSE handler threads that detokenise/write between steps, and the OS
+    // preempts this thread among them (measured 6.4ms/step, 19% of the period, outside the
+    // engine). Higher priority keeps the GPU driver loop scheduled; EPERM (no CAP_SYS_NICE) is
+    // silently accepted.
     {
         sched_param sp{};
         sp.sched_priority = 10;
@@ -206,13 +203,11 @@ void BatchingEngine::worker_loop() {
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {
         auto wt0 = std::chrono::steady_clock::now();
-        // 0. Graceful pause handshake. When a caller wants exclusive engine
-        //    access (embeddings / blocking vision), it calls pause(). We must
-        //    NOT cancel in-flight generations — instead we keep stepping until
-        //    active work has drained, then park here until resume(). New
-        //    pending requests are left queued (not admitted, not cancelled) so
-        //    they run after resume. The caller holds state.mtx, so no new chat
-        //    can be submitted while we are parked.
+        // Graceful pause handshake: when a caller wants exclusive engine access (embeddings/blocking
+        // vision) via pause(), in-flight generations are NOT cancelled - stepping continues until
+        // active work drains, then parks here until resume(). New pending requests stay queued
+        // (not admitted, not cancelled) so they run after resume; the caller holds state.mtx so no new
+        // chat can be submitted while parked.
         if (pause_requested_.load(std::memory_order_relaxed) && active_requests_.empty()) {
             std::unique_lock<std::mutex> lock(pause_mutex_);
             paused_.store(true);
@@ -248,12 +243,12 @@ void BatchingEngine::worker_loop() {
             if (!pause_requested_.load(std::memory_order_relaxed)) {
                 // Move all pending requests to active
                 while (!pending_queue_.empty()) {
-                    // Per-request LoRA (AUDIT_arch_2026 E-1): the adapter is
-                    // engine-global (executor pointer, decode graphs), so a
-                    // request naming a different one waits until the in-flight
-                    // requests have drained, then this thread switches and
-                    // admits it. FIFO barrier: nothing behind it is admitted
-                    // meanwhile, so it cannot starve behind same-adapter traffic.
+                    // Per-request LoRA (AUDIT_arch_2026 E-1): the adapter is engine-global (executor pointer,
+                    // decode graphs), so a request naming a different one waits until in-flight requests
+                    // drain,
+                    // then this thread switches and admits it. FIFO barrier: nothing behind it admits
+                    // meanwhile, so
+                    // it can't starve behind same-adapter traffic.
                     const int want_lora = pending_queue_.front()->request->lora_id;
                     if (want_lora != engine->active_lora()) {
                         if (!active_requests_.empty())
@@ -269,11 +264,11 @@ void BatchingEngine::worker_loop() {
                     auto sr = std::move(pending_queue_.front());
                     pending_queue_.pop_front();
 
-                    // Per-request vision: encode the image on THIS worker thread
-                    // (the encode is serialized + uses the shared encoder
-                    // workspace, so it must not run concurrently with step()).
-                    // The result lands in request->vision_emb; the request then
-                    // batches with text like any other — no engine pause.
+                    // Per-request vision: encode the image on THIS worker thread (serialized, shares the
+                    // encoder
+                    // workspace, must not run concurrently with step()). Result lands in request->vision_emb;
+                    // the
+                    // request then batches with text like any other, no engine pause.
                     if (sr->request->image && !engine->encode_image_for(*sr->request)) {
                         sr->request->status = imp::RequestStatus::CANCELLED;
                         sr->push_finish("image_encode_failed");
@@ -281,11 +276,10 @@ void BatchingEngine::worker_loop() {
                     }
 
                     sr->notified_count = sr->request->output_tokens.size();
-                    // queue_ms is closed when the scheduler puts the request
-                    // into its first batch (Request::t_scheduled), not here:
-                    // this queue drains every loop, so a stamp at this point
-                    // measured loop latency, never the wait behind
-                    // max_batch_size and KV admission (AUDIT_arch_2026 C-5).
+                    // queue_ms is closed when the scheduler puts the request into its first batch
+                    // (Request::t_scheduled), not here: this queue drains every loop, so a stamp here would
+                    // measure loop latency, never the wait behind max_batch_size and KV admission
+                    // (AUDIT_arch_2026 C-5).
                     engine->add_request(sr->request);
                     active_requests_.push_back(std::move(sr));
                 }
@@ -309,10 +303,9 @@ void BatchingEngine::worker_loop() {
             queue_running.store(running, std::memory_order_relaxed);
         }
 
-        // 2. Check for cancelled requests before stepping. A pipelined
-        // batched-decode step may still be in flight and WRITING these
-        // sequences' KV — collect it before freeing their blocks (engine
-        // invariant; drain is a no-op when nothing is in flight).
+        // Check for cancelled requests before stepping: a pipelined batched-decode step may still be
+        // in flight and WRITING these sequences' KV, so it must be collected before freeing their
+        // blocks (engine invariant; drain is a no-op when nothing is in flight).
         for (auto& sr : active_requests_) {
             if (sr->is_cancelled() && sr->request->status != imp::RequestStatus::FINISHED &&
                 sr->request->status != imp::RequestStatus::CANCELLED) {
@@ -329,15 +322,12 @@ void BatchingEngine::worker_loop() {
             }
         }
 
-        // 3. Run one engine step (processes all scheduled requests).
-        // Wrap in try/catch — a bug in any model/quant/cuda path that throws
-        // mid-forward used to call std::terminate and kill the container,
-        // taking every other in-flight request with it. Now we cancel all
-        // active requests with a clear reason and keep the worker alive.
+        // Run one engine step. Wrapped in try/catch: a bug in any model/quant/cuda path that throws
+        // mid-forward used to call std::terminate and kill the container, taking every other in-flight
+        // request with it. Now cancels all active requests with a clear reason and keeps the worker alive.
         {
-            // What the engine is about to run together (#1580). Counted here
-            // rather than inside the engine because this is where the server
-            // already knows the set, and it keeps the metric out of the
+            // What the engine is about to run together (#1580). Counted here rather than inside the
+            // engine because the server already knows the set here, keeping the metric out of the
             // runtime's headers.
             int rows = 0;
             for (const auto& sr : active_requests_) {
@@ -364,11 +354,10 @@ void BatchingEngine::worker_loop() {
             fail_active_requests_("engine->step() threw a non-std exception", cudaSuccess);
             continue;
         }
-        // A device fault that no guard promoted to a throw (every
-        // IMP_CUDA_CHECK_* in the hot path is log-only) is still in this
-        // thread's error slot. Probe before the tokens go out: a step that
-        // faulted wrote no new tokens, so delivering its buffer would replay
-        // the previous step's (AUDIT_arch_2026 D-1).
+        // A device fault no guard promoted to a throw (every IMP_CUDA_CHECK_* in the hot path is
+        // log-only) is still in this thread's error slot. Probed before the tokens go out: a step that
+        // faulted wrote no new tokens, so delivering its buffer would replay the previous step's
+        // (AUDIT_arch_2026 D-1).
         if (const cudaError_t probe = cudaPeekAtLastError(); imp::cuda_error_is_unrecoverable(probe)) {
             fail_active_requests_(std::string("engine->step() left a sticky CUDA error: ") +
                                       cudaGetErrorString(probe),
@@ -377,10 +366,9 @@ void BatchingEngine::worker_loop() {
         }
 
         auto wt2 = std::chrono::steady_clock::now();
-        // 4. Deliver new tokens and check for completion. Events are staged
-        // and handed to notify_loop_ in ONE batch (see the header note): a
-        // direct push_token here wakes the SSE handler before the worker can
-        // start the next GPU step.
+        // Deliver new tokens and check for completion. Events are staged and handed to notify_loop_
+        // in ONE batch: a direct push_token here would wake the SSE handler before the worker can start
+        // the next GPU step.
         std::vector<PendingDelivery> staged;
         imp::Tokenizer* tok = engine->model()->tokenizer();
         const auto& stop_ids = engine->chat_template().stop_token_ids();
@@ -412,10 +400,11 @@ void BatchingEngine::worker_loop() {
                     const char* reason = "length";
                     bool is_stop_token = false;
                     if (req->status == imp::RequestStatus::CANCELLED) {
-                        // "capacity" rather than "cancelled" when the pool can
-                        // never hold this prompt: the caller can act on that
-                        // one (shorter prompt, more VRAM), and the handler maps
-                        // it to 503 instead of a silent empty completion (I6).
+                        // "capacity" rather than "cancelled" when the pool can never hold this prompt: the
+                        // caller
+                        // can act on that (shorter prompt, more VRAM), and the handler maps it to 503 instead
+                        // of a
+                        // silent empty completion (I6).
                         reason = req->cancel_reason == imp::CancelReason::KvCapacity ? "capacity"
                                                                                      : "cancelled";
                     } else if (req->ignore_eos) {

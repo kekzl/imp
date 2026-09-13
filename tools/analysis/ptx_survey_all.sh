@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# Master PTX feature survey for sm_120f.
-# Runs every individual survey in tools/analysis/ptx_*_survey.sh and
-# concatenates the markdown output. Use after CUDA toolkit upgrades to refresh
-# the dead-end status of every documented PTX instruction we care about.
-#
-# Usage:
-#   tools/analysis/ptx_survey_all.sh                  # full
-#   tools/analysis/ptx_survey_all.sh > docs/ptx-status-$(date +%Y-%m-%d).md
-#   tools/analysis/ptx_survey_all.sh --image custom   # custom CUDA image
+# Master PTX feature survey for sm_120f: runs every tools/analysis/ptx_*_survey.sh and
+# concatenates the markdown output. Use after CUDA toolkit upgrades to refresh dead-end status.
+# Usage: tools/analysis/ptx_survey_all.sh [--image custom] [> docs/ptx-status-<date>.md].
 
 set -e
 

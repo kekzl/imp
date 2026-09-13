@@ -1,19 +1,9 @@
 #pragma once
 
-// The vendor-prefixed speculation keys that ride in `usage`, in ONE place
-// because three surfaces carry them and only one of them writes them.
-//
-// OpenAI chat writes them into `usage.completion_tokens_details`
-// (add_spec_usage_, handlers_internal.h). The Anthropic shim lifts them into
-// top-level `usage`, and the Responses shim into `usage.output_tokens_details`,
-// and both did it through a hand-copied list of three names. So the moment a
-// fourth key appeared, `/v1/chat/completions` reported it and the other two
-// dialects silently did not - which is how `imp_spec_emitted` and the decline
-// reason reached one surface out of three while the docs claimed all of them.
-//
-// A CPU test (tests/test_spec_usage.cpp) asserts that this table is exactly
-// the set of keys add_spec_usage_ writes, so adding a key without adding it
-// here is red rather than invisible.
+// Vendor-prefixed speculation usage keys, defined in ONE place: OpenAI writes them
+// (add_spec_usage_), Anthropic/Responses shims lift them via this same list instead of their own
+// hand-copied ones - a 4th key used to reach only 1 of 3 dialects silently.
+// tests/test_spec_usage.cpp asserts this table matches exactly what add_spec_usage_ writes.
 
 #include <nlohmann/json.hpp>
 

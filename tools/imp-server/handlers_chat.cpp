@@ -1,10 +1,6 @@
-// AUTO-SPLIT from handlers.cpp (verbatim move; see handlers_internal.h).
-// OpenAI chat endpoints: handle_chat_completions (/v1/chat/completions),
-// handle_completions (/v1/completions), plus the Anthropic
-// handle_count_tokens (/v1/messages/count_tokens). The handle_messages
-// (/v1/messages) endpoint lives in handlers_messages.cpp next to its streaming
-// loop. Streaming/parse machinery lives in handlers_chat_core.cpp /
-// handlers_chat_stream.cpp / handlers_messages.cpp.
+// AUTO-SPLIT from handlers.cpp. OpenAI chat endpoints: handle_chat_completions
+// (/v1/chat/completions), handle_completions (/v1/completions), Anthropic handle_count_tokens.
+// handle_messages lives in handlers_messages.cpp; stream machinery in handlers_chat_core/stream.cpp.
 
 #include "runtime/engine.h"
 #include "handlers.h"
@@ -79,11 +75,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
 namespace {
 
-// Everything the two /v1/completions response paths need from the parse phase.
-// The chat route has had this shape since its own split (ChatRequestContext in
-// handlers_internal.h, filled by parse_chat_request_params); /v1/completions
-// carried parse, stream loop and non-stream response in one 593-LOC body
-// instead, which is what the function-size gate flagged in #1905.
+// CompletionCtx mirrors ChatRequestContext (handlers_internal.h) so /v1/completions parse/stream/
+// response are three phases instead of one 593-LOC body (#1905 file-size gate).
 struct CompletionCtx {
     const std::string& prompt;
     const std::vector<int32_t>& tokens;
@@ -146,30 +139,21 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
             std::string pending_text;
             bool text_stop_matched = false;
 
-            // Strip <think> blocks for completions (no reasoning_content field).
-            // think_confirmed starts FALSE so a raw /v1/completions prompt
-            // (no chat template → no injected <think>) streams incrementally
-            // instead of buffering every token into think_buf waiting for a
-            // </think> that never comes (#760: completions stream arrived as
-            // one frame). It flips true only if a real <think> opener shows
-            // up in the first kThinkScanLimit tokens, so genuine think blocks
-            // are still stripped.
+            // think_strip starts false for /v1/completions (no chat template -> no injected <think>) so a
+            // raw prompt streams incrementally instead of buffering for a </think> that never comes (#760).
+            // Flips true only if a real <think> opener appears within kThinkScanLimit tokens.
             bool think_strip = (snap_is_think_model && state.default_args.reasoning_format != "none");
             bool think_confirmed = false;
             std::string think_buf;
             int think_tokens = 0;
             const int kThinkScanLimit = 8;
 
-            // #1589: this path emitted no logprobs at all. It emits one
-            // chunk per token now when they were asked for, which is the
-            // shape a client can consume: a chunk carrying two tokens has
-            // nowhere to put two offsets.
+            // #1589: emit one SSE chunk per token when logprobs are requested - a chunk carrying two tokens
+            // has nowhere to put two offsets.
             imp::stream::TokenSpans pending_spans;
             imp::stream::TokenSpans utf8_spans;
-            // think_buf holds tokens back too, so it needs the same
-            // bookkeeping: a completion shorter than the 8-token think
-            // scan window never leaves the buffer during the loop and used
-            // to reach the client as one unattributed chunk.
+            // think_buf must track spans the same way pending_spans does: a completion shorter than the
+            // 8-token think-scan window never leaves the buffer mid-loop, so attribution must flush at end.
             imp::stream::TokenSpans think_spans;
             std::vector<imp::stream::TokenSpans::Emit> carried_spans;
             size_t completion_offset = 0;  // byte offset of the next token in the completion
@@ -205,13 +189,10 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
             double ttft_ms = -1.0;
             auto t_prev_token = t_start;  // last delivered token (ITL)
             for (;;) {
-                // #757: the is_last token sets `finish` then falls through
-                // to think-stripping, which `continue`s on every swallowed
-                // token — bypassing the trailing `if (finish) break`. For a
-                // think-capable model whose final token lands inside the
-                // think buffer the loop would otherwise spin on pop_token
-                // until the client gives up (0 bytes, never terminates).
-                // Break here so the buffers flush and [DONE] is sent.
+                // #757: is_last sets `finish` then falls into think-stripping's `continue`, bypassing the
+                // trailing `if (finish) break` - a think-capable model whose last token lands in the think
+                // buffer spun on pop_token forever (0 bytes, never terminates). Break here to flush and send
+                // [DONE].
                 if (finish)
                     break;
 
@@ -261,11 +242,9 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
 
                 int32_t token = evt.token_id;
 
-                // First token closes TTFT and the queue wait, every later
-                // one is an ITL sample. This loop fed none of the four
-                // latency histograms before, so /v1/completions traffic
-                // (every serving harness in tools/analysis/) left them
-                // empty.
+                // First token closes TTFT/queue-wait histograms; every later token is an ITL sample. This
+                // loop
+                // fed none of the four before, so all /v1/completions traffic left them empty.
                 {
                     const auto t_tok = std::chrono::high_resolution_clock::now();
                     if (ttft_ms < 0.0) {
@@ -385,10 +364,9 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
                 const size_t before = think_buf.size();
                 strip_think_block(think_buf);
                 if (!think_buf.empty()) {
-                    // Only carry the attribution across when the strip
-                    // changed nothing. Once bytes have been removed the
-                    // recorded offsets no longer describe this string, and
-                    // a plausible-looking wrong index is worse than none.
+                    // Carry attribution across only when the strip changed nothing: once bytes are removed
+                    // the
+                    // recorded offsets no longer match the string, and a wrong index is worse than none.
                     if (think_buf.size() == before) {
                         for (const auto& e : think_spans.flush(before))
                             utf8_spans.append(e.length, e.token_index);
@@ -581,10 +559,8 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
                  n_output_tokens, ms);
     state.metrics.record_completion("/v1/completions", ms, ttft_ms, n_prompt_tokens, n_output_tokens);
 
-    // Build logprobs if requested
-    // #1589: this is /v1/completions, so it gets the Completions shape.
-    // It used to build the Chat object here, which an OpenAI SDK reading
-    // `.logprobs.tokens` cannot see at all.
+    // #1589: build the Completions logprobs shape here (not the Chat shape) - an OpenAI SDK reading
+    // `.logprobs.tokens` on /v1/completions cannot see the Chat object.
     json logprobs_obj = nullptr;
     if (req_logprobs && active_req) {
         logprobs_obj = completions_logprobs_json(active_req->output_logprobs, output_ids.size(), text);
@@ -640,12 +616,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         return;
     }
 
-    // best_of asks the server to generate N candidates and return the best by
-    // total logprob. imp has no such path - no COW-fork, no candidate scoring -
-    // so the field was read by nothing and the caller got one ordinary
-    // completion with 200 (#1598). Same treatment as its neighbour n: an
-    // explicit refusal, because "best of 8" and "the first one" are different
-    // answers and the response cannot tell them apart.
+    // best_of: imp has no candidate-scoring path, so this field is refused (400) rather than
+    // silently ignored (#1598) - "best of 8" and "the first one" are different answers.
     if (body.contains("best_of") && !body["best_of"].is_null()) {
         if (!body["best_of"].is_number_integer()) {
             send_json_error(res, 400, "invalid_request_error", "\"best_of\" must be an integer");
@@ -931,11 +903,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     }
 }
 
-// POST /v1/messages/count_tokens — Anthropic token-counting endpoint. Claude
-// Code calls it for context tracking / auto-compaction. Runs the exact chain a
-// real request would take (anthropic_to_openai_body -> common param parse ->
-// state snapshot + chat-template tokenize, including tool defs and the think
-// prefix) WITHOUT submitting to the engine, and returns {"input_tokens": N}.
+// POST /v1/messages/count_tokens: runs the real request chain (convert, parse, snapshot,
+// tokenize) without submitting to the engine; returns {"input_tokens": N}. Used by Claude Code
+// for context tracking/auto-compaction.
 void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     namespace anth = imp_server::anthropic;
 

@@ -39,12 +39,9 @@ typedef struct ImpContext_T* ImpContext;
 
 ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_model);
 
-// Like imp_model_load, but lets the caller opt into loading the MTP
-// (multi-token-prediction) head sidecar for SafeTensors models that ship one
-// (DeepSeek-V3 family, e.g. Qwen3.6). The head is ~1.57 GiB BF16 of VRAM and is
-// only useful when MTP spec-decode is subsequently enabled via
-// imp_enable_mtp_spec_decode. imp_model_load() is equivalent to passing
-// load_mtp_head=0. Has no effect for GGUF or models without an MTP sidecar.
+// Opts into loading the MTP head sidecar for SafeTensors models that ship one (DeepSeek-V3
+// family, e.g. Qwen3.6): ~1.57 GiB BF16, useful only with imp_enable_mtp_spec_decode.
+// imp_model_load() == load_mtp_head=0. No effect for GGUF or models without an MTP sidecar.
 ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp_head,
                            ImpModel* out_model);
 
@@ -131,49 +128,38 @@ ImpError imp_tokenize(ImpModel model, const char* text, int32_t* tokens, int* n_
 ImpError imp_detokenize(ImpModel model, const int32_t* tokens, int n_tokens, char* output_buf,
                         size_t output_buf_size);
 
-// Prefill: process input tokens, populate KV cache.
-// NOTE: prefill samples the FIRST output token; without `params` the request
-// inherits Request struct defaults (top_p=1, top_k=0) and ignores caller
-// sampling choices for that first token. Quantized MoE models with noisy
-// logit tails (Gemma-4-NVFP4, Qwen3-Coder-NVFP4) can produce a degenerate
-// first token under those defaults. Use imp_prefill_with_params instead and
-// pass the same params you will hand to imp_decode_step.
+// Prefill samples the FIRST output token; without params it uses Request defaults (top_p=1,
+// top_k=0), ignoring caller sampling. Quantized MoE models with noisy logit tails (Gemma-4-NVFP4,
+// Qwen3-Coder-NVFP4) can degenerate on that token. Use imp_prefill_with_params instead.
 ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens);
 
-// Prefill that applies caller-supplied sampling params to the first-token
-// sample at end of the last prefill chunk. Strongly preferred over
-// imp_prefill for any path that uses non-default temperature/top_p/top_k.
-// `params` may be NULL (degrades to imp_prefill semantics).
+// Applies caller sampling params to the first-token sample at end of the last prefill chunk.
+// Strongly preferred over imp_prefill for non-default temperature/top_p/top_k.
+// params may be NULL (degrades to imp_prefill semantics).
 ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_tokens,
                                  const ImpGenerateParams* params);
 
-// Decode: generate one token.
-// Returns IMP_ERROR_CANCELLED when the engine had to cancel the request —
-// e.g. the KV pool is exhausted mid-decode (reject-newest; the engine log
-// names the cause and remedy). IMP_ERROR_INTERNAL after natural FINISH is
+// Returns IMP_ERROR_CANCELLED when the engine cancels mid-decode (e.g. KV pool exhausted,
+// reject-newest; engine log names cause+remedy). IMP_ERROR_INTERNAL after natural FINISH is
 // the end-of-stream signal for callers that keep stepping.
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token);
 
-// Teacher-forced perplexity over tokens[0..n_tokens-1] (eval/bench).
-// Resets context, runs a SINGLE-CHUNK prefill (so all-position hidden survives),
-// applies the LM head to every position, and returns PPL in *out_ppl.
-// Requires n_tokens <= the model's max prefill length. *out_ppl < 0 on failure.
+// Teacher-forced perplexity over tokens[0..n_tokens-1]: resets context, runs a SINGLE-CHUNK
+// prefill (all-position hidden survives), applies the LM head to every position.
+// Requires n_tokens <= the model's max prefill length; *out_ppl < 0 on failure.
 ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, double* out_ppl);
 
-// Write the activation-calibration statistics collected so far to `path`
-// (see `[calibration] enabled`). Input to imp-quantize's AWQ scale search.
-// Returns IMP_ERROR_INVALID_ARG when calibration was never enabled or no
-// forward pass has run, so an empty file can never pass for a valid one.
+// Writes activation-calibration stats collected so far to `path` ([calibration] enabled),
+// input to imp-quantize's AWQ scale search.
+// IMP_ERROR_INVALID_ARG when calibration was never enabled or no forward pass ran.
 ImpError imp_calibration_write(ImpContext ctx, const char* path);
 
 // Reset context state (clear KV cache etc.)
 ImpError imp_context_reset(ImpContext ctx);
 
-// Enable MTP-based speculative decoding (DeepSeek-V3-family models, e.g.
-// Qwen3.6 with `model_mtp.safetensors`). k = draft length (1-4 typical).
-// Returns IMP_ERROR_INVALID_ARGUMENT if model has no MTP head loaded.
-// Phase 3 scaffolding: API in place, auto-invocation from decode loop is
-// Phase 4 production work (currently Phase 5 smoke tests use the C++ API).
+// MTP-based speculative decoding (DeepSeek-V3-family, e.g. Qwen3.6 model_mtp.safetensors).
+// k = draft length (1-4 typical). IMP_ERROR_INVALID_ARGUMENT if no MTP head loaded.
+// API in place; auto-invocation from the decode loop is not wired (C++ API only today).
 ImpError imp_enable_mtp_spec_decode(ImpContext ctx, int k);
 
 // --- Vision (Multimodal) ---
@@ -186,38 +172,24 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path);
 // Set image from raw memory (e.g. decoded base64). Pass NULL/0 to clear.
 ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
-// Append an image instead of replacing the pending one, so a prompt can carry
-// several. They are consumed in the order added, one per placeholder.
-// IMP_ERROR_UNSUPPORTED on a model whose vision tower takes a single image
-// (the mmproj path) — refused rather than silently keeping only one.
+// Appends an image instead of replacing the pending one, so a prompt can carry several;
+// consumed in order added, one per placeholder.
+// IMP_ERROR_UNSUPPORTED on single-image models (mmproj path): refused, not silently truncated.
 ImpError imp_add_image(ImpContext ctx, const char* image_path);
 ImpError imp_add_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
-// Number of image tokens the pending image expands to, 0 if none. Dynamic-
-// resolution encoders (Qwen3-VL) only know this after the image is set, and the
-// prompt has to reserve exactly this many placeholders — so call it between
-// imp_set_image and tokenizing.
+// Number of image tokens the pending image expands to, 0 if none. Dynamic-resolution
+// encoders (Qwen3-VL) only know this after the image is set.
+// Call between imp_set_image and tokenizing so the prompt reserves exactly this many placeholders.
 int imp_pending_image_tokens(ImpContext ctx);
 
-// --- Suspend to RAM (weight snapshot) ---
-//
-// Flow (see imp-server /admin/suspend and /admin/resume):
-//   1. imp_weights_snapshot_capture(model, headroom_mb, &snap)  — D2H copy of
-//      the post-upload weight buffers into pageable host RAM. Model/engine
-//      still fully alive; on failure nothing was torn down.
-//   2. imp_context_free(ctx); imp_model_free(model);            — free VRAM.
-//   3. imp_gpu_release(1);                                      — trim pools,
-//      optional cudaDeviceReset so the process holds ~0 MiB VRAM.
-//   4. later: imp_weights_snapshot_arm(snap); then reload the SAME model file
-//      (imp_model_load + imp_context_create). The weight upload restores
-//      buffer bytes from the snapshot instead of re-reading + re-converting;
-//      any per-tensor mismatch silently falls back to the normal cold path.
-//   5. imp_weights_snapshot_free(snap);
-//
-// Capture errors: IMP_ERROR_UNSUPPORTED for models whose device weight buffers
-// were transformed in place after upload (native MXFP4 GGUF, gpt-oss, Gemma-4
-// fused-expert split), IMP_ERROR_OUT_OF_MEMORY when host MemAvailable is
-// insufficient (snapshot bytes + headroom_mb).
+// Suspend to RAM (see imp-server /admin/suspend, /admin/resume): capture D2H-copies weight
+// buffers to host RAM (imp_weights_snapshot_capture(model, headroom_mb, &snap); engine stays
+// alive, failure tears down nothing); imp_context_free+imp_model_free free VRAM; imp_gpu_release(1)
+// trims pools/resets the device. imp_weights_snapshot_arm(snap) + reload the SAME model file
+// restores buffer bytes (a mismatch falls back to cold path); free with imp_weights_snapshot_free.
+// Capture: UNSUPPORTED for weights transformed post-upload (native MXFP4 GGUF, gpt-oss, Gemma-4
+// fused-expert split); OUT_OF_MEMORY if host MemAvailable < snapshot bytes + headroom_mb.
 typedef struct ImpWeightSnapshot_T* ImpWeightSnapshot;
 
 ImpError imp_weights_snapshot_capture(ImpModel model, size_t host_ram_headroom_mb,
@@ -230,10 +202,9 @@ size_t imp_weights_snapshot_bytes(ImpWeightSnapshot snap);
 // Number of uploads restored from this snapshot by the last armed consume.
 int imp_weights_snapshot_hits(ImpWeightSnapshot snap);
 
-// Release process-held GPU resources after model/context teardown: syncs,
-// trims the async mempool, and (device_reset != 0) resets the CUDA primary
-// context so nvidia-smi shows ~0 MiB for this process. After a reset the next
-// imp_model_load/imp_context_create re-initializes CUDA state from scratch.
+// Releases process-held GPU resources after model/context teardown: syncs, trims the async
+// mempool, and (device_reset != 0) resets the CUDA primary context so nvidia-smi shows ~0 MiB.
+// After a reset, the next imp_model_load/imp_context_create reinitializes CUDA from scratch.
 ImpError imp_gpu_release(int device_reset);
 
 // --- Version ---

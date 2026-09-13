@@ -1,11 +1,5 @@
-// GGUF loader against a real file (AUDIT_arch_2026 F1-12).
-//
-// The two S0 findings of the 2026 audit (F1-1: `n_dims > 4` stack write,
-// F1-2: the mmproj fork of the same parse loop) were both in unfuzzed parsers,
-// and the hand-written battery (tests/test_gguf_fault_injection.cpp) never
-// patched `n_dims`. Same shape as fuzz_safetensors.cpp: the input becomes a
-// file, the loader runs to whatever it refuses on. No GPU: load_gguf() builds
-// the host-side Model over the mmap and stops before any upload.
+// GGUF loader against a real file (AUDIT_arch_2026 F1-12): load_gguf() builds the host-side
+// Model over the mmap and stops before upload, so no GPU is needed.
 
 #include "fuzz_targets.h"
 #include "fuzz_common.h"

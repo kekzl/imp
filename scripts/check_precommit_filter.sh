@@ -1,22 +1,9 @@
 #!/bin/sh
-# Guard the pre-commit hook's path filter against over- and under-gating.
-#
-# The hook runs the FULL GPU suite, so its filter decides minutes of a shared
-# card per commit. It used to select on the path prefix alone, and `tools/` and
-# `tests/` also hold the CLAUDE.md tree and the gate/generator scripts - so a
-# Markdown edit paid an image build plus the whole suite for a result that
-# cannot move. Excluding too much is the worse failure: a C++ change that skips
-# the suite is gated nowhere, because CI has no GPU runner.
-#
-# The filter is READ OUT OF the hook rather than copied here. A guard with its
-# own copy of the expression guards the copy.
-#
-# Guards the pre-push hook's filter as well: it strips the same extensions before
-# deciding whether to run verify-fast, and it gates on a card shared with another
-# session, so over-gating there is not free either.
-#
-# Usage: check_precommit_filter.sh <repo-root>
-# Exit 0 = every case below lands on the expected side.
+# Guards the pre-commit hook's path filter against over/under-gating: a path-prefix-only
+# filter used to run the full GPU suite on a Markdown edit under tools/ or tests/ (which also
+# hold CLAUDE.md and gate scripts). Under-gating is worse: a C++ change skipping the suite is
+# gated nowhere (CI has no GPU). Filter is READ OUT OF the hook, not copied; also guards
+# pre-push's same filter.
 
 set -eu
 
@@ -125,13 +112,9 @@ if [ -x "$TOUCHES" ]; then
     done
 fi
 
-# --- the INSTALLED hook is a copy -----------------------------------------
-# `make install-hooks` copies scripts/pre-commit.hook into .git/hooks/. Editing
-# the repo copy changes nothing until that runs again, so a shipped hook fix can
-# sit inactive on the machine that shipped it - which is how the #1723 filter
-# was still gating .py locally after it had merged. It also fires while a branch
-# that edits a hook is checked out without installing it - same true statement,
-# same fix. Absent (a fresh clone, CI) is fine; present and different is not.
+# make install-hooks copies scripts/pre-commit.hook into .git/hooks/; editing the repo copy
+# changes nothing until that reruns (#1723 filter stayed stale locally after merge).
+# Absent (fresh clone, CI) is fine; present and different is not.
 for h in pre-commit pre-push; do
     INSTALLED="$ROOT/.git/hooks/$h"
     [ -f "$INSTALLED" ] || continue

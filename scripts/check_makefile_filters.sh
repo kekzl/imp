@@ -1,25 +1,9 @@
 #!/bin/sh
-# Every `--gtest_filter="..."` literal in the Makefile must match at least one
-# test in the binary the same line names (AUDIT_arch_2026 I-7).
-#
-# gtest treats a pattern that matches nothing as success: it runs zero tests
-# and reports PASSED. The repo has paid for that three times (#1299 DetEval,
-# #1575 the pre-commit "full suite", #1586 `AttentionTest.*` for four months)
-# and built a guard per filter each time (guard_e2e_lane_split,
-# guard_det_suite_filter, guard_verify_filter). The Makefile's own filters had
-# none, and one was live: `test-text --gtest_filter="*Qwen38TokenizerParity*"`
-# named a suite that lives in test-e2e, so `make test-gpu` ran "0 tests,
-# PASSED" for it on every commit.
-#
-# Reads the literals OUT OF the Makefile (a copy would guard the copy), maps
-# the binary named before `--gtest_filter` to the build dir, and lists tests
-# with --gtest_list_tests, which runs no test body and needs no GPU. Splits
-# each filter on `:` so one dead pattern inside a long filter is still caught.
-#
-# Usage: check_makefile_filters.sh <build-dir> [<Makefile>]
-# Exit 0 = every pattern matches; 2 = usage; 1 = a dead pattern.
-# Fail-open per binary: a binary this configuration did not build is skipped
-# with a note, never counted as a match.
+# AUDIT_arch_2026 I-7: every --gtest_filter literal in the Makefile must match >=1 test in
+# the binary named on the same line. gtest treats a matchless pattern as success (0 tests,
+# PASSED); this repo paid for that three times (#1299, #1575, #1586).
+# Reads literals out of the Makefile, lists tests via --gtest_list_tests (no GPU needed).
+# Fail-open per binary a given configuration did not build.
 set -eu
 BUILD="${1:?usage: check_makefile_filters.sh <build-dir> [Makefile]}"
 MAKEFILE="${2:-$(dirname "$0")/../Makefile}"

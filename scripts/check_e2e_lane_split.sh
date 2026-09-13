@@ -1,18 +1,8 @@
 #!/bin/sh
-# Guard the test-e2e unit/gpu lane split against silent rename drift (R5/#580).
-#
-# test-e2e bundles CPU-only stub/API tests AND GPU-backed E2E tests in one
-# binary; the unit lane is carved out by a gtest_filter (_unit_e2e_filter in
-# CMakeLists.txt). A test rename used to silently shift a test into the wrong
-# lane — a CPU test renamed out of the filter would start running in the GPU
-# lane (skipped in CI, lost coverage) with no error.
-#
-# This script asserts the filter resolves to EXACTLY the expected set of unit
-# tests. Renaming/removing/adding a unit test now fails this guard loudly until
-# both the filter and the expected list below are updated together.
-#
-# Usage: check_e2e_lane_split.sh <path-to-test-e2e> "<gtest_filter>"
-# Exit 0 = lanes match expectation; non-zero = drift (prints the diff).
+# Guards the test-e2e unit/gpu lane split against silent rename drift (R5/#580): a CPU test
+# renamed out of _unit_e2e_filter (CMakeLists.txt) used to silently shift into the GPU lane
+# (skipped in CI, lost coverage) with no error. Asserts the filter resolves to EXACTLY the
+# expected unit set.
 
 set -eu
 
@@ -24,10 +14,9 @@ if [ ! -x "$BIN" ]; then
     exit 2
 fi
 
-# Expected unit-lane tests (fully-qualified). Keep in sync with _unit_e2e_filter
-# in CMakeLists.txt. These are the CPU-only stub/API tests in test-e2e; the rest
-# of the binary (EndToEndModelTest.*, StubModelTest GPU subtests, GPUBatchTest.*)
-# is the GPU lane.
+# Expected unit-lane tests (fully-qualified), kept in sync with _unit_e2e_filter in
+# CMakeLists.txt: CPU-only stub/API tests in test-e2e. The rest (EndToEndModelTest.*,
+# StubModelTest GPU subtests, GPUBatchTest.*) is the GPU lane.
 EXPECTED=$(cat <<'EOF'
 BatchBuilderTest.MultipleDecodeSequences
 BatchBuilderTest.PrefillSequence

@@ -1,16 +1,8 @@
 #!/bin/bash
-# Stage a HuggingFace checkpoint and quantize it to NVFP4, in one command.
-#
-# The gap this closes: imp reads NVFP4 SafeTensors and refuses to fetch anything
-# itself (clean-host policy, src/model/hf_hub.h), so a newcomer with a 5090 and a
-# model in mind has to work out the download, the conversion, the container
-# invocation and the disk arithmetic before seeing a single token. For a model
-# with no usable published export that is a long way from "try it".
-#
-#   scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
-#
-# curl and jq only, no Python and no huggingface-cli: this runs on the host,
-# which by policy has neither.
+# Stages a HuggingFace checkpoint and quantizes it to NVFP4 in one command: imp reads NVFP4
+# SafeTensors and refuses to fetch anything itself (clean-host policy, src/model/hf_hub.h).
+# curl and jq only, no Python and no huggingface-cli (host has neither by policy).
+# Usage: scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4.
 set -uo pipefail
 
 REPO="${1:-}"
@@ -79,11 +71,9 @@ for f in $(echo "$LISTING" | jq -r '.siblings[].rfilename'); do
 done
 echo " done"
 
-# A repo that is ALREADY imp-readable NVFP4 needs no conversion, only the
-# download — which is the part that is awkward without git-lfs (not installed
-# here by policy, so `git clone` fetches pointer files instead of weights) and
-# without huggingface-cli (Python, likewise absent). Detect it and stop here
-# rather than spend 25 minutes proving there is nothing to quantize.
+# A repo already imp-readable NVFP4 needs only the download, which git-lfs/huggingface-cli
+# would make easy but neither is installed here by policy. Detect it and stop rather than
+# spend time proving there is nothing to quantize.
 if [ -f "$SRC/hf_quant_config.json" ] && grep -q '"quant_algo"[[:space:]]*:[[:space:]]*"NVFP4"' \
         "$SRC/hf_quant_config.json" 2>/dev/null; then
     echo "== already NVFP4, no conversion needed"
@@ -121,11 +111,9 @@ if [ "$DROP_SOURCE" = "1" ]; then
     rm -rf "$SRC"
 fi
 
-# The container serves as its own uid (1001), not as the caller. A checkpoint
-# under a 0700 directory therefore quantizes fine and then fails to LOAD with a
-# bare "filesystem error: status: Permission denied", which says nothing about
-# the cause. Check it here, where the fix is one chmod, rather than leaving it
-# to be discovered as a crash.
+# Container serves as its own uid (1001), not the caller: a checkpoint under a 0700 directory
+# quantizes fine and then fails to LOAD with an opaque "Permission denied". Checked here, where
+# the fix is one chmod, rather than left to surface as a crash.
 if ! docker run --rm -v "$(cd "$(dirname "$OUT")" && pwd)":/probe:ro "$IMAGE" \
         test -r "/probe/$(basename "$OUT")/config.json" 2>/dev/null; then
     echo

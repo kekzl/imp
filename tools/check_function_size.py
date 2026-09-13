@@ -76,11 +76,10 @@ code_loc = _cfs.code_loc
 
 SRC_EXT = (".cu", ".cpp")
 
-# A signature starts in column 0 and is not one of the block openers that are not
-# functions. `if`/`for`/`while` cannot appear in column 0 outside a body, so they
-# need no exclusion. A parameter list is what separates a function from a data
-# table: `static const uint32_t T[256] = {` opens a 256-line brace block in column
-# 0 and is not a function, and requiring `)` is what tells them apart.
+# A signature starts in column 0 and isn't one of the non-function block openers
+# (if/for/while can't appear in column 0 outside a body, so they need no exclusion). Requiring
+# a `)` parameter list is what separates a function from a column-0 data table like
+# `static const uint32_t T[256] = {`.
 NOT_A_FUNCTION = re.compile(
     r"^(namespace|extern|struct|class|enum|union|using|typedef|template|#|//|/\*|\}|else)\b")
 SIG_START = re.compile(r"^[A-Za-z_~][^=]*\(")
@@ -171,11 +170,9 @@ def functions_in(path, text, frag_cache):
                 or ")" not in " ".join(sig):
             i += 1
             continue
-        # The body ends where the brace depth returns to zero, NOT at the first
-        # column-0 `}`: a dedented inner close (`}  // !done` at column 0 inside
-        # a 557-LOC body) made the gate read 176 and clear the hard limit
-        # (AUDIT_arch_2026 G-6). Braces inside comments and string literals do
-        # not count.
+        # Body ends where brace depth returns to zero, NOT at the first column-0 `}`: a dedented
+        # inner close inside a long body made the gate undercount and clear the hard limit
+        # (AUDIT_arch_2026 G-6). Braces inside comments/string literals don't count.
         body, frags = [], []
         depth, in_comment = _braces(lines[k][lines[k].index("{") + 1:], False)
         depth += 1

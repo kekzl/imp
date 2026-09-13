@@ -1,19 +1,7 @@
 #!/bin/sh
-# Guard: batch>1 speculation is gated on "is there a draft source", not on
-# speculative.ngram.
-#
-# Two call sites decide whether round-robin batched verify happens at all, and
-# both used to ask `speculative.ngram` - the one key the measured MTP recipe
-# sets to false (docs/MODELS.md). Fixing the rule does not fix the wiring: a
-# mutant that points either site back at the n-gram predicate survives the
-# entire CPU lane, because answering the question at runtime needs a GPU, a
-# model and a batch. So this guard reads the source, the same trade
-# check_cancel_teardown.sh makes. It is a ctest script rather than a GTest
-# body because the shipped test binaries run without the tree (imp:test has
-# no /src), and a source-reading TEST is red there.
-#
-# Usage: check_spec_rr_wiring.sh <repo-root>
-# Exit 0 = both sites ask the drafter question; non-zero = one asks n-gram.
+# Guard: batch>1 speculation must gate on "is there a draft source", not speculative.ngram
+# (the key the measured MTP recipe sets false, docs/MODELS.md). Source-reading script, not a
+# GTest body: shipped test binaries run without the tree (imp:test has no /src).
 
 set -eu
 

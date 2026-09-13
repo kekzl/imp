@@ -70,12 +70,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         runtime_cfg.calibration.enabled = true;
-        // A calibration file that varies run to run makes the checkpoint built
-        // from it unreproducible, and the variance is NOT small: two runs of
-        // this exact command differed on 94% of the recorded floats (up to
-        // 0.5% each), which moved the quantized model's perplexity by ~1.6%.
-        // runtime.deterministic_gemm makes it bit-identical, so calibration
-        // forces it rather than offering it.
+        // A calibration file that varies run to run makes the checkpoint built from it unreproducible:
+        // two runs of the same command differed on 94% of recorded floats, moving quantized PPL ~1.6%.
+        // runtime.deterministic_gemm makes it bit-identical, so calibration forces it rather than
+        // offering it.
         if (!runtime_cfg.runtime.deterministic_gemm) {
             runtime_cfg.runtime.deterministic_gemm = true;
             fprintf(stderr,
@@ -117,10 +115,8 @@ int main(int argc, char** argv) {
     if (format == IMP_FORMAT_GGUF) {
         resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
         if (resolved_model.empty()) {
-            // The most common failure of all, and the one a caller most wants
-            // to distinguish: a path that is not there. It never reached
-            // imp_model_load_ex, so it needs its own code rather than the
-            // generic 1 (#1585).
+            // The most common failure a caller wants distinguished: a model path that doesn't exist.
+            // Never reaches imp_model_load_ex, so it needs its own code rather than the generic 1 (#1585).
             fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
             return imp::tools::exit_code_for(IMP_ERROR_FILE_NOT_FOUND);
         }
@@ -135,13 +131,10 @@ int main(int argc, char** argv) {
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
     ImpModel model = nullptr;
-    // Only load the MTP head sidecar (~1.57 GiB BF16 on Qwen3.6) when the user
-    // actually requested MTP spec-decode. Otherwise it is dead VRAM.
-    // Both spellings count: the startup hint recommends --set
-    // speculative.mtp_k=2, and until this line the CLI silently ignored it.
-    // speculative.mtp_k is a tri-state: -1 auto, 0 off, >0 fixed. The CLI is
-    // always single-stream (config.max_batch_size = 1 below), so auto engages
-    // here whenever the checkpoint ships a head; --mtp-spec-decode still wins.
+    // Only load the MTP head sidecar (~1.57 GiB BF16 on Qwen3.6) when the user actually requested
+    // MTP spec-decode, else it is dead VRAM. speculative.mtp_k is tri-state: -1 auto, 0 off, >0
+    // fixed; the CLI is always single-stream, so auto engages whenever the checkpoint ships a
+    // head. --mtp-spec-decode still wins.
     int mtp_k = args.mtp_spec_decode_k > 0
                     ? args.mtp_spec_decode_k
                     : imp::tools::mtp_auto_request_k(runtime_cfg, /*configured_batch=*/1);
@@ -223,13 +216,10 @@ int main(int argc, char** argv) {
     // In bench mode, ensure KV cache matches what the benchmark needs.
     // Raises max_seq_len for long-context benchmarks, caps it for short ones.
     if (args.bench) {
-        // Headroom: at least 256 tokens, at least 12.5% of the bench shape. The
-        // StreamingLLM valve (engine_scheduler.cpp) fires on an F16 KV cache
-        // when under 10% of the pool is free; with a flat +256 an F16 model at
-        // pp >= ~2.3k benched into the valve, the first decode step produced
-        // no token and the bench printed 0 tok/s (Llama-3.2-3B-Q8_0 at pp
-        // 8192: "0/536 blocks free", 2026-09-03). pp512 + tg128 stays at 896,
-        // so the perf-gate pool is unchanged.
+        // Headroom: at least 256 tokens, at least 12.5% of the bench shape. The StreamingLLM valve
+        // (engine_scheduler.cpp) fires on an F16 KV cache under 10% free; a flat +256 let an F16 model
+        // at pp>=~2.3k hit the valve, so the first decode step produced no token and the bench printed
+        // 0 tok/s. pp512+tg128 stays at 896, so the perf-gate pool is unchanged.
         const int bench_shape = args.bench_pp + args.max_tokens;
         int bench_need = bench_shape + std::max(256, bench_shape / 8);
         if (config.max_seq_len != bench_need) {
@@ -283,13 +273,11 @@ int main(int argc, char** argv) {
             for (int ti = 0; ti < n_tok; ti++)
                 fprintf(stderr, "TOK %d %d\n", ti, ppl_tokens[ti]);
         }
-        // Chunked prefill is the DEFAULT here since the engine-side capture
-        // became chunk-aware (#553): per-chunk NLL accumulation makes the
-        // teacher-forced score independent of chunking, and the chunked
-        // rectangular cuBLAS path is the attention-correctness reference for
-        // long corpora (the single-chunk route falls into the FMHA/WMMA
-        // family beyond the S-matrix cap — the #566 WMMA hd=256 remnant).
-        // An explicit --prefill-chunk-size (incl. 0) still wins.
+        // Chunked prefill is the DEFAULT here since engine-side capture became chunk-aware (#553):
+        // per-chunk NLL accumulation makes the teacher-forced score independent of chunking, and the
+        // chunked rectangular cuBLAS path is the attention-correctness reference for long corpora
+        // (single-chunk falls into the FMHA/WMMA family beyond the S-matrix cap, the #566 WMMA hd=256
+        // remnant). An explicit --prefill-chunk-size (incl. 0) still wins.
         config.max_batch_size = 1;
         config.max_seq_len = n_tok + 16;
         fprintf(stderr, "Perplexity: %d tokens from %s\n", n_tok, args.perplexity_file.c_str());

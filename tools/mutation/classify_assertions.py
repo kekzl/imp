@@ -96,12 +96,9 @@ def body_of(src: str, start: int) -> str:
     return src[i:]
 
 
-# A one-line `TEST_F(X, Y) { run_config(...); }` carries its assertions in the
-# helper, not in the body. Classifying such a test from the body alone reports
-# a golden-checked kernel test as A0 — the exact false "the suite asserts
-# nothing" claim this audit must not make. So resolve callees one level deep
-# (transitively, bounded) against every function defined in the same file or in
-# any tests/ header it includes.
+# A one-line TEST_F(X,Y){run_config(...);} carries its assertions in the helper, not the body -
+# classifying from the body alone would falsely report A0 ("asserts nothing"). Resolves callees
+# one level deep (bounded) against functions in the same file or any included tests/ header.
 FUNC_HEAD_RE = re.compile(
     r'^[ \t]*(?:static\s+|inline\s+|constexpr\s+|template\s*<[^>]*>\s*)*'
     r'(?:[A-Za-z_][\w:<>,\s\*&]*?)\s+([A-Za-z_]\w*)\s*\(', re.M)

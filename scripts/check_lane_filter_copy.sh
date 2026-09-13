@@ -1,17 +1,8 @@
 #!/bin/sh
-# scripts/verify.sh carries a literal copy of CMake's `_unit_e2e_filter`
-# (the container path has no configured build/ dir to read it from). The two
-# copies must be byte-identical (AUDIT_arch_2026 I-3).
-#
-# verify.sh's own comment said going stale "is caught by the primary ctest
-# guard plus the frozen EXPECTED list". Neither reads verify.sh's string:
-# guard_e2e_lane_split gets the CMake variable, check_verify_filter.sh greps
-# `^ *FILTER="` only. So #1795 added two suites to CMake on 2026-08-27, the
-# copy kept the old list, and every full `make verify` failed its lane-split
-# check for nine days.
-#
-# Usage: check_lane_filter_copy.sh <repo-root>
-# Exit 0 = identical; 1 = drift; 2 = a literal could not be read.
+# scripts/verify.sh carries a literal copy of CMake's _unit_e2e_filter (the container path
+# has no configured build/ dir); the two copies must be byte-identical (AUDIT_arch_2026 I-3).
+# Neither guard_e2e_lane_split nor check_verify_filter.sh reads verify.sh's own string, so a
+# CMake-side change (#1795) can drift the copy silently for days.
 set -eu
 ROOT="${1:?usage: check_lane_filter_copy.sh <repo-root>}"
 CMAKE_COPY=$(sed -n 's/^ *set(_unit_e2e_filter "\([^"]*\)").*/\1/p' "$ROOT/CMakeLists.txt" | head -1)

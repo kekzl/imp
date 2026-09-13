@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Phase-0 microbench for the BitDecoding NVFP4 port. Builds + runs the
-# scalar-FFMA vs HMMA-MMA Q.K dot comparison on synthetic input, then
-# SASS-audits the binary to confirm HMMA dispatch.
-#
-# Re-run after each kernel-layout change to verify numerical equivalence
-# stays within tolerance and HMMA dispatch is preserved.
-#
-# Usage: bash tools/analysis/bench_nvfp4_qk_tc_vs_scalar.sh
+# Phase-0 microbench for the BitDecoding NVFP4 port: builds + runs the scalar-FFMA vs HMMA-MMA
+# Q.K dot comparison, then SASS-audits the binary to confirm HMMA dispatch.
+# Re-run after each kernel-layout change to verify numerical equivalence and HMMA dispatch hold.
+# Usage: bash tools/analysis/bench_nvfp4_qk_tc_vs_scalar.sh.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
