@@ -260,7 +260,9 @@ def main():
     # token bit-identical to the full spare slot.
     # 1111 -> 1112: StashedTapAdvancesTheWindowLikeTheTwoRowCommit (test-compute, GPU, no model): the
     # conv half of the same spare, tap stash plus window advance against the window definition.
-    PINNED = 1112
+    # 1112 -> 1113: DeviceSaltDrawsLikeTheHostStepSeed (test-compute, GPU, no model): the graph decode's
+    # device seed salt must draw the host token of seed + salt on both sides of the k=128 split.
+    PINNED = 1113
 
     text = CMAKE.read_text()
     mods = module_sources(text)

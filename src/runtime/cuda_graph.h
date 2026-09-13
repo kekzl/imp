@@ -169,7 +169,7 @@ public:
         float temperature = 1.0f;
         float top_p = 1.0f;
         int top_k = 0;
-        int seed = -1;
+        int seed = -1;                  // sampler seed of the first step; step j uses seed + j
         // Think budget: break loop when reasoning tokens exceed limit.
         // CPU then takes over with force_token for </think> injection.
         int think_budget_limit = 0;     // 0 = no limit

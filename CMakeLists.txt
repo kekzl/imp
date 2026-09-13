@@ -796,6 +796,7 @@ if(IMP_BUILD_TESTS)
         tests/test_token_recycle_draft.cpp
         tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp
+        tests/test_step_seed.cpp
         tests/test_stream_pipeline.cpp
         tests/test_npy_writer.cpp
         tests/test_vision_preprocess.cpp

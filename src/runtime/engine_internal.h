@@ -31,16 +31,14 @@ inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, stream));
 }
 
-// Compute a deterministic-but-varying seed for each decode step.
-// Mixes the request seed (or a hash of the request ID + clock) with
-// the current output token count so each step gets a unique RNG draw.
+// Per-step sampler seed: request seed (or hash(id) ^ clock) + output token count.
+// Masked to 31 bits: samplers read a negative seed as unset and draw with the fixed 42u.
 inline int compute_step_seed(const Request& req) {
-    int base_seed = req.seed >= 0
-                        ? req.seed
-                        : static_cast<int>(std::hash<int>{}(req.id) ^
-                                           std::chrono::steady_clock::now().time_since_epoch().count());
-    int step = static_cast<int>(req.output_tokens.size());
-    return base_seed + step;
+    const unsigned base = req.seed >= 0 ? static_cast<unsigned>(req.seed)
+                                        : static_cast<unsigned>(
+                                              std::hash<int>{}(req.id) ^
+                                              std::chrono::steady_clock::now().time_since_epoch().count());
+    return static_cast<int>((base + static_cast<unsigned>(req.output_tokens.size())) & 0x7fffffffu);
 }
 
 // Build a TokenLogprobInfo on the host from the PROCESSED logits: the row the

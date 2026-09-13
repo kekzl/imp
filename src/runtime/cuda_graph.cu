@@ -969,7 +969,11 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         body_state.temperature = config_.temperature;
         body_state.top_p = config_.top_p;
         body_state.top_k = config_.top_k;
-        body_state.seed = config_.seed;
+        // Step j draws with config_.seed + j: the baked scalar is shifted by initial_position and
+        // the sampler adds the device position, which rearm() re-uploads.
+        body_state.seed = static_cast<int>(static_cast<unsigned>(config_.seed) -
+                                           static_cast<unsigned>(config_.initial_position));
+        body_state.d_seed_salt = d_position_;
         // max_context_len drives kernel-path selection in paged_attention_decode. The split-K
         // pipeline kernel is broken when captured into a conditional WHILE body, but the dispatch
         // detects stream capture and falls back to the non-pipeline split-K: safe to use the real value here.

@@ -337,9 +337,10 @@ void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d
     } else {
         int top_k = state.top_k > 0 ? state.top_k : 50;
         float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
-        unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
+        unsigned int seed = (state.seed >= 0 || state.d_seed_salt) ? static_cast<unsigned int>(state.seed)
+                                                                   : 42u;
         sample_topk_topp_device(last_logits, top_k, top_p, state.temperature, seed, d_token_id, h_mapped,
-                                stream);
+                                stream, state.d_seed_salt);
     }
     // No cudaStreamSynchronize — host polls h_mapped asynchronously.
 }
