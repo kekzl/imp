@@ -1,9 +1,5 @@
 // Pipelined batched decode (bd_pipe_): one decode step kept in flight
 // so host bookkeeping and SSE delivery overlap GPU compute.
-//
-// Split out of engine_scheduler.cpp on 2026-08-26 (the file had doubled to
-// 2230 code LOC past its allowlist rationale). Pure move: the function bodies
-// are byte-identical to their previous form in that file.
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
@@ -29,30 +25,26 @@ namespace imp {
 
 using engine_internal::compute_step_seed;
 
-// =====================================================================
-// Pipelined batched decode (bd_pipe_) — one step in flight.
+// Pipelined batched decode (bd_pipe_): one step in flight.
 //
-// Step N+1 is enqueued (device token chain feeding step N's sampled slot
-// tokens as input ids + forward-graph replay + per-row sampler enqueue into
-// the OTHER slot-parity half) BEFORE step N's tokens are read back; the
-// host then event-waits on step N's gather only, so its bookkeeping + the
-// server's SSE delivery overlap the GPU's work on N+1 instead of idling it
-// (the ~15-20% step tail at n=16 sustained serving, nsys 2026-07-12).
+// Step N+1 is enqueued (device token chain feeding step N's sampled tokens as
+// input ids, forward-graph replay, per-row sampler enqueue into the OTHER
+// parity half) BEFORE step N's tokens are read back; the host then
+// event-waits only on step N's gather, overlapping bookkeeping and SSE
+// delivery with the GPU's work on N+1.
 //
-// Scope (v1) is the clean serving case: every row async-sampleable (greedy
-// or top-k<=SAMPLE_MAX_TOP_K/top-p; min_p/typical_p fine), no penalties/DRY
-// (their token history grows per step host-side), no constraints/logprobs/
-// mirostat/logit_bias, no SSM/SWA/StreamingLLM/residual-KV, CUDA graphs on.
-// Anything else keeps the per-step path bit-for-bit unchanged.
+// Scope (v1): every row async-sampleable (greedy or top-k<=SAMPLE_MAX_TOP_K/
+// top-p; min_p/typical_p fine); penalties allowed (device-side history), DRY
+// excluded (host-side token array); no constraints/logprobs/mirostat/
+// logit_bias, no SSM/SWA/StreamingLLM/residual-KV, CUDA graphs on. Anything
+// else uses the per-step path unchanged.
 //
-// Known (accepted) semantics deltas vs the per-step path:
-//  - host state lags the in-flight step by one token, so think-budget
-//    forcing and stop-string detection fire one step later (one discarded
-//    token; KV stays consistent because the row's release is deferred);
-//  - a row that stops still has step N+1 computed for it — its token is
-//    discarded and its KV blocks are freed only after that step completes
-//    (deferred_release), so the in-flight forward never writes freed blocks.
-// =====================================================================
+// Known semantics deltas vs the per-step path:
+//  - host state lags the in-flight step by one token: think-budget forcing
+//    and stop-string detection fire one step later (KV stays consistent; the
+//    row's release is deferred);
+//  - a stopped row still has step N+1 computed; its token is discarded and
+//    its KV blocks freed only after that step completes (deferred_release).
 
 namespace {
 inline int pipeline_bucket_pow2(int x) {
@@ -99,14 +91,9 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
         return false;
     if (offload_mgr_)
         return false;
-    // Recurrent hybrids: excluded in #975 because a GDN decode step then
-    // served one sequence. #1750's batched decode (stable device slot table)
-    // made the pipeline RUNNABLE here — and measured SLOWER: alternating A/B
-    // on Qwen3.8-27B at 32 streams, fresh server per arm, 2026-08-25:
-    // pipeline ON 862-914 tok/s aggregate (median ~890) against OFF 940-953
-    // (median ~945), non-overlapping. The chained advance + event waits cost
-    // more on the hybrid step than the overlapped host gap returns. Keep the
-    // exclusion as a measured verdict, not an inherited one.
+    // Recurrent hybrids excluded (#975, #1750): the chained advance + event
+    // waits measure slower than the per-step path on the hybrid decode step.
+    // Kept as a measured verdict, not an inherited one.
     if (ssm_state_)
         return false;
     if (swa_sizing_active_ || config_.streaming_kv_enabled)
@@ -121,11 +108,10 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
     return true;
 }
 
-// Same logging blind spot the prefill-graph gates had (#1646): seven
-// conditions gate the pipelined loop and none of them said anything, so a
-// model that never pipelines looks exactly like one that does. Report the
-// closed gate once per process, from the first batch that got as far as
-// asking.
+// Same logging blind spot the prefill-graph gates had (#1646): seven silent
+// conditions gate the pipeline, so a non-pipelining model looks identical to
+// one that pipelines. Logged once per process, at the first batch that
+// reaches this check.
 void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>& rows) {
     static bool logged = false;
     if (logged)
@@ -143,10 +129,9 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
         (int)runtime_config_.runtime.decode_pipeline, (int)rows.size(), (int)config_.use_cuda_graphs,
         (int)runtime_config_.diagnostics.profile, (int)decode_batch_pool_.is_allocated(),
         (int)(offload_mgr_ != nullptr),
-        // Mirrors the gate above exactly: `if (ssm_state_) return false;` is
-        // unconditional since the #1750 measurement. The pre-#1750 rule
-        // (batched decode + slot table = eligible) printed ssm_ok=1 on the
-        // hybrids this gate refuses (AUDIT_arch_2026 C-7).
+        // Mirrors the gate above: `if (ssm_state_) return false;` is
+        // unconditional since #1750 (AUDIT_arch_2026 C-7: the pre-#1750
+        // version printed ssm_ok=1 on hybrids this gate now refuses).
         (int)!ssm_state_, (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
         (int)(kv_manager_ && kv_manager_->residual_enabled()), (int)executor_->sample_pipeline_ready(),
         (int)rows_ok);
@@ -162,10 +147,9 @@ InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {
     per.penalty_tokens = nullptr;
     per.n_penalty_tokens = 0;
     per.host_penalty_tokens = nullptr;
-    // Penalty rows read the per-row device history: host-known tokens were
-    // uploaded at entry, and the advance kernel appended the in-flight
-    // token at position `count` — the chained step penalizes count+1
-    // tokens, exactly what the eager path would upload for that step.
+    // Penalty rows read the per-row device history: tokens are uploaded at
+    // entry, the advance kernel appends the in-flight token at `count`, so
+    // the chained step penalizes count+1 tokens (matching the eager path).
     const bool needs_pen = (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
                             req.presence_penalty != 0.0f);
     if (needs_pen && d_pipe_hist_) {
@@ -184,8 +168,8 @@ bool Engine::pipeline_staging_ensure_() {
     if (bt_patch_cap_ == 0) {
         // Lazy mapped-pinned staging: at most one appended block per row per
         // step, so kMaxGraphPoolSize entries per parity set cover any batch.
-        // The per-row device output-token history (penalty rows) is sized
-        // to the model context (outputs are KV-bounded) with a sanity cap.
+        // Output-token history (penalty rows) sizes to the model context
+        // (KV-bounded), capped.
         const int msl = model_ ? model_->config().max_seq_len : 0;
         pipe_hist_stride_ = std::max(1024, std::min(msl > 0 ? msl : 32768, 65536));
         bool ok = true;
@@ -284,11 +268,11 @@ bool Engine::pipeline_enqueue_next_(int parity, cudaStream_t stream) {
         h_hist_pos_[parity].as<int>()[i] = count;
     }
 
-    // Device-side chain: feed the IN-FLIGHT step's sampled tokens (other
-    // parity's slots) as this step's input ids, bump positions/context lens,
-    // append them to the per-row history, scatter freshly appended block
-    // ids. Stream-ordered after the in-flight step's samplers, before this
-    // step's forward.
+    // decode_pipeline_advance: feeds the IN-FLIGHT step's sampled tokens
+    // (other parity's slots) as this step's input ids, bumps positions/
+    // context lens, appends the per-row history, scatters freshly appended
+    // block ids. Stream-ordered after the in-flight step's samplers, before
+    // this step's forward.
     decode_pipeline_advance(n, executor_->sample_slot_base(parity ^ 1), SAMPLE_SCRATCH_BYTES,
                             bd_pipe_.gpu.d_token_ids, bd_pipe_.gpu.d_positions, bd_pipe_.gpu.d_context_lens,
                             bd_pipe_.gpu.d_block_tables, n_patches, d_bt_patch_off_[parity],
@@ -317,10 +301,9 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
                              int graph_idx, const InferenceState& state, const Tensor& logits,
                              cudaStream_t stream, std::vector<int32_t>& tokens_out) {
     const int n = static_cast<int>(rows.size());
-    // Penalty rows need the device-side history BEFORE any sampler runs —
-    // without it the entry pass would sample unpenalized. Bail to the
-    // legacy path (which uploads d_penalty_tokens_ per row) if staging is
-    // unavailable or a row's history would not fit.
+    // Penalty rows need device-side history BEFORE any sampler runs, or the
+    // entry pass samples unpenalized. Falls back to the legacy path (per-row
+    // d_penalty_tokens_ upload) if staging is unavailable or history won't fit.
     if (!pipeline_staging_ensure_())
         return false;
     for (const auto& req : rows) {
@@ -340,10 +323,10 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
                                 req->presence_penalty != 0.0f);
         const int count = static_cast<int>(req->output_tokens.size());
         if (needs_pen && count > 0) {
-            // Seed the per-row device history with the host-known tokens;
-            // chained steps keep it current via the advance-kernel append.
-            // The async H2D from the (pageable) vector is safe: the gather
-            // event below is synced before process_outputs can grow it.
+            // Seeds device history with host-known tokens (advance-kernel
+            // keeps it current on chained steps). Async H2D from the
+            // pageable vector is safe: the gather event below syncs before
+            // process_outputs can grow it.
             int32_t* row_hist = d_pipe_hist_ + static_cast<size_t>(i) * pipe_hist_stride_;
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(row_hist, req->output_tokens.data(), count * sizeof(int32_t),
                                                cudaMemcpyHostToDevice, stream));
@@ -403,11 +386,9 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
 
 void Engine::step_decode_pipeline_(cudaStream_t stream) {
     auto& db = sched_decode_batch_;
-    // Continue only with the EXACT same composition in the same order (the
-    // scheduler preserves admission order; any join/leave/cancel changes the
-    // set) and only while the static gates still hold. Apply the same
-    // max_batch_size cap the per-step path applies — at overload the rows
-    // beyond the cap are not being stepped either way.
+    // Continues only with the EXACT same composition and order (any
+    // join/leave/cancel changes the set), while the static gates still hold;
+    // applies the same max_batch_size cap as the per-step path.
     size_t eff = db.size();
     const int max_bs_cap = runtime_config_.runtime.max_batch_size;
     if (max_bs_cap > 0 && eff > static_cast<size_t>(max_bs_cap))
@@ -432,20 +413,15 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
     if (cont)
         cont = pipeline_batch_eligible_(bd_pipe_.rows);
 
-    // #1003: yield the chain periodically so the plain path's round-robin
-    // spec verify gets a turn — once in flight the pipeline otherwise chains
-    // until the composition changes, and batch>1 speculation never fires
-    // (observed verify_steps=1 per request). Fields-only candidate check;
-    // the draft-depth economics (min_draft) run in the RR branch. The chain
-    // re-engages on the following step via the normal plain-path entry.
-    // The same widening as the RR branch itself (engine_scheduler.cpp): the
-    // question is whether ANY drafter can feed the verify step, not whether the
-    // n-gram matcher is on. Asking for `speculative.ngram` here starved the RR
-    // verify on exactly the configuration the recipe prescribes (dense model,
-    // mtp_k=2 PAIRED with ngram=false, batch > 1): the pipeline chained, the
-    // yield never fired, and the branch it was built to reach never ran.
-    // `runtime.decode_pipeline` defaults on, so this gate, not the RR branch,
-    // is what decides whether batch>1 speculation happens at all.
+    // #1003: yields the chain periodically so the plain path's round-robin
+    // spec verify gets a turn (otherwise batch>1 speculation never fires).
+    // Fields-only candidate check; draft-depth economics run in the RR
+    // branch, and the chain re-engages next step via the plain-path entry.
+    // Widened like the RR branch itself (engine_scheduler.cpp): checks
+    // whether ANY drafter can feed the verify step, not just
+    // `speculative.ngram` (dense model + mtp_k=2 + ngram=false is valid).
+    // `runtime.decode_pipeline` defaults on, so this gate, not the RR
+    // branch, decides whether batch>1 speculation happens at all.
     if (cont && runtime_config_.speculative.batch_rr && !ssm_state_ &&
         ++bd_pipe_.steps_since_spec_yield >= spec_rr_yield_interval_) {
         bd_pipe_.steps_since_spec_yield = 0;

@@ -1,13 +1,4 @@
-// Device-buffer lifecycle for the speculative paths, split out of
-// engine_spec_ngram.cpp on 2026-08-21.
-//
-// Split on RESPONSIBILITY, not size. That file held two things: the buffers the
-// speculative paths allocate and release, and the policy and execution that use
-// them. The trigger was the file reaching its hard-review ceiling exactly (800
-// code LOC) so that a one-line feature could not be added without exceeding it -
-// which is the size gate reporting a conflation rather than a length.
-//
-// Pure move: every function below is byte-identical to its previous form.
+// Device-buffer lifecycle for the speculative paths.
 
 #include "compute/json_constrain.h"
 #include "compute/mtp_forward.h"
@@ -31,15 +22,12 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     if (spec_chunk_cap_ >= chunk_cap && spec_block_table_cap_ >= max_blocks)
         return true;
     free_spec_buffers_();
-    // #1055 consolidated staging: tokens/positions/row-ctx-lens (chunk_cap
-    // each) + {ctx_len, past_len, chunk_len} live in ONE device block with a
-    // PINNED host twin — a single small H2D per verify step instead of six
-    // (pageable-source async copies stage through a driver buffer on WSL2).
-    // The captured graphs bake the sub-pointers; the block is allocated once
-    // per capacity, so they stay stable. Same trick for argmax+topm D2H.
-    // [tokens | positions | row_ctx_lens | ctx_len, past_len, chunk_len, snap_n]
-    // + kMtpMaxTopW: the multi-candidate hybrid chunk's per-candidate
-    // recurrent slot ids ride the same H2D.
+    // #1055 consolidated staging: tokens/positions/row_ctx_lens (chunk_cap
+    // each) plus {ctx_len, past_len, chunk_len, snap_n} and kMtpMaxTopW slot
+    // ids live in ONE device block with a PINNED host twin: one H2D per
+    // verify step instead of six (pageable sources stage through a driver
+    // buffer on WSL2). Captured graphs bake the sub-pointers, so the block
+    // must stay stable per capacity. Same trick for argmax+topm D2H.
     const size_t stage_ints = 3ull * chunk_cap + 4 + kMtpMaxTopW;
     const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
     // T5b for the pinned twins (memory/host_pinned.h). Wrapped in a lambda so the
@@ -85,11 +73,10 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     spec_block_table_cap_ = max_blocks;
 
     // diagnostics.spec_trace only: room for the chunk's full logits, so the
-    // trace can report the TOP-2 GAP per row and not just the argmax id.
-    // Allocated here with the other spec buffers rather than lazily at the
-    // trace site: a first-use allocation would be a serving-phase allocation
-    // (docs/internals/MEMORY.md A3.2, and my own check_alloc_pairs gate would
-    // see it). Off by default, so the memory is only taken when asked for.
+    // trace can report the TOP-2 GAP per row, not just the argmax id.
+    // Allocated here (not lazily at the trace site) to avoid a serving-phase
+    // allocation (docs/internals/MEMORY.md A3.2; the check_alloc_pairs gate
+    // would flag it). Off by default: memory is taken only when asked for.
     if (runtime_config_.diagnostics.spec_trace && !d_spec_logits_) {
         const size_t v = static_cast<size_t>(model_->config().vocab_size);
         const size_t bytes = static_cast<size_t>(chunk_cap) * v * sizeof(float);
@@ -128,17 +115,15 @@ bool Engine::ensure_spec_state_scratch_() {
         return false;
     }
     spec_state_scratch_bytes_ = bytes;
-    // A second slab for the mid-chunk snapshot. The chunk writes the state as
-    // of its first row here alongside the committed one at the last row, so a
-    // draft that was rejected outright adopts it instead of restoring the
-    // pre-chunk state and re-forwarding a full model pass to reach it — that
-    // re-forward measures 17.2 ms against a 28.5 ms verify. Optional: without
-    // it the replay path stands, so an allocation failure is a warning.
-    // Through the VRAM allocator rather than cudaMalloc: invariant I1 keeps
-    // direct driver calls inside src/memory/, and the allowlist this file sits
-    // on only ever shrinks. #1459 added a raw pair here and pushed the file
-    // from its budgeted 13 sites to 15, which failed the blocking Alloc-sites
-    // gate on main from that commit onward.
+    // A second slab for the mid-chunk snapshot: the chunk writes state as of
+    // its first row here (alongside the committed one at the last row), so a
+    // rejected draft adopts it instead of re-forwarding a full pass (17.2 ms
+    // vs a 28.5 ms verify). Optional: an allocation failure only warns, the
+    // replay path still stands.
+    // Through the VRAM allocator, not cudaMalloc: invariant I1 confines
+    // direct driver calls to src/memory/, and this file's alloc-site
+    // allowlist only ever shrinks (a raw pair here broke the Alloc-sites
+    // gate, #1459).
     if (spec_state_snap_ == nullptr) {
         spec_state_snap_ = vram_alloc_.allocate(bytes, "spec_state_snapshot");
         if (spec_state_snap_ == nullptr)

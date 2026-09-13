@@ -13,10 +13,9 @@ constexpr double kMiB = 1024.0 * 1024.0;
 PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     PlanInput in;
 
-    // Weights and the CUDA context are already resident at this point, so the
-    // budget being distributed is what is left — charging them again would
-    // double-count. This is the one place the shadow plan is not the shape it
-    // will have in step 6, where the plan runs BEFORE the upload and charges
+    // Weights and the CUDA context are already resident here, so the budget
+    // distributed is what is left; charging them again would double-count.
+    // Step 6 changes this: the plan then runs BEFORE upload and charges
     // everything from a clean slate.
     in.budget_bytes = probe.distributable_bytes;
     in.context_bytes = 0;
@@ -30,10 +29,10 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     in.features.recurrent_snapshot_bytes = probe.recurrent_snapshot_bytes;
     in.features.spec_decode_bytes = probe.spec_decode_bytes;
     in.features.residual_ring_bytes = probe.residual_ring_bytes;
-    // features.vision_tower_bytes stays 0 deliberately: the tower is an engine
-    // ARENA tenant and the arena is already open when this probe is built, so
-    // its bytes are outside distributable_bytes. Charging it here would
-    // double-count it. The note at the bottom of the report says so.
+    // features.vision_tower_bytes stays 0 deliberately: the tower is an
+    // engine ARENA tenant, already open when this probe is built, so its
+    // bytes are outside distributable_bytes (would double-count). The
+    // report note at the bottom says so.
     in.features.n_swa_layers = probe.n_swa_layers;
     in.features.swa_live_tokens = probe.swa_live_tokens;
 
@@ -109,20 +108,18 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         out += '\n';
     }
 
-    // Both pool ceilings, in the same unit an operator thinks in: sequences.
-    // The two pools are sized by different rules - the recurrent state is a
-    // fixed pre-charge of max_batch_size slots, the KV pool takes whatever
-    // residual is left - so nothing makes them agree, and when they disagree
-    // the state was bought for slots the KV pool cannot serve at full context.
-    // Printed in BOTH branches: a rejected plan is exactly when the operator
-    // needs to know which of the two ceilings is the binding one.
+    // Both pool ceilings, in the unit an operator thinks in: sequences. The
+    // two pools are sized by different rules (recurrent: fixed pre-charge of
+    // max_batch_size slots; KV: whatever residual is left), so they can
+    // disagree, and state can be bought for slots KV cannot serve at full
+    // context. Printed in both branches: a rejected plan is exactly when the
+    // operator needs the binding ceiling.
     const int recurrent_seqs = probe.max_batch_size;
     const int kv_seqs =
         shadow.plan.kv.blocks_per_seq > 0 ? shadow.plan.kv.blocks / shadow.plan.kv.blocks_per_seq : 0;
-    // The context at which ALL recurrent slots fit: the pool in tokens, split N
-    // ways. Without it the common shape (max_seq_len 131072 on a 4596-block
-    // pool: M = 0) reads "KV 0 seqs" and names two knobs with no target for
-    // either. 4596 x 16 / 28 = 2626 tokens is the answer the operator needs.
+    // The context at which ALL recurrent slots fit: pool tokens split N ways.
+    // Without it, max_seq_len far above the KV ceiling reads "KV 0 seqs" and
+    // gives no common target for either knob.
     const int ctx_all = recurrent_seqs > 0
                             ? shadow.plan.kv.blocks * probe.kv_block_size / recurrent_seqs
                             : 0;

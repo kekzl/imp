@@ -2,13 +2,10 @@
 
 // Which speculation sources are live, as a pure function of configuration.
 //
-// The verify step is shared: the n-gram/suffix matcher, the trained MTP head
-// and token recycling all fill the same draft chunk, and which one filled it
-// is decided inside step_spec_verify_. Entering that step is therefore a
-// question about ALL of them, while running the matcher is a question about
-// one. Conflating the two is how `speculative.ngram=false` came to disable
-// MTP outright: mtp_k=2 drafted nothing, because the step that consumes its
-// chain was never reached, and nothing in the logs said so.
+// The verify step is shared across n-gram/suffix, MTP and token recycling:
+// entering it is a question about ALL drafters, running the matcher is a
+// question about one. Conflating the two silently disables MTP when
+// speculative.ngram=false.
 //
 // Kept here as a free function so the truth table is testable without a GPU
 // or a live Engine. The engine holds the state; this file holds the rule.
@@ -38,13 +35,10 @@ constexpr bool spec_ngram_source(const SpecDrafterState& s) {
 
 // Round-robin batched speculation (speculative.batch_rr, #1003 stage 1): at
 // batch > 1 one request per step runs its verify while the rest decode
-// batched. Entering it is the same question as entering any verify step - is
-// there A DRAFT SOURCE - and it used to demand `speculative.ngram` by name.
-// That is exactly the key the MTP recipe turns off (docs/MODELS.md: `--set
-// speculative.mtp_k=2 --set speculative.ngram=false` as a pair), so an
-// MTP-drafting server lost batched speculation to the flag that was supposed
-// to arm the head. On the hybrid the `recurrent` term hides it; on every dense
-// model it was live.
+// batched. Entering it is the same question as any verify step: is there a
+// draft source, not just `speculative.ngram` by name - the MTP recipe
+// (docs/MODELS.md) turns that key off, which silently loses batched
+// speculation on an MTP-drafting server.
 struct SpecBatchRrState {
     bool enabled = false;      // speculative.batch_rr
     bool recurrent = false;    // ssm_state_ != nullptr (the verify shape differs)

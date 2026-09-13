@@ -88,24 +88,15 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 
     const int32_t think_close = detect_think_close(tokenizer);
 
-    // The large think-close budget applies only when THIS REQUEST is actually
-    // reasoning (thinking_open). Keying it off tokenizer capability alone gave
-    // every request on a think-capable tokenizer an 8192-token unmasked
-    // preamble — a non-thinking json_mode request never emits </think>, so the
-    // grammar never engaged and the output was unconstrained garbage.
-    //   - has_tools: 512-token slack. Think-capable models with thinking
-    //     suppressed (json/tools requests) deliberate in PLAIN TEXT before
-    //     opening the tool tag — Qwen3-8B spends 60-130 tokens of prose
-    //     deciding to call get_weather. The old 64-token slack (sized for
-    //     "Sure! "-style preambles) expired mid-sentence, and the schema
-    //     mask then forced a contentless `{"answer":""}` INSTEAD of the
-    //     tool call the model was about to make (#840). 512 covers real
-    //     deliberation while still bounding a model that never produces
-    //     structure.
-    //   - no tools: 0 — the old 8-token "markdown fence" slack let the model
-    //     open ```json fences that then leaked into content around otherwise
-    //     perfect JSON. With the mask active from token 1 the model starts
-    //     at '{' directly (whitespace is still legal in the START state).
+    // Budget applies only when THIS REQUEST is reasoning (thinking_open):
+    // keying off tokenizer capability alone unmasks 8192 tokens for a
+    // non-thinking json_mode request that never emits </think>, so the
+    // grammar never engages.
+    //   - has_tools: 512. Think-capable models deliberate in plain text
+    //     before the tool tag (up to ~130 tokens); too small forces a
+    //     contentless call mid-deliberation (#840).
+    //   - no tools: 0. Anything > 0 lets ```json fences leak into content
+    //     around otherwise valid JSON.
     int preamble_budget;
     if (thinking_open && think_close >= 0) {
         preamble_budget = 8192;
@@ -137,15 +128,13 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
         }
     };
 
-    // Free-form object schema ({"type":"object"} without properties/enum):
-    // semantically this IS json_object, so route it to the any-JSON
-    // constrainer, which is whole-token validated and does not carry the
-    // schema machinery.
+    // Free-form object schema ({"type":"object"} without properties/enum) is
+    // semantically json_object, so it routes to the any-JSON constrainer
+    // (whole-token validated, no schema machinery).
     //
-    // Since #1729 the schema FSM could also take it (a property-less object
-    // parses as additionalProperties: true and its keys and values are free),
-    // so this route is a cost choice now, not a correctness one. It stays
-    // because the two produce the same language and this one is cheaper.
+    // The schema FSM can also take it since #1729 (a property-less object
+    // parses as additionalProperties: true, free keys/values), so this route
+    // is now a cost choice, not a correctness one: same language, cheaper.
     bool use_schema = !json_schema.empty();
     if (use_schema) {
         auto probe = parse_json_schema(json_schema);
@@ -229,8 +218,7 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
 
     // Llama3 bare-args: the `<function=NAME>{args}</function>` body IS the
     // arguments object, so the constraint root is the tool's parameter schema
-    // directly (the per-tool envelope carries the name). Otherwise the ChatML
-    // TOOL_CALL {"name","arguments"} wrapper.
+    // (the envelope carries the name); otherwise the ChatML TOOL_CALL wrapper.
     std::unique_ptr<SchemaNode> schema;
     if (bare_args) {
         if (tools.size() != 1) {
@@ -254,18 +242,15 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
         return false;
     }
 
-    // Cache key: envelope + per-tool (name, schema) + body dialect. The mode
-    // (forced vs optional) is NOT keyed — it only changes the envelope/gate
-    // config applied by the setters below, not the expensive vocab
-    // classification, so a forced and an optional request over the same tools
-    // share the classified tables.
+    // Cache key: envelope + per-tool (name, schema) + body dialect. Mode
+    // (forced vs optional) is NOT keyed: it only changes the envelope/gate
+    // config, not the vocab classification, so both share the classified tables.
     const std::string key = tool_call_key(tools, envelope_open, envelope_close, xml);
 
     const int32_t think_close = detect_think_close(tokenizer);
-    // Thinking models deliberate inside <think>; the envelope is enforced right
-    // after the close. Forced (mandatory) calls are enforced from token 1.
-    // Optional calls keep the tool-deliberation slack (#840): the model spends
-    // tokens of prose deciding whether to call before opening the tag.
+    // Thinking models deliberate inside <think>; the envelope enforces right
+    // after the close. Forced calls enforce from token 1; optional calls keep
+    // the tool-deliberation slack (#840) for prose before the tag.
     int preamble_budget;
     if (thinking_open && think_close >= 0)
         preamble_budget = 8192;
@@ -315,15 +300,13 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
     if (!regex_constrainer_)
         regex_constrainer_ = std::make_unique<RegexConstrainer>();
     // Same pattern this pooled manager already serves: skip re-compiling and
-    // re-classifying ~151K tokens, and keep the warm mask cache. prepare_grammar
-    // below has carried this check since it was written; the regex path never
-    // had one, so every request paid a full vocabulary classification on the
-    // scheduler thread - and a client that pins one pattern sends it on every
-    // request (#1568).
+    // re-classifying ~151K tokens, keeping the warm mask cache. Avoids a full
+    // vocabulary classification per request when a client pins one pattern
+    // (#1568).
     const bool reuse = regex_constrainer_->is_initialized() && regex_constrainer_->pattern() == pattern;
     // vocab_size here is the LOGITS width; the constrainer clamps its own
     // classification to the tokenizer vocab (SafeTensors models pad lm_head
-    // past it — indexing to the logits width read out of bounds once).
+    // past it, so an unclamped index would read out of bounds).
     if (!reuse && !regex_constrainer_->init(pattern, tokenizer)) {
         IMP_LOG_WARN("ConstraintManager: regex '%s' rejected — not enforcing it", pattern.c_str());
         return false;
@@ -355,7 +338,7 @@ bool ConstraintManager::prepare_grammar(const std::string& gbnf, Tokenizer* toke
             grammar_constrainer_ = std::make_unique<GrammarConstrainer>();
         // vocab_size here is the LOGITS width; the constrainer clamps its own
         // classification to the tokenizer vocab (SafeTensors models pad lm_head
-        // past it — indexing to the logits width read out of bounds once).
+        // past it, so an unclamped index would read out of bounds).
         if (!grammar_constrainer_->init(gbnf, tokenizer)) {
             IMP_LOG_WARN("ConstraintManager: GBNF grammar rejected (%s) — not enforcing it",
                          grammar_constrainer_->error().c_str());

@@ -2,12 +2,8 @@
 
 #include "core/dispatch_policy.h"  // the nine sections exec/ reads (F-10)
 
-// imp.conf — central runtime configuration.
-//
-// Replaces ~50 ad-hoc IMP_*-prefixed environment variables that were scattered
-// over ~80 getenv() call sites in src/runtime/ and src/exec/. The same values
-// now flow through a single RuntimeConfig struct loaded once at startup,
-// optionally from a TOML file, with CLI-flag overrides on top.
+// imp.conf: central runtime configuration, loaded once at startup from a
+// TOML file plus CLI-flag overrides.
 //
 // Loading precedence (first non-empty wins):
 //   1. --config <path>              CLI flag (passed via load_with_path)
@@ -29,282 +25,165 @@ namespace imp {
 struct RuntimeConfig {
     struct Runtime {
         bool deterministic_gemm = false;
-        // Opt-in full reproducibility mode for temperature=0 agent evals.
-        // When true, run-to-run non-determinism in MoE token routing
-        // (atomic expert-bucket scatter ordering) and top-k sampling
-        // (atomicMax/atomicAdd softmax-stat races) is eliminated by
-        // selecting deterministic kernel variants. It ALSO implies
-        // deterministic_gemm (timing-based cuBLAS algo selection is itself
-        // a non-determinism source), so a single switch covers GEMM +
-        // routing + sampling. Costs a little throughput (serial / ordered
-        // reductions), so it is strictly OFF by default — the default code
-        // path runs the exact same kernels as before with zero overhead.
+        // Full run-to-run reproducibility for temp=0 agent evals: removes
+        // MoE routing and top-k sampling races by selecting deterministic
+        // kernel variants, and also implies deterministic_gemm. Off by
+        // default (costs throughput via serial/ordered reductions).
         // Legacy env: IMP_DETERMINISTIC=1.
         bool deterministic = false;
-        // "auto" | "always" | "never". "always" is a synonym for "auto" today:
-        // it does not override the safety demotions (host-resident experts,
-        // streaming KV, failed pinned buffer), because a captured decode on
-        // those paths replays stale pointers rather than running faster.
+        // "auto" | "always" | "never". "always" == "auto": both still demote
+        // to eager on host-resident experts, streaming KV, or a failed
+        // pinned buffer, since a captured decode there replays stale pointers.
         std::string cuda_graphs = "auto";
-        // Engine warmup (two tiny BOS requests at init, ~2-4 s on a 30B).
-        // Default ON since the greedy request-order-independence fix: warmup
-        // pre-arms the decode graph pool (mark_process_warm), so the FIRST
-        // real request takes the same graph-kernel path at the same step
-        // indices as every later one. Without it the first request runs one
-        // step on a different kernel mix and greedy output can flip on
-        // near-tie logits (the 30B-NVFP4-MoE temp=0 flipper). Set false to
-        // trade reproducibility for init time (dev/CI). Gemma-4 and MXFP4
-        // models keep their warmup skips (Engine::warmup).
+        // Engine warmup: two tiny BOS requests at init (~2-4 s on a 30B)
+        // that pre-arm the decode graph pool (mark_process_warm), so the
+        // first real request takes the same kernel path as later ones and
+        // avoids greedy flips on near-tie logits. False trades this for
+        // init time. Gemma-4/MXFP4 models keep their own skip (Engine::warmup).
         bool warmup = true;
-        // Pre-capture the per-batch-size decode graph pool at init (server
-        // shapes only: no-op unless max_batch_size > 1 and graphs are on).
-        // Without it every never-seen batch size pays its capture during the
-        // first wave of real traffic: measured 75 captures across a 4-wave
-        // 32-stream run, wave 1 at 704 tok/s against 953-976 steady. The
-        // prewarm walks one staggered dummy batch from max_batch_size down
-        // to 1 so each pool slot captures before the engine goes ready. One
-        // anchor request carries a ~1000-token prompt so the captures bake
-        // the 1024 context bucket, not the 64 one. Costs init time; set
-        // false to trade first-wave throughput for startup.
+        // Pre-captures the per-batch-size decode graph pool at init (server
+        // shapes only; no-op unless max_batch_size > 1 and graphs are on),
+        // walking one staggered dummy batch from max_batch_size down to 1 so
+        // no batch size pays its capture cost during live traffic. One
+        // anchor request carries a ~1000-token prompt so captures bake the
+        // 1024 context bucket, not the 64 one. False trades this for init time.
         bool graph_prewarm = true;
-        // NOTE: full run-to-run determinism additionally needs stable cuBLAS
-        // algo selection across processes — see runtime.deterministic_gemm.
+        // NOTE: full determinism also needs stable cuBLAS algo selection
+        // across processes, see runtime.deterministic_gemm.
         int max_seq_len = 0;               // 0 = use model default
-        // Hard VRAM budget for THIS process (MiB, 0 = uncapped). Every sizing
-        // decision (weight caches, KV clamp, expert offload, workspaces,
-        // upload gates) sees a virtual GPU of this size, so multiple
-        // imp-server processes can share one card without overcommitting it.
-        // Best-effort: leave ~1 GiB real headroom between the sum of budgets
-        // and the card (small fixed buffers + cuBLAS internals sit outside).
-        // CLI flag --vram-budget / C-API ImpConfig.vram_budget_mb override.
+        // Hard VRAM budget for this process, MiB (0 = uncapped). Every sizing
+        // decision sees a virtual GPU of this size, so processes can share a
+        // card; leave ~1 GiB real headroom (cuBLAS internals sit outside it).
+        // Overridden by --vram-budget / ImpConfig.vram_budget_mb.
         int vram_budget_mb = 0;
         bool no_pdl = false;
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture
-        // Qwen3-VL patch budget: the largest image the dynamic-resolution
-        // encoder will accept, in 16x16 patches. It is a CEILING that pulls
-        // the preprocessor's max_pixels down, not a check that refuses an
-        // image, and it sizes every encoder workspace. 4096 = 1024x1024.
+        // Qwen3-VL patch budget, in 16x16 patches: ceiling that pulls the
+        // preprocessor's max_pixels down and sizes every encoder workspace
+        // (not a refusal check). 4096 = 1024x1024.
         int vision_max_patches = 4096;
-        // cudaStreamCaptureMode passed to begin_capture / conditional bodies:
-        // "global" | "relaxed" (default) | "thread_local". "relaxed" drops the
-        // cross-thread sync constraint that CUTLASS 3.x grouped-GEMM
-        // collective scheduler is suspected to deadlock on under prefill
-        // capture (Blocker B in prefill_graph_blockers_2026_05_14). Default
-        // flipped to "relaxed" 2026-05-16 as the M3-probe for prefill_graph
-        // unblock — `cudaStreamCaptureModeRelaxed` is a strict superset of
-        // capturable behaviors so the decode fast path that previously
-        // worked under "global" continues to work, while the prefill path
-        // gets a real chance of capturing without hanging.
-        //
-        // Set graph_capture_mode = "global" via imp.conf to opt back into
-        // the legacy strict mode (any decode regression should also be
-        // investigated under "thread_local" before assuming relaxed is the
-        // cause).
+        // cudaStreamCaptureMode: "global" | "relaxed" (default) | "thread_local".
+        // "relaxed" avoids a suspected CUTLASS grouped-GEMM deadlock under
+        // prefill capture (prefill_graph_blockers_2026_05_14.md, Blocker B);
+        // it is a strict superset of "global" so the decode path is
+        // unaffected. Regression: try "thread_local" before reverting to "global".
         std::string graph_capture_mode = "relaxed";
-        // Capture prefill into a CUDA graph (in addition to decode). Default
-        // flipped 2026-05-17 after the M3 Phase 4 A/B sweep across
-        // Gemma-4-26B-NVFP4 / Qwen3.6-35B-NVFP4 / Qwen3-Coder-30B-FP4
-        // (3 trials × 4 capture modes each, harness at
-        // /tmp/imp-bench-results/run_bench.sh): no hang on any
-        // (model, capture_mode) combination — Blocker B
-        // (`prefill_graph_blockers_2026_05_14.md`) is gone now that
-        // `graph_capture_mode = "relaxed"` is the default. Decode tg
-        // is flat ±1-2% across all four capture-mode configs for every
-        // model; prefill pp is variance-dominated (cuBLAS algo-selection
-        // noise documented in CLAUDE.md) but the candidate (relaxed)
-        // never regressed below baseline. Opt out via
-        // `--set runtime.prefill_graph=false` or imp.conf if a model
-        // regresses.
+        // Capture prefill into a CUDA graph in addition to decode. Default
+        // ON: safe now that graph_capture_mode defaults to "relaxed"
+        // (prefill_graph_blockers_2026_05_14.md, Blocker B). Opt out per
+        // model via `--set runtime.prefill_graph=false` if one regresses.
         bool prefill_graph = true;
-        // 0 = auto: the engine sizes the decode batch from the model's weight
-        // footprint (a >20 GiB MoE auto-picks 1). A positive value forces it.
-        // (Was 4, which both contradicted the documented "0 = auto" semantics
-        // and never reached engine sizing — it only acted as the decode cap.)
+        // 0 = auto: engine sizes the decode batch from the model's weight
+        // footprint (a >20 GiB MoE auto-picks 1). Positive value forces it.
         int max_batch_size = 0;
-        // Bound for the autonomous decode graph loop on a NON-streaming request
-        // with speculation off (which would otherwise run UNBOUNDED to
-        // max_tokens on-device, so a client disconnect/timeout — polled only
-        // between bursts — couldn't interrupt it and burned a full generation).
-        // The loop runs in bursts of this many tokens and returns to the host
-        // to re-poll cancellation; output is identical (same decode, chunked).
-        // Larger = less relaunch overhead but higher cancel latency. Streaming
-        // and speculation paths are unaffected. <=0 restores the old unbounded
-        // behavior. IGNORED when `deterministic` is set: the unbounded loop is
-        // the only greedy-bit-reproducible decode path, and evals run to
-        // completion (no mid-burst cancel needed), so determinism wins there.
+        // Token burst size for the autonomous decode graph loop on a
+        // non-streaming, non-speculative request: bounds it so a client
+        // cancel can be polled between bursts instead of running unbounded
+        // to max_tokens. Output is identical either way (same decode,
+        // chunked). Larger = less relaunch overhead, higher cancel latency;
+        // <=0 = unbounded. Ignored when `deterministic` is set (needs the
+        // unbounded path for bit-reproducible greedy decode).
         int decode_burst = 128;
-        // Cap the prefill chunk while other sequences are DECODING: prefill
-        // and decode share one stream, so every chunk forward inserts its
-        // full latency between two of their decode steps. Measured (Qwen3-8B
-        // Q8, 7.2k-token ingest against one active decoder): 2048 → decoder
-        // p95 inter-token 164 ms; 1024 → 94 ms at +27% ingest TTFT; 512 →
-        // 65 ms at +85%. 1024 is the default compromise; set 512 for
-        // latency-critical multi-tenant serving, 0 to disable (full chunk).
-        // The full chunk returns as soon as nobody is decoding.
-        // -1 = per-arch default (2048 where chunked prefill is supported, 0
-        // otherwise). #1645: only the CLI flag and a per-request override could
-        // reach this, while the knob that merely CAPS it - the line below - had
-        // a key. A CLI value wins over the file.
+        // Cap the prefill chunk (tokens) while other sequences are DECODING:
+        // prefill and decode share one stream, so a chunk forward blocks
+        // decode steps by its own latency. Lower = better decode latency,
+        // worse ingest TTFT; 512 for latency-critical multi-tenant serving,
+        // 0 to disable (full chunk, returns once nobody is decoding). -1 =
+        // per-arch default (2048 where chunked prefill is supported, else
+        // 0). CLI flag wins over the file value (#1645).
         int prefill_chunk_size = -1;
-        // Burst-heavy serving note (2026-08-26, Qwen3.8-27B-NVFP4, 32-stream
-        // burst with ragged prefill): this cap paces the post-wave-start
-        // prefill to ~2 prompts per engine step; raising it to 4096 measured
-        // aggregate 1004-1048 -> 1111-1128 tok/s and TTFT p90 3.5-3.7 ->
-        // 2.5-2.6 s (0 = off is equivalent). The default stays 1024 because
-        // it bounds a concurrent STREAMER's inter-token gap during another
-        // session's large ingest (the #1643 measurement) — raise it when the
-        // workload is burst-shaped rather than mixed.
+        // Paces the post-wave-start prefill to ~2 prompts per engine step,
+        // bounding a concurrent STREAMER's inter-token gap during another
+        // session's large ingest (#1643). Raise (e.g. 4096) for burst-shaped
+        // rather than mixed workloads; 0 = off.
         int prefill_chunk_decode_cap = 1024;
-        // Scale the cap above by W x (requests waiting for prefill) / (requests
-        // decoding) once that exceeds 1, clamped to the full chunk
-        // (prefill_pacing.h); W is how many waiters one decoder's smoothness
-        // is worth, 0 = off. The cap protects a decoder's inter-token gap; on
-        // a burst arrival the protected decoders are the wave's own first
-        // finishers and the cap makes the other 30 wait one capped chunk per
-        // step. The protection scenario (many decoders, one ingest) is
-        // unchanged for every W below the decoder count.
-        // Measured (Qwen3-14B-NVFP4, 32 x 982-token burst, 3 trials each):
-        // W=1 vs off aggregate +3.0..+4.2 %, TTFT p50 1009-1085 -> 827-839 ms,
-        // ITL max 106 -> 139 ms; W=2 / W=4 vs W=1 aggregate +1.3..+1.6 % /
-        // +1.9..+2.5 %, TTFT p90 -5..-6 % / -8..-9 %, ITL max unchanged
-        // (144-147), gaps over 100 ms 9 -> 22 of 9568 tokens. 31 short streams
-        // + a 4.4k-token ingest: their ITL during the ingest p95 62.5-66.0 /
-        // max 65-69 ms on every arm (docs/roadmap.md, Server and latency).
+        // Scales the cap above by W x (requests waiting for prefill) /
+        // (requests decoding) once that ratio exceeds 1, clamped to the full
+        // chunk (prefill_pacing.h). W = how many waiters one decoder's
+        // smoothness is worth, 0 = off. Higher W favors decoder ITL over
+        // ingest TTFT (docs/roadmap.md, Server and latency).
         int prefill_cap_fairness = 4;
-        // Cap the NUMBER of prefill chunk forwards per engine step while other
-        // sequences are DECODING (#1643). The size cap above bounds ONE chunk;
-        // with k concurrent ingests the step loop still runs k of them between
-        // two decode steps of every decoder, and no term in the size cap
-        // depends on k - the 1024 measurement above was taken with a single
-        // ingest. 0 = unbounded (the pre-#1643 behaviour). The starting index
-        // rotates, so a later ingest is not starved behind an earlier one.
-        //
-        // Measured (Qwen3-8B Q8, one streaming decoder, three concurrent
-        // ~5.2k-token ingests, two alternating rounds per arm):
-        //   worst inter-token gap  259/254 ms -> 112/88 ms
-        //   gaps over 100 ms       6/6        -> 1/0
-        //   gaps over 50 ms        6/6        -> 16/17
-        //   ingest wall time       2017.7 ms  -> 2381.4 ms (+18.0%)
-        // The stall is spread instead of removed: more small gaps, no large
-        // ones. Same trade the chunk cap above already takes (+27% TTFT for
-        // bounded latency), so the default follows it. The cap does not apply
-        // when nobody is decoding, so batch ingest throughput is untouched.
-        // Default 0 since the token-charged budget (engine_scheduler.cpp,
-        // prefill loop) took over the protective role: the budget admits
-        // exactly one FULL-sized chunk per step (the #1643 schedule for
-        // large ingests, unchanged by construction) but lets several small
-        // prompts through together, each charged a 256-token launch-cost
-        // floor. The count cap of 1 serialised 31 concurrent ~110-token
-        // prompts to one per engine step: burst-arrival TTFT reached 8 s at
-        // 32 streams while the pool sat idle. Set a positive value to
-        // reimpose a hard forward-count cap on top of the token budget.
+        // Caps the NUMBER of prefill chunk forwards per engine step while
+        // other sequences are DECODING (#1643); the size cap above bounds
+        // only ONE chunk. 0 (default) = unbounded, since the token-charged
+        // budget in engine_scheduler.cpp's prefill loop now does the
+        // protective job instead: one full-sized chunk plus several small
+        // prompts (each charged a 256-token launch-cost floor) per step.
+        // Rotates the starting index so no ingest is starved. The cap does
+        // not apply when nobody is decoding. Positive = hard forward-count
+        // cap on top of the token budget.
         int prefill_batch_decode_cap = 0;
-        // Mixed prefill+decode step: while prompts prefill, the decoding
-        // requests ride the ragged prefill forward as one-row members (their
-        // next token sampled by the decode sampler), so the step runs no
-        // separate decode forward. Dense models only; a decoder the ragged
-        // path does not admit (vision, logprobs, constraints, MTP) keeps the
-        // whole batch on the separate decode step. Measured (Qwen3-14B-NVFP4,
-        // 3 trials x 3 waves): 32 x 982-token burst aggregate +6.6..+7.8 %,
-        // TTFT p50 821-842 -> 630-665 ms, p90 -21 %, ITL max 141 -> 80 ms,
-        // gaps over 100 ms 22 -> 0 of 9568; 31 short streams + a 4.4k-token
-        // ingest: their ITL during the ingest p95 63 -> 51 ms, the ingest's
-        // TTFT 293 -> 240 ms. The 2048-row step reads 65 ms against 86 with
-        // the separate decode step (docs/roadmap.md, Server and latency).
+        // Mixed prefill+decode step: while prompts prefill, decoding
+        // requests ride the ragged prefill forward as one-row members
+        // (sampled by the decode sampler) instead of a separate decode
+        // forward. Dense models only; a decoder the ragged path does not
+        // admit (vision, logprobs, constraints, MTP) keeps the whole batch
+        // on the separate decode step (docs/roadmap.md, Server and latency).
         bool prefill_mixed_decode = true;
-        // Tokens of `max_tokens` the think budget keeps for the ANSWER on a
-        // reasoning model. The engine force-closes the think block (injects
-        // `</think>`) once reasoning reaches
+        // Tokens of `max_tokens` reserved for the ANSWER on a reasoning
+        // model: the engine injects `</think>` once reasoning reaches
         // max_tokens - max(think_answer_reserve, max_tokens/4), or the
-        // `think_budget` fraction, whichever is LATER - so a larger max_tokens
-        // only ever buys more thinking room. Was a compile-time constant
-        // (think_stop_logic.h kMaxAnswerReserve); operators serving a model
-        // whose answers are long (structured output) raise it, an agent loop
-        // that only needs a short verdict lowers it. Below 0 is read as 0 (no
-        // floor: the fraction alone decides). At the 0.5 default and
-        // max_tokens 260 the limit is max(130, 4) = 130 reasoning tokens.
+        // `think_budget` fraction, whichever is LATER. Below 0 reads as 0
+        // (no floor: the fraction alone decides). Raise for models with long
+        // structured answers, lower for a short-verdict agent loop.
         int think_answer_reserve = 256;
-        // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
-        // single-sequence, so concurrent sessions time-slice the decode.
-        // This is the slice length in tokens — after it, the engine rotates
-        // to the next DECODING request (round-robin). Rotation re-captures
-        // the decode graphs for the new sequence's state slot (~10-20 ms),
-        // so smaller values buy latency fairness at capture overhead
-        // (128 ≈ 1-2% at typical hybrid decode rates). 0 restores the old
-        // head-of-line behavior (first request runs to completion).
+        // Hybrid (SSM/GDN) decode time-slice length in tokens: the recurrent
+        // scan is single-sequence, so the engine round-robins DECODING
+        // requests every this many tokens. Rotation re-captures the decode
+        // graph for the new sequence's state slot (~10-20 ms), so smaller =
+        // fairer at more capture overhead (128 ~= 1-2% cost). 0 = head-of-line
+        // (no rotation).
         int hybrid_decode_quantum = 128;
-        // Batch concurrent GDN/SSM sequences into ONE decode step instead of
-        // time-slicing them (the hybrid_decode_quantum rotation above). The
-        // recurrent scan is sequential in tokens, not in sequences, so separate
-        // sequences parallelise across blockIdx.y; without this the whole step
-        // — including the FFN and attention GEMMs — runs at M=1. Profiled at
-        // 32-way load: 82 % of GPU time in M=1 GEMV kernels against 1 % in
-        // CUTLASS GEMM, where a dense model is the other way round.
-        // Set false to fall back to the rotation.
+        // Batches concurrent GDN/SSM sequences into ONE decode step instead
+        // of time-slicing (hybrid_decode_quantum above): the recurrent scan
+        // is sequential in tokens, not sequences, so sequences parallelize
+        // across blockIdx.y. Without this the whole step (FFN and attention
+        // GEMMs included) runs at M=1. False falls back to the rotation.
         bool gdn_batched_decode = true;
-        // Pipelined batched decode (n>=2, CUDA graphs on): keep ONE decode
-        // step in flight — step N+1 (device-side token chain + graph replay
-        // + sampler enqueue) is enqueued BEFORE step N's tokens are read
-        // back, so host bookkeeping/SSE delivery overlaps GPU compute
-        // instead of idling it (the ~15-20% step tail at n=16, 2026-07-12).
-        // Engages for async-sampleable rows (greedy / top-k<=128 / top-p /
-        // min-p / typical-p; rep/freq/presence penalties served via a
-        // device-side token history) on non-SSM models. Rows with DRY/
-        // mirostat/logit-bias/constraints/logprobs, and SWA/StreamingLLM/
-        // residual-KV configs, keep the per-step path.
+        // Pipelined batched decode (n>=2, graphs on): step N+1 (device-side
+        // token chain + graph replay + sampler enqueue) is enqueued BEFORE
+        // step N's tokens are read back, so host bookkeeping/SSE delivery
+        // overlaps GPU compute instead of idling it. Engages for
+        // async-sampleable rows (greedy/top-k<=128/top-p/min-p/typical-p;
+        // penalties via a device-side token history) on non-SSM models.
+        // DRY/mirostat/logit-bias/constraints/logprobs and
+        // SWA/StreamingLLM/residual-KV rows keep the per-step path.
         bool decode_pipeline = true;
-        // Cross-sequence prefill batching (roadmap 0(d)): assemble the
-        // prefill chunks of several admitted requests into ONE ragged forward
-        // — GEMMs/norms/elementwise run over the concatenated rows, attention
-        // and the GDN conv loop per sequence, the GDN scan batches via a
-        // row-offset table. A 32-prompt burst otherwise prefills one sequence
-        // per forward (launch-bound, ~25% of a burst wave's wall). Measured
-        // 2026-08-26 on Qwen3.8-27B-NVFP4 (32-stream burst, 4 waves x 3
-        // alternating trials/arm): aggregate 977.3 -> 1038.2 tok/s median
-        // (+6.2%, all 12 ON waves above all 12 OFF waves), TTFT p50 4.11 ->
-        // 2.55 s. Byte-level A/B at deterministic+no-prefix-cache matches the
-        // serial control's batch-shape noise (27/32 vs 24/32 identical).
-        // Requests with vision, constraints, logprobs, embeddings or rerank
-        // scoring — and Mamba2 / MLA models, MTP, SWA sizing, residual KV,
-        // gdn.fp32_scan/ref_kernel — keep the serial path.
+        // Cross-sequence prefill batching (roadmap 0(d)): assembles the
+        // prefill chunks of several admitted requests into ONE ragged
+        // forward (GEMMs/norms/elementwise over concatenated rows, attention
+        // and the GDN conv loop per sequence, GDN scan via a row-offset
+        // table), instead of one sequence per forward. Requests with vision,
+        // constraints, logprobs, embeddings/rerank scoring, and Mamba2/MLA
+        // models, MTP, SWA sizing, residual KV, gdn.fp32_scan/ref_kernel
+        // keep the serial path.
         bool prefill_batch = true;
 
-        // Run the paced prefill chunk CONCURRENT with the in-flight batched
+        // Runs the paced prefill chunk CONCURRENT with the in-flight batched
         // decode step (prefill on the low-priority stream, decode in the
-        // dual-workspace slot 1) instead of serially between two decode
-        // steps. Implies the green-context stream pair (which on sm_120
-        // falls back to priority streams + distinct memSyncDomains —
-        // LIMITATIONS.md). Overlap engages only when every gate holds:
-        // decode workspace allocated at max_batch, no MoE, NVFP4-native
-        // model (no GGUF decode overlay), decode batch >= 2 this step
-        // (spec-verify chunks share the CUTLASS activation scratch and only
-        // exist at batch 1). Otherwise the serial path runs unchanged.
-        //
-        // Default OFF, and since 2026-08-27 that is a MEASURED verdict, not
-        // caution: on Qwen3.8-27B-NVFP4 at 32 streams (3 alternating
-        // trials/arm) the overlap is throughput-neutral on short prompts
-        // (1771.3 vs 1777.7 median, pairs -0.0/-0.3/+1.5%) AND under heavy
-        // ingest (~1000-token prompts: 789.7 vs 790.6, TTFT p50 3.70 vs
-        // 3.74 s). Without green-context SM partitioning — dead on sm_120 —
-        // two compute-bound streams displace each other: the "serial
-        // prefill block" is GPU work that takes the same time concurrently
-        // and stretches the decode step by its own duration. Revisit only
-        // on hardware with real SM partitioning.
-        // Design + collision table + ledger:
-        // docs/plans/2026-08-27-prefill-decode-overlap.md
+        // dual-workspace slot 1), instead of serially between two decode
+        // steps. Implies the green-context stream pair (falls back to
+        // priority streams + distinct memSyncDomains on sm_120,
+        // LIMITATIONS.md). Engages only when every gate holds: decode
+        // workspace allocated at max_batch, no MoE, NVFP4-native model (no
+        // GGUF decode overlay), decode batch >= 2 this step (spec-verify
+        // chunks share the CUTLASS activation scratch and only exist at
+        // batch 1). Default OFF: without real SM partitioning on sm_120, two
+        // compute-bound streams just displace each other instead of
+        // overlapping. Revisit on hardware with real SM partitioning.
+        // Design: docs/plans/2026-08-27-prefill-decode-overlap.md
         bool prefill_overlap = false;
     } runtime;
 
     cfg::KVCache kv_cache;
 
-    // Runtime RoPE-scaling override — stretch a model's usable context past
+    // Runtime RoPE-scaling override: stretches a model's usable context past
     // its native window without editing the checkpoint. Sets the same
-    // ModelConfig fields the GGUF/HF loaders set from model-declared
-    // rope_scaling metadata, before max_seq_len auto-detection, so the
-    // extended window flows into KV sizing, YaRN corr-dims, and the MTP
-    // draft head. Refused (logged) for models with per-dimension frequency
-    // tables (LongRoPE / llama3), MLA (mscale entanglement), and NoPE.
+    // ModelConfig fields the GGUF/HF loaders set from rope_scaling metadata,
+    // before max_seq_len auto-detection, so it flows into KV sizing, YaRN
+    // corr-dims, and the MTP draft head. Refused (logged) for per-dimension
+    // frequency tables (LongRoPE/llama3), MLA (mscale entanglement), NoPE.
     struct Rope {
         // "" = off (model metadata only). "yarn" | "linear".
         std::string scaling;
@@ -314,59 +193,48 @@ struct RuntimeConfig {
         // 0 = auto: the model's declared rope_n_ctx_orig, else max_seq_len.
         int orig_ctx = 0;
         // HF attn_factor multiplier. The kernel already applies the YaRN
-        // paper mscale 1 + 0.1*ln(factor) internally — leave at 1.0 unless
-        // matching a checkpoint that shipped a custom attn_factor.
+        // mscale 1 + 0.1*ln(factor) internally; leave at 1.0 unless matching
+        // a checkpoint that shipped a custom attn_factor.
         float attn_factor = 1.0f;
         float beta_fast = 32.0f;
         float beta_slow = 1.0f;
     } rope;
 
-    // VRAM budget-planner tuning. Governs compute_vram_budget() only —
-    // the pre-dequant phases keep their own internal reserve floors.
+    // VRAM budget-planner tuning. Governs compute_vram_budget() only;
+    // pre-dequant phases keep their own internal reserve floors.
     struct Vram {
-        // Commit the slot-shaped pools on demand instead of at init: the
-        // SSM/GDN state slab commits one slot when a sequence is admitted,
-        // the engine arena commits as tenants take (the vision tower only on
-        // the first image). The plan still charges every byte, the address
-        // space is reserved at init, and a commit is refused (the request
+        // Commits slot-shaped pools on demand instead of at init (SSM/GDN
+        // state slab per admitted sequence, engine arena per tenant, vision
+        // tower on first image). The plan still charges every byte and
+        // reserves address space at init; a commit is refused (request
         // waits) rather than spilled when the card cannot spare it. Needs
-        // CUDA VMM; without it every pool is fixed, as before. Qwen3.8-27B at
-        // max_batch_size=28: 2226 MiB of state + 1107 MiB of vision tower
-        // held at idle before, 0 after, until the sequences and the image
-        // arrive.
+        // CUDA VMM, else every pool is fixed as before.
         bool lazy_commit = true;
         // Fraction of post-reserve/post-weight-cache VRAM the KV pool
         // targets. Clamped to [0.05, 0.95] at use.
         float kv_fraction = 0.8f;
         // Free-VRAM reserve floor as % of (budget-visible) total VRAM,
-        // still floored at 256 MiB absolute. Clamped to [0, 50] at use.
-        // Default 10 ≈ 3.2 GiB on a 32 GiB card — lower to trade headroom
-        // for KV pool.
+        // floored at 256 MiB absolute. Clamped to [0, 50] at use.
+        // Default 10 ~= 3.2 GiB on a 32 GiB card; lower for more KV pool.
         int reserve_floor_pct = 10;
-        // The fixed charge CUDA/cuBLAS/CUTLASS claim on the FIRST forward
-        // pass, in MiB. Measured at ~3900 on this target and invariant to
-        // batch (1..16) and context (1024..4096) — it is not a workspace imp
-        // allocates, and the old budget pass cannot see it, which is why it
-        // hands the KV pool a number that much too optimistic
-        // (docs/internals/MEMORY.md A1.5).
-        //   -1 = use the built-in measured constant (default)
-        //    0 = charge nothing (for a driver/toolkit where it does not apply)
-        //   >0 = the measured value for THIS host, in MiB
-        // Advisory until A7 step 6: today it only feeds the shadow plan that
-        // is logged next to the live budget.
+        // Fixed CUDA/cuBLAS/CUTLASS charge on the first forward pass, MiB;
+        // not a workspace imp allocates, so the budget pass cannot otherwise
+        // see it (docs/internals/MEMORY.md A1.5). ~3900 measured, invariant
+        // to batch/context on this target.
+        //   -1 = built-in measured constant (default)
+        //    0 = charge nothing (driver/toolkit where it does not apply)
+        //   >0 = measured value for THIS host, MiB
+        // Advisory only: feeds the shadow plan logged next to the live budget.
         int library_reserve_mb = -1;
-        // Where to remember what the first forward ACTUALLY claimed, so the
-        // second start on a model charges the measured value instead of the
-        // constant (AUDIT B41/B49). Empty = the default cache location;
-        // "off" disables it. A cache miss or an unwritable path is never fatal.
+        // Where to remember what the first forward ACTUALLY claimed, so a
+        // later start on the same model charges the measured value instead
+        // of the constant (AUDIT B41/B49). Empty = default location, "off" =
+        // disabled. A cache miss or unwritable path is never fatal.
         std::string library_reserve_cache;
-        // Pinned staging ring for the weight upload (#1653). Pinning host
-        // memory is expensive on WDDM - the shipped 4x128 MiB cost 503 ms to
-        // acquire and 115 ms to release against the 208 ms of H2D the ring
-        // exists to overlap. Measured load time on Qwen3-8B-Q8_0, 5 alternating
-        // starts each: 4x128 MiB median 4.55 s, 4x4 MiB median 3.87 s. The
-        // optimum is a property of the host's pinning cost, not of imp, so it
-        // is a key rather than a constant.
+        // Pinned staging ring for the weight upload (#1653): depth x chunk
+        // MiB. Pinning host memory is expensive on WDDM, so the profitable
+        // ring shape is a property of the host's pinning cost, not of imp;
+        // hence a configurable key rather than a constant.
         int upload_ring_depth = 4;
         int upload_ring_chunk_mib = 4;
     } vram;
@@ -379,61 +247,47 @@ struct RuntimeConfig {
 
     cfg::GEMM gemm;
 
-    // (RuntimeConfig::Gemma4 lived here through Phase 4 of the architecture
-    // refactor. Phase 5 Track A moved it to ModelConfig::Overrides::Gemma4 —
-    // see src/model/model_config.h. Model-specific knobs do not belong on a
-    // global runtime singleton.)
+    // Model-specific knobs (e.g. Gemma4) live in ModelConfig::Overrides, not
+    // here: see src/model/model_config.h.
 
     cfg::Generation generation;
 
     struct Server {
         // Prefix caching: reuse KV blocks for shared prompt prefixes. Default
-        // ON for the server/CLI — this is the documented behaviour (README,
-        // imp.conf.example) and what delivers the advertised warm-prompt TTFT
-        // win + cache_read_input_tokens reporting (#758: shipping OFF meant the
-        // prebuilt image never cached unless an imp.conf opted in). Library /
-        // C-API embedders are unaffected — they drive EngineConfig directly
-        // (off-by-default there). The engine ORs this into
-        // EngineConfig.use_prefix_caching at init. PrefixCacheE2ETest is the
-        // ship gate. For hybrid (SSM/GDN) models it additionally requires the
-        // recurrent snapshot store below.
+        // ON for server/CLI (#758: OFF meant the prebuilt image never cached
+        // without an imp.conf). Library/C-API embedders drive EngineConfig
+        // directly and stay off-by-default; the engine ORs this in at init.
+        // Ship gate: PrefixCacheE2ETest. Hybrid (SSM/GDN) models additionally
+        // need the recurrent snapshot store below.
         bool prefix_cache = true;
         // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
         int prefix_pin_budget_pct = 25;
-        // Serve a model other than the loaded one by swapping to it, instead of
-        // answering 404. Agent harnesses run a big model beside a small one
-        // (router, sub-agents, autocomplete) and 32 GB fits one at a time, so
-        // the swap is serial: in-flight generations drain first (never
-        // cancelled, same contract as /admin/suspend), then the old model is
-        // torn down and the requested one loaded. The requested name must
-        // resolve inside the models directory — an unknown name is still a 404,
-        // so a typo cannot trigger a load. Cost is one model load on the
-        // requesting call (the warm weight cache, #956, makes repeats cheap);
-        // set false to keep the single-model contract and fail fast instead.
+        // Serve a model other than the loaded one by swapping to it instead
+        // of answering 404. Swap is serial: in-flight generations drain
+        // first (same contract as /admin/suspend), then the old model is
+        // torn down and the requested one loaded. The name must resolve
+        // inside the models directory, so a typo still 404s. Cost mitigated
+        // by the warm weight cache (#956); false keeps the single-model
+        // contract and fails fast instead.
         bool model_swap = true;
         // How long a swap waits for in-flight generations to finish before
         // giving up and keeping the current model (503, nothing torn down).
         int model_swap_drain_ms = 60000;
-        // Tokens the streaming driver holds back on a TOOL request while it is
-        // still unknown whether the model is reasoning: a tool request renders
-        // a pre-closed think block, a model that reasons anyway emits only the
-        // closer, and the held prefix is what keeps that chain of thought from
-        // streaming as the answer (stream_driver.cpp). The hold is the whole
-        // TTFT of a prose reply on the agent path: 8 tokens measured ~85 ms on
-        // Qwen3.8-27B, so 256 is ~2.7 s at that rate, paid only when the reply
-        // is prose rather than a call (AUDIT_arch_2026 E-4). Lower it on a
-        // model that never reasons; plain chat requests hold 8 and release on
-        // the first word regardless.
+        // Tokens the streaming driver holds back on a TOOL request while it
+        // is unknown whether the model is reasoning: a tool request renders
+        // a pre-closed think block, and the held prefix keeps a model that
+        // reasons anyway from streaming that as the answer
+        // (stream_driver.cpp). Paid only on a prose reply
+        // (AUDIT_arch_2026 E-4); lower it on a model that never reasons.
+        // Plain chat requests hold a fixed 8 tokens and release on the first word.
         int agent_scan_limit = 256;
-        // Device budget (MiB) for recurrent-state snapshots — what makes
-        // prefix caching work on hybrid (SSM/GDN) models: KV blocks alone
-        // cannot skip prefill there, the recurrent state at the skip boundary
-        // must be restored too. One snapshot = one per-sequence state slab
-        // (~64 MiB for Qwen3.6-35B), saved per prefill, LRU-evicted. Buffers
-        // are pre-allocated at engine init (free VRAM is ~0 at serving time
-        // by design) and accounted in the expert-offload reserve. imp-cli
-        // --bench pins this to 0 (baseline semantics unchanged).
-        // 0 disables snapshots AND hybrid prefix caching (dense unaffected).
+        // Device budget, MiB, for recurrent-state snapshots: what makes
+        // prefix caching work on hybrid (SSM/GDN) models, since KV blocks
+        // alone cannot skip prefill there. One snapshot = one per-sequence
+        // state slab, saved per prefill, LRU-evicted; pre-allocated at
+        // engine init and accounted in the expert-offload reserve. imp-cli
+        // --bench pins this to 0. 0 disables snapshots and hybrid prefix
+        // caching (dense models unaffected).
                         int recurrent_snapshot_mb = 256;
         // Pinned host memory for recurrent snapshots evicted from the device
         // tier (hybrid prefix caching beyond recurrent_snapshot_mb / slab
@@ -441,16 +295,14 @@ struct RuntimeConfig {
         // prefill. 0 = off.
         int recurrent_snapshot_host_mb = 2048;
         // A prompt whose block-aligned prefix is shorter than this takes no
-        // prefix-cache snapshot (recurrent slab or SWA window) and no prefill
-        // split at the boundary. The split costs every first turn two eager
-        // chunks plus a sync: 35-token prompt, Qwen3.8-27B-NVFP4, one stream,
-        // server-side TTFT floor 36 -> 22 ms unsplit (2026-09-08), while the
-        // turn-2 saving of a 32-token prefix is under 3 ms. 0 = snapshot
-        // every block-aligned prompt.
+        // prefix-cache snapshot (recurrent slab or SWA window) and no
+        // prefill split at the boundary, since the split costs every first
+        // turn two eager chunks plus a sync. 0 = snapshot every
+        // block-aligned prompt.
         int snapshot_min_prompt_tokens = 256;
-        // Green Contexts / prefill-decode overlap streams in the server engine.
-        // OFF by default (suspected memSyncDomain race on sm_120 fallback
-        // streams — gemma-3-12b IMA); opt in via [server] green_contexts = true.
+        // Green Contexts / prefill-decode overlap streams in the server
+        // engine. OFF by default (suspected memSyncDomain race on sm_120
+        // fallback streams, gemma-3-12b IMA); opt in via [server] green_contexts = true.
                 bool green_contexts = false;
         // OpenTelemetry span export (OTLP/HTTP, JSON): the full traces URL,
         // e.g. http://localhost:4318/v1/traces; "" = off. One SERVER span
@@ -461,29 +313,27 @@ struct RuntimeConfig {
     } server;
 
     struct WarmCache {
-        // On-disk warm weight cache: at the first fully-cold load, persist the
-        // TRANSFORMED weight uploads (BF16->FP16 conversions, dequants, split
-        // layouts) next to the model; later boots restore them instead of
-        // re-converting. Raw-from-source uploads are never stored (the model
-        // file already holds those bytes), so the cache is near-zero for
-        // raw-served GGUF quants / NVFP4-prequant SafeTensors and ~model-size
-        // only for BF16-dense checkpoints. Guarded by a format version and a
-        // model-content fingerprint; any mismatch = normal cold load.
+        // On-disk warm weight cache: persists TRANSFORMED weight uploads
+        // (BF16->FP16 conversions, dequants, split layouts) next to the
+        // model so later boots skip re-converting. Raw-from-source uploads
+        // are never stored, so size is near-zero for raw GGUF/NVFP4-prequant
+        // and ~model-size only for BF16-dense. Guarded by a format version
+        // and a content fingerprint; any mismatch is a normal cold load.
         bool enabled = true;
-        // Where to store cache files. Empty (default) = next to the model
-        // ("<file>.impwcache" / "<dir>/.imp_warm_cache"). Point this at a
-        // writable volume when the model directory is read-only for the
-        // serving user (the prebuilt container runs as uid 1001): files are
-        // then named "<model-basename>-<path-hash>.impwcache" inside it.
+        // Where to store cache files. Empty = next to the model
+        // ("<file>.impwcache" / "<dir>/.imp_warm_cache"). Point at a writable
+        // volume when the model dir is read-only for the serving user (the
+        // prebuilt container runs as uid 1001); files are then named
+        // "<model-basename>-<path-hash>.impwcache" inside it.
         std::string dir;
     } warm_cache;
 
     struct Suspend {
-        // Suspend-to-RAM (/admin/suspend): after model/engine teardown, also
-        // cudaDeviceReset() so the CUDA primary context (+ module code,
-        // ~300-600 MiB) is released and the GPU reads ~0 MiB for this process.
-        // Escape hatch: set false if a foreign library holds CUDA state the
-        // reset would orphan (imp itself re-arms everything at the next init).
+        // Suspend-to-RAM (/admin/suspend): after teardown, also
+        // cudaDeviceReset() so the CUDA primary context (~300-600 MiB) is
+        // released and the GPU reads ~0 MiB for this process. False if a
+        // foreign library holds CUDA state the reset would orphan (imp
+        // re-arms everything at the next init).
         bool device_reset = true;
         // Host RAM the snapshot must leave free (MemAvailable gate) on top of
         // the snapshot bytes themselves.
@@ -498,39 +348,29 @@ struct RuntimeConfig {
         std::string mmproj;
     } paths;
 
-    // n-gram (prompt-lookup) speculative decoding. Drafts come from suffix
-    // matches against the request's own prompt+output tokens — no draft
-    // model, no MTP head. Greedy-only Phase 1: the verify step replays the
-    // draft as a teacher-forced continuation chunk and accepts the longest
-    // argmax-matching prefix, so output is token-identical to plain greedy
-    // decode. The verify loop runs eager (no async conditional graph loop);
-    // burst_rearm + miss_burst keep draft-miss fragmentation ~free, so the old
-    // tg128 -15% draft-poor downside no longer reproduces (-0.2%/-0.9% on
-    // dense Q8/NVFP4, 2026-06-16) — hence default-ON. spec_verify_gates_ok_
-    // confines engagement to batch-1 / greedy / no-penalty-window / no-json /
-    // no-logprobs / non-recurrent requests (MoE additionally requires
-    // native-NVFP4 experts, see `moe` below); everything else falls back
-    // cleanly, so default-on is a no-op for sampled chat, tool/JSON calls,
-    // concurrent batches, and GGUF-MoE (which the async loop carries).
+    // n-gram (prompt-lookup) speculative decoding: drafts come from suffix
+    // matches against the request's own prompt+output tokens, no draft
+    // model or MTP head. Verify replays the draft as a teacher-forced chunk
+    // and accepts the longest argmax-matching prefix, so output is
+    // token-identical to plain greedy decode. spec_verify_gates_ok_ confines
+    // engagement to batch-1/greedy/no-penalty-window/no-json/no-logprobs/
+    // non-recurrent requests (MoE additionally needs native-NVFP4 experts,
+    // see `moe` below); everything else falls back cleanly, so default-ON
+    // is a no-op elsewhere.
     cfg::Speculative speculative;
 
     // Constrained decoding (json_mode / json_schema).
     struct Constrained {
         // Jump-ahead over schema-forced spans (#844): when the schema FSM
-        // forces the next CHARACTERS (skeleton keys/punctuation — the text
-        // is forced even though its tokenization is not), one speculative
-        // chunk forward drafts the canonical tokenization and materializes
-        // per-position logits rows; subsequent tokens are then sampled from
-        // those rows without running forwards. Exact for greedy AND
-        // sampling — each row is the true logits given the accepted prefix;
-        // a token that diverges from the draft re-enters normal pipelining
-        // (one wasted chunk forward, nothing else). OPT-IN: measured net
-        // -3-5% on Qwen3-8B (Q8 + NVFP4, 2026-07-03) — the model picks
-        // context-dependent tokenization splits the canonical draft misses,
-        // so wasted chunks outweigh consumed rows. Also note the chunk path
-        // is not bit-identical to per-token decode (prefill vs decode
-        // kernels), so free-text AFTER a consumed span can diverge from a
-        // jump-off run (same cross-path property as spec-ngram verify).
+        // forces the next CHARACTERS, one speculative chunk forward drafts
+        // the canonical tokenization and samples subsequent tokens from its
+        // logits rows without running forwards. Exact for greedy and
+        // sampling; a token that diverges from the draft just re-enters
+        // normal pipelining. OPT-IN: measured net negative, since
+        // context-dependent tokenization splits the canonical draft misses
+        // make wasted chunks outweigh consumed rows. Not bit-identical to
+        // per-token decode past a consumed span (same cross-path property
+        // as spec-ngram verify).
         bool jump_ahead = false;
         // Minimum draft length (tokens) worth the speculative chunk;
         // shorter forced spans stay on the per-token pipeline.
@@ -541,13 +381,11 @@ struct RuntimeConfig {
 
     cfg::Diagnostics diagnostics;
 
-    // ----- Activation calibration (offline quantizer input) -----
-    //
-    // Collect per-input-channel activation magnitudes during a forward pass and
-    // write them for imp-quantize's AWQ scale search. Not an inference feature:
-    // a calibration run is a prefill over a corpus whose only output is this
-    // file. Turning it on also turns CUDA graphs off, because the collector
-    // allocates a per-weight accumulator lazily and a capture forbids that.
+    // Collects per-input-channel activation magnitudes during a forward
+    // pass for imp-quantize's AWQ scale search (not an inference feature: a
+    // prefill over a corpus whose only output is this file). Also disables
+    // CUDA graphs, since the accumulator is allocated lazily per weight and
+    // capture forbids that.
     struct Calibration {
         bool enabled = false;
         // Where imp_calibration_write() puts the file. Empty means the caller
@@ -565,12 +403,11 @@ struct RuntimeConfig {
     // is left at its default state and an error is logged.
     bool load_from_file(const std::string& path);
 
-    // Apply key=value strings (e.g. "kv_cache.dtype=fp8"). Each entry is
-    // parsed via dotted-section lookup. Returns the entries that bound to
-    // nothing — a `--set` naming a key this build does not have is a typo,
-    // and a measurement flag that silently does nothing is worse than one
-    // that stops. (An unknown key in imp.conf stays a warning: a config file
-    // may legitimately outlive the build that understood it.)
+    // Apply key=value strings (e.g. "kv_cache.dtype=fp8") via dotted-section
+    // lookup. Returns entries that bound to nothing: a `--set` naming an
+    // unknown key is a typo and should stop the caller. An unknown key in
+    // imp.conf stays a warning only, since a config file may outlive the
+    // build that understood it.
     [[nodiscard]] std::vector<std::string> apply_overrides(const std::vector<std::string>& kvs);
 
     // Convenience: locate + load + apply overrides + log a one-line summary.
@@ -580,11 +417,11 @@ struct RuntimeConfig {
     static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides,
                               std::vector<std::string>* rejected = nullptr);
 
-    // Dotted keys this configuration actually took from a file or a `--set`,
-    // in application order. An "auto" default that resolves into a pair of
-    // keys has to know which half the operator chose themselves, or it
-    // silently overrides an explicit setting (speculative.mtp_k=-1 pairing
-    // ngram off is the first such resolution).
+    // Dotted keys this configuration actually took from a file or a
+    // `--set`, in application order. Needed so an "auto" default that
+    // resolves a pair of keys knows which half the operator set explicitly
+    // (e.g. speculative.mtp_k=-1 pairing with ngram off) instead of
+    // silently overriding it.
     std::vector<std::string> explicit_keys;
     [[nodiscard]] bool was_set(std::string_view dotted_key) const {
         for (const auto& k : explicit_keys)
@@ -596,17 +433,15 @@ struct RuntimeConfig {
 
 // ---- Pending-config handoff (tool-main → Engine) -----------------------
 //
-// The C API constructs Engine inside src/api/imp_api.cpp. Tool mains
-// (imp-cli, imp-server) load a RuntimeConfig from imp.conf + CLI
-// overrides at startup and need to hand that to Engine::init without
-// passing it through the ABI-stable ImpConfig C struct.
+// Tool mains (imp-cli, imp-server) load a RuntimeConfig from imp.conf + CLI
+// overrides at startup and hand it to Engine::init without passing it
+// through the ABI-stable ImpConfig C struct (Engine is constructed inside
+// src/api/imp_api.cpp).
 //
-// Workflow: tool main calls set_pending_runtime_config(loaded_cfg) once,
-// then later imp_context_create() pulls it via take_pending_runtime_config()
-// and passes to Engine::init. This replaces the former
-// RuntimeConfig::install() process-wide singleton (Phase 5 Track D
-// follow-up, 2026-05-20) — the lifetime is now bounded to a single
-// Engine construction; there is no per-call accessor.
+// Workflow: tool main calls set_pending_runtime_config(loaded_cfg) once;
+// imp_context_create() later pulls it via take_pending_runtime_config() and
+// passes it to Engine::init. Lifetime is bounded to a single Engine
+// construction; there is no per-call accessor.
 void set_pending_runtime_config(RuntimeConfig cfg);
 RuntimeConfig take_pending_runtime_config();
 

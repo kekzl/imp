@@ -37,19 +37,14 @@ public:
     // max_batch_size once the post-weight budget is known). Never raises it.
     void clamp_max_batch_size(int n) { max_batch_size_ = std::min(max_batch_size_, std::max(1, n)); }
 
-    // Hybrid (SSM/GDN) prefix caching: cap on reusable prefix blocks for a
-    // request being admitted. The engine's hook finds the longest recurrent-
-    // state snapshot matching the prompt, attaches it to the request, and
-    // returns its block boundary (0 = no restorable prefix, so no KV reuse
-    // — skipping prefill without the matching recurrent state would decode
-    // from a zero state). Unset (dense models) = unlimited reuse.
+    // Hybrid (SSM/GDN) prefix caching: cap on reusable prefix blocks. The
+    // engine's hook finds the longest recurrent-state snapshot matching the
+    // prompt and returns its block boundary (0 = no restorable prefix, since skipping prefill without matching state would decode from zero). Unset (dense models) = unlimited reuse.
     using PrefixReuseLimitFn = std::function<int(Request&)>;
     void set_prefix_reuse_limit(PrefixReuseLimitFn fn) { prefix_reuse_limit_ = std::move(fn); }
-    // Asked before a pending request takes KV blocks: can the engine seat
-    // one more sequence right now? False ends this round's admission (the
-    // resource is shared, so nothing behind it could be seated either) and
-    // the request stays pending; it is retried next round. The lazy SSM slab
-    // answers with a slot commit (docs/internals/MEMORY.md, lazy pools).
+    // Asked before a pending request takes KV blocks: can the engine seat one
+    // more sequence now? False ends this round's admission (shared resource,
+    // nothing behind could be seated either); retried next round. Lazy SSM slab answers with a slot commit (docs/internals/MEMORY.md).
     using AdmissionGateFn = std::function<bool()>;
     void set_admission_gate(AdmissionGateFn fn) { admission_gate_ = std::move(fn); }
 

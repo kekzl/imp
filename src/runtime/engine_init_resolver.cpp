@@ -1,9 +1,7 @@
 // Engine init phase: resolve quant/KV/SSM dtype policies + compute max
 // sequence length from VRAM budget. Pure orchestration of RuntimeConfig
-// + Model metadata — no kernel launches, no allocations.
-//
-// Extracted from engine.cpp in Phase 4 of the architecture refactor
-// roadmap. Methods remain Engine::* with declarations in engine.h.
+// and Model metadata: no kernel launches, no allocations. Methods remain
+// Engine::* with declarations in engine.h.
 
 #include "runtime/engine.h"
 
@@ -61,17 +59,12 @@ void Engine::init_apply_debug_raw_overrides_() {
     config_.use_fp8_prefill = 0;
     config_.use_nvfp4_decode = 0;
     config_.dual_path_quant = false;
-    // #1628: four of these were `setenv()` on IMP_* variables that NOTHING in
-    // the tree reads, so warmup, deterministic cuBLAS and the MoE expert cache
-    // all stayed at their normal settings while the log line above and
-    // imp.conf.example:97 said otherwise. `grep -rn 'getenv("IMP_NO_WARMUP"'`
-    // and the other three: zero hits each. They are config assignments now.
+    // #1628: these were dead setenv() calls (nothing in the tree reads the
+    // IMP_* vars); now direct config assignments.
     //
-    // CUDA graphs off (graph capture can mask state bugs). Through
-    // demote_graphs_, not by writing the field: setting use_cuda_graphs
-    // directly left graph_demotion_ at None, so the resolved-dispatch summary
-    // printed `graphs=0(none)` - "graphs are off, reason: graphs still
-    // enabled" (#1658).
+    // CUDA graphs off (capture can mask state bugs). Via demote_graphs_, not
+    // by writing use_cuda_graphs directly: that left graph_demotion_ at None,
+    // so the dispatch summary printed graphs=0(none) with no reason (#1658).
     demote_graphs_(GraphDemotionReason::DebugRaw);
     // No warmup (warmup can leak state into first request)
     runtime_config_.runtime.warmup = false;
@@ -82,25 +75,20 @@ void Engine::init_apply_debug_raw_overrides_() {
     setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
     // MoE: no expert LRU cache (state-carrying)
     runtime_config_.moe.no_expert_cache = true;
-    // GDN: reference unfused scan (no register-state reordering). The env var
-    // this used to set is dead, but the switch it stood for exists as a config
-    // key (`gdn.ref_kernel`, read at executor_ssm_gdn.cu:526).
+    // GDN: reference unfused scan (no register-state reordering); config key
+    // `gdn.ref_kernel`, read at executor_ssm_gdn.cu:526.
     runtime_config_.gdn.ref_kernel = true;
     // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
-    // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
-    // some combinations. The RAW flag is about disabling *caches and approximations*,
-    // not about swapping kernel variants.
+    // IMP_NO_MMVQ: those trigger incompatible kernel paths that IMA on some
+    // combinations. debug_raw disables caches and approximations, not kernel variants.
 }
 
-// Runtime RoPE-scaling override (imp.conf [rope]): inject YaRN/linear
-// scaling into a model that doesn't declare it (or replace what it does
-// declare). Mirrors the HF-loader semantics (hf_config_loader.cpp,
-// rope_scaling type=yarn/linear): rope_freq_scale stores the FACTOR, the
-// kernel applies 1/factor itself and self-computes the paper mscale
-// 1 + 0.1*ln(factor) (rope_yarn.cuh). Must run before
-// init_compute_max_seq_len_() so the extended window reaches the KV sizing
-// math, and before executor setup so yarn_corr_dims_ + the MTP draft head
-// (shared ModelConfig + rope_yarn.cuh) see the final fields.
+// Runtime RoPE-scaling override (imp.conf [rope]): injects YaRN/linear
+// scaling into a model, mirroring HF-loader semantics (hf_config_loader.cpp):
+// rope_freq_scale stores the FACTOR, the kernel applies 1/factor and
+// self-computes mscale 1 + 0.1*ln(factor) (rope_yarn.cuh). Must run before
+// init_compute_max_seq_len_() (extended window feeds KV sizing) and before
+// executor setup (yarn_corr_dims_ + the MTP draft head need final fields).
 bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope) {
     if (rope.scaling.empty())
         return false;
@@ -184,24 +172,20 @@ void Engine::init_apply_rope_override_() {
 }
 
 // KV cache dtype policy + FP8 KV NaN-bug deterministic-cuBLAS workaround +
-// max_batch_size auto-sizing. Default: FP16 (safe). FP8 / NVFP4 / MXFP4-KV
-// are opt-in. See the inline rationale for the 2026-04-24 root-cause memo.
+// max_batch_size auto-sizing. Default FP16 (safe); FP8/NVFP4/MXFP4-KV are
+// opt-in.
 void Engine::init_resolve_kv_dtype_policy_() {
     const auto& mcfg = model_->config();
     const bool debug_raw_ = runtime_config_.runtime.debug_raw;
     const bool force_kv_fp16 = (runtime_config_.kv_cache.dtype == "fp16");
     const bool fp8_auto_legacy = runtime_config_.kv_cache.fp8_auto_legacy;
 
-    // Resolve the config-file KV dtype string into the engine enum. The CLI flags
-    // (--kv-fp8 / --kv-int4 / …) set config_.kv_cache_dtype directly and win — we
-    // only resolve here when the CLI left it at the F16 default. The default "auto"
-    // honors the model author's kv_cache_quant_algo=FP8 hint, but ONLY for arch
-    // families verified safe for long-context FP8 KV (kv_fp8_hint_default_safe — the
-    // measured PPL/coherence gate). Explicit "fp16" opts out; explicit
+    // Resolve the config-file KV dtype string into the engine enum. CLI flags
+    // (--kv-fp8 / --kv-int4 / ...) set config_.kv_cache_dtype directly and win;
+    // this only resolves when the CLI left it at the F16 default. "auto" honors
+    // kv_cache_quant_algo=FP8 only for archs verified safe
+    // (kv_fp8_hint_default_safe); explicit fp16 opts out, explicit
     // fp8/int8/int4/nvfp4/mxfp4 force that dtype.
-    // Captured before the block resolves anything: != F16 here means a CLI flag
-    // (--kv-fp8 and friends) already pinned the dtype and this whole resolver is
-    // a no-op for it.
     const QType kv_cli_pin = config_.kv_cache_dtype;
     if (config_.kv_cache_dtype == QType::F16) {
         const std::string& kv_str = runtime_config_.kv_cache.dtype;
@@ -216,21 +200,19 @@ void Engine::init_resolve_kv_dtype_policy_() {
         } else if (kv_str == "mxfp4") {
             config_.kv_cache_dtype = QType::MXFP4_KV;
         } else if (kv_str != "auto" && kv_str != "fp16" && !kv_str.empty()) {
-            // An unrecognised value used to fall through in silence and leave
-            // FP16 — so `kv_cache.dtype=mxfp4_kv` (the QType's name, not the
-            // config's) looked like it applied, and the log line naming the
-            // resolved dtype was the only hint that it had not.
+            // Unrecognised value: warn rather than silently keep FP16 (the
+            // config key spelling differs from the QType name, e.g. "mxfp4"
+            // here vs QType::MXFP4_KV).
             IMP_LOG_WARN(
                 "kv_cache.dtype=\"%s\" is not a known value "
                 "(auto|fp16|fp8|int8|int4|nvfp4|mxfp4) — keeping FP16 KV.",
                 kv_str.c_str());
         } else if (kv_str == "auto" && kv_nvfp4_default_safe(mcfg.arch)) {
             // Capacity, not speed: on a GDN hybrid the KV cache covers only the
-            // attention layers, and it is what bounds max_seq_len. NVFP4 costs
-            // ~0.3% PPL on this family and buys 2.7x the context (48 512 ->
-            // 131 072 tokens on a 32 GB card). Checked BEFORE the FP8 arms so a
-            // family on both lists gets the capacity trade; the head_dim and
-            // sink fallbacks below still apply and can put it back on FP16.
+            // attention layers and bounds max_seq_len. NVFP4 costs ~0.3% PPL
+            // for 2.7x the context on this family. Checked before the FP8
+            // arms so a family on both lists gets the capacity trade;
+            // head_dim/sink fallbacks below can still revert to FP16.
             config_.kv_cache_dtype = QType::NVFP4;
             IMP_LOG_INFO("KV cache dtype: NVFP4 (auto — %s measured at +0.3%% PPL for 2.7x the "
                          "context; set kv_cache.dtype=fp16 to opt out)",
@@ -243,9 +225,9 @@ void Engine::init_resolve_kv_dtype_policy_() {
                          "set kv_cache.dtype=fp16 to opt out)",
                          model_arch_name(mcfg.arch));
         } else if (kv_str == "auto" && kv_fp8_no_hint_default_safe(mcfg.arch)) {
-            // No checkpoint hint (GGUF exports never carry one) — upgrade on the
-            // stricter arch-measured no-hint gate. Long-context GGUF decode was
-            // leaving −39% at 16k on the table under the hint-only policy.
+            // No checkpoint hint (GGUF exports never carry one): upgrade on
+            // the stricter arch-measured no-hint gate, since long-context
+            // GGUF decode was leaving up to 39% on the table under the hint-only policy.
             config_.kv_cache_dtype = QType::FP8_E4M3;
             IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — %s measured PPL-neutral for "
                          "long-context FP8 KV without a checkpoint hint; "
@@ -254,13 +236,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    // An explicit pin that costs context on this family gets one line saying so.
-    // A pin can invert without being touched: `IMP_KV_FP8=1` left in a compose
-    // file was correct when `auto` meant FP16 and now DOUBLES the bytes per
-    // token here. Neither half logged anything - the CLI flag skips the block
-    // above entirely, and the config-file arm only logs the branches it takes.
-    // Evaluated here rather than after the head_dim/sink fallbacks below, so
-    // this reports the user's choice and not a fallback's.
+    // An explicit pin that costs context on this family gets one line saying
+    // so: a pin can invert silently when the "auto" default changes (e.g.
+    // from FP16 to NVFP4) without the pin itself being touched. Evaluated
+    // before the head_dim/sink fallbacks below, so this reports the user's
+    // choice, not a fallback's.
     const bool kv_dtype_pinned = kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype);
     if (kv_dtype_pinned) {
         const int factor = kv_pin_context_cost_factor(mcfg.arch, config_.kv_cache_dtype);
@@ -273,28 +253,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    // Learned attention sinks are applied by the FP16 paged decode kernels and
-    // by nothing else: paged_attention_decode() takes an `attn_sinks` pointer,
-    // paged_attention_decode_fp8() has only `n_sinks` and no pointer at all. So
-    // a quantised KV cache on a sink model silently drops the sink term from
-    // the softmax denominator. executor_attention_decode.cu already WARNs about
-    // exactly this — but at decode time, long after the dtype was chosen, so
-    // the user got a line in the log and wrong output anyway.
-    //
-    // Measured on gpt-oss-20b-mxfp4 (#1339), greedy, 300 tokens: FP16 KV answers
-    // ("Paris", the prime list, both finish_reason=stop) while FP8 KV emits no
-    // content at all on either prompt (finish_reason=length, empty). Decide it
-    // here, where the choice can still be changed.
-    // Two questions here, and they are not the same one:
-    //   1. does this dtype's decode kernel apply the sink term? — kernel capability,
-    //      answered by paged_attention_applies_sinks();
-    //   2. is the result usable on a sink model? — measured, per dtype.
-    // INT4 answers YES to (1) since #1345 (PagedAttentionTest.INT4_*_Sinks hold
-    // against a sink-aware reference) and NO to (2): gpt-oss returns empty
-    // completions on INT4 KV, which is 4 bits per value on a 64-wide head. That
-    // failure looks exactly like a dropped sink from the outside, which is why
-    // the unit tests above exist — they are what says it is the quantiser and
-    // not the sink. So INT4 keeps the fallback.
+    // Learned attention sinks are applied by the FP16 paged decode kernels
+    // and nothing else, so a quantized KV cache on a sink model silently
+    // drops the sink term (decided here, before dtype is fixed downstream;
+    // executor_attention_decode.cu only warns at decode time). Two distinct
+    // questions: (1) does the dtype's kernel apply the sink term at all
+    // (paged_attention_applies_sinks(), a capability check) vs (2) is the
+    // result usable on a sink model (measured per dtype). INT4 answers yes
+    // to (1) (#1345) but no to (2): gpt-oss returns empty completions on
+    // INT4 KV, so it keeps the fallback despite passing (1).
     const bool sink_dtype_ok = paged_attention_applies_sinks(config_.kv_cache_dtype) &&
                                config_.kv_cache_dtype != QType::INT4;
     if (!sink_dtype_ok && mcfg.arch == ModelArch::GPT_OSS) {
@@ -306,11 +273,9 @@ void Engine::init_resolve_kv_dtype_policy_() {
         config_.kv_cache_dtype = QType::F16;
     }
 
-    // #1674: the guard above asks whether the dtype can serve SINKS. Whether it
-    // has a decode kernel for this model's head_dim was asked nowhere, and the
-    // launchers answered a miss with a log line and a return - leaving O
-    // unwritten, which is a wrong answer at exit code 0. Same fallback shape as
-    // the sink arm, over every distinct head_dim the model uses.
+    // #1674: the sink guard above doesn't ask whether a decode kernel exists
+    // for this model's head_dim; a missing template silently left output
+    // unwritten. Same fallback shape as the sink arm, per head_dim used.
     std::set<int> dims;
     if (mcfg.head_dim > 0)
         dims.insert(mcfg.head_dim);
@@ -331,18 +296,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    // FP8 KV serves head_dim 256, and serves it on the SCALAR kernel: the
-    // four-token and GQA-lane decode kernels are head_dim-128 instances
-    // (attention_paged.h). The pin therefore looked free - init accepted it,
-    // the launcher wrote correct output - and cost the whole FP8 decode
-    // speedup with nothing in the log to say so. One line, at the point the
-    // dtype is chosen.
-    //
-    // A PIN only. An auto-resolved FP8 is this engine's own choice on an arch
-    // it measured (the hint and no-hint arms above), and the arms that can
-    // resolve FP8 are gated on families whose head_dim is 128; warning there
-    // would be the engine reporting itself for a decision it made, on a line
-    // the operator cannot act on.
+    // FP8 KV at head_dim 256 falls back to the scalar decode kernel (the fast
+    // four-token/GQA-lane kernels are head_dim-128 only, attention_paged.h),
+    // silently losing the FP8 decode speedup. Warned only for an explicit
+    // pin: auto-resolved FP8 is already gated to head_dim-128 families, so
+    // warning there would report a decision the engine made itself.
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && kv_dtype_pinned) {
         for (int d : dims) {
             if (paged_fp8_decode_has_fast_kernel(d))
@@ -377,22 +335,12 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    // Scope (2026-06-12, #680 diagnosis): the deterministic forcing below is
-    // a PR-#52-era (April) workaround for NaNs in the cuBLAS-attention + FP8
-    // round-trip — it predates the FA2 default-on stack (#478/#548). When the
-    // f16-QK FA2 chain serves every attention call (hd=128, fa2 enabled),
-    // cuBLAS attention never touches the FP8 KV and the forcing only drags in
-    // the single-block deterministic MoE permute (measured: the entire −35%
-    // pp4096 regression of --kv-fp8 on Qwen3-30B-A3B was that one kernel;
-    // without it kv-fp8 is perf-neutral-to-positive at clean PPL on
-    // Qwen3-30B/14B/8B). Non-FA2 configs (gemma-class hd!=128, attn sinks
-    // via head_dim, fa2 disabled) keep the workaround.
-    // hd=256 rides the FA2 port (#930) since attention.fa2_hd256 went
-    // default-on: with the single-shot uniform-hybrid refinement the f16-QK
-    // FA2 chain serves every attention call on uniform hd=128/256 models —
-    // cuBLAS attention (the FP8-KV NaN-roundtrip risk this forcing guards)
-    // only remains for learned sinks (gpt-oss, hd=64) and heterogeneous
-    // per-layer shapes (gemma-4), which keep the workaround below.
+    // The deterministic forcing below (#680) works around NaNs in the
+    // cuBLAS-attention + FP8 round-trip; unneeded once FA2 serves all
+    // attention (hd=128, and hd=256 since #930/fa2_hd256 default-on), since
+    // cuBLAS attention never touches the FP8 KV there. Non-FA2 configs
+    // (learned sinks/hd=64, heterogeneous per-layer shapes like gemma-4)
+    // still need it.
     const bool fa2_hd_ok = mcfg.head_dim == 128 ||
                            (mcfg.head_dim == 256 && runtime_config_.attention.fa2_hd256);
     const bool fa2_serves_attention = fa2_hd_ok &&
@@ -407,11 +355,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && !fa2_serves_attention &&
         !runtime_config_.kv_cache.allow_nondeterministic_fp8 &&
         !runtime_config_.runtime.deterministic_gemm) {
-        // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
-        // (formerly an install() call into the global singleton). Free-
-        // function readers (gemm.cu's algo-selection skip-benchmark branch)
-        // now read from the process_diag cache; update it here too so the
-        // promotion is visible to them.
+        // Mutates the per-Engine RuntimeConfig in place; also updates the
+        // process_diag cache since free-function readers (gemm.cu's
+        // algo-selection skip-benchmark branch) read from there, not from
+        // RuntimeConfig.
         runtime_config_.runtime.deterministic_gemm = true;
         process_diag_set_deterministic_gemm(true);
         setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
@@ -423,8 +370,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
     if (config_.max_batch_size <= 0) {
         size_t approx_weight_bytes = approx_weight_footprint_bytes(mcfg);
-        // Weight-footprint tier — kept as a FLOOR so this never regresses below
-        // the previous default for any model.
+        // Weight-footprint tier: kept as a FLOOR so this never regresses
+        // below the previous default for any model.
         int tier;
         if (approx_weight_bytes > 20ULL * 1024 * 1024 * 1024)
             tier = 1;
@@ -435,18 +382,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
         else
             tier = 16;
 
-        // VRAM-aware concurrency cap. The KV cache is a shared paged pool clamped
-        // to the free-VRAM headroom downstream (vram_budget), so a larger cap can
-        // NOT OOM — it only lets more sequences share the pool (continuous
-        // batching). The old weight-footprint-only heuristic capped a 30B MoE at
-        // batch=1 even with ~10 GB headroom, serving concurrent requests one at a
-        // time (measured: batch=16 ≈ 2.4× aggregate server throughput). Size the
-        // cap so each concurrent slot retains at least a serving context floor
-        // (kRefCtxTokens) of KV within a fraction of the headroom. max_seq_len is
-        // not resolved yet here, so use the reference length (not the model max)
-        // — this avoids the batch↔seq_len circular dependency and the downstream
-        // KV clamp keeps it safe regardless. FP16-conservative + all-layers
-        // over-estimate KV per token (safe: over-estimate → smaller batch).
+        // VRAM-aware concurrency cap: the KV cache is a shared paged pool
+        // clamped downstream (vram_budget), so a larger cap cannot OOM, only
+        // enables more continuous-batching concurrency. Sized so each slot
+        // retains at least kRefCtxTokens of KV within a fraction of headroom;
+        // uses the reference length, not max_seq_len (not resolved yet), to
+        // avoid a batch<->seq_len circular dependency. FP16-conservative,
+        // all-layers over-estimate of per-token KV (safe: smaller batch).
         int auto_batch = tier;
         size_t free_vram = 0, total_vram = 0;
         size_t headroom = 0;
@@ -454,24 +396,23 @@ void Engine::init_resolve_kv_dtype_policy_() {
             constexpr int kRefCtxTokens = 4096;  // per-slot serving context floor
             constexpr int kMaxAutoBatch = 32;
             constexpr double kKvHeadroomFrac = 0.6;  // rest: workspaces + long-ctx + safety
-            // Weights are NOT in VRAM yet at resolver time (still host/mmap; the
-            // GPU upload runs later), so cudaMemGetInfo reports the near-empty
-            // card. Subtract the weight footprint that WILL be uploaded to get the
-            // real post-load headroom. approx_weight_bytes under-counts the NVFP4
-            // decode + CUTLASS-SF caches, but kKvHeadroomFrac (0.6) reserves for
-            // those + workspaces, and the downstream KV clamp is the hard backstop.
+            // Weights are NOT in VRAM yet at resolver time (still host/mmap),
+            // so cudaMemGetInfo reports the near-empty card; subtract the
+            // weight footprint that WILL be uploaded. approx_weight_bytes
+            // under-counts NVFP4 decode/CUTLASS-SF caches; kKvHeadroomFrac
+            // (0.6) reserves for those plus workspaces, and the downstream
+            // KV clamp is the hard backstop.
             size_t upload_bytes = approx_weight_bytes;
             // Native-NVFP4 models: the mandatory decode caches (CUTLASS SfAtom
-            // slab + nvfp4_moe) are built before the KV pool and are charged in
-            // the budget — subtract them here too so the auto batch does not size
-            // workspaces into bytes the cache build will take.
+            // slab + nvfp4_moe) are built before the KV pool and are charged
+            // in the budget; subtract them here too so the auto batch does
+            // not size workspaces into bytes the cache build will take.
             if (mcfg.is_nvfp4_prequant)
                 upload_bytes += native_cache_demand().total();
             // MTP head (speculative.mtp_k > 0): uploaded AFTER the pools, so
-            // the auto batch must leave it room — the hybrid-aware sizing
-            // below otherwise spends the 832 MiB the Qwen3.8-27B head needs
-            // on recurrent-state slots and the head upload fails (2026-08-25).
-            // ~130 MiB on top for the draft workspace + batched-feed scratch.
+            // the auto batch must leave it room, else hybrid-aware sizing
+            // spends it on recurrent-state slots and the head upload fails.
+            // ~130 MiB on top for draft workspace + batched-feed scratch.
             if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
                 model_->mtp_->loaded)
                 upload_bytes += mtp_upload_peak_bytes(*model_->mtp_) + (130ULL << 20);
@@ -479,11 +420,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
                                        : (mcfg.n_heads > 0 ? mcfg.d_model / mcfg.n_heads : 128);
-            // Attention layers only: hybrids populate n_kv_heads_per_layer with
-            // zeros on the recurrent layers, and those hold no KV. Counting all
-            // layers overestimated Qwen3.8-27B 4x (64 counted, 16 with KV) and
-            // auto-sized batch 5 where 32 fits and runs — measured 224 vs 937
-            // tok/s aggregate at 32 concurrent requests (2026-08-25).
+            // Attention layers only: hybrids populate n_kv_heads_per_layer
+            // with zeros on recurrent layers, which hold no KV. Counting all
+            // layers overestimates per-token KV cost and undersizes the
+            // auto batch on hybrids.
             int kv_layers = mcfg.n_layers;
             if (!mcfg.n_kv_heads_per_layer.empty()) {
                 int populated = 0;
@@ -494,28 +434,26 @@ void Engine::init_resolve_kv_dtype_policy_() {
                     kv_layers = populated;
             }
             // The KV dtype is final here (init_resolve_kv_dtype_ runs before
-            // this), so size with its real per-element cost instead of the old
-            // FP16 guess — the NVFP4-KV default on QWEN35 is 4x smaller.
+            // this), so size with its real per-element cost instead of the
+            // old FP16 guess: the NVFP4-KV default on QWEN35 is 4x smaller.
             const QType kvd = config_.kv_cache_dtype;
             const bool kv_4bit =
                 (kvd == QType::INT4 || kvd == QType::NVFP4 || kvd == QType::MXFP4_KV);
             size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * kv_layers;
             size_t per_tok_kv = kv_4bit ? per_tok_elems / 2 : per_tok_elems * dtype_size(kvd);
             // Recurrent per-sequence state (GDN/Mamba2 hybrids): unlike KV it
-            // does NOT clamp downstream — SSMState allocates
-            // max_batch_size × per_seq up front (151.5 MiB/seq on Qwen3.8-27B),
-            // so it must be in the per-slot price or auto over-commits.
+            // does NOT clamp downstream. SSMState allocates max_batch_size x
+            // per_seq up front, so it must be in the per-slot price or auto
+            // over-commits.
             size_t per_slot_state = 0;
             if (mcfg.ssm_inner_size > 0 && mcfg.ssm_state_size > 0) {
                 int n_ssm = (kv_layers < mcfg.n_layers) ? (mcfg.n_layers - kv_layers)
                                                         : mcfg.n_layers;
                 const int ssm_heads = mcfg.ssm_dt_rank > 0 ? mcfg.ssm_dt_rank : 1;
-                // memory/ssm_state_size.h, F32 h state: this runs BEFORE
-                // init_resolve_ssm_dtype_ picks the storage dtype, so it prices
-                // the widest one on purpose. The header's conv term (full
-                // kernel width, 256-byte aligned) is larger than the 2-byte
-                // estimate this site used to carry, which keeps the
-                // conservatism and removes the fourth copy of the formula.
+                // memory/ssm_state_size.h, F32 h state: runs BEFORE
+                // init_resolve_ssm_dtype_ picks the storage dtype, so it
+                // deliberately prices the widest one (conv term full kernel
+                // width, 256-byte aligned).
                 const SsmStateGeometry geom{n_ssm,
                                             mcfg.ssm_conv_channels(),
                                             mcfg.ssm_conv_kernel,
@@ -529,13 +467,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
             if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
                                            static_cast<double>(per_slot));
-                // MTP head on a hybrid: the head uploads AFTER the recurrent
-                // state is priced into the upload reserve, so room for it must
-                // come out of state slots at the state price. 2x the head: the
-                // async pool doubles the first large request it serves
-                // (measured 2026-08-19), and the head is exactly that request.
-                // Measured on Qwen3.8-27B (state 151.5 MiB/slot, head 832 MiB):
-                // upload fails at batch >= 16, works at <= 12; this lands 12.
+                // MTP head on a hybrid: uploads AFTER the recurrent state is
+                // priced into the reserve, so room for it comes out of state
+                // slots at the state price. 2x the head: the async pool
+                // doubles the first large request it serves, and the head is
+                // exactly that request.
                 if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
                     model_->mtp_->loaded && per_slot_state > 0) {
                     size_t mtp_cost = 2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
@@ -566,15 +502,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
 
-    // Every decode-graph path is gated on n_sequences <= kMaxGraphPoolSize, so a
-    // batch above it runs the forward EAGERLY - with no clamp, no warning, and
-    // no branch that says so (#1646). Measured on this box, graphs on against
-    // off, tg256: 454 vs 190 tok/s, i.e. the configured value silently costs
-    // 2.4x decode the moment it exceeds the pool.
-    //
-    // Not clamped: the value also bounds admission and KV sizing, and silently
-    // serving fewer requests than asked is its own defect. Said out loud
-    // instead, once, at the place where the number is resolved.
+    // Every decode-graph path is gated on n_sequences <= kMaxGraphPoolSize, so
+    // a batch above it runs the forward EAGERLY with no clamp or warning
+    // (#1646). Not clamped here: the value also bounds admission and KV
+    // sizing, and silently serving fewer requests than asked is its own
+    // defect. Warned once instead, at the point the number is resolved.
     if (config_.use_cuda_graphs && config_.max_batch_size > Engine::kMaxGraphPoolSize) {
         IMP_LOG_WARN(
             "max_batch_size %d exceeds the decode-graph pool (%d): any step with more than "
@@ -584,13 +516,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 }
 
-// `runtime.prefill_graph` is default-on, but the capture gate in
-// engine_prefill.cpp needs the F16 KV append: every quantized append runs a
-// dynamic-scale reduction with a host absmax sync per chunk, which aborts a
-// capture. So on every quantized KV dtype the flag was read, stored and could
-// never fire, and the first prefill logged "not capturing" with seven flags
-// to decode (AUDIT_arch_2026 C-10). Resolve it here and say why, once, the
-// way the other policies do. Runs after the KV dtype is final.
+// `runtime.prefill_graph` is default-on, but capture in engine_prefill.cpp
+// needs the F16 KV append: a quantized append runs a per-chunk host absmax
+// sync, which aborts a capture. So on any quantized KV dtype the flag could
+// never fire (AUDIT_arch_2026 C-10). Resolved here, once, after the KV dtype
+// is final.
 void Engine::init_resolve_prefill_graph_() {
     if (!runtime_config_.runtime.prefill_graph || config_.kv_cache_dtype == QType::F16)
         return;
@@ -601,13 +531,11 @@ void Engine::init_resolve_prefill_graph_() {
         qtype_name(config_.kv_cache_dtype));
 }
 
-// Auto-detect SSM state dtype for hybrid models. Nemotron-H and similar
-// Mamba models: use FP16 (~50% VRAM savings). GDN models (Qwen3.5/3.6)
-// MUST keep FP32: the delta-rule scan kernel writes FP32 (float) into
-// h_state and assumes 4 bytes/element. FP16 allocation would be half the
-// size and the next layer's state region would overflow — shipped bug
-// that corrupted L1+ GDN state on every Qwen 3.6 forward, producing 37%
-// scan-output divergence vs llama.cpp.
+// Auto-detect SSM state dtype for hybrid models. Nemotron-H/Mamba: FP16
+// (~50% VRAM savings). GDN models (Qwen3.5/3.6) MUST keep FP32: the
+// delta-rule scan kernel writes FP32 into h_state and assumes 4
+// bytes/element; FP16 would halve the allocation and overflow into the
+// next layer's state region.
 void Engine::init_resolve_ssm_dtype_() {
     const auto& mcfg = model_->config();
     const bool has_gdn_for_dtype = (mcfg.ssm_state_size > 0) && model_->profile().is_gdn;
@@ -617,9 +545,9 @@ void Engine::init_resolve_ssm_dtype_() {
     }
     // gdn.state_bf16: BF16 recurrent state for GDN (halves the state traffic
     // that dominates batched decode; FP32 arithmetic in registers). Only the
-    // fused scan supports it, and only at HD=SS=128 — the executor drops the
-    // chunkwise route when the pool is BF16; ref_kernel has no BF16 kernel,
-    // so that combo keeps FP32 rather than serving a scan that corrupts.
+    // fused scan supports it, and only at HD=SS=128: the executor drops the
+    // chunkwise route when the pool is BF16, and ref_kernel has no BF16
+    // kernel, so that combo keeps FP32 rather than serving a scan that corrupts.
     if (has_gdn_for_dtype && runtime_config_.gdn.state_bf16) {
         const int hd = (mcfg.ssm_dt_rank > 0) ? mcfg.ssm_inner_size / mcfg.ssm_dt_rank : 0;
         if (runtime_config_.gdn.ref_kernel) {
@@ -637,7 +565,7 @@ void Engine::init_resolve_ssm_dtype_() {
 // Auto-detect FP8 prefill. Under runtime.debug_raw or
 // [attention] fp8_prefill = "never", keep disabled. The "never" escape
 // hatch is for models (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) that
-// produce garbage decode with FP8 weight cache active — accumulated
+// produce garbage decode with FP8 weight cache active: accumulated
 // dequant error through deep narrow-GQA stacks.
 void Engine::init_resolve_fp8_prefill_() {
     const bool no_fp8_prefill = (runtime_config_.attention.fp8_prefill == "never");
@@ -666,21 +594,19 @@ void Engine::init_resolve_fp8_prefill_() {
 }
 
 // Resolve NVFP4 decode mode (additive/only/none) + dual-path quant
-// validation + Gemma-4 model-specific carve-outs (force FP16 paths
-// until proper kernels land, except CUDA Graphs which Gemma-4 keeps
-// because the MoE decode fast path is fully captured). The biggest
-// init helper — central place where the quant-stack profile is fixed.
+// validation + Gemma-4 model-specific carve-outs (force FP16 paths until
+// proper kernels land, except CUDA Graphs which Gemma-4 keeps since the
+// MoE decode fast path is fully captured). Central place where the
+// quant-stack profile is fixed.
 void Engine::init_resolve_quant_flags_() {
     const auto& mcfg = model_->config();
     // --- Resolve auto-detection flags ---
 
-    // gemm.cublas_fp16_acc=auto → per-arch default. GeForce sm_120 quarters
-    // FP32-accumulate FP16 tensor-core rate (PR #606 calibration); 16F
-    // accumulate restores full rate (+24.9% q8 pp512 measured 2026-06-07,
-    // decode neutral, PPL flat on Qwen3-8B). Denied per measurement/risk:
-    // Gemma-3/4 (+0.7% PPL on gemma-3-12b) and gpt-oss (documented FP16
-    // residual-overflow sensitivity — f16 accumulators are the same hazard
-    // class). "on"/"off" bypass this and were applied at install time.
+    // gemm.cublas_fp16_acc=auto -> per-arch default. GeForce sm_120 quarters
+    // FP32-accumulate FP16 tensor-core rate; 16F accumulate restores full
+    // rate with PPL flat on Qwen3-8B. Denied for Gemma-3/4 (PPL cost) and
+    // gpt-oss (FP16 residual-overflow sensitivity, same hazard class as f16
+    // accumulators). "on"/"off" bypass this and apply at install time.
     if (runtime_config_.gemm.cublas_fp16_acc == "auto") {
         const auto& prof = model_->profile();
         const bool deny = (prof.is_gemma3 || prof.is_gemma4 || prof.is_gpt_oss);
@@ -710,15 +636,12 @@ void Engine::init_resolve_quant_flags_() {
         const bool sub8bit_qtype = (wq_qtype == QType::Q4_K || wq_qtype == QType::Q3_K ||
                                      wq_qtype == QType::Q2_K || is_iq4);
         if (nvfp4_beneficial_qtype && !is_moe && !is_gdn && !sub8bit_qtype) {
-            // Dense Q*_K (6-8 bit GGUF) on sm_120: mode 1 (additive — high-
-            // precision prefill cache (FP8 1 B/elem, or FP16 2 B/elem when FP8 is
-            // unavailable) PLUS an NVFP4 decode cache (0.5 B/elem)). Prefill stays
-            // high-precision (prefill-on-NVFP4 corrupts the prompt context and
-            // degenerates output for 8-bit GGUF — that is why mode 2 is reserved
-            // for sub-8-bit weights below). Decode uses the NVFP4 cache, which is
-            // both fast and coherent. Measures +4% decode over mode 2 on Qwen3-14B
-            // Q6_K @ ctx=2048 (151 vs 145.6 tok/s, PR #364). docs/GOAL.md ranks decode
-            // #1 for the north-star, so dense Q*_K defaults to mode 1.
+            // Dense Q*_K (6-8 bit GGUF) on sm_120: mode 1 (high-precision
+            // prefill cache, FP8 1B/elem or FP16 2B/elem, PLUS an NVFP4
+            // decode cache, 0.5B/elem). Prefill-on-NVFP4 corrupts the prompt
+            // and degenerates output for 8-bit GGUF (mode 2 is reserved for
+            // sub-8-bit weights below). docs/GOAL.md ranks decode #1 for the
+            // north-star, so dense Q*_K defaults to decode-first mode 1.
             config_.use_nvfp4_decode = 1;
             IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (dense Q*_K — decode-first)");
         } else if (nvfp4_beneficial_qtype && !is_moe && !is_gdn && sub8bit_qtype) {
@@ -741,10 +664,10 @@ void Engine::init_resolve_quant_flags_() {
         }
     }
 
-    // FP8 prefill auto-disable for sub-8-bit models: Q4_K→FP8 loses ~1 bit
-    // per weight element; with 48 attention layers this compounds into
-    // degenerate output (verified on Qwen3-30B Q4_K_M). The dequant fallback
-    // (PR #431) handles these models by dequanting Q4_K→FP16 on each forward.
+    // FP8 prefill auto-disable for sub-8-bit models: Q4_K->FP8 loses ~1 bit
+    // per weight element, compounding into degenerate output over many
+    // attention layers. The dequant fallback (#431) handles these models by
+    // dequanting Q4_K->FP16 on each forward.
     if (config_.use_fp8_prefill) {
         auto qtype = model_->layer(0).wq.qtype;
         bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K || qtype == QType::Q5_0 ||
@@ -769,61 +692,45 @@ void Engine::init_resolve_quant_flags_() {
         }
     }
 
-    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS paths, and CUDA graphs all have
-    // incompatibilities with the per-layer head_dim + split MoE tensor layout.
-    // Force plain FP16 paths for Gemma 4 until proper kernels are added.
-    // GDN models can't use FP8 prefill: recurrent state accumulates precision
-    // error per token, FP8 E4M3 (3-bit mantissa) amplifies it through the delta
-    // rule scan and degenerates output after ~50 multi-turn special tokens.
-    // Decide this BEFORE executor_->init() so the fp8_activation scratch
-    // buffer + d_act_scale / d_fp8_block_maxes / d_fp8_absmax aren't allocated
-    // and then never used (was happening when the disable lived inside
-    // init_kv_cache, ~3 MiB pure waste). Dual-path quant keeps the FP8 path
-    // for FFN even on GDN — only attention drops to FP16.
+    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS paths, and CUDA graphs all
+    // have incompatibilities with the per-layer head_dim + split MoE tensor
+    // layout; force plain FP16 until proper kernels land. GDN models can't
+    // use FP8 prefill either: recurrent state accumulates error per token,
+    // and FP8 E4M3's 3-bit mantissa amplifies it through the delta rule scan.
+    // Decided BEFORE executor_->init() so fp8_activation scratch buffers
+    // aren't allocated and never used. Dual-path quant keeps FP8 for FFN
+    // even on GDN; only attention drops to FP16.
     if (config_.use_fp8_prefill && !config_.dual_path_quant && model_->profile().is_gdn) {
         IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
         config_.use_fp8_prefill = 0;
     }
-    // DENSE Gemma (3 and 4) from GGUF: the mode-2 NVFP4 conversion used to be
-    // broken here (#514 server-only IMA truncation on gemma-3-12b, #516 NaN
-    // logits from step 2 on gemma-4-31B) and was capped to mode 1 as a
-    // mitigation. Re-validated 2026-06-06 (#552): both manifestations are
-    // gone on current main (fixed by the intervening decode-path work, most
-    // likely the #539 in-place compaction race fix) — gemma-3-12b mode 2 is
-    // degen-suite clean CLI+server, gemma-4-31B mode 2 answers coherently
-    // (55 tok/s vs 21.7 at mode 1) with multi-turn green. The cap is removed;
-    // dense Gemma follows the same sub-8-bit mode-2 auto-pick as every other
-    // arch (still gated behind gemm.nvfp4_decode_all for Q4_K-class sources).
+    // DENSE Gemma (3 and 4) from GGUF: no longer capped to mode 1 (#514/#516
+    // fixed by #539). Dense Gemma follows the same sub-8-bit mode-2 auto-pick
+    // as every other arch, gated behind gemm.nvfp4_decode_all for Q4_K-class
+    // sources.
     if (model_->profile().is_gemma4) {
-        // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
-        // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
-        // Only the legacy host-args MoE prefill path uses D2H sync; engine_prefill.cpp runs
-        // that path eager (moe_prefill_uncapturable, #874) while runtime.prefill_graph
-        // (default on since 2026-05-17) captures the rest.
-        // FP8 prefill carve-out removed 2026-05-15. The 2026-05-09 measurement
-        // showed -5..-19% prefill on Gemma-4 vs FP16; since then (PRs #177, #181)
-        // the gap has closed. Re-measured 2026-05-15 on Q4_K_M:
-        //   pp128:  +1.0%  pp512:  -0.9%  pp833:  -4.2%  pp2048: +7.3%
-        // Net effect is neutral with a long-context advantage. FP8 also halves
-        // the activation cache, which helps VRAM at long context. Users wanting
-        // max prefill at medium pp can opt out via [attention] fp8_prefill = "never".
+        // CUDA graphs enabled for Gemma-4 decode: the MoE decode fast path is
+        // fully device-side (dp4a GEMV, no D2H memcpy). Only the legacy
+        // host-args MoE prefill path needs D2H sync; engine_prefill.cpp runs
+        // that eager (moe_prefill_uncapturable, #874) while runtime.prefill_graph
+        // captures the rest.
+        // FP8 prefill: no longer carved out for Gemma-4. Net effect vs FP16
+        // is prefill-neutral with a long-context advantage, and FP8 halves
+        // the activation cache (helps VRAM at long context). Opt out via
+        // [attention] fp8_prefill = "never" for max prefill at medium pp.
         if (config_.use_nvfp4_decode) {
-            // Prequant SafeTensors NVFP4 weights are already in NVFP4 layout on
-            // disk. Phase 3a (Q*_K → NVFP4 conversion) and Phase 3b
-            // (NVFP4 → CUTLASS sm_120) iterate `wcache_.nvfp4` which stays
-            // empty for prequant, so they are no-ops. Phase 3-MoE (the
-            // cache_moe_native_nvfp4 lambda in executor_pre_dequant.cu) IS
-            // load-bearing — it builds the contiguous per-layer expert buffer
-            // that lights up the M=1 decode fast path (gemv_nvfp4_*) and lets
-            // CUDA Graphs capture decode without D2H expert_offsets sync.
+            // Prequant SafeTensors NVFP4 weights are already NVFP4 on disk:
+            // Phase 3a/3b (Q*_K->NVFP4->CUTLASS) iterate `wcache_.nvfp4`,
+            // which stays empty here, so they are no-ops. Phase 3-MoE
+            // (cache_moe_native_nvfp4 in executor_pre_dequant.cu) IS
+            // load-bearing: it builds the contiguous per-layer expert buffer
+            // that lights up the M=1 decode fast path and lets CUDA Graphs
+            // capture decode without D2H expert_offsets sync.
             //
-            // For Q*_K source weights the per-tensor convert→quantize loop in
-            // executor_pre_dequant.cu builds wcache_.nvfp4 per tensor; the
-            // per-layer head_dim (256 SWA / 512 global) is uniformly handled
-            // since each entry carries its own (N, K) shape. Verified 2026-05-15
-            // on Q4_K_M + UD-Q4_K_M: tg256 184 → 204 tok/s (+11%), pp512
-            // 1795 → 2347 tok/s (+30%). Coherent on chat prompts; the
-            // pre-existing Q4_K_M code-gen drift (see roadmap) is orthogonal.
+            // For Q*_K source weights the per-tensor convert->quantize loop
+            // in executor_pre_dequant.cu builds wcache_.nvfp4 per tensor; the
+            // per-layer head_dim (256 SWA / 512 global) is handled uniformly
+            // since each entry carries its own (N, K) shape.
             IMP_LOG_INFO("Gemma 4: NVFP4 decode cache enabled (use_nvfp4_decode=%d, prequant=%d)",
                          config_.use_nvfp4_decode,
                          (int)model_->config().is_nvfp4_prequant);
@@ -832,22 +739,19 @@ void Engine::init_resolve_quant_flags_() {
             IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
             config_.dual_path_quant = false;
         }
-        // (Gemma-4 force-FP16 KV carve-out removed 2026-05-01.) The original
-        // bug was the FP8 KV calibration reading garbage beyond the per-layer
-        // live K/V region — Gemma-4 has dual head_dim (256 SWA / 512 global)
-        // and the workspace is allocated for max_head_dim, leaving a
-        // tail-region of uninitialized memory on SWA layers. The fix in
-        // src/exec/executor_kv_write.cu narrows the calibration view to
-        // `nkv * hd` per layer; FP8 KV is now safe to opt into on Gemma-4.
+        // FP8 KV is safe on Gemma-4: the original bug (FP8 KV calibration
+        // reading garbage past the per-layer K/V region, since Gemma-4 has
+        // dual head_dim 256 SWA / 512 global) is fixed in
+        // src/exec/executor_kv_write.cu by narrowing the calibration view to
+        // `nkv * hd` per layer.
         // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
         // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
         // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
         // deterministic GEMM paths so generation is stable run-to-run.
         if (!runtime_config_.runtime.deterministic_gemm) {
-            // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
-            // (formerly an install() call into the global singleton). Also
-            // update the process_diag cache so free-function gemm.cu reader
-            // observes the promotion (see FP8-KV block above).
+            // Mutates the per-Engine RuntimeConfig in place; also updates the
+            // process_diag cache so the free-function gemm.cu reader observes
+            // the promotion (see FP8-KV block above).
             runtime_config_.runtime.deterministic_gemm = true;
             process_diag_set_deterministic_gemm(true);
             IMP_LOG_INFO(
@@ -857,7 +761,7 @@ void Engine::init_resolve_quant_flags_() {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
-        // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
+        // Enable MMVQ for all weight GEMMs: quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.
         if (!model_->config().overrides.gemma4.force_mmvq) {
             model_->config_.overrides.gemma4.force_mmvq = true;
@@ -868,20 +772,17 @@ void Engine::init_resolve_quant_flags_() {
 
 // Auto-detect max_seq_len. Runs AFTER model-specific overrides (Gemma-4
 // forces FP16 KV etc.) so the per-token cost reflects the actual dtype
-// that will be allocated. Auto ceiling is kAutoMaxSeqLenCap (128K) — bounded
-// further by what VRAM affords and what the model declares. A model that
-// declares MORE than 128K needs an explicit `--max-seq-len` / runtime.max_seq_len
-// override to exceed the auto cap (documented in imp.conf.example); the manual
-// path bypasses the auto resolver entirely (short-circuit below).
-// The KV block size used to be resolved inside init_kv_cache(), which runs
-// AFTER init_weights() -> allocate_workspaces(). Anything sized before then had
-// to guess, and the sparse decode attention budget guessed kKVBlockSize: on a
-// model with n_kv_heads <= 4 (block size 32) `attention.sparse_topk_tokens=N`
-// bought 2N tokens of budget and `sparse_min_ctx` engaged at twice its stated
-// length, while the startup line reported the 16-based arithmetic and the
-// per-step ACTIVE line the real one. Same shape as the FP8-prefill disable a
-// few functions up: a decision that lived in init_kv_cache and was needed
-// earlier. Resolving here makes init_kv_cache a reader.
+// that will be allocated. Auto ceiling is kAutoMaxSeqLenCap (128K), bounded
+// further by VRAM and the model's declared context. A model declaring MORE
+// than 128K needs an explicit --max-seq-len / runtime.max_seq_len override
+// to exceed the auto cap (imp.conf.example); the manual path bypasses the
+// auto resolver entirely.
+//
+// KV block size must be resolved before init_kv_cache()/allocate_workspaces():
+// anything sized earlier (e.g. the sparse decode attention budget) otherwise
+// has to guess it. Same shape as the FP8-prefill disable above: a decision
+// that lived in init_kv_cache and was needed earlier. Resolving here makes
+// init_kv_cache a reader.
 void Engine::init_resolve_kv_block_size_() {
     const auto& mcfg = model_->config();
     if (config_.kv_block_size > 0) {
@@ -896,11 +797,9 @@ void Engine::init_resolve_kv_block_size_() {
                      mcfg.n_kv_heads);
         return;
     }
-    // 16 for every model since 2026-09-07. The 2026-03-23 rule (32 when
-    // n_kv_heads <= 4, "improves coalescing") was measured for the first time
-    // with tools/analysis/kv_block_size_ab.sh: 32 never won, and lost 1.5 to
-    // 4.3 % tg128 on Qwen3.8-27B-NVFP4 (4 KV heads), the class it was meant
-    // for (docs/audit/PERF_LOG.md 2026-09-07). kv_cache.block_size overrides.
+    // 16 for every model: the old n_kv_heads<=4 -> 32 rule never won and
+    // lost tg128 on the class it targeted (docs/audit/PERF_LOG.md,
+    // tools/analysis/kv_block_size_ab.sh). kv_cache.block_size overrides.
     config_.kv_block_size = kKVBlockSize;
     IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
 }
@@ -909,8 +808,8 @@ void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
         // config.h: a CLI value wins over the file. --max-seq-len / a C-API
-        // value is already in config_.max_seq_len here; the key fills only an
-        // unset one. This block overwrote it until AUDIT_arch_2026 G-5.
+        // value is already in config_.max_seq_len; the key fills only an
+        // unset one (AUDIT_arch_2026 G-5).
         const int preset = config_.max_seq_len;
         config_.max_seq_len = max_seq_len_operator_value(preset, v);
         if (config_.max_seq_len == v)
@@ -930,10 +829,10 @@ void Engine::init_compute_max_seq_len_() {
         vram_budget_mem_get_info(&free_vram, &total_vram);
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         // Hybrid models (Qwen3.5/3.6 GDN, Nemotron-H Mamba2) populate
-        // n_kv_heads_per_layer with zeros for non-attention layers — those don't
-        // contribute to the KV cache. Counting only nonzero entries avoids a
-        // 4-9× per-token-bytes overestimate that clamped max_seq_len far below
-        // VRAM-feasible (e.g. Qwen3.5-4B GDN: 32 total / 8 attention = 4×).
+        // n_kv_heads_per_layer with zeros for non-attention layers, which
+        // hold no KV. Counting only nonzero entries avoids a 4-9x
+        // per-token-bytes overestimate that clamped max_seq_len far below
+        // VRAM-feasible.
         int kv_layer_count = mcfg.n_layers;
         if (!mcfg.n_kv_heads_per_layer.empty()) {
             int populated = 0;
@@ -944,11 +843,11 @@ void Engine::init_compute_max_seq_len_() {
                 kv_layer_count = populated;
         }
         // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold
-        // only a fixed trailing window, so they don't scale with context —
-        // count only global layers for the per-token cost. Mirror the
-        // auto-mode prefix-caching yield (use_prefix_caching is final before
-        // this resolver runs). (The final gate is resolved in init_kv_cache;
-        // if it declines there the budget clamps conservatively, never OOMs.)
+        // only a fixed trailing window, so count only global layers for the
+        // per-token cost. Mirrors the auto-mode prefix-caching yield
+        // (use_prefix_caching is final before this resolver runs). The final
+        // gate is resolved in init_kv_cache; a decline there clamps
+        // conservatively, never OOMs.
         const auto swa_mode = runtime_config_.kv_cache.swa_sizing_mode();
         if (swa_mode == SwaSizingMode::On ||
             (swa_mode == SwaSizingMode::Auto && !config_.use_prefix_caching)) {
@@ -964,25 +863,24 @@ void Engine::init_compute_max_seq_len_() {
             }
         }
         auto kv = config_.kv_cache_dtype;
-        // All packed-4-bit KV dtypes: qtype_elem_bytes() cannot express half a
-        // byte and returns 0 for NVFP4/MXFP4_KV, which made kv_bytes_per_token
-        // 0 and max_by_vram fall through to the cap — the auto context ignored
-        // VRAM entirely on the NVFP4-KV default (found 2026-08-25).
+        // All packed-4-bit KV dtypes: qtype_elem_bytes() cannot express half
+        // a byte and returns 0 for NVFP4/MXFP4_KV, which made
+        // kv_bytes_per_token 0 and max_by_vram fall through to the cap,
+        // ignoring VRAM entirely on the NVFP4-KV default.
         bool packed_4bit = (kv == QType::INT4 || kv == QType::NVFP4 || kv == QType::MXFP4_KV);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
         size_t kv_bytes_per_token = packed_4bit ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
         // The budget planner downstream targets kv_fraction (default 0.8) of
-        // free VRAM for KV. Cap the auto-detect at 0.75 × that (0.6 at the
+        // free VRAM for KV. Cap the auto-detect at 0.75x that (0.6 at the
         // default) so it doesn't undershoot what the planner can afford and
-        // keeps tracking a tuned vram.kv_fraction. (Was a flat 30%, calibrated
-        // when weight caches competed at FP16.)
+        // stays tracking a tuned vram.kv_fraction.
         float kv_fraction = std::clamp(config_.kv_fraction, 0.05f, 0.95f);
-        // Native-NVFP4 models: weights + the mandatory decode caches (CUTLASS
-        // SfAtom slab + nvfp4_moe, physically reserved right after upload)
-        // will consume most of the card — subtract them so the auto context
+        // Native-NVFP4 models: weights plus the mandatory decode caches
+        // (CUTLASS SfAtom slab + nvfp4_moe, reserved right after upload) will
+        // consume most of the card; subtract them so the auto context
         // reflects the KV room that actually remains. GGUF models keep the
-        // historical raw-free overshoot (absorbed by the downstream KV clamp).
+        // raw-free overshoot (absorbed by the downstream KV clamp).
         size_t free_for_kv = free_vram;
         if (mcfg.is_nvfp4_prequant) {
             size_t reserved = approx_weight_footprint_bytes(mcfg) +
@@ -993,12 +891,10 @@ void Engine::init_compute_max_seq_len_() {
                               ? static_cast<int>(free_for_kv * (0.75 * kv_fraction) / kv_bytes_per_token)
                               : 131072;
         // Agentic workloads (tool loops, accumulating history, large file
-        // context) routinely exceed 16K and run a single long sequence rather
-        // than many short ones, so a high per-request ceiling is the right
-        // default. Cap lifted 16K → 64K → 128K (#1004: coding-agent
-        // transcripts run 50–150K tokens); max_by_vram still bounds it to
-        // what VRAM honestly affords and model_ctx to what the model
-        // supports, so this only raises the ceiling on models that declare
+        // context) routinely exceed 16K in a single long sequence, so a high
+        // per-request ceiling is the right default (#1004: coding-agent
+        // transcripts run 50-150K tokens). max_by_vram and model_ctx still
+        // bound it, so this only raises the ceiling for models that declare
         // (and can hold) more than 64K.
         constexpr int kAutoMaxSeqLenCap = 131072;
         config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
@@ -1009,15 +905,12 @@ void Engine::init_compute_max_seq_len_() {
     }
 }
 
-// The SSM/GDN state is batch-shaped and mandatory, and the live pass never
-// charged it. Falling back on a plan rejection therefore served max_batch_size
-// slots the card could not hold: Qwen3.8-27B at 64 slots (2026-09-08)
-// allocated 5088 MiB of state past the headroom, the library reserve claimed
-// at the first forward oversubscribed the device and the pool probe read
-// 528 GB/s (spilled) at a 15% slower step. Clamp the batch to what the plan
-// fits instead: capacity is planned, not discovered (MEMORY.md I4, D14).
-// Mutates probe/plan (re-planned at the clamped batch), config_, the runtime
-// config and the scheduler's admission cap.
+// The SSM/GDN state is batch-shaped and mandatory; the live pass never
+// charged it, so serving max_batch_size slots could oversubscribe the
+// device (bandwidth reads spilled, not resident). Clamps the batch to what
+// the plan fits instead: capacity is planned, not discovered (MEMORY.md I4,
+// D14). Mutates probe/plan (re-planned at the clamped batch), config_, the
+// runtime config, and the scheduler's admission cap.
 void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
                                       int live_kv_blocks) {
     if (probe.ssm_state_bytes == 0 || probe.max_batch_size <= 1)

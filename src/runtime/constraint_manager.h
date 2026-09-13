@@ -25,10 +25,9 @@ public:
     // json_mode: enforce valid JSON syntax
     // json_schema: enforce JSON matching this schema string (empty = disabled)
     // tokenizer: needed for lazy init
-    // has_tools: true if the request also has tools — gate enters tool-aware
-    //   mode, schema/json mask only applies to free-text JSON, not tool bodies
-    // tpl_family: chat-template family — selects which tool-tag dialect to look
-    //   for (only consulted when has_tools is true)
+    // has_tools: true enters tool-aware mode (schema/json mask applies only
+    //   to free-text JSON, not tool bodies)
+    // tpl_family: selects which tool-tag dialect to look for (has_tools only)
     void prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer, bool has_tools = false,
                  ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool thinking_open = true);
 
@@ -36,24 +35,24 @@ public:
     // envelope with a TOOL_CALL schema FSM (see build_tool_call_schema).
     // tools: (name, parameter-schema JSON) per callable tool.
     //
-    // optional=false (tool_choice=required / forced function): the envelope is
-    //   FORCED from token 1 (after any <think>) — a tool call is mandatory.
-    // optional=true (OpenAI strict:true with a model-chosen call): the envelope
-    //   is NOT forced — the tool-aware preamble gate lets free text/a plain
-    //   answer pass, and only IF the model emits the opener does the body FSM
-    //   enforce the arguments. `tpl_family` selects the tool-tag dialect the
-    //   gate watches for (ChatML only for now — non-ChatML families decline).
+    // optional=false (tool_choice=required / forced function): envelope
+    //   FORCED from token 1 (after any <think>), a tool call is mandatory.
+    // optional=true (OpenAI strict:true, model-chosen call): envelope NOT
+    //   forced, the tool-aware preamble gate lets free text/a plain answer
+    //   pass; only if the model emits the opener does the body FSM enforce
+    //   the arguments. `tpl_family` selects the dialect the gate watches for
+    //   (ChatML only for now, non-ChatML families decline).
     //
-    // Returns false when the schemas are not enforceable — caller keeps the
+    // Returns false when the schemas are not enforceable; caller keeps the
     // prompt-hint behavior (optionally calling prepare() for json fallback).
-    // parallel (strict optional mode only): true = the model may emit several
-    // tool calls (each body enforced); false = at most one, then EOS.
-    // bare_args (Llama3 `<function=NAME>{args}</function>`): the constraint root
-    // is the single tool's bare parameter schema (the body is the arguments
-    // object), not a TOOL_CALL {"name","arguments"} wrapper.
-    // xml (Qwen-Coder / Qwen3.6 templates): the body inside <tool_call> is the
-    // XML dialect (<function=NAME><parameter=KEY> with raw-text values) — the
-    // XML_TOOL_CALL grammar enforces it (see build_xml_tool_call_schema).
+    // parallel (strict optional mode only): true = may emit several tool
+    //   calls (each body enforced); false = at most one, then EOS.
+    // bare_args (Llama3 `<function=NAME>{args}</function>`): constraint root
+    //   is the single tool's bare parameter schema (body = arguments object),
+    //   not a TOOL_CALL {"name","arguments"} wrapper.
+    // xml (Qwen-Coder / Qwen3.6 templates): body inside <tool_call> is the
+    //   XML dialect (<function=NAME><parameter=KEY>, raw-text values);
+    //   XML_TOOL_CALL grammar enforces it (see build_xml_tool_call_schema).
     bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                            const std::string& envelope_open, const std::string& envelope_close,
                            Tokenizer* tokenizer, bool thinking_open, bool optional = false,

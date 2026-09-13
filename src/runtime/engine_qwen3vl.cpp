@@ -1,13 +1,11 @@
 // The engine side of Qwen3-VL: image entry points, per-request attachment,
-// and M-RoPE position binding — turning a request's (t, h, w) layout into the
-// per-step device array the rotary kernels read.
+// and M-RoPE position binding, turning a request's (t, h, w) layout into
+// the per-step device array the rotary kernels read.
 //
-// Everything here is a no-op for a model without M-RoPE. For a model WITH it,
-// the array is bound on every step — even a text-only prompt, where all three
-// rows carry the same value and the rotation is bit-identical to the
-// single-axis path. That is not waste: the rope dispatch branches on this
-// pointer, and a branch that flips between CUDA-graph capture and replay would
-// bake the wrong rotation into every replay.
+// A no-op for a model without M-RoPE. For a model with it, the array is
+// bound on every step, even text-only, because the rope dispatch branches
+// on this pointer: a branch flipping between CUDA-graph capture and replay
+// would bake the wrong rotation into every replay.
 
 #include "runtime/engine.h"
 
@@ -31,7 +29,7 @@ void Engine::bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int
     if (!mc.has_mrope() || n_tokens <= 0)
         return;
 
-    // `cap` is the ALLOCATED capacity, so a null buffer always allocates —
+    // `cap` is the ALLOCATED capacity, so a null buffer always allocates:
     // setting a capacity before the memory exists would memcpy into nothing.
     if (!buf || n_tokens > cap) {
         if (buf && fixed) {
@@ -99,10 +97,10 @@ void Engine::bind_mrope_prefill_ragged_(InferenceState& state,
     if (!mc.has_mrope() || total_rows <= 0)
         return;
 
-    // Axis-major [3, total_rows]: each request's chunk contributes its rows at
-    // the same column range on all three axes. Vision requests are excluded
-    // from ragged assembly, so every request takes the plain-ascending branch
-    // of bind_mrope_prefill_ — replicated here per sub-range.
+    // Axis-major [3, total_rows]: each request's chunk contributes its rows
+    // at the same column range on all three axes. Vision requests are
+    // excluded from ragged assembly, so every request takes the
+    // plain-ascending branch of bind_mrope_prefill_, replicated per sub-range.
     h_mrope_scratch_.assign(static_cast<size_t>(3) * total_rows, 0);
     int col = 0;
     for (size_t r = 0; r < reqs.size(); ++r) {
@@ -127,8 +125,8 @@ void Engine::bind_mrope_prefill_ragged_(InferenceState& state,
 void Engine::bind_mrope_single_(InferenceState& state, const Request& req, cudaStream_t stream) {
     (void)stream;
     const ModelConfig& mc = model_->config_;
-    // No delta buffer means no image, and a zero offset — which is what the
-    // unbound path already computes, bit for bit.
+    // No delta buffer means no image, and a zero offset: what the unbound
+    // path already computes, bit for bit.
     if (!mc.has_mrope() || !req.mrope_delta_dev)
         return;
     state.mrope.pos_delta = static_cast<const int*>(req.mrope_delta_dev->ptr());
@@ -240,9 +238,9 @@ bool Engine::add_image_from_memory(std::span<const uint8_t> data) {
         pending_image_hash_ = combine_image_hash(pending_image_hash_, image_content_hash(data));
         return true;
     }
-    // The mmproj path stores its image inside VisionPipeline, but the hash has
-    // to reach the request either way — see the note at the prefill guard. It
-    // holds exactly one image, so adding replaces.
+    // The mmproj path stores its image inside VisionPipeline, but the hash
+    // has to reach the request either way: see the note at the prefill
+    // guard. It holds exactly one image, so adding replaces.
     pending_image_hash_ = image_content_hash(data);
     return vision_.set_image_from_memory(data, stream_);
 }
@@ -284,10 +282,9 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
     if (req.qwen_patches.empty() || !qwen_vision_.is_ready() || qwen_image_pad_id_ < 0)
         return false;
 
-    // One buffer for every image, laid out in prompt order. The kernels index
-    // it by "the k-th image token in the prompt", which does not care where one
-    // picture ends and the next begins, so concatenation IS the multi-image
-    // representation — no per-image indirection is needed downstream.
+    // One buffer for every image, laid out in prompt order. The kernels
+    // index it by "the k-th image token in the prompt", so concatenation IS
+    // the multi-image representation: no per-image indirection needed.
     std::vector<int> tokens_per_image;
     tokens_per_image.reserve(req.qwen_patches.size());
     int total_tokens = 0;
@@ -383,9 +380,9 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
         return false;
     }
     req.mrope_positions = std::move(mrope->pos);
-    // Negative whenever the prompt held an image — it occupied more tokens than
-    // it cost positions — and it is what keeps generation continuing where the
-    // prompt left off instead of jumping past a gap.
+    // Negative whenever the prompt held an image: it occupied more tokens
+    // than it cost positions, which is what keeps generation continuing
+    // where the prompt left off instead of jumping past a gap.
     req.mrope_pos_delta = mrope->next_pos - static_cast<int>(req.input_tokens.size());
     // Its own device copy: decode replays dereference this pointer, and a
     // shared one would let a concurrent request's prefill change it mid-run.
@@ -406,8 +403,8 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
     return true;
 }
 
-// CLI path: one pending image on the engine, moved onto the first request that
-// reserves placeholders for it. The server does not use this — it sets
+// CLI path: one pending image on the engine, moved onto the first request
+// that reserves placeholders for it. The server does not use this: it sets
 // `req.qwen_patches` directly, because it admits image requests concurrently.
 bool Engine::attach_qwen_image_(Request& req) {
     if (qwen_pending_patches_.empty() || !req.qwen_patches.empty() || req.vision_emb)

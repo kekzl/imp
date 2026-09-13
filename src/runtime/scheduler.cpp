@@ -21,43 +21,23 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     prefill_batch.clear();
     decode_batch.clear();
 
-    // 1. Remove finished/cancelled requests from active_ AND from pending_.
-    //
-    // pending_ was not filtered (#1633). A request cancelled while queued -
-    // which is what the server does when the client disconnects - was promoted
-    // anyway a few lines below, and the promotion overwrote CANCELLED with
-    // PREFILLING, so nothing downstream could tell either. It then ran a full
-    // generation, holding KV and a batch slot, for a client that was gone.
+    // 1. Remove finished/cancelled requests from active_ AND pending_: a request
+    // cancelled while queued must not be promoted (the promotion would overwrite
+    // CANCELLED with PREFILLING and run a full generation for a gone client) (#1633).
     const auto is_done = [](const std::shared_ptr<Request>& r) {
         return r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED;
     };
     std::erase_if(active_, is_done);
     std::erase_if(pending_, is_done);
 
-    // 2. Sort pending by priority, then shortest-first with aging.
-    //
-    // Priority (Request::priority, lower value first, default 0) is the
-    // primary key and dominates STRICTLY: an aged low-priority request does
-    // not overtake a fresh high-priority one. A caller that sets priorities
-    // owns cross-class starvation, same as vLLM's contract; callers that
-    // never send the field all sit in class 0 and see exactly the pre-#1634
-    // behavior below.
-    //
-    // Within a class: shortest-first reduces head-of-line blocking, which is
-    // why it is here. On its own it also starves: the queue is re-sorted on
-    // every arrival, so a long prompt is passed over by every shorter one
-    // that shows up while the batch is full, for as long as that lasts.
-    // Under sustained short traffic "for as long as that lasts" has no bound
-    // (#1634).
-    //
-    // Aging puts a bound on it without giving up the property: a request that
-    // has been waiting kAgingRounds scheduling rounds sorts ahead of every
-    // peer that has not, and ties fall back to length. So the ordering is
-    // shortest-first among peers, and arrival order across the aging boundary.
-    //
-    // The sort has to run whenever the round advances, not only when the queue
-    // changed - the aging bucket of a request changes with time, not with
-    // arrivals, and `pending_dirty_` cannot see time passing.
+    // 2. Sort pending: priority (Request::priority, default 0) is primary and
+    // dominates STRICTLY (aging never lets a class overtake another, caller owns
+    // cross-class starvation, #1634).
+    // Within a class: shortest-first, aged (kAgingRounds) requests sort ahead of
+    // unaged peers to bound starvation under sustained short traffic; ties break
+    // by enqueue order among the aged, else by length.
+    // Re-sorts every round, not only on pending_dirty_: the aging bucket changes
+    // with time, not with arrivals.
     ++round_;
     const uint64_t now = round_;
     if (pending_dirty_ || !pending_.empty()) {
@@ -81,14 +61,10 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         auto it = pending_.begin();
         while (it != pending_.end() && static_cast<int>(active_.size()) < max_batch_size_) {
             auto& req = *it;
-            // Aging lifted this request to the head of its class; the
-            // allocator half of the guarantee is that nothing behind it is
-            // admitted in a round where it could not get its blocks. Without
-            // the hold, a stream of shorter requests that each fit kept
-            // passing an aged one on a pool that was nearly but never quite
-            // full (AUDIT_arch_2026 C-2). Only the aged head holds the queue:
-            // the infeasible case below still cancels, and a request that has
-            // not aged still yields to what fits.
+            // Aging's allocator half: nothing behind an aged head is admitted in a
+            // round it could not get blocks in (AUDIT_arch_2026 C-2), else shorter
+            // requests starve it on a pool that's nearly but never quite full. Only
+            // the aged head holds the queue; infeasible still cancels, unaged still yields to what fits.
             const bool aged = now - req->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
 
             // Before any KV is taken: a seat the engine cannot back right now
@@ -102,34 +78,18 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 const int bs = kv_manager_->kv_cache()->block_size();
                 int blocks_needed = (ctx_len + bs - 1) / bs;
 
-                // Admit on prompt + generation, not on the prompt alone
-                // (#1635). context_len() counts what exists NOW, so a batch
-                // whose prompts all fit could still run the pool dry mid-
-                // generation, and the loser is cancelled after the client has
-                // already received part of the answer. The grow branch below
-                // has computed the decode half correctly since it was written;
-                // the admission test above it did not read it.
-                //
-                // Clamped to the pool: on a cache too small to ever hold
-                // prompt + max_tokens (the 16-block floor case) the full
-                // reserve would queue every request forever. There the
-                // guarantee degrades to the old prompt-only admission rather
-                // than to a refusal, and the mid-stream cancel stays possible.
+                // Admit on prompt + generation, not prompt alone (#1635): context_len() is
+                // NOW, so an all-fits batch can still run the pool dry mid-generation.
+                // Clamped to the pool: a cache too small for prompt+max_tokens (16-block
+                // floor) degrades to prompt-only admission instead of queuing forever.
                 const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
                 const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
                 const int admit_blocks = std::min(blocks_needed + decode_blocks,
                                                   std::max(blocks_needed, pool_blocks));
 
-                // Aggregate-pressure growth (2026-08-27): requests that each
-                // fit used to queue while the pool sat at its initial commit:
-                // 32 x 8k-token concurrent measured effectively ~7-way with
-                // 4437 of the 6483 ceiling blocks never committed (45.2 s
-                // wall). The old rule "ordinary contention is left to queue so
-                // growth never competes with the weight caches" is stricter
-                // than its own reason: the ceiling IS the post-weight residual
-                // the planner clamped at init (vram_budget "KV clamped ... to
-                // fit post-weight VRAM"), so growing up to it competes with
-                // nothing. Coarse steps, same as the decode-side trigger.
+                // Aggregate-pressure growth: the pool grows toward its ceiling here
+                // because the ceiling IS the post-weight residual already clamped at
+                // init (vram_budget), so growing up to it competes with nothing. Coarse steps, same as the decode-side trigger.
                 if (!kv_manager_->can_allocate(admit_blocks)) {
                     auto* kvc = kv_manager_->kv_cache();
                     const int total_now = kvc->total_blocks();
@@ -137,35 +97,18 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         kvc->try_grow_to(total_now + std::max(admit_blocks, total_now / 4));
                 }
                 if (!kv_manager_->can_allocate(admit_blocks)) {
-                    // If the request needs more blocks than the KV cache can
-                    // ever hold, no eviction will free enough — leaving the
-                    // request in pending_ would busy-loop the worker forever
-                    // (observed on Nemotron-H NVFP4 where the KV cache fell
-                    // back to the 16-block / 512-token floor and any longer
-                    // prompt looped here indefinitely). Cancel up front so
-                    // the caller gets a clear error instead of a 30s timeout.
+                    // If the request needs more blocks than the KV cache can ever
+                    // hold, no eviction frees enough: leaving it in pending_ busy-loops
+                    // the worker forever, so cancel up front instead of a 30s timeout.
                     int cap = kv_manager_->kv_cache()->total_blocks();
-                    // A growable pool is allowed to answer this with memory
-                    // rather than with a refusal. Only here, where the pool
-                    // cannot hold the request AT ALL: that is the condition a
-                    // clamped startup produces and the one no amount of
-                    // waiting fixes. Ordinary contention between requests that
-                    // each fit is left to queue, so growth never competes with
-                    // the weight caches for VRAM on a merely busy server.
-                    //
-                    // This does ask the driver for memory during serving,
-                    // which invariant I2 otherwise forbids. It is the
-                    // exception the growable pool is for, it is bounded by the
-                    // ceiling reserved at init, and it is logged when it
-                    // happens.
+                    // Grows here only when the pool cannot hold the request AT ALL (a
+                    // clamped startup, unfixable by waiting); ordinary contention among
+                    // fitting requests still queues. This is the deliberate exception to
+                    // invariant I2 (no driver calls during serving): bounded by the init ceiling, logged when it fires.
                     if (blocks_needed > cap) {
-                        // Grow for the whole request, not for its prompt.
-                        // context_len() counts what exists NOW, so growing to
-                        // exactly that produced a pool with zero decode
-                        // headroom and the request was cancelled anyway, one
-                        // block short, after paying for the growth. Measured on
-                        // a 25 222-token prompt: grew 810 -> 1577 blocks, then
-                        // refused.
+                        // Grow for the whole request, not just its prompt: context_len()
+                        // is NOW, so growing to exactly that leaves zero decode headroom
+                        // and cancels anyway, one block short, after paying for the growth.
                         cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed + decode_blocks);
                     }
                     if (blocks_needed > cap) {
@@ -188,14 +131,10 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     ++it;
                     continue;
                 }
-                // Reserve blocks, using prefix caching when enabled.
-                //
-                // An image request participates only through its content hash:
-                // the cache is addressed by TOKEN IDS, every image token carries
-                // the SAME id, and two different pictures would otherwise share
-                // a long prefix. A request that carries an image but reports no
-                // hash is excluded outright, so a missed plumbing site degrades
-                // to "no reuse" rather than "the previous picture".
+                // Reserve blocks, using prefix caching when enabled. An image request
+                // participates only through its content hash (every image token shares
+                // one id, so two different pictures would otherwise share a prefix); no
+                // hash means excluded, degrading to "no reuse" rather than "the previous picture".
                 const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb ||
                                        req->n_vision_tokens > 0;
                 const bool cacheable = !has_image || req->vision_content_hash != 0;
@@ -212,12 +151,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         continue;
                     }
                     if (max_reuse >= 0 && reused != max_reuse) {
-                        // Defensive: the snapshot boundary was probed against
-                        // the cache a moment ago, so this should not happen.
-                        // The restore position no longer matches the reused
-                        // KV prefix — release everything (a full prefill must
-                        // not re-write blocks still shared with other seqs)
-                        // and fall back to plain allocation.
+                        // Defensive: the snapshot boundary was probed moments ago, so this
+                        // should not happen. Restore position no longer matches the reused
+                        // KV prefix: release everything (a full prefill must not rewrite shared blocks) and fall back to plain allocation.
                         IMP_LOG_WARN(
                             "Scheduler: hybrid prefix reuse mismatch (reused=%d, snapshot=%d "
                             "blocks) — full prefill for req %d",
@@ -239,19 +175,12 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         if (skip >= total)
                             skip = (total / bs) * bs;
                         if (skip >= total)
-                            // Full prefix hit: still forward the last token (the
-                            // model needs logits for the next position). That
-                            // re-prefill re-writes KV at total-1, which may sit
-                            // in a SHARED (ref>=2) cached block — there is no
-                            // copy-on-write here (F-A10). It is safe because the
-                            // write is idempotent: a prefix hit requires
-                            // byte-identical tokens+positions (chained block
-                            // hash), and quantizing identical FP16 source is
-                            // deterministic, so the shared holders see the same
-                            // KV bytes. If a future KV-quant scheme makes
-                            // re-quant input-dependent on neighbouring tokens
-                            // (non-idempotent), this site needs COW of the last
-                            // block before the re-prefill.
+                            // Full prefix hit: still forward the last token (model needs
+                            // logits for the next position). Re-prefill rewrites KV at
+                            // total-1, possibly in a SHARED (ref>=2) block with no
+                            // copy-on-write (F-A10); safe only because a prefix hit requires
+                            // byte-identical tokens+positions and quantizing identical FP16
+                            // is deterministic. A future input-dependent re-quant needs COW here first.
                             skip = total - 1;
                         req->prefill_offset = skip;
                         // Reporting: usage prompt_tokens_details / Anthropic
@@ -269,11 +198,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
             }
 
             if (kv_manager_) {
-                // Hold the promise, do not just test it. Without this the next
-                // request is admitted against the blocks this one has not
-                // written yet, which is the same over-admission one round
-                // later (#1635). It decays as the blocks are appended and is
-                // dropped by free_sequence().
+                // Hold the promise, do not just test it: without this the next request is
+                // admitted against blocks this one has not written yet (#1635). Decays as
+                // blocks are appended, dropped by free_sequence().
                 const int bs = kv_manager_->kv_cache()->block_size();
                 const int prompt_blocks = (req->context_len() + bs - 1) / bs;
                 const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
@@ -291,17 +218,10 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         }
     }
 
-    // 3. Re-schedule incomplete PREFILLING requests (chunked prefill).
-    //    Skip requests already in prefill_batch (just promoted from pending).
-    //
-    //    `>= 0`, not `> 0` (#1643): a request promoted in step 2 but not served
-    //    that tick still has offset 0, and the old condition dropped it here -
-    //    PREFILLING, admitted, holding KV, and in no batch ever again. Nothing
-    //    hit it while every promoted request was served immediately; the
-    //    per-step prefill cap makes "not served this tick" a normal state, and
-    //    two of three concurrent ingests then hung until the 300 s request
-    //    timeout. The `already_queued` scan below is what keeps the
-    //    just-promoted ones from being added twice.
+    // 3. Re-schedule incomplete PREFILLING requests (chunked prefill), skipping
+    //    ones already in prefill_batch. `>= 0`, not `> 0` (#1643): a request
+    //    promoted but not served this tick still has offset 0, and `> 0` dropped it
+    //    here forever, holding KV with no batch. already_queued avoids double-adding.
     for (auto& req : active_) {
         if (req->status == RequestStatus::PREFILLING && req->prefill_offset >= 0 &&
             req->prefill_offset < static_cast<int>(req->input_tokens.size())) {

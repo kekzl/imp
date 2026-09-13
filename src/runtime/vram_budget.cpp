@@ -18,12 +18,9 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
     if (!mcfg.is_nvfp4_prequant)
         return d;
 
-    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cu): each
-    // slab entry is align_up(cutlass_nvfp4_sf_size(N, K), 256); contiguous
-    // MoE expert groups occupy align_up(ne × sf_size, 256) as ONE entry.
-    // Wire shapes store the PACKED byte dim (K/2 for e2m1 pairs), so
-    // logical K = 2 × shape[1]. The previous elems/16+256 heuristic was
-    // NOT an upper bound under SfAtom padding (rows→128, K→64 elems).
+    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cu): each slab entry is
+    // align_up(cutlass_nvfp4_sf_size(N, K), 256); contiguous MoE expert groups occupy
+    // align_up(ne × sf_size, 256) as ONE entry. Wire shapes store K/2 (e2m1 pairs): logical K = 2 × shape[1].
     constexpr size_t kSfAlign = 256;
     auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
 
@@ -59,18 +56,16 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
         d.sf_bytes += align_up(static_cast<size_t>(ne) *
                                    cutlass_nvfp4_sf_size(N, static_cast<int>(K)),
                                kSfAlign);
-        // Transient contiguous-copy slab (phase 3-moe copy branch: packed +
-        // micro-scales + tensor-scales, matching add_bytes there). The
-        // zero-copy borrow branch needs ~none — this is the upper bound.
+        // Transient contiguous-copy slab (phase 3-moe copy branch: packed + micro-scales + tensor-scales,
+        // matching add_bytes there). The zero-copy borrow branch needs ~none of this: it is an upper bound.
         size_t slab = static_cast<size_t>(ne) * N * Kp + static_cast<size_t>(ne) * N * (K / 16) +
                       static_cast<size_t>(ne) * sizeof(float);
         d.moe_slab_bytes = std::max(d.moe_slab_bytes, slab);
     };
 
     // The same tensor set phase 0b registers for the decode cache
-    // (pre_dequant_phase0_nvfp4_loader.cu register_prequant) — including
-    // ssm_in/ssm_out/gdn_gate, which the previous inline scan omitted
-    // (under-count on GDN hybrids, i.e. Qwen3.6-35B itself).
+    // (pre_dequant_phase0_nvfp4_loader.cu register_prequant), including
+    // ssm_in/ssm_out/gdn_gate: required for GDN hybrids (e.g. Qwen3.6-35B).
     add_dense(model.output_proj());
     for (int i = 0; i < mcfg.n_layers; i++) {
         const auto& L = model.layer(i);
@@ -110,13 +105,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     VRAMBudget budget;
     const auto& mcfg = model.config();
 
-    // --- 1. Classify model quantization ---
     auto qtype = model.layer(0).wq.qtype;
     bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K || qtype == QType::Q5_0 ||
                      qtype == QType::Q5_K || qtype == QType::Q3_K || qtype == QType::Q2_K ||
                      qtype == QType::Q4_1 || qtype == QType::Q5_1);
 
-    // --- 2. Choose strategy ---
     if (config.use_nvfp4_decode == 0) {
         budget.strategy = VRAMBudget::FP16_ONLY;
     } else if (sub_8bit) {
@@ -125,7 +118,6 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         budget.strategy = VRAMBudget::FP8_PREFILL_NVFP4_DECODE;
     }
 
-    // --- 3. Compute available VRAM ---
     // Feature-aware reserve instead of flat 1 GiB.
     budget.reserve_bytes = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
     if (config.use_cuda_graphs)
@@ -135,12 +127,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     if (config.use_fp8_prefill)
         budget.reserve_bytes += 128ULL * 1024 * 1024;
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
-    // At least 10% of total VRAM as headroom — but skipped for second-pass
-    // NVFP4 (mode 2). In that mode the NVFP4 MoE caching path already enforced
-    // its own ~1 GiB reserve before this runs; piling another 10% on top here
-    // pushed `available` to 0 on Nemotron-H NVFP4 (32 GiB GPU → 3.2 GiB extra
-    // reserve > what the MoE pass left free), which collapsed the KV cache to
-    // the 16-block floor and left long-prompt requests stuck in pending_.
+    // At least 10% of total VRAM as headroom, skipped for second-pass NVFP4 (mode 2): the NVFP4
+    // MoE caching path already enforces its own ~1 GiB reserve, and adding 10% on top pushed
+    // `available` to 0 on a 32 GiB card, collapsing KV to the 16-block floor.
     size_t total_vram = 0;
     {
         size_t f;
@@ -154,28 +143,14 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         budget.reserve_bytes =
             std::max(budget.reserve_bytes, vram_reserve_floor(total_vram, reserve_floor_pct));
     }
-    // Mode 2 skips the reserve-floor POLICY above on purpose (it wants the room
-    // for bigger weight caches), but it must still respect what the allocator
-    // physically enforces. Without this the plan handed the KV pool everything
-    // down to 512 MiB while VRAMAllocator refused any cache allocation that
-    // left less than 1630 MiB free — so the pool was sized from a number that
-    // could never be realised and the caches it starved failed mid-build
-    // ("rejecting fp8_ssm_sidecar ... 0 MiB free, need 1630 MiB headroom"),
-    // costing ~7x decode on gpt-oss-20b at server defaults (#1103).
+    // Mode 2 skips the reserve-floor POLICY above (wants room for bigger weight caches), but must
+    // still respect what the allocator physically enforces: without this the KV pool was sized down
+    // to 512 MiB while VRAMAllocator required 1630 MiB free, so cache builds failed mid-build (#1103).
     budget.reserve_bytes = std::max(budget.reserve_bytes, vram_allocator_headroom(total_vram));
 
-    // The library reserve (A1.5) is what cuBLAS/CUTLASS claim on the FIRST
-    // forward pass — after this pass runs, so it is not in the `free_vram` we
-    // are dividing up. Every term above is either a small feature constant or
-    // a percentage of total, and that is the bug under --vram-budget: asking
-    // for a 16 GiB slice scaled the reserve down to 1.6 GiB while the library
-    // still took its full ~3.9 GiB, so the plan overran the cap by the
-    // difference (measured: budget 16000 -> peak 22584 MiB, i.e. the budget
-    // changed nothing at all). The charge is fixed, so the floor must be too.
-    //
-    // plan_memory() has always charged this; the live pass did not, and the
-    // shadow-plan log said so on every startup ("library reserve ... the live
-    // pass does not charge this"). This closes that divergence.
+    // Library reserve (A1.5): cuBLAS/CUTLASS claim on the FIRST forward pass, not present in
+    // free_vram. The charge is fixed regardless of --vram-budget scaling, so the floor must be
+    // fixed too (a 16 GiB budget request still let the library take its full ~3.9 GiB).
     {
         const size_t lib_reserve = config.library_reserve_mb < 0
                                        ? kMeasuredLibraryReserveBytes
@@ -188,7 +163,6 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
-    // Estimate SSM footprint
     size_t ssm_footprint = 0;
     if (mcfg.ssm_inner_size > 0) {
         int n_ssm = 0;
@@ -196,11 +170,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             if (model.layer(i).ssm_in.data != nullptr)
                 n_ssm++;
         if (n_ssm > 0) {
-            // memory/ssm_state_size.h, the same header SSMState::init allocates
-            // from. This site used to carry its own copy of the formula with
-            // conv_kernel-1 taps and no 256-byte alignment: 4968 MiB charged
-            // against 5088 MiB taken on Qwen3.8-27B-NVFP4 at 64 slots, i.e. the
-            // budget was short of the allocation it bounds (MEMORY.md D14).
+            // Uses memory/ssm_state_size.h, the same header SSMState::init allocates from: must
+            // match exactly, or the budget diverges from the actual allocation (MEMORY.md D14).
             const int n_heads = mcfg.ssm_dt_rank;
             const SsmStateGeometry geom{n_ssm,
                                         mcfg.ssm_conv_channels(),
@@ -213,19 +184,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
-    // Mandatory MXFP4 → FP16 decode-fallback reserve. On GDN hybrids the
-    // native MXFP4 GEMV is disabled (cuBLAS status-14 cascade on the GDN
-    // projections — see pre_dequant_phase3_cutlass.cu and
-    // qwen35_27b_mxfp4_ima_2026_04_25.md), so decode REQUIRES the FP16
-    // dequant cache (~4× the raw MXFP4 bytes, resident alongside it). The
-    // StoragePlanner classifies these tensors at their MXFP4 wire size and
-    // never sees the fallback, so without charging it here the KV clamp ate
-    // the headroom (server default max_seq_len fills VRAM): the fallback
-    // then failed to allocate and decode ran against no valid weights →
-    // uniform logits → token-0 ("!") garbage (#934). Charge it as overhead
-    // so the KV pool sizes down to leave room, mirroring the SWA/SSM
-    // footprints above. Same failure class as the NVFP4 (#926) and Q4_K
-    // (#874) weight-cache reserves; MXFP4-GDN was simply missed.
+    // Mandatory MXFP4 -> FP16 decode-fallback reserve: on GDN hybrids the native MXFP4 GEMV is
+    // disabled (see pre_dequant_phase3_cutlass.cu), so decode requires the FP16 dequant cache
+    // (~4x the raw MXFP4 bytes) resident alongside it. StoragePlanner sizes at MXFP4 wire size
+    // and misses this: must charge it here or the KV clamp starves the fallback (#934).
     size_t mxfp4_fp16_fallback_bytes = 0;
     if (mcfg.ssm_inner_size > 0) {
         auto count_mxfp4 = [&](const Tensor& w, QType qt) {
@@ -254,20 +216,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                          mxfp4_fp16_fallback_bytes / (1024.0 * 1024.0));
     }
 
-    // Mandatory INT8 IMMA prefill planes (gemm.q8_imma_enabled /
-    // gemm.moe_imma_prefill). mmq_q8_imma keeps an s8 + (alpha, beta) SoA copy
-    // of every Q8_0 weight it prefills, taken on that tensor's FIRST prefill —
-    // 1.125 B per element, i.e. up to 8.6 GiB on Qwen3-8B-Q8_0. Nothing charged
-    // it, so it grew into whatever the KV pool left free and read back as the
-    // A1.5 "library reserve": 5612 MiB cold, 7839 at library_reserve_mb=6782,
-    // 7942 at 12000, all on the same model and the same tree (#1899). The card
-    // then ran full and WDDM spilled whatever the startup path had touched
-    // last, which is why decode throughput moved with the graph-prewarm ladder
-    // rather than with the code under test.
-    //
-    // Charge it as overhead, like the MXFP4 fallback above, and hand the same
-    // figure to mmq_q8_imma_set_plane_budget() so the cache cannot outgrow what
-    // the plan reserved. Same failure class as #934 / #874 / #926.
+    // Mandatory INT8 IMMA prefill planes (gemm.q8_imma_enabled / gemm.moe_imma_prefill):
+    // mmq_q8_imma keeps an s8 + (alpha, beta) copy per prefilled Q8_0 weight, 1.125 B/element
+    // (up to 8.6 GiB on Qwen3-8B-Q8_0). Charge as overhead and cap via
+    // mmq_q8_imma_set_plane_budget(), or it grows unbounded into the KV pool (#1899).
     size_t imma_plane_bytes = 0;
     {
         auto count_q8 = [&](const Tensor& w, QType qt) {
@@ -276,10 +228,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         };
         for (int i = 0; i < mcfg.n_layers; i++) {
             const auto& L = model.layer(i);
-            // Dense/shared projections take the IMMA path only through the
-            // NVFP4-decode-overlay branch of the GEMM dispatch; without the
-            // overlay a Q8_0 weight is served from an FP16/FP8 cache and no
-            // planes are built.
+            // Dense/shared projections take the IMMA path only through the NVFP4-decode-overlay
+            // branch of the GEMM dispatch; without the overlay a Q8_0 weight is served from an
+            // FP16/FP8 cache and no planes are built.
             if (q8_imma_prefill && config.use_nvfp4_decode > 0) {
                 count_q8(L.wq, L.wq.qtype);
                 count_q8(L.wk, L.wk.qtype);
@@ -315,15 +266,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t overhead = budget.reserve_bytes + ssm_footprint + mxfp4_fp16_fallback_bytes + imma_plane_bytes;
     available = (available > overhead) ? (available - overhead) : 0;
 
-    // --- 4. Compute KV cache per-block cost ---
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
     const size_t per_layer_block_bytes =
         kv_block_bytes_per_layer(config.kv_cache_dtype, bs, mcfg.n_kv_heads, head_dim);
 
-    // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold a
-    // fixed live span (window + slack + burst/chunk peak) per sequence slot —
-    // charge them batch-shaped up front, exactly like the SSM state slabs,
-    // and let only the global layers scale with context below.
+    // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold a fixed live span
+    // (window + slack + burst/chunk peak) per sequence slot, charged batch-shaped up front like
+    // the SSM state slabs; only the global layers scale with context below.
     int n_global_layers = n_kv_layers;
     if (swa_live_tokens > 0 && n_swa_layers > 0 && n_swa_layers <= n_kv_layers) {
         n_global_layers = n_kv_layers - n_swa_layers;
@@ -339,20 +288,15 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                      swa_live_tokens, n_global_layers);
     }
 
-    // K+V (2x) per GLOBAL layer — SWA layers were charged batch-shaped above.
+    // K+V (2x) per GLOBAL layer: SWA layers were charged batch-shaped above.
     size_t per_block_total = per_layer_block_bytes * n_global_layers;
 
     int blocks_per_seq = (config.max_seq_len + bs - 1) / bs;
     int needed_blocks = blocks_per_seq * config.max_batch_size;
 
-    // Cap the IMMA plane grant at what is left after one full sequence (or the
-    // min-KV floor). The demand is 1.125x the Q8_0 weight bytes and there is no
-    // model shape that guarantees it fits: a 14B-Q8_0 wants ~16 GiB of planes
-    // on top of its 15 GiB of weights. Uncapped, the plan would hand them
-    // everything and leave the pool at its floor — worse than the pre-#1899
-    // behaviour, where the cache simply stopped allocating and those GEMMs ran
-    // the dequant path. Capped, the same thing happens, deterministically and
-    // with the KV pool intact.
+    // Cap the IMMA plane grant at what is left after one full sequence (or the min-KV floor):
+    // demand is 1.125x Q8_0 weight bytes with no shape guarantee it fits (e.g. ~16 GiB planes
+    // on 15 GiB of weights). Uncapped, the plan starves the KV pool to its floor (#1899).
     if (imma_plane_bytes > 0) {
         int floor_tok = config.min_kv_tokens > 0 ? config.min_kv_tokens
                                                  : std::min(16384, config.max_seq_len * 4);
@@ -373,10 +317,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
-    // --- 5. Estimate NVFP4-eligible weight cache size ---
-    // Eligibility policy is the shared nvfp4_beneficial() in core/qtype.h —
-    // the same predicate the pre-dequant phases use, so the estimate and the
-    // actual cache build can't drift.
+    // Eligibility policy is the shared nvfp4_beneficial() in core/qtype.h: the same predicate
+    // the pre-dequant phases use, so the estimate and the actual cache build can't drift.
     const bool decode_all = config.nvfp4_decode_all;
     size_t nvfp4_elems = 0;
     auto count_nvfp4 = [&](const Tensor& w, QType qt) {
@@ -407,16 +349,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;
     size_t cutlass_sf_estimate = nvfp4_elems / 16;
 
-    // Cross-check the heuristic estimate against the StoragePlanner's
-    // projected total (source-qtype-aware). Diverging numbers indicate the
-    // heuristic missed a tier (e.g. Q4_K weights that the planner routes to
-    // the FP16 cache but the heuristic treats as 0 because nvfp4_beneficial
-    // is false). The heuristic drives allocation; the plan built here is
-    // UNCONSTRAINED (no vram_budget_bytes hint, so no downgrade loop and
-    // plan.failed can never be set) — it measures ideal per-tensor demand,
-    // which the GGUF branch below folds into the weight-cache reserve (#875).
-    // The budget-constrained plan the phases actually consult is built
-    // separately in QuantPipeline::build (executor_pre_dequant.cu).
+    // Cross-check heuristic estimate against StoragePlanner's projected total (source-qtype-aware):
+    // divergence means the heuristic missed a tier (e.g. Q4_K routed to FP16 cache but treated as 0
+    // here since nvfp4_beneficial is false, #875). This plan is UNCONSTRAINED (no vram_budget_bytes
+    // hint); the actual budget-constrained plan is built in QuantPipeline::build (executor_pre_dequant.cu).
     {
         PlanHints hints;
         hints.prefer_nvfp4_decode = (config.use_nvfp4_decode > 0);
@@ -429,48 +365,26 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             plan.projected_vram_bytes / (1024.0 * 1024.0), plan.entries.size(),
             nvfp4_estimate / (1024.0 * 1024.0), cutlass_sf_estimate / (1024.0 * 1024.0));
 
-        // Native NVFP4 checkpoints: the GGUF-oriented count above sees the
-        // source as non-beneficial and yields 0, but phase 3 still needs
-        // post-KV headroom for (a) the persistent CUTLASS SfAtom SF cache
-        // (~elems/16 across ALL NVFP4 weights incl. experts — model qtypes
-        // are still wire dtypes here, so sum it from the PLAN, which is
-        // source-aware), (b) the transient per-(layer,proj) MoE contiguous-
-        // copy slab, and (c) the free-VRAM reserves phases 0-3 re-derive for
-        // themselves (max(total/10, 256 MiB)) plus executor workspaces that
-        // allocate between KV init and phase 3. With the estimate at 0 the
-        // KV clamp below ate ALL post-weight VRAM at auto max_batch_size and
-        // both caches got zero budget — Qwen3-Coder-30B-FP4 @45k served
-        // 31.8 tok/s / 1265 ms TTFT instead of 314.7 / 106 (both caches are
-        // free-VRAM-driven at phase 3, so reserving room here is the fix).
+        // Native NVFP4 checkpoints: the GGUF-oriented count above yields 0, but phase 3 still needs
+        // post-KV headroom for (a) the persistent CUTLASS SfAtom SF cache (~elems/16 across ALL
+        // NVFP4 weights incl. experts, summed from the source-aware PLAN), (b) the transient
+        // per-(layer,proj) MoE contiguous-copy slab, and (c) free-VRAM reserves phases 0-3
+        // re-derive (max(total/10, 256 MiB)) plus executor workspaces between KV init and phase 3.
+        // Without this the KV clamp eats ALL post-weight VRAM and both caches get zero budget.
         if (mcfg.is_nvfp4_prequant) {
-            // Both the count above AND the plan classify by source qtype,
-            // which at budget time is still the wire dtype (NVFP4-ness lives
-            // in the nvfp4_scratch_ sidecars until phase 0 promotes it) — so
-            // compute_native_cache_demand scans the projection tensors
-            // directly, no qtype filter: on an NVFP4-prequant checkpoint
-            // these are exactly the quantized set.
+            // Both the count above and the plan classify by source qtype, which at budget time is still
+            // the wire dtype (NVFP4-ness lives in nvfp4_scratch_ sidecars until phase 0 promotes it), so
+            // compute_native_cache_demand scans projection tensors directly, no qtype filter needed.
             NativeCacheDemand demand = native_demand ? *native_demand : compute_native_cache_demand(model);
-            // The floors are now unconditional. They used to be handed to phase 3
-            // only when the balloon had physically reserved the bytes, on the
-            // argument that an unbacked floor could over-commit the SF slab on a
-            // tight card. Two things changed: A7 step 6.4 builds the caches BEFORE
-            // the KV pool, i.e. at the moment VRAM is least contended, and the
-            // balloon is gone (AUDIT B62). What the floor is actually for survives
-            // both — cudaMemGetInfo under-reports free while async frees are still
-            // being reclaimed, so the builder must trust the plan over the live
-            // read. If the slab genuinely cannot be allocated the builder degrades
-            // to partial coverage, which is exactly what it did without a balloon.
+            // Floors are unconditional (AUDIT B62): cudaMemGetInfo under-reports free while async frees
+            // are still being reclaimed, so the builder must trust the plan over the live read.
+            // If the slab genuinely cannot be allocated, the builder degrades to partial coverage.
             budget.mandatory_sf_bytes = demand.sf_bytes;
             budget.mandatory_moe_bytes = demand.moe_slab_bytes;
             size_t phase3_reserve =
                 vram_reserve_floor(total_vram, reserve_floor_pct) + 1024ULL * 1024 * 1024;
-            // KV is charged the full measured demand, which is what the
-            // no-balloon path always did — nothing is hidden from free_vram any
-            // more, so the plan states the cost instead of a hold enforcing it.
-            // (I tried dropping this charge as a suspected double count against
-            // the post-cache residual sizing; diffing the init logs showed the
-            // budget produces the same kv_max_blocks either way, so the charge
-            // stays and the speculation does not.)
+            // KV is charged the full measured demand: nothing is hidden from free_vram, the plan
+            // states the cost instead of enforcing it via a hidden hold.
             size_t native_need = demand.total() + phase3_reserve;
             if (native_need > cutlass_sf_estimate) {
                 IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
@@ -485,40 +399,24 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                 budget.weight_cache_transient_bytes = phase3_reserve;
             }
         } else if (per_block_total > 0) {
-            // GGUF sources the heuristic can't see: Q4_K/Q3_K weights are not
-            // nvfp4_beneficial (estimate 0) but the planner routes them to the
-            // FP16 cache — exactly the divergence the log above warns about.
-            // Without reserving that demand the KV backstop below eats ALL
-            // post-weight VRAM and phases 1/3 build 0 tensors: Ornith-35B
-            // Q4_K_M served 11 tok/s via on-the-fly dequant with a 159k-token
-            // KV pool nobody asked for (#874 follow-up). Same failure class as
-            // the native-NVFP4 branch above, same fix: fold the real demand
-            // into cutlass_sf_estimate so both the strategy math and the
-            // backstop see it.
+            // GGUF sources the heuristic can't see: Q4_K/Q3_K weights are not nvfp4_beneficial
+            // (estimate 0) but the planner routes them to the FP16 cache. Without reserving
+            // that demand the KV backstop eats ALL post-weight VRAM and phases 1/3 build 0
+            // tensors (#874 follow-up); fold the real demand into cutlass_sf_estimate.
             //
-            // Gated on ANY divergence, not on a 2x one (#1631). The 2x gate was
-            // there so "heuristic-covered models (Q6_K/Q8 dense - the tuned
-            // bench configs) keep their KV pools unchanged", and the model it
-            // was protecting is the one that stopped starting: Qwen3-8B-Q8_0
-            // at shipped defaults projects 6100 MiB against a 4511 MiB
-            // heuristic, 1.35x, so the reserve stayed at the heuristic, the KV
-            // pool took the difference, and the first cuBLASLt call OOMed with
-            // 537 error lines and exit 1. A pool that is 38% smaller is worth
-            // more than a server that does not start.
+            // Gated on ANY divergence, not a 2x threshold (#1631): a 2x gate missed
+            // Qwen3-8B-Q8_0's 1.35x divergence and let its KV pool take the difference,
+            // OOMing the first cuBLASLt call. A smaller pool beats a server that won't start.
             //
-            // Raising the reserve to the projection alone is NOT enough - that
-            // was measured too: it plans 9977 KV blocks and still OOMs, while
-            // the arm that works plans 7079. The margin the floor adds is
-            // load-bearing, and the 500 MiB between those two arms is why this
-            // is a floor rather than a tighter estimate.
+            // Reserve = projection + floor margin, not the projection alone: projection-alone
+            // still OOMs in practice, so the margin is load-bearing, not slack.
             size_t heuristic = nvfp4_estimate + cutlass_sf_estimate;
             if (plan.projected_vram_bytes > heuristic) {
                 size_t want =
                     plan.projected_vram_bytes + vram_reserve_floor(total_vram, reserve_floor_pct);
-                // Never squeeze the pool below one full max_seq_len sequence
-                // (or the min-KV floor, whichever is larger) — long-context
-                // must stay servable; concurrency is bounded by scheduler
-                // admission, not by pool size.
+                // Never squeeze the pool below one full max_seq_len sequence (or the min-KV floor,
+                // whichever is larger): long-context must stay servable, concurrency is bounded by
+                // scheduler admission, not pool size.
                 int floor_tok = config.min_kv_tokens > 0
                                     ? config.min_kv_tokens
                                     : std::min(16384, config.max_seq_len * 4);
@@ -544,7 +442,6 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
-    // --- 6. Allocate based on strategy ---
     switch (budget.strategy) {
         case VRAMBudget::NVFP4_DECODE_ONLY: {
             budget.fp8_cache_bytes = 0;
@@ -559,28 +456,22 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             break;
         }
         case VRAMBudget::FP8_PREFILL_NVFP4_DECODE: {
-            // NVFP4 decode cache is critical for performance — ensure it fits first.
+            // NVFP4 decode cache is critical for performance, ensure it fits first.
             // FP8 prefill cache is nice-to-have but not essential (fallback: dequant on-the-fly).
             budget.nvfp4_cache_bytes = nvfp4_estimate;
-            // KV target = kv_fraction (default 0.8) of available for BOTH
-            // modes. Mode 2 (native-NVFP4 second pass) previously used 0.1 and
-            // skipped the needed_blocks floor — intended to leave room for an
-            // FP8 prefill cache. But on sm_120 FP8 prefill is unavailable
-            // (native NVFP4 uses the CUTLASS NVFP4 GEMM, no FP8 weight cache is
-            // built), so the 90% reserve was dead VRAM: an NVFP4 SafeTensors
-            // model starved its KV pool to ~24K tokens while 16 GB sat free —
-            // the long-context/agentic default was effectively broken.
-            // target_blocks (below) clamps every mode to needed_blocks, so
-            // the fraction only lifts KV up to the per-sequence need and leaves
-            // the remainder for FP8 (computed post-clamp) when it IS enabled —
-            // no regression for fp8-prefill configs.
+            // KV target = kv_fraction (default 0.8) of available for BOTH modes: on sm_120, mode 2
+            // (native-NVFP4 second pass) has no FP8 weight cache to protect room for, so reserving
+            // less here would only be dead VRAM. target_blocks below clamps every mode to
+            // needed_blocks, so the fraction lifts KV to the per-sequence need and leaves the
+            // remainder for FP8 (computed post-clamp) when it IS enabled, no regression for
+            // fp8-prefill configs.
             budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
                                        ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
                                        : needed_blocks;
             budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
-            // FP8 budget is computed below — after the kv_max_blocks clamp /
-            // min_kv_blocks enforcement — so it reflects the FINAL KV size.
+            // FP8 budget is computed below, after the kv_max_blocks clamp / min_kv_blocks
+            // enforcement, so it reflects the FINAL KV size.
             budget.nvfp4_second_pass = (config.use_nvfp4_decode == 2);
             break;
         }
@@ -597,37 +488,19 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     }
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
-    // One pool per advertised sequence set, not two. The `* 2` this used to
-    // apply outside mode 2 entered in #100 (a public-release sweep, not a sizing
-    // decision) with no comment and survived ~1000 PRs. It was the ENTIRE
-    // divergence between the live pass and plan_memory(): measured on
-    // Qwen3-8B-Q8_0 at two different (seq, batch) combinations, live came out
-    // 4096 blocks against the plan's 2048 both times, and mode-2 models — which
-    // never had the doubling — already agreed. D9 recorded that disagreement as
-    // the reason CI cannot assert the plan; this is what it was.
-    //
-    // Measured before removing it (AUDIT B65): the doubling buys no prefix-cache
-    // reuse — 12656 cached tokens and the same warm latency with half the pool —
-    // and it binds rather than being VRAM-clamped, so it was holding ~2.3 GiB for
-    // headroom nothing demonstrated a need for. Admission control
-    // (Scheduler::can_allocate) already bounds concurrency against the real pool,
-    // so a smaller pool limits how many sequences run at once; it cannot
-    // under-serve one.
+    // One pool per advertised sequence set, not doubled (AUDIT B65): the doubling bought no
+    // prefix-cache reuse and just held ~2.3 GiB of unused headroom. Admission control
+    // (Scheduler::can_allocate) already bounds concurrency against the real pool, so a smaller
+    // pool limits how many sequences run at once; it cannot under-serve one.
     int target_blocks = needed_blocks;
     budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
-    // Hard backstop: never request more KV blocks than the post-weight VRAM can
-    // physically hold. The strategy above can raise kv_max_blocks toward
-    // needed_blocks (= max_batch_size × max_seq_len); with the VRAM-aware auto
-    // max_batch_size (#736) that product blows past real headroom on a
-    // small-weight / large-card config — dense Q8 on a 32 GB card sizes batch
-    // auto→25, so 25 × 16384-token slots = 25600 blocks (57.6 GB) and the KV
-    // cudaMalloc OOMs at context creation. The KV pool is paged with scheduler
-    // admission control (Scheduler::can_allocate), so clamping the pool to what
-    // fits only bounds concurrency under load — no single sequence is
-    // under-served. Subtract the NVFP4 decode + CUTLASS-SF caches, which share
-    // the same post-weight headroom (FP8 is computed from the remainder below).
+    // Hard backstop: never request more KV blocks than post-weight VRAM can physically hold.
+    // The VRAM-aware auto max_batch_size (#736) can size needed_blocks (= max_batch_size ×
+    // max_seq_len) past real headroom on small-weight/large-card configs, overflowing cudaMalloc.
+    // Clamping bounds concurrency via scheduler admission (Scheduler::can_allocate); no single
+    // sequence is under-served. Subtract NVFP4 decode + CUTLASS-SF caches sharing this headroom.
     if (per_block_total > 0) {
         size_t weight_caches = nvfp4_estimate + cutlass_sf_estimate;
         size_t kv_room = (available > weight_caches) ? (available - weight_caches) : available;
@@ -646,16 +519,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     bool user_requested_min = (min_kv_tok > 0);
     if (!user_requested_min) {
         min_kv_tok = std::min(16384, config.max_seq_len * 4);
-        // Cover the full advertised context when that is CHEAP (#963
-        // follow-up): the 16384-token floor left a max_seq_len=17408 hybrid
-        // with a pool a 16k prompt fills to 94% — tripping the >90%
-        // StreamingLLM valve (block-table mutation, graphs off, windowed
-        // attention) on a request that fits outright. Hybrids price KV at
-        // ~0.02 MiB/token (few attention layers), so full coverage plus the
-        // 12.5% streaming headroom costs ~400 MiB — take it whenever it
-        // stays under 1 GiB. Expensive-KV models (dense 64k ≈ 9 GiB) keep
-        // the old floor and the kv_fraction affordability cap below keeps
-        // protecting the weight-cache budget either way.
+        // Cover the full advertised context when that is CHEAP (#963 follow-up): the 16384-token
+        // floor left long-context hybrids tripping the >90% StreamingLLM valve on requests that fit
+        // outright. Hybrids price KV at ~0.02 MiB/token, so full coverage plus 12.5% streaming
+        // headroom stays cheap; take it whenever the cost is under 1 GiB (dense/expensive-KV models
+        // keep the old floor, protected by the kv_fraction affordability cap below).
         const int full_cov_tok = config.max_seq_len + config.max_seq_len / 8;
         if (full_cov_tok > min_kv_tok && per_block_total > 0) {
             const size_t full_cov_bytes =
@@ -668,10 +536,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     const int min_kv_blocks_wanted = min_kv_blocks;  // pre-cap: what the floor asked for
     int max_affordable = (per_block_total > 0) ? static_cast<int>(available / per_block_total)
                                                : budget.kv_max_blocks;
-    // Defensive cap for auto mode (leaves room for weight caches). When the
-    // user explicitly sets min_kv_tokens, respect their request up to the
-    // physical max_affordable — they're opting into a tighter weight-cache
-    // budget in exchange for more context.
+    // Defensive cap for auto mode (leaves room for weight caches). When the user explicitly sets
+    // min_kv_tokens, respect it up to physical max_affordable: they're opting into a tighter
+    // weight-cache budget in exchange for more context.
     int cap = user_requested_min ? max_affordable : static_cast<int>(max_affordable * kv_fraction);
     min_kv_blocks = std::min(min_kv_blocks, cap);
     budget.kv_blocks_pre_floor = budget.kv_max_blocks;
@@ -681,12 +548,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         budget.kv_max_blocks = min_kv_blocks;
         budget.kv_cache_bytes = static_cast<size_t>(min_kv_blocks) * per_block_total;
     }
-    // Loud when the pool STILL can't hold the KV floor after every clamp: any
-    // request longer than the pool is rejected/cancelled at admission while
-    // /v1/models keeps advertising max_seq_len. Observed: --max-batch 64 on
-    // Qwen3.6-35B-A3B-NVFP4 (32 GB card) collapsed KV to 16 blocks = 512
-    // tokens — every longer prompt came back finish_reason=cancelled with no
-    // hint why. Batch-scaled workspaces are the usual culprit.
+    // Loud when the pool STILL can't hold the KV floor after every clamp: any request longer
+    // than the pool is rejected or cancelled at admission while /v1/models keeps advertising
+    // max_seq_len. Batch-scaled workspaces are the usual culprit.
     if (budget.kv_max_blocks < min_kv_blocks_wanted) {
         IMP_LOG_WARN(
             "VRAM budget: KV pool holds only %d tokens (< %d-token floor; requested context "
@@ -696,13 +560,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             budget.kv_max_blocks * bs, min_kv_tok, config.max_seq_len);
     }
 
-    // FP8 prefill: use remaining VRAM after NVFP4 decode + the *final* KV size.
-    // Computing this earlier (against the unclamped kv_max_blocks) silently
-    // zeroed FP8 in mode 1 because the 0.8 kv_fraction filled the budget on
-    // paper, even though `target_blocks` clamped the actual KV allocation
-    // back down. The post-clamp computation lets mode 1 (additive) populate
-    // both caches when VRAM allows — Qwen3-14B Q6_K mode 1 default flags
-    // previously cached fp8=0 tensors and paid ~28 % prefill for it.
+    // FP8 prefill: use remaining VRAM after NVFP4 decode + the FINAL (post-clamp) KV size.
+    // Computing this against the unclamped kv_max_blocks silently zeroed FP8 in mode 1, since
+    // the 0.8 kv_fraction filled the budget on paper even though target_blocks clamped the
+    // actual KV allocation back down.
     if (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE && config.use_fp8_prefill) {
         size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
         size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
@@ -717,9 +578,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             fp8_size_cap = remaining_for_fp8;
         budget.fp8_cache_bytes = std::min(fp8_size_cap, remaining_for_fp8);
     }
-    // With FP8 prefill resolved off (the sm_120 auto default), the strategy's
-    // KV math above still applies but no FP8 cache will ever be built (Phase 2
-    // is gated on use_fp8) — report 0 instead of a phantom reservation.
+    // With FP8 prefill resolved off (the sm_120 auto default), the strategy's KV math above
+    // still applies but no FP8 cache is ever built (Phase 2 is gated on use_fp8): report 0
+    // instead of a phantom reservation.
 
     // Publish the demand figure this pass actually used, so the A7 step-2b
     // comparison feeds plan_memory() the same number instead of re-deriving it.
@@ -745,11 +606,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
 
 size_t kv_block_bytes_per_layer(QType kv_dtype, int block_size, int n_kv_heads, int head_dim) {
     size_t single_block_bytes;
-    // Packed 4-bit KV dtypes: 2 elements per byte (FP4 nibbles or INT4 packed).
-    // NVFP4 was historically missing from this OR-chain — fell through to the
-    // dtype_size() fallback which returns 0 for QType::NVFP4, silently zeroing
-    // out NVFP4's KV-cache budget contribution. Pre-existing pre-MXFP4-KV; the
-    // Slice 2 spec reviewer flagged it during the MXFP4-KV scope review.
+    // Packed 4-bit KV dtypes: 2 elements per byte (FP4 nibbles or INT4 packed). Must include
+    // NVFP4 here: falling through to dtype_size() returns 0 for QType::NVFP4, silently
+    // zeroing out NVFP4's KV-cache budget.
     if (kv_dtype == QType::INT4 || kv_dtype == QType::NVFP4 || kv_dtype == QType::MXFP4_KV) {
         single_block_bytes = static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2;
     } else {

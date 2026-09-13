@@ -1,27 +1,18 @@
 // Engine init phase (tail): workspace buffers + banned-token list + warmup.
 //
-// init_features:
-//   Initialises green-context overlap, chat-template detection, banned-
-//   token list, think-token cache, vision pipeline, pinned sample buffer
-//   for CUDA graphs, decode-done event, and pre-allocates DRY penalty
-//   buffers. See executor_workspace_*.cu for the per-subsystem workspace
-//   builders that this method drives indirectly.
+// init_features: green-context overlap, chat-template detection, banned-token list,
+// think-token cache, vision pipeline, pinned sample buffer for CUDA graphs, decode-done
+// event, DRY penalty buffers. See executor_workspace_*.cu for the per-subsystem builders.
 //
-// build_banned_token_list:
-//   Constructs the runtime ban-list from RuntimeConfig + model tokenizer.
-//   Keeps stop/EOS/think/Gemma-4 channel markers out of the ban set.
+// build_banned_token_list: runtime ban-list from RuntimeConfig + model tokenizer, keeping
+// stop/EOS/think/Gemma-4 channel markers out of the ban set.
 //
-// warmup:
-//   Optional first forward pass to prime cuBLAS + CUDA graph capture.
-//   Skipped for MXFP4 weights (FP16-cache bypass) and Gemma-4 (algo
-//   jitter). Resets FP8 KV calibration after the synthetic BOS pass.
+// warmup: optional first forward pass to prime cuBLAS + CUDA graph capture. Skipped for
+// MXFP4 weights (FP16-cache bypass) and Gemma-4 (algo jitter); resets FP8 KV calibration
+// after the synthetic BOS pass.
 //
-// All three execute at engine-init time and are colocated here as the
-// "init tail" — after weights + KV cache are up but before the engine
-// becomes ready.
-//
-// Extracted from engine.cpp in Phase 4 of the architecture refactor
-// roadmap. Bodies byte-identical.
+// All three run at engine-init time, colocated as the "init tail": after weights + KV
+// cache are up but before the engine becomes ready.
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
@@ -52,10 +43,9 @@ bool Engine::init_features() {
     if (config_.use_green_contexts) {
         if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
             IMP_LOG_WARN("Green context init failed — falling back to regular streams");
-            // Clear the CUDA error state so it doesn't corrupt subsequent operations.
-            // Green context failure on sm_120 consumer GPUs is expected (requires
-            // data-center features). Without clearing, the stale error causes
-            // cublasLtMatmul to fail with CUBLAS_STATUS_INVALID_VALUE.
+            // Clear the CUDA error state so it doesn't corrupt subsequent operations. Green context
+            // failure on sm_120 consumer GPUs is expected (requires data-center features); without
+            // clearing, the stale error causes cublasLtMatmul to fail with CUBLAS_STATUS_INVALID_VALUE.
             cudaGetLastError();
         }
         if (green_ctx_.is_available() && resolve_prefill_chunk_size_() > 0)
@@ -63,10 +53,9 @@ bool Engine::init_features() {
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
     }
 
-    // Prefill/decode overlap gates (runtime.prefill_overlap; each DECLINE is
-    // logged once, #1755 style — a gate that refuses silently is a gate
-    // nobody can see). The per-step gate (decode batch >= 2, no spec-verify
-    // sharing the CUTLASS activation scratch) lives in step_impl_.
+    // Prefill/decode overlap gates (runtime.prefill_overlap): each DECLINE is logged once
+    // (#1755), since a gate that refuses silently is a gate nobody can see. The per-step gate
+    // (decode batch >= 2, no spec-verify sharing the CUTLASS activation scratch) lives in step_impl_.
     if (runtime_config_.runtime.prefill_overlap) {
         const char* decline = nullptr;
         if (!green_ctx_.is_available())
@@ -104,11 +93,9 @@ bool Engine::init_features() {
                              chat_template_family_name(family), model_arch_name(mcfg.arch));
         }
         if (family != ChatTemplateFamily::RAW && !chat_template_.init(family, *tok, tok->chat_template_str()))
-            // Was silently discarded until #1206 marked init() [[nodiscard]]. A
-            // failed template init leaves chat_template_ inert, so every
-            // /v1/chat/completions request falls back to raw concatenation —
-            // the model sees no role markers and answers as if continuing text.
-            // That looks like a model-quality problem, not a load problem.
+            // A failed template init leaves chat_template_ inert, so every /v1/chat/completions
+            // request falls back to raw concatenation (no role markers), which looks like a
+            // model-quality problem, not a load problem (#1206 marked init() [[nodiscard]]).
             IMP_LOG_WARN(
                 "Chat template init failed for family %s — requests will use raw "
                 "prompt concatenation (no role markers)",
@@ -126,13 +113,10 @@ bool Engine::init_features() {
             int32_t ts = ptok->find_token("<think>");
             int32_t te = ptok->find_token("</think>");
             int vocab = ptok->vocab_size();
-            // Accept CONTROL *and* USER_DEFINED token types: Qwen3 GGUFs tag
-            // <think>/</think> as USER_DEFINED (type 4), and requiring CONTROL
-            // left think_end_id_ at -1 — the think-budget enforcement
-            // (force </think> via logit manipulation) could then never fire,
-            // so models thought until max_tokens (empty content under
-            // json_mode/short budgets). Nemotron's "<think>" at ID 12 is type
-            // NORMAL text and stays excluded.
+            // Accept CONTROL *and* USER_DEFINED token types: Qwen3 GGUFs tag <think>/</think> as
+            // USER_DEFINED (type 4); requiring CONTROL only left think_end_id_ at -1, so the think-budget
+            // enforcement (force </think> via logit manipulation) could never fire and models thought
+            // until max_tokens. Nemotron's "<think>" at ID 12 is type NORMAL text and stays excluded.
             bool accept = think_logic::accept_think_token(
                 ts, ptok->has_token_types(), ptok->has_token_types() && ptok->is_special_token(ts),
                 ptok->is_added_token(ts), vocab);
@@ -140,24 +124,19 @@ bool Engine::init_features() {
                 think_start_id_ = ts;
                 think_end_id_ = te;
             } else if (chat_template_.family() == ChatTemplateFamily::HARMONY) {
-                // gpt-oss Harmony: reasoning lives in the analysis channel and
-                // closes with <|end|>; the model emits <|channel|>analysis
-                // <|message|> itself (no <think> opener, so `accept` is false).
-                // Map <|end|> to think_end so the answer-headroom budget can
-                // force the analysis -> final channel switch when reasoning
-                // would otherwise consume all of max_tokens and leave the final
-                // channel (the answer) empty (finish=length). think_start stays
-                // -1: analysis is the initial state, seeded via started_in_think.
+                // gpt-oss Harmony: reasoning lives in the analysis channel and closes with <|end|>;
+                // the model emits <|channel|>analysis<|message|> itself (no <think> opener, so
+                // `accept` is false). Map <|end|> to think_end so the answer-headroom budget can
+                // force the analysis -> final channel switch before max_tokens empties the final
+                // channel. think_start stays -1: analysis is the initial state, seeded via started_in_think.
                 int32_t he = ptok->find_token("<|end|>");
                 if (he >= 0) {
                     think_start_id_ = -1;
                     think_end_id_ = he;
                     harmony_reasoning_ = true;
                     // Forced final-channel opener: <|end|> closes analysis, then
-                    // <|start|>assistant<|channel|>final<|message|> commits the
-                    // model to the answer channel (forcing <|end|> alone lets it
-                    // re-open analysis). Encode the literal so the exact ids
-                    // (incl. role/channel-name pieces) match this tokenizer.
+                    // <|start|>assistant<|channel|>final<|message|> commits the model to the answer
+                    // channel (bare <|end|> lets it re-open analysis). Encode the literal so ids match this tokenizer.
                     harmony_force_seq_ =
                         ptok->encode("<|end|><|start|>assistant<|channel|>final<|message|>");
                     std::string seq;
@@ -165,10 +144,9 @@ bool Engine::init_features() {
                     IMP_LOG_INFO("Harmony reasoning: <|end|>=%d, force opener=[ %s]", he, seq.c_str());
                 }
             }
-            // Build the whitespace-token mask once for any think model (the
-            // post-</think>/<|end|> grace needs it). A token that decodes to
-            // empty/all-whitespace must not count as answer content. Mirror to
-            // device for the conditional-graph loop.
+            // Build the whitespace-token mask once for any think model (post-</think>/<|end|> grace
+            // needs it): a token that decodes to empty/all-whitespace must not count as answer
+            // content. Mirrored to device for the conditional-graph loop.
             if (think_end_id_ >= 0) {
                 token_is_whitespace_.assign(vocab, 0);
                 for (int32_t id = 0; id < vocab; ++id) {
@@ -204,10 +182,9 @@ bool Engine::init_features() {
         if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), stream_))
             return false;
     }
-    // Qwen3-VL's tower came in with the checkpoint, so there is no mmproj path
-    // to key off — its presence IS the signal. A tower that fails to come up is
-    // not fatal: the text half of the model works, and refusing to load at all
-    // would be a worse answer than "images are unavailable".
+    // Qwen3-VL's tower came in with the checkpoint, so there is no mmproj path to key off: its
+    // presence IS the signal. A tower that fails to come up is not fatal, the text half of the
+    // model works, and refusing to load entirely would be worse than "images are unavailable".
     if (model_->vision_tower) {
         const int budget =
             Qwen3VLPipeline::patch_budget(*model_->vision_tower, runtime_config_.runtime.vision_max_patches);
@@ -268,10 +245,9 @@ void Engine::build_banned_token_list() {
     }
     for (int32_t sid : chat_template_.stop_token_ids()) keep_ids.push_back(sid);
     if (tok) {
-        // Harmony (gpt-oss, #547): the model is TRAINED to emit its own
-        // structure tokens (<|channel|>analysis<|message|>...<|end|>
-        // <|start|>assistant<|channel|>final<|message|>...). Banning them
-        // traps generation in an endless analysis channel.
+        // Harmony (gpt-oss, #547): the model is TRAINED to emit its own structure tokens
+        // (<|channel|>analysis<|message|>...<|end|><|start|>assistant<|channel|>final<|message|>...).
+        // Banning them traps generation in an endless analysis channel.
         for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>",
                                   "<|channel>", "<channel|>",
                                   "<|channel|>", "<|message|>", "<|start|>", "<|end|>",
@@ -319,7 +295,6 @@ void Engine::build_banned_token_list() {
         }
     }
 
-    // Deduplicate
     std::sort(banned_token_ids_.begin(), banned_token_ids_.end());
     banned_token_ids_.erase(std::unique(banned_token_ids_.begin(), banned_token_ids_.end()),
                             banned_token_ids_.end());
@@ -338,36 +313,26 @@ void Engine::build_banned_token_list() {
             IMP_LOG_INFO("  banned: %s", bl.c_str());
         }
     }
-    // Upload once, here in the loading phase: the graph paths and the
-    // constrained pipeline read this one engine-owned copy, and a first-use
-    // upload while serving was a counted I2 violation
+    // Upload once, here in the loading phase: the graph paths and the constrained pipeline read
+    // this one engine-owned copy. A first-use upload while serving was a counted I2 violation
     // (scripts/check_alloc_interpose.sh).
     (void)banned_tokens_device_(decode_stream());
 }
 
 // What the first forward pass actually claimed, against what the plan charged.
 //
-// The plan needs this number BEFORE the forward that produces it, so it cannot
-// measure it in the same run — the charge is a constant
-// (kMeasuredLibraryReserveBytes) with an imp.conf override. AUDIT B41 measured
-// that constant wrong in both directions across four configs: 0 MiB on
-// Qwen3-4B-IQ4_NL (3900 MiB of KV pool set aside for nothing) and 7458 MiB on
-// Qwen3-8B-Q8_0 (a 3.5 GiB under-charge, most of the residual acceptance
-// criterion 5 is missing).
+// The plan needs this number BEFORE the forward that produces it, so it can't measure
+// inline: the charge is a constant (kMeasuredLibraryReserveBytes, imp.conf override) that
+// AUDIT B41 found wrong in both directions. Measuring here and pinning the exact number is
+// stable per model + quant path and invariant to batch/context (M5).
 //
-// So the honest move is to measure it here and hand the operator the exact
-// number to pin. It is stable per model + quant path and invariant to batch and
-// context (M5), so one line in imp.conf fixes that deployment for good.
-// Free function: it needs no Engine state beyond these two values, and keeping
-// it out of the class keeps engine.h (a god-header already at its size limit)
-// from growing for a diagnostic. Returns the measured claim, SIZE_MAX if it
-// could not be measured.
-// `named_in_window` is what the window swallowed that IS attributed — the IMMA
-// prefill planes, which the first forward takes and the plan already charged
-// (#1899). Without subtracting them the window reported them as an unattributed
-// library claim, the cache remembered that figure, and the NEXT start planned
-// the same bytes twice (measured on Qwen3-8B-Q8_0: window 7797 MiB against a
-// 763 MiB residual, i.e. a -22 % attribution).
+// Free function: needs no Engine state beyond its two arguments, keeping engine.h (a
+// god-header at its size limit) from growing for a diagnostic. Returns SIZE_MAX if the
+// claim could not be measured.
+//
+// `named_in_window` subtracts what the window swallowed that IS already attributed: the
+// IMMA prefill planes the first forward takes and the plan already charged (#1899).
+// Without it the window double-counts them as an unattributed library claim across starts.
 static size_t measure_library_forward_window(size_t free_before, size_t named_in_window) {
     if (free_before == 0)
         return SIZE_MAX;
@@ -380,16 +345,10 @@ static size_t measure_library_forward_window(size_t free_before, size_t named_in
 
 // Report the charge against what the plan assumed, and name the value to pin.
 //
-// This used to live inside the measurement and recommend the FORWARD WINDOW,
-// which is not what anything charges: the caller takes
-// max(forward_window, whole_init) and caches that. On the NVFP4 path the two
-// are three orders of magnitude apart, because CUTLASS claims during the
-// phase-02 cache build and the window only opens at the warmup forward (AUDIT
-// B79). An operator following the old advice pinned 4 MiB on a model that
-// charges 3292, and got the under-reserve the same warning describes in its
-// other branch (#1746).
-//
-// So it runs here, after the charge is decided, and recommends that number.
+// The caller takes max(forward_window, whole_init) and caches that: on the NVFP4 path the
+// two differ by orders of magnitude, since CUTLASS claims during the phase-02 cache build
+// while the window only opens at the warmup forward (AUDIT B79). Runs after the charge is
+// decided, so it can recommend the correct number instead of the forward window alone.
 static void report_library_reserve(size_t charge, size_t forward_window, size_t whole_init,
                                    int library_reserve_mb) {
     if (charge == SIZE_MAX)
@@ -423,9 +382,8 @@ static void report_library_reserve(size_t charge, size_t forward_window, size_t 
 }
 
 void Engine::warmup() {
-    // Skip warmup for MXFP4 models — the warmup forward pass triggers
-    // illegal memory access due to kernel paths that bypass the FP16 cache
-    // and attempt to use raw MXFP4 data as FP16 weights.
+    // Skip warmup for MXFP4 models: the warmup forward pass triggers illegal memory access via
+    // kernel paths that bypass the FP16 cache and treat raw MXFP4 data as FP16 weights.
     bool has_mxfp4_weights = false;
     for (int i = 0; i < model_->config().n_layers && !has_mxfp4_weights; i++) {
         if (model_->layer(i).wq.qtype == QType::MXFP4)
@@ -436,11 +394,9 @@ void Engine::warmup() {
         return;
     }
 
-    // Gemma-4 has outlier-heavy output_norm activations that amplify cuBLAS
-    // algo jitter — warming up with BOS-filled buffers pins an algo that
-    // produces wrong logits under real inputs and drives decode into
-    // backtick/markdown degeneration. IMP_NO_WARMUP=1 was the manual
-    // mitigation; make it automatic for the arch.
+    // Gemma-4 has outlier-heavy output_norm activations that amplify cuBLAS algo jitter: warming
+    // up with BOS-filled buffers pins an algo that produces wrong logits under real inputs and
+    // drives decode into backtick/markdown degeneration.
     if (model_->profile().is_gemma4) {
         IMP_LOG_INFO("Warmup skipped (Gemma-4 algo-jitter protection)");
         return;
@@ -451,12 +407,10 @@ void Engine::warmup() {
     if (warmup_id < 0)
         warmup_id = 1;
 
-    // Split the warmup phase in the VRAM audit. `05_post_warmup` measured
-    // +7458 MiB on the dense config against a named library reserve of 3900,
-    // leaving ~3.5 GiB attributed to nothing — and a single checkpoint around
-    // the whole phase cannot say whether that is the first forward's library
-    // claim, the graph captures, or imp's own lazy workspaces. These three cost
-    // one cudaMemGetInfo each, at init only (AUDIT B41).
+    // Split the warmup phase in the VRAM audit: a single checkpoint around the whole phase
+    // can't say whether unattributed VRAM is the first forward's library claim, the graph
+    // captures, or imp's own lazy workspaces. These three cost one cudaMemGetInfo each, at
+    // init only (AUDIT B41).
     MemAccount::instance().checkpoint("05a_pre_warmup_forward");
     size_t warm_free_before = 0;
     vram_budget_mem_get_info(&warm_free_before, nullptr);
@@ -485,21 +439,18 @@ void Engine::warmup() {
                                              : 0;
     const size_t forward_window = measure_library_forward_window(warm_free_before, imma_planes_in_window);
 
-    // Which library claims WHEN depends on the model's execution path, so the
-    // forward window only ever sees part of the charge: Q8_0 first touches
-    // cuBLAS in the forward and measures ~7.5 GiB, while the NVFP4 cache build
-    // runs CUTLASS two phases earlier and measures ~0 (AUDIT B79). What the
-    // device holds that imp's own allocations cannot account for IS the rest —
-    // B78 established the allocator and the async mempool are both fully named,
-    // and the invariance A1.5 defines the charge by confirms it.
+    // Which library claims WHEN depends on the model's execution path, so the forward window
+    // only sees part of the charge (Q8_0 measures ~7.5 GiB in-forward; NVFP4's CUTLASS claims
+    // two phases earlier and measures ~0, AUDIT B79). What imp's own allocations (B78: allocator
+    // + async mempool fully named) cannot account for IS the rest (invariant A1.5).
     //
     // This reads the per-pool ledger, which is why note() is no longer gated on
     // --mem-report: with an empty ledger the residual is the whole device, and
     // charging from it collapsed the 35B's KV pool 4096 -> 512 tokens (B80).
     //
-    // Take the larger. The window can only see a subset, so a window reading
-    // HIGHER means the residual lost something to a pool still growing during
-    // warmup — keep the bigger number rather than under-charge the plan.
+    // Take the larger: the window can only see a subset, so a window reading HIGHER means the
+    // residual lost something to a pool still growing during warmup. Keep the bigger number
+    // rather than under-charge the plan.
     const size_t whole_init = MemAccount::instance().unattributed_bytes();
     measured_library_reserve_ = (forward_window == SIZE_MAX) ? SIZE_MAX
                                                              : std::max(forward_window, whole_init);
@@ -513,20 +464,17 @@ void Engine::warmup() {
     // Only now is there a number to recommend: everything above decides it, and
     // the warning that names it has to come after, not before (#1746).
     report_library_reserve(measured_library_reserve_, forward_window, whole_init, config_.library_reserve_mb);
-    // Remember it, so the NEXT start on this model charges the measured value
-    // instead of the constant (AUDIT B49). A write failure is a warning, never a
-    // load failure — refusing to serve a model over a cache file would be absurd.
+    // Remember it, so the NEXT start on this model charges the measured value instead of the
+    // constant (AUDIT B49). A write failure is a warning, never a load failure: refusing to
+    // serve a model over a cache file would be absurd.
     if (measured_library_reserve_ != SIZE_MAX && !library_reserve_cache_path_.empty()) {
         if (library_reserve_cache_store(library_reserve_cache_path_, library_reserve_key_,
                                         measured_library_reserve_)) {
-            // "the next start plans with it" is only true if that path
-            // OUTLIVES this process. The supported way to run imp is a
-            // container, where the default location ($XDG_CACHE_HOME or
-            // $HOME/.cache) is ephemeral — so a `docker run --rm` server
-            // re-measures forever and keeps charging the constant. Measured on
-            // Qwen3-14B-Q6_K: with the path mounted the second start plans a
-            // 0 MiB reserve instead of 3900 and hands the pools 639 MiB more.
-            // Say the condition out loud rather than promise the outcome.
+            // "the next start plans with it" is only true if that path OUTLIVES this process. The
+            // supported way to run imp is a container, where the default cache location
+            // ($XDG_CACHE_HOME or $HOME/.cache) is ephemeral, so a `docker run --rm` server
+            // re-measures forever and keeps charging the constant. Say the condition out loud
+            // rather than promise the outcome.
             IMP_LOG_INFO("library reserve: recorded %.0f MiB in %s — the next start on this model "
                          "plans with it IF that path persists (in a container, mount it or set "
                          "vram.library_reserve_cache; otherwise the constant is charged again)",
@@ -541,11 +489,10 @@ void Engine::warmup() {
 
     for (int i = 0; i < kMaxGraphPoolSize; i++) {
         decode_graph_pool_[i].invalidate();
-        // The eager pre-capture warmup step is per-runner state, but what it
-        // exists for (cuBLAS autotuning, lazy workspace init) is per-process
-        // and just ran via the two warmup requests. Skip it so the first REAL
-        // request executes the same captured-graph kernel mix as every later
-        // one — greedy request-order independence (see docs/determinism.md).
+        // The eager pre-capture warmup step is per-runner state, but what it exists for (cuBLAS
+        // autotuning, lazy workspace init) is per-process and already ran via the two warmup
+        // requests. Skip it so the first REAL request matches the captured-graph kernel mix of
+        // every later one (greedy request-order independence, docs/determinism.md).
         decode_graph_pool_[i].mark_process_warm();
     }
     decode_batch_pool_.reset_upload_cache();
@@ -569,21 +516,17 @@ void Engine::warmup() {
             IMP_LOG_ERROR("warmup CUDA error: %s", cudaGetErrorString(e));
     }
     // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
-    // failure on consumer GPUs — the error propagates to cuBLAS otherwise).
+    // failure on consumer GPUs: the error propagates to cuBLAS otherwise).
     cudaGetLastError();
     cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
 
-    // Graph prewarm: capture the per-batch-size decode graph pool BEFORE the
-    // engine goes ready. Continuous batching visits every batch size on the
-    // way up and down, and each never-seen size pays its capture in the first
-    // wave of real traffic (measured: 75 captures across a 4-wave 32-stream
-    // run, wave 1 at 704 tok/s against 953-976 steady). One staggered dummy
-    // batch walks max_batch_size -> 1 so each pool slot captures now. The
-    // last request carries a ~1000-token prompt so max_ctx during every
-    // capture sits in the 1024 pow2 bucket - the growth-only re-capture
-    // trigger (see engine_scheduler.cpp) then stays quiet for real requests
-    // up to that context. Runs before reset_kv_calibration below, so the
-    // synthetic tokens never leave a calibration trace either.
+    // Graph prewarm: capture the per-batch-size decode graph pool BEFORE the engine goes ready.
+    // Continuous batching visits every batch size on the way up and down, and each never-seen
+    // size otherwise pays its capture cost in the first wave of real traffic. One staggered dummy
+    // batch walks max_batch_size -> 1 so each pool slot captures now; the last request carries a
+    // ~1000-token prompt so max_ctx sits in the 1024 pow2 bucket, keeping the growth-only
+    // re-capture trigger (engine_scheduler.cpp) quiet for real requests up to that context. Runs
+    // before reset_kv_calibration below so synthetic tokens leave no calibration trace.
     if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs &&
         config_.max_batch_size > 1) {
         const auto t0 = std::chrono::steady_clock::now();
@@ -594,18 +537,15 @@ void Engine::warmup() {
         for (int i = 0; i < n; i++) {
             auto req = std::make_shared<Request>();
             req->id = next_request_id_++;
-            // The anchor goes FIRST so its long prefill completes before the
-            // short ones start decoding - queued last, the batch peaked at
-            // n-1 because the shortest-budget request finished during the
-            // anchor's prefill (measured: 31/32 captured).
+            // The anchor goes FIRST so its long prefill completes before the short ones start
+            // decoding; queued last, the shortest-budget request would finish during the
+            // anchor's prefill and the batch would never peak at full size.
             const bool is_anchor = (i == 0);
             req->input_tokens.resize(is_anchor ? anchor_len : 16, warmup_id);
-            // Staggered budgets: the batch passes through every size n..1;
-            // the anchor lives longest. The +4 base keeps the shortest
-            // request alive across the chunked-prefill window in which late
-            // requests still prefill while early ones already decode - with
-            // a base of 2 the first request finished before the batch ever
-            // assembled fully and size n never captured.
+            // Staggered budgets: the batch passes through every size n..1, anchor lives longest.
+            // The +4 base keeps the shortest request alive across the chunked-prefill window
+            // where late requests still prefill while early ones already decode; a base of 2 let
+            // the first request finish before the batch assembled fully, so size n never captured.
             req->max_tokens = is_anchor ? n + 8 : i + 4;
             req->temperature = 0.0f;
             req->ignore_eos = true;
@@ -645,20 +585,15 @@ void Engine::warmup() {
                      captured, n, steps, dt, missing.empty() ? "" : ", missing sizes:",
                      missing.c_str());
     }
-    // Drop FP8 KV calibrated_ flags so the first real prefill re-runs absmax
-    // and promotes the per-layer scale via high-water-mark. Warmup uses
-    // synthetic BOS tokens whose K/V absmax is unrepresentative; without this
-    // reset, Llama-3.2-3B with --kv-fp8 degenerated to " France, and, 2008,
-    // 201, 201, …" within 30 tokens. The high-water-mark logic in
-    // executor_kv_write.cu (FP8 path) keeps the scale monotonically
-    // non-decreasing, so warmup's contribution survives if it was already
-    // wider than real prefill (Qwen3 case), and real prefill widens it
-    // further when needed (Llama case).
+    // Drop FP8 KV calibrated_ flags so the first real prefill re-runs absmax and promotes the
+    // per-layer scale via high-water-mark: warmup's synthetic BOS tokens give an unrepresentative
+    // K/V absmax. executor_kv_write.cu's high-water-mark logic (FP8 path) keeps the scale
+    // monotonically non-decreasing, so warmup's contribution survives if already wider than real
+    // prefill, and real prefill widens it further when needed.
     if (executor_)
         executor_->reset_kv_calibration();
-    // The prewarm above ran a slot per batch row; the lazy slab hands the
-    // pages back so serving starts at zero committed slots (measured: 28/28
-    // committed at init_complete without this, 2240 MiB).
+    // The prewarm above ran a slot per batch row; the lazy slab hands the pages back so
+    // serving starts at zero committed slots.
     IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     trim_recurrent_slots_after_warmup_();
     IMP_LOG_INFO("Warmup complete");

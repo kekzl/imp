@@ -1,36 +1,35 @@
 // =============================================================================
-// engine_spec_ngram.cpp — n-gram (prompt-lookup) speculative decoding
+// engine_spec_ngram.cpp - n-gram (prompt-lookup) speculative decoding
 // =============================================================================
 //
 // Drafts come from suffix matches against the request's own prompt+output
-// tokens — no draft model, no MTP head. Two matchers: the suffix index
+// tokens, no draft model, no MTP head. Two matchers: the suffix index
 // (SuffixDraftIndex, speculative.suffix, default) with frequency-voted
 // continuations and adaptive draft length, or the legacy single-most-recent
-// backward scan (ngram_draft). The verify step replays
-// [t0, d1..dK] as a teacher-forced continuation chunk through the standard
-// chunked-prefill forward (KV written in place), applies the tier-aware LM
-// head to every chunk position (executor greedy_argmax_all) and accepts the
-// longest prefix where the model's greedy token equals the draft. Rejected
-// draft KV entries are dropped via KVCacheManager::rollback — safe because
-// draft blocks were appended this step and are never content-hashed (prefix
+// backward scan (ngram_draft). Verify replays [t0, d1..dK] as a
+// teacher-forced continuation chunk through the standard chunked-prefill
+// forward (KV written in place), applies the tier-aware LM head to every
+// chunk position (executor greedy_argmax_all), and accepts the longest
+// prefix where the model's greedy token equals the draft. Rejected draft KV
+// entries are dropped via KVCacheManager::rollback: safe because draft
+// blocks were appended this step and are never content-hashed (prefix
 // hashing only covers prompt prefill blocks).
 //
 // Phase 1 scope (gated in spec_verify_gates_ok_): batch-1, greedy sampling,
-// no penalties / logit_bias / DRY / mirostat, no logprobs, no json/schema
+// no penalties/logit_bias/DRY/mirostat, no logprobs, no json/schema
 // constraints, no think budget, chunked-prefill-capable archs only. The
-// verify loop runs eager — the async conditional graph loop stays off while
+// verify loop runs eager; the async conditional graph loop stays off while
 // speculation is enabled (the host must see every token to draft the next
 // step).
 //
 // Hybrid (SSM/GDN) models (speculative.hybrid): the chunk forward advances
 // recurrent state through rejected draft positions, so the committed
-// per-sequence state slab is copied to scratch before the chunk; a full
-// acceptance keeps the advanced state as-is (it covers exactly the forwarded
-// tokens), a partial acceptance restores the slab and re-forwards the
-// accepted prefix (~one extra chunk forward, amortized over the accepted
-// tokens). Draft sources: the suffix/ngram matcher first; when it has no
-// match and an MTP head is enabled (--mtp-spec-decode / speculative.mtp_k),
-// the pending MTP chain fills the chunk (engine_spec_mtp.cpp).
+// per-sequence state slab is copied to scratch before the chunk. Full
+// acceptance keeps the advanced state as-is; partial acceptance restores
+// the slab and re-forwards the accepted prefix. Draft sources: the
+// suffix/ngram matcher first; when it has no match and an MTP head is
+// enabled (--mtp-spec-decode / speculative.mtp_k), the pending MTP chain
+// fills the chunk (engine_spec_mtp.cpp).
 // =============================================================================
 
 #include "compute/json_constrain.h"
@@ -56,7 +55,7 @@
 namespace imp {
 
 // Burst-hybrid re-arm: a given-up request whose async-loop burst
-// (speculative.burst tokens) has completed gets a short probe window — two
+// (speculative.burst tokens) has completed gets a short probe window: two
 // draft attempts and a fresh acceptance sample. Think models produce their
 // draft-rich region only after the reasoning prose; a sticky give-up would
 // lock them out exactly there.
@@ -94,7 +93,7 @@ int Engine::spec_effective_miss_burst_(const Request& req) const {
 // Whether a bounded async-loop burst may be launched directly from the spec
 // hook (mirrors the launch conditions in step_decode_process_outputs).
 bool Engine::spec_burst_launch_ok_(const Request& req) const {
-    // IMP_SPEC_TRACE: dump every term — the launch decision decides WHICH
+    // IMP_SPEC_TRACE: dump every term. The launch decision decides WHICH
     // kernel mix (loop vs pooled/eager) serves the next tokens, so an
     // asymmetric term here shows up as a greedy flip between requests.
     if (runtime_config_.diagnostics.spec_trace) {
@@ -108,7 +107,7 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
     }
     if (!decode_graph_pool_[0].graph_path_available() || offload_mgr_ || !config_.use_cuda_graphs)
         return false;
-    // A runner that is setup but NOT parked is in flight — blocked. Parked
+    // A runner that is setup but NOT parked is in flight: blocked. Parked
     // for a DIFFERENT request is fine: try_launch_async_graph_loop tears the
     // stale park down and rebuilds (a parked warmup request would otherwise
     // lock every later server request out of the loop entirely).
@@ -124,12 +123,9 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
 
 // Which gate refuses this request, or nullptr when none does.
 //
-// Split out of spec_verify_gates_ok_ because the one-time diagnosis in
-// engine_scheduler.cpp printed eighteen request fields and named none of them
-// as the cause, so "why is speculation off" was a manual re-derivation of this
-// function against a log line. #1538 and #1539 were both filed against that
-// line; answering either took reading this file. The strings are the gate
-// names, stable enough to grep for.
+// Split out of spec_verify_gates_ok_ so "why is speculation off" (#1538,
+// #1539) can be answered by grepping a stable gate-name string instead of
+// re-deriving this function from a log line.
 const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_think) const {
     if (req.spec_ngram_given_up) return "given_up";
     // Greedy sampling only: verify compares argmax tokens.
@@ -137,7 +133,7 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     if (!greedy) return "sampling_not_greedy";
     // rep/freq/presence penalties are replicated in the verify
     // (greedy_argmax_all) for the unbounded window; a bounded repeat_last_n
-    // window slides per chunk row and is not replicated — stay eager there.
+    // window slides per chunk row and is not replicated: stay eager there.
     const bool penalties = req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
                            req.presence_penalty != 0.0f;
     if (penalties && req.repeat_last_n != 0) return "bounded_repeat_window";
@@ -147,15 +143,12 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     if (req.logprobs || req.json_mode || !req.json_schema.empty() ||
         !req.regex_pattern.empty() || !req.grammar.empty() || !req.tool_constraint_tools.empty())
         return "constrained_decode";  // verify replicates no FSM masks (#1002)
-    // Think budget forces tokens INSIDE the think block (loop/host-side) —
-    // verify only outside it; the think interior runs loop bursts, which
-    // handle the budget device-side. Exception: an MTP-bound request already
-    // runs the interior eager (a loop burst would desync the MTP cache for
-    // the rest of the generation, #847), and the eager step owns the budget
-    // forcing - verifies between forcing points are legal and overshoot the
-    // budget by at most k tokens per chunk. Without this the interior pays
-    // the eager tax with no speculation, which on think-heavy chat eats the
-    // MTP win.
+    // Think budget forces tokens INSIDE the think block (loop/host-side);
+    // verify runs only outside it, since think interior loop bursts handle
+    // the budget device-side. Exception: an MTP-bound request runs the
+    // interior eager already (a loop burst would desync the MTP cache for
+    // the rest of the generation, #847), so verifies between forcing points
+    // are legal there and overshoot the budget by at most k tokens/chunk.
     if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) {
         if (!(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id)))
             return "think_budget_in_block";
@@ -170,14 +163,11 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     if (spec_history_too_short_(req)) return "cold_start";  // see speculative.min_history
     // Long-context economics on the DENSE path (#964): the captured chunk
     // verify runs the FA2 tile + paged-KV gather over the ctx TIER (pow2,
-    // floor 4096, clamped to max_seq_len) — its cost follows the tier, not
-    // the live context. Measured 2026-07-11 (Qwen3-8B Q8_0): a verify step
-    // costs ~2.1× a decode step at 2k ctx and ~5.2× at 16k, so with dense
-    // ngram's ~2 tok/verify payout speculation turns net-negative past ~2k
-    // (−62% at 16k). Gate drafting once the request's context crosses the
-    // cap, checked per step. MoE-NVFP4 and GDN-hybrid requests are exempt:
-    // their drafts run much deeper (Coder-30B code-edit 15.9 tok/verify,
-    // MTP chains), which pays for the verify at any measured context.
+    // floor 4096, clamped to max_seq_len), so its cost follows the tier, not
+    // the live context, and dense ngram's shallow payout turns net-negative
+    // past a few k of context. Gate drafting once the request's context
+    // crosses the cap. MoE-NVFP4 and GDN-hybrid requests are exempt: their
+    // drafts run much deeper, which pays for the verify at any context.
     {
         const int cap = runtime_config_.speculative.draft_ctx_cap;
         const bool moe_nvfp4_path = model_->profile().is_moe &&
@@ -192,11 +182,10 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     // per-sequence slab for snapshot/restore.
     if (ssm_state_ && !runtime_config_.speculative.hybrid) return "recurrent_without_hybrid";
     // MoE speculation engages only for native-NVFP4 experts: the batched
-    // verify forward reads the NVFP4 expert cache directly and nets +49-81%
-    // on draft-rich code-edit (Qwen3-Coder-30B-FP4, 2026-07-02) with a -3-7%
-    // draft-poor floor (miss_burst hybrid). GGUF-MoE verify re-dequants every
-    // activated expert per step and measured -22% — those stay on the async
-    // conditional-graph loop (as does everything when speculative.moe=false).
+    // verify forward reads the NVFP4 expert cache directly. GGUF-MoE verify
+    // re-dequants every activated expert per step, which is net-negative, so
+    // those stay on the async conditional-graph loop (as does everything
+    // when speculative.moe=false).
     if (!spec_ngram_model_capable_())
         return "model_not_capable";
     return nullptr;
@@ -213,8 +202,8 @@ bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const 
 bool Engine::spec_ngram_model_capable_uncached_() const {
     if (ssm_state_ && !runtime_config_.speculative.hybrid)
         return false;
-    // GGUF-MoE verify re-dequants every activated expert per step (-22%), so
-    // these stay on the async conditional-graph loop — as does everything when
+    // GGUF-MoE verify re-dequants every activated expert per step, so these
+    // stay on the async conditional-graph loop, as does everything when
     // speculative.moe=false.
     if (model_->profile().is_moe &&
         !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
@@ -248,8 +237,8 @@ TokenRecycleTable& Engine::spec_recycle_table_() {
 
 // Ingest this request's not-yet-seen tokens into the engine-scoped
 // adjacency table: prompt bigrams once (spec_recycle_fed == 0), then the
-// new output tokens (every emit path — verify accepts, loop bursts,
-// plain steps — lands in output_tokens, so one cursor covers them all).
+// new output tokens (every emit path, verify accepts, loop bursts,
+// plain steps, lands in output_tokens, so one cursor covers them all).
 void Engine::spec_recycle_feed_(Request& req) {
     TokenRecycleTable& tr = spec_recycle_table_();
     const auto& out = req.output_tokens;
@@ -278,17 +267,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int pred_end = pred_begin + static_cast<int>(req->prediction_tokens.size());
 
     const int k = std::max(1, scfg.k);
-    // One object, two names: the draft and the history index it came from are
-    // produced together and were two locals only because the old signature
-    // wrote the index through a pointer.
+    // One object, two names: the draft and the history index it came from
+    // are produced together.
     NgramDraft nd;
     auto& [draft, draft_start] = nd;
     // The history matcher is the n-gram source, so it answers to the n-gram
-    // flag alone. The step itself is entered whenever ANY drafter is enabled
-    // (spec_any_drafter_enabled_), which is what lets MTP and token recycling
-    // reach the verify with `speculative.ngram=false` — but they must not drag
-    // the matcher in with them, or turning n-gram off would stop meaning
-    // anything.
+    // flag alone. The step is entered whenever ANY drafter is enabled
+    // (spec_any_drafter_enabled_), letting MTP and token recycling reach the
+    // verify with `speculative.ngram=false` without dragging the matcher in.
     const bool ngram_source_on = spec_ngram_enabled_(*req);
     if (!ngram_source_on) {
         // fall through to the MTP / recycling sources below
@@ -312,12 +298,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         nd = ngram_draft(history, k, std::max(1, scfg.min_match), scfg.max_match);
     }
     const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
-    // #964 stage 2 — depth-aware long-context gate: a verify step costs
-    // ~1.4x a decode step at 512 ctx rising to ~2.6x at 16k, so a 1-token
-    // draft (2 emitted tokens) stops paying past ~14k while depth >= 2
-    // keeps winning. Discard shallow drafts at long context and let the
-    // miss/burst path serve the step at plain decode speed. MoE-NVFP4 and
-    // hybrids are exempt (deep drafts pay for the verify at any context).
+    // #964 stage 2, depth-aware long-context gate: a verify step's cost
+    // rises with context, so a 1-token draft stops paying past a
+    // long-context threshold while depth >= 2 keeps winning. Discard
+    // shallow drafts at long context and let the miss/burst path serve at
+    // plain decode speed. MoE-NVFP4 and hybrids are exempt (deep drafts pay
+    // for the verify at any context).
     if (!draft.empty() && static_cast<int>(draft.size()) < 2 &&
         scfg.shallow_draft_ctx > 0 && req->context_len() > scfg.shallow_draft_ctx &&
         ssm_state_ == nullptr &&
@@ -326,27 +312,22 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
     // MTP fallback: when the matcher has no draft, the pending MTP chain
     // (drafted at the end of the previous verify step / prefill tail) fills
-    // the chunk — the trained head drafts where suffix matching cannot
-    // (78-94% depth-1 accept on Qwen3.6, PR #804). Subject to the economics
-    // guard below: high accept alone does not pay for the eager chunk +
-    // chain lm_head GEMVs + hybrid replay.
+    // the chunk, since the trained head drafts where suffix matching cannot
+    // (#804). Subject to the economics guard below: high accept alone does
+    // not pay for the eager chunk + chain lm_head GEMVs + hybrid replay.
     std::vector<std::vector<int32_t>> mc;  // multi-candidate rows (route a)
     int mc_depth = 0;
     bool draft_from_mtp = false;
     // diagnostics.mtp_tree_probe is measurement-only: the chain is scored
     // against the eager decode path (engine_scheduler.cpp), so it must never
-    // be consumed as a verify draft - a verified chain leaves no eager step
-    // to score it on (measured 2026-08-31: 262 verifies, 0 eager steps, an
-    // empty table).
+    // be consumed as a verify draft. A verified chain leaves no eager step
+    // to score it on.
     if (draft.empty() && mtp_spec_decode_enabled() && !runtime_config_.diagnostics.mtp_tree_probe) {
         // Multi-candidate MTP (speculative.mtp_tree_width > 1): the head's W
-        // chains verify as one grouped chunk — the branch at position 1
+        // chains verify as one grouped chunk; the branch at position 1
         // hedges the chain's weakest link. v1 shares the TR route's
-        // preconditions (the hybrid one falls in Stage 3 of
-        // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md, which is where
-        // every MTP-bearing checkpoint actually lives); the old blanket
-        // "!mtp_spec_decode_enabled()" mc exclusion was the row-consumer
-        // offset, fixed by the winner harvest (mtp_post_verify_update_ row0).
+        // preconditions (the hybrid case is Stage 3 of
+        // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md).
         const bool mtp_pen = req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
                              req->presence_penalty != 0.0f;
         // Hybrids take the route through the grouped recurrent chunk (Stage
@@ -372,15 +353,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
     }
     // Token-Recycling fallback: adjacency draft from the last emitted token.
-    // Fires on unigram context — exactly the fresh reasoning/agentic prose
-    // where the suffix/n-gram sources measured 0 drafts (2026-07-22/23).
-    // Preferred shape is the multi-candidate chunk (route (a), `mc` below):
-    // `recycle_width` candidates verified at once lift the per-step accept
-    // where a single linear chain measured below the verify break-even
-    // (1.55-1.9 emitted/verify vs ~1.9x step cost, 2026-07-23). Falls back
-    // to the linear chain when the decode-attn route (or its gates) is
-    // unavailable. Same shallow-depth economics as above for the linear
-    // form: at long context a depth-1 chain does not pay for the verify.
+    // Fires on unigram context: fresh reasoning/agentic prose where the
+    // suffix/n-gram sources have no drafts. Preferred shape is the
+    // multi-candidate chunk (route (a), `mc` below): `recycle_width`
+    // candidates verified at once lift the per-step accept above a single
+    // linear chain's verify break-even. Falls back to the linear chain when
+    // the decode-attn route (or its gates) is unavailable. Same
+    // shallow-depth economics as above: at long context a depth-1 chain
+    // does not pay for the verify.
     if (runtime_config_.speculative.token_recycling && mc.empty()) {
         spec_recycle_feed_(*req);
         const bool penalties_active = req->repetition_penalty != 1.0f ||
@@ -424,11 +404,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
     const bool mc_on = !mc.empty();
     // #1003 batch-RR economics: at batch > 1 the WHOLE batch waits for the
-    // verify forward (~1.4-2.6x a decode step) while only this request
-    // benefits — a shallow draft is net-negative (measured -10% aggregate at
-    // batch 4 on shallow drafts). Soft-decline below the caller's depth
-    // floor: no miss accounting, no give-up pressure — the request decodes
-    // batched this step and gets its next turn with a hopefully deeper draft.
+    // verify forward while only this request benefits, so a shallow draft
+    // is net-negative there. Soft-decline below the caller's depth floor:
+    // no miss accounting, no give-up pressure, the request decodes batched
+    // this step and gets its next turn with a hopefully deeper draft.
     if (min_draft > 0 && (mc_on ? mc_depth : static_cast<int>(draft.size())) < min_draft)
         return false;
     if (draft.empty() && !mc_on) {
@@ -442,11 +421,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                          req->id, req->spec_consecutive_misses);
         }
         // Skip the eager probe step entirely when a bounded loop burst can
-        // take over right away — the eager path costs ~2x per token and the
-        // burst forwards output.back() itself. Not while MTP is bound to this
-        // request: a stale chain resyncs on the very next eager step (the
-        // per-step chain feed), while a burst desyncs the MTP cache for the
-        // rest of the generation (#847 sync gate).
+        // take over right away: the eager path costs ~2x per token and the
+        // burst forwards output.back() itself. Not while MTP is bound to
+        // this request: a burst desyncs the MTP cache for the rest of the
+        // generation (#847 sync gate).
         if (scfg.miss_burst > 0 && !req->spec_ngram_given_up &&
             !(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req->id)) &&
             spec_burst_launch_ok_(*req) &&
@@ -454,15 +432,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                                         spec_effective_miss_burst_(*req))) {
             return true;  // step handled by the burst launch
         }
-        return false;  // no usable draft — normal decode step
+        return false;  // no usable draft, normal decode step
     }
 
     // Verify chunk. Linear: [t0, d1..dK], positions p0..p0+K. Multi-candidate
-    // (route a): mc.size() candidate groups of (1 + mc_depth) rows each —
+    // (route a): mc.size() candidate groups of (1 + mc_depth) rows each;
     // every candidate re-forwards t0 itself (its KV lands in the candidate's
     // PRIVATE block copy, see the mc staging below), so no row is shared and
     // no token-level mask is needed. K doubles as the stats/economics depth
-    // (winner-depth proxy in mc mode — the verify cost is ~flat in rows).
+    // (winner-depth proxy in mc mode: the verify cost is ~flat in rows).
     const auto verify_t0 = std::chrono::steady_clock::now();
     const int32_t t0 = req->output_tokens.back();
     const int mc_rows_per_cand = mc_on ? (1 + mc_depth) : 0;
@@ -477,7 +455,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             const int64_t cap2 = static_cast<int64_t>(s_cap) * s_cap;
             const int64_t ctx_end = static_cast<int64_t>(p0) + 1 + K;
             if (mc_on) {
-                // The grouped chunk doesn't shrink gracefully — decline the
+                // The grouped chunk doesn't shrink gracefully: decline the
                 // step instead (only reachable at extreme context).
                 const int64_t rows = static_cast<int64_t>(mc.size()) * mc_rows_per_cand;
                 if (rows * ctx_end > cap2) {
@@ -497,20 +475,20 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         mc_on ? static_cast<int>(mc.size()) * mc_rows_per_cand : K + 1;
     // Graph-captured verify (#847): pad the chunk up to its bucket length so
     // one cached graph serves every draft length in the bucket. Pad rows
-    // (copies of t0 at positions after every real row) are causally invisible
-    // to the real rows; their KV entries fall to the same rollback that drops
-    // rejected drafts, and the argmax window below stays [0, chunk_len).
+    // (copies of t0 after every real row) are causally invisible to the real
+    // rows; their KV entries fall to the same rollback that drops rejected
+    // drafts, and the argmax window below stays [0, chunk_len).
     // SWA-aware sizing: the verify chunk stays EAGER (captured verify bakes
-    // full-context gather grids + a static block-table pointer; the SWA table
-    // rewrites every step). Correctness still requires the SWA table below.
-    // #964: dense verify chunks route their attention through the batched-
-    // decode split-K paged kernels (see the route block below). Composes with
-    // capture: the decode kernels pay per-ROW KV traffic, but the per-row
-    // context lens are data — pad rows get ctx_len=1, so the capture bucket
-    // padding (2 real rows -> 9) costs ~nothing in attention while the graph
-    // still swallows the ~200 eager launches per verify step. MoE/hybrid keep
-    // the FA2 chunk path (deep drafts amortize it; the hybrid scan needs the
-    // chunk-forward semantics).
+    // full-context gather grids + a static block-table pointer; the SWA
+    // table rewrites every step). Correctness still requires the SWA table
+    // below.
+    // #964: dense verify chunks route their attention through the
+    // batched-decode split-K paged kernels (see the route block below).
+    // Composes with capture: the decode kernels pay per-ROW KV traffic, but
+    // per-row context lens are data, so pad rows get ctx_len=1 and cost
+    // ~nothing extra while the graph still swallows the eager launch count.
+    // MoE/hybrid keep the FA2 chunk path (deep drafts amortize it; the
+    // hybrid scan needs the chunk-forward semantics).
     // The multi-candidate chunk on a hybrid is the one hybrid case that takes
     // the decode-attention route: its recurrent layers run the grouped
     // geometry (W scan sequences), and its attention layers need the per-row
@@ -529,7 +507,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
 
     // mc: per-candidate PRIVATE blocks for the block indices the candidate
     // rows write (positions p0..p0+mc_depth). They are ordinary appended
-    // table entries beyond blocks_needed — the per-row tables below alias
+    // table entries beyond blocks_needed: the per-row tables below alias
     // them in place of the canonical entries, and the post-accept rollback
     // frees them like any other rejected-draft block.
     const int mc_bp = mc_on ? p0 / kv_bs : 0;
@@ -545,9 +523,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     while (static_cast<int>(kv_manager_->block_table(req->id).size()) < blocks_target) {
         int new_block = kv_manager_->append_block(req->id);
         if (new_block < 0) {
-            // KV exhausted. The old evict_lru fallback freed a LIVE sequence (no
-            // recompute path) → silent corruption. Just roll back the
-            // speculative growth and fall through to the normal decode path.
+            // KV exhausted: roll back the speculative growth and fall
+            // through to the normal decode path (evicting a live sequence
+            // here would silently corrupt it).
             kv_manager_->rollback(req->id, p0);
             spec_stats_.miss_steps++;
             return false;
@@ -569,7 +547,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int n_blocks = static_cast<int>(block_table.size());
     const auto& swa_block_table = kv_manager_->swa_block_table(req->id);
 
-    // Staging capacity follows the REAL table size — the async graph loop
+    // Staging capacity follows the REAL table size: the async graph loop
     // pre-allocates blocks for the whole remaining generation, so the table
     // is usually much larger than this chunk needs. Captured graphs bake the
     // staging pointers, so size for the largest bucket up front (a later
@@ -590,9 +568,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // chunk_len]. mc: candidate c's rows are [t0, cand_c...] at positions
     // p0..p0+len_c; short candidates and the bucket padding fill with t0
     // rows whose argmax is never consulted (their KV writes land in dead
-    // slots — private-block tails past the accepted length, or canonical
+    // slots: private-block tails past the accepted length, or canonical
     // slots past the rollback point). Row ctx lens: real rows attend
-    // p0+i+1 (per-row causality), pads attend 1 token — consumed only on
+    // p0+i+1 (per-row causality), pads attend 1 token, consumed only on
     // the decode-attn route, harmless otherwise.
     const int cap = spec_chunk_cap_;
     int32_t* h_stage = h_spec_stage_.as<int32_t>();
@@ -600,10 +578,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     int32_t* h_positions = h_stage + cap;
     int32_t* h_row_lens = h_stage + 2ull * cap;
     // Pad rows sit at positions AFTER every real row in both shapes: the
-    // rollback drops them. (mc pads used to sit at p0 on the canonical
-    // table, which the winner's block copy had to repair - and the hybrid
-    // mc partial-accept replay re-forwards the chunk AFTER that copy, so a
-    // pad writing canonical p0 would clobber the kept row.)
+    // rollback drops them. A pad writing canonical p0 would clobber the
+    // hybrid mc partial-accept replay, which re-forwards the chunk after
+    // the winner's block copy.
     for (int i = 0; i < chunk_pad; ++i) {
         h_tokens[i] = t0;
         h_positions[i] = p0 + i;
@@ -699,23 +676,23 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
 
     // #964 decode-attention route: present the chunk rows as n same-KV
-    // "sequences" with per-row context lens (p0+1+i) and row-replicated block
-    // tables — causality holds by construction, and run_attention takes the
-    // batched-decode split-K path (quantized-KV direct reads, context split
-    // across CTAs) instead of the small-M prefill FA2 tile + full-context
-    // FP16 KV gather (557 vs ~44 us/layer at 16k, nsys 2026-07-12).
+    // "sequences" with per-row context lens (p0+1+i) and row-replicated
+    // block tables; causality holds by construction, and run_attention
+    // takes the batched-decode split-K path (quantized-KV direct reads,
+    // context split across CTAs) instead of the small-M prefill FA2 tile +
+    // full-context FP16 KV gather.
     if (decode_attn_route) {
         // Row ctx lens were staged with the chunk metadata above (pads and
         // short-candidate tails attend 1 token: their output is never read,
         // and a 1-token walk keeps the per-row KV traffic at real-chunk
-        // cost). Only the row-replicated tables remain — pinned staging,
+        // cost). Only the row-replicated tables remain: pinned staging,
         // one H2D of the used region.
         for (int i = 0; i < chunk_pad; ++i)
             std::copy(block_table.begin(), block_table.end(),
                       h_spec_row_tables_pinned_.as<int32_t>() +
                           static_cast<size_t>(i) * spec_block_table_cap_);
         // mc: alias each candidate's written block indices [mc_bp ..
-        // mc_bp + mc_n_priv) to its private appended blocks — reads of the
+        // mc_bp + mc_n_priv) to its private appended blocks: reads of the
         // committed prefix stay canonical, writes are candidate-isolated.
         if (mc_on) {
             for (int i = 0; i < chunk_len; ++i) {
@@ -737,7 +714,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             state.block_tables = d_spec_row_block_tables_;
             state.max_blocks_per_seq = spec_block_table_cap_;
             // Captured graphs bake the split-K grid from max_context_len at
-            // capture time — bake the tier ceiling so later replays in the
+            // capture time: bake the tier ceiling so later replays in the
             // same tier stay covered (per-row device lens bound the real
             // work; #948/#950 pow2-bucket class).
             if (capture_on)
@@ -754,7 +731,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             return false;
         }
         // Seed each candidate's private partial block with the committed
-        // rows of the canonical one (positions [mc_bp*kv_bs, p0) — t0 is
+        // rows of the canonical one (positions [mc_bp*kv_bs, p0); t0 is
         // forwarded by the candidate itself). A block-aligned p0 has no
         // committed rows in mc_bp; the private block starts fresh.
         if (p0 % kv_bs != 0) {
@@ -771,7 +748,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
 
     // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
-    // slab — the chunk forward advances it through rejected draft positions.
+    // slab, since the chunk forward advances it through rejected draft positions.
     const bool hybrid = ssm_state_ != nullptr;
     if (hybrid) {
         if (!ensure_spec_state_scratch_()) {
@@ -829,7 +806,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         spec_capture_probe_forward_(state, logits_out, stream);
     } else if (capture_on) {
         if (!spec_captured_forward_(state, logits_out, stream)) {
-            // Warmup use, or capture/launch failed (nothing executed) — run
+            // Warmup use, or capture/launch failed (nothing executed): run
             // eagerly. A doomed capture means the capture-mode path itself
             // threw; strip the capture fields so the eager forward takes the
             // plain host-length chunk path (the padded chunk stays valid).
@@ -854,7 +831,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         InferenceState pstate;
         upload_penalties(*req, pstate, stream);
         if (pstate.penalty_tokens == nullptr) {
-            // Upload failed — an unpenalized verify would diverge from the
+            // Upload failed: an unpenalized verify would diverge from the
             // eager path; fall back to the normal step. The chunk forward
             // already ran: restore the committed hybrid state.
             if (hybrid)
@@ -872,7 +849,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // Greedy token for every chunk position, D2H, host compare. With
     // token_recycling the same lm-head pass also harvests each row's top-M
     // logit ids for the adjacency table (the model's own successor
-    // candidates — Token Recycling's feed signal).
+    // candidates, Token Recycling's feed signal).
     const int recycle_m =
         runtime_config_.speculative.token_recycling
             ? std::min({std::max(1, runtime_config_.speculative.recycle_slots),
@@ -898,7 +875,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         check(cudaStreamSynchronize(stream), "verify sync");
     if (!argmax_ok) {
         // No tokens were emitted; leave the request exactly as before the
-        // step (the chunk forward advanced hybrid state — restore it).
+        // step (the chunk forward advanced hybrid state: restore it).
         if (hybrid)
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
                                                ssm_state_->per_seq_bytes(),
@@ -957,7 +934,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                                static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
         // Per-request FSM; must advance before finish_request returns the
         // manager to the pool. (Spec gates exclude json/schema requests, so
-        // this is normally null — kept for parity with the eager path.)
+        // this is normally null; kept for parity with the eager path.)
         if (req->constraints)
             req->constraints->update(tokj);
         if (hard_stop) {
@@ -967,25 +944,23 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (j >= acc_len || tokj != (*acc)[j]) break;  // bonus reached or draft diverged
         matched++;
         // Crossing a think boundary mid-chunk (either direction): stop
-        // extending; the accepted prefix stays. Entering: the budget forcing
-        // lives in the loop/eager path. Leaving: the post-</think> stop/grace
-        // window is the boundary where chunk-argmax noise diverges from the
-        // eager path (empty-content completions in degen_suite) - hand it to
-        // the eager step, which is byte-identical to the pre-MTP behavior.
+        // extending; the accepted prefix stays. Entering: budget forcing
+        // lives in the loop/eager path. Leaving: the post-</think>
+        // stop/grace window is where chunk-argmax noise diverges from the
+        // eager path, so hand it to the eager step, which is byte-identical
+        // to the pre-MTP behavior.
         if (req->think_budget > 0.0f && req->in_think_block != think_at_chunk_start) break;
     }
     kv_manager_->touch(req->id);
 
-    // mc: materialize the winner's KV — copy its private block(s) covering
+    // mc: materialize the winner's KV, copying its private block(s) covering
     // the accepted span [p0, p0+matched] back over the canonical entries.
-    // The rollback below frees the private blocks; a freed block re-used by
-    // work on ANOTHER stream (a concurrent prefill on pf_stream) must not
-    // race the in-flight copy, so sync first — but only when such a stream
-    // can exist. Single-stream steady state (batch=1, no prefill queued —
-    // the CLI/agent case) skips the sync: every later consumer of the pool
-    // enqueues on this same stream, which is ordered after the copy.
-    // (WSL2 measures cudaStreamSynchronize at 1-4 ms — per verify step that
-    // sync alone was a double-digit share of the TR verify cost.)
+    // The rollback below frees the private blocks; a freed block reused by
+    // work on ANOTHER stream (a concurrent prefill) must not race the
+    // in-flight copy, so sync first, but only when such a stream can exist.
+    // Single-stream steady state (batch=1, no prefill queued) skips the
+    // sync: every later consumer of the pool enqueues on this same stream,
+    // ordered after the copy.
     if (mc_on && req->status != RequestStatus::FINISHED) {
         const int mc_best_c = mc_row0 / mc_rows_per_cand;
         int srcs[KVCache::kCopyMaxPairs];
@@ -1003,7 +978,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
 
     // Token-Recycling: feed the model's own top-M successor candidates for
-    // every real chunk row into the adjacency table — rejected rows
+    // every real chunk row into the adjacency table, rejected rows
     // included (the prediction is the model's, valid regardless of
     // acceptance; that breadth is what makes the next draft fire).
     if (recycle_m > 0) {
@@ -1024,7 +999,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
     }
 
-    // MTP bookkeeping runs BEFORE the hybrid re-forward below — it consumes
+    // MTP bookkeeping runs BEFORE the hybrid re-forward below: it consumes
     // this chunk's hidden rows, which the re-forward overwrites.
     if (mtp_spec_decode_enabled())
         mtp_post_verify_update_(*req, emitted, mc_on ? mc_row0 : 0);
@@ -1090,16 +1065,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     kv_manager_->rollback(req->id, p0 + 1 + matched);
 
     // Hybrid, partial acceptance: the in-place state advanced through
-    // rejected draft positions — restore the committed slab and re-advance
-    // it over the accepted prefix ([t0, d1..d_matched] is still staged in
-    // d_spec_tokens_). Full acceptance keeps the advanced state (it covers
-    // exactly the forwarded tokens); finished requests skip (the slot is
-    // released and nothing reads the state again). The replay rewrites the
-    // kept KV rows with identical values.
+    // rejected draft positions, so restore the committed slab and
+    // re-advance it over the accepted prefix ([t0, d1..d_matched] is still
+    // staged in d_spec_tokens_). Full acceptance keeps the advanced state;
+    // finished requests skip (the slot is released). The replay rewrites
+    // the kept KV rows with identical values.
     if (hybrid && matched == 0 && state.spec_snap_slab != nullptr && req->status != RequestStatus::FINISHED) {
-        // Nothing was accepted, so the committed state must be the one after
-        // the chunk's first row — which the scan just wrote into the snapshot
-        // slab. Adopt it: a 151 MiB device copy instead of a full model
+        // Nothing was accepted, so the committed state must be the one
+        // after the chunk's first row, which the scan just wrote into the
+        // snapshot slab. Adopt it: a device copy instead of a full model
         // forward. Everything below is the general path for a partial
         // acceptance that landed further along.
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), state.spec_snap_slab,
@@ -1116,13 +1090,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         bool replayed = false;
         if (capture_on && !spec_capture_doomed_) {
             // Reuse the captured chunk graph rather than forwarding eagerly.
-            // The graph reads its chunk length from device memory and the GDN
-            // scan commits h_state at that row, so the same recording serves a
-            // shorter prefix: keep the padded row count, tell the device the
-            // real one. Eager here cost 25.1 ms for one or two rows against
-            // 17.8 ms for the captured three-row chunk, measured over 300
-            // verifies on Qwen3.8-27B — the difference is launch pacing, not
-            // work.
+            // The graph reads its chunk length from device memory and the
+            // GDN scan commits h_state at that row, so the same recording
+            // serves a shorter prefix: keep the padded row count, tell the
+            // device the real one. Eager here costs more: the difference is
+            // launch pacing, not work.
             const int real_rows = matched + 1;
             if (check(cudaMemcpyAsync(d_spec_chunk_len_, &real_rows, sizeof(int), cudaMemcpyHostToDevice,
                                       stream),
@@ -1150,7 +1122,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
 
     // Acceptance economics: structured-but-mutating content (number tables,
     // counters) produces plenty of suffix matches whose continuations are
-    // always wrong — pure miss counting never triggers there while every
+    // always wrong; pure miss counting never triggers there while every
     // step pays a full verify chunk for 1 emitted token. After a fair
     // sample, an acceptance rate below 15% can't amortize the verify cost;
     // hand the request back to the async loop.
@@ -1168,9 +1140,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         req->pred_rejected += K - matched;
     }
     // MTP economics: an MTP-filled verify must emit enough tokens to beat
-    // the async loop it displaces (eager chunk ≈ 2x a loop step, plus the
+    // the async loop it displaces (eager chunk ~2x a loop step, plus the
     // chain's full-vocab lm_head GEMVs, plus the hybrid partial-accept
-    // replay). Below ~4 emitted/verify the step loses outright — doom MTP
+    // replay). Below ~4 emitted/verify the step loses outright: doom MTP
     // drafting for this request; the suffix matcher and miss bursts carry on.
     if (draft_from_mtp) {
         mtp_active_.econ_verifies++;

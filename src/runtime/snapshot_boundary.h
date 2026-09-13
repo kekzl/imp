@@ -4,21 +4,17 @@
 // hybrid, SWA window on a windowed model): the largest block-aligned prompt
 // position, or nowhere when that position is shorter than `min_tokens`.
 //
-// The snapshot costs every first turn a prefill split at the boundary (two
-// eager chunks of ~1500 launches each instead of one) plus a stream sync
-// between them. Measured 2026-09-08 on Qwen3.8-27B-NVFP4, one stream, a
-// 35-token prompt: server-side TTFT floor 36 ms split against 22 ms unsplit,
-// while the turn-2 saving of a 32-token prefix is under 3 ms of GPU time.
-// A snapshot pays for itself only when the prefix it saves is long.
+// Splitting the prefill at the boundary costs two eager chunks plus a
+// stream sync instead of one. A snapshot pays for itself only when the
+// prefix it saves is long.
 
 namespace imp {
 
-// A restore has to leave at least one prompt token to forward (the model needs
-// logits), so the admission cap is (prompt_tokens - 1) / block_size blocks
-// (Engine::hybrid_prefix_reuse_limit_). A prompt that is itself block-aligned
-// therefore snapshots one block short of its length: saved at the full length
-// the snapshot could never be matched and every aligned prompt got zero reuse
-// (measured 2026-09-09: 512-token prompt, warm cached_tokens 0).
+// A restore has to leave at least one prompt token to forward (the model
+// needs logits), so the admission cap is (prompt_tokens - 1) / block_size
+// blocks (Engine::hybrid_prefix_reuse_limit_). A block-aligned prompt
+// therefore snapshots one block short of its length: at full length the
+// snapshot could never be matched, and every aligned prompt got zero reuse.
 inline int snapshot_boundary(int prompt_tokens, int block_size, int min_tokens) {
     if (block_size <= 0 || prompt_tokens <= 1)
         return 0;

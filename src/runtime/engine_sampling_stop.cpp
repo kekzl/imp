@@ -1,18 +1,6 @@
-// Engine sampling helpers + stop-token detection.
-//
-// fill_sampling_params:    pull per-request sampling config into InferenceState
-// upload_penalties:        copy penalty buffers (repeat/freq/presence/DRY) to device
-// fill_recurrent_state:    SSM/GDN per-request state setup
-// is_stop_token:           single-token stop check (EOS variants)
-// track_think_state:       update <think>...</think> blockcount budget
-// should_stop:             aggregate stop check (EOS, max_tokens, stop_strings)
-//
-// Two related concern clusters colocated because they share the
-// per-request state-passing pattern (Request& + InferenceState&) and
-// run in the decode loop's tail.
-//
-// Extracted from engine.cpp in Phase 4 of the architecture refactor
-// roadmap. This is the final per-subsystem extraction.
+// Engine sampling helpers + stop-token detection: fill_sampling_params
+// (per-request config -> InferenceState), upload_penalties, fill_recurrent_state
+// (SSM/GDN), is_stop_token, track_think_state (<think> budget), should_stop (aggregate EOS/max_tokens/stop_strings).
 
 #include "runtime/engine.h"
 #include "runtime/batch.h"
@@ -38,7 +26,7 @@ bool Engine::is_stop_token(int32_t token) const {
         if (token == stop_id)
             return true;
     }
-    // Banned tokens (e.g. <pad>) should also trigger stop — they indicate
+    // Banned tokens (e.g. <pad>) should also trigger stop: they indicate
     // the model has degenerated and continuing would produce garbage.
     for (int32_t bid : banned_token_ids_) {
         if (token == bid)
@@ -62,14 +50,9 @@ void Engine::track_think_state(Request& req, int32_t token) const {
     }
 
     // Text-based fallback: NVFP4 SafeTensors loaders (Qwen3.6, Qwen3-Coder)
-    // ship <think>/</think> as added_tokens with `special=False`. think_*_id_
-    // stay -1 in that case, and the model emits </think> as a 3-token BPE
-    // sequence ['</', 'think', '>'] which the single-id compare above can
-    // never see. Append the decoded piece to a sliding window and match the
-    // literal string. Without this, a model that has been chat-template-
-    // primed with `<think>\n` (Qwen3.6 add_generation_prompt default) closes
-    // its empty thinking block and the next sampled token (typically im_end)
-    // hits should_stop with in_think_block=false → 0-content completion.
+    // ship <think>/</think> as added_tokens with special=False; think_*_id_
+    // stay -1, and </think> arrives as a 3-token BPE sequence the single-id
+    // compare above can never see. Without this, a chat-template-primed empty think block closes and the next token hits should_stop with in_think_block=false: 0-content completion.
     Tokenizer* ptok = model_ ? model_->tokenizer() : nullptr;
     if (!ptok)
         return;
@@ -97,16 +80,12 @@ bool Engine::should_stop(Request& req, int32_t token) const {
         return false;
     // Inside <think>...</think>: suppress stop tokens so reasoning can complete.
     // The model may generate <|im_end|> during reasoning as part of its internal
-    // monologue — stopping here produces empty content (llama.cpp ignores this).
+    // monologue: stopping here produces empty content (llama.cpp ignores this).
     if (req.in_think_block) {
         // With a think budget the sampler masks stop ids here (stop_mask_active_)
         // and this branch is not reached. Without one, a stop token inside
-        // thinking is an implicit </think>: NVFP4 quants on Qwen3.6 occasionally
-        // skip the explicit close marker and jump straight to <|im_end|>.
-        // Without this, generation freezes inside the suppressed-stop branch
-        // forever (in_think never flips, every EOS is masked). Flipping the
-        // flag here lets the next stop honour normal semantics so the
-        // request can actually finish.
+        // thinking is an implicit </think> (NVFP4 quants on Qwen3.6 skip the
+        // explicit close); flipping the flag lets the next stop finish the request instead of freezing forever with every EOS masked.
         if (is_stop_token(token)) {
             req.in_think_block = false;
             req.think_exit_idx = static_cast<int>(req.output_tokens.size());
@@ -116,14 +95,9 @@ bool Engine::should_stop(Request& req, int32_t token) const {
         return false;
     }
     // After </think>: suppress a too-eager stop ONLY while no real answer
-    // content has been emitted yet. NVFP4 quantization noise on Qwen3.6 lets
-    // the model close an empty thinking block in ~3 tokens and then immediately
-    // emit <|im_end|> to a zero-content completion. But once a genuine answer
-    // token has appeared (content_after_think), honour the model's own stop
-    // instantly — otherwise a complete short answer ("VIOLET-2218", "Paris")
-    // gets padded or repeated until the raw-distance budget elapses. The
-    // budget remains a HARD CAP for the no-content case so generation is still
-    // bounded if the model only ever emits stops.
+    // content has been emitted yet (content_after_think). NVFP4 quantization
+    // noise on Qwen3.6 can close an empty thinking block in ~3 tokens and emit
+    // <|im_end|> to a zero-content completion. Once real content appears, honour the stop instantly; the budget stays a HARD CAP for the no-content case.
     if (req.think_exit_idx >= 0 && is_stop_token(token)) {
         if (think_logic::grace_blocks_stop(req.think_exit_idx,
                                            static_cast<int>(req.output_tokens.size()),
@@ -132,11 +106,9 @@ bool Engine::should_stop(Request& req, int32_t token) const {
     } else if (req.think_exit_idx >= 0 &&
                static_cast<int>(req.output_tokens.size()) > req.think_exit_idx &&
                !token_is_whitespace(token)) {
-        // A non-stop, non-whitespace token after </think> is real answer content
-        // — release the grace so the model's next stop is honoured immediately.
-        // Whitespace/newline tokens the model routinely emits right after the
-        // close must NOT release it, or a stop following that newline yields a
-        // 0-content completion (the post-#798 regression).
+        // A non-stop, non-whitespace token after </think> is real answer
+        // content: release the grace so the next stop is honoured immediately.
+        // Whitespace/newline right after the close must NOT release it, or a stop right after yields a 0-content completion (#798).
         req.content_after_think = true;
     }
     return is_stop_token(token);
@@ -153,7 +125,7 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     state.frequency_penalty = req.frequency_penalty;
     state.presence_penalty = req.presence_penalty;
     state.repeat_last_n = req.repeat_last_n;
-    // Remaining output allowance — the JSON constrainer uses it to force the
+    // Remaining output allowance: the JSON constrainer uses it to force the
     // document closed before max_tokens truncates it mid-structure (#1104).
     state.constrain_remaining_tokens = req.max_tokens - static_cast<int>(req.output_tokens.size());
     state.dry_multiplier = req.dry_multiplier;
@@ -179,15 +151,9 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
         state.n_banned_tokens = static_cast<int>(banned_token_ids_.size());
     }
 
-    // Think budget: force </think> token via logit manipulation when budget exceeded.
-    // Count reasoning tokens (between <think> and </think>) from output history.
-    // The model generates </think> itself so it lands in the KV cache correctly.
-    // Think budget: force </think> via logit manipulation when budget exceeded.
-    // Scan output_tokens directly (no dependency on in_think_block tracking).
-    // Injected <think> prefixes live in the PROMPT — the output then has no
-    // opener, so the recount must start in-think (req.started_in_think) or the
-    // budget never fires (model thinks until max_tokens, content stays empty).
-    // See think_stop_logic.h for the pure recount logic.
+    // Force </think> via logit manipulation when the budget is exceeded: the
+    // model generates it itself so it lands in the KV cache correctly. Scans
+    // output_tokens directly; injected <think> prefixes need started_in_think as the recount seed (think_stop_logic.h has the pure logic).
     state.force_token = -1;
     if (req.harmony_force_idx >= 0) {
         // Mid-opener: keep forcing the Harmony final-channel sequence until it
@@ -211,10 +177,9 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
         }
     }
 
-    // Sampler-side stop mask (think_logic::stop_mask_active): on the steps
+    // Sampler-side stop mask (think_logic::stop_mask_active): on steps where
     // should_stop would suppress a stop token, take it out of the logits
-    // instead, so it never enters the context. A forced token is the whole
-    // distribution already.
+    // instead, so it never enters the context. A forced token is the whole distribution already.
     if (state.force_token < 0 && stop_mask_.n() > 0 && stop_mask_active(req, think_end_id_)) {
         state.banned_tokens = stop_mask_.ids.data();
         state.n_banned_tokens = stop_mask_.n();
@@ -364,11 +329,9 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
         state.ssm_state = ssm_state_.get();
         state.ssm_seq_id = slot;
         if (reset) {
-            // Prefix-cache hit with a matching recurrent snapshot: restore
-            // the state at exactly req.cached_tokens instead of zeroing —
-            // prefill then continues from the snapshot boundary. All snapshot
-            // copies run on the prefill stream, so save/restore/recycle
-            // ordering is the stream order.
+            // Prefix-cache hit with a matching recurrent snapshot: restore the
+            // state at exactly req.cached_tokens instead of zeroing, so prefill
+            // continues from the snapshot boundary. All snapshot copies run on the prefill stream, so save/restore/recycle ordering is the stream order.
             if (req.recurrent_restore && req.recurrent_restore->data &&
                 recurrent_snapshots_ &&
                 recurrent_snapshots_->entry_bytes() == ssm_state_->per_seq_bytes()) {
@@ -388,25 +351,20 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
 }
 
 // ─── Recurrent-state snapshots (hybrid prefix caching) ──────────────────
-//
 // Dense models reuse prefix KV at block granularity; recurrent (SSM/GDN)
-// state is cumulative, so prefill can only be skipped up to a position where
-// the exact state was snapshotted. The engine saves one snapshot per prefill
-// at the largest block-aligned prompt position (step_prefill_one ends a chunk
-// there), keyed by the chained KV block hash. On admission the scheduler asks
-// hybrid_prefix_reuse_limit_ for the longest restorable prefix and caps KV
-// block reuse to it — blocks past the snapshot are freshly allocated, so the
-// continuation prefill never re-writes blocks shared with other sequences.
+// state is cumulative, so prefill can only skip up to a snapshotted position.
+// One snapshot is saved per prefill at the largest block-aligned position
+// (step_prefill_one), keyed by the chained KV block hash; the scheduler caps KV block reuse to the longest restorable prefix so continuation prefill never rewrites blocks shared with other sequences.
 
 int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     req.recurrent_restore.reset();
     if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
         return 0;
-    // Restoring means starting prefill at offset > 0 — a chunked continuation.
+    // Restoring means starting prefill at offset > 0: a chunked continuation.
     if (!supports_chunked_prefill_())
         return 0;
     // Vision prompts: image content is not represented in the token ids the
-    // hash covers — never match snapshots across them.
+    // hash covers, so never match snapshots across them.
     if (req.vision_emb || req.image || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -453,10 +411,9 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
         return;
     const auto t0 = std::chrono::steady_clock::now();
     if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream)) {
-        // The copy must complete before anything else mutates the slot. Later
-        // prefill chunks run on this same stream (ordered); the first DECODE
-        // step may run on a different stream (green contexts), so make the
-        // last-chunk save visible before returning. One sync per prefill.
+        // The copy must complete before anything else mutates the slot: later
+        // prefill chunks are ordered on this stream, but the first DECODE step
+        // may run on a different stream (green contexts). One sync per prefill.
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         // The wall time sits inside the TTFT (between the prefill chunks):
         // the D2D save plus everything queued ahead of it on the stream.
@@ -468,17 +425,15 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
 }
 
 // ─── SWA window snapshots (prefix caching under SWA sizing) ─────────────
-//
 // Same admission/save pattern as the hybrid pair above, but the restorable
-// state is the packed windowed-layer KV (the trailing window at the reuse
-// boundary) instead of a recurrent slab. Hybrid models are excluded from
-// SWA sizing, so at most one of the two snapshot stores is live.
+// state is the packed windowed-layer KV (trailing window at the reuse
+// boundary) instead of a recurrent slab. Hybrid models are excluded from SWA sizing, so at most one of the two snapshot stores is live.
 
 int Engine::swa_prefix_reuse_limit_(Request& req) {
     req.swa_restore.reset();
     if (!swa_snapshots_ || !swa_snapshots_->enabled())
         return 0;
-    // Restoring means starting prefill at offset > 0 — a chunked continuation.
+    // Restoring means starting prefill at offset > 0: a chunked continuation.
     if (!supports_chunked_prefill_())
         return 0;
     if (req.vision_emb || req.image || vision_.has_input())
@@ -519,24 +474,17 @@ void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStre
                                   /*hard_sync=*/false);
 }
 
-// Core save: snapshot the seq's live window at the block-floor of `tokens`.
-// Called at the prefill snapshot boundary (tokens = the prompt) and at
-// request finish (tokens = prompt + generated-minus-final, the same span
-// finish_request_release_ registers block hashes for) — the finish save is
-// what lets the NEXT agent turn reuse the whole previous transcript instead
-// of only up to the last prefill end.
+// Core save: snapshots the seq's live window at the block-floor of `tokens`.
+// Called at the prefill snapshot boundary (tokens = prompt) and at request
+// finish (prompt + generated-minus-final, same span finish_request_release_ uses): the finish save lets the NEXT agent turn reuse the whole transcript.
 void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
                                            cudaStream_t stream, bool hard_sync) {
     if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_)
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // One block short of the length, not the plain block floor: the restore
-    // caps at (total - 1) / bs blocks (swa_prefix_reuse_limit_, a restore has
-    // to leave a token to forward) AND requires entry->n_tokens == b * bs, so
-    // a snapshot saved at the full aligned length can never be matched. That
-    // is the same defect the hybrid path had (snapshot_boundary.h, measured
-    // 2026-09-09: 512-token prompt, warm cached_tokens 0); only aligned
-    // lengths change, and for those the old value was unusable.
+    // caps at (total-1)/bs blocks (a restore must leave a token to forward)
+    // AND requires entry->n_tokens == b*bs, so a snapshot at the full aligned length could never match (same defect the hybrid path had, snapshot_boundary.h).
     const int snap_end = snapshot_boundary(static_cast<int>(tokens.size()), bs, /*min_tokens=*/0);
     if (snap_end <= 0)
         return;
@@ -552,27 +500,20 @@ void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> 
         return;  // read-relevant window not fully resident
     if (swa_snapshots_->save(key, snap_end, swa_snap_slab_, stream)) {
         const auto t1 = std::chrono::steady_clock::now();
-        // Sync policy (measured 2026-07-24: the prefill-boundary sync waited
-        // ~50 ms on in-flight prefill compute and was the entire warm-TTFT
-        // cost of the feature; enqueue is ~0.1 ms):
-        //  - prefill-boundary save (hard_sync=false): NO sync needed. SWA
-        //    blocks are private to this sequence; the only later writers are
-        //    this request's own later chunks (same stream, ordered) and its
-        //    decode steps — which start only after the host read the first
-        //    sampled token via a D2H on this same stream, enqueued after the
-        //    pack. Stream order + host causality make the pack complete
-        //    before any writer can touch the window. Store-buffer recycling
-        //    is stream-ordered too (all snapshot copies ride pf_stream).
+        // Sync policy:
+        //  - prefill-boundary save (hard_sync=false): NO sync needed. SWA blocks
+        //    are private to this sequence; later writers (this request's own
+        //    chunks/decode) are stream-ordered or gated by host causality (the
+        //    host reads the first sampled token via a D2H enqueued after the pack).
         //  - finish save (hard_sync=true): free_sequence recycles the window
-        //    blocks immediately after we return; a third request already in
-        //    decode can grab and write them on ANOTHER stream with no
-        //    ordering against the pack. Sync — measured ~1 ms (idle stream).
+        //    blocks right after return, and another request already in decode
+        //    can write them on ANOTHER stream with no ordering against the pack, so this needs a sync.
         if (hard_sync)
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         const auto t2 = std::chrono::steady_clock::now();
-        // Permanent telemetry (ms/verify precedent): one line per save —
-        // rare (<= 2 per request) and the only way to attribute warm-TTFT
-        // cost between the enqueue half and the sync half.
+        // Permanent telemetry (ms/verify precedent): one line per save, rare
+        // (<= 2 per request) and the only way to attribute warm-TTFT cost
+        // between the enqueue half and the sync half.
         IMP_LOG_INFO("SwaSnapshot: saved %d-token window for seq %d (%d/%d slots, "
                      "enqueue %.2f ms + sync %.2f ms)",
                      snap_end, seq_id, swa_snapshots_->size(), swa_snapshots_->capacity(),

@@ -1,13 +1,6 @@
-// Engine init phase: weight upload to VRAM.
-// Drives Model::upload_weights_gpu (which in turn calls upload_weight +
-// upload_expert_weights from src/model/weight_upload.cu and triggers
-// pre-dequant via src/exec/executor_pre_dequant.cu's pre_dequant_weights()
-// orchestrator). Also reserves the L2 persisting cache, tunes the default
-// cudaMallocAsync pool, computes the expert-upload VRAM reserve, and wires
-// up StreamingLLM / host-offload guards before kv-cache init runs.
-//
-// Extracted from engine.cpp in Phase 4 of the architecture refactor
-// roadmap. Method remains Engine::* with declaration in engine.h.
+// Engine init phase: weight upload to VRAM via Model::upload_weights_gpu
+// (src/model/weight_upload.cu, pre-dequant via executor_pre_dequant.cu). Also
+// reserves L2 cache, tunes cudaMallocAsync, sizes the expert-upload VRAM reserve, wires StreamingLLM / host-offload guards.
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
@@ -25,11 +18,9 @@
 namespace imp {
 
 namespace {
-// Bytes of model on disk, for the one comparison that can tell a weight upload
-// from a card someone else is on. A file is its own size; a checkpoint
-// directory is the sum of its weight shards (config/tokenizer JSON is noise at
-// this scale). 0 = could not tell, which reads as "no reference to check
-// against" everywhere below.
+// Bytes of model on disk, the one comparison that can tell a weight upload
+// from a card someone else is on. A checkpoint directory sums its weight
+// shards (config/tokenizer JSON is noise); 0 = could not tell.
 size_t model_source_bytes(const std::string& path) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -60,10 +51,8 @@ bool Engine::init_weights() {
     executor_ = std::make_unique<GraphExecutor>();
     executor_->set_vram_allocator(&vram_alloc_);
     // Fill the dispatch snapshot HERE, not earlier: init_resolve_* still mutates
-    // runtime_config_ (deterministic_gemm, kv dtype policy, fp8 prefill, quant
-    // flags) and those run before init_weights(). Filling before them would hand
-    // exec/ pre-resolution values, which is exactly the class of bug that has no
-    // symptom other than the wrong kernel running.
+    // runtime_config_ (deterministic_gemm, kv dtype, fp8 prefill, quant flags)
+    // before this runs; filling earlier hands exec/ pre-resolution values, the wrong kernel running with no other symptom.
     dispatch_policy_.kv_cache = runtime_config_.kv_cache;
     dispatch_policy_.attention = runtime_config_.attention;
     dispatch_policy_.moe = runtime_config_.moe;
@@ -97,10 +86,9 @@ bool Engine::init_weights() {
         }
 
         if (config_.streaming_kv_enabled) {
-            // Streaming is only safe for the FP16 GQA decode kernel — the
-            // quantized variants don't yet skip -1 sentinels in their block
-            // tables. Refuse to enable streaming with non-FP16 KV caches so
-            // we never call evict_middle_blocks for an unsupported path.
+            // Streaming is only safe for the FP16 GQA decode kernel: quantized
+            // variants don't yet skip -1 sentinels in their block tables. Refuse
+            // non-FP16 KV caches so evict_middle_blocks never runs an unsupported path.
             if (config_.kv_cache_dtype != QType::F16) {
                 IMP_LOG_WARN(
                     "StreamingLLM smart KV cache requires FP16 KV cache "
@@ -115,10 +103,9 @@ bool Engine::init_weights() {
                 if (n_sinks > 0 && win > 0) {
                     IMP_LOG_INFO("StreamingLLM smart KV cache enabled: %d sinks + %d-token window", n_sinks,
                                  win);
-                    // Block-table contents change every step once eviction
-                    // begins; a CUDA graph captured against an old table
-                    // would replay stale pointers. Re-capturing per step
-                    // negates the graph's win, so disable graphs entirely.
+                    // Block-table contents change every step once eviction begins;
+                    // a captured graph would replay stale pointers, and re-capturing
+                    // per step negates the graph's win, so disable graphs entirely.
                     demote_graphs_(GraphDemotionReason::StreamingKvConfigured);
                 } else {
                     IMP_LOG_WARN(
@@ -131,13 +118,9 @@ bool Engine::init_weights() {
         }
     }
 
-    // Reserve L2 persisting cache for decode GEMV. cudaLimitPersistingL2CacheSize
-    // is a per-primary-context device limit that survives Engine teardown, so a
-    // previously-loaded model in this process leaves its reservation (and any
-    // persisting cache lines) behind. Reset the persisting lines first so this
-    // model starts from a clean L2 persistence state — otherwise the next
-    // per-forward access-policy-window set can return cudaErrorInvalidValue and
-    // poison the stream (cross-model GDN→Gemma-4 garbage repro).
+    // cudaLimitPersistingL2CacheSize is a per-primary-context device limit that
+    // survives Engine teardown, so a previous model's reservation persists.
+    // Reset it first, or the next access-policy-window set can return cudaErrorInvalidValue and poison the stream.
     {
         cudaDeviceProp prop{};
         cudaGetDeviceProperties(&prop, 0);
@@ -152,13 +135,9 @@ bool Engine::init_weights() {
         }
     }
 
-    // Tune the default cudaMallocAsync pool so it retains freed memory instead
-    // of returning it to the driver. Many paths (prefill metadata, MoE scratch,
-    // spec decoder block tables, vision staging) use cudaMallocAsync with the
-    // default pool; the default threshold is 0, which calls cuMemUnmap on every
-    // free. Setting UINT64_MAX keeps allocations for re-use — the KV cache and
-    // workspaces own their memory via VRAMAllocator/plain cudaMalloc, so the
-    // default-pool footprint stays small.
+    // Tunes the default cudaMallocAsync pool to retain freed memory instead of
+    // calling cuMemUnmap on every free (default threshold 0): many paths (prefill
+    // metadata, MoE scratch, spec block tables, vision staging) use this pool; KV cache and workspaces own their memory separately (VRAMAllocator/cudaMalloc).
     {
         cudaMemPool_t default_pool = nullptr;
         int dev = 0;
@@ -203,12 +182,9 @@ bool Engine::init_weights() {
             for (int i = 0; i < mcfg.n_layers; i++)
                 if (model_->layer(i).ssm_in.data != nullptr)
                     n_ssm++;
-            // memory/ssm_state_size.h, the same header SSMState::init allocates
-            // from. This was the THIRD copy of the formula: conv_kernel-1 taps,
-            // no 256-byte alignment and no reserved verify slots, so the
-            // expert-offload decision was taken against a state pool smaller
-            // than the one that gets allocated - under-charging in the direction
-            // that oversubscribes the card (MEMORY.md D14/D15).
+            // Uses memory/ssm_state_size.h, the same header SSMState::init reads:
+            // an inline formula here undercounted (missing 256-byte alignment and
+            // verify slots), under-charging in the direction that oversubscribes the card (MEMORY.md D14/D15).
             const int n_heads = mcfg.ssm_dt_rank;
             const SsmStateGeometry geom{n_ssm,
                                         mcfg.ssm_conv_channels(),
@@ -266,25 +242,18 @@ bool Engine::init_weights() {
 
     size_t free_after = 0, total_after = 0;
     cudaMemGetInfo(&free_after, &total_after);
-    // A free-VRAM delta is not a weight size, and this line used to call it one.
-    // The two come apart exactly where it matters: on WSL2 the driver reports
-    // the whole card as free until a process allocates, so a server started
-    // beside a neighbour sees an empty card here and only learns otherwise
-    // THROUGH its own upload. Measured on this box, same 3263 MiB checkpoint:
-    // 3264 MiB consumed on an idle card, 8446 MiB beside a 23.4 GiB neighbour —
-    // and the second one was printed as "weights ~8446 MiB" (MEMORY.md B8).
+    // A free-VRAM delta is not a weight size: on WSL2 the driver reports the
+    // whole card as free until a process allocates, so a server started beside
+    // a neighbour only learns of it THROUGH its own upload (MEMORY.md B8).
     const size_t upload_consumed = free_before - free_after;
     const size_t on_disk = model_source_bytes(model_->source_path());
     IMP_LOG_INFO(
         "GPU memory after weight upload: %zu MiB free / %zu MiB total (upload consumed "
         "%zu MiB of device free)",
         free_after / (1024UL * 1024), total_after / (1024UL * 1024), upload_consumed / (1024UL * 1024));
-    // One-sided on purpose. Consuming LESS than the checkpoint is ordinary —
-    // host-resident experts, dropped sources — but consuming a quarter more
-    // than the file holds cannot be weights, and this is the first and only
-    // moment the card's real occupancy is observable. Everything sized after
-    // this point (KV pool, decode caches) reads the same shrunken residual and
-    // the load still reports success, so the operator has to hear it here.
+    // One-sided on purpose: consuming less than the checkpoint is ordinary
+    // (host-resident experts, dropped sources), but consuming a quarter more
+    // cannot be weights, and this is the only moment occupancy is observable.
     if (upload_exceeds_checkpoint(upload_consumed, on_disk)) {
         IMP_LOG_WARN(
             "Weight upload consumed %zu MiB of device free VRAM for a %zu MiB checkpoint. The "
@@ -296,27 +265,11 @@ bool Engine::init_weights() {
             upload_consumed / (1024UL * 1024), on_disk / (1024UL * 1024));
     }
 
-    // The one config value that means "no graphs", applied before anything that
-    // could skip it. This check used to sit inside the MoE block below, so it
-    // was only evaluated for models with experts and not gpt-oss: on every
-    // dense model runtime.cuda_graphs="never" was read, stored, and then never
-    // looked at. Silently: the resolved-dispatch line still printed graphs=1,
-    // which reads as a decision rather than an ignored request. Measured
-    // 2026-08-20 on Qwen3.8-27B-NVFP4 (GDN, dense FFN, n_experts=0): with
-    // "never" set, graphs=1 and a capture happened.
-    //
-    // That made the escape hatch inoperative for exactly the models it was
-    // written for: engine_kv_cache_init.cpp calls it "the way out" for the
-    // Mamba2/SSM demotion it removed, and SSM/GDN models have no experts.
-    //
-    // It runs first so an explicit "never" is also the reason that gets
-    // recorded when another demotion would apply too; demote_graphs_ keeps the
-    // first reason, and the one the user asked for is the informative one.
-    //
-    // The same key silently accepted anything (AUDIT.md G1: `=off` parsed fine,
-    // changed nothing, and produced a byte-identical A/B that read as a clean
-    // refutation). An unknown value now warns instead of resolving to "auto"
-    // without a word.
+    // runtime.cuda_graphs=="never" is checked HERE, unconditionally, not nested
+    // in the MoE block below: SSM/GDN models have no experts, so nesting it there
+    // silently ignored an explicit "never" for exactly those models.
+    // Runs first so its reason wins in demote_graphs_ (keeps the first reason).
+    // Unknown values now warn instead of silently resolving to "auto" (AUDIT.md G1).
     {
         const std::string& g = runtime_config_.runtime.cuda_graphs;
         if (g == "never") {
@@ -330,19 +283,15 @@ bool Engine::init_weights() {
     }
 
     // Check for host-resident expert weights.
-    // gpt-oss is exempt: its MXFP4 experts are intentionally kept host-resident
-    // through upload (weight_upload's carve-out) and converted to on-device
-    // NVFP4 + CUTLASS-grouped at pre_dequant. They are NOT host-offloaded at
-    // decode, so treating them as on-host here would wrongly enable the LRU
-    // host-offload path (reading the post-convert device pointers as host
-    // MXFP4 → garbage) and disable CUDA graphs.
+    // gpt-oss is exempt: its MXFP4 experts are kept host-resident through
+    // upload but converted to on-device NVFP4 + CUTLASS-grouped at pre_dequant,
+    // not host-offloaded at decode; treating them as on-host would read post-convert device pointers as host MXFP4 (garbage) and wrongly disable CUDA graphs.
     if (mcfg.n_experts > 0 && !model_->profile().is_gpt_oss) {
         for (int i = 0; i < mcfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             // Packed-tensor path (most MoE archs) OR per-expert 2D views
-            // (DeepSeek-V2 SafeTensors builds no expert_*_packed — only
-            // expert_w_up[e]). Either being host-resident means the decode
-            // MoE uses the D2H-sync host path, which is NOT graph-capturable.
+            // (DeepSeek-V2 SafeTensors: only expert_w_up[e], no expert_*_packed).
+            // Either being host-resident means the decode MoE uses the D2H-sync host path, which is NOT graph-capturable.
             bool packed_host = L.expert_up_packed.data && !L.expert_up_packed.on_device;
             bool view_host = !L.expert_w_up.empty() && L.expert_w_up[0].data &&
                              !L.expert_w_up[0].on_device;
@@ -352,20 +301,10 @@ bool Engine::init_weights() {
             }
         }
         if (experts_on_host_ && config_.use_cuda_graphs) {
-            // The opt-in `moe.allow_graphs_under_offload` flag skips this
-            // guard. It does NOT currently buy captured decode, and the old
-            // wording here ("correctness depends on prefetch coverage")
-            // oversold it: capture never gets far enough for that to be the
-            // question. Every MoE path that serves host-resident experts reads
-            // routing on the host — the serial fallback and, since #1370, the
-            // slot-pool decode path — and `moe_host_args_capture_guard` throws
-            // unconditionally under capture. Measured 2026-08-11: three capture
-            // attempts, three aborts, per-step decode throughout.
-            //
-            // The flag is kept because it is the escape hatch the day that
-            // changes: making this capturable means resolving routing AND
-            // expert residency device-side, and residency needs a host-issued
-            // H2D on a miss. See docs/roadmap.md.
+            // `moe.allow_graphs_under_offload` skips this guard but buys nothing:
+            // every MoE path serving host-resident experts reads routing on the
+            // host, and moe_host_args_capture_guard throws unconditionally under
+            // capture. Kept as the escape hatch for the day routing + residency resolve device-side (docs/roadmap.md).
             if (runtime_config_.moe.allow_graphs_under_offload) {
                 IMP_LOG_WARN(
                     "moe.allow_graphs_under_offload=true: the graphs-off guard is skipped, but "
@@ -382,22 +321,14 @@ bool Engine::init_weights() {
                 // does not deliver captured decode (see the branch above).
             }
         }
-        // MoE decode fast path is fully device-side (no D2H memcpy) — graph-safe.
+        // MoE decode fast path is fully device-side (no D2H memcpy): graph-safe.
         // Only MoE prefill paths use D2H sync for expert_offsets, but prefill is
         // never captured in CUDA graphs.
     }
 
-    // The mandatory native-NVFP4 decode caches used to be protected by a
-    // physical balloon here: a cudaMalloc taken right after the upload purely so
-    // every later live-free reader saw fewer bytes, released again before the
-    // cache build. It is gone (AUDIT B61/B62). Its premise expired when A7 step
-    // 6.4 moved the cache build BEFORE the KV pool — the comment still claimed
-    // the caches were built last — and measured across five configs it bound on
-    // exactly one, where it cost 5x KV capacity (16 vs 87 blocks) to buy coverage
-    // whose absence changed neither throughput nor correctness. The guarantee it
-    // provided now comes from the plan instead: vram_budget floors phase 3 at the
-    // measured demand (mandatory_sf_bytes / mandatory_moe_bytes), which is what
-    // I4 asks for — capacity decided up front, not hidden from a live query.
+    // Capacity for the mandatory native-NVFP4 decode caches comes from the plan,
+    // not a live query: vram_budget floors phase 3 at the measured demand
+    // (mandatory_sf_bytes / mandatory_moe_bytes), per invariant I4.
 
     // Phase 2: allocate GPU workspace
     (void)executor_->allocate_workspaces(experts_on_host_);
@@ -411,16 +342,10 @@ bool Engine::init_weights() {
         }
     }
 
-    // Every phase that reads the checkpoint has run. The loaders faulted the
-    // whole weight file in (MAP_POPULATE + MADV_WILLNEED) and nothing dropped
-    // it again, so a serving process held the file resident for its whole life:
-    // measured 18.48 GiB of file-backed RSS out of 21.53 GiB total on
-    // Qwen3.8-27B-NVFP4-vllm, against 3.2 GiB in `docker stats`, which reports
-    // the cgroup and not this. It cost another session two OOM-killed
-    // background jobs.
-    //
-    // Pages only, not the mapping: host-resident experts and offloaded layers
-    // still point into it, and they refault from the page cache.
+    // Every phase that reads the checkpoint has run: release the pages the
+    // loaders faulted in (MAP_POPULATE + MADV_WILLNEED), since nothing else
+    // drops them. `docker stats` reports the cgroup, not this host-resident RSS.
+    // Pages only, not the mapping: host-resident experts and offloaded layers still point into it and refault from the page cache.
     const size_t dropped = model_->release_weight_pages();
     if (dropped > 0)
         IMP_LOG_INFO(

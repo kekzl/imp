@@ -1,22 +1,15 @@
-// =============================================================================
-// engine_spec_stats.cpp - what speculation counted, and per which drafter
-// =============================================================================
+// engine_spec_stats.cpp: what speculation counted, and per which drafter.
 //
-// Split out of engine_spec_ngram.cpp, which sits at the file-size hard-review
-// ceiling: tallying is not what makes that file long, and the per-source split
-// added here would have pushed it over.
-//
-// The counters exist because a speculative-decoding test passes whether or not
-// a single token was drafted (#1321): the n-gram matcher only fires on
-// repetitive context, so on ordinary prompts the engine logs drafted=0 for
-// every request while the test compares the non-speculative path against
-// itself. The per-source split exists for the same reason one level down - the
-// matcher, the prompt prediction, token recycling and the trained MTP head all
-// fill the SAME verify chunk, so an aggregate acceptance rate says nothing
-// about the head that costs 0.79 GiB of VRAM.
+// The counters exist because a speculative-decoding test passes whether or
+// not a single token was drafted (#1321): the n-gram matcher only fires on
+// repetitive context, so ordinary prompts log drafted=0 while the test
+// compares the non-speculative path against itself. The per-source split
+// exists one level down for the same reason: the matcher, prompt prediction,
+// token recycling and the trained MTP head all fill the SAME verify chunk,
+// so an aggregate acceptance rate says nothing about the head that costs
+// 0.79 GiB of VRAM.
 //
 // Exported as imp_spec_mtp_* / imp_spec_ngram_* on /metrics (docs/API.md).
-// =============================================================================
 
 #include "core/logging.h"
 #include "runtime/engine.h"
@@ -25,14 +18,9 @@
 namespace imp {
 
 // One verify step's tally, aggregate and per source. Split out of
-// step_spec_verify_ because that function sits on the file-size allowlist as a
-// ceiling, not an exemption: counting is not what makes it long.
-//
-// The per-source half is what prices the MTP head. The n-gram/suffix matcher,
-// the prompt prediction and token recycling fill the same verify chunk and land
-// in the same aggregate, so "drafted 4000, accepted 2600" says nothing about
-// the 0.79 GiB the head costs. `from_mtp` is what step_spec_verify_ actually
-// used to fill the chunk, not what was configured.
+// step_spec_verify_ (file-size allowlist ceiling, not an exemption: counting
+// isn't what makes it long). `from_mtp` reflects what step_spec_verify_
+// actually used to fill the chunk, not what was configured.
 void Engine::spec_stats_record_(bool from_mtp, long long drafted, long long accepted,
                                 long long emitted, double wall_ms) noexcept {
     spec_stats_.verify_steps++;

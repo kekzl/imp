@@ -5,21 +5,20 @@
 
 namespace imp {
 
-// Memory sync domains separate prefill and decode so concurrent operations
-// on different domains don't need to honor implicit memory ordering. Explicit
-// event/stream waits still work. Reduces cross-stream fence overhead on
-// sm_90+ when prefill and decode overlap under a green context split.
-// CUDA 13.2: cudaLaunchMemSyncDomainRemote is the non-default domain.
+// Memory sync domains separate prefill and decode so operations on
+// different domains skip implicit ordering; explicit event/stream waits
+// still work. Reduces cross-stream fences on sm_90+ overlap. CUDA 13.2:
+// cudaLaunchMemSyncDomainRemote is the non-default domain.
 static constexpr cudaLaunchMemSyncDomain kPrefillSyncDomain = cudaLaunchMemSyncDomainDefault;
 static constexpr cudaLaunchMemSyncDomain kDecodeSyncDomain = cudaLaunchMemSyncDomainRemote;
 
-// Apply stream attributes (sync domain) best-effort. Failures are ignored —
+// Apply stream attributes (sync domain) best-effort. Failures are ignored:
 // the feature requires CUDA 12.2+ and falls back silently on older drivers.
 static void apply_stream_sync_domain(cudaStream_t stream, cudaLaunchMemSyncDomain domain) {
     cudaStreamAttrValue v = {};
     v.memSyncDomain = domain;
     cudaStreamSetAttribute(stream, cudaStreamAttributeMemSyncDomain, &v);
-    // Clear any error — this attribute is advisory.
+    // Clear any error: this attribute is advisory.
     cudaGetLastError();
 }
 
@@ -72,7 +71,6 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
 
     // --- Green Contexts (Runtime API): true SM partitioning ---
     {
-        // Get the full SM resource for this device
         cudaDevResource full_sm_resource;
         err = cudaDeviceGetDevResource(device, &full_sm_resource, cudaDevResourceTypeSm);
         if (err != cudaSuccess) {
@@ -232,12 +230,11 @@ bool GreenContextManager::reconfigure(float new_prefill_sm_ratio) {
 }
 
 void GreenContextManager::destroy() {
-    // #1656: reconfigure() calls this from inside step_schedule() whenever the
-    // prefill/decode mix changes, i.e. with work in flight. cudaStreamDestroy
-    // does not wait, the green context the work runs in is destroyed right
-    // after, and the replacement streams carry no ordering against any of it.
-    // Draining first costs the reconfigure its latency once; not draining
-    // leaves the outcome to timing.
+    // #1656: reconfigure() calls this from step_schedule() with work in
+    // flight. cudaStreamDestroy does not wait; destroying the green context
+    // right after leaves the replacement streams with no ordering against
+    // it. Draining first costs latency once; not draining leaves the
+    // outcome to timing.
     if (prefill_stream_)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(prefill_stream_));
     if (decode_stream_)
