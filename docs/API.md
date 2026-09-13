@@ -71,14 +71,14 @@ Two of these do not switch off the way the field name suggests:
 
 - **`top_k: 0` is not "off", it is 50.** Every sampling site spells
   `top_k > 0 ? top_k : 50` (`src/exec/executor.cu:193`, `:290`,
-  `src/runtime/engine_decode_pipeline.cpp:82`): zero and "unset" both land on
+  `src/runtime/engine_decode_pipeline.cpp:74`): zero and "unset" both land on
   50, a *tighter* truncation than the 40 default. Disabling top-k needs a
   value at or above the vocabulary size, which the dispatcher clamps to the
-  full vocabulary (`engine_decode_pipeline.cpp:83`).
+  full vocabulary (`engine_decode_pipeline.cpp:75`).
 - **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant
   client cannot switch it off. Sending the non-OpenAI field with value `1.0`
   disables it: the engine skips the penalty pass when all three penalties are
-  neutral (`src/runtime/engine_sampling_stop.cpp:212`).
+  neutral (`src/runtime/engine_sampling_stop.cpp:178`).
 
 ### Metrics for what the server decided
 

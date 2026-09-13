@@ -175,7 +175,7 @@ Drafter engages on some processes but not others: 6.2% acceptance at ~50 ms per
 verify vs ~6.2 ms decode step (8 steps per token). Default throughput: 162 quiet
 mode, ~154 firing. On 1024-token request: **104 of 288, 36.1 %** acceptance at
 6.78 tokens per verify. A 128-token bench is entirely cold-start. Economics guard
-(`engine_spec_ngram.cpp:175`) arms at `spec_verifies >= 8` per request; 128-token
+(`engine_spec_ngram.cpp:166`) arms at `spec_verifies >= 8` per request; 128-token
 request produces ~1 verify.
 
 ² Basis changed since 07-12: was imp SafeTensors vs llama.cpp GGUF, now both

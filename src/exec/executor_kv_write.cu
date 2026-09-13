@@ -171,7 +171,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             // smaller head_dim, producing a scale derived from junk and
             // permanently locking the FP8 dynamic range to the wrong value
             // (was the root cause of the Gemma-4 force-FP16 carve-out at
-            // engine.cpp:567).
+            // engine.cpp:516).
             Tensor kv_cal = view_rows(k_, n);
             Tensor vv_cal = view_rows(v_, n);
             const int64_t live_cols = static_cast<int64_t>(nkv) * hd;

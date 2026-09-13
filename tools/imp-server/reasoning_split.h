@@ -11,7 +11,7 @@
 // copies flipped REASONING->CONTENT at the FIRST </think> and could only detect
 // a *second* <think> via a single-token-id compare — which never fires for
 // Qwen3.6, whose <think>/</think> ship as multi-BPE added_tokens (special=False;
-// see src/runtime/request.h:84-90). The result was reasoning leaking into
+// see src/runtime/request.h:78-84). The result was reasoning leaking into
 // `content` on the streaming path only.
 //
 // This unit closes that gap: in the CONTENT phase it detects a re-opened

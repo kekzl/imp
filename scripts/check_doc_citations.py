@@ -21,7 +21,7 @@ def check(doc, root):
     bad, ambiguous = [], []
 
     # Build a basename index once: the doc cites most files by bare name
-    # (`engine_spec_ngram.cpp:1072`), not by path.
+    # (`engine_spec_ngram.cpp:1047`), not by path.
     index = {}
     for base, _dirs, files in os.walk(root):
         if any(x in base for x in (".git", "build", "third_party", "node_modules")):
