@@ -16,20 +16,10 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// FP8 E4M3 quantization with per-tensor scale factor.
-//
-// Phase 2A of the imp quantization pipeline.  Builds on the unscaled FP8
-// cast utilities in fp8_utils.{h,cu} by adding calibration-based scaling,
-// which is essential for preserving accuracy on real model weights.
-//
-// Workflow:
-//   1.  calibrate_fp8_scale()  -- find absmax, compute scale = absmax / 448
-//   2.  quantize_fp16_to_fp8_e4m3_scaled()  -- val / scale -> E4M3
-//   3.  dequantize_fp8_e4m3_to_fp16()       -- E4M3 * scale -> FP16
-//
-// E4M3 representable range: [-448, 448]  (max normal: e=14, m=7)
-// ---------------------------------------------------------------------------
+// FP8 E4M3 quantization with per-tensor scale (Phase 2A): 1. calibrate_fp8_scale() finds
+// absmax, scale=absmax/448. 2. quantize_fp16_to_fp8_e4m3_scaled(): val/scale->E4M3.
+// 3. dequantize_fp8_e4m3_to_fp16(): E4M3*scale->FP16. E4M3 range: [-448,448] (max normal
+// e=14,m=7).
 
 static constexpr int kBlockSize = 256;
 static constexpr int kElemsPerThread = 4;
@@ -103,11 +93,8 @@ __global__ void absmax_final_reduce_kernel(const float* __restrict__ block_maxes
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fused calibrate+quantize: absmax → scale → quantize, all on device.
-// Reads the absmax result from a device pointer, computes scale = absmax/448,
-// writes scale to d_scale_out, and quantizes in a single kernel launch.
-// ---------------------------------------------------------------------------
+// Fused calibrate+quantize: reads absmax from a device pointer, computes scale=absmax/448,
+// writes it to d_scale_out, and quantizes, all in one kernel launch.
 
 __global__ void calibrate_quantize_fp8_kernel(const half* __restrict__ input, uint8_t* __restrict__ output,
                                               const float* __restrict__ d_absmax,  // from absmax reduction
@@ -187,16 +174,11 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__
 // Host-side launch wrappers
 // ---------------------------------------------------------------------------
 
-// Reduction scratch for calibrate_fp8_scale. It used to cudaMalloc the
-// per-block buffer and the result scalar on every call and free them again —
-// 144 of the 414 device allocations the --wrap interposer caught after warmup
-// (AUDIT B28/B29). The calls are one-shot per layer, not per request, so this
-// is not a hot-path win; it is an I2 violation that costs nothing to remove.
-//
-// Taken from the engine-persistent arena, growing by re-taking (the superseded
-// slab strands, bounded and one-time, exactly as the MMVQ tenant does). Falls
-// back to a direct allocation when the arena is closed — a bare quant unit in
-// a test has no engine.
+// Reduction scratch for calibrate_fp8_scale, taken from the engine-persistent arena
+// (growing by re-taking, bounded and one-time) instead of cudaMalloc/free per call - the
+// calls are one-shot per layer, not hot-path, but freeing was still an I2 violation costing
+// nothing to remove. Falls back to a direct allocation when the arena is closed (a bare
+// quant unit in a test has no engine).
 namespace {
 float* g_absmax_scratch = nullptr;   // [grid] block maxima, then [1] result
 int g_absmax_scratch_grid = 0;
@@ -290,21 +272,19 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream) {
     return scale;
 }
 
-// ---- calibrate_and_quantize_fp8_async -------------------------------------
-// Fully asynchronous: calibrate + quantize with reusable temp buffers.
-// No host sync — caller provides pre-allocated d_block_maxes and d_absmax.
-// The scale is written to d_scale_out on device.
+// Fully asynchronous calibrate+quantize with reusable temp buffers; no host sync. Caller
+// provides pre-allocated d_block_maxes/d_absmax; the scale is written to d_scale_out on
+// device.
 
 void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, int64_t n_elements,
                                       float* d_block_maxes, int max_grid, float* d_absmax, float* d_scale_out,
                                       cudaStream_t stream) {
     if (!input_fp16 || !output_fp8 || n_elements <= 0)
         return;
-    // The reduction/quantize kernels index with int. No current model is close
-    // (largest tensor ~778M elems), but guard the boundary loudly instead of
-    // silently truncating size_t→int — a >2.1B-element tensor would otherwise
-    // corrupt with a wrong grid + wrapped indices (F-A11). The callers pass the
-    // full size_t now, so the truncation can only ever happen here.
+    // The reduction/quantize kernels index with int. Guards the size_t->int truncation loudly
+    // (a >2.1B-element tensor would corrupt with a wrong grid + wrapped indices, F-A11) rather
+    // than silently truncating; callers now pass the full size_t, so this is the only place it
+    // could still happen.
     if (n_elements > static_cast<int64_t>(INT_MAX)) {
         IMP_LOG_ERROR("calibrate_and_quantize_fp8_async: n_elements=%lld exceeds int range — skipping",
                       static_cast<long long>(n_elements));
@@ -330,13 +310,10 @@ void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, 
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---- quantize_fp8_rows_async ----------------------------------------------
-// Per-ROW (per-output-channel) E4M3 quantization: one block per row reduces
-// the row absmax, derives scale = absmax/448, records it in d_row_scales[row]
-// and quantizes the row with it. Per-row scales avoid the range waste of one
-// per-tensor scale across heterogeneous row blocks (e.g. the fused GDN input
-// pack [conv | gate | alpha | beta]). Init-time only — the row is read twice
-// from L2, which is irrelevant there.
+// Per-ROW (per-output-channel) E4M3 quantization: one block per row reduces the row absmax,
+// scale=absmax/448, recorded in d_row_scales[row]. Avoids the range waste of one per-tensor
+// scale across heterogeneous row blocks (e.g. the fused GDN input pack). Init-time only;
+// the double L2 read of the row is irrelevant there.
 
 __global__ void quantize_fp8_rows_kernel(const half* __restrict__ in, uint8_t* __restrict__ out,
                                          int K, float* __restrict__ d_row_scales) {
@@ -508,11 +485,8 @@ void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16, int n
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-expert FP8 scale calibration kernel for MoE.
-// One block per expert: finds absmax within [offsets[e], offsets[e+1]) × K,
-// writes scale = absmax / 448.0.
-// ---------------------------------------------------------------------------
+// Per-expert FP8 scale calibration for MoE: one block per expert finds absmax within
+// [offsets[e],offsets[e+1))xK, writes scale = absmax/448.
 
 __global__ void calibrate_fp8_scales_per_expert_kernel(const half* __restrict__ input,
                                                        const int32_t* __restrict__ offsets,
@@ -549,10 +523,8 @@ __global__ void calibrate_fp8_scales_per_expert_kernel(const half* __restrict__ 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-expert FP8 quantization kernel for MoE.
-// Each block handles one expert's activations with its own scale.
-// ---------------------------------------------------------------------------
+// Per-expert FP8 quantization for MoE: each block handles one expert's activations with
+// its own scale.
 
 __global__ void quantize_fp16_to_fp8_per_expert_kernel(const half* __restrict__ input,
                                                        uint8_t* __restrict__ output,
@@ -613,18 +585,9 @@ void quantize_fp16_to_fp8_e4m3_per_expert(const void* input_fp16, void* output_f
     if (n_experts <= 0 || !input_fp16 || !output_fp8 || !d_offsets || !d_scales)
         return;
 
-    // Launch with enough blocks per expert for the maximum possible token count.
-    // We use a 2D grid: x = blocks within expert, y = expert index.
-    // Conservative upper bound: use total token count for grid.x sizing.
-    // Each expert's kernel skips work if base >= n_elems for that expert.
-    //
-    // For efficiency, we estimate max tokens per expert. In the worst case,
-    // all tokens go to one expert. We read offsets[n_experts] via the last
-    // cudaMemcpy that the caller already did, but here we don't have host
-    // offsets. Use a generous grid.x that covers max_tokens * K.
-    // A 128-expert model with 4096 tokens: max ~4096 tokens/expert × K.
-    // With K=7168, that's 29M elements per expert. Grid.x = 29M/(256*4) = 28K blocks.
-    // This is fine — excess blocks return immediately.
+    // Launch grid: x = blocks within expert, y = expert index. Conservative upper bound sized
+    // for the worst case (all tokens routed to one expert); each expert's kernel skips work if
+    // base>=n_elems, so excess blocks return immediately at no real cost.
     constexpr int kMaxBlocksPerExpert = 32768;
     dim3 grid(kMaxBlocksPerExpert, n_experts);
     quantize_fp16_to_fp8_per_expert_kernel<<<grid, kBlockSize, 0, stream>>>(

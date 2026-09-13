@@ -6,32 +6,21 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// NVFP4 (FP4 E2M1) micro-block packing device helpers.
-//
-// Moved VERBATIM from nvfp4_quant.cu so producer-side kernels (fused
-// RMSNorm+quantize, fused SwiGLU+quantize) share the exact arithmetic with
-// quantize_fp16_to_nvfp4_into(): identical inputs must yield identical
-// packed bytes and micro-scales.
-//
-// Packed format: 2 FP4 values per byte.
-//   Low nibble  (bits 0-3) = even-indexed element
-//   High nibble (bits 4-7) = odd-indexed element
-// ---------------------------------------------------------------------------
+// NVFP4 (FP4 E2M1) micro-block packing device helpers, moved VERBATIM from nvfp4_quant.cu
+// so producer-side kernels (fused RMSNorm+quantize, fused SwiGLU+quantize) share the exact
+// arithmetic with quantize_fp16_to_nvfp4_into(): identical inputs must yield identical
+// packed bytes and micro-scales. Packed format: 2 FP4/byte, low nibble=even index, high=odd.
 
 static constexpr int kNvfp4MicroBlockSize = 16;   // micro-block: 16 values
 static constexpr float kNvfp4FP4E2M1Max = 6.0f;   // max representable in FP4 E2M1
 static constexpr float kNvfp4FP8E4M3Max = 448.0f;
 
-// ---------------------------------------------------------------------------
-// Device helper: quantize a single FP32 magnitude to FP4 E2M1 (3-bit code)
-// Uses round-to-nearest-even among the 8 representable magnitudes.
-// ---------------------------------------------------------------------------
+// Quantizes one FP32 magnitude to FP4 E2M1 (3-bit code), round-to-nearest-even among the 8
+// representable magnitudes.
 __device__ __forceinline__ uint8_t float_abs_to_fp4_e2m1(float abs_val) {
-    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
-    // Thresholds between adjacent representable values:
-    //   0    0.5    1.0    1.5    2.0    3.0    4.0    6.0
-    //     0.25  0.75  1.25  1.75  2.5   3.5    5.0
+    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code. Thresholds between
+    // adjacent representable values (0,0.5,1.0,1.5,2.0,3.0,4.0,6.0): 0.25,0.75,1.25,1.75,2.5,
+    // 3.5,5.0.
     uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f) + (abs_val >= 1.75f) +
                    (abs_val >= 2.5f) + (abs_val >= 3.5f) + (abs_val >= 5.0f);
     return code;  // 0..7
@@ -58,12 +47,9 @@ __device__ __forceinline__ uint8_t nvfp4_pack_pair_hw(float v0, float v1) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Micro-scale encode for one 16-value micro-block: local absmax → clamped
-// FP8 E4M3 micro-scale. Returns the RECONSTRUCTED scale (the value the
-// dequant will use), which is what the pack step must divide by. Extracted
-// verbatim from quantize_micro_block_nvfp4 (steps 2 of nvfp4_quant.cu).
-// ---------------------------------------------------------------------------
+// Micro-scale encode for one 16-value micro-block: local absmax -> clamped FP8 E4M3
+// micro-scale. Returns the RECONSTRUCTED scale (what dequant will use), which the pack step
+// must divide by. Extracted verbatim from quantize_micro_block_nvfp4 step 2.
 __device__ __forceinline__ float nvfp4_encode_micro_scale(float local_absmax, float tensor_scale,
                                                           uint8_t* fp8_out) {
     float micro_scale_f = local_absmax / (tensor_scale * kNvfp4FP4E2M1Max);

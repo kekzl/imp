@@ -1,12 +1,8 @@
 #pragma once
 
-// Minimal JSON parser shared across model loaders (hf_config_loader,
-// safetensors_loader, tokenizer, …). Handles UTF-16 surrogate pairs in
-// `\uXXXX` escapes and emits proper UTF-8.
-//
-// Supported scalars: string, number, bool (encoded as NUMBER 0.0/1.0), null.
-// Containers: object (preserves insertion order) and array. No streaming;
-// the entire document is materialized as a tree of `JValue`.
+// Minimal JSON parser shared across model loaders. Handles UTF-16 surrogate pairs in
+// \uXXXX, emits UTF-8. Scalars: string/number/bool(as NUMBER 0.0/1.0)/null. No streaming;
+// whole document materialized as a JValue tree.
 
 #include <cstddef>
 #include <cstdint>
@@ -21,13 +17,9 @@ enum class JType { NUL, STRING, NUMBER, ARRAY, OBJECT };
 
 struct JValue;
 
-// One key/value pair of an object. Not std::pair: `vector<T>` accepts an
-// INCOMPLETE T (a recursive JSON tree needs that), but `pair<string, JValue>`
-// is a complete type with an incomplete member, which is not the same
-// permission. libstdc++ instantiates the vector destructor at the defaulted
-// constructor and clang rejects it there, so `IMP_FUZZERS=ON` could not build
-// with clang at all. Structured bindings (`for (auto& [k, v] : v.obj)`, 11 of
-// the 12 uses) read identically either way.
+// Not std::pair: vector<T> accepts an incomplete T (needed for the recursive JSON tree),
+// but pair<string,JValue> is complete with an incomplete member, a different permission -
+// libstdc++'s defaulted dtor instantiation there fails to build under clang (IMP_FUZZERS=ON).
 struct JMember;
 
 struct JValue {
@@ -50,17 +42,13 @@ struct JMember {
 
 class JsonParser {
 public:
-    // The depth cap bounds the stack, not the heap: a JValue is ~104 bytes
-    // (string + double + two vectors) against 2 bytes of `0,` text, so the
-    // 128 MiB SafeTensors header cap alone admits ~6.6 GiB of tree
-    // (AUDIT_arch_2026 F1-10). 8M nodes is ~870 MiB; the largest real input,
-    // a 151k-vocab tokenizer.json, is ~0.4M.
+    // Depth cap bounds the stack, not the heap: a JValue is ~104 bytes against 2 bytes of "0,"
+    // text, so a 128 MiB SafeTensors header alone admits ~6.6 GiB of tree (AUDIT_arch_2026 F1-10).
+    // 8M nodes is ~870 MiB; the largest real input (151k-vocab tokenizer.json) is ~0.4M.
     static constexpr size_t kMaxNodes = size_t{1} << 23;
 
-    // A view, not (pointer, length): every caller already had both halves of
-    // one object and had to spell the pair out.
-    // `max_nodes` is the seam the node-budget test uses; production callers
-    // take the default.
+    // A view, not (pointer,length): every caller already had both halves of one object.
+    // `max_nodes` is the seam the node-budget test uses; production callers take the default.
     explicit JsonParser(std::string_view data, size_t max_nodes = kMaxNodes);
 
     JValue parse();
@@ -75,12 +63,9 @@ private:
     size_t nodes_ = 0;
     size_t max_nodes_;
 
-    // Recursion is bounded because the input is not: a SafeTensors header may
-    // declare up to 128 MiB, and every '[' is one `parse_value` frame at ~240
-    // bytes of stack. Measured on an 8 MiB stack, this parser survives 30 000
-    // levels and takes SIGSEGV somewhere before 40 000, so a 128 MiB header of
-    // '[' crashes the loader before a weight is read. 512 is far past any real
-    // config.json or tokenizer.json; the deepest in this tree is 7.
+    // Recursion is bounded because the input isn't: a SafeTensors header may declare up to
+    // 128 MiB, each '[' is one parse_value frame (~240 B stack). An 8 MiB stack survives
+    // ~30000 levels, SIGSEGVs before 40000; 512 is far past any real config (deepest here: 7).
     static constexpr int kMaxDepth = 512;
 
     // RAII depth counter: `parse_value` has eight returns and the count has to

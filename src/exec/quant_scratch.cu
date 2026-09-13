@@ -4,13 +4,10 @@
 
 namespace imp {
 
-// The FP8 reduction trio (d_act_scale, d_fp8_block_maxes, d_fp8_absmax) and the
-// whole dp4a input-staging family (q8_1/d8, their prefill pair, the FFN block
-// mask, the split-K partials) are T2 arena tenants since A7 step 4b.2 —
-// engine-lifetime, charged by exec_t2_demand as `fp8_reduction`, `quant_scratch`
-// and `splitk_scratch`. ~Engine closes the arena after every executor teardown,
-// so only the pointer nulling remains here. What is still freed below draws from
-// the VRAMAllocator, not the arena.
+// FP8 reduction trio + the dp4a input-staging family are T2 arena tenants (A7 step
+// 4b.2): engine-lifetime, charged by exec_t2_demand as fp8_reduction, quant_scratch and
+// splitk_scratch. ~Engine closes the arena after teardown, so only pointer nulling
+// remains here; what is still freed below draws from the VRAMAllocator, not the arena.
 
 void QuantScratch::free(VRAMAllocator* alloc) {
     auto vfree = [alloc](void*& p) {

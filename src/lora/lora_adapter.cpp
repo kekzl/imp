@@ -232,10 +232,9 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
             IMP_LOG_ERROR("LoRA: tensor '%s' bad shape/offsets", key.c_str());
             return false;
         }
-        // The dims arrive as JSON doubles narrowed to int64 (#1605 class):
-        // sign, ceiling and product are checked before anything is sized
-        // from them, and the payload must match the shape before the host
-        // copy is allocated (AUDIT_arch_2026 F1-6).
+        // Dims arrive as JSON doubles narrowed to int64 (#1605 class): sign, ceiling and product
+        // are checked before anything is sized from them, and the payload must match the shape
+        // before the host copy is allocated (AUDIT F1-6).
         if (shape[0] <= 0 || shape[1] <= 0 || shape[0] > INT32_MAX || shape[1] > INT32_MAX ||
             shape[0] > INT64_MAX / shape[1]) {
             IMP_LOG_ERROR("LoRA: tensor '%s' dims [%lld, %lld] out of range", key.c_str(),

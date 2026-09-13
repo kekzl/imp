@@ -1,9 +1,5 @@
-// ============================================================================
-// GGUF parsing: GGML type tables, binary-value decoding, tensor-info parsing,
-// and tensor bounds checks. Split out of gguf_loader.cpp to bound recompile
-// blast radius (see tools/check_filesize.py). Top-level load orchestration
-// stays in gguf_loader.cpp.
-// ============================================================================
+// GGUF parsing: type tables, binary-value decoding, tensor-info parsing, bounds checks.
+// Split out of gguf_loader.cpp to bound recompile blast radius (tools/check_filesize.py).
 
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
@@ -353,10 +349,8 @@ GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
                     r, count, v.int_array,
                     [](BinaryReader& br) { return static_cast<int32_t>(br.read_u8()); }, 1);
             } else {
-                // Unknown/unsupported array element type. read_gguf_value()'s
-                // switch has no default, so it would consume zero bytes per
-                // element — a `count` of 2^60 would then spin ~forever without
-                // ever tripping the EOF guard. Treat it as a parse error.
+                // read_gguf_value()'s switch has no default, so an unknown array element type would consume
+                // zero bytes per element; a count of 2^60 would spin without tripping the EOF guard.
                 r.fail();
             }
             break;
@@ -429,10 +423,8 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
             info.dims[d] = 1;
         }
         info.type = static_cast<GgufWireType>(reader.read_u32());
-        // Q8_1 (wire type 9) is llama.cpp's activation format, not a weight
-        // storage type: imp has no dequant, no kernel and no registry entry for
-        // it, and the 1:1 map to QType::Q8_1 let such a tensor reach dispatch
-        // with no path (AUDIT_arch_2026 G-8). Refused like n_dims > 4 above.
+        // Q8_1 (wire type 9) is llama.cpp's activation format, not a weight storage type: imp has
+        // no dequant/kernel/registry entry for it (AUDIT_arch_2026 G-8). Refused like n_dims>4 above.
         if (info.type == GgufWireType::Q8_1) {
             IMP_LOG_ERROR(
                 "GGUF tensor '%s' is stored as Q8_1 (an activation format, "
@@ -448,10 +440,9 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
 
 // ---- Tensor on-disk byte span ----
 
-// Total bytes a tensor occupies in the file, with saturating arithmetic so a
-// crafted dim product (e.g. ne[0]*ne[1] overflowing int64) can never wrap to a
-// small value that then passes the bounds check. Returns SIZE_MAX on overflow,
-// which makes the caller reject the tensor.
+// Total tensor bytes with saturating arithmetic: a crafted dim product (ne[0]*ne[1]
+// overflow) can never wrap to a small value that passes the bounds check. Returns SIZE_MAX
+// on overflow, which makes the caller reject the tensor.
 static size_t gguf_tensor_byte_size(const GGUFTensorInfo& info) {
     uint64_t n_elements = 1;
     for (uint32_t d = 0; d < info.n_dims && d < 4; d++) {

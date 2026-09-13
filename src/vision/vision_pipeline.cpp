@@ -16,10 +16,10 @@ VisionPipeline::~VisionPipeline() {
     d_pixels_ = nullptr;
 }
 
-// Everything the T2 arena owes the mmproj (Gemma-3 / Gemma-4v) path: the SigLIP
-// tower plus the pipeline and encoder workspace. Engine::init asks this one
-// question before the arena opens; the probe runs the real loader in counting
-// mode, so the answer cannot drift from what the warmup then takes.
+// Everything the T2 arena owes the mmproj (Gemma-3/Gemma-4v) path: SigLIP tower plus
+// pipeline/encoder workspace. Engine::init asks this one question before the arena opens;
+// the probe runs the real loader in counting mode, so the answer cannot drift from what
+// warmup takes.
 size_t vision_mmproj_arena_bytes(const std::string& mmproj_path, int lm_d_model) {
     VisionConfig cfg;
     int probed_lm_d = 0;

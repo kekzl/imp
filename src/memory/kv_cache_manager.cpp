@@ -396,15 +396,12 @@ int KVCacheManager::evict_lru() {
     if (lru_order_.empty())
         return -1;
 
-    // Skip pinned sequences — find the first unpinned LRU victim.
-    //
-    // NOTE: every sequence in lru_order_ is LIVE (free_sequence removes finished
-    // ones), and imp has no recompute-on-resume path, so freeing a live
-    // sequence's KV here corrupts it. The engine therefore no longer calls this
-    // to make room under KV pressure (it reject-newests instead — see
-    // prefill_allocate_kv_blocks_/step_decode/step_spec_verify). Kept as a
-    // manager primitive + unit-tested; do NOT reintroduce engine-side eviction
-    // of live sequences without a preempt-and-recompute path.
+    // Skip pinned sequences, find the first unpinned LRU victim. Every lru_order_ entry is
+    // LIVE (free_sequence removes finished ones) and imp has no recompute-on-resume path, so
+    // freeing a live sequence's KV here corrupts it. The engine no longer calls this to make
+    // room under KV pressure (it reject-newests instead); kept as a manager primitive + unit
+    // test. Do NOT reintroduce engine-side eviction of live sequences without a
+    // preempt-and-recompute path.
     for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
         int candidate = *it;
         if (pinned_seq_blocks_.find(candidate) != pinned_seq_blocks_.end())
@@ -439,15 +436,12 @@ bool KVCacheManager::can_allocate(int num_blocks) const {
     if (num_blocks <= 0)
         return true;
 
-    // Free pool + reclaimable cached blocks (O(1) via counter), minus what
-    // running sequences have already been promised and not yet written.
-    //
-    // There is deliberately no second source. The old slow path added the
-    // blocks of live LRU sequences, which evict_lru() would have to free —
-    // and evict_lru() has no production caller precisely because freeing a
-    // live sequence's KV corrupts it (no recompute path). The predicate
-    // therefore answered "there is room" with memory that never comes back,
-    // which is the over-admission half of #1635.
+    // Free pool + reclaimable cached blocks (O(1) via counter), minus what running
+    // sequences have already been promised and not yet written. Deliberately no second
+    // source: the old slow path also added live LRU sequences' blocks, which evict_lru()
+    // would have to free, but evict_lru() has no production caller (freeing a live
+    // sequence's KV corrupts it, no recompute path). That predicate answered "there is room"
+    // with memory that never comes back (#1635).
     const int available = cache_->num_free_blocks() + reclaimable_cached_count_ -
                           outstanding_reserved_blocks();
     return available >= num_blocks;
@@ -502,11 +496,10 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
     auto& hashes = seq_block_hashes_[seq_id];
     int reused_blocks = 0;
     size_t parent_hash = content_salt;
-    // Reuse must form a contiguous prefix: once a block misses (or the
-    // caller's cap is reached), later hash hits must NOT be shared — the
-    // caller skips prefill for reused*block_size tokens, so a hole would
-    // leave uncomputed KV inside the "skipped" range (possible when LRU
-    // eviction removed an early block while later chain blocks survive).
+    // Reuse must form a contiguous prefix: once a block misses (or the caller's cap is
+    // reached), later hash hits must NOT be shared, or a hole would leave uncomputed KV
+    // inside the range the caller skips prefill for (possible when LRU eviction removed an
+    // early block while later chain blocks survive).
     bool reuse_open = true;
 
     for (int b = 0; b < total_blocks; ++b) {
@@ -703,13 +696,11 @@ BlockRef KVCacheManager::allocate_block_ref_with_eviction() {
     if (ref)
         return ref;
 
-    // A growable pool below its ceiling grows BEFORE the prefix cache is
-    // reclaimed. Reclaiming first emptied the cache while the pool sat at its
-    // planned commit: the LRU front is the oldest chain's prefix block, so one
-    // reclaim breaks that whole chain, and the pool only grew once nothing was
-    // left to reclaim (Qwen3.8-27B, 8 sessions x 3 turns: 2 growths and 5 of 8
-    // sessions re-prefilled their history). Coarse steps, one driver mapping
-    // per growth; try_grow_to() refuses what is not free above the headroom.
+    // A growable pool below its ceiling grows BEFORE the prefix cache is reclaimed:
+    // reclaiming first empties the cache while the pool sits at its planned commit (the LRU
+    // front is the oldest chain's prefix block, so one reclaim breaks that whole chain).
+    // Coarse steps, one driver mapping per growth; try_grow_to() refuses what is not free
+    // above the headroom.
     if (cache_->growable() && cache_->ceiling_blocks() > cache_->total_blocks()) {
         const int have = cache_->total_blocks();
         if (cache_->try_grow_to(have + std::max(64, have / 4)) > have) {
@@ -798,10 +789,9 @@ void KVCacheManager::unpin_prefix(int seq_id) {
             continue;  // still pinned by another owner
         pin_refcount_.erase(rc);
         pinned_blocks_.erase(bid);
-        // While pinned the block was excluded from the reclaimable count;
-        // if it sits in the cached LRU it is reclaimable again now. Blocks
-        // currently referenced by an active seq are not in the LRU — their
-        // free_sequence() takes the normal hashed-block path later.
+        // While pinned the block was excluded from the reclaimable count; if it sits in the
+        // cached LRU it is reclaimable again now. Blocks currently referenced by an active seq
+        // are not in the LRU; their free_sequence() takes the normal hashed-block path later.
         if (cached_blocks_map_.contains(bid))
             reclaimable_cached_count_++;
     }
@@ -966,12 +956,11 @@ bool KVCacheManager::swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab,
     if (it == seq_swa_blocks_.end() || static_cast<int>(it->second.size()) < end_b)
         return false;
     const auto& swa = it->second;
-    // Generation-end saves pack at the block-FLOOR of the live context, so
-    // the lowest slack blocks may already be trimmed. Restore-time queries
-    // at positions >= upto never read below floor((upto - window)/bs); keep
-    // one extra boundary block (the #963 floor/ceil lesson) and zero-fill
-    // tolerated holes below that — a masked position contributes exactly 0
-    // regardless of KV bytes, and zeros can never produce NaN scores.
+    // Generation-end saves pack at the block-FLOOR of the live context, so the lowest slack
+    // blocks may already be trimmed. Restore-time queries at positions >= upto never read
+    // below floor((upto - window)/bs); keep one extra boundary block (#963) and zero-fill
+    // tolerated holes below that, since a masked position contributes exactly 0 and zeros
+    // can never produce NaN scores.
     const int needed_start =
         std::max(first, (upto_tokens - swa_window_) / bs - 1);
     bool zero_filled = false;
@@ -1102,15 +1091,12 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
 
     const int sink_end_block = (n_sink_tokens + block_size - 1) / block_size;
     const int window_block_count = (n_window_tokens + block_size - 1) / block_size;
-    // Retain ONE extra boundary block beyond the ceil-aligned window (#963):
-    // the paged decode kernels compute their window start as
-    // floor((ctx_len - window) / block_size), which for non-block-aligned
-    // ctx_len (every decode step after an aligned prefill) lands one block
-    // BEFORE ceil-aligned tail retention — the kernels then read a -1
-    // sentinel, and phys_block = -1 is an out-of-bounds KV access (IMA on a
-    // full-VRAM card, silent garbage attention otherwise). One 32-token
-    // block of extra KV is the price of keeping host eviction and device
-    // window math aligned regardless of ctx alignment or call ordering.
+    // Retain ONE extra boundary block beyond the ceil-aligned window (#963): the paged
+    // decode kernels compute window start as floor((ctx_len - window) / block_size), which
+    // for non-block-aligned ctx_len lands one block BEFORE ceil-aligned tail retention, and
+    // the kernels then read a -1 sentinel (out-of-bounds KV access: IMA on a full-VRAM card,
+    // silent garbage attention otherwise). One extra 32-token block keeps host eviction and
+    // device window math aligned regardless of ctx alignment or call ordering.
     const int window_start_block = std::max(0, total_blocks - window_block_count - 1);
 
     if (sink_end_block >= window_start_block) {
@@ -1118,10 +1104,9 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
         return 0;
     }
 
-    // Pin sink blocks so LRU / cached-block eviction never touches them
-    // while the sequence is alive. Same owner bookkeeping as cache_control
-    // pins; pin_prefix replaces the owner's pin set, so only re-pin when
-    // the sink range grew.
+    // Pin sink blocks so LRU/cached-block eviction never touches them while the sequence is
+    // alive. Same owner bookkeeping as cache_control pins; pin_prefix replaces the owner's
+    // pin set, so only re-pin when the sink range grew.
     auto pit = pinned_seq_blocks_.find(seq_id);
     int already = (pit != pinned_seq_blocks_.end()) ? static_cast<int>(pit->second.size()) : 0;
     if (sink_end_block > already)
@@ -1243,13 +1228,10 @@ int KVCacheManager::total_allocated_blocks() const {
 //   Header: magic(4) version(4) n_blocks(4) n_layers(4) n_kv_heads(4)
 //           head_dim(4) dtype(4) block_bytes(8) model_fingerprint(8)
 //   Per block: hash(8) + KV data (n_layers * 2 * block_bytes)
-//
-// model_fingerprint (v2): identifies the model+tokenizer+quant that produced
-// the KV. Block hashes are content-addressed over token IDs ONLY — two
-// different models with identical KV geometry (common across same-family
-// fine-tunes) would otherwise match each other's token-hashes and serve the
-// WRONG model's KV silently. The geometry checks below cannot catch that.
-// Rejecting on fingerprint mismatch degrades to a clean recompute.
+// model_fingerprint (v2) identifies the model+tokenizer+quant: block hashes are
+// content-addressed over token IDs ONLY, so two different models with identical KV
+// geometry would otherwise serve the WRONG model's KV silently. Fingerprint mismatch
+// degrades to a clean recompute.
 
 static constexpr uint32_t kPrefixCacheMagic = 0x494D5043;  // "IMPC"
 // v3 carries the KV scale blocks alongside K/V.
@@ -1312,11 +1294,10 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
         return -1;
     }
 
-    // Allocate host buffer for ALL blocks' KV data so we can pipeline
-    // all D2H transfers with cudaMemcpyAsync and sync once.
-    // K + V + their scales, per layer. Persisting the KV bytes without the
-    // scales produced a block that loads and then decodes against whatever
-    // scales happened to be in the pool — wrong attention, no error.
+    // Allocate a host buffer for ALL blocks' KV data so every D2H transfer pipelines via
+    // cudaMemcpyAsync with one sync. K + V + their scales, per layer: persisting KV bytes
+    // without scales produces a block that loads and decodes against whatever scales
+    // happened to be in the pool, wrong attention, no error.
     size_t per_block_total = static_cast<size_t>(nl) * 2 * (bb + sbb);
 
     // First pass: collect valid block IDs and their hashes.

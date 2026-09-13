@@ -1,30 +1,16 @@
 #pragma once
 
-// Persisted library-reserve measurements (docs/internals/MEMORY.md A1.5,
-// AUDIT B41/B42/B49).
-//
-// The planner's largest fixed charge is what cuBLAS/CUTLASS claim on the FIRST
-// forward pass. `kMeasuredLibraryReserveBytes` was a single constant, and it is
-// wrong in both directions: measured 0 MiB on Qwen3-4B-IQ4_NL, 4182 on
-// Qwen3-4B-Q8_0 and 7460 on Qwen3-8B-Q8_0. Charging 3900 for all of them sets
-// aside 3.9 GiB of KV pool for nothing on the first, and under-reserves the
-// third by 3.5 GiB — which is most of the residual acceptance criterion 5 was
-// missing, and the difference between 82.5 % and 98.3 % accounted for 6.
-//
-// The plan needs the figure BEFORE the forward that produces it, so a single run
-// cannot both measure and use it. It can, however, remember: the value is
-// stable per (model, quant path, library stack) and invariant to batch and
-// context (A1.5 M5). So the first start on a given model charges the constant
-// and records what actually happened; every start after that charges the
-// measured value.
-//
-// That is what "capacity planned, not discovered" (I4) looks like for a quantity
-// only the device can tell you — planned from a recorded measurement rather than
-// re-derived from a live query on every boot.
-//
-// Format is one `key<TAB>bytes` line per entry, rewritten whole. It is a cache:
-// a missing, unreadable or corrupt file is not an error, it just means "charge
-// the constant and measure again".
+// Persisted library-reserve measurements (MEMORY.md A1.5, AUDIT B41/B42/B49).
+// kMeasuredLibraryReserveBytes (what cuBLAS/CUTLASS claim on the first forward) was a
+// single constant, wrong in both directions across models: it either wastes GiB of KV
+// pool or under-reserves and spills the card.
+// The plan needs the figure BEFORE the forward that produces it, so a single run cannot
+// both measure and use it; the value IS stable per (model, quant path, library stack)
+// and invariant to batch/context (A1.5 M5), so the first start charges the constant and
+// records what happened, and every start after charges the measured value. That is
+// "capacity planned, not discovered" (I4) for a quantity only the device can tell you.
+// Format: one `key<TAB>bytes` line per entry, rewritten whole. A cache: a missing,
+// unreadable or corrupt file just means "charge the constant and measure again".
 
 #include <cstddef>
 #include <cstdint>
@@ -48,13 +34,11 @@ struct LibraryReserveKey {
 // callers then skip the cache rather than guessing a path.
 std::string library_reserve_cache_default_path();
 
-// Recorded bytes for `key`. `found` distinguishes a recorded ZERO from no entry
-// at all — and that distinction is the whole point of the out-param: models whose
-// first forward claims nothing (measured: Qwen3-4B-IQ4_NL, Qwen3.6-35B-A3B-NVFP4)
-// record 0, and a `> 0` test on the return value silently threw their
-// measurement away and charged the 3900 MiB constant instead. B43 found exactly
-// this shape in the reporter and fixed it there; the loader kept it (AUDIT B70).
-// Never throws; an absent or malformed file reads as "no entry".
+// Recorded bytes for `key`. `found` distinguishes a recorded ZERO from no entry at all:
+// models whose first forward claims nothing record 0, and a `> 0` test on the return
+// value silently threw that measurement away and charged the 3900 MiB constant instead
+// (B43 fixed this shape in the reporter; the loader kept the bug, AUDIT B70). Never
+// throws; an absent or malformed file reads as "no entry".
 size_t library_reserve_cache_load(const std::string& path, const LibraryReserveKey& key,
                                   bool* found = nullptr);
 

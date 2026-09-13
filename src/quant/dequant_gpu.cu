@@ -30,37 +30,20 @@ bool dequant_gpu_supported(QType qtype) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Q6_K GPU dequantization kernel
-//
-// Block format (210 bytes per 256 elements):
-//   ql[128]   : lower 4 bits, GGML interleaved layout
-//   qh[64]    : upper 2 bits, GGML interleaved layout
-//   scales[16]: int8 sub-block scales (one per 16 elements)
-//   d[2]      : fp16 super-block scale
-//
-// GGML Q6_K packing: 256 values split into 2 groups of 128.
-// Each group has 4 sub-groups of 32 (q1, q2, q3, q4).
-//   q1 (vals 0..31):   ql[l] low nibble,    qh[l] bits 0..1
-//   q2 (vals 32..63):  ql[l+32] low nibble,  qh[l] bits 2..3
-//   q3 (vals 64..95):  ql[l] high nibble,   qh[l] bits 4..5
-//   q4 (vals 96..127): ql[l+32] high nibble, qh[l] bits 6..7
-// Second group (vals 128..255) offsets: ql+=64, qh+=32, sc+=8.
-// ---------------------------------------------------------------------------
+// Q6_K GPU dequant, 210 bytes per 256-element block: ql[128] lower 4 bits (GGML
+// interleaved), qh[64] upper 2 bits (GGML interleaved), scales[16] int8 sub-block scales
+// (1/16 elements), d[2] fp16 super-block scale. 256 values = 2 groups of 128, each 4
+// sub-groups of 32:
+//   q1 (0..31):   ql[l] low nibble,   qh[l] bits 0-1
+//   q2 (32..63):  ql[l+32] low nibble, qh[l] bits 2-3
+//   q3 (64..95):  ql[l] high nibble,  qh[l] bits 4-5
+//   q4 (96..127): ql[l+32] high nibble, qh[l] bits 6-7
+// Second group (128..255): ql+=64, qh+=32, sc+=8.
 
-// ---------------------------------------------------------------------------
-// Optimized Q6_K dequant kernel — block-centric indexing
-//
-// One CUDA thread block per Q6_K super-block (256 elements).
-// 128 threads, each processing 2 consecutive elements with half2 writes.
-//
-// Eliminates expensive integer division (row/col from flat index) by
-// mapping blockIdx.x directly to a Q6_K block.  Consecutive Q6_K blocks
-// in memory map to consecutive blockIdx values, so:
-//   src_ptr  = src + blockIdx.x * 210
-//   dst_ptr  = dst + blockIdx.x * 256
-// No row/col computation needed.
-// ---------------------------------------------------------------------------
+// Block-centric Q6_K dequant: one thread block per 256-element super-block, 128 threads
+// each handling 2 consecutive elements with half2 writes. Avoids row/col integer division:
+// consecutive Q6_K blocks map to consecutive blockIdx.x, so src=src+blockIdx.x*210,
+// dst=dst+blockIdx.x*256 directly.
 
 __device__ __forceinline__ int dequant_q6k_element(const uint8_t* __restrict__ bp, int i) {
     int group = i >> 7;
@@ -108,13 +91,8 @@ __global__ void dequant_q6k_v2_kernel(const uint8_t* __restrict__ src, half* __r
     out[threadIdx.x] = result;
 }
 
-// ---------------------------------------------------------------------------
-// Q8_0 GPU dequantization kernel
-//
-// Block format (34 bytes per 32 elements):
-//   d[2]   : fp16 scale
-//   qs[32] : int8 quantized values
-// ---------------------------------------------------------------------------
+// Q8_0 GPU dequant, block format (34 bytes per 32 elements): d[2] fp16 scale,
+// qs[32] int8 quantized values.
 
 __global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
@@ -137,14 +115,9 @@ __global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ src, half* __res
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q8_K GPU dequantization kernel
-//
-// Block format (292 bytes per 256 elements):
-//   d[4]        : float scale
-//   qs[256]     : int8 quantized values
-//   bsums[32]   : int16 block sums (unused for dequant, used for optimized dp)
-// ---------------------------------------------------------------------------
+// Q8_K GPU dequant, block format (292 bytes per 256 elements): d[4] float scale,
+// qs[256] int8 quantized values, bsums[32] int16 block sums (unused for dequant, used for
+// optimized dot product).
 
 __global__ void dequant_q8k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
@@ -168,13 +141,8 @@ __global__ void dequant_q8k_kernel(const uint8_t* __restrict__ src, half* __rest
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q4_0 GPU dequantization kernel
-//
-// Block format (18 bytes per 32 elements):
-//   d[2]   : fp16 scale
-//   qs[16] : packed nibbles (2 x 4-bit values per byte, low nibble first)
-// ---------------------------------------------------------------------------
+// Q4_0 GPU dequant, block format (18 bytes per 32 elements): d[2] fp16 scale,
+// qs[16] packed nibbles (2x4-bit values per byte, low nibble first).
 
 __global__ void dequant_q4_0_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
@@ -203,16 +171,8 @@ __global__ void dequant_q4_0_kernel(const uint8_t* __restrict__ src, half* __res
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q4_1 GPU dequantization kernel
-//
-// Block format (20 bytes per 32 elements):
-//   d[2]   : fp16 scale
-//   m[2]   : fp16 min (offset)
-//   qs[16] : 4-bit quantized values (2 per byte)
-//
-// Dequantization: val = d * nibble + m   (unsigned nibble 0..15)
-// ---------------------------------------------------------------------------
+// Q4_1 GPU dequant, block format (20 bytes per 32 elements): d[2] fp16 scale, m[2] fp16 min,
+// qs[16] 4-bit values (2 per byte). Dequant: val = d*nibble + m (unsigned nibble 0..15).
 
 __global__ void dequant_q4_1_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
@@ -240,14 +200,8 @@ __global__ void dequant_q4_1_kernel(const uint8_t* __restrict__ src, half* __res
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q5_0 GPU dequantization kernel
-//
-// Block format (22 bytes per 32 elements):
-//   d[2]   : fp16 scale
-//   qh[4]  : high bits (bit 4 of each element, packed 8 per byte)
-//   qs[16] : low 4-bit nibbles (2 per byte)
-// ---------------------------------------------------------------------------
+// Q5_0 GPU dequant, block format (22 bytes per 32 elements): d[2] fp16 scale,
+// qh[4] high bits (bit 4 of each element, packed 8/byte), qs[16] low 4-bit nibbles (2/byte).
 
 __global__ void dequant_q5_0_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
@@ -270,11 +224,9 @@ __global__ void dequant_q5_0_kernel(const uint8_t* __restrict__ src, half* __res
     int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
     int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
-    // ggml packs high bits into a u32 where element i (0..31) has its high bit
-    // at bit i. Ref dequantize_row_q5_0:
-    //   xh_0 = ((qh >> j) << 4) & 0x10        // bit j   → element j
-    //   xh_1 = ((qh >> (j+12))) & 0x10        // bit j+16→ element j+16
-    // (the j+12 shift picks up bit (4+j+12)=bit j+16 at output position 4).
+    // ggml packs high bits into a u32 where element i (0..31) has its high bit at bit i.
+    // Ref dequantize_row_q5_0: xh_0 = ((qh>>j)<<4)&0x10 (bit j -> element j),
+    // xh_1 = ((qh>>(j+12)))&0x10 (bit j+16 -> element j+16).
     int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
@@ -282,15 +234,8 @@ __global__ void dequant_q5_0_kernel(const uint8_t* __restrict__ src, half* __res
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q5_1 GPU dequantization kernel
-//
-// Block format (24 bytes per 32 elements):
-//   d[2]   : fp16 scale
-//   m[2]   : fp16 min
-//   qh[4]  : high bits (bit 4 of each element)
-//   qs[16] : low 4-bit nibbles
-// ---------------------------------------------------------------------------
+// Q5_1 GPU dequant, block format (24 bytes per 32 elements): d[2] fp16 scale, m[2] fp16 min,
+// qh[4] high bits (bit 4 of each element), qs[16] low 4-bit nibbles.
 
 __global__ void dequant_q5_1_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
@@ -322,18 +267,10 @@ __global__ void dequant_q5_1_kernel(const uint8_t* __restrict__ src, half* __res
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q4_K GPU dequantization kernel
-//
-// Super-block format (144 bytes per 256 elements):
-//   d[2]           : fp16 super-block scale
-//   dmin[2]        : fp16 super-block min
-//   scales[12]     : packed sub-block scales and mins (6 bits each)
-//   qs[128]        : 4-bit quantized values (2 per byte)
-//
-// 8 sub-blocks of 32 elements each. Each sub-block has a 6-bit scale
-// and 6-bit min packed into the 12-byte scales array.
-// ---------------------------------------------------------------------------
+// Q4_K GPU dequant, super-block format (144 bytes per 256 elements): d[2] fp16 super-block
+// scale, dmin[2] fp16 super-block min, scales[12] packed 6-bit sub-block scales+mins,
+// qs[128] 4-bit values (2/byte). 8 sub-blocks of 32 elements, each with its own 6-bit
+// scale+min packed into the 12-byte scales array.
 
 __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
@@ -356,11 +293,10 @@ __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __rest
 
     int sub = i / 32;  // sub-block index 0..7 (= scale index)
 
-    // Unpack 6-bit scale and min for this sub-block.
-    // GGML packing (get_scale_min_k4):
-    //   sub < 4: sc_val = scales[sub] & 63,       min_val = scales[sub+4] & 63
-    //   sub >= 4: sc_val = (scales[sub+4] low4) | (scales[sub-4] top2 << 4)
-    //             min_val = (scales[sub+4] high4) | (scales[sub] top2 << 4)
+    // Unpack 6-bit scale/min per sub-block, GGML get_scale_min_k4 packing:
+    //   sub<4:  sc=scales[sub]&63,             min=scales[sub+4]&63
+    //   sub>=4: sc=(scales[sub+4] low4)|((scales[sub-4] top2)<<4)
+    //           min=(scales[sub+4] high4)|((scales[sub] top2)<<4)
     uint8_t sc_val, min_val;
     if (sub < 4) {
         sc_val = sc[sub] & 63;
@@ -382,19 +318,10 @@ __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __rest
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q5_K GPU dequantization kernel
-//
-// Super-block format (176 bytes per 256 elements):
-//   d[2]           : fp16 super-block scale
-//   dmin[2]        : fp16 super-block min
-//   scales[12]     : packed sub-block scales and mins (6 bits each, same as Q4_K)
-//   qh[32]         : high bits (5th bit) for 256 elements
-//   qs[128]        : 4-bit quantized values (low 4 bits, 2 per byte)
-//
-// 8 sub-blocks of 32 elements each. Dequant: val = d * sc * q5 - dmin * min
-// where q5 is a 5-bit value: q5 = (q4 & 0xF) | ((qh_bit) << 4)
-// ---------------------------------------------------------------------------
+// Q5_K GPU dequant, super-block format (176 bytes per 256 elements): d[2]/dmin[2] fp16
+// super-block scale/min, scales[12] packed 6-bit (same as Q4_K), qh[32] high (5th) bit for
+// 256 elements, qs[128] low 4-bit values (2/byte). 8 sub-blocks of 32.
+// Dequant: val = d*sc*q5 - dmin*min, where q5 = (q4&0xF) | (qh_bit<<4).
 
 __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
@@ -434,14 +361,10 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
     uint8_t packed = qs[qs_byte];
     int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
 
-    // Extract 5th bit from qh array. Ref ggml layout (dequantize_row_q5_K):
-    //   32 bytes. Each byte[l] holds the high bits for element l across
-    //   all 4 chunks (j=0,64,128,192) at bit positions 0..7.
-    //   For chunk c (0..3) and half h (0..1):
-    //     - l = index within the chunk-half (0..31)
-    //     - byte_idx = l   (0..31)
-    //     - bit_pos  = c*2 + h
-    //     - element index in block: i = c*64 + h*32 + l
+    // Extracts the 5th bit from qh (ggml dequantize_row_q5_K layout): 32 bytes, byte[l] holds
+    // the high bits for element l across all 4 chunks (j=0,64,128,192) at bit positions 0..7.
+    // For chunk c (0..3), half h (0..1), l = index in chunk-half: byte_idx=l, bit_pos=c*2+h,
+    // element index in block = c*64+h*32+l.
     int c = i >> 6;         // chunk 0..3
     int h2 = (i >> 5) & 1;  // half 0/1
     int l = i & 31;
@@ -453,21 +376,11 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q2_K GPU dequantization kernel
-//
-// Super-block format (84 bytes per 256 elements):
-//   scales[16]  : 4-bit packed scales and mins (one byte per 16 elements,
-//                 low nibble = scale, high nibble = min)
-//   qs[64]      : 2-bit packed quants (4 elements per byte)
-//   d[2]        : fp16 super-block scale
-//   dmin[2]     : fp16 super-block min
-//
-// 16 sub-blocks of 16 elements. Within each 128-element half:
-//   shift cycles 0,2,4,6 over groups of 32 quant bytes.
-//   q2_val = (qs[byte] >> shift) & 3
-//   val = d * (sc_low4) * q2_val - dmin * (sc_high4)
-// ---------------------------------------------------------------------------
+// Q2_K GPU dequant, super-block format (84 bytes per 256 elements): scales[16] 4-bit packed
+// (low nibble=scale, high nibble=min, 1 byte/16 elements), qs[64] 2-bit packed (4/byte),
+// d[2]/dmin[2] fp16 super-block scale/min. 16 sub-blocks of 16 elements; within each
+// 128-element half, shift cycles 0,2,4,6 over groups of 32 quant bytes:
+// q2_val=(qs[byte]>>shift)&3, val = d*sc_low4*q2_val - dmin*sc_high4.
 
 __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
@@ -513,19 +426,10 @@ __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __rest
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q3_K GPU dequantization kernel
-//
-// Super-block format (110 bytes per 256 elements):
-//   hmask[32]   : high bit (bit 2) for each of 256 elements
-//   qs[64]      : 2-bit packed quants (low 2 bits, 4 per byte)
-//   scales[12]  : packed 6-bit scales (same packing as Q4_K/Q5_K)
-//   d[2]        : fp16 super-block scale
-//
-// 16 sub-blocks of 16 elements. Each element has a 3-bit value:
-//   q3 = (qs_2bit) + (hmask_bit ? 0 : -4)  giving range [-4..3]
-//   val = d * (unpacked_6bit_scale - 32) * q3
-// ---------------------------------------------------------------------------
+// Q3_K GPU dequant, super-block format (110 bytes per 256 elements): hmask[32] high bit
+// (bit 2) per element, qs[64] 2-bit packed (low 2 bits, 4/byte), scales[12] packed 6-bit
+// (same packing as Q4_K/Q5_K), d[2] fp16 super-block scale. 16 sub-blocks of 16 elements;
+// q3 = qs_2bit + (hmask_bit?0:-4) giving range [-4..3]; val = d*(unpacked_6bit_scale-32)*q3.
 
 __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
@@ -557,20 +461,15 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
     int qs_idx = half_idx * 32 + in_grp;
     int q2 = (qs[qs_idx] >> shift) & 3;
 
-    // Extract high bit from hmask. The 256 high bits are NOT stored in output
-    // order: ggml walks one bitplane per 32-element sub-block (dequantize_row_q3_K
-    // holds m = 1 << (4*n + j) across the whole super-block while the byte index
-    // runs 0..31 within the row). Element i therefore reads BIT i/32 of BYTE
-    // i%32, not bit i%8 of byte i/8 — the two agree only for i < 8, which is why
-    // this survived every by-eye check (AUDIT_arch_2026 D-5).
+    // hmask's 256 high bits are NOT stored in output order: ggml walks one bitplane per
+    // 32-element sub-block, so element i reads bit i/32 of byte i%32, not bit i%8 of byte i/8
+    // (the two agree only for i<8, why this survived every by-eye check, AUDIT_arch_2026 D-5).
     int hm_bit = (hmask[i % 32] >> (i / 32)) & 1;
     int q3 = q2 - (hm_bit ? 0 : 4);
 
-    // Unpack 6-bit scale for this sub-block (16 sub-blocks of 16 elements)
-    // Q3_K scale packing is the same complex 12-byte format used for 16 scales:
-    //   scales[0..3] and scales[4..7] hold low 4 bits
-    //   scales[8..11] hold upper 2 bits (interleaved)
-    // Simplified single-element extraction:
+    // Q3_K 6-bit scale unpack (16 sub-blocks of 16 elements), same 12-byte packing as the
+    // 16-scale format: scales[0..3]/[4..7] hold low 4 bits, scales[8..11] hold interleaved
+    // upper 2 bits.
     int sub = i / 16;  // 0..15
     int8_t sc_val;
     {
@@ -599,18 +498,10 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// IQ4_NL GPU dequantization kernel
-//
-// Block format (18 bytes per 32 elements):
-//   d[2]   : fp16 scale
-//   qs[16] : packed 4-bit codebook indices (2 per byte)
-//
-// Non-linear 4-bit: the index selects from a fixed signed codebook
-// (kvalues_iq4nl, ggml-common.h). Element layout matches Q4_0: element e
-// (0..15) is the low nibble of qs[e]; element e+16 is the high nibble.
-// Dequantization: val = d * codebook[nibble].
-// ---------------------------------------------------------------------------
+// IQ4_NL GPU dequant, block format (18 bytes per 32 elements): d[2] fp16 scale, qs[16]
+// packed 4-bit codebook indices (2/byte, into kvalues_iq4nl). Non-linear 4-bit: index
+// selects from a fixed signed codebook. Layout matches Q4_0 (element e = low nibble of
+// qs[e], e+16 = high nibble). val = d * codebook[nibble].
 
 __device__ __constant__ int8_t kvalues_iq4nl_gpu[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
                                                         1,    13,   25,  38,  53,  69,  89,  113};
@@ -640,22 +531,11 @@ __global__ void dequant_iq4_nl_kernel(const uint8_t* __restrict__ src, half* __r
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// IQ4_XS GPU dequantization kernel
-//
-// Super-block format (136 bytes per 256 elements):
-//   d[2]        : fp16 super-block scale
-//   scales_h[2] : uint16, upper 2 bits of the 8 sub-block scales (2 bits each)
-//   scales_l[4] : lower 4 bits of the 8 sub-block scales (2 per byte)
-//   qs[128]     : packed 4-bit codebook indices (2 per byte)
-//
-// 8 sub-blocks of 32 elements, each with a 6-bit scale ls (bias 32) and the
-// same non-linear codebook as IQ4_NL. Within a sub-block the nibble layout
-// matches IQ4_NL: 16 bytes, element j low nibble, element j+16 high nibble
-// (ggml dequantize_row_iq4_xs). Dequantization:
-//   ls  = (scales_l nibble) | ((scales_h >> 2*sub) & 3) << 4
-//   val = d * (ls - 32) * codebook[nibble]
-// ---------------------------------------------------------------------------
+// IQ4_XS GPU dequant, super-block format (136 bytes per 256 elements): d[2] fp16
+// super-block scale, scales_h[2]/scales_l[4] packed 6-bit sub-block scales (bias 32),
+// qs[128] packed 4-bit codebook indices (2/byte, same codebook as IQ4_NL). 8 sub-blocks
+// of 32, nibble layout matches IQ4_NL. ls = (scales_l nibble)|((scales_h>>2*sub)&3)<<4;
+// val = d*(ls-32)*codebook[nibble].
 
 __global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                       int cols) {
@@ -693,17 +573,10 @@ __global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __r
     dst[idx] = __float2half(val);
 }
 
-// ---------------------------------------------------------------------------
-// Q6_K → FP8 E4M3 dequantization kernel
-//
-// Same Q6_K block decoding as dequant_q6k_v2_kernel, but writes FP8 E4M3
-// instead of FP16. Uses the existing dequant_q6k_element() helper.
-// Q6_K dequanted values are typically |val| < 10 — well within FP8 E4M3
-// range (max 448), so scale=1.0 with saturating conversion is safe.
-//
-// One CTA per Q6_K super-block (256 elements), 128 threads, 2 elements/thread.
-// Writes uint16_t (2 packed FP8 bytes) per thread for coalesced 2-byte stores.
-// ---------------------------------------------------------------------------
+// Q6_K -> FP8 E4M3 dequant: same block decoding as dequant_q6k_v2_kernel, writes FP8 E4M3
+// instead of FP16 via dequant_q6k_element(). Q6_K values are |val|<10, well within E4M3's
+// 448 max, so scale=1.0 with saturating conversion is safe. One CTA per 256-element
+// super-block, 128 threads, 2 elements/thread, packed uint16_t (2 FP8 bytes) per thread.
 
 __global__ void dequant_q6k_to_fp8_kernel(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
                                           int total_blocks) {

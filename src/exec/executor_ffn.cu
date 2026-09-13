@@ -107,10 +107,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                          !will_fuse_down_nvfp4 && !will_fuse_down_beta1 && n > 1 &&
                                          qscratch_.dequant != nullptr &&
                                          dequant_gpu_supported(ly.w_down.qtype));
-    // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier
-    // (gemm.nvfp4_residual_beta1): h += down(so) via the smallm accumulate
-    // path — replaces GEMM-to-scratch + elementwise_add_store and skips the
-    // residual save below (see the o-projection twin in executor_attention.cu).
+    // Batched-decode residual accumulation on CUTLASS_NVFP4 (gemm.nvfp4_residual_beta1):
+    // h += down(so) via the smallm accumulate path, replacing GEMM-to-scratch
+    // + elementwise_add_store (o-projection twin: executor_attention.cu).
     bool will_fuse_down_beta1_nvfp4 =
         (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
          !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 && !will_fuse_down_mxfp4 && n > 1 &&
@@ -288,10 +287,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // 4+5+6. Gated activation + Down projection + residual add.
-    //    For decode (n=1) with dp4a: fuse activation→Q8_1→GEMV+residual.
-    //    SwiGLU case: swiglu_quantize_q8_1 fuses activation + Q8_1 in one kernel,
-    //    eliminating the intermediate FP16 buffer write and one kernel launch.
+    // Gated activation + down projection + residual add. Decode (n=1, dp4a):
+    // fuse activation->Q8_1->GEMV+residual. SwiGLU: swiglu_quantize_q8_1 fuses
+    // activation+Q8_1 in one kernel, no intermediate FP16 buffer.
     {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         bool fused_down_residual = (!has_post_ffn_norm && n == 1 && q8 != nullptr &&
@@ -358,10 +356,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                               static_cast<const half*>(h.data), M_d, K_d, stream);
                 }
             } else {
-                // Large K (e.g. 12288): split activation + GEMV.
-                // The fused kernel's silu/gelu compute dominates at large K,
-                // while the separate vectorized activation kernel is ~1 μs,
-                // then GEMV uses prmt dequant (no smem LUT, no bank conflicts).
+                // Large K (e.g. 12288): split activation + GEMV. The fused kernel's
+                // silu/gelu compute dominates at large K, while the separate vectorized
+                // activation kernel is cheap and the GEMV then uses prmt dequant (no smem LUT, no bank
+                // conflicts).
                 if (cfg.ffn_activation != FFNActivation::GEGLU) {
                     swiglu(go, uo, so, stream);
                 } else {
@@ -373,12 +371,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            // Fuse activation + Q8_1 quantization into a single kernel when possible.
-            // This saves 1 kernel launch per layer (activation + quantize → single kernel).
-            // NOTE: tried fusing act+quant+GEMV into one kernel but it regresses ~22%
-            // because the 2-pass SwiGLU recomputation doubles gate/up L2 reads and the
-            // kpar GEMV is already memory-bound on weight reads (same issue as O-proj
-            // inline quant at line 674). Separate quant + kpar achieves higher occupancy.
+            // Fuses activation + Q8_1 quantization into one kernel (saves a launch).
+            // Fusing act+quant+GEMV further regresses: the 2-pass SwiGLU
+            // recomputation doubles gate/up L2 reads while the kpar GEMV is already
+            // memory-bound on weight reads. Separate quant + kpar reaches higher occupancy.
             if (cfg.ffn_activation != FFNActivation::GEGLU) {
                 swiglu_quantize_q8_1(static_cast<const half*>(go.data), static_cast<const half*>(uo.data), q8,
                                      qscratch_.d8_buf, K_d, stream);
@@ -508,12 +504,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // LoRA delta on down_proj: h already holds residual + Wd·act from
-    // whichever arm ran. The fused arms never materialize `so`, but go/uo
-    // are intact — recompute the activation into `so` for the delta input
-    // (one extra kernel per adapted layer; PEFT semantics preserved).
-    // Sandwich-norm archs (post_ffn_norm) would need the delta inside the
-    // norm — declined in v1 with a log.
+    // LoRA delta on down_proj: h already holds residual + Wd.act. Fused arms
+    // never materialize `so`, but go/uo are intact, so recompute the
+    // activation into `so` for the delta input. Sandwich-norm archs would need
+    // the delta inside the norm; declined in v1 (logged).
     if (lora_) {
         if (const LoraWeights* w = lora_->get(layer, LoraProj::DOWN)) {
             if (!has_post_ffn_norm) {

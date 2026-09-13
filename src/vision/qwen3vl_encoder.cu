@@ -216,10 +216,9 @@ bool Qwen3VLEncoder::run_merger(const VisionMergerWeights& m, const half* d_hidd
     const int merged = tokens / unit;
     const int wide = c.hidden_size * unit;
 
-    // The norm's own width says where it sits relative to the 2x2 concat: the
-    // main merger normalises each patch (hidden_size), the DeepStack mergers
-    // normalise the concatenated token (merge^2 * hidden_size). Same bytes
-    // either way — only the row length differs.
+    // The norm's own width says where it sits relative to the 2x2 concat: the main merger
+    // normalises each patch (hidden_size), DeepStack mergers normalise the concatenated token
+    // (merge^2*hidden_size). Same bytes either way, only the row length differs.
     const bool postshuffle = m.norm_w.shape[0] == wide;
     if (postshuffle)
         launch_qwen3vl_layernorm(d_hidden, static_cast<const half*>(m.norm_w.data),

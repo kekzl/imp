@@ -1,36 +1,18 @@
-// QKV-projection dispatch block for GraphExecutor::run_attention.
-//
-// This is NOT a standalone translation unit — it is textually #include'd inside
-// the body of GraphExecutor::run_attention (executor_attention.cu), between the
-// braces of the QKV-projection scope. It is therefore omitted from the CMake
-// source list and must not be compiled on its own. The contents are byte-for-
-// byte the original inline block; see executor_attention.cu for surrounding
-// context and local variables in scope.
+// NOT a standalone TU: textually #include'd inside GraphExecutor::run_attention,
+// between the braces of the QKV-projection scope. Omitted from CMake; must
+// not be compiled alone. Byte-for-byte the original inline block; see
+// executor_attention.cu for surrounding context and local variables in scope.
         if (prof.attn_variant == AttnVariant::MLA) {
-            // MLA (DeepSeek-V2/V3) materialized two-step KV projection (Task 2.3).
-            //
-            // Math:
-            //   kv_a  = norm_out @ kv_a_proj^T        [n, kv_lora_rank + rope_dim]
-            //   latent = kv_a[:, :kv_lora_rank]        [n, kv_lora_rank]
-            //   k_rope = kv_a[:, kv_lora_rank:]         [n, rope_dim]  MQA-style shared
-            //   latent = rmsnorm(latent, kv_a_layernorm)
-            //   kv_b   = latent @ kv_b_proj^T           [n, n_heads*(nope_dim + v_head_dim)]
-            //   K[h]   = [pe(rope_dim) | nope(nope_dim)]  -- rope kernel hits first rope_dim dims
-            //   V[h]   = kv_b last v_head_dim dims
-            //
-            // RoPE layout choice (b): pe FIRST so the existing rope_forward kernel
-            // (which rotates the leading rope_dim dims of each head) applies unchanged.
-            // Q is also reordered from HF [nope | pe] to [pe | nope] to match K.
-            //
-            // Dispatch: gemm_via_handle_ for tier-aware weight lookup; rmsnorm for latent
-            // normalisation; mla_assemble_kv scatter kernel. Scratch via cudaMallocAsync.
-            //
-            // LIMITATION: LoRA deltas are NOT applied on the MLA path. The
-            // non-MLA path (the `else` branch below) applies Q/K/V LoRA deltas
-            // after the projections, but MLA's Q-projection delta and the
-            // latent kv_a/kv_b projections have no LoRA wiring here. A LoRA
-            // adapter targeting a DeepSeek MLA model is therefore silently
-            // ignored. Emit a one-time warning so this isn't a silent surprise.
+            // MLA (DeepSeek-V2/V3) materialized two-step KV projection.
+            // kv_a = norm_out @ kv_a_proj^T [n, kv_lora_rank+rope_dim]; latent =
+            // rmsnorm(kv_a[:,:kv_lora_rank]); k_rope = kv_a[:,kv_lora_rank:] (MQA-style
+            // shared); kv_b = latent @ kv_b_proj^T [n, n_heads*(nope_dim+v_head_dim)];
+            // K[h] = [pe(rope_dim)|nope(nope_dim)], V[h] = kv_b's last v_head_dim dims.
+            // RoPE layout: pe FIRST so rope_forward's leading-dims rotation applies
+            // unchanged; Q is reordered from HF [nope|pe] to [pe|nope] to match K.
+            // LIMITATION: LoRA deltas are NOT applied on the MLA path (Q-proj delta and
+            // the latent kv_a/kv_b projections have no LoRA wiring); a LoRA adapter on
+            // a DeepSeek MLA model is silently ignored except for a one-time warning.
             if (lora_ && lora_->has_any()) {
                 static bool mla_lora_warned = false;
                 if (!mla_lora_warned) {
@@ -57,10 +39,9 @@
             gemm_via_handle_(ly.wq_id, no, qv, ctx);
             mla_reorder_q(static_cast<half*>(qv.data), n, nh, nope_dim, rope_dim, stream);
 
-            // 3. kv_a = norm_out @ kv_a_proj^T   [n, kva_out]
-            //    Scratch is pre-allocated (mla_*_buf_), NOT cudaMallocAsync'd here:
-            //    stream-ordered alloc/free is rejected inside CUDA-graph capture
-            //    (decode loop), which silently falls back to eager and degenerates.
+            // kv_a scratch is pre-allocated (mla_*_buf_), NOT cudaMallocAsync'd here:
+            // stream-ordered alloc/free is rejected inside CUDA-graph capture (decode loop), silently falling
+            // back to eager and degenerating.
             void* kv_a_buf = mla_kv_a_buf_;
             {
                 int64_t kva_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kva_out)};
@@ -106,15 +87,11 @@
                     gemm_via_handle_(ly.kv_b_proj_id, lat, kvb, ctx);
                 }
 
-                // 8. Scatter into K [pe|nope] and V.
-                //    K: [n, n_heads, rope_dim+nope_dim]
-                //    V: [n, n_heads, hd]  — over-allocated to K's head_dim (hd =
-                //    rope_dim+nope_dim), real v_head_dim values first, tail zeroed.
-                //    Padding V to hd lets BOTH the prefill attention kernels
-                //    (cuBLAS/FA2/FMHA, which assume V shares K's head_dim) and the
-                //    paged-decode KV write see a uniform hd-wide V layout. The
-                //    zero tail contributes nothing to the P·V sum; the attention
-                //    output is later narrowed per-head to v_head_dim.
+                // Scatter into K [pe|nope] and V. V is [n,n_heads,hd], over-allocated to
+                // K's head_dim (hd=rope_dim+nope_dim): real v_head_dim values first, tail
+                // zeroed. This lets prefill kernels (which assume V shares K's head_dim)
+                // and the paged-decode KV write see a uniform hd-wide V layout; the zero tail contributes
+                // nothing to P.V.
                 const int v_dst_hd = rope_dim + nope_dim;  // == hd
                 mla_assemble_kv(
                     static_cast<const half*>(kv_b_buf),
@@ -140,11 +117,10 @@
                           mxfp4_hwk->payload.mxfp4.linear_scales && mxfp4_hwv &&
                           mxfp4_hwv->primary_tier == StorageTier::MXFP4 &&
                           mxfp4_hwv->payload.mxfp4.linear_scales);
-        // NVFP4 decode path: uses FP16 input (no Q8_1 quantization needed).
-        // Two sources: (1) primary NVFP4 storage tier (native NVFP4 models),
-        // (2) secondary NVFP4 decode cache populated by Phase 3 for
-        // Q8_0/Q6_K/Q5_K models — c8763ad refactor lost this fallback;
-        // restore by also probing `wcache_.nvfp4`.
+        // NVFP4 decode path uses FP16 input (no Q8_1 quantization). Two sources:
+        // primary NVFP4 storage tier (native models), and the secondary NVFP4
+        // decode cache for Q8_0/Q6_K/Q5_K models (c8763ad regressed this fallback; restored by also probing
+        // wcache_.nvfp4).
         auto nv_q_it = wcache_.nvfp4.find(ly.wq.data);
         auto nv_k_it = wcache_.nvfp4.find(ly.wk.data);
         auto nv_v_it = wcache_.nvfp4.find(ly.wv.data);
@@ -237,10 +213,9 @@
                                     static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                                     static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream);
         } else {
-            // Separate RMSNorm + dispatch.
-            // Gemma-4 FP32 accum path: read FP32 residual directly to avoid the
-            // FP16 round-trip that drops ~1-2% precision per layer and causes
-            // the last-token hidden state to drift by sign-flip at L29.
+            // Gemma-4 FP32 accum path: read the FP32 residual directly to avoid the
+            // FP16 round-trip that drops ~1-2% precision per layer and drifts the
+            // last-token hidden state (sign-flip at L29).
             if (using_fp32_accum && prof.is_gemma4) {
                 Tensor fp32_h = view_tokens(fp32_hidden_, n);
                 rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
@@ -283,11 +258,10 @@
                 gemm_cublaslt(fp8_no, fp8_tv, vv, 1.0f, 0.0f, qscratch_.d_act_scale,
                               fp8_hwv->payload.fp8.d_scale, stream);
             } else {
-                // Try fused K+V path: single strided batched GEMM for both
-                // projections. Read via WeightRegistry handle — the wcache_
-                // map is no longer the lookup mechanism (it remains the
-                // storage owner; cleanup happens via wcache_.clear()).
-                // Gemma 4 per-layer shapes break strided-batched K+V layout assumptions.
+                // Fused K+V path: one strided batched GEMM for both projections, looked
+                // up via WeightRegistry handle (wcache_ is the storage owner only, not the
+                // lookup mechanism now). Gemma 4 per-layer shapes break the strided-batched K+V layout
+                // assumption.
                 const Tensor* fused_kv = nullptr;
                 Tensor fused_from_handle;
                 if (ly.fused_kv_id != kInvalidTensorID) {
@@ -303,10 +277,9 @@
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                 } else {
-                    // NVFP4-CUTLASS prefill QKV reads the SAME normed input
-                    // three times — quantize it into the activation scratch
-                    // once (Q's dispatch) and let K/V skip the re-quantize
-                    // via the act-quant hint. Bit-identical reuse.
+                    // NVFP4-CUTLASS prefill QKV reads the SAME normed input three times:
+                    // quantize once (Q's dispatch) into the activation scratch, K/V skip the
+                    // re-quantize via the act-quant hint. Bit-identical reuse.
                     GemmContext kv_ctx = ctx;
                     if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.wq_id, n) &&
                         prefill_routes_cutlass_nvfp4_(ly.wk_id, n) &&
@@ -343,10 +316,9 @@
         // Apply Q/K/V biases if present (Qwen2) — fused 3-way for 1 launch
         add_bias_3way(qv, ly.q_bias, kk, ly.k_bias, vv, ly.v_bias, stream);
 
-        // LoRA deltas on the raw projection outputs (pre QK-norm / pre RoPE —
-        // matches HF PEFT semantics of wrapping the Linear). Every QKV arm
-        // above materializes the normed input in `no` (the fused dp4a arm
-        // side-writes it when an adapter is active).
+        // LoRA deltas on the raw projection outputs (pre QK-norm/pre RoPE, matches
+        // HF PEFT's wrapped-Linear semantics). Every QKV arm materializes the
+        // normed input in `no` (the fused dp4a arm side-writes it when an adapter is active).
         if (lora_) {
             if (const LoraWeights* w = lora_->get(layer, LoraProj::Q))
                 lora_delta_(*w, no.data, qv.data, n, stream);

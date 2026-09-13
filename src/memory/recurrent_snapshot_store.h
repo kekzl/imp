@@ -10,10 +10,10 @@
 
 namespace imp {
 
-// One stored recurrent-state snapshot: the full per-sequence SSM/GDN state
-// slab as it was after prefilling exactly `n_tokens` tokens. `key` is the
-// chained KV block hash of those tokens (n_tokens is always a multiple of
-// the KV block size, so the key identifies the byte-exact token prefix).
+// One stored recurrent-state snapshot: the full per-sequence SSM/GDN state slab as it
+// was after prefilling exactly n_tokens tokens. key is the chained KV block hash of
+// those tokens (n_tokens is always a multiple of the KV block size, so the key
+// identifies the byte-exact token prefix).
 struct RecurrentSnapshotEntry {
     size_t key = 0;
     int n_tokens = 0;
@@ -21,33 +21,23 @@ struct RecurrentSnapshotEntry {
     bool on_host = false;  // host-tier copy: restore with cudaMemcpyDefault (pinned H2D)
 };
 
-// Device-side LRU store of recurrent-state snapshots for hybrid (SSM/GDN)
-// models. Dense models reuse KV blocks at block granularity; recurrent state
-// is cumulative, so a prefix can only be skipped when the state at exactly
-// that boundary was saved. The engine saves one snapshot per prefill (at the
-// largest block-aligned prompt position) and restores the longest match on
-// admission, turning multi-turn full-history re-prefill into a tail-only
-// prefill.
-//
-// Threading: save/find/clear run on the engine worker thread. Entries are
-// handed out as shared_ptr; a Request may hold one across steps and release
-// it from another thread (server request teardown), so buffer recycling goes
-// through a mutex-guarded pool shared with the entry deleters. An evicted
-// entry's buffer is recycled only after the last holder releases it — an
-// in-flight restore can never read a reused buffer.
-// Host tier (server.recurrent_snapshot_host_mb): the device tier is a few
-// slots (256 MiB = 3 slabs on Qwen3.8-27B), so with more concurrent
-// multi-turn sessions than slots every session's snapshot is evicted before
-// its next turn and the whole history is prefilled again. An entry evicted
-// from the device tier is copied into pinned host memory on the save stream
-// instead of being dropped (the D2H is stream-ordered before any later save
-// reuses the device buffer), and find() serves host-tier entries with
-// on_host = true; the restore copies them back with cudaMemcpyDefault. Host
-// entries are never promoted back: a restore is one H2D of one slab.
-// A save that finds every device slab held by an in-flight restore goes
-// straight into the host tier (save_to_host_): with 8 sessions on 3 slabs
-// the device tier is held for whole generations, and a dropped save costs
-// the session its next turn's prefix.
+// Device-side LRU store of recurrent-state snapshots for hybrid (SSM/GDN) models. Dense
+// models reuse KV blocks at block granularity; recurrent state is cumulative, so a
+// prefix can only be skipped when the state at exactly that boundary was saved. The
+// engine saves one snapshot per prefill (largest block-aligned position) and restores
+// the longest match on admission, turning multi-turn full-history re-prefill into a
+// tail-only prefill.
+// Threading: save/find/clear run on the engine worker thread; entries are shared_ptr, a
+// Request may hold one across steps and release it from another thread, so buffer
+// recycling goes through a mutex-guarded pool shared with the entry deleters. An evicted
+// entry's buffer recycles only after the last holder releases it.
+// Host tier (server.recurrent_snapshot_host_mb): the device tier is only a few slots, so
+// with more concurrent multi-turn sessions than slots every snapshot would be evicted
+// before its next turn. An entry evicted from the device tier is copied into pinned host
+// memory instead of dropped (stream-ordered D2H); find() serves host-tier entries
+// (on_host = true), restored via cudaMemcpyDefault. Host entries are never promoted back
+// (a restore is one H2D of one slab). A save finding every device slab held by an
+// in-flight restore goes straight into the host tier (save_to_host_).
 class RecurrentSnapshotStore {
 public:
     ~RecurrentSnapshotStore();
@@ -70,11 +60,10 @@ public:
     std::shared_ptr<const RecurrentSnapshotEntry> find(size_t key);
 
         // Copy entry_bytes from `src` (device) into the store on `stream`.
-    // Evicts the LRU entry if at capacity (into the host tier when one is
-    // configured, the D2H issued on `stream`). When every device slab is held
-    // by an in-flight request the save goes straight into the host tier
-    // instead (one D2H on `stream`). Returns false only when no slab of
-    // either tier is free or on a copy failure.
+    // Evicts the LRU entry if at capacity (into the host tier when configured, D2H on
+    // `stream`). When every device slab is held by an in-flight request, the save goes
+    // straight into the host tier instead. Returns false only when no slab of either tier is
+    // free or on a copy failure.
     bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream);
     // Saves that landed in the host tier because no device slab was free, and
     // saves dropped because no slab of either tier was.

@@ -1,9 +1,7 @@
 #pragma once
 
-// Internal helpers shared across pre_dequant_*.cu translation units.
-// Not part of any public API; included only by src/exec/pre_dequant_*.cu.
-//
-// Phase 3 of the architecture-refactor roadmap (archived: docs/archive/README.md)
+// Internal helpers shared across pre_dequant_*.cu translation units. Not a public API;
+// included only by src/exec/pre_dequant_*.cu.
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"
@@ -23,24 +21,14 @@
 
 namespace imp::pre_dequant_internal {
 
-// #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head,
-// "auto"/"on"/"off", legacy true/false accepted). The 2026-07-12 parity sweep
-// measured the cache PER SOURCE TYPE:
-//  - QUANTIZED (GGUF) heads: dp4a already decodes them fast, so the cache buys
-//    little but stacks NVFP4 on the quant lattice — net-positive ONLY on small
-//    dense models (4B +6.6% decode/+3.8% PPL, 8B +5.8%/+2.6%); net-NEGATIVE at
-//    14B Q6_K (+1.9%/+2.1%) and 30B-A3B Q4_K_M (+3.7%/+5.0%), 35B a wash.
-//    auto → ON iff dense && d_model <= 4096 (the measured net-positive set).
-//    EXCEPTION — GDN/SSM hybrids: their head trade is owned by
-//    gemm.nvfp4_lm_head_gdn (GOAL-listed, default ON: +5.3% decode / +1.4% PPL
-//    on the Qwen3.6-35B UD-Q4_K_M hero, re-measured 2026-07-15). The dense/MoE
-//    net rule's is_dense=false arm silently voided that flag on quantized
-//    hybrids and cost the hero −5% decode — pass is_gdn_hybrid so auto defers
-//    to the callers' nvfp4_lm_head_gdn gate instead.
-//  - NATIVE (F16/BF16) heads: 2 B/elem cuBLAS GEMV is the alternative, the
-//    cache is a 4x byte win (+8-16% decode, +2.2% PPL, owner-accepted trade,
-//    GOAL-listed). auto → ON (unchanged).
-// GDN/SSM hybrids remain additionally gated by gemm.nvfp4_lm_head_gdn.
+// #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off,
+// legacy bool accepted). QUANTIZED (GGUF) heads: auto -> ON iff dense && d_model <= 4096
+// (net-positive only on small dense models; net-negative at larger sizes).
+// EXCEPTION: GDN/SSM hybrids are owned by gemm.nvfp4_lm_head_gdn (GOAL-listed, default
+// ON) instead; the dense/MoE net rule's is_dense=false arm silently voided that flag on
+// quantized hybrids, so auto defers to nvfp4_lm_head_gdn via is_gdn_hybrid.
+// NATIVE (F16/BF16) heads: auto -> ON unconditionally (cuBLAS GEMV alternative, NVFP4
+// cache wins on bytes; GOAL-listed).
 inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, bool is_dense, int d_model,
                                   bool is_gdn_hybrid = false) {
     const std::string& v = rc.gemm.nvfp4_lm_head;
@@ -93,10 +81,9 @@ inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, 
             if (it != wc.nvfp4.end()) {
                 h.payload.nvfp4.data = static_cast<uint8_t*>(it->second.packed_data);
                 h.payload.nvfp4.block_scales = static_cast<uint8_t*>(it->second.micro_scales);
-                // Borrow a pointer to the host tensor_scale stored in the wcache entry.
-                // The NvFP4QuantResult lives in wcache_.nvfp4 (stable address in unordered_map).
-                // Callers that read tensor_scale must NOT pass this to cudaMemcpyDeviceToHost
-                // (it's a host float, not a device pointer). They should read it as *tensor_scale.
+                // Borrow a pointer to the host tensor_scale stored in the wcache entry (stable address in
+                // unordered_map). Callers must NOT pass this to cudaMemcpyDeviceToHost: it's a host
+                // float, not a device pointer. Read as *tensor_scale.
                 h.payload.nvfp4.tensor_scale = const_cast<float*>(&it->second.tensor_scale);
                 h.payload.nvfp4.tensor_scale_2 = nullptr;
             }

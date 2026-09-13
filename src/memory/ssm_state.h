@@ -9,40 +9,31 @@ namespace imp {
 
 class VRAMAllocator;
 
-// Manages per-sequence, per-SSM-layer state for Mamba2 models.
-// Two state types per (sequence, layer):
-//   - conv_state: [conv_channels, conv_kernel] float (sliding window for causal conv1d)
-//   - h_state:    [n_heads, head_dim_ssm, state_size] in h_dtype (SSM recurrent state)
-//
-// conv_state is always FP32 (small, needs precision for convolution).
-// h_state dtype is configurable: FP32 (default) or FP16 (saves ~50% VRAM for h_state).
-// SSM scan computes in FP32 regardless; FP16 h_state uses FP16 load/store only.
-//
-// Two backing modes. Fixed: one allocation for every slot at init. Lazy: the
-// address space for every slot is reserved at init (costs nothing), and a
-// slot's slab is committed the first time ensure_slot() is asked for it, so
-// an idle server holds the state of the sequences it runs, not of
-// max_batch_size. The slot stride is padded to the backend's commit granule
-// so two slots never share a page; the payload (per_seq_bytes) is unchanged.
+// Per-sequence, per-SSM-layer state for Mamba2 models. Two state types per (sequence,
+// layer): conv_state [conv_channels, conv_kernel] float (causal conv1d sliding window),
+// h_state [n_heads, head_dim_ssm, state_size] in h_dtype (SSM recurrent state).
+// conv_state is always FP32 (small, needs precision); h_state is FP32 (default) or FP16
+// (saves ~50% VRAM); the scan always computes in FP32, FP16 h_state only affects
+// load/store.
+// Two backing modes: Fixed (one allocation for every slot at init) and Lazy (address
+// space reserved at init for free, a slot's slab committed on first ensure_slot(), so an
+// idle server holds only the state of sequences it runs). Slot stride is padded to the
+// backend's commit granule so two slots never share a page; per_seq_bytes is unchanged.
 class SSMState {
 public:
     SSMState() = default;
     ~SSMState();
 
-    // Allocate state for the given configuration.
-    // h_dtype: QType::F32 (default) or QType::F16 for h_state storage.
-    // n_reserved: extra slots past max_sequences that the scheduler never
-    // hands out — scratch for the multi-candidate speculative verify, which
-    // runs W candidates as W sequences and needs W-1 slots inside the pool
-    // (the batched scan addresses state by slot id, not by pointer). Reached
-    // through reserved_slot(i); same slab layout, priced with the pool.
-    // lazy_backend: a growable backend to reserve from instead of allocating
-    // every slot up front. Reserved slots commit at init; live slots commit
-    // on ensure_slot(). Null, or a backend that cannot grow, keeps the fixed
-    // pool.
-    // n_reserved_lazy: the LAST n_reserved_lazy of the reserved slots are not
-    // committed at init on a lazy pool (the batched verify's spares, taken on
-    // first use through ensure_slot()); the others commit at init as before.
+    // h_dtype: F32 (default) or F16 for h_state storage. n_reserved: extra slots past
+    // max_sequences the scheduler never hands out, scratch for multi-candidate speculative
+    // verify (W candidates run as W sequences, needing W-1 slots since the batched scan
+    // addresses state by slot id). Reached through reserved_slot(i); same slab layout,
+    // priced with the pool.
+    // lazy_backend: a growable backend to reserve from instead of allocating every slot up
+    // front; reserved slots commit at init, live slots commit on ensure_slot(). Null, or a
+    // backend that cannot grow, keeps the fixed pool. n_reserved_lazy: the LAST
+    // n_reserved_lazy reserved slots are not committed at init on a lazy pool (batched
+    // verify's spares, taken on first use); the others commit at init as before.
     [[nodiscard]] bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel,
                             int n_heads, int head_dim_ssm, int state_size, QType h_dtype = QType::F32,
                             VRAMAllocator* alloc = nullptr, int n_reserved = 0,
@@ -68,10 +59,9 @@ public:
     // step by THIS, copies move per_seq_bytes().
     size_t slot_stride_bytes() const { return slot_stride_bytes_; }
 
-    // The same per-layer layout applied to an arbitrary slab of per_seq_bytes()
-    // — a snapshot scratch rather than a live sequence. The speculative verify
-    // writes a second, mid-chunk state into one of these so a partial
-    // acceptance can adopt it instead of re-forwarding to reach it.
+    // The same per-layer layout applied to an arbitrary slab of per_seq_bytes(): a snapshot
+    // scratch rather than a live sequence. Speculative verify writes a second, mid-chunk
+    // state into one of these so a partial acceptance can adopt it instead of re-forwarding.
     void* conv_state_in(void* slab, int ssm_layer_idx) const {
         return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_;
     }
@@ -91,19 +81,17 @@ public:
     // buffer for one layer's state without re-deriving the geometry.
     size_t h_bytes() const { return h_bytes_; }
 
-    // Lazy pool: commit the slot's slab if it is not committed yet. False
-    // when the card cannot spare it above the allocator headroom right now
-    // (a VMM commit does not fail when the card is full, it spills, #1103),
-    // or the backend refused. A fixed pool answers true for every valid slot.
-    // Does not zero the slab: every acquisition is followed by
-    // reset_sequence() or a snapshot restore on the engine stream, and a
-    // memset here would race that restore.
+    // Lazy pool: commit the slot's slab if not committed yet. False when the card cannot
+    // spare it above the allocator headroom right now (a VMM commit does not fail when the
+    // card is full, it spills, #1103), or the backend refused. A fixed pool answers true for
+    // every valid slot. Does not zero the slab: every acquisition is followed by
+    // reset_sequence() or a snapshot restore on the engine stream, and a memset here would
+    // race that restore.
     [[nodiscard]] bool ensure_slot(int slot);
-    // Lazy pool: hand a committed slot's pages back to the driver (the
-    // address stays reserved, so graphs that step to it by id stay valid).
-    // Used once, after warmup, which had touched every slot capturing the
-    // decode graphs. False when the slot was not committed or the backend
-    // cannot decommit.
+    // Lazy pool: hand a committed slot's pages back to the driver (the address stays
+    // reserved, so graphs that step to it by id stay valid). Used once, after warmup, which
+    // had touched every slot capturing the decode graphs. False when the slot was not
+    // committed or the backend cannot decommit.
     bool decommit_slot(int slot);
     bool lazy() const { return lazy_; }
     bool slot_committed(int slot) const;

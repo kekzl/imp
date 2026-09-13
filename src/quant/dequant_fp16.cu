@@ -7,17 +7,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// INT4 -> FP16 dequantization kernel (GGML Q4_0 compatible packing)
-//
-// Packing format: each byte holds 2 x 4-bit unsigned values.
-//   low  nibble (bits 0-3)  = first element  (even index)
-//   high nibble (bits 4-7)  = second element (odd index)
-// Unsigned range [0, 15] is centered at 8:
-//   dequant_value = (nibble - 8) * scale
-//
-// Scales are FP16, one per group of `group_size` elements.
-// ---------------------------------------------------------------------------
+// INT4->FP16 dequant (GGML Q4_0-compatible packing): each byte holds 2x4-bit unsigned
+// values (low nibble = even index, high nibble = odd index), unsigned [0,15] centered at 8:
+// dequant_value = (nibble-8)*scale. Scales are FP16, one per group of group_size elements.
 
 static constexpr int kBlockSize = 256;
 

@@ -1,18 +1,11 @@
 #pragma once
 
-// GemmKernel registry: the (Strategy -> function pointer) table behind the
-// three production dispatch sites in executor_gemm_dispatch.cu:
+// GemmKernel registry, the (Strategy -> handler) table behind the 3 dispatch sites:
 //   {FP16, NONE, false}          generic dequant catch-all (M>1, uncached weight)
-//   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq / dp4a / fused gemv), 8 qtypes
+//   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq/dp4a/fused gemv), 8 qtypes
 //   {CUTLASS_NVFP4, F16, false}  CUTLASS NVFP4 prefill GEMM
-// Every registered key has one of those producers and every producer has a
-// key; GemmKernelRegistryTest.RegistryHoldsExactlyTheProducedKeys pins the
-// count at 10. The FP8 / NVFP4 GEMV+GEMM / MXFP4 / FP16 / Q4_K-IMMA arms of
-// `gemm_via_handle_` never moved onto the table (the R5 migration stopped at
-// slice 8; the FP8 copy had drifted to W8A8 against the live W8A16). Their
-// 9 unreachable registrations were retired in AUDIT_arch_2026 dispatch #8
-// (2026-09-05, decision (b) in docs/audit/SETTLED.md section H). A new tier
-// registers here only together with its dispatch site.
+// Every key has one producer and vice versa; RegistryHoldsExactlyTheProducedKeys pins the
+// count at 10. A new tier registers here only together with its dispatch site.
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"
@@ -27,13 +20,10 @@ namespace imp {
 struct CutlassNvFP4Weight;
 struct CutlassMxFP4Weight;
 
-// ---------------------------------------------------------------------------
-// Strategy key — fully describes which kernel handles a dispatch request.
-// `qtype` is the WEIGHT qtype (input qtype is always FP16 on the dispatch
-// hot path today). `m_is_one` separates GEMV (M==1, decode) from GEMM
-// (M>1, prefill) because the two reach different kernels even within the
-// same tier (e.g. NVFP4 GEMV vs NVFP4 dequant->GEMM).
-// ---------------------------------------------------------------------------
+// Strategy key: fully describes which kernel handles a dispatch request. qtype is the
+// WEIGHT qtype (input is always FP16 on the hot path today). m_is_one separates GEMV
+// (M==1, decode) from GEMM (M>1, prefill): the two reach different kernels even within
+// the same tier (e.g. NVFP4 GEMV vs NVFP4 dequant->GEMM).
 struct GemmStrategy {
     StorageTier tier = StorageTier::Undefined;
     QType weight_qtype = QType::F16;
@@ -44,12 +34,9 @@ struct GemmStrategy {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Args struct — replaces the 21 trailing parameters of the legacy
-// gemm_dispatch_impl. Per-tier handlers cast `weight_payload` to the
-// tier-appropriate pointer type (Tensor* for FP16, FP8CacheEntry* for
-// FP8, NvFP4QuantResult* for NVFP4, etc.).
-// ---------------------------------------------------------------------------
+// Args struct replacing the 21 trailing parameters of the legacy gemm_dispatch_impl.
+// Per-tier handlers cast weight_payload to the tier-appropriate pointer type (Tensor* for
+// FP16, FP8CacheEntry* for FP8, NvFP4QuantResult* for NVFP4, etc.).
 struct GemmKernelArgs {
     // Required across every tier
     const Tensor* input = nullptr;        // [M, K] FP16
@@ -73,34 +60,22 @@ struct GemmKernelArgs {
     void* mxfp4_act_sf = nullptr;
     void* mxfp4_workspace = nullptr;
     size_t mxfp4_workspace_size = 0;
-    // R5 Slice 8.6 — QW7 dual-cache CUTLASS MXFP4 hand-off. When the
-    // CUTLASS_NVFP4 strategy fires AND the same `weight.data` is also present
-    // in the `cutlass_mxfp4` cache (only happens when `--mxfp4-prefill` is on,
-    // because executor_pre_dequant.cu builds the mxfp4 cache by iterating
-    // every NVFP4 entry), the dispatch site forwards the MXFP4 payload here
-    // so the handler can try the MXFP4 CUTLASS GEMM before falling back to
-    // the NVFP4 CUTLASS GEMM. nullptr = no dual-cache hit, take the NVFP4
-    // path directly. See cutlass_nvfp4_gemm_kernel in
-    // gemm_kernel_cutlass_nvfp4.cu for the branching logic.
+    // QW7 dual-cache CUTLASS MXFP4 hand-off: when CUTLASS_NVFP4 fires and weight.data is also
+    // in cutlass_mxfp4 (--mxfp4-prefill on), the dispatch forwards the MXFP4 payload so the
+    // handler tries MXFP4 CUTLASS before falling back to NVFP4 CUTLASS. nullptr = no
+    // dual-cache hit. See cutlass_nvfp4_gemm_kernel (gemm_kernel_cutlass_nvfp4.cu).
     const void* mxfp4_payload = nullptr;
 
-    // dp4a / Q8_1 activation quantization scratch (slice 7 — GGUF dp4a tier):
-    // a per-call activation scratch pre-sized by engine init
-    // (QuantScratch::q8_1_buf / d8_buf).
-    // The dp4a kernels quantize the FP16 activation into `q8_1_buf` then run
-    // dispatch_dp4a_gemv with the block scales in `d8_buf`. nullptr means the
-    // caller did not supply scratch and the kernel must PreconditionFail so
-    // the dispatch site can fall back to legacy. Typed as void* / float* to
-    // mirror the legacy gemm_dispatch_impl signature; the kernel reinterpret-
-    // casts to block_q8_1*.
+    // dp4a/Q8_1 activation quantization scratch (GGUF dp4a tier): per-call scratch pre-sized
+    // by engine init (QuantScratch::q8_1_buf/d8_buf). nullptr means no scratch supplied; the
+    // kernel must PreconditionFail so the dispatch site falls back to legacy.
     void* q8_1_buf = nullptr;
     float* d8_buf = nullptr;
 
-    // Act-quant dedupe (CUTLASS_NVFP4 prefill): cutlass_act_data/_sf already
-    // hold the quantized form of `input` (a prior dispatch on the same input
-    // quantized it). The handler skips quantize_fp16_to_nvfp4_cutlass. Set
-    // by gemm_via_handle_ when the GemmContext act-quant hint matches the
-    // (input.data, M, K) of this call.
+    // Act-quant dedupe (CUTLASS_NVFP4 prefill): cutlass_act_data/_sf already hold the
+    // quantized form of input (a prior dispatch on the same input quantized it); the handler
+    // skips quantize_fp16_to_nvfp4_cutlass. Set when the GemmContext act-quant hint matches
+    // (input.data, M, K).
     bool act_prequantized = false;
 
     // Per-model gemma4.force_mmvq override (Phase 5 Track A). Used by the
@@ -126,15 +101,9 @@ enum class GemmDispatchResult {
 // Per-kernel function signature.
 using GemmKernelFn = GemmDispatchResult (*)(const GemmKernelArgs& args);
 
-// ---------------------------------------------------------------------------
-// Registry singleton.
-//
-// `register_kernel` populates the table at static-init time (each tier's
-// .cu file calls it from a `__attribute__((constructor))` or
-// `static const int _reg = (register_kernel(...), 0);` idiom). `dispatch`
-// is the hot-path entry — does a linear scan over the (small) table and
-// invokes the matching kernel.
-// ---------------------------------------------------------------------------
+// Registry singleton: register_kernel populates the table at static-init time (each
+// tier's .cu calls it via a constructor attribute or static-init idiom). dispatch is the
+// hot-path entry: linear scan over the small table to the matching kernel.
 class GemmKernelRegistry {
 public:
     static GemmKernelRegistry& instance();

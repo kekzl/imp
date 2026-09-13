@@ -1,17 +1,10 @@
-// Pipelined batched-decode chain advance (runtime.decode_pipeline).
-//
-// One tiny single-block launch that makes step N+1 runnable BEFORE the host
-// has read step N's tokens: feed step N's sampled slot tokens (the per-row
-// SAMPLE_SCRATCH_BYTES slots) as step N+1's input token ids, bump positions
-// and context lens, append each token to the per-row device output history
-// (rep/freq/presence penalty rows sample step N+1 against a history that
-// includes the token the host has not seen yet), and scatter freshly
-// appended KV block-table entries. The patch/pos arrays live in mapped
-// pinned memory (host-written just before launch, parity-alternated by the
-// engine so a set is never overwritten while a kernel may still read it).
-//
-// Own TU (split from executor_elementwise.cu): distinct logical unit on the
-// serving hot path — an edit here must not re-ptxas the elementwise grab-bag.
+// Pipelined batched-decode chain advance (runtime.decode_pipeline): makes
+// step N+1 runnable before the host reads step N's tokens by feeding
+// step N's sampled slot tokens as step N+1 input, bumping positions/context
+// lens, appending to per-row output history, and scattering new KV
+// block-table entries. Patch/pos arrays live in mapped pinned memory,
+// parity-alternated so a set is never overwritten mid-read. Own TU (split
+// from executor_elementwise.cu) so an edit here doesn't re-ptxas that file.
 
 #include "core/logging.h"
 

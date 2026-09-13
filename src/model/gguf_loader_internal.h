@@ -1,13 +1,7 @@
 #pragma once
 
-// ============================================================================
-// GGUF loader — internal shared declarations.
-//
-// File-local helpers/tables that are needed by more than one of the gguf_*.cpp
-// translation units (gguf_loader.cpp, gguf_parse.cpp, gguf_tensor_assign.cpp).
-// NOT part of the public loader API (model/gguf_loader.h) — do not include
-// outside the gguf_* TUs.
-// ============================================================================
+// File-local helpers/tables shared by gguf_loader.cpp, gguf_parse.cpp, gguf_tensor_assign.cpp.
+// Not part of the public loader API (model/gguf_loader.h); do not include outside gguf_* TUs.
 
 #include "model/gguf_loader.h"
 #include "model/model.h"
@@ -82,10 +76,8 @@ public:
 
     std::string read_string() {
         uint64_t len = read_u64();
-        // A length that runs past EOF (incl. an absurd 2^60-style value) is a
-        // hard parse error, not a recoverable empty string: returning "" here
-        // would leave the cursor desynced and let the caller keep parsing
-        // garbage. Flag failure so the surrounding loop stops.
+        // A length past EOF (incl. an absurd 2^60 value) is a hard parse error, not a recoverable
+        // empty string: returning "" would desync the cursor and let the caller parse garbage.
         if (failed_ || len > remaining()) {
             failed_ = true;
             return "";

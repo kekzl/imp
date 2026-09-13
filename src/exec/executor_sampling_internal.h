@@ -1,7 +1,6 @@
-// Shared between executor.cu (forward/masked_sample/decode-async paths) and
-// executor_sampling.cu (the batched per-row sampling family) after the
-// 2026-08-27 TU split. Host-inline helper + the launcher for the ban kernel
-// that stays defined in executor.cu.
+// Shared between executor.cu and executor_sampling.cu after the
+// 2026-08-27 TU split: host-inline helper + the launcher for the ban kernel that stays defined in
+// executor.cu.
 #pragma once
 
 #include "core/tensor.h"
@@ -22,11 +21,11 @@ void launch_ban_logits(float* logits, const int32_t* banned_ids, int n_banned, i
 void launch_ban_logits_if(float* logits, const int32_t* banned_ids, int n_banned, int vocab_size,
                           const int* d_active, cudaStream_t stream);
 
-// The one place that decides which constrainer masks a step. There are four
-// sampling paths across these two TUs and they used to carry four copies of
-// this chain — a new constrainer then had to be added to all four, and the
-// two easy-to-miss ones are exactly how an unmasked path ships. Precedence
-// mirrors ConstraintManager: grammar > regex > schema > json.
+// The one place that decides which constrainer masks a step. Four
+// sampling paths across two TUs used to carry four copies of this chain,
+// so a new constrainer had to be added to all four and an easy-to-miss one
+// is exactly how an unmasked path ships. Precedence mirrors
+// ConstraintManager: grammar > regex > schema > json.
 inline void apply_constraint_mask(const imp::InferenceState& st, float* logits, int vocab,
                                   cudaStream_t stream) {
     if (st.grammar_constrainer)

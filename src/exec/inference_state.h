@@ -11,10 +11,9 @@
 
 namespace imp {
 
-// Constrained-decoding hooks are referenced only by pointer here; their full
-// definitions live in compute/json_constrain.h / schema_constrain.h /
-// regex_constrain.h and are included by the TUs that dereference them
-// (executor.cu).
+// Constrained-decoding hooks referenced only by pointer here; full definitions live in
+// compute/json_constrain.h / schema_constrain.h / regex_constrain.h, included by the TUs
+// that dereference them (executor.cu).
 class JsonConstrainer;
 class SchemaConstrainer;
 class RegexConstrainer;
@@ -30,10 +29,9 @@ struct InferenceState {
     // KV cache for paged attention (decode)
     KVCache* kv_cache = nullptr;
     const int* block_tables = nullptr;  // [n_sequences, max_blocks_per_seq] on device (2D padded)
-    // SWA-group block tables (kv_cache.swa_sizing): same shape/stride as
-    // block_tables, -1 holes outside the trailing window. Sliding-window
-    // layers read/write through this table; nullptr when the feature is off
-    // (all layers use block_tables, today's behavior).
+    // SWA-group block tables (kv_cache.swa_sizing): same shape/stride as block_tables, -1
+    // holes outside the trailing window. Sliding-window layers read/write through this table;
+    // nullptr when off (all layers use block_tables).
     const int* block_tables_swa = nullptr;
     const int* context_lens = nullptr;  // [n_sequences] on device
     int max_context_len = 0;
@@ -42,82 +40,57 @@ struct InferenceState {
     SSMState* ssm_state = nullptr;
     int ssm_seq_id = 0;  // sequence ID for SSM state access (single-sequence path)
 
-    // Batched GDN decode: when ssm_n_seq > 1 the rows of this step belong to
-    // ssm_n_seq DIFFERENT sequences, one token each, and ssm_seq_slots is a
-    // DEVICE array of their recurrent-state slot ids (ssm_n_seq ints).
-    //
-    // The recurrent scan is sequential in TOKENS, which is why one sequence
-    // cannot be parallelised over its own timeline. Separate sequences share
-    // nothing but weights, so they batch — and without this the whole decode
-    // step, including the FFN and attention projections that are ordinary
-    // GEMMs, runs at M=1 (profiled: 82 % of GPU time in GEMV kernels against
-    // 1 % in CUTLASS GEMM, where a dense model is the other way round).
-    //
-    // The array is a stable device buffer, not the values: a CUDA graph
-    // captures the pointer, and the host refills it per step, so a changed set
-    // of sequences does not force a re-capture.
+    // Batched GDN decode: when ssm_n_seq > 1, rows belong to ssm_n_seq DIFFERENT sequences
+    // (one token each); ssm_seq_slots is a DEVICE array of their recurrent-state slot ids.
+    // The scan is sequential in tokens (cannot parallelize one sequence over its timeline),
+    // so separate sequences batch instead; this is what keeps FFN/attention GEMMs off M=1.
+    // Stable device buffer, not the values: a CUDA graph captures the pointer; the host
+    // refills it per step, so a changed sequence set does not force a re-capture.
     const int* ssm_seq_slots = nullptr;
     int ssm_n_seq = 1;
-    // Multi-candidate verify chunk on a hybrid (roadmap gap 5, Stage 3): the
-    // chunk rows are ssm_n_seq candidate groups of ssm_seq_tokens rows each,
-    // group c owning rows [c * ssm_seq_tokens, (c + 1) * ssm_seq_tokens) and
-    // recurrent slot ssm_seq_slots[c] (device data for conv AND scan, so a
-    // replay can re-point a group at another slot under a captured graph;
-    // the primary candidate binds the request's live slot, the others
-    // spec-reserved pool slots seeded from it). Rows past ssm_n_seq * ssm_seq_tokens are capture-bucket
-    // pads outside every group. d_chunk_len then carries the per-GROUP real
-    // row count (uniform), not the whole chunk's. 0 = not a grouped chunk
-    // (batched decode keeps one row per sequence).
+    // Multi-candidate verify chunk on a hybrid (roadmap gap 5, Stage 3): rows are ssm_n_seq
+    // candidate groups of ssm_seq_tokens rows; group c owns rows
+    // [c*ssm_seq_tokens, (c+1)*ssm_seq_tokens) and recurrent slot ssm_seq_slots[c].
+    // Rows past ssm_n_seq*ssm_seq_tokens are capture-bucket pads. d_chunk_len carries the
+    // per-GROUP row count (uniform), not the whole chunk's. 0 = not a grouped chunk.
     int ssm_seq_tokens = 0;
     bool ssm_grouped_chunk() const {
         return is_prefill && ssm_seq_slots != nullptr && ssm_n_seq > 1 && ssm_seq_tokens > 0;
     }
-    // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md):
-    // a grouped chunk whose groups are DIFFERENT requests. Group g reads slot
-    // ssm_seq_slots[g], commits its state at d_chunk_len rows into slot
-    // ssm_out_slots[g] and its state at d_snap_n rows into slot
-    // ssm_snap_slots[g] (every group; in place when == ssm_seq_slots[g]).
-    // Device int arrays of ssm_n_seq entries; nullptr = the mc contract
-    // above (in-place commit, group-0 snapshot into spec_snap_slab).
+    // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md): a grouped
+    // chunk whose groups are DIFFERENT requests. Group g reads slot ssm_seq_slots[g], commits
+    // state at d_chunk_len rows into ssm_out_slots[g] and at d_snap_n rows into
+    // ssm_snap_slots[g]. nullptr = in-place commit, group-0 snapshot into spec_snap_slab.
     const int* ssm_out_slots = nullptr;
     const int* ssm_snap_slots = nullptr;
-    // Factored spare (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md).
-    // ssm_fac_out replaces ssm_out_slots: the drafted row is carried as
-    // (g, k, delta) per head instead of a second full state slot. ssm_fac_in
-    // carries the row a previous verify left for an ACCEPTED request; the scan
-    // applies it to the state it just loaded, so it costs no state traffic.
-    // Both are the base of a [n_ssm_layers][slot][head][ssm_fac_stride] float
-    // buffer; the per-layer stride is ssm_fac_layer_stride floats.
+    // Factored spare (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md):
+    // ssm_fac_out replaces ssm_out_slots, carrying the drafted row as (g,k,delta) per head
+    // instead of a second full state slot. ssm_fac_in carries the row a previous verify left
+    // for an accepted request. Both are [n_ssm_layers][slot][head][ssm_fac_stride] float,
+    // per-layer stride ssm_fac_layer_stride.
     float* ssm_fac_out = nullptr;
     const float* ssm_fac_in = nullptr;
     int ssm_fac_stride = 0;
     int64_t ssm_fac_layer_stride = 0;
-    // Conv half of the same spare (compute/ssm_conv_tap.cu). ssm_tap_out
-    // stashes the drafted row's conv input; ssm_tap_in plus ssm_tap_slots
-    // advance the windows of the slots whose draft was accepted, before this
-    // layer's conv reads them.
+    // Conv half of the same spare (compute/ssm_conv_tap.cu): ssm_tap_out stashes the drafted
+    // row's conv input; ssm_tap_in + ssm_tap_slots advance accepted slots' windows before
+    // this layer's conv reads them.
     void* ssm_tap_out = nullptr;
     const void* ssm_tap_in = nullptr;
     const int* ssm_tap_slots = nullptr;
     int ssm_tap_n = 0;
     int64_t ssm_tap_layer_stride = 0;
 
-    // BitDecoding Phase 3 residual KV cache.
-    //
-    // Two activation modes: single-seq scalar OR multi-seq array. The
-    // attention dispatcher prefers the multi-seq form whenever the engine
-    // sets up the device arrays (see d_residual_seq_slots below).
-    //
-    // Single-seq mode (legacy / batch_size==1):
-    //   `kv_seq_id` carries the seq_id (= request id) used to look up the
-    //   ring state via KVCacheManager. -1 disables.
+    // BitDecoding Phase 3 residual KV cache. Two modes: single-seq scalar or multi-seq array
+    // (dispatcher prefers multi-seq whenever the engine sets up the device arrays).
+    // Single-seq: kv_seq_id is the request id used to look up ring state via KVCacheManager;
+    // -1 disables.
     int kv_seq_id = -1;
     // KVCacheManager owning the residual buffer + ring-state map.
     class KVCacheManager* kv_manager = nullptr;
-    // Multi-seq array form: device pointers to per-batch metadata, all of
-    // length n_sequences. Built by the engine on each forward step before
-    // the attention call. Each element matches the corresponding row of
-    // block_tables / context_lens. nullptr = multi-seq form inactive.
+    // Multi-seq array form: device pointers to per-batch metadata, length n_sequences, built
+    // by the engine each forward step before the attention call. Each element matches the
+    // corresponding row of block_tables/context_lens. nullptr = multi-seq form inactive.
     const int* d_residual_seq_slots = nullptr;     // [n_sequences] slot in [0, residual_max_seqs)
     const int* d_residual_counts = nullptr;         // [n_sequences] fill_count
     const int* d_residual_write_idxes = nullptr;    // [n_sequences] write_idx
@@ -128,43 +101,34 @@ struct InferenceState {
     // Batching
     int n_sequences = 1;         // number of sequences in the batch
     int max_blocks_per_seq = 0;  // max blocks per sequence (for 2D block_table indexing)
-    // Spec-verify chunk whose ATTENTION runs on the batched-decode split-K
-    // path (#964): the chunk rows are presented as n_sequences same-KV
-    // "sequences" with per-row context_lens (p0+1+i, causality via lengths)
-    // and row-replicated block_tables. is_prefill stays true so everything
-    // outside run_attention keeps the chunk-forward semantics.
+    // Spec-verify chunk whose attention runs on the batched-decode split-K path (#964):
+    // chunk rows are presented as n_sequences same-KV "sequences" with per-row context_lens
+    // and row-replicated block_tables. is_prefill stays true so non-attention code keeps
+    // chunk-forward semantics.
     bool chunk_decode_attn = false;
-    // Spec-verify chunk forward (#998): small-M GEMMs may read the NVFP4
-    // decode overlay (one weight pass per MR tile) instead of the M>1
-    // prefill dequant path — on GGUF K-quants the per-chunk source dequant
-    // cost ~7x a decode step and made speculation net-negative. Set for
-    // every verify chunk regardless of the attention route.
+    // Spec-verify chunk forward (#998): small-M GEMMs may read the NVFP4 decode overlay
+    // (one weight pass per MR tile) instead of the M>1 prefill dequant path, since on GGUF
+    // K-quants the per-chunk dequant cost made speculation net-negative. Set for every verify
+    // chunk regardless of attention route.
     bool spec_verify_chunk = false;
     const int* seq_offsets =
         nullptr;  // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
 
-    // Cross-sequence ragged prefill (roadmap 0(d)): the rows of this forward
-    // are the CONCATENATED prefill chunks of n_sequences requests. Row-wise
-    // work (GEMMs, norms, elementwise, RoPE via per-row positions) runs over
-    // all rows in one launch; attention and the GDN conv drop to a per-seq
-    // loop over [h_seq_offsets[i], h_seq_offsets[i+1]); the GDN scan runs the
-    // chunk-parallel kernel per member on the same loop (h_ssm_slots picks
-    // each member's state slot), and falls back to the fused batched kernel
-    // with `seq_offsets` (the device twin of h_seq_offsets) and ssm_seq_slots.
-    // h_seq_offsets != nullptr is the activation condition; the engine only
-    // sets it with n_sequences > 1, is_prefill, and none of the excluded
-    // per-request features (vision, MTP, spec-verify, logprobs, constraints,
-    // ppl capture, SWA sizing, residual KV).
+    // Cross-sequence ragged prefill (roadmap 0(d)): rows are the CONCATENATED prefill
+    // chunks of n_sequences requests. Row-wise work (GEMMs, norms, RoPE) runs over all rows
+    // in one launch; attention and GDN conv drop to a per-seq loop over
+    // [h_seq_offsets[i], h_seq_offsets[i+1]), falling back to the fused batched GDN kernel
+    // with seq_offsets + ssm_seq_slots. h_seq_offsets != nullptr is the activation condition:
+    // engine sets it only for n_sequences>1, is_prefill, none of vision/MTP/spec-verify/
+    // logprobs/constraints/ppl capture/SWA sizing/residual KV.
     const int* h_seq_offsets = nullptr;    // HOST [n_sequences+1] row prefix sums
     const int* h_seq_q_offsets = nullptr;  // HOST [n_sequences] per-seq prefill_offset
     const int* h_ssm_slots = nullptr;      // HOST [n_sequences] recurrent-state slots
     bool ragged_prefill() const { return is_prefill && n_sequences > 1 && h_seq_offsets != nullptr; }
-    // Mixed prefill+decode step (runtime.prefill_mixed_decode): the LAST
-    // n_riders sequences of a ragged prefill state are decoding requests with
-    // one row each. run_attention gives them one batched paged-decode launch
-    // per layer instead of the per-member prefill dispatch (measured on
-    // Qwen3-14B-NVFP4 with 32 riders: the per-member route cost +25 ms per
-    // 2048-row step, more than the decode step it replaced).
+    // Mixed prefill+decode step (runtime.prefill_mixed_decode): the LAST n_riders sequences
+    // of a ragged prefill state are decoding requests with one row each; run_attention gives
+    // them one batched paged-decode launch per layer instead of the per-member prefill
+    // dispatch.
     int n_riders = 0;
     int rider_max_context_len = 0;
 
@@ -217,12 +181,9 @@ struct InferenceState {
     SchemaConstrainer* schema_constrainer = nullptr;
     RegexConstrainer* regex_constrainer = nullptr;
     GrammarConstrainer* grammar_constrainer = nullptr;
-    // Output tokens still available to this request (max_tokens - produced).
-    // A constrainer can forbid illegal tokens but cannot force termination, so
-    // a model that wanders — an unterminated string, a whitespace flood — runs
-    // to the limit and returns truncated, unparseable JSON. With the budget
-    // known, the mask narrows to the closers once only just enough tokens
-    // remain to shut the document (#1104). -1 = unknown, no narrowing.
+    // Output tokens still available to this request (max_tokens - produced). A constrainer
+    // can forbid illegal tokens but not force termination, so once only enough tokens remain
+    // to close the document, the mask narrows to closers (#1104). -1 = unknown, no narrowing.
     int constrain_remaining_tokens = -1;
 
     // Logit bias (host-side, applied via cudaMemcpy before sampling)
@@ -251,31 +212,22 @@ struct InferenceState {
     int vision_token_id = -1;                 // <image_soft_token> ID
     int n_vision_tokens = 0;                  // total in the buffer, across all chunks
 
-    // How many image tokens EARLIER chunks already placed. `token_ids` is one
-    // chunk, so without this the k-th placeholder of a later chunk would take
-    // the k-th embedding of the image — the wrong picture region, silently.
-    // Zero whenever the prompt is prefilled in one go.
+    // How many image tokens EARLIER chunks already placed. token_ids is one chunk; without
+    // this the k-th placeholder of a later chunk would take the k-th embedding of the image,
+    // the wrong region, silently. Zero when the prompt is prefilled in one go.
     int vision_emb_offset = 0;
 
-    // DeepStack (Qwen3-VL): extra visual features ADDED at the image-token
-    // positions after each of the LM's first `n_deepstack` layers. Indexed by
-    // LM layer, NOT by the vision block the feature was tapped from — those are
-    // blocks 5/11/17 and these are layers 0/1/2. Each entry has the same shape
-    // as `vision_embeddings`.
+    // DeepStack (Qwen3-VL): extra visual features ADDED at image-token positions after each
+    // of the LM's first n_deepstack layers. Indexed by LM layer (0/1/2), not the vision block
+    // tapped (blocks 5/11/17). Each entry has the same shape as vision_embeddings.
     static constexpr int kMaxDeepStack = 4;
     const half* deepstack_embeddings[kMaxDeepStack] = {};
     int n_deepstack = 0;
 
-    // M-RoPE: per-token (t, h, w) positions, [3, n_tokens] on device.
-    //
-    // Present on EVERY step of a model that has M-RoPE, including text-only
-    // prompts — there all three rows carry the same value and the result is
-    // bit-identical to the single-axis path. Always-on rather than
-    // only-when-an-image-is-present is deliberate: the rope dispatch branches
-    // on this pointer, and a branch that flips between CUDA-graph capture and
-    // replay would bake the wrong rotation into every replay.
-    //
-    // Null for every model without M-RoPE, which is the unchanged path.
+    // M-RoPE: per-token (t,h,w) positions, [3, n_tokens] on device. Present on EVERY step of
+    // an M-RoPE model, even text-only (all three rows equal, bit-identical to single-axis).
+    // Always-on because rope dispatch branches on this pointer; a flipping branch would bake
+    // the wrong rotation into a CUDA-graph replay. Null for non-M-RoPE models.
     MRopeParams mrope;
 
     // Early exit: run only the first exit_layer layers (-1 = all layers).
@@ -300,25 +252,21 @@ struct InferenceState {
     // Avoids FP8 per-tensor quantization artifacts in batched verification.
     bool per_row_lm_head = false;
 
-    // Graph-captured verify chunk (#847). When ctx_capacity > 0 the chunked
-    // continuation attention path becomes replayable across context growth:
-    // gather grids and the KV scratch are sized for ctx_capacity, and the
-    // kernels read the REAL lengths from device (context_lens[0] for the
-    // total, d_past_len for the already-cached prefix) instead of baking
-    // max_context_len / prefill_offset. Requires n_sequences == 1 and an
-    // FA2-served attention config (GraphExecutor::chunk_capture_supported).
+    // Graph-captured verify chunk (#847). ctx_capacity > 0 makes chunked continuation
+    // attention replayable across context growth: gather grids and KV scratch are sized for
+    // ctx_capacity, kernels read real lengths from device (context_lens[0], d_past_len)
+    // instead of baking max_context_len/prefill_offset. Requires n_sequences==1 and an
+    // FA2-served config (GraphExecutor::chunk_capture_supported).
     int ctx_capacity = 0;
     const int* d_past_len = nullptr;  // device int == prefill_offset
     // Device int == real (unpadded) chunk length. Hybrid recurrent-state
     // updates (conv tail, scan final state) read it so the padding rows of a
     // captured verify chunk don't advance the committed state.
     const int* d_chunk_len = nullptr;
-    // Speculative verify: a second per-sequence recurrent slab to write the
-    // state as of row d_snap_n into, alongside the committed one at the real
-    // last row. A partial acceptance that lands on that row adopts it instead
-    // of restoring the pre-chunk state and re-forwarding to reach it — the
-    // re-forward is a full model pass, measured at 17.2 ms against a 28.5 ms
-    // verify on Qwen3.8-27B. nullptr disables it and nothing else changes.
+    // Speculative verify: second per-sequence recurrent slab, written with the state as of
+    // row d_snap_n, alongside the committed one at the real last row. A partial acceptance
+    // landing on that row adopts it instead of restoring pre-chunk state and re-forwarding.
+    // nullptr disables it; nothing else changes.
     void* spec_snap_slab = nullptr;
     const int* d_snap_n = nullptr;
     // The state as it was BEFORE this chunk. The conv snapshot's leading values

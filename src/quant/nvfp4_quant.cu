@@ -89,58 +89,29 @@ float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* 
     return h_scale;
 }
 
-// ---------------------------------------------------------------------------
-// NVFP4 (FP4 E2M1) quantization with two-level scaling.
-//
-// Phase 4 of the imp quantization pipeline.  Implements NVIDIA's FP4 format
-// used in Blackwell (SM100) with software emulation for earlier architectures.
-//
-// FP4 E2M1 format: 1 sign | 2 exponent | 1 mantissa, bias = 1
-//   Representable magnitudes: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
-//
-// Two-level scaling scheme:
-//   Level 1 (tensor scale):  global_absmax / 6.0  (FP32)
-//   Level 2 (micro scale):   local_absmax / (tensor_scale * 6.0)  (FP8 E4M3)
-//   Quantized value:          val / (tensor_scale * micro_scale) -> FP4 E2M1
-//
-// Packed format: 2 FP4 values per byte.
-//   Low nibble  (bits 0-3) = even-indexed element
-//   High nibble (bits 4-7) = odd-indexed element
-// ---------------------------------------------------------------------------
+// NVFP4 (FP4 E2M1) quantization with two-level scaling (Phase 4). FP4 E2M1: 1 sign|2
+// exponent|1 mantissa, bias=1, magnitudes {0,0.5,1.0,1.5,2.0,3.0,4.0,6.0}. Two-level scale:
+// Level 1 (tensor): global_absmax/6.0 (FP32). Level 2 (micro): local_absmax/
+// (tensor_scale*6.0) (FP8 E4M3). Quantized value = val/(tensor_scale*micro_scale) -> E2M1.
+// Packed: 2 FP4/byte, low nibble=even index, high=odd.
 
 static constexpr int kBlockSize = 256;
 static constexpr int kMicroBlockSize = 16;  // micro-block: 16 values
 static constexpr float kFP4E2M1Max = 6.0f;  // max representable in FP4 E2M1
 static constexpr float kFP8E4M3Max = 448.0f;
 
-// ---------------------------------------------------------------------------
-// FP4 E2M1 lookup table (unsigned magnitudes, indexed by 3-bit code 0..7)
-// ---------------------------------------------------------------------------
-//   code  exp(2-bit)  man(1-bit)   value
-//     0      00          0         0.0   (zero)
-//     1      00          1         0.5   (subnormal: 0.mantissa * 2^(1-bias) = 0.1 * 2^0)
-//     2      01          0         1.0   (1.0 * 2^(1-1))
-//     3      01          1         1.5   (1.1 * 2^0)
-//     4      10          0         2.0   (1.0 * 2^1)
-//     5      10          1         3.0   (1.1 * 2^1)
-//     6      11          0         4.0   (1.0 * 2^2)
-//     7      11          1         6.0   (1.1 * 2^2)
+// FP4 E2M1 lookup table (unsigned magnitudes, 3-bit code = 2-bit exp | 1-bit man, bias=1):
+// value = (1 + man) * 2^(exp-1) for exp>0 (code 2-7), 0.5*man for exp=0 (code 0-1, subnormal).
 
 __constant__ float kFP4E2M1Dequant[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
 
-// float_abs_to_fp4_e2m1() and nvfp4_pack_pair_hw() moved VERBATIM to
-// quant/nvfp4_pack.cuh — shared with the producer-side fused quantize
-// kernels (rmsnorm_nvfp4, swiglu_quantize_nvfp4).
-// float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
+// float_abs_to_fp4_e2m1() and nvfp4_pack_pair_hw() moved verbatim to quant/nvfp4_pack.cuh,
+// shared with the producer-side fused quantize kernels. float_to_fp8_e4m3()/
+// fp8_e4m3_to_float() come from fp8_utils.cuh.
 
-// ---------------------------------------------------------------------------
-// Device helper: quantize one micro-block (16 FP16 values) to NVFP4.
-//
-// Loads 16 values from `input + base`, computes the micro-scale via
-// two-level scaling, writes the packed FP4 nibbles and FP8 micro-scale.
-//
-// Shared by quantize_nvfp4_kernel and quantize_nvfp4_from_absmax_kernel.
-// ---------------------------------------------------------------------------
+// Quantizes one micro-block (16 FP16 values) to NVFP4: loads 16 values from input+base,
+// computes the micro-scale via two-level scaling, writes packed FP4 nibbles + FP8
+// micro-scale. Shared by quantize_nvfp4_kernel and quantize_nvfp4_from_absmax_kernel.
 __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restrict__ input,
                                                            uint8_t* __restrict__ packed_out,
                                                            uint8_t* __restrict__ micro_scales,
@@ -181,12 +152,9 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
     }
 }
 
-// ---------------------------------------------------------------------------
-// Kernel: absmax reduction over entire tensor (FP16 input).
-// Grid-stride loop, block-level reduction to shared memory, then atomicMax
-// on a global counter.  Uses integer atomicMax on the float bit pattern
-// (works because absval is non-negative and IEEE754 preserves ordering).
-// ---------------------------------------------------------------------------
+// Absmax reduction over the entire tensor (FP16 input): grid-stride loop, block-level
+// reduction to shared memory, then atomicMax on a global counter via integer atomicMax on
+// the float bit pattern (works since absval is non-negative and IEEE754 preserves ordering).
 __global__ void absmax_kernel(const half* __restrict__ input, int64_t n_elements,
                               float* __restrict__ global_max) {
     __shared__ float smem[kBlockSize];
@@ -221,16 +189,10 @@ __global__ void absmax_kernel(const half* __restrict__ input, int64_t n_elements
     }
 }
 
-// ---------------------------------------------------------------------------
-// Kernel: quantize FP16 -> NVFP4 with two-level scaling.
-// Each thread handles one micro-block of 16 elements.
-//
-// Thread mapping:
-//   global_thread_id = blockIdx.x * blockDim.x + threadIdx.x
-//   row  = global_thread_id / num_micro_blocks_per_row
-//   col_mb = global_thread_id % num_micro_blocks_per_row
-//   first element index = row * K + col_mb * 16
-// ---------------------------------------------------------------------------
+// Quantizes FP16->NVFP4 with two-level scaling, one micro-block (16 elements) per thread.
+// Thread mapping: global_thread_id=blockIdx.x*blockDim.x+threadIdx.x;
+// row=id/num_micro_blocks_per_row; col_mb=id%num_micro_blocks_per_row;
+// first element index = row*K + col_mb*16.
 __global__ void quantize_nvfp4_kernel(const half* __restrict__ input,      // [N, K] FP16
                                       uint8_t* __restrict__ packed_out,    // [N, K/2] packed nibbles
                                       uint8_t* __restrict__ micro_scales,  // [N, K/16] FP8 E4M3
@@ -255,10 +217,8 @@ __global__ void quantize_nvfp4_kernel(const half* __restrict__ input,      // [N
                                num_mb_per_row, K);
 }
 
-// ---------------------------------------------------------------------------
-// Variant that reads tensor_scale from a device pointer (for async pipeline).
-// Computes tensor_scale = absmax / kFP4E2M1Max on the fly.
-// ---------------------------------------------------------------------------
+// Variant that reads tensor_scale from a device pointer (async pipeline); computes
+// tensor_scale = absmax/kFP4E2M1Max on the fly.
 __global__ void quantize_nvfp4_from_absmax_kernel(
     const half* __restrict__ input, uint8_t* __restrict__ packed_out, uint8_t* __restrict__ micro_scales,
     const float* __restrict__ d_absmax,  // device pointer to absmax value
@@ -286,10 +246,8 @@ __global__ void quantize_nvfp4_from_absmax_kernel(
                                num_mb_per_row, K);
 }
 
-// ---------------------------------------------------------------------------
-// Kernel: dequantize NVFP4 -> FP16.
-// Reverses the two-level scaling.  Each thread handles one micro-block.
-// ---------------------------------------------------------------------------
+// Dequantizes NVFP4->FP16, reversing the two-level scaling; each thread handles one
+// micro-block.
 __global__ void dequantize_nvfp4_kernel(const uint8_t* __restrict__ packed_data,   // [N, K/2]
                                         const uint8_t* __restrict__ micro_scales,  // [N, K/16]
                                         float tensor_scale,
@@ -525,10 +483,8 @@ void dequantize_nvfp4_to_fp16(const NvFP4QuantResult& quant, void* output_fp16, 
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// ---------------------------------------------------------------------------
-// Kernel: dequantize NVFP4 MoE -> FP16 (per-expert tensor scales).
-// Same as dequantize_nvfp4_kernel but reads tensor_scale from device array.
-// ---------------------------------------------------------------------------
+// Dequantizes NVFP4 MoE->FP16 with per-expert tensor scales; same as
+// dequantize_nvfp4_kernel but reads tensor_scale from a device array.
 __global__ void dequantize_nvfp4_moe_kernel(const uint8_t* __restrict__ packed_data,
                                             const uint8_t* __restrict__ micro_scales,
                                             const float* __restrict__ tensor_scales,  // [n_experts] on device

@@ -40,20 +40,17 @@ struct Nvfp4DecodeContext {
     int    nvfp4_moe_count = 0;         // populated by the MoE-cache phase
     size_t nvfp4_moe_total = 0;
     size_t nvfp4_moe_ms_freed = 0;      // duplicated per-expert micro-scales freed (borrow path)
-    // Shared VRAM safety reserve for mode 2 paths (dense incremental,
-    // CUTLASS NVFP4, MoE expert caching). Computed once at the top of
-    // pre_dequant_phase3_nvfp4_decode_() from the model's actual attention
-    // layout — replaces the previous `total_mem / 10` heuristic which
-    // reserved 3.2 GiB on a 32 GiB 5090 and starved the dense NVFP4 cache
-    // (20 of 281 tensors uncached on Qwen3-14B Q6_K → −20% decode tok/s).
+    // Shared VRAM safety reserve for mode 2 paths (dense incremental, CUTLASS NVFP4, MoE
+    // expert caching), computed once from the model's actual attention layout. Replaces the
+    // previous total_mem/10 heuristic, which over-reserved and starved the dense NVFP4
+    // cache.
     size_t safety_reserve = 0;
 };
 
-// Init-time weight-quantization pipeline, extracted from GraphExecutor (D2).
-// Runs once via build(); fills the four long-lived caches (owned by the caller)
-// and owns only the build-only StoragePlan + decode context. The forward hot
-// path reads the caches unchanged (byte-identical). See the QuantPipeline
-// design memo (archived: docs/archive/README.md).
+// Init-time weight-quantization pipeline, extracted from GraphExecutor (D2). Runs once
+// via build(); fills the four long-lived caches (owned by the caller) and owns only the
+// build-only StoragePlan + decode context. The forward hot path reads the caches
+// unchanged (byte-identical).
 class QuantPipeline {
 public:
     // Runs the full init-time quantization pipeline once. Populates the four
@@ -76,13 +73,10 @@ private:
     MoEWorkspace* moe_ = nullptr;
     int max_tokens_ = 0;   // workspace max token count (build-time scratch sizing)
 
-    // Accessor mirroring GraphExecutor::dispatch_policy() so the moved phase
-    // methods read the config exactly as before. Set in build() from the
-    // owning GraphExecutor's already-validated config.
-    // DELIBERATE DUPLICATION (behaviour-neutral verbatim move): keeps the ~12
-    // dispatch_policy() call sites in the moved phases byte-identical. When the
-    // next GraphExecutor component (MoeRunner/Workspace) needs a 3rd copy, hoist
-    // this to a shared free helper next to core/dispatch_policy.h instead.
+    // Accessor mirroring GraphExecutor::dispatch_policy() so the moved phase methods read
+    // config exactly as before. DELIBERATE DUPLICATION (behaviour-neutral verbatim move):
+    // keeps the moved phases' dispatch_policy() call sites byte-identical. When a 3rd copy
+    // is needed, hoist to a shared free helper next to core/dispatch_policy.h instead.
     const DispatchPolicy& dispatch_policy() const noexcept {
         static const DispatchPolicy kDefault;
         return dispatch_policy_ ? *dispatch_policy_ : kDefault;

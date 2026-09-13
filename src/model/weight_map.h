@@ -9,11 +9,9 @@ namespace imp {
 // Maps weight names from file format to internal layer structure
 class WeightMap {
 public:
-    // Why a tensor was not assigned. `total` is the number the load summary has
-    // always printed; the rest is the breakdown it used to hide. `audio` is the
-    // one class nothing downstream owns: no encoder, no input type, no
-    // tokenizer route, so those tensors are a lost modality rather than a lost
-    // weight, and the loader says so.
+    // Why a tensor was not assigned. `total` is what the load summary has always printed; the
+    // rest is the breakdown. `audio` is the one class nothing downstream owns (no encoder,
+    // input type, or tokenizer route), so those tensors are a lost modality, not a lost weight.
     struct SkipStats {
         int total = 0;
         int vision = 0;        // model.{vision_tower,visual,embed_vision}.*

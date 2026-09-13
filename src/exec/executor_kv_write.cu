@@ -149,29 +149,20 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_fp8) {
-        // FP8 E4M3 quantized KV cache write path with online calibration.
-        //
-        // Calibration strategy: high-water-mark per layer. The first prefill
-        // for a given kv_calibrated_ slot sets the initial scale; subsequent
-        // prefills (after Engine::warmup() resets the calibrated_ flag) only
-        // promote the scale if their absmax exceeds the stored value. The
-        // scale is never reduced, which avoids the warmup-pollution failure
-        // mode where synthetic BOS tokens produced a too-small scale and
-        // real generation overflowed FP8_MAX (was: Llama-3.2-3B with
-        // --kv-fp8 → " France, and, 2008, 201, …"; now: " The capital of
-        // Italy is Rome…").
+        // FP8 E4M3 KV write with online calibration, high-water-mark per layer:
+        // the first prefill after Engine::warmup() resets calibrated_ sets the
+        // initial scale, later prefills only promote it if absmax exceeds the
+        // stored value. Never reduced: avoids warmup-pollution (synthetic BOS
+        // tokens give a too-small scale, real generation overflows FP8_MAX).
         float inv_scale;
         if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
             !kv_calibrated_[kv_layer]) {
-            // Narrow the calibration view to the per-layer K/V shape. The k_/v_
-            // workspaces are sized for max_nkv * max_head_dim across all layers
-            // (Gemma-4 dual head_dim 256 SWA / 512 global; uniform on Llama / Qwen).
-            // Without narrowing, calibrate_fp8_scale would absmax-reduce over
-            // uninitialized memory beyond the live data region for layers with
-            // smaller head_dim, producing a scale derived from junk and
-            // permanently locking the FP8 dynamic range to the wrong value
-            // (was the root cause of the Gemma-4 force-FP16 carve-out at
-            // engine.cpp:516).
+            // Narrows the calibration view to the per-layer K/V shape. k_/v_
+            // workspaces are sized for max_nkv*max_head_dim across all layers (Gemma-4
+            // dual head_dim 256/512); without narrowing, calibrate_fp8_scale would
+            // absmax-reduce over uninitialized memory past the live region for
+            // smaller-head_dim layers, locking the FP8 range to junk (was the root cause of the Gemma-4
+            // force-FP16 carve-out, engine.cpp:516).
             Tensor kv_cal = view_rows(k_, n);
             Tensor vv_cal = view_rows(v_, n);
             const int64_t live_cols = static_cast<int64_t>(nkv) * hd;
@@ -210,14 +201,10 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                     row_elems, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        // Standard FP16 KV cache write path — fused K+V in single launch.
-        //
-        // MLA note: the V workspace (v_) is over-allocated to head_dim (hd) per
-        // head by mla_assemble_kv (real v_head_dim values first, tail zeroed), so
-        // V already shares K's hd-wide layout here. The fused write therefore
-        // stores hd-wide K and hd-wide (padded) V uniformly — no asymmetric V
-        // path is needed. Decode reads only v_head_dim per V head; the zero tail
-        // is harmless. row_elems == nkv * hd for both K and V.
+        // Standard FP16 KV cache write, fused K+V in one launch. MLA: V (v_) is
+        // over-allocated to head_dim (hd) per head by mla_assemble_kv (real
+        // v_head_dim values first, tail zeroed), so V already shares K's hd-wide
+        // layout here; no asymmetric V path needed. row_elems == nkv*hd for both K and V.
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
         dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V
@@ -230,24 +217,14 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     }
 
     // Sparse decode attention metadata is maintained by ONE batched all-layer
-    // launch at the end of the forward (run_forward) for every forward shape
-    // - the per-layer inline launch that used to sit here cost the
-    // multi-stream serving prefill ~12% wall (2026-08-29).
+    // launch at the end of the forward, not the per-layer inline launch this
+    // replaced (cost the multi-stream serving prefill ~12% wall).
 
-    // ─── Phase 3c: BitDecoding residual write-through (decode only) ────────
-    //
-    // Append each seq's just-computed FP16 K/V (one token per seq,
-    // n_sequences ≥ 1, n_tokens == n_sequences) to its residual ring slot.
-    // The paged write above already cached the same data in its native dtype;
-    // the residual is a lookaside copy that lets the TC attention kernel skip
-    // dequant on the freshest tokens. Eviction-free: when the ring fills, the
-    // slot at write_idx is overwritten and the older copy stays in paged.
-    // Skipped on prefill (warm-up writes only), and non-NVFP4 caches (residual
-    // is gated to NVFP4 by KVCacheManager::enable_residual_buffer).
-    //
-    // Two seq-id sources, mirroring the attention dispatcher:
-    //   - state.h_residual_seq_ids: host array of length n_sequences (multi-seq)
-    //   - state.kv_seq_id: single int (legacy single-seq, used when h_… is null)
+    // Phase 3c: appends each seq's just-computed FP16 K/V (one token/seq) to
+    // its residual ring slot, a lookaside copy letting the TC attention kernel
+    // skip dequant on the freshest tokens. Eviction-free (ring overwrite).
+    // Skipped on prefill and non-NVFP4 caches. Two seq-id sources: h_residual_seq_ids (multi-seq) or
+    // kv_seq_id (single-seq legacy).
     if (!row_range && !state.is_prefill && use_nvfp4 && state.kv_manager != nullptr &&
         state.kv_manager->residual_enabled() && n == state.n_sequences) {
         const int res_n_kv = cache->n_kv_heads();
@@ -265,11 +242,10 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             const int blocks_y = (slot_elems + kThreads - 1) / kThreads;
 
             if (state.n_sequences == 1) {
-                // Single-seq fast path: resolve destination on the host and
-                // pass scalar pointers — avoids per-step device-pointer-array
-                // upload. Two cudaMemcpyAsync had been the bottleneck here
-                // (-3× decode regression at 4K ctx); a single kernel launch
-                // is several × cheaper.
+                // Single-seq fast path: resolves the destination on the host and passes
+                // scalar pointers, avoiding a per-step device-pointer-array upload (two
+                // cudaMemcpyAsync had been a -3x decode regression at 4K ctx; one kernel launch is far
+                // cheaper).
                 int seq_id;
                 if (state.h_residual_seq_ids != nullptr) {
                     seq_id = state.h_residual_seq_ids[0];
@@ -283,10 +259,10 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                     void* base_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
                     void* base_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
                     if (slot >= 0 && base_k != nullptr && base_v != nullptr) {
-                        // Graph-safe: kernel reads write_idx from device at execution
-                        // time. Per-step advance happens once at end of forward_logits
-                        // (a tiny advance_residual_state_kernel), inside the captured
-                        // graph — replays update ring state correctly.
+                        // Graph-safe: kernel reads write_idx from device at execution time.
+                        // Per-step advance happens once at end of forward_logits (a tiny
+                        // advance_residual_state_kernel), inside the captured graph, so replays update ring
+                        // state correctly.
                         dim3 grid_single(2, blocks_y);
                         residual_kv_write_indirect_kernel<<<grid_single, kThreads, 0, stream>>>(
                             src_k_base, src_v_base,
@@ -298,20 +274,13 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                     }
                 }
             } else if (state.d_residual_seq_slots != nullptr) {
-                // Multi-seq, graph-safe (#1708). Everything the destination
-                // depends on is resolved on the DEVICE at execution time: the
-                // layer base plus the per-seq stride, the residual slot from
-                // the engine's per-step upload, and the ring index from the
-                // manager's device array.
-                //
-                // What this replaces built a device array of destination
-                // pointers per call and per layer, with `cudaMallocAsync` and a
-                // matching `cudaFreeAsync` around the launch - inside the
-                // captured region. A replay wrote through the captured address
-                // after it had been freed and reused ("an illegal memory
-                // access"), with the ring index frozen at capture time on top.
-                // It was written when `n_sequences > 1` was rare; the comment
-                // said so.
+                // Multi-seq, graph-safe (#1708): everything the destination depends on
+                // (layer base + per-seq stride, residual slot from the engine's per-step
+                // upload, ring index from the manager's device array) is resolved on
+                // DEVICE at execution time. Replaces a form that built a device pointer
+                // array per call/layer with cudaMallocAsync/FreeAsync around the launch
+                // inside the captured region: a replay wrote through the freed, reused
+                // address ("illegal memory access"), with the ring index frozen at capture time too.
                 void* k_layer_base = state.kv_manager->residual_k_layer_base(kv_layer);
                 void* v_layer_base = state.kv_manager->residual_v_layer_base(kv_layer);
                 const int* d_widx = state.kv_manager->d_residual_widx_ptr();
@@ -325,10 +294,9 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                         d_widx, slot_elems);
                     IMP_CUDA_CHECK_LAUNCH();
                 }
-                // No host advance_residual: the ring is advanced on device once
-                // per step by advance_residual_state_multi_kernel, inside the
-                // captured graph. The host call this replaces ran at capture
-                // time only, so replays left the ring where the capture found
+                // No host advance_residual: the ring advances on device once per step via
+                // advance_residual_state_multi_kernel, inside the captured graph. The host
+                // call this replaces ran only at capture time, so replays left the ring where capture found
                 // it.
             }
         }

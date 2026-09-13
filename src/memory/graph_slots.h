@@ -1,29 +1,17 @@
 #pragma once
 
-// T2 slot pool for the conditional graph loop
-// (docs/internals/MEMORY.md §A2/§A3.4, A7 step 5.3).
-//
-// CudaGraphConditionalRunner::setup() allocated 13 device buffers and 4 pinned
-// host buffers, and cleanup() freed them again — once per burst, which the
-// --wrap interposer measured as the whole of the remaining steady-state
-// allocation traffic (AUDIT B28: 238 of 238 calls after the earlier fixes).
-//
-// These cannot come from the T4 scratch stack. A Mark rewinds when the forward
-// returns, but the graph that baked these addresses in is replayed *later* —
-// the stack's discipline is exactly wrong for them (I3). What they need is a
-// fixed set of long-lived slots with stable addresses, taken for the length of
-// a burst and returned: T3's shape, at T2's lifetime.
-//
-// One slot is one contiguous device region carved at fixed offsets, plus one
-// pinned+mapped host region. Two runners exist at a time in the engine (the
-// local one in try_graph_loop_decode and Engine::async_graph_runner_), so the
-// pool is small; exceeding it, or exceeding a capacity, falls back to direct
-// allocation so a surprising config degrades in throughput rather than failing.
-//
-// Side effect worth knowing about: because a returned slot keeps its address,
-// consecutive bursts see *identical* pointers. Nothing depends on that yet —
-// the runner still recaptures — but it is the precondition for reusing a
-// captured graph across bursts, which is not in this change's scope.
+// T2 slot pool for the conditional graph loop (MEMORY.md A2/A3.4, A7 step 5.3).
+// CudaGraphConditionalRunner::setup()/cleanup() used to alloc/free 13 device + 4 pinned
+// host buffers per burst; these cannot come from the T4 scratch stack because the graph
+// that bakes their addresses in replays LATER than the Mark that would rewind them (I3).
+// Needs a fixed set of long-lived slots with stable addresses, taken for a burst and
+// returned: T3's shape at T2's lifetime.
+// One slot = one contiguous device region at fixed offsets + one pinned+mapped host
+// region. Two runners exist at a time (local + Engine::async_graph_runner_), so the pool
+// is small; exceeding it falls back to direct allocation (throughput degrades, doesn't fail).
+// A returned slot keeps its address, so consecutive bursts see identical pointers -
+// nothing depends on that yet (the runner still recaptures), but it is the precondition
+// for reusing a captured graph across bursts.
 
 #include "memory/backend.h"
 #include "memory/host_pinned.h"
@@ -37,19 +25,17 @@ namespace imp {
 
 class GraphSlotPool;
 
-// Size of the sampler scratch each slot carries. Must equal
-// compute/sampling.h's SAMPLE_SCRATCH_BYTES; it is restated here rather than
-// included because that header pulls in the CUDA sampling surface and this one
-// is host-only. cuda_graph.cu static_asserts the two against each other, so a
-// change to either side is a compile error rather than a silent overrun.
+// Size of the sampler scratch each slot carries, must equal compute/sampling.h's
+// SAMPLE_SCRATCH_BYTES; restated here (not included) because that header pulls in the
+// CUDA sampling surface and this one is host-only. cuda_graph.cu static_asserts the two
+// against each other.
 constexpr size_t kGraphSlotSampleScratchBytes =
     sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
 
 // The pinned-host half of a slot comes from T5's engine-persistent allocator
-// (memory/host_pinned.h). It used to be declared here; it moved out because it
-// is a tier, not a detail of this pool — 26 acquisition sites in 11 files were
-// waiting for it. Substituting it is still what makes this pool testable in the
-// CPU lane rather than needing a GPU (A6).
+// (memory/host_pinned.h); moved out because it is a tier, not a detail of this pool.
+// Substituting it is what makes this pool testable in the CPU lane rather than needing a
+// GPU (A6).
 
 // Capacities a slot is cut for. Requests beyond these fall back.
 struct GraphSlotCaps {
@@ -61,12 +47,10 @@ struct GraphSlotCaps {
     int stop_ids = 64;
 };
 
-// Pointers into one slot. Everything is device memory except the h_* fields,
-// which are pinned host memory; d_ring / d_step_counter_mapped /
-// d_burst_done_mapped are the device-side views of the mapped host buffers.
-//
-// A default-constructed view is all-null, which is what the runner sees when
-// the pool declines and it must allocate for itself.
+// Pointers into one slot: everything is device memory except the h_* fields (pinned
+// host); d_ring/d_step_counter_mapped/d_burst_done_mapped are the device-side views of
+// the mapped host buffers. A default-constructed view is all-null, what the runner sees
+// when the pool declines and must allocate for itself.
 struct GraphSlotView {
     void* sample_scratch = nullptr;  // >= SAMPLE_SCRATCH_BYTES, also holds the token id
 
@@ -200,13 +184,10 @@ private:
 // no Engine to reach through.
 GraphSlotPool& graph_slot_pool();
 
-// Open the global pool for a context of `max_seq_len`. The capacities follow
-// from that: a burst cannot be longer than the context, and the penalty ring is
-// prefix history + burst length, so twice the context bounds it. Four slots
-// covers the two runners that exist at a time with room to spare.
-//
-// Never fatal — a pool that will not open just means the runner keeps
-// allocating for itself, which is what it did before this existed.
+// Open the global pool for a context of max_seq_len: a burst cannot be longer than the
+// context, and the penalty ring is prefix history + burst length, so twice the context
+// bounds it. Four slots covers the two runners that exist at a time with room to spare.
+// Never fatal: a pool that won't open just means the runner keeps allocating for itself.
 void graph_slot_pool_open_for(Backend& backend, int max_seq_len);
 
 }  // namespace imp

@@ -1,17 +1,13 @@
 #pragma once
 
-// LoRA adapter (PEFT format) for runtime low-rank deltas — issue #522.
-//
-// Design: NO weight patching. The base weights (FP16 cache / NVFP4 cache /
-// raw GGUF dp4a) stay untouched; the adapter contributes an activation-path
-// delta  y += (alpha/r) * (x · A^T) · B^T  per adapted projection. That makes
-// the feature quant-path-agnostic by construction and hot-swap = swapping an
-// adapter pointer (plus a decode-graph re-capture, handled by the engine).
-//
-// Loads HuggingFace PEFT directories:
-//   adapter_config.json          (r, lora_alpha, use_rslora, target_modules)
-//   adapter_model.safetensors    (base_model.model.model.layers.N.<proj>.lora_{A,B}.weight)
-// A is [r, K], B is [N, r]; F32/F16/BF16 accepted, stored as F16 on device.
+// LoRA adapter (PEFT format) for runtime low-rank deltas (#522). Design: NO weight
+// patching; the adapter contributes an activation-path delta
+// y += (alpha/r) * (x . A^T) . B^T per adapted projection, quant-path-agnostic by
+// construction; hot-swap = swapping the adapter pointer (plus a decode-graph
+// re-capture).
+// Loads HF PEFT dirs: adapter_config.json (r, lora_alpha, use_rslora, target_modules),
+// adapter_model.safetensors (...layers.N.<proj>.lora_{A,B}.weight). A is [r,K], B is
+// [N,r]; F32/F16/BF16 accepted, stored F16 on device.
 
 #include <cstdint>
 #include <memory>

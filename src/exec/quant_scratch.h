@@ -7,13 +7,10 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Quantization scratch buffers: pre-allocated per-GEMM scratch space for
-// activation quantization, on-the-fly weight dequantization, and dp4a GEMV.
-//
-// Allocated once during GraphExecutor::allocate_workspaces(), freed by free().
-// All members are public for zero-overhead access in the forward pass.
-// ---------------------------------------------------------------------------
+// Quantization scratch buffers: pre-allocated per-GEMM scratch for activation
+// quantization, on-the-fly weight dequant, and dp4a GEMV. Allocated once during
+// GraphExecutor::allocate_workspaces(), freed by free(). All members public for
+// zero-overhead forward-pass access.
 struct QuantScratch {
     // --- Generic on-the-fly dequant scratch (Q8_0/Q6_K) ---
     void* dequant = nullptr;
@@ -42,10 +39,9 @@ struct QuantScratch {
     void* mxfp4_workspace = nullptr;
     size_t mxfp4_workspace_size = 0;
 
-    // --- dp4a (MMVQ) scratch for quantized input vector (M=1 decode) ---
-    // Sized q8_1_rows x q8_1_max_blocks: production decode uses row 0 only;
-    // the spec-verify batched LM head (#847 lever 2) quantizes up to
-    // q8_1_rows chunk rows at stride q8_1_max_blocks.
+    // dp4a (MMVQ) scratch for quantized input vector (M=1 decode): sized q8_1_rows x
+    // q8_1_max_blocks. Production decode uses row 0 only; the spec-verify batched LM head
+    // (#847 lever 2) quantizes up to q8_1_rows chunk rows at stride q8_1_max_blocks.
     void* q8_1_buf = nullptr;  // block_q8_1 array
     float* d8_buf = nullptr;   // float scale array
     int q8_1_max_blocks = 0;   // max K/32 (per-row stride)

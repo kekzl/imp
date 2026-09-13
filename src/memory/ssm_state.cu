@@ -54,12 +54,10 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
         return true;
 
     if (alloc_) {
-        // No raw-cudaMalloc retry behind the allocator's back. That hatch is
-        // how 5088 MiB of state landed past the headroom on Qwen3.8-27B-NVFP4
-        // and spilled the KV pool to 528 GB/s (MEMORY.md D14): the allocator
-        // said no, the pool took the memory anyway, and nothing downstream
-        // knew. A rejected pool is a refused configuration now, with the
-        // numbers and the lever.
+        // No raw-cudaMalloc retry behind the allocator's back: that hatch is how state landed
+        // past the headroom and spilled the KV pool to a fraction of its bandwidth (MEMORY.md
+        // D14) - the allocator said no, the pool took the memory anyway, and nothing downstream
+        // knew. A rejected pool is a refused configuration now, with the numbers and the lever.
         pool_ = alloc_->allocate(total_bytes_, "ssm_state");
     } else {
         cudaError_t err = cudaMalloc(&pool_, total_bytes_);
@@ -152,10 +150,10 @@ bool SSMState::ensure_slot(int slot) {
         return pool_ != nullptr;
     if (committed_[static_cast<size_t>(slot)])
         return true;
-    // Refuse rather than spill: the commit itself would succeed into host
-    // memory on a full card (#1103). The reading excludes every lazy pool's
-    // pending charge, this one's included; add ours back, it is what this
-    // commit draws on. What is left must cover the slot above the headroom.
+    // Refuse rather than spill: the commit itself would succeed into host memory on a full
+    // card (#1103). The reading excludes every lazy pool's pending charge except this one's,
+    // which is added back since it's what this commit draws on; what is left must cover the
+    // slot above the headroom.
     size_t free_now = 0, total_now = 0;
     if (vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
         const size_t own_pending = region_.reserved() - committed_bytes();

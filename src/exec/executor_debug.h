@@ -19,19 +19,17 @@ namespace imp {
 inline bool debug_forward_enabled() { return imp::process_diag_debug_forward(); }
 
 // Decode-step counter shared between executor_forward.cu (writer) and
-// executor_ssm_gdn.cu (reader). Prefill passes use step=0; each single-token
-// decode pass increments it. Used for diagnostics.dump_hidden_dir config flag (was
-// IMP_DUMP_HIDDEN env) filename tagging so
-// GDN-internal dumps correlate with per-layer snapshots.
+// executor_ssm_gdn.cu (reader). Prefill uses step=0; each decode pass
+// increments it. Tags diagnostics.dump_hidden_dir filenames so GDN-internal dumps correlate with per-layer
+// snapshots.
 inline int& debug_decode_step() {
     static int s = 0;
     return s;
 }
 
-// Hidden-state npy dump for layer-diff analysis against llama.cpp.
-// Returns the directory if [diagnostics] dump_hidden_dir is non-empty, else
-// nullptr. Accepts "1" or "all" as shorthand for /tmp (matches the legacy
-// IMP_DUMP_HIDDEN env shorthand). Resolution happens in process_diag_install().
+// Hidden-state npy dump for layer-diff analysis against llama.cpp. Returns
+// the directory if [diagnostics] dump_hidden_dir is non-empty, else
+// nullptr. "1" or "all" is shorthand for /tmp.
 inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(); }
 
 // Writes a numpy .npy v1.0 file with a 2D FP32 array.
@@ -106,12 +104,10 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
         }
     }
 
-    // A snapshot may point at a shared workspace whose tail is uninitialised, or
-    // whose valid extent for THIS model is narrower than the view (attn_out_ is
-    // both: its layout depends on head count, vhd-vs-hd and the MLA compaction
-    // path). The file then looks like data and is not, and a diff against another
-    // model reads as a finding — a relative error of 28.6 on one model and
-    // exactly 1.0000 on another, which is what uncorrelated garbage looks like.
+    // A snapshot may point at a shared workspace with an uninitialised tail,
+    // or a valid extent narrower than the view for this model (attn_out_'s
+    // layout depends on head count, vhd-vs-hd, MLA compaction). Then the file
+    // looks like data and is not, and a cross-model diff reads as a finding.
     // Say so instead of writing it silently.
     size_t bad = 0;
     for (size_t i = 0; i < n; i++)
@@ -187,10 +183,9 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
                   vmax, mean, vsum, l2, extra.c_str());
 }
 
-// Multi-row variant: dump stats over ALL rows of a tensor for cross-impl
-// comparison (matching llama.cpp's eval-callback sum dump). Sync first to
-// avoid races against pending stream work.
-// Dump first-3 and last-3 elements of each row (matches llama eval-callback's 3x3 slice).
+// Multi-row variant: dumps stats over ALL rows for cross-impl comparison
+// (matches llama.cpp's eval-callback sum dump). Syncs first to avoid races
+// against pending stream work; dumps first-3/last-3 elements of each row.
 inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t stream) {
     if (!debug_forward_enabled())
         return;

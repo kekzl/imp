@@ -1,29 +1,14 @@
-// Link-time interposition on the CUDA allocation symbols
-// (docs/internals/MEMORY.md A6, AUDIT B8/B26).
-//
-// Why this exists. Acceptance criterion 3 — "an instrumented soak shows zero
-// driver allocations after warmup" — needs a detector that sees EVERY device
-// allocation, not just the ones that were polite enough to route through
-// Backend. Three layers already exist and each has a blind spot:
-//
-//   * the allocation-phase guard sees only Backend traffic;
-//   * the default mempool's UsedMemHigh sees every cudaMallocAsync but no
-//     plain cudaMalloc;
-//   * the graph mempool's UsedMemHigh sees capture-region allocations, and
-//     measured zero (B26).
-//
-// What is left is plain cudaMalloc/cudaFree, which is exactly what the
-// remaining per-request sites use (engine_graph_decode.cpp:284/316/341). This
-// file closes that hole without touching a single call site: the linker
-// redirects imp's references to __wrap_*, we record and forward to __real_*.
-//
-// Calls made INSIDE libcudart/libcublas/CUTLASS are not redirected — their
-// references were resolved when those libraries were linked. That is the
-// desired behaviour, not a limitation: the ~3.9 GiB library reserve (A1.5)
-// stays out of the counter and is charged separately by the planner.
-//
-// Built only when IMP_ALLOC_INTERPOSE=ON, because --wrap has to be on the
-// final executable link and we do not want it in shipping binaries.
+// Link-time interposition on the CUDA allocation symbols (MEMORY.md A6, AUDIT B8/B26).
+// Needed because the acceptance criterion ("zero driver allocations after warmup") needs
+// visibility into EVERY device allocation, not just Backend-routed ones: the mempool
+// UsedMemHigh counters miss plain cudaMalloc, and the graph mempool's counter measured
+// zero (B26). This closes the plain cudaMalloc/cudaFree hole without touching call
+// sites: the linker redirects references to __wrap_*, which record and forward to
+// __real_*.
+// Calls made INSIDE libcudart/libcublas/CUTLASS are NOT redirected (resolved at their
+// own link time); the ~3.9 GiB library reserve stays out of the counter and is charged
+// separately by the planner. Built only with IMP_ALLOC_INTERPOSE=ON: --wrap must be on
+// the final executable link, so it stays out of shipping binaries.
 
 #include "memory/backend.h"
 #include "core/logging.h"
@@ -63,19 +48,16 @@ Counter g_dev_sync;    // cudaMalloc
 Counter g_dev_async;   // cudaMallocAsync
 Counter g_host_pinned; // cudaMallocHost / cudaHostAlloc
 
-// Per-call-site tally. A bare count is not actionable — "444 allocations while
-// serving" does not say which three lines to fix. dladdr() gives the module
-// base, so the printed offset feeds straight into
-//   addr2line -e <binary> <offset>
-// Bounded table; the tail is aggregated rather than dropped silently.
+// Per-call-site tally: a bare count isn't actionable. dladdr() gives the module base, so
+// the printed offset feeds straight into `addr2line -e <binary> <offset>`. Bounded
+// table; the tail is aggregated rather than dropped silently.
 struct Site {
     const void* ret = nullptr;
     uint64_t calls = 0;
     uint64_t bytes = 0;
-    // Two frames above `ret`, taken on first sight. The site alone names the
-    // cudaMalloc, not the path: `VRAMAllocator::allocate` was a 24 KB serving
-    // allocation with no way to say who asked. backtrace() unwinds through
-    // .eh_frame, so no frame pointers are needed.
+    // Two frames above `ret`, taken on first sight: the site alone names the cudaMalloc, not
+    // the path (e.g. VRAMAllocator::allocate says nothing about who asked). backtrace()
+    // unwinds through .eh_frame, so no frame pointers are needed.
     const void* up[2] = {nullptr, nullptr};
 };
 constexpr size_t kMaxSites = 32;
@@ -157,10 +139,9 @@ struct Reporter {
         const uint64_t ds = g_dev_sync.calls.load(), da = g_dev_async.calls.load(),
                        hp = g_host_pinned.calls.load();
         if ((ds | da | hp) == 0) {
-            // The clean line is INFO for the same reason the violation is WARN:
-            // the gate asserts that one of the two appears at all. Absent both,
-            // the binary was built without -DIMP_ALLOC_INTERPOSE=ON and a grep
-            // for violations passes for the wrong reason.
+            // The clean line is INFO for the same reason a violation is WARN: the gate asserts that
+            // one of the two appears at all. Absent both, the binary was built without
+            // -DIMP_ALLOC_INTERPOSE=ON, and a grep for violations would pass for the wrong reason.
             IMP_LOG_INFO(
                 "[alloc-interpose] steady state clean: 0 cudaMalloc, "
                 "0 cudaMallocAsync, 0 pinned-host allocations while serving");
@@ -170,11 +151,8 @@ struct Reporter {
         // when someone remembers to raise the log level is a finding nobody
         // finds: this is the line `make check-alloc-interpose` fails on.
         IMP_LOG_WARN(
-            // The newline after the banner is load-bearing: without it the
-            // first class is glued to the banner line, and any reader anchored
-            // at the start of a line silently skips it. That is how
-            // check_alloc_interpose.sh first reported 2 allocations when there
-            // were 19.
+            // The newline after the banner is load-bearing: without it the first class glues to the
+            // banner line, and any reader anchored at the start of a line silently skips it.
             "[alloc-interpose] I2 VIOLATIONS while serving:\n"
             "    cudaMalloc       %8llu calls  %10.2f MiB\n"
             "    cudaMallocAsync  %8llu calls  %10.2f MiB\n"

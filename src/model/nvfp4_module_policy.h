@@ -1,25 +1,11 @@
 #pragma once
 
-// The checkpoint's quantization contract, as a pure function.
-//
-// A compressed-tensors NVFP4 checkpoint states two things about every module:
-// `config_groups[*].targets` says which module class is quantized (always
-// `["Linear"]` in the exports imp reads) and `quantization_config.ignore` lists
-// the modules that stayed at source precision. Together those two are a
-// COMPLETE partition of the checkpoint's Linears: a Linear is either packed or
-// listed, never neither. Qwen3.8-27B-NVFP4-vllm: 496 packed modules, 170 ignore
-// entries, and every one of its 121 plain 2-D weights is covered by an entry:
-// 0 Linears left over.
-//
-// Until #1960 imp parsed `ignore` into NvFP4Config::exclude_modules and read it
-// nowhere. A Linear that lost its `weight_scale` on the way in (misnamed,
-// wrong dtype, dropped shard) was therefore indistinguishable from a Linear the
-// author deliberately left in BF16: both arrive as a plain `.weight` and both
-// serve. The partition is what makes the difference checkable, so this header
-// reconstructs it and the loader refuses a checkpoint that does not partition.
-//
-// Pure and header-only on purpose: the loader drives it with a real tensor map
-// and the CPU lane drives it with synthetic names.
+// A compressed-tensors NVFP4 checkpoint states a COMPLETE partition of its Linears:
+// config_groups[*].targets (always ["Linear"]) says what's quantized, quantization_config
+// .ignore lists what stayed at source precision. Before #1960 the ignore list was parsed and
+// read nowhere, so a Linear that lost its weight_scale (misnamed, wrong dtype, dropped shard)
+// was indistinguishable from one the author deliberately left in BF16. Pure and header-only:
+// the loader drives it with a real tensor map, the CPU lane with synthetic names.
 
 #include <cstdint>
 #include <regex>
@@ -42,11 +28,9 @@ inline bool contains_(std::string_view s, std::string_view what) {
     return s.find(what) != std::string_view::npos;
 }
 
-// Strip the multimodal wrapper prefix, exactly as llm_compressor::translate_name
-// step 3 does. The ignore list is written against the ON-DISK spelling
-// (`model.language_model.layers.0.linear_attn.conv1d`) while the tensor map
-// holds the translated one (`model.layers.0...`), so one side has to move; both
-// are normalized here so neither caller has to remember which it holds.
+// Strips the multimodal wrapper prefix, exactly as llm_compressor::translate_name step 3.
+// The ignore list is written against the ON-DISK spelling while the tensor map holds the
+// translated one, so both sides are normalized here rather than each caller remembering which.
 inline std::string normalize_module(std::string_view name) {
     static constexpr std::string_view kGemma4 = "model.language_model.";
     static constexpr std::string_view kMistral3 = "language_model.";
@@ -94,12 +78,10 @@ inline bool glob_match(std::string_view pat, std::string_view s) {
     return p == pat.size();
 }
 
-// The wrapper-prefix strip, applied to a REGEX rather than to a module name. A
-// checkpoint that spells its ignore entries against the on-disk names needs it
-// on the `re:` arm too: the modules being matched are already prefix-stripped,
-// so `re:model\.language_model\.decoder\..*` would match nothing and turn every
-// Linear it covers into an unclassified slot, i.e. a refusal. Both the raw and
-// the stripped pattern are tried, so this can only ever add a match.
+// Wrapper-prefix strip applied to a REGEX, not a module name: an ignore entry written
+// against on-disk names needs it on the re: arm too, or re:model\.language_model\..*
+// matches nothing against already-stripped names (an unclassified-slot refusal). Both the
+// raw and stripped pattern are tried, so this can only add a match.
 inline std::string normalize_pattern(std::string_view p) {
     static constexpr std::string_view kForms[][2] = {{"model\\.language_model\\.", "model\\."},
                                                      {"model.language_model.", "model."},
@@ -146,15 +128,11 @@ inline CompiledIgnoreEntry compile_ignore_entry(std::string_view raw) {
     return e;
 }
 
-// One ignore entry against one module name. The three forms are the ones the
-// two producers actually write:
-//   - `re:<regex>`   compressed-tensors / vLLM `check_equal_or_regex_match`
-//   - `a.b.c`        a fully qualified module (what imp-quantize writes:
-//                    tools/imp-quantize/checkpoint_out.cpp feeds it the tensor
-//                    name minus `.weight`)
-//   - `*.suffix`     Modelopt glob
-// Plus a trailing-segment match (`lm_head` covers `model.lm_head`), which is
-// how vLLM's fused-module lookup resolves a short entry.
+// One ignore entry against one module name, the three forms the two producers write:
+//   re:<regex>   compressed-tensors/vLLM check_equal_or_regex_match
+//   a.b.c        fully qualified module (imp-quantize: tensor name minus .weight)
+//   *.suffix     Modelopt glob
+// Plus a trailing-segment match (lm_head covers model.lm_head), matching vLLM's fused lookup.
 inline bool entry_matches(const CompiledIgnoreEntry& e, const std::string& module) {
     if (e.is_regex) {
         if (!e.regex_ok)
@@ -180,30 +158,15 @@ inline bool module_is_ignored(const std::string& module, const std::vector<std::
     return false;
 }
 
-// The roles that are 2-D, K-aligned, and still must NOT be NVFP4. This is the
-// list `imp-quantize` refuses to write (tools/imp-quantize/tensor_policy.cpp
-// calls this function, so the writer and the reader cannot drift), because the
-// question is the same one in both directions: is this module a Linear the
-// NVFP4 GEMM path serves? Returns true and fills `why_not` when it is not.
-//
-// Each entry was measured, not assumed:
-//   embeddings   quantizing them costs quality for no bandwidth win on decode.
-//   vision tower qwen3vl_vision_upload.cpp takes F16/BF16/F32 only, so an NVFP4
-//                tower is a tower no loader can read back; every shape check
-//                waves it through.
-//   MTP head     its loader reads `mtp.*.weight` by name and knows nothing about
-//                the scale companions. Quantized on Qwen3.8-27B, draft
-//                acceptance went 81% -> 0 of 24: costs speed, never
-//                correctness, so there is no louder symptom.
-//   MLA latent   `kv_a_proj_with_mqa` / `kv_b_proj` are sliced and reshaped by
-//                the runtime. Found by bisection on DeepSeek-V2-Lite: leaving
-//                only these two full precision made the checkpoint coherent.
-//   MoE router   FP4 across 16 shared-scale values changes the top-k pick. With
-//                the MLA pair already excluded, the router alone still produced
-//                garbage. Modelopt and llm-compressor keep routers full
-//                precision for the same reason. `.gate.weight` is the router;
-//                expert `gate_proj.weight` is unaffected by that suffix test.
-//   K % 16       the micro-block size the kernel hard-codes.
+// Roles that are 2-D, K-aligned, and still must NOT be NVFP4 (imp-quantize refuses to write
+// them too, tensor_policy.cpp calls this same function so writer/reader cannot drift).
+// Returns true and fills why_not when excluded. Each entry measured, not assumed:
+//   embeddings   quantizing costs quality for no decode-bandwidth win
+//   vision tower loader reads F16/BF16/F32 only; an NVFP4 tower is unreadable
+//   MTP head     loader has no scale companions; quantized draft acceptance went 81%->0/24
+//   MLA latent   kv_a_proj_with_mqa/kv_b_proj are sliced/reshaped by the runtime (bisected)
+//   MoE router   FP4 across 16 shared scales flips the top-k pick (.gate.weight only)
+//   K % 16       the kernel's hard-coded micro-block size
 inline bool role_excluded(const std::string& name, int64_t K, bool allow_lm_head, std::string& why_not) {
     // `embeddings` covers Nemotron's `backbone.embeddings`, which is an
     // embedding table under a name the `embed_*` tests miss; it was the one
@@ -253,16 +216,10 @@ struct SlotObservation {
     bool has_global_scale = false;  // a sibling `.weight_scale_2` exists
 };
 
-// Two independent counts, and the log line has to keep them apart.
-//
-// The SLOT counts partition the Linear-role `.weight` tensors the loader holds.
-// The IGNORE counts partition the checkpoint's `ignore` list, which is the list
-// the operator has in front of them: Qwen3.8-27B declares 170 entries and only
-// one of them lands on a slot that reaches the classifier, because 112 are
-// vision-tower modules, 48 are 3-D conv1d kernels, one is the embedding table
-// (none of which is a Linear the NVFP4 GEMM path serves) and 8 are MTP modules
-// whose tensors are diverted out of the map entirely. Reporting "1 ignored"
-// against a 170-entry list reads as "169 were dropped".
+// Two independent counts kept apart: SLOT counts partition the Linear-role .weight tensors
+// the loader holds; IGNORE counts partition the checkpoint's own ignore list (what the
+// operator sees). Most ignore entries land on non-Linear tensors (vision, conv1d, embedding,
+// MTP), so reporting "N ignored" against the slot count misreads as "the rest were dropped".
 struct Inventory {
     int quantized = 0;
     int ignored = 0;
@@ -316,10 +273,9 @@ inline Inventory classify(const std::vector<SlotObservation>& slots, const std::
             inv.first_unclassified = module;
     }
 
-    // Attribute the ignore list itself. An entry that matches any Linear-role
-    // slot counts as honoured even if that slot turned out to be packed: the
-    // question here is what became of the operator's 170 lines, not what became
-    // of the tensors.
+    // Attributes the ignore list itself: an entry matching any Linear-role slot counts as
+    // honoured even if that slot turned out packed. Question is what became of the operator's
+    // ignore lines, not what became of the tensors.
     inv.ignore_entries = static_cast<int>(ignore.size());
     for (const std::string& raw : ignore) {
         const CompiledIgnoreEntry e = compile_ignore_entry(raw);
@@ -343,15 +299,11 @@ inline Inventory classify(const std::vector<SlotObservation>& slots, const std::
     return inv;
 }
 
-// Whether the load must be refused, and why.
-//
-// Both rules are scoped to compressed-tensors, and that scope is the load-
-// bearing part. Modelopt's `exclude_modules` is a HINT (`["lm_head"]` on
-// exports that leave far more than lm_head unquantized) and its
-// `weight_scale_2` is genuinely optional, so applying either rule there would
-// refuse working checkpoints. compressed-tensors states a complete partition
-// and gives every quantized module its own `weight_global_scale`; a gap is a
-// defect on the imp side of the read, not a property of the export.
+// Both refusal rules are scoped to compressed-tensors; that scope is load-bearing. Modelopt's
+// exclude_modules is a HINT (may list far less than what's actually unquantized) and its
+// weight_scale_2 is genuinely optional, so applying either rule there refuses working
+// checkpoints. compressed-tensors states a complete partition with a weight_global_scale per
+// module; a gap there is an imp-side read defect, not a property of the export.
 inline bool refuses(const Inventory& inv, bool is_compressed_tensors, std::string* why) {
     if (!is_compressed_tensors)
         return false;

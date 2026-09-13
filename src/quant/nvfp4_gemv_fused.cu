@@ -1,7 +1,6 @@
-// Fused multi-matrix NVFP4 GEMV kernels (QKV-fused, gate+up-fused) + launchers.
-// Split out of nvfp4_gemm.cu (kernel .cu size gate). All kernels and launchers
-// MOVED VERBATIM — hot-path numeric code, must stay bit-identical. Shared device
-// helpers + tuning constants live in nvfp4_gemm_internal.cuh.
+// Fused multi-matrix NVFP4 GEMV kernels (QKV-fused, gate+up-fused) + launchers, split out
+// of nvfp4_gemm.cu (kernel .cu size gate). MOVED VERBATIM: hot-path numeric code, must stay
+// bit-identical. Shared device helpers + tuning constants live in nvfp4_gemm_internal.cuh.
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -14,10 +13,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Fused QKV: 3 weight matrices, shared input, separate outputs
-// Grid: (q_rows + k_rows + v_rows) blocks.
-// ---------------------------------------------------------------------------
+// Fused QKV: 3 weight matrices, shared input, separate outputs. Grid: (q_rows+k_rows+v_rows)
+// blocks.
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
     const uint8_t* __restrict__ packed_q, const uint8_t* __restrict__ ms_q, float ts_q,
     const uint8_t* __restrict__ packed_k, const uint8_t* __restrict__ ms_k, float ts_k,
@@ -65,10 +62,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
         out[local_row] = __float2half(total);
 }
 
-// ---------------------------------------------------------------------------
-// Fused Gate+Up: 2 weight matrices, shared input, separate outputs
-// Grid: 2 * rows blocks. First half = gate, second half = up.
-// ---------------------------------------------------------------------------
+// Fused Gate+Up: 2 weight matrices, shared input, separate outputs. Grid: 2*rows blocks
+// (first half gate, second half up).
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_gate_up_fused_kernel(
     const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
     const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
@@ -108,11 +103,9 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_gate_up_fused_kernel(
         out[local_row] = __float2half(total);
 }
 
-// ---------------------------------------------------------------------------
-// Multi-row variants of fused kernels (NR rows/block, 256 threads, 8 warps).
-// Used when K is small (n_mb ≤ 512) to reduce block count and improve
-// per-thread work (32 threads/row vs 128 threads/row).
-// ---------------------------------------------------------------------------
+// Multi-row variants of fused kernels (NR rows/block, 256 threads, 8 warps), used when K is
+// small (n_mb<=512) to reduce block count and improve per-thread work (32 threads/row vs
+// 128 threads/row).
 
 // Multi-row QKV fused: each warp determines its matrix and row independently.
 template <int NR>

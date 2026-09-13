@@ -27,14 +27,10 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Checked GPU allocation: prevents CUDA memory oversubscription by verifying
-// enough free GPU memory exists before allocating.  Without this, cudaMalloc
-// on Linux silently succeeds by backing with system RAM (unified memory),
-// which causes cuBLASLt INTERNAL_ERROR on the resulting pointers.
-// ---------------------------------------------------------------------------
-// Cached VRAM state — refreshed once per upload pass instead of per-tensor.
-// Eliminates ~500+ cudaMemGetInfo roundtrips during weight upload.
+// Checked GPU allocation prevents oversubscription: an unchecked cudaMalloc on Linux
+// silently backs with system RAM (unified memory), causing cuBLASLt INTERNAL_ERROR on the
+// resulting pointers. VRAM state is cached, refreshed once per upload pass instead of
+// per-tensor, to avoid hundreds of cudaMemGetInfo roundtrips.
 static size_t g_cached_free_mem = 0;
 static size_t g_total_allocated = 0;
 static size_t g_vram_reserve = 0;  // set from Engine's computed reserve
@@ -75,37 +71,16 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
     return err;
 }
 
-// ---------------------------------------------------------------------------
-// Double-buffered pinned staging for fast H2D transfers.
-// On WSL2, mmap'd memory cannot be pinned (cudaHostRegister fails/corrupts),
-// so cudaMemcpyAsync from mmap'd memory falls back to synchronous staging
-// inside the CUDA driver (~8 GB/s on PCIe 5.0 x16).
-// This stager pre-allocates two pinned buffers and pipelines:
-//   CPU: memcpy(pinned[i], mmap_data)  ←→  GPU: DMA(gpu, pinned[i^1])
-// Achieves true async DMA at full PCIe bandwidth (~25 GB/s on PCIe 5.0).
-// ---------------------------------------------------------------------------
+// Double-buffered pinned staging for H2D transfers: on WSL2, mmap'd memory cannot be
+// pinned (cudaHostRegister fails/corrupts), so cudaMemcpyAsync from mmap'd memory falls
+// back to synchronous driver-side staging. Pre-allocates two pinned buffers and pipelines
+// CPU memcpy(pinned[i], mmap) against GPU DMA(gpu, pinned[i^1]) for full-bandwidth async DMA.
 struct PinnedStager {
-    // Ring of N pinned buffers — deeper pipeline lets CPU memcpy stay ahead of
-    // queued DMAs, smoothing per-tensor stalls (each tensor wakes one DMA, ring
-    // depth N keeps N-1 DMAs queued while CPU fills the next).
-    // Depth and chunk come from vram.upload_ring_{depth,chunk_mib} (#1653).
-    // They were 4 and 128 MiB, constants that had never been varied, and
-    // pinning 512 MiB of host memory cost 503 ms to acquire and 115 ms to
-    // release against the 208 ms of H2D the ring exists to overlap. Swept on
-    // Qwen3-8B-Q8_0, load time only, 3 starts per point:
-    //
-    //   4x128 MiB  4.55 s   4x32  4.16 s   2x64  4.12 s   2x32  4.00 s
-    //   4x16 MiB   4.00 s   4x8   3.93 s   4x4   3.84 s   4x2   3.96 s
-    //   8x8 MiB    3.93 s
-    //
-    // Monotone until 4 MiB and back up at 2: the pin cost dominates the overlap
-    // the whole way down, and below 4 MiB the per-chunk event/memcpy pairs
-    // start to cost more than the pinning saves. Confirmed against the old
-    // default over 5 alternating starts each: 4.55 s against 3.87 s, ranges not
-    // overlapping.
-    //
-    // A key rather than a constant because the optimum is a property of the
-    // host's pinning cost - a WDDM number here - not of imp.
+    // Ring of N pinned buffers: depth and chunk size come from vram.upload_ring_{depth,
+    // chunk_mib} (#1653), keys rather than constants because the optimum is a property of the
+    // host's WDDM pinning cost, not of imp. Pinning cost dominates the H2D overlap it exists to
+    // buy; smaller rings/chunks win on this host, down to a point where per-chunk event/memcpy
+    // overhead starts costing more than the pinning saves.
     static int ring() {
         static const int n = std::clamp(process_diag_upload_ring_depth(), 1, kRingMax);
         return n;
@@ -172,11 +147,9 @@ static cudaError_t h2d_copy(void* dst, const void* src, size_t n, cudaStream_t s
     return cudaMemcpyAsync(dst, src, n, cudaMemcpyHostToDevice, s);
 }
 
-// ---------------------------------------------------------------------------
-// WSL2 detection: cudaHostRegister on mmap'd memory can succeed but produce
-// corrupted DMA transfers on WSL2 (stale data from GPU reads).  Detect WSL2
-// at runtime so we can skip pinning and fall back to pageable H2D copies.
-// ---------------------------------------------------------------------------
+// WSL2 detection: cudaHostRegister on mmap'd memory can succeed but produce corrupted DMA
+// transfers on WSL2 (stale data from GPU reads). Detected at runtime to skip pinning and
+// fall back to pageable H2D copies.
 static bool is_wsl2() {
 #ifdef __linux__
     static int cached = -1;
@@ -199,11 +172,8 @@ static bool is_wsl2() {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Host-side FP16 <-> FP32 conversion helpers.
-// We cannot use CUDA device intrinsics (__half2float, __float2half) on the
-// host, so we implement bitwise conversions.
-// ---------------------------------------------------------------------------
+// Host-side FP16<->FP32 conversion: CUDA device intrinsics (__half2float, __float2half)
+// aren't available on the host, so these are bitwise conversions.
 
 static float fp16_to_float(uint16_t h) {
     uint16_t sign = (h >> 15) & 1;
@@ -277,18 +247,11 @@ static uint16_t float_to_fp16(float val) {
     return static_cast<uint16_t>((f_sign << 15) | (h_exp << 10) | h_man);
 }
 
-// ---------------------------------------------------------------------------
-// upload_weight: upload a single weight tensor from host (mmap) to GPU.
-//
-// For Q4_0: splits into packed_nibbles [N, K/2] + scales [N, K/32] on GPU.
-//           Updates weight tensor to point to packed_nibbles (dtype=INT4),
-//           fills scales_out tensor.
-// For Q8_0/Q6_K (raw_quant=true): uploads raw quantized bytes to GPU.
-//           Executor dequants on-the-fly into a scratch buffer before GEMM.
-// For Q8_0/Q6_K (raw_quant=false): dequants to FP16 on host, uploads as FP16.
-// For F16/BF16: direct upload. scales_out stays empty.
-// For F32: converts to FP16 on host, uploads. scales_out stays empty.
-// ---------------------------------------------------------------------------
+// upload_weight: uploads one weight tensor from host (mmap) to GPU. Q4_0 splits into
+// packed_nibbles [N,K/2] + scales [N,K/32] on GPU (dtype->INT4). Q8_0/Q6_K raw_quant=true
+// uploads raw bytes (executor dequants on-the-fly before GEMM); raw_quant=false dequants to
+// FP16 on host first. F16/BF16 upload direct; F32 converts to FP16 on host. scales_out is
+// empty except for Q4_0.
 
 
 // Per-qtype upload handler extracted from upload_weight: mxfp4 path.
@@ -303,25 +266,20 @@ static bool upload_qtype_mxfp4_(Tensor& weight, QType qtype, QType compute_dtype
     int total_blocks = static_cast<int>(N) * blocks_per_row;
     size_t data_bytes = static_cast<size_t>(N) * blocks_per_row * 16;  // packed nibbles only
 
-    // CPU-side split: [data_0..data_N | scale_0..scale_N] contiguous layout.
-    // Source block layout depends on the originating GGUF type:
-    //   legacy (type 31): [data (16) | scale (1)] per block
-    //   modern (type 39): [scale (1) | data (16)] per block (llama.cpp standard)
-    // weight.mxfp4_layout_v2 tracks the modern layout (set by gguf_loader).
+    // CPU-side split: [data_0..data_N | scale_0..scale_N] contiguous layout. Source block
+    // layout depends on the GGUF type: legacy (31) is [data(16)|scale(1)] per block, modern (39)
+    // is [scale(1)|data(16)] per block (llama.cpp standard). weight.mxfp4_layout_v2 tracks the
+    // modern layout (set by gguf_loader).
     size_t scale_bytes = static_cast<size_t>(total_blocks);  // 1 byte per block
     size_t total_bytes = data_bytes + scale_bytes;
     const uint8_t* src = static_cast<const uint8_t*>(weight.data);
     std::vector<uint8_t> h_buf(total_bytes);
     if (weight.mxfp4_layout_v2) {
-        // GGML type-39 blocks differ from imp's legacy type 31 in TWO ways,
-        // not one: the scale byte leads, AND the nibble order inside qs[16]
-        // is SPLIT (ggml dequantize_row_mxfp4: element j = LOW nibble of
-        // qs[j], element j+16 = HIGH nibble of qs[j]) — not the LINEAR pair
-        // order (element 2i = low / 2i+1 = high of byte i) that every imp
-        // consumer (split dequant, mxf4 GEMM, decode GEMV) assumes from the
-        // type-31 layout. Copying the bytes verbatim permutes all 32 elements
-        // of every block → fluent garbage on llama.cpp-produced MXFP4 GGUFs
-        // (#551, Qwen3.5-4B-mxfp4). Normalize to linear order once, here.
+        // GGML type-39 blocks differ from imp's legacy type 31 in TWO ways: the scale byte leads,
+        // AND the nibble order in qs[16] is SPLIT (elem j=low nibble of qs[j], j+16=high), not the
+        // LINEAR pair order (2i=low/2i+1=high of byte i) every imp consumer assumes. Copying bytes
+        // verbatim permutes all 32 elements of every block (#551, Qwen3.5-4B-mxfp4). Normalize to
+        // linear order once, here.
         for (int i = 0; i < total_blocks; i++) {
             const uint8_t* qs = src + static_cast<size_t>(i) * 17 + 1;
             h_buf[data_bytes + i] = src[static_cast<size_t>(i) * 17];
@@ -795,11 +753,10 @@ static bool upload_weight_dispatch_(Tensor& weight, QType qtype, QType compute_d
 static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cudaStream_t stream,
                           std::vector<void*>& gpu_allocs, bool raw_quant = true, float weight_offset = 0.0f,
                           const char* wname = nullptr, int wlayer = -1) {
-    // weight_offset: added to each FP32 element BEFORE FP16 conversion. Only
-    // applied on BF16-source paths (qtype==BF16 or qtype==F32/NONE with
-    // weight.qtype==BF16). F32-source paths leave it unused — GGUF norms
-    // already carry the offset baked in by the converter; SafeTensors stores
-    // the delta `W` (where actual gamma = 1 + W) for Qwen3.5/3.6 block norms.
+    // weight_offset: added to each FP32 element BEFORE FP16 conversion, applied only on
+    // BF16-source paths (qtype==BF16, or F32/NONE with weight.qtype==BF16). F32-source paths
+    // leave it unused: GGUF norms already carry the offset from the converter; SafeTensors
+    // stores the delta W (actual gamma = 1+W) for Qwen3.5/3.6 block norms.
     if (weight.data == nullptr || weight.on_device)
         return true;
     if (weight.ndim < 1)
@@ -838,10 +795,8 @@ static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cuda
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: upload a weight tensor that has no associated quant type
-// (e.g., norm weights, embedding). We detect the dtype from the tensor.
-// ---------------------------------------------------------------------------
+// Uploads a weight tensor with no associated quant type (norm weights, embeddings);
+// detects the dtype from the tensor itself.
 
 static bool upload_unquantized_weight(Tensor& weight, QType qtype, QType compute_dtype, cudaStream_t stream,
                                       std::vector<void*>& gpu_allocs, bool raw_quant = true,
@@ -870,40 +825,35 @@ size_t Model::estimate_expert_bytes() const {
     return total;
 }
 
-// ---------------------------------------------------------------------------
-// Upload context: bundles the repeated parameters needed by all upload helpers.
-// Passed by reference to avoid >8 params on every helper call.
-// ---------------------------------------------------------------------------
+// Bundles the repeated parameters needed by all upload helpers, passed by reference to
+// avoid more than 8 params on every helper call.
 struct UploadCtx {
     QType compute_dtype;
     cudaStream_t stream;
     std::vector<void*>& gpu_allocs;
     std::vector<HostRegistration>& host_pinned;
     std::vector<PinnedBuffer>& host_pinned_allocs;
-    // Architecture-specific norm-weight offset. Qwen3.5/3.6 SafeTensors stores
-    // block-norm gammas as deltas (gamma = 1 + W) while GGUF bakes the +1 in
-    // at conversion time. Applied only on BF16-source paths in upload_weight().
-    // Set to 1.0f for QWEN35[_MOE]/QWEN36_MOE, 0.0f otherwise.
+    // Architecture-specific norm-weight offset: Qwen3.5/3.6 SafeTensors stores block-norm
+    // gammas as deltas (gamma=1+W) while GGUF bakes the +1 in at conversion. Applied only on
+    // BF16-source paths in upload_weight(). 1.0f for QWEN35[_MOE]/QWEN36_MOE, 0.0f otherwise.
     float arch_norm_offset = 0.0f;
-    // gpt-oss MXFP4 MoE experts must stay host-resident through weight upload:
-    // the MXFP4→NVFP4 conversion runs at pre_dequant (needs the executor's
-    // wcache). Set true for ModelArch::GPT_OSS so upload_packed_experts skips
-    // them instead of uploading raw MXFP4 the executor cannot consume.
+    // gpt-oss MXFP4 MoE experts must stay host-resident through weight upload: the
+    // MXFP4->NVFP4 conversion runs at pre_dequant (needs the executor's wcache). True for
+    // ModelArch::GPT_OSS so upload_packed_experts skips them instead of uploading raw MXFP4 the
+    // executor cannot consume.
     bool is_gpt_oss = false;
-    // NVFP4-prequant SafeTensors: the MoE host-offload path does NOT support
-    // native-NVFP4 experts (they stay QType::INT8 packed and leak to the
-    // generic cuBLAS GEMM → status-15 garbage). Force all experts on-device for
-    // these models so Phase-0 promotes them; see decide_expert_layer_placement_.
+    // NVFP4-prequant SafeTensors: the MoE host-offload path does not support native-NVFP4
+    // experts (they'd stay QType::INT8 packed and leak to the generic cuBLAS GEMM, status-15
+    // garbage). Forces all experts on-device for these models so Phase-0 promotes them; see
+    // decide_expert_layer_placement_.
     bool is_nvfp4_prequant = false;
     // Back-pointer for upload-time in-place device transforms (Gemma-4 fused
     // expert split) to mark the model suspend-unsupported.
     Model* model = nullptr;
 };
 
-// ---------------------------------------------------------------------------
-// UPLOAD_OR_FAIL / UPLOAD_UNQUANT_OR_FAIL: reduces the per-weight boilerplate
-// of calling upload_weight() + error log + early return.
-// ---------------------------------------------------------------------------
+// UPLOAD_OR_FAIL / UPLOAD_UNQUANT_OR_FAIL: reduces the per-weight boilerplate of
+// upload_weight() + error log + early return.
 #define UPLOAD_OR_FAIL(tensor, qtype, msg, layer_idx, ctx)                                          \
     do {                                                                                            \
         if (!upload_weight((tensor), (qtype), (ctx).compute_dtype, (ctx).stream, (ctx).gpu_allocs, \
@@ -938,11 +888,9 @@ struct UploadCtx {
 // ---------------------------------------------------------------------------
 static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tensor& out_proj,
                                          const UploadCtx& ctx) {
-    // Upload token embedding
-    // Embedding lookup only supports Q8_0/Q6_K natively; other quant types
-    // need to be dequanted to FP16 (raw_quant=false) so the standard FP16
-    // embedding gather works. tok_emb.qtype is updated in-place by
-    // upload_weight if a host-side dequant occurs.
+    // Embedding lookup only supports Q8_0/Q6_K natively; other quant types need dequanting to
+    // FP16 (raw_quant=false) for the standard FP16 embedding gather. tok_emb.qtype is updated
+    // in-place by upload_weight if a host-side dequant occurs.
     const void* tok_emb_host_ptr = tok_emb.data;  // save for weight-tying check below
     const QType tok_emb_orig_qtype = tok_emb.qtype;
     if (tok_emb.data && !tok_emb.on_device) {
@@ -954,15 +902,11 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
         }
     }
 
-    // Upload output norm — with ctx.arch_norm_offset, like every other norm.
-    //
-    // This is the model's final RMSNorm, the one that feeds the LM head. It
-    // used to go through the no-offset path while attn_norm, ffn_norm, the QK
-    // norms and even the MTP head's norms all took the offset, so on a
-    // Qwen3.5/3.6 SafeTensors checkpoint it ran with gamma = W instead of
-    // gamma = 1 + W. Every layer was correct and only the last scaling before
-    // the logits was wrong, which is why the damage never looked like a load
-    // bug: the model stayed coherent and merely got much worse.
+    // Output norm (final RMSNorm feeding the LM head) must take ctx.arch_norm_offset like every
+    // other norm. It used to skip the offset while attn_norm/ffn_norm/QK-norms/MTP norms all
+    // took it, so a Qwen3.5/3.6 SafeTensors checkpoint ran the last scaling before logits with
+    // gamma=W instead of gamma=1+W: every layer correct, only the final scale wrong, so the
+    // model stayed coherent and merely got much worse.
     if (out_norm.data && !out_norm.on_device) {
         if (!upload_weight(out_norm, out_norm.qtype, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,
                            /*raw_quant=*/true, ctx.arch_norm_offset, "out_norm")) {
@@ -998,19 +942,11 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// upload_mtp_weights: BF16 → FP16 upload of the MTP head (Phase 2 prereq).
-// Walks all 19 named tensors in MtpHead and uploads each via upload_weight().
-// All tensors are stored BF16 on disk and run as FP16 on GPU. The MoE expert
-// tensors (3D [n_experts, ...]) are uploaded raw as 3D FP16 — slicing per-
-// expert is the forward kernel's concern (Phase 2 compute).
-//
-// CRITICAL — norm-weight offset: Qwen3.5/3.6 SafeTensors stores RMSNorm
-// gammas as deltas `W` (actual gamma = 1 + W). Without ctx.arch_norm_offset
-// applied during BF16→FP16, MTP norms run with scale ≈ 0 instead of ≈ 1,
-// producing zero output that locks the LM-head argmax to a deterministic
-// noise token. Pass the offset on norm tensors only.
-// ---------------------------------------------------------------------------
+// upload_mtp_weights: BF16->FP16 upload of the MTP head. Walks all 19 named MtpHead
+// tensors; MoE expert tensors (3D [n_experts,...]) upload raw as 3D FP16, per-expert
+// slicing is the forward kernel's concern. CRITICAL: Qwen3.5/3.6 SafeTensors RMSNorm gammas
+// are deltas (actual gamma=1+W); without ctx.arch_norm_offset on norm tensors the MTP norms
+// run at scale~0, zeroing output and locking the LM-head argmax to a noise token.
 
 static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     if (!head.loaded) return true;  // nothing to upload
@@ -1069,16 +1005,12 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     for (size_t e = 0; e < head.experts_down.size() && ok; ++e)
         ok &= up(head.experts_down[e], "mtp_expert_down");
 
-    // Restack the per-expert weights into one contiguous slab each, so the
-    // decode GEMV can address an expert by a device-side id. Without this the
-    // draft has to copy routing D2H and loop on the host, which is exactly what
-    // makes the draft path uncapturable.
-    //
-    // The per-expert Tensors are then repointed INTO the slab. The originals are
-    // NOT freed: they stay in gpu_allocs until teardown, so both copies are
-    // resident for the life of the process. That is why mtp_upload_peak_bytes
-    // counts the slabs on top of the head, and why the load refuses a head it
-    // cannot afford as a whole.
+    // Restacks per-expert weights into one contiguous slab each so the decode GEMV can address
+    // an expert by device-side id; without this the draft has to copy routing D2H and loop on
+    // host, which is what makes the draft path uncapturable. Per-expert Tensors are repointed
+    // INTO the slab; the originals are NOT freed (stay in gpu_allocs until teardown), so both
+    // copies are resident for the process lifetime - mtp_upload_peak_bytes counts the slabs on
+    // top of the head for exactly this reason.
     if (ok && !head.experts_up.empty() && head.experts_up[0].data != nullptr) {
         auto stack = [&](std::vector<Tensor>& parts, Tensor& out, const char* what) -> bool {
             const int64_t ne = static_cast<int64_t>(parts.size());
@@ -1123,12 +1055,9 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     return ok;
 }
 
-// ---------------------------------------------------------------------------
-// upload_gptq_weight: dequantize a GPTQ-packed weight to FP16 on GPU.
-// Uploads qweight/qzeros/scales/g_idx to temporary GPU buffers, runs the
-// dequant kernel, then frees the temporaries.  Sets output tensor to point
-// to the resulting FP16 weight on GPU.
-// ---------------------------------------------------------------------------
+// upload_gptq_weight: dequantizes a GPTQ-packed weight to FP16 on GPU. Uploads
+// qweight/qzeros/scales/g_idx to temporary GPU buffers, runs the dequant kernel, frees the
+// temporaries, and sets the output tensor to the resulting FP16 GPU weight.
 static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor& output, cudaStream_t stream,
                                std::vector<void*>& gpu_allocs) {
     if (!gptq.qweight.data || !gptq.scales.data)
@@ -1244,10 +1173,9 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     UPLOAD_OR_FAIL(L.wk, L.wk.qtype, "wk", i, ctx);
     UPLOAD_OR_FAIL(L.wv, L.wv.qtype, "wv", i, ctx);
     UPLOAD_OR_FAIL(L.wo, L.wo.qtype, "wo", i, ctx);
-    // MLA (DeepSeek-V2/V3) latent-attention projections. UPLOAD_OR_FAIL is a
-    // no-op when tensor.data == nullptr (non-MLA layers) or already on device,
-    // so this is safe to call unconditionally for all architectures.
-    // kv_a_layernorm is a norm weight — uploaded in the QK-norm section below.
+    // MLA (DeepSeek-V2/V3) latent-attention projections. UPLOAD_OR_FAIL no-ops when
+    // tensor.data==nullptr (non-MLA layers) or already on device, so safe to call
+    // unconditionally for every architecture. kv_a_layernorm uploads separately (QK-norm section).
     UPLOAD_OR_FAIL(L.kv_a_proj, L.kv_a_proj.qtype, "kv_a_proj", i, ctx);
     UPLOAD_OR_FAIL(L.kv_b_proj, L.kv_b_proj.qtype, "kv_b_proj", i, ctx);
 
@@ -1273,10 +1201,9 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
         }
     }
 
-    // Attention norm (typically F32/F16, no quant). For Qwen3.5/3.6
-    // SafeTensors, the BF16 weight stores `W` (delta from 1.0) and the actual
-    // gamma is `1 + W`; ctx.arch_norm_offset bakes that +1 in during BF16→FP16
-    // conversion. GGUF F32 norms already carry the offset and are unaffected.
+    // Attention norm (typically F32/F16, unquantized). For Qwen3.5/3.6 SafeTensors the BF16
+    // weight stores W (delta from 1.0); ctx.arch_norm_offset bakes the +1 in during BF16->FP16.
+    // GGUF F32 norms already carry the offset and are unaffected.
     if (L.attn_norm.data && !L.attn_norm.on_device) {
         if (!upload_weight(L.attn_norm, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true,
                            ctx.arch_norm_offset, "attn_norm", i)) {
@@ -1301,10 +1228,9 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
             return false;
         }
     }
-    // MLA (DeepSeek-V2/V3) RMSNorm on the 512-dim latent after kv_a_proj.
-    // The rmsnorm kernel expects FP16 weights; upload with no offset (DeepSeek
-    // stores plain gamma, not a 1+W delta like Qwen3.5/3.6).
-    // No-op for non-MLA layers (kv_a_layernorm.data == nullptr).
+    // MLA (DeepSeek-V2/V3) RMSNorm on the 512-dim latent after kv_a_proj: uploaded with NO
+    // offset (DeepSeek stores plain gamma, not the Qwen3.5/3.6 1+W delta). No-op for non-MLA
+    // layers.
     if (L.kv_a_layernorm.data && !L.kv_a_layernorm.on_device) {
         if (!upload_weight(L.kv_a_layernorm, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,
                            true, 0.0f, "kv_a_layernorm", i)) {
@@ -1384,10 +1310,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// upload_layer_ffn_weights: w_gate/w_up/w_down + norms + MoE routing +
-//                           shared experts for one layer
-// ---------------------------------------------------------------------------
+// upload_layer_ffn_weights: w_gate/w_up/w_down + norms + MoE routing + shared experts for
+// one layer.
 static bool upload_layer_ffn_weights(TransformerLayer& L, int i, const UploadCtx& ctx) {
     // FFN weights (dense path)
     UPLOAD_OR_FAIL(L.w_gate, L.w_gate.qtype, "w_gate", i, ctx);
@@ -1480,22 +1404,12 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
             }
         }
     }
-    // SSM scalar/vector tensors that MUST end up as FP32 on device, because
-    // the GDN/Mamba scan kernels read them as `const float*` (A_log, D,
-    // dt_bias). GGUF emits them as F32 — direct upload. SafeTensors with
-    // bfloat16 model dtype emits them as BF16, and a previous engine version
-    // simply h2d_copy'd the bytes — the scan kernel then reinterpreted BF16
-    // as F32 (sign/exponent/mantissa all wrong) and produced NaN within the
-    // first GDN layer. Convert on host before upload so the scan always sees
-    // real FP32 values.
-    // ssm_a needs an extra HF-vs-GGUF transform: imp's GDN scan kernel computes
-    //   g = exp(A_log * softplus(alpha + dt_bias))
-    // which matches GGUF semantics — the Unsloth/llama.cpp converter pre-applies
-    // `-exp()` to the original HF A_log so kernel reads the post-transform value.
-    // HF SafeTensors carries the RAW HF `A_log` (mean ~3.3 positive). Without
-    // applying `-exp()` at load time, the kernel produces exp(positive*positive)
-    // and the recurrent state grows exponentially → garbage decode.
-    // Verified: GGUF[i] == -exp(NVFP4_A_log_HF[head_perm(i)]) elementwise on L0.
+    // SSM scalars (A_log, D, dt_bias) must end up FP32 on device: the GDN/Mamba scan kernels
+    // read them as const float*. GGUF emits F32 directly; SafeTensors BF16-model checkpoints
+    // emit BF16, and h2d-copying the bytes verbatim let the kernel reinterpret BF16 as F32
+    // (wrong sign/exponent/mantissa), producing NaN in the first GDN layer - convert on host
+    // first. ssm_a additionally needs -exp() (HF stores the raw pre-transform A_log; GGUF/imp's
+    // kernel expects the post-transform value): verified GGUF[i] == -exp(HF_A_log[perm(i)]).
     for (Tensor* t : {&L.ssm_a, &L.ssm_d, &L.ssm_dt_b}) {
         if (!t->data || t->on_device)
             continue;
@@ -1528,22 +1442,11 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
             return false;
         }
 
-        // Apply HF-to-GGUF A_log transform: A_log_GGUF = -exp(A_log_HF).
-        //
-        // Deciding this from the dtype does NOT work. It used to read "F32 means
-        // GGUF, already transformed" and skip — but an HF checkpoint may store
-        // A_log as F32, and Qwen3.5-4B does. Its raw A_log then reached the scan
-        // as a positive decay rate (up to +2.05), so the state grew instead of
-        // decaying: per-token absmax 0.04, 0.06, 0.40, 2.51, 110, 31680, inf.
-        // FP16 overflows between token 5 and 6, rmsnorm(inf) makes NaN, and the
-        // model emitted one token forever (#1282).
-        //
-        // Decide from the VALUES, which is decidable: -exp(x) is strictly
-        // negative for every real x, so any value >= 0 can only be a raw HF
-        // A_log. The dtype signal is kept as an OR because BF16/F16 storage is
-        // HF-only regardless of sign — a GGUF file never gets here in those
-        // types. When every value is negative AND the source is F32, this stays
-        // a no-op, exactly as before, so no existing GGUF model changes.
+        // Deciding the HF-to-GGUF A_log transform (-exp()) from dtype alone doesn't work: an HF
+        // checkpoint may store A_log as F32 too (Qwen3.5-4B does), and skipping the transform then
+        // fed the scan a positive decay rate that grew the state to inf (#1282). Decide from
+        // VALUES instead: -exp(x) is strictly negative for any real x, so any value >=0 can only be
+        // raw HF A_log. dtype is kept as an OR since BF16/F16 storage is HF-only regardless of sign.
         bool has_nonnegative = false;
         for (int64_t k = 0; k < n_elem; ++k) {
             if (h_fp32[k] >= 0.0f) {
@@ -1572,13 +1475,11 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         t->on_device = true;
     }
 
-    // Gated DeltaNet (GDN) weights (Qwen3.5).
-    // GDN alpha/beta: dispatched via gemm_dispatch like every other quantized
-    // weight. Earlier code used raw_quant=false to pre-dequant to FP16 on host,
-    // but upload_weight() does not update L.gdn_*_qtype after conversion, so
-    // gemm_dispatch still saw qtype=Q8_0 and re-interpreted the FP16 bytes as
-    // Q8_0 blocks → ~80× too-large alpha/beta and immediate state collapse.
-    // Uploading raw Q8_0 keeps the qtype consistent with the bytes on device.
+    // GDN alpha/beta upload via gemm_dispatch like every quantized weight. Pre-dequanting to
+    // FP16 on host (raw_quant=false) left L.gdn_*_qtype at Q8_0 after conversion, so
+    // gemm_dispatch re-interpreted the FP16 bytes as Q8_0 blocks (~80x too-large values,
+    // immediate state collapse). Upload raw Q8_0 instead so the qtype stays consistent with the
+    // on-device bytes.
     if (L.gdn_gate.data && !L.gdn_gate.on_device) {
         UPLOAD_OR_FAIL(L.gdn_gate, L.gdn_gate.qtype, "gdn_gate", i, ctx);
     }
@@ -1589,13 +1490,10 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         UPLOAD_OR_FAIL(L.gdn_beta, L.gdn_beta.qtype, "gdn_beta", i, ctx);
     }
 
-    // GDN input projection fusion (M=1 decode GEMV). Tries the full 4-way pack
-    // first (ssm_in + gdn_gate + gdn_alpha + gdn_beta → one [total_out, d_model]
-    // weight); falls back to the alpha+beta-only 2-way pack if ssm_in / gdn_gate
-    // aren't FP16/BF16 (e.g. raw-quant Q*_K or NVFP4 prequant paths). Originals
-    // stay live so prefill (n>1) keeps the 4-call path unchanged. Decode opt-in
-    // via the executor: when n==1 it slices the fused output instead of running
-    // 4 separate matmuls.
+    // GDN input projection fusion (M=1 decode GEMV): tries the full 4-way pack (ssm_in+
+    // gdn_gate+gdn_alpha+gdn_beta -> one weight) first, falls back to the alpha+beta-only 2-way
+    // pack if ssm_in/gdn_gate aren't FP16/BF16 (raw-quant Q*_K, NVFP4 prequant). Originals stay
+    // live for prefill's unchanged 4-call path; decode opts in via the executor at n==1.
     auto& a = L.ssm_in;
     auto& b = L.gdn_gate;
     auto& c = L.gdn_alpha;
@@ -1680,13 +1578,9 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// upload_expert_weights: MoE expert weight upload for all layers (Pass 2).
-// Handles packed 3D tensors and per-expert 2D tensors.
-// ---------------------------------------------------------------------------
-// Phase 1 of upload_expert_weights: compute per-layer expert-tensor byte cost
-// for the packed 3-D tensors PLUS per-expert 2-D tensors (NVFP4 llm-compressor
-// format). Returns total_expert_bytes; fills layer_expert_bytes in place.
+// upload_expert_weights (Pass 2): handles packed 3D and per-expert 2D expert tensors.
+// Phase 1 computes per-layer expert-tensor byte cost (packed 3-D plus per-expert 2-D
+// NVFP4 llm-compressor tensors), filling layer_expert_bytes and returning total_expert_bytes.
 static size_t compute_expert_layer_costs_(const std::vector<TransformerLayer>& layers, int n_layers,
                                           std::vector<size_t>& layer_expert_bytes) {
     size_t total_expert_bytes = 0;
@@ -1722,15 +1616,11 @@ static size_t compute_expert_layer_costs_(const std::vector<TransformerLayer>& l
     return total_expert_bytes;
 }
 
-// Phase 2 of upload_expert_weights: pick which MoE layers' experts stay on
-// GPU vs go to host. Honors:
-//   - VRAM reserve passed by Engine (KV cache + workspaces + FP16 cache),
-//   - WSL2/WDDM driver overhead (auto-pick 10 % aggressive if all fit, else
-//     30 % conservative), explicit overhead_pct override (0..50),
-//   - moe.force_host_experts = N debug flag (last N MoE layers off-GPU).
-// Also re-arms the g_cached_free_mem / g_total_allocated / g_vram_reserve
-// trio so per-expert checked_cuda_malloc calls don't double-count the
-// reserve.
+// Phase 2: picks which MoE layers' experts stay on GPU vs go to host. Honors the VRAM
+// reserve Engine passes (KV cache + workspaces + FP16 cache), WSL2/WDDM driver overhead
+// (10% aggressive if all fit, else 30% conservative, or an explicit override), and
+// moe.force_host_experts=N. Re-arms the g_cached_free_mem/g_total_allocated/g_vram_reserve
+// trio so per-expert checked_cuda_malloc calls don't double-count the reserve.
 static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expert_bytes,
                                            size_t total_expert_bytes, size_t expert_reserve_bytes,
                                            int n_layers, std::vector<bool>& experts_upload_layer,
@@ -1741,12 +1631,10 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     size_t free_mem = 0, total_mem = 0;
     vram_budget_mem_get_info(&free_mem, &total_mem);
 
-    // Auto-pick default: use 10% (aggressive) if ALL experts would fit with
-    // that overhead, else 30% (conservative). This saves users from a
-    // silent 3× perf penalty on Qwen3-Coder-30B / Qwen3.6-35B-class MoE
-    // models where the conservative default unnecessarily offloads experts
-    // to host (measured: 77 → 237 tok/s with 10% vs 30% on Qwen3-Coder-30B
-    // Q6_K, RTX 5090 native Linux).
+    // Auto-pick default: 10% (aggressive) if ALL experts fit with that overhead, else 30%
+    // (conservative). Saves users from a silent large perf penalty on Qwen3-Coder-30B/
+    // Qwen3.6-35B-class MoE models where the conservative default unnecessarily offloads
+    // experts to host.
     int overhead_pct = process_diag_moe_expert_overhead_pct();
     if (overhead_pct < 0 || overhead_pct > 50) {
         overhead_pct = 30;
@@ -1763,15 +1651,11 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
                 total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
         }
     }
-    // NVFP4-prequant experts have NO working host-offload path: kept host-
-    // resident they stay QType::INT8 packed (Phase-0 promote never runs on
-    // them), and at inference the MoE fallback hands their raw packed bytes to
-    // the generic cuBLAS GEMM → CUBLAS_STATUS_NOT_SUPPORTED (status 15) →
-    // repeated-token garbage + IMA (Qwen3.6-35B-A3B-NVFP4: default context
-    // offloaded layers 23-39 → gibberish). They are mandatory on-device. Drop
-    // the KV/workspace overhead reserve so they all upload when they physically
-    // fit; the KV pool is sized later from the remaining VRAM (with a min
-    // floor) and shrinks to accommodate — correctness over context length.
+    // NVFP4-prequant experts have no working host-offload path: host-resident they stay
+    // QType::INT8 packed (Phase-0 promote never runs on them) and the MoE fallback hands raw
+    // packed bytes to cuBLAS -> CUBLAS_STATUS_NOT_SUPPORTED, repeated-token garbage + IMA. They
+    // are mandatory on-device: drop the KV/workspace reserve so they all upload when they
+    // physically fit, and size the KV pool from what's left (correctness over context length).
     if (is_nvfp4_prequant)
         overhead_pct = 0;
     size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
@@ -1859,16 +1743,11 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     decide_expert_layer_placement_(layer_expert_bytes, total_expert_bytes, expert_reserve_bytes, n_layers,
                                    experts_upload_layer, ctx.is_nvfp4_prequant);
 
-    // A host-resident NVFP4 placement is servable now — the expert cache
-    // stages those experts per layer and the fused kernels address its slot
-    // pool. What CANNOT be decided here is whether the cache will be big
-    // enough: it is sized in init_weights()' workspace pass, which runs after
-    // this. Re-deriving that sizing here would be a second copy of the
-    // arithmetic, and a copy that drifts is exactly the failure #1403 was.
-    //
-    // So this only reports; the refusal lives in
-    // GraphExecutor::verify_host_expert_placement(), which runs once both the
-    // promotion and the real cache exist.
+    // A host-resident NVFP4 placement is servable: the expert cache stages those experts per
+    // layer and the fused kernels address its slot pool. Whether the cache will be big enough
+    // cannot be decided here - it's sized in init_weights()' workspace pass, which runs after.
+    // This only reports; the refusal lives in GraphExecutor::verify_host_expert_placement(),
+    // once both the promotion and the real cache exist.
     if (expert_placement_needs_host_path(ctx.is_nvfp4_prequant, layer_expert_bytes,
                                          experts_upload_layer)) {
         const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);
@@ -1885,12 +1764,10 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     for (int i = 0; i < n_layers; ++i) {
         TransformerLayer& L = layers[i];
 
-        // MoE expert weights -- two paths:
-        // A) Packed 3D tensors (*_exps):
-        //    - For quantized types (Q6_K, Q8_0, Q4_0): upload raw bytes to GPU,
-        //      keep packed tensor. Dequant happens on-the-fly in run_moe_ffn.
-        //    - For F16/BF16/F32: dequant/upload and slice into per-expert views.
-        // B) Per-expert 2D tensors: upload individually (legacy per-expert GGUF format)
+        // MoE expert weights, two paths: (A) packed 3D *_exps - quantized types (Q6_K/Q8_0/Q4_0)
+        // upload raw bytes and dequant on-the-fly in run_moe_ffn; F16/BF16/F32 dequant/upload and
+        // slice into per-expert views. (B) per-expert 2D tensors upload individually (legacy
+        // per-expert GGUF format).
 
         auto upload_packed_experts = [&](Tensor& packed, QType qtype, std::vector<Tensor>& expert_vec,
                                          const char* name) -> bool {
@@ -1899,11 +1776,10 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             if (packed.on_device)
                 return true;  // already on GPU (e.g. from Gemma 4 fused split)
 
-            // gpt-oss MXFP4 experts: keep host-resident raw. The executor's
-            // pre_dequant phase converts them to NVFP4 + registers the CUTLASS
-            // grouped path (gpt_oss_convert_moe_experts_). Uploading raw MXFP4
-            // here would leave them in a format no MoE kernel consumes (NaN);
-            // the F16-slice fallback below also mis-strides MXFP4 bytes.
+            // gpt-oss MXFP4 experts stay host-resident raw: the executor's pre_dequant phase converts
+            // them to NVFP4 and registers the CUTLASS grouped path. Uploading raw MXFP4 here would
+            // leave them in a format no MoE kernel consumes (NaN); the F16-slice fallback also
+            // mis-strides MXFP4 bytes.
             if (ctx.is_gpt_oss && qtype == QType::MXFP4) {
                 IMP_LOG_DEBUG("  %s: gpt-oss MXFP4 experts kept host-resident for NVFP4 convert", name);
                 return true;
@@ -2025,20 +1901,12 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                                    "expert_gate_exps"))
             return false;
 
-        // Gemma 4: split fused ffn_gate_up_exps into separate gate and up packed tensors.
-        // The original tensor (in expert_gate_packed) has shape [n_exp, 2*n_ff_exp, d_model].
-        // Layout per expert: rows [0, n_ff_exp) = gate, rows [n_ff_exp, 2*n_ff_exp) = up.
-        // We split physically on GPU via cudaMemcpy2D, then free the fused buffer.
-        // Host-resident fused gate_up split (Gemma-4 + partial upload):
-        // When the fused tensor is not uploaded to GPU, we still need to split
-        // it into gate and up tensors so the MoE dispatch can find
-        // expert_up_packed. Without this, host-resident MoE layers have
-        // nullptr expert_up_packed → use_packed_dequant=0 → fallback to
-        // uninitialized expert_w_up[eidx] → garbage output.
-        //
-        // Gate this on `!experts_upload_layer[i]` — only for layers that won't
-        // be uploaded. Upload-destined layers use the GPU split code below,
-        // which runs after upload_packed_experts has set on_device=true.
+        // Gemma 4: splits the fused ffn_gate_up_exps [n_exp,2*n_ff_exp,d_model] (rows [0,n_ff_exp)
+        // = gate, [n_ff_exp,2*n_ff_exp) = up) into separate gate/up packed tensors via cudaMemcpy2D
+        // on GPU, then frees the fused buffer. Host-resident layers get the same split so MoE
+        // dispatch finds expert_up_packed; without it a host-resident layer's null
+        // expert_up_packed falls back to an uninitialized expert_w_up[eidx] (garbage output). Gated
+        // on !experts_upload_layer[i]; upload-destined layers use the GPU split path instead.
         if (!experts_upload_layer[i] && L.expert_gate_packed.data && !L.expert_gate_packed.on_device &&
             L.expert_up_packed.data == nullptr && L.expert_gate_packed.ndim >= 3 &&
             (L.expert_gate_packed.shape[1] & 1) == 0 && dequant_gpu_supported(L.expert_gate_packed.qtype)) {
@@ -2093,11 +1961,9 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             size_t row_bytes = qtype_row_bytes(L.expert_gate_packed.qtype, cols);
             size_t half_raw = static_cast<size_t>(n_exp) * half_rows * row_bytes;
 
-            // Memory-efficient split: allocate only ONE half-sized buffer for the
-            // up half, copy it out, then reuse the fused buffer in-place for the
-            // gate half (its rows are already at the front; the trailing half is
-            // simply ignored via the new shape). Peak overhead = 0.5x fused
-            // instead of 1.0x for a two-buffer split.
+            // Memory-efficient split: allocates only ONE half-sized buffer for the up half, copies it
+            // out, then reuses the fused buffer in-place for the gate half (rows already at the front).
+            // Peak overhead 0.5x fused instead of 1.0x for a two-buffer split.
             void* up_buf = nullptr;
             cudaError_t e2 = checked_cuda_malloc(&up_buf, half_raw, ctx.stream);
             if (e2 != cudaSuccess) {
@@ -2118,14 +1984,9 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 cudaFreeAsync(up_buf, ctx.stream);
                 return false;
             }
-            // Compact the gate half in-place: row e at offset e*src_pitch must
-            // move to offset e*dst_pitch. Walk experts forward — for forward
-            // copy, dst[e] starts BEFORE src[e] (e*dst_pitch < e*src_pitch +
-            // half_pitch for e>=1, but src[e] of expert e is read fully before
-            // expert e+1's dst is written, so this is safe as a sequential 2D
-            // copy from a single launch only when there is no inter-expert
-            // overlap. With dst_pitch < src_pitch the expert-1 dst region
-            // overlaps with expert-0 src — so we must serialize per expert.
+            // Compacts the gate half in-place: row e (offset e*src_pitch) moves to e*dst_pitch. With
+            // dst_pitch < src_pitch expert e+1's dst overlaps expert e's src region, so experts are
+            // walked forward and copied one at a time rather than as a single overlapping 2D launch.
             for (int64_t e = 1; e < n_exp; ++e) {  // e=0 already at the right offset
                 cudaError_t cp_e = cudaMemcpyAsync(const_cast<char*>(src_base) + e * dst_pitch,
                                                    src_base + e * src_pitch, dst_pitch,
@@ -2199,13 +2060,10 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 }
             }
         } else {
-            // Host-resident path for per-expert 2D BF16 tensors: convert BF16→FP16
-            // in pinned host memory. The legacy MoE GEMM path calls cuBLAS which
-            // rejects mixed FP16-activation × BF16-weight (NOT_SUPPORTED, status 15).
-            // Pinned FP16 copies are accessible via UVA and match the compute dtype.
-            // Only fires for unquantized per-expert BF16 (e.g. DeepSeek-V2 SafeTensors);
-            // quantized types (Q6_K/Q8_0/Q4_0) stay as raw bytes and go through the
-            // dequant-on-the-fly path — they don't hit cuBLAS directly.
+            // Host-resident per-expert 2D BF16 tensors: converted BF16->FP16 in pinned host memory,
+            // since the legacy MoE GEMM path's cuBLAS call rejects mixed FP16-activation x BF16-weight
+            // (status 15). Only fires for unquantized per-expert BF16 (e.g. DeepSeek-V2 SafeTensors);
+            // quantized types stay raw and go through dequant-on-the-fly instead.
             auto convert_host_bf16 = [&](std::vector<Tensor>& expert_vec) {
                 for (Tensor& w : expert_vec) {
                     if (!w.data || w.on_device || w.qtype != QType::BF16)
@@ -2236,29 +2094,12 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             convert_host_bf16(L.expert_w_up);
             convert_host_bf16(L.expert_w_down);
 
-            // Host-resident NVFP4 experts: copy the mmap'd bytes into pinned
-            // host memory, for exactly the reason Path A1 does it for the
-            // packed GGUF tensor — on WSL2 an mmap cannot be page-locked in
-            // place, so a cudaMemcpyAsync from it is staged synchronously
-            // inside the driver.
-            //
-            // Measured on this box at one expert's size (768 KiB weights +
-            // 96 KiB micro-scales): 76.2 us of HOST time inside the copy calls
-            // from mmap against 2.8 us from pinned, and the DMA itself runs at
-            // 9.6 vs 32.4 GB/s. The offload prefill issues ~89k such transfers,
-            // which nsys measured as 4.13 s of host time against 795 ms of
-            // actual GPU transfer.
-            //
-            // These stay pageable until here because the per-expert path never
-            // ran Path A1's pinning: the BF16 converter above is the only thing
-            // in this branch that produced pinned experts, and it declines
-            // anything that is not BF16.
-            // ONE buffer per projection, not one per expert. Pinning is a
-            // syscall-heavy operation: a first cut took a buffer per expert and
-            // nsys measured 36 877 cudaHostAlloc calls costing 24.7 s, plus
-            // 6.4 s of cudaFreeHost at teardown, to save 0.5 s of transfer
-            // time. Per projection it is 144 allocations for the same result,
-            // and the experts land contiguously as a side benefit.
+            // Host-resident NVFP4 experts: copies mmap'd bytes into pinned host memory (same reason as
+            // the packed-GGUF path - WSL2 can't page-lock an mmap in place, so cudaMemcpyAsync from it
+            // stages synchronously in-driver at far lower bandwidth). ONE pinned buffer per projection,
+            // not one per expert: pinning is syscall-heavy, and a per-expert buffer costs orders of
+            // magnitude more time in cudaHostAlloc/cudaFreeHost than the transfer time it saves; a
+            // per-projection buffer also lands the experts contiguously as a side benefit.
             auto pin_host_nvfp4_experts = [&](std::vector<Tensor>& expert_vec) {
                 if (!ctx.is_nvfp4_prequant || expert_vec.empty())
                     return;
@@ -2404,15 +2245,10 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         }
     }
 
-    // =========================================================================
-    // Two-pass upload strategy:
-    // Pass 1: Upload all non-expert per-layer weights (attention, FFN, norms,
-    //         SSM, shared experts, routing). This consumes a variable amount
-    //         of VRAM that's hard to estimate accurately.
-    // Pass 2: After non-expert weights are on GPU, cudaMemGetInfo gives us
-    //         the actual remaining VRAM. We then greedily upload expert
-    //         layers until the budget is exhausted.
-    // =========================================================================
+    // Two-pass upload: Pass 1 uploads all non-expert per-layer weights (attention, FFN, norms,
+    // SSM, shared experts, routing), whose VRAM cost is hard to estimate up front. Pass 2 reads
+    // actual remaining VRAM via cudaMemGetInfo after Pass 1 and greedily uploads expert layers
+    // until the budget is exhausted.
 
     // --- Pass 1: Non-expert per-layer weights ---
     for (int i = 0; i < n_layers(); ++i) {
@@ -2444,11 +2280,6 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     g_cached_free_mem = 0;
     g_total_allocated = 0;
 
-    // =========================================================================
-    // --- Pass 2: Expert weight upload ---
-    // Now that all non-expert weights are on GPU, measure actual free VRAM
-    // and greedily upload expert layers until the budget is exhausted.
-    // =========================================================================
 
     if (!upload_expert_weights(layers_, n_layers(), expert_reserve_bytes, ctx)) {
         return false;
@@ -2458,11 +2289,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // canonical slot name; replaced the per-layer NvFP4PreQuantWeight slots.
     if (config_.is_nvfp4_prequant) {
         int scale_count = 0;
-        // Diagnostic: diagnostics.audit_nvfp4_scales
-        // dumps per-slot stats for weight_scale_2
-        // (tensor-level FP32 scalar) BEFORE upload, so we can bisect
-        // Mistral-3.2-NVFP4 long-form bugs by comparing scale ranges against
-        // a known-good model (e.g. Gemma-4-NVFP4).
+        // Diagnostic (diagnostics.audit_nvfp4_scales): dumps per-slot weight_scale_2 (tensor-level
+        // FP32 scalar) stats before upload, to bisect NVFP4 long-form bugs by comparing scale
+        // ranges against a known-good model.
         const bool audit = imp::process_diag_audit_nvfp4_scales();
         float ws2_min = 1e30f, ws2_max = -1e30f, ws2_sum = 0.0f;
         int ws2_count = 0, ws2_zero = 0;
@@ -2496,32 +2325,23 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             t.on_device = true;
             scale_count++;
         };
-        // NVFP4 MoE expert micro-scales: upload one CONTIGUOUS slab per
-        // (layer, projection) so experts[e].scales = base + e*e_ms. Otherwise
-        // each expert's weight_scale is a separate cudaMallocAsync issued in
-        // unordered_map hash order, landing at non-adjacent addresses
-        // (scales_contig=0) — which forces the decode-cache borrow to allocate
-        // a contiguous copy and free the scattered originals at load time
-        // (pre_dequant_phase3_nvfp4_decode.cu, the #679 copy/free dance). A
-        // single slab makes that borrow truly zero-copy. The per-expert sub-
-        // blocks are byte-identical to the individual uploads, so CUTLASS
-        // SfAtom (Phase-3b) and the fused-projection split are unaffected.
+        // NVFP4 MoE expert micro-scales: uploads one CONTIGUOUS slab per (layer, projection) so
+        // experts[e].scales = base + e*e_ms. Otherwise each expert's weight_scale is a separate
+        // cudaMallocAsync landing at non-adjacent addresses, forcing the decode-cache borrow to
+        // allocate a contiguous copy and free the scattered originals at load time (#679 copy/free
+        // dance). A single slab makes that borrow zero-copy; per-expert sub-blocks stay
+        // byte-identical to individual uploads.
         {
             int moe_scale_slabs = 0;
             auto slab_proj_scales = [&](std::vector<Tensor>& experts, int layer, const char* kind) {
                 const int N = static_cast<int>(experts.size());
                 if (N == 0)
                     return;
-                // Experts that stayed on host keep their micro-scales there.
-                // The expert cache stages BOTH halves of an NVFP4 expert into
-                // one slot, so a scale already in VRAM would be the wrong
-                // address space for that copy — and VRAM spent on a layer that
-                // was moved out of VRAM precisely because it did not fit.
-                //
-                // They do get pinned, in ONE slab for the whole projection, for
-                // the same reason and with the same per-allocation discipline
-                // as the weights: the scale is the second of the two transfers
-                // every staged expert pays.
+                // Experts that stayed on host keep their micro-scales there: the expert cache stages both
+                // halves of an NVFP4 expert into one slot, so a scale in VRAM would be the wrong address
+                // space and wasted VRAM on a layer moved out precisely because it didn't fit. They are
+                // still pinned, in ONE slab per projection, for the same per-allocation discipline as the
+                // weights.
                 if (!experts[0].on_device) {
                     if (!process_diag_moe_pin_host_experts())
                         return;  // stays on host, unpinned
@@ -2649,11 +2469,10 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     is_samples.push_back(std::move(s));
                 }
             }
-            // Same rule as the slab path above, for the experts it declined
-            // (ragged shapes, or a projection it bailed out of): a scale whose
-            // weight is host-resident stays on host. Asking the weight itself
-            // rather than tracking a parallel flag is what keeps the two in
-            // agreement — the failure mode of #1384 and #1403 both.
+            // Same rule as the slab path: a scale whose weight is host-resident stays on host, for
+            // experts declined for ragged shapes or a bailed-out projection. Asking the weight itself
+            // rather than tracking a parallel flag keeps the two in agreement (the failure mode behind
+            // both #1384 and #1403).
             bool weight_is_host_expert = false;
             if (const auto ek = parse_expert_key(name); ek.valid && ek.layer < n_layers()) {
                 const auto& L = layers_[ek.layer];
@@ -2670,10 +2489,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 upload_scale(sc.weight_scale);
             }
             upload_scale(sc.weight_scale_2);
-            // input_scale is loaded for diagnostics but never read by any
-            // GEMM kernel (see executor_pre_dequant.cu Phase 0 comment + the
-            // dead-end memory). Only upload when audit mode is on so we don't
-            // burn VRAM on a tensor we'll never use in production.
+            // input_scale is loaded for diagnostics but never read by any GEMM kernel (see
+            // executor_pre_dequant.cu Phase 0). Only uploaded when audit mode is on, to avoid burning
+            // VRAM on a tensor never used in production.
             if (audit) {
                 upload_scale(sc.input_scale);
             }
@@ -2719,11 +2537,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             IMP_LOG_INFO("NVFP4 prequant: uploaded %d scale tensors to GPU", scale_count);
     }
 
-    // --- MTP head weights (DeepSeek-V3 / Qwen3.6 family, optional sidecar) ---
-    // Phase 2 of MTP wiring: upload the trained MTP head tensors. The forward
-    // path that consumes them is Phase 3+. Loading them here gates VRAM-wise
-    // — if the upload fails (no VRAM), we degrade by disabling MTP rather
-    // than failing the entire model load.
+    // MTP head weights (DeepSeek-V3/Qwen3.6 sidecar, optional), Phase 2 of MTP wiring; the
+    // consuming forward path is Phase 3+. Gates on VRAM here: if the upload fails, MTP is
+    // disabled rather than failing the whole model load.
     if (mtp_.has_value() && mtp_->loaded) {
         // Refuse a head that does not fit BEFORE uploading any of it. See
         // mtp_upload_peak_bytes: a per-allocation refusal partway through

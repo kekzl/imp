@@ -1,41 +1,17 @@
 #pragma once
 
-// Host IEEE-754 half / bfloat16 <-> float conversion: one copy, constexpr.
-//
-// WHY THIS FILE EXISTS. These conversions were written out by hand in TEN
-// files: model/gguf_half.h, quant/awq_transform.cpp, lora/lora_adapter.cpp,
-// vision/vision_loader.cpp (twice), vision/qwen3vl_vision_upload.cpp,
-// imp-quantize (fp8_source.cpp, awq_plan.cpp, checkpoint_out.cpp),
-// imp-server/handlers_misc.cpp and imp-bench/bench_e2e.cpp. Several of them
-// carry the same comment explaining that the code is written out rather than
-// taken from cuda_fp16.h so the translation unit stays host-only and the CPU
-// test lane can link it. That reason is real; needing ten copies of it was
-// not. A header with no CUDA dependency satisfies it once.
-//
-// MEASURED before merging them (all 2^16 half patterns, all 2^32 float
-// patterns, nvcc 13.3 / GCC 15.2, 2026-08-21):
-//
-//   fp16 -> float, gguf vs handlers_misc vs checkpoint_out vs __half2float
-//                                                    0 of 65536 differ
-//   float -> fp16, gguf vs imp-quantize fp8_source   0 of 4294967296 differ
-//   float -> fp16, gguf vs CUDA __float2half      1024 of 4294967296 differ
-//   float -> fp16, gguf vs imp-bench        352290816 of 4294967296 differ
-//
-// So the merge below is bit-exact for every caller except imp-bench, which
-// truncated where everyone else rounds (its inputs are synthetic random
-// weights, so the last mantissa bit is all that moves).
-//
-// THE 1024. float_to_half rounds a subnormal tie half-UP; CUDA's __float2half
-// rounds it half-to-EVEN. The disagreement is exactly the 1024 float patterns
-// that land on an exact tie at the subnormal boundary, the first being
-// 0x33000000 = 2^-25, half of the smallest subnormal. Host and device
-// therefore narrow those 1024 values differently. Left as-is deliberately:
-// this header merges copies without moving numbers, and changing a rounding
-// mode is a separate change with its own evidence.
-//
-// The bit moves are std::bit_cast, not memcpy: same codegen, but a constant
-// expression, so the identities at the bottom are checked by the compiler
-// instead of by a test somebody has to remember to run.
+// Host IEEE-754 half/bfloat16 <-> float conversion, one copy, constexpr:
+// merges ten hand-written copies across the tree (loaders, quant, lora,
+// vision, imp-quantize, imp-server, imp-bench) that existed to keep the
+// conversion host-only (linkable into the CPU test lane without cuda_fp16.h).
+// Bit-exact vs every prior caller except imp-bench, which truncated instead
+// of rounding on synthetic random weights.
+// float_to_half rounds a subnormal tie half-up; CUDA's __float2half rounds
+// half-to-even, disagreeing on exactly 1024 float patterns at the subnormal
+// tie boundary (first: 0x33000000 = 2^-25). Left as-is: this header merges
+// without moving numbers; changing a rounding mode is a separate change.
+// Bit moves via std::bit_cast (same codegen as memcpy, but a constant
+// expression, so identities are compiler-checked, not test-remembered).
 
 #include <bit>
 #include <cmath>

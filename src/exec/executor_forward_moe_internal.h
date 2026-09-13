@@ -15,14 +15,12 @@
 
 namespace imp {
 
-// Several MoE prefill paths read routing metadata on the host (D2H + stream
-// sync) to size the per-expert GEMMs. Under an active stream capture that
-// sync fails SILENTLY (the error was unchecked) and the host reads
-// uninitialized offsets — the recorded graph then launches expert GEMMs with
-// garbage geometry and dies with `misaligned address` at graph launch (the
-// #855 census crash class; root-caused on Nemotron-H NVFP4 in #847). Only
-// the CUTLASS 3.x device-args path records cleanly; every host-args path
-// must fail the capture loudly instead (same lesson as #858).
+// Several MoE prefill paths read routing metadata on the host (D2H+sync)
+// to size per-expert GEMMs. Under an active stream capture that sync fails
+// SILENTLY, the host reads uninitialized offsets, and the recorded graph
+// launches expert GEMMs with garbage geometry -> misaligned address at
+// launch (#855 class, root-caused on Nemotron-H NVFP4 in #847). Only the
+// CUTLASS 3.x device-args path records cleanly; every host-args path must fail the capture loudly (#858).
 inline void moe_host_args_capture_guard(cudaStream_t stream) {
     cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
     if (cudaStreamIsCapturing(stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone)
@@ -69,15 +67,12 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
     return static_cast<size_t>(rows) * qtype_row_bytes(qtype, cols);
 }
 
-// Can the fused MoE decode kernels address host-resident experts through the
-// LRU cache's per-layer slot pool? They read `base + idx * stride`, and the
-// pool is exactly that (fixed `slot_size_` stride), so `idx` becomes a slot
-// index. Lives here because the DISPATCH predicate and run_moe_decode_fast
-// must agree exactly: if the dispatch says yes and the function then declines,
-// a host pointer reaches a kernel. One definition, two call sites.
-//
-// The whole working set must fit the layer's pool, or one projection's loads
-// evict another's — the same threshold the cache gate in #1365 enforces.
+// Can the fused MoE decode kernels address host-resident experts through
+// the LRU cache's per-layer slot pool (base+idx*stride, idx=slot index)?
+// Lives here because the DISPATCH predicate and run_moe_decode_fast must
+// agree exactly, else a host pointer reaches a kernel. One definition, two
+// call sites. The whole working set must fit the layer's pool (#1365), or one projection's loads evict
+// another's.
 inline bool host_expert_pool_ready(const Tensor& up_packed, const ExpertLRUCache& cache,
                                    const MoEWorkspace& moe, int top_k) {
     return (!up_packed.on_device && cache.n_slots_ > 0 && cache.pool_ != nullptr && cache.slot_size_ > 0 &&
@@ -85,20 +80,18 @@ inline bool host_expert_pool_ready(const Tensor& up_packed, const ExpertLRUCache
             cache.slots_per_layer_ >= kExpertProjCount * top_k);
 }
 
-// The weaker form the LEGACY (prefill) path needs. It stages one expert at a
-// time and consumes the result before touching the next, so it needs neither
-// the slot-index buffer nor `3 * top_k` slots — stream ordering already keeps
-// a refill behind the kernel that read the previous occupant. What it does
-// need is a pool that carries NVFP4 slots at all.
+// Weaker form for the LEGACY (prefill) path: stages one expert at a time
+// and consumes it before the next, so it needs neither the slot-index
+// buffer nor 3*top_k slots (stream ordering already keeps a refill behind
+// its reader). Just needs a pool that carries NVFP4 slots at all.
 inline bool nvfp4_host_pool_ready_for_staging(const ExpertLRUCache& cache) {
     return (cache.nvfp4_slots_ && cache.d_slot_scales_ != nullptr && cache.pool_ != nullptr &&
             cache.slot_size_ > 0 && cache.slots_per_layer_ >= kExpertProjCount);
 }
 
-// Same question for NVFP4 experts. Two extra requirements over the GGUF case:
-// the pool must have been initialised with NVFP4 slots (they are wider — one
-// slot holds packed weights AND micro-scales), and the per-slot tensor-scale
-// mirror must exist, because the fused kernels index it with the slot number.
+// Same question for NVFP4 experts, two extra requirements over GGUF: the
+// pool must be initialised with NVFP4 slots (wider: packed weights AND
+// micro-scales), and the per-slot tensor-scale mirror must exist (fused kernels index it by slot number).
 inline bool nvfp4_host_pool_ready(const ExpertLRUCache& cache, const MoEWorkspace& moe, int top_k) {
     return (cache.nvfp4_slots_ && cache.d_slot_scales_ != nullptr && cache.n_slots_ > 0 &&
             cache.pool_ != nullptr && cache.slot_size_ > 0 && moe.d_slot_idx != nullptr &&
@@ -107,16 +100,10 @@ inline bool nvfp4_host_pool_ready(const ExpertLRUCache& cache, const MoEWorkspac
 }
 
 // Does this layer's n==1 decode go to the host-resident NVFP4 slot path?
-//
-// ONE definition, three readers: `can_decode_fast` (may I take the decode fast
-// path at all), the residual-fusion pre-check, and run_moe_decode_fast's own
-// branch. They must agree exactly — if the first says yes and the last
-// declines, the layer falls through to a path that cannot serve it.
-//
-// This deliberately does NOT look at `expert_up_packed`: that tensor is only
-// stamped for device-resident experts, so a host-resident NVFP4 layer arrives
-// with it empty. Reading it there is what kept this decode in the serial
-// legacy path at 35 tok/s while the slot path sat unused.
+// ONE definition, three readers (can_decode_fast, the residual-fusion
+// pre-check, run_moe_decode_fast) that must agree exactly. Deliberately
+// does NOT look at expert_up_packed: that tensor is only stamped for
+// device-resident experts, so checking it kept host-resident NVFP4 decode stuck in the slow serial path.
 inline bool nvfp4_host_decode_ready(const TransformerLayer& ly, const ExpertLRUCache& cache,
                                     const MoEWorkspace& moe, int top_k) {
     if (!nvfp4_host_pool_ready(cache, moe, top_k))

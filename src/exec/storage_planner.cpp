@@ -32,14 +32,11 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
     return 0;
 }
 
-// What the plan must budget for is the INCREMENTAL cost of reaching the tier,
-// not the tier's full footprint. A native-NVFP4 source already holds the
-// packed nibbles and per-16 micro-scales on device: Phase 0b registers them in
-// the decode cache zero-copy (`owned = false`), and only the Phase 3b CUTLASS
-// SfAtom repack (~n/16) allocates. Pricing the full tier bytes here projected
-// ~15 GiB of phantom demand on a 27B native checkpoint, so the budget check
-// failed on every load while the caches fit - which made a real insufficiency
-// indistinguishable from the normal case (#1765).
+// The plan must budget the INCREMENTAL cost of reaching a tier, not its full footprint.
+// A native-NVFP4 source already holds the packed nibbles + micro-scales on device (Phase
+// 0b registers zero-copy); only the Phase 3b CUTLASS SfAtom repack (~n/16) allocates.
+// Pricing the full tier bytes projected phantom demand on native checkpoints, making a
+// real insufficiency indistinguishable from the normal case (#1765).
 int64_t incremental_bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier, QType source) {
     if (source == QType::NVFP4) {
         if (tier == StorageTier::NVFP4)
@@ -47,21 +44,20 @@ int64_t incremental_bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier,
         if (tier == StorageTier::CUTLASS_NVFP4)
             return rows * cols / 16;  // SfAtom sidecar; nibbles stay shared
     }
-    // An F16/F32-source tensor at the FP16 tier is the resident upload itself:
-    // Phase 1 only builds FP16 cache copies for dequantable (or native-FP8)
-    // sources, so nothing new is allocated. Without this the token embedding
-    // alone (2.4 GiB at 248320 x 5120) kept the budget check failing on
-    // native checkpoints after the NVFP4 entries were priced honestly.
+    // An F16/F32-source tensor at the FP16 tier is the resident upload itself: Phase 1 only
+    // builds FP16 cache copies for dequantable (or native-FP8) sources, so nothing new is
+    // allocated here. Without this the token embedding alone kept the budget check failing
+    // on native checkpoints after the NVFP4 entries were priced honestly.
     if ((source == QType::F16 || source == QType::BF16 || source == QType::F32) &&
         tier == StorageTier::FP16)
         return 0;
     return bytes_for_tier(rows, cols, tier);
 }
 
-// Pick the initial (best allowable) tier for a tensor given its (source-qtype-
-// refined) capabilities and the hints. Hints can only push toward a tier that
-// the refined capabilities still list as supported — that's how the Q4_K-
-// source W_GATE case correctly stays FP16 even when `prefer_nvfp4_decode=true`.
+// Pick the initial (best allowable) tier for a tensor given its (source-qtype-refined)
+// capabilities and hints. Hints can only push toward a tier the refined capabilities
+// still list as supported: that's how a Q4_K-source W_GATE correctly stays FP16 even
+// with prefer_nvfp4_decode=true.
 StorageTier pick_initial_tier(TensorKind kind, const KindCapabilities& cap, const PlanHints& hints) {
     // dual_path hint: attention projections prefer FP8; FFN prefer NVFP4.
     if (hints.dual_path_attn_fp8_ffn_nvfp4) {
@@ -76,45 +72,39 @@ StorageTier pick_initial_tier(TensorKind kind, const KindCapabilities& cap, cons
             return StorageTier::NVFP4;
     }
 
-    // prefer_nvfp4_decode: pick NVFP4 only if the (refined) capabilities still
-    // list it. For Q4_K sources `effective_capabilities` stripped NVFP4, so the
-    // hint silently falls through to required_floor (FP16). That's the
-    // structural fix for the 2026-05-24 Q4_K coverage-gap bug.
+    // prefer_nvfp4_decode: pick NVFP4 only if the refined capabilities still list it. For
+    // Q4_K sources effective_capabilities strips NVFP4, so the hint falls through to
+    // required_floor (FP16). Structural fix for the Q4_K coverage-gap bug.
     if (hints.prefer_nvfp4_decode && mask_contains(cap.supported, StorageTier::NVFP4))
         return StorageTier::NVFP4;
 
     return cap.required_floor;
 }
 
-// Return the next-smaller (more compressed) supported tier after `current`,
-// never going below `floor`. Returns `current` if no such tier exists.
-// StorageTier enum order: FP32=1, FP16=2, FP8=3, NVFP4=4, CUTLASS_NVFP4=5, MXFP4=6
-// Higher integer = more compressed, so "downgrade" = increase enum value.
+// Return the next-smaller (more compressed) supported tier after current, never below
+// floor; returns current if none exists. StorageTier order: FP32=1, FP16=2, FP8=3,
+// NVFP4=4, CUTLASS_NVFP4=5, MXFP4=6 - higher integer = more compressed, so "downgrade"
+// means increasing the enum value.
 StorageTier downgrade_one(StorageTier current, StorageTier floor, const KindCapabilities& cap) {
     for (int s = std::to_underlying(current) + 1; s <= std::to_underlying(StorageTier::MXFP4); ++s) {
         auto candidate = static_cast<StorageTier>(s);
         if (!mask_contains(cap.supported, candidate))
             continue;
-        // Only downgrade if the candidate is at or below the floor in compression.
-        // floor is the *required* minimum quality, i.e. the least compressed tier
-        // we must stay at. Since higher integer = more compressed, the floor
-        // constraint means candidate >= floor (we can go more compressed than floor,
-        // not less). We never need to enforce a ceiling here — downgrade always
-        // moves toward more compression.
+        // Only downgrade if the candidate is at or below the floor in compression. floor is the
+        // required minimum quality (least-compressed tier we must stay at); since higher
+        // integer = more compressed, downgrade always moves toward more compression, so no
+        // ceiling check is needed here.
         (void)floor;  // floor enforced by the caller (skip if tier==required_floor)
         return candidate;
     }
     return current;
 }
 
-// Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cu
-// creates fresh Tensor descriptors. The planner uses the field position
-// (L.wq → WQ, L.wk → WK, …) rather than the stored kind so that Phase 5
-// plan-driven allocation works correctly even before kind preservation is
-// added to every upload code path.
-//
-// `t.qtype` IS preserved across weight_upload, so the planner uses it for
-// source-qtype-aware capability refinement via `effective_capabilities`.
+// Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cu creates fresh
+// Tensor descriptors. The planner uses field position (L.wq -> WQ, etc.) rather than the
+// stored kind, so Phase 5 plan-driven allocation works even before kind preservation is
+// added to every upload path. t.qtype IS preserved, so the planner uses it for
+// source-qtype-aware capability refinement (effective_capabilities).
 void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& next_id, size_t& total,
                 const PlanHints& hints) {
     if (!t.data)
@@ -172,13 +162,10 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
         add_tensor(L.w_down_shared, TensorKind::W_DOWN, plan, next_id, total, hints);
         add_tensor(L.ssm_in, TensorKind::SSM_IN, plan, next_id, total, hints);
         add_tensor(L.ssm_out, TensorKind::SSM_OUT, plan, next_id, total, hints);
-        // gdn_gate is intentionally NOT enumerated for overlay caching: it is
-        // consumed only by the specialized GDN scan kernel (gdn_kernel.cu) via
-        // the raw `L.gdn_gate.data` pointer, never through `gemm_dispatch`. An
-        // overlay copy would burn VRAM with no consumer. The diagnostic in
-        // pre_dequant_weights would otherwise (correctly) flag a 24-handle
-        // "gap" on every GDN model — see commit 3c7803a for the discovery and
-        // PR #43 for the per-kind gap diagnostic that surfaced this.
+        // gdn_gate is intentionally NOT enumerated for overlay caching: it's consumed only by
+        // the specialized GDN scan kernel via the raw L.gdn_gate.data pointer, never through
+        // gemm_dispatch. An overlay copy would burn VRAM with no consumer (see PR #43's
+        // per-kind gap diagnostic).
         for (const auto& e : L.expert_w_gate)
             add_tensor(e, TensorKind::EXPERT_GATE, plan, next_id, total, hints);
         for (const auto& e : L.expert_w_up)
@@ -187,17 +174,16 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
             add_tensor(e, TensorKind::EXPERT_DOWN, plan, next_id, total, hints);
     }
 
-    // Top-level (model-global) tensors. Embeddings and LM head have their own
-    // tier choices (LM head is NVFP4-prequant on Qwen3-Coder-30B-FP4) and must
-    // not be omitted from the plan — the future PlanExecutor owns their GPU
-    // storage allocation too.
+    // Top-level (model-global) tensors: embeddings and LM head have their own tier choices
+    // and must not be omitted from the plan; the future PlanExecutor owns their GPU storage
+    // allocation too.
     add_tensor(model.token_embedding(), TensorKind::TOK_EMBED, plan, next_id, total, hints);
     add_tensor(model.output_proj(), TensorKind::LM_HEAD, plan, next_id, total, hints);
 
-    // Budget satisfaction: iteratively downgrade the entry with the highest
-    // bytes-saved potential until we fit or everything is at required_floor.
-    // Uses effective_capabilities(kind, source_qtype) so Q4_K-source tensors
-    // can't be downgraded to NVFP4 (no compression win, possible quality risk).
+    // Budget satisfaction: iteratively downgrade the entry with the highest bytes-saved
+    // potential until the total fits or everything is at required_floor. Uses
+    // effective_capabilities(kind, source_qtype) so Q4_K-source tensors can't be downgraded
+    // to NVFP4 (no compression win, possible quality risk).
     if (hints.vram_budget_bytes > 0 && total > hints.vram_budget_bytes) {
         bool progress = true;
         while (total > hints.vram_budget_bytes && progress) {

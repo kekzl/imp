@@ -109,10 +109,10 @@ ExecShape exec_shape_of(const Model& model) {
     s.qk_rope_head_dim = cfg.qk_rope_head_dim;
     s.qk_nope_head_dim = cfg.qk_nope_head_dim;
     s.v_head_dim = cfg.v_head_dim;
-    // max_batch_size, use_fp8_prefill and mla_absorb are filled by the caller: the
-    // model knows neither the batch nor the runtime config. mla_absorb matters
-    // because the absorbed latent cache is two orders of magnitude larger than the
-    // MLA quartet, so the plan can treat it as neither always-on nor always-off.
+    // max_batch_size, use_fp8_prefill and mla_absorb are filled by the caller: the model
+    // knows neither the batch nor the runtime config. mla_absorb matters because the
+    // absorbed latent cache is orders of magnitude larger than the MLA quartet, so the plan
+    // can treat it as neither always-on nor always-off.
     for_each_weight(model, [&](const Tensor& t) {
         const Dims d = weight_dims(t);
         if (d.valid())
@@ -133,10 +133,9 @@ ExecShape exec_shape_of(const Model& model) {
             if (w->data && w->ndim >= 3)
                 s.mmvq_max_k = std::max(s.mmvq_max_k, static_cast<int>(w->shape[2]));
         }
-        // IMMA prefill routes (executor_gemm_dispatch.cu). Dense takes Q8_0
-        // only; the MoE batch path takes the GGUF expert stacks. Scanned here
-        // rather than reusing mmvq_max_k because that one merges dense and
-        // expert Ks into a single number, and this term needs them apart.
+        // IMMA prefill routes (executor_gemm_dispatch.cu): dense takes Q8_0 only, the MoE batch
+        // path takes the GGUF expert stacks. Scanned here rather than reusing mmvq_max_k because
+        // that merges dense and expert Ks into one number, and this term needs them apart.
         for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down,
                               &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
             if (w->data && w->ndim >= 2 && w->qtype == QType::Q8_0)
@@ -261,15 +260,12 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     for (const auto& [n, k] : shape.weights)
         consider(n, k);
 
-    // Config-derived shapes, because this runs BEFORE the weight upload and
-    // some checkpoints do not carry their final layout yet. gpt-oss is the
-    // case that forced this: its experts arrive as
-    // expert_gate_up_packed_blocks, a 4D U8 [ne, 2*d_ff, K/32, 16] slot that
-    // the upload consumes, so the tensor scan sees nothing resembling the
-    // dequant target. The real target is one expert's FUSED gate_up —
-    // 2*expert_d_ff x d_model — which is exactly the 31.64 MiB the workspace
-    // asked for and was refused (AUDIT B23). Deriving it from the config
-    // instead of the tensors makes the reservation independent of when it runs.
+    // Config-derived shapes: this runs BEFORE weight upload, and some checkpoints don't
+    // carry their final layout yet. gpt-oss forced this: its experts arrive as a 4D
+    // expert_gate_up_packed_blocks slot the upload consumes, so a tensor scan sees nothing
+    // resembling the dequant target. The real target is one expert's FUSED gate_up
+    // (2*expert_d_ff x d_model); deriving it from config instead of tensors makes the
+    // reservation independent of when it runs (AUDIT B23).
     if (shape.n_experts > 0) {
         const int64_t eff = shape.expert_d_ff > 0 ? shape.expert_d_ff : shape.d_ff;
         consider(2 * eff, shape.d_model);  // fused gate_up
@@ -284,11 +280,10 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
 
     out.nvfp4_dequant = covered;
 
-    // Small-M NVFP4 scratch (executor_gemm_smallm.cu, allocate_smallm_scratch):
-    // the largest of the v1 / v2 split-K workspaces over the dense projections
-    // (the LM head never takes the route), plus the packed 32-row activation
-    // for the widest K. Both kernel variants are charged because the choice is
-    // a runtime knob (gemm.nvfp4_smallm_impl).
+    // Small-M NVFP4 scratch (executor_gemm_smallm.cu): the largest of the v1/v2 split-K
+    // workspaces over the dense projections (the LM head never takes this route), plus the
+    // packed 32-row activation for the widest K. Both kernel variants are charged because
+    // the choice is a runtime knob (gemm.nvfp4_smallm_impl).
     {
         size_t ws = 0;
         int64_t k_max = 0;
@@ -306,10 +301,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                                  32 * static_cast<size_t>(k_max / 16) + 2 * 256;
     }
 
-    // Sampling result scratch (executor_workspace_buffers.cu): two parities of
-    // max_logit_tokens slots, each SAMPLE_SCRATCH_BYTES. max_logit_tokens is
-    // max(max_batch_size, 8) — the BATCH, not the context, which is why this is
-    // ~1 MiB and not the ~115 MiB I first assumed (AUDIT B53).
+    // Sampling result scratch: two parities of max_logit_tokens slots, each
+    // SAMPLE_SCRATCH_BYTES. max_logit_tokens is max(max_batch_size, 8), the BATCH not the
+    // context (AUDIT B53).
     constexpr size_t kSampleScratchBytes =
         sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
     const int logit_tokens = std::max(shape.max_batch_size, 8);
@@ -319,10 +313,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     if (shape.vocab_size > 0)
         out.penalty_counts = static_cast<size_t>(logit_tokens) * ((shape.vocab_size + 1) / 2) * sizeof(uint32_t);
 
-    // Batched-MoE pointer/scale arrays (executor_workspace_buffers.cu): work
-    // pointers 3*ne void*, fp8 scales ne float, M_per ne int32, alpha_compact ne
-    // float, the active-expert counter, and the SFA offset prefix sum (ne+1)
-    // int64. A few KiB in total; charged so the arena is sized for them.
+    // Batched-MoE pointer/scale arrays: work pointers 3*ne void*, fp8 scales ne float, M_per
+    // ne int32, alpha_compact ne float, the active-expert counter, and the SFA offset prefix
+    // sum (ne+1) int64. A few KiB total; charged so the arena is sized for them.
     if (shape.n_experts > 0) {
         const size_t ne = static_cast<size_t>(shape.n_experts);
         out.moe_arrays = 3 * ne * sizeof(void*)        // d_work_ptrs
@@ -338,11 +331,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                          + 11 * 256;                  // per-take 256 B alignment
     }
 
-    // dp4a input staging (executor_workspace_buffers.cu), all three tenants of
-    // one sizing family. The site's max_blocks is max(max_k/32, top_k *
-    // down_k/32) — the MoE down projection quantizes top_k expert activations
-    // contiguously, which is what makes the second term able to exceed the
-    // first.
+    // dp4a input staging, all three tenants of one sizing family. max_blocks = max(max_k/32,
+    // top_k * down_k/32): the MoE down projection quantizes top_k expert activations
+    // contiguously, which is what lets the second term exceed the first.
     {
         const int moe_down_blocks =
             shape.n_experts_active * (shape.mmvq_max_expert_down_k / 32);
@@ -386,22 +377,19 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         }
     }
 
-    // DRY-penalty staging: one slot per token of advertised context, which is
-    // the bound sampling_preallocate_dry() uses and the reason its grow path
-    // could be deleted — `n` counts distinct tokens from the penalty window and
-    // cannot exceed the history.
+    // DRY-penalty staging: one slot per token of advertised context, the bound
+    // sampling_preallocate_dry() uses (and the reason its grow path could be deleted): n
+    // counts distinct tokens from the penalty window and cannot exceed the history.
     {
         const int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
         const size_t slots = static_cast<size_t>(effective > 0 ? effective : 4096);
         out.dry_penalty = slots * (sizeof(int32_t) + sizeof(float)) + 2 * 256;
     }
 
-    // cuBLASLt workspace + algo-bench scratch (compute/gemm.cu, gemm_init()).
-    // Not a function of the shape at all — cuBLASLt is handed a workspace
-    // CEILING and picks algos that fit inside it, so the number is a policy
-    // choice (the pre-arena code tried 64 MiB and stepped down on failure).
-    // Charged for every model because gemm_init() is unconditional; the site
-    // still steps down if the arena cannot serve the full amount, and says so.
+    // cuBLASLt workspace + algo-bench scratch (compute/gemm.cu, gemm_init()): not a function
+    // of shape at all. cuBLASLt is handed a workspace CEILING and picks algos that fit
+    // inside it, so the number is a policy choice. Charged for every model since gemm_init()
+    // is unconditional; the site steps down if the arena can't serve the full amount.
     out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + 2 * 256;
 
     // IMMA prefill activation scratch (mmq_q8_imma.cu) plus its split-K
@@ -413,12 +401,10 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         out.imma_scratch = rows * k + rows * (k / 32) * 6 + kExecImmaSplitkBytes + 4 * 256;
     }
 
-    // Chunk-capture K/V pair (executor_workspace_buffers.cu,
-    // ensure_chunk_capture_scratch). Two buffers of ctx * kv_heads * head_dim
-    // halves each. It used to be the one exec/ buffer left out of the T2
-    // migration because it grows and "a bump arena strands it" — which is true
-    // of the intermediate takes, not of taking the bound once, so it is charged
-    // here and the site takes it at this size (A7 step 4b.2, AUDIT B13).
+    // Chunk-capture K/V pair (ensure_chunk_capture_scratch): two buffers of ctx * kv_heads *
+    // head_dim halves each. Was the one exec/ buffer left out of the T2 migration because it
+    // grows and "a bump arena strands it"; true of intermediate takes, not of taking the
+    // bound once, so it's charged here at that size (A7 step 4b.2, AUDIT B13).
     if (shape.capture_ctx_cap > 0 && shape.kv_heads_max > 0 && shape.head_dim_max > 0) {
         const size_t ctx = static_cast<size_t>(shape.capture_ctx_cap);
         out.chunk_capture = 2 * ctx * static_cast<size_t>(shape.kv_heads_max) *
@@ -426,19 +412,16 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                             2 * 256;
     }
 
-    // CUTLASS 3.x grouped staging + workspace, for MoE models only — the same
-    // gate engine.cpp puts on the prewarm. The workspace half is a MEASURED
-    // 152 320 B rounded to 1 MiB, not the 512 MiB the pre-arena code reserved
-    // (AUDIT B73); the demand is what makes the smaller number safe, because
-    // the arena reserves it before the pre-dequant caches can spend it.
+    // CUTLASS 3.x grouped staging + workspace, MoE models only (same gate engine.cpp puts on
+    // the prewarm). The workspace half is a MEASURED ~152 KB rounded to 1 MiB, not the 512
+    // MiB the pre-arena code reserved (AUDIT B73); the arena reserves it before the
+    // pre-dequant caches can spend it, which is what makes the smaller number safe.
     if (shape.is_moe)
         out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + 2 * 256;
 
-    // MLA QKV scratch (executor_workspace_buffers.cu). kv_lora_rank > 0 IS
-    // is_mla(). The quartet is sized for max_tokens and, unlike every other tenant
-    // here, has NO degradation contract: executor_attention_qkv.cu dereferences
-    // all four unconditionally, so a short arena fails the load instead of
-    // handing out a null (see the site).
+    // MLA QKV scratch. kv_lora_rank > 0 IS is_mla(). Sized for max_tokens and, unlike every
+    // other tenant here, has NO degradation contract: executor_attention_qkv.cu dereferences
+    // all four unconditionally, so a short arena fails the load instead of handing out null.
     if (shape.kv_lora_rank > 0) {
         const size_t T = static_cast<size_t>(t);
         const size_t kva_out = static_cast<size_t>(shape.kv_lora_rank + shape.qk_rope_head_dim);
@@ -449,11 +432,10 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                            static_cast<size_t>(shape.qk_rope_head_dim) + kvb_out);
         out.mla_scratch += 4 * 256;  // four takes
 
-        // Absorbed-decode latent cache. Sized from the FULL sequence length, NOT
-        // from max_tokens — mla_absorb_max_seq_ is deliberately uncapped where
-        // max_tokens_ clamps at 4096, so this is the term that reaches ~974 MiB at
-        // a 32k context. Charged only when the opt-in flag is on, because charging
-        // it always would reserve that on every DeepSeek load.
+        // Absorbed-decode latent cache: sized from the FULL sequence length, NOT max_tokens
+        // (mla_absorb_max_seq_ is deliberately uncapped where max_tokens_ clamps at 4096).
+        // Charged only when the opt-in flag is on; charging it always would reserve this on
+        // every DeepSeek load.
         if (shape.mla_absorb) {
             const int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
             const size_t absorb_seq = static_cast<size_t>(effective > 0 ? effective : 4096);

@@ -1,11 +1,7 @@
-// Pre-dequant orchestrator.
-// Dispatches the six pre-dequant phases (0/0b/1/2/3/3c/4) to their
-// extracted translation units. Each phase lives in src/exec/pre_dequant_phase*.cu.
-//
-// Adding a new phase: write one new src/exec/pre_dequant_phase*.cu file,
-// add it to CMakeLists.txt IMP_EXEC_SOURCES, declare the method on
-// QuantPipeline in quant_pipeline.h, and call it from QuantPipeline::build()
-// below.
+// Pre-dequant orchestrator: dispatches the six pre-dequant phases
+// (0/0b/1/2/3/3c/4) to their extracted TUs (src/exec/pre_dequant_phase*.cu).
+// New phase: add a src/exec/pre_dequant_phase*.cu, list it in
+// IMP_EXEC_SOURCES, declare the method on QuantPipeline, call it from QuantPipeline::build().
 
 #include "exec/executor.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
@@ -21,10 +17,10 @@
 
 namespace imp {
 
-// Delegate: the init-time quantization pipeline lives in QuantPipeline. The
-// engine call site (engine_kv_cache_init.cpp) is unchanged. The four long-lived
-// caches + moe_ stay owned by GraphExecutor and are filled by reference; the
-// forward hot path reads them exactly as before (byte-identical).
+// Delegates to QuantPipeline for the init-time quantization pipeline; the
+// engine call site (engine_kv_cache_init.cpp) is unchanged. The four
+// long-lived caches + moe_ stay owned by GraphExecutor, filled by
+// reference, so the forward hot path reads them byte-identically to before.
 void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget) {
     if (!initialized_ || !model_)
         return;
@@ -53,12 +49,11 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // Reserve headroom to avoid shared/system memory fallback on WSL2 (not
     // visible via nvidia-smi) — canonical floor in vram_query.h.
     size_t min_reserve = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));
-    // Deduct NVFP4 decode cache (Phase 3, not yet allocated) from the EARLY
+    // Deducts the (not-yet-allocated) NVFP4 decode cache from the EARLY
     // phases' budget so Phase 1's FP16 cache doesn't overcommit VRAM on large
-    // dense models (Gemma-3-12B Q4_K_M: 12.3 GiB FP16 + 1.4 GiB NVFP4 + 6.1 GiB
-    // KV → IMA). KV cache is already allocated before Phase 1 so free_vram
-    // already reflects it. Deducting the reservation from the SHARED budget
-    // charged it to Phase 3 too — see split_pre_dequant_budget (#1100).
+    // dense models. KV cache is already allocated before Phase 1, so
+    // free_vram reflects it; deducting from the SHARED budget charges Phase 3 too (split_pre_dequant_budget,
+    // #1100).
     const PreDequantBudget budgets = split_pre_dequant_budget(free_vram, min_reserve,
                                                               budget.nvfp4_cache_bytes);
     size_t remaining_budget = budgets.shared;
@@ -73,14 +68,12 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // (body extracted to pre_dequant_phase0b_register_cutlass_nvfp4_)
     pre_dequant_phase0b_register_cutlass_nvfp4_(cfg, stream);
 
-    // Stage 1 (one-tier-truth): build the budget-constrained StoragePlan once
-    // and hold it for the model's lifetime. Built AFTER Phase 0 so prequant-
-    // NVFP4 weights already carry QType::NVFP4 (Phase 0 stamps it) — building
-    // earlier mis-tiered native-NVFP4 weights as FP16/FP8. Phase 1 reads its
-    // FP16-tier decision from the plan; a plan-vs-actual parity diagnostic
-    // runs in Phase 4. The per-phase cache SIZING stays with the heuristic
-    // budget (a separate UNCONSTRAINED plan feeds the #875 weight-cache
-    // reserve in vram_budget.cpp — see the comment there).
+    // Stage 1 (one-tier-truth): builds the budget-constrained StoragePlan once
+    // for the model's lifetime, AFTER Phase 0 so prequant-NVFP4 weights
+    // already carry QType::NVFP4 (building earlier would mis-tier them as
+    // FP16/FP8). Phase 1 reads its FP16-tier decision from the plan; a
+    // plan-vs-actual parity diagnostic runs in Phase 4. Per-phase cache SIZING
+    // stays with the heuristic budget (a separate unconstrained plan feeds the #875 weight-cache reserve).
     hints_->vram_budget_bytes = remaining_budget;
     storage_plan_ = plan_storage(*model_, cfg, *hints_);
     apply_arch_rules_(storage_plan_, cfg);
@@ -171,11 +164,11 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
     return true;
 }
 
-// Fold the scattered arch-specific overlay rules into one pass over the plan so
-// the plan reproduces what the legacy builders do (the precondition for making
-// builders plan-driven without changing behaviour). Driven by the Phase-4
-// plan/actual parity diagnostic: a rule is added here only where parity shows
-// the plan and the legacy path disagree for a real (non-budget) reason.
+// Folds scattered arch-specific overlay rules into one pass over the plan,
+// so the plan reproduces what the legacy builders do (precondition for
+// making builders plan-driven without changing behaviour). Driven by the
+// Phase-4 plan/actual parity diagnostic: a rule is added only where parity shows a real (non-budget)
+// disagreement.
 void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg) const {
     // FP8 prefill unavailable (sm_120 cuBLAS, and disabled for gemma/GDN): the
     // FP8-floor kinds (WK/WV/QKV_FUSED) the plan picked from the kind table fall
@@ -186,13 +179,11 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
                 e.tier = StorageTier::FP16;
     }
 
-    // LM head → NVFP4 per the #982 net rule (nvfp4_lm_head_enabled): the kind
-    // table caps LM_HEAD at FP16, so the plan can't pick NVFP4 itself, but the
-    // legacy path quantizes the lm_head to an NVFP4 decode cache. This plan
-    // site only serves NATIVE (BF16/F16) heads (+8-16% decode, +2.2% PPL —
-    // owner-accepted, GOAL-listed); quantized GGUF heads route through the
-    // phase-3 collector, which applies the size/arch-gated auto rule.
-    // GDN/SSM hybrids keep the FP16 lm_head unless nvfp4_lm_head_gdn.
+    // LM head -> NVFP4 per the #982 net rule: the kind table caps LM_HEAD at
+    // FP16 so the plan can't pick NVFP4 itself, but the legacy path quantizes
+    // it to an NVFP4 decode cache. This plan site serves only NATIVE (BF16/F16)
+    // heads; quantized GGUF heads route through the phase-3 collector's
+    // size/arch-gated auto rule. GDN/SSM hybrids keep FP16 unless nvfp4_lm_head_gdn.
     if (pre_dequant_internal::nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false,
                                                     model_->profile().is_dense, cfg.d_model)) {
         bool is_gdn = false;
@@ -210,11 +201,10 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
         }
     }
 
-    // gemma-3: the NVFP4 decode cache must be built FROM an FP16 companion copy,
-    // not from scratch — from-scratch corrupts gemma-3 decode (first step emits
-    // token 0 / <pad>, then IMA). The legacy Phase 1 keeps these FP16-cached;
-    // encode that as an fp16_companion flag on every NVFP4-tier entry so the
-    // plan-driven Phase 1 (Stage 1.3) preserves the same backing copy.
+    // gemma-3: the NVFP4 decode cache must be built FROM an FP16 companion
+    // copy, not from scratch (from-scratch corrupts decode: first step emits
+    // token 0/<pad>, then IMA). Encoded as an fp16_companion flag on every
+    // NVFP4-tier entry so the plan-driven Phase 1 preserves the same backing copy.
     if (model_->profile().is_gemma3) {
         for (auto& e : plan.entries) {
             if (e.tier == StorageTier::NVFP4)
@@ -222,13 +212,11 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
         }
     }
 
-    // Weights stored as FP8 on disk (Modelopt MIXED_PRECISION — Nemotron-3.5
-    // puts its Mamba in/out projections there while the experts stay NVFP4).
-    // sm_120 has no FP8 prefill GEMM, so the tier the planner picks for them
-    // (FP8, their source floor) has no way to reach cuBLAS: the raw bytes go
-    // out as dtB=CUDA_R_8F_E4M3 and the call fails with status 15. An FP16
-    // companion gives the prefill path something it can actually multiply;
-    // decode still re-quantizes to FP8 through the usual sidecar.
+    // Weights stored as FP8 on disk (Modelopt MIXED_PRECISION, e.g. Nemotron-3.5
+    // Mamba in/out): sm_120 has no FP8 prefill GEMM, so the FP8 tier the
+    // planner picks has no path to cuBLAS (raw bytes as CUDA_R_8F_E4M3 fail
+    // with status 15). An FP16 companion gives prefill something to multiply; decode still re-quantizes to
+    // FP8 through the usual sidecar.
     for (auto& e : plan.entries) {
         if (e.source_qtype == QType::FP8_E4M3)
             e.fp16_companion = true;

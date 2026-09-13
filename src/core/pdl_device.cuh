@@ -1,22 +1,12 @@
 #pragma once
 
-// Programmatic Dependent Launch, device half.
-//
-// The host half (core/pdl.h: the launch attribute, and the graph-edge
-// rewrite in runtime/cuda_graph.cu) lets a registered kernel be SCHEDULED
-// while its predecessor is still running. That is only correct when the
-// registered kernel calls pdl_wait() before it touches any global memory a
-// predecessor may still be reading or writing: griddepcontrol.wait blocks
-// until every prerequisite grid has completed and its memory is visible.
-// pdl_trigger() in a producer (griddepcontrol.launch_dependents) lets the
-// dependent grid launch once every producer block has triggered or exited;
-// it changes scheduling only, never visibility, so it sits after the block's
-// last input read, before the epilogue stores.
-//
-// Both are no-ops for a kernel launched without a programmatic dependency
-// and for the compute_120f PTX fallback (sm_90+ instructions, guarded).
-// Contract: every kernel registered with pdl::enable() calls pdl_wait()
-// first; a kernel that does not wait must never be registered.
+// Programmatic Dependent Launch, device half. pdl_wait()
+// (griddepcontrol.wait) must run before touching any global memory a
+// predecessor may still write; pdl_trigger() (griddepcontrol.launch_dependents)
+// sits after the last input read, before epilogue stores, and affects
+// scheduling only, never visibility. No-ops for a non-programmatic launch
+// and for the compute_120f fallback. Contract: every kernel registered via
+// pdl::enable() calls pdl_wait() first.
 
 namespace imp {
 

@@ -6,17 +6,11 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// MXFP4 GEMV kernels for decode (M=1) dispatch.
-//
-// MXFP4 format: FP4 E2M1 packed nibbles + UE8M0 scale per 32 elements.
-// Same prmt LUT nibble decoding as NVFP4, different scale handling:
-//   NVFP4: FP8 E4M3 scale per 16 elements + FP32 tensor_scale
-//   MXFP4: UE8M0 scale per 32 elements (tensor_scale absorbed)
-//
-// Architecture: 128 threads (4 warps), 1 row/block, N blocks.
-// Uses CutlassMxFP4Weight.linear_scales (not SfAtom) for sequential access.
-// ---------------------------------------------------------------------------
+// MXFP4 GEMV for decode (M=1): FP4 E2M1 packed nibbles + UE8M0 scale per 32 elements, same
+// prmt LUT nibble decoding as NVFP4 but different scale handling (NVFP4: FP8 E4M3 per 16
+// elements + FP32 tensor_scale; MXFP4: UE8M0 per 32 elements, tensor_scale absorbed).
+// 128 threads (4 warps), 1 row/block; uses CutlassMxFP4Weight.linear_scales (sequential),
+// not SfAtom.
 
 // Basic GEMV: y[N] = W_mxfp4[N,K] @ x[K]
 void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N, int K, cudaStream_t stream);

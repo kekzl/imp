@@ -77,22 +77,15 @@ struct WeightUploadRecord {
     size_t src_nbytes = 0;
     // Source dropped by the pipeline (release_gpu_allocation) — not capturable.
     bool dead = false;
-    // Device bytes are a verbatim copy of the host source (plain h2d, no
-    // conversion/reorder). Derived heuristically in record(): single alloc,
-    // same qtype, same byte count, no scales sidecar (MXFP4 excluded — its
-    // split reorder keeps size + qtype). Only gates what the on-disk warm
-    // cache persists: a false "raw" merely skips caching that tensor, the
-    // cold re-upload is byte-equivalent either way.
+    // Heuristic in record(): single alloc, same qtype, same byte count, no scales sidecar
+    // (MXFP4 excluded, its split reorder keeps size+qtype). True means device bytes are a
+    // verbatim h2d copy. Only gates warm-cache persistence: a false negative just re-uploads cold.
     bool raw_from_source = false;
 };
 
-// Everything the restore dereferences out of a warm-cache record is
-// file-supplied (AUDIT_arch_2026 F1-3): the alloc indices, the byte offsets
-// and the Tensor POD itself, out of a file another process may have replaced
-// (the directory falls back to /tmp when HOME is unset). The reader has
-// already checked `allocs[i].bytes` against the mapping; this checks what
-// indexes into them. Refuses, never clamps: one bad record is the whole cache
-// falling back to a cold load.
+// Warm-cache records are file-supplied (AUDIT_arch_2026 F1-3): alloc indices, byte offsets,
+// and the Tensor POD may come from a file another process replaced. Validates indices only
+// (caller already checked byte bounds); one bad record forces a cold load, never clamps.
 inline bool weight_record_indices_ok(const WeightUploadRecord& rec, std::string* why) {
     auto fail = [why](std::string msg) {
         if (why)
@@ -166,17 +159,13 @@ struct WarmRestoreOps {
 
 class WeightSnapshot {
 public:
-    // D2H-copies all live logged allocations of `model` into pageable host
-    // memory. Throws std::runtime_error with a clear message when the model is
-    // unsupported (no upload log, device sources mutated in place) or host RAM
-    // is insufficient (MemAvailable < snapshot bytes + headroom).
+    // D2H-copies all live logged allocations into pageable host memory. Throws if the model has
+    // no upload log / device sources mutated, or MemAvailable < snapshot bytes + headroom.
     static std::unique_ptr<WeightSnapshot> capture(const Model& model, size_t host_ram_headroom_bytes);
 
-    // Restore one keyed upload: allocate device buffers, copy the blob back,
-    // reproduce the post-upload tensor state, append the allocations to
-    // gpu_allocs, and re-record into new_log (so a later suspend works).
-    // Returns false (and leaves `weight` untouched) on miss/mismatch — the
-    // caller proceeds with the normal cold upload.
+    // Restore one keyed upload: alloc device buffers, copy blob back, restore tensor state,
+    // append to gpu_allocs, re-record into new_log so a later suspend still works.
+    // Returns false (weight untouched) on miss/mismatch; caller falls back to cold upload.
     bool try_restore(const char* key, Tensor& weight, cudaStream_t stream,
                      std::vector<void*>& gpu_allocs, const WarmRestoreOps& ops,
                      WeightUploadLog* new_log);

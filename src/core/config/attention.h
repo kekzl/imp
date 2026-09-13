@@ -1,22 +1,8 @@
 #pragma once
 
-// Attention configuration, one of the nine sections split out of
-// core/dispatch_policy.h on 2026-08-21.
-//
-// WHY. dispatch_policy.h aggregates all nine and is included by 23 translation
-// units, of which 21 touch two sections or fewer. Adding one field to it costs
-// 137.1 s of incremental rebuild, against 9.1 s for a small .cpp and 14.6 s for
-// the largest .cu the file-size gate polices. A TU that needs only this section
-// can include only this header and stop rebuilding when the others change.
-//
-// This is F-10 one level down, and dispatch_policy.h's own preamble records the
-// original: config.h was included by 22 files, 85 TUs transitively, and changed
-// 130 times in six months - "the highest build cost in the repo". Lifting nine
-// sections into an aggregate fixed that, and gave the aggregate the same
-// property for the same reason.
-//
-// Pure move: the contents below are byte-identical to their previous form, and
-// dispatch_policy.h includes every one of these, so no existing include breaks.
+// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// isolates a TU that touches only this section from the other eight's churn.
+// Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
 #include <cstdint>
 #include <string>
@@ -26,175 +12,91 @@ namespace imp::cfg {
 
 struct Attention {
     std::string fp8_prefill = "auto";
-    // fp8-QK FMHA family (smem-materializing fp8 kernel + FA2 in fp8-QK
-    // mode): converts Q/K to e4m3 RAW (no per-tile scaling) — ~10% relative
-    // score error on real activations that compounds across layers (#511).
-    // Teacher-forced PPL when this kernel actually serves prefill:
-    // gemma-3-12b 16.6 -> 549 (production chunked long-ctx), Qwen3-8B
-    // 40.5 -> 4506 (forced). The #511 "no measurable loss above threshold"
-    // needle check never exercised this kernel (fa2_fp16qk served those
-    // chunks). Opt-in ("on") for experiments; anything else = off.
+    // fp8-QK FMHA (e4m3 RAW Q/K, no per-tile scaling): ~10% relative score error
+    // that compounds across layers (#511). Opt-in ("on") for experiments only;
+    // anything else = off.
     std::string fp8_fmha = "never";
     int fmha_prefill_threshold = -1;  // -1 = auto (derived from S-matrix capacity)
     std::string fmha_sm120 = "auto";
-    // Register-resident FA2 prefill kernel (fmha_sm120_fa2_kernel). When "on"
-    // (default) it serves supported configs (F16, head_dim=128) in the tiled
-    // prefill chain — keeps S/P/O in registers, 1 __syncthreads/KV tile.
-    // QK^T mode follows fa2_fp16qk: f16-QK by default (no e4m3 score noise,
-    // #511); fp8-QK only when fa2_fp16qk=never AND fp8_fmha=on. Declines
-    // (-> FP16 WMMA FMHA) for hd!=128 (Gemma), non-F16, or insufficient
-    // smem, so it's safe by default. Legacy env: IMP_FMHA_FA2.
+    // Register-resident FA2 prefill kernel. "on" (default) serves F16 hd=128 in
+    // the tiled prefill chain; QK^T is f16 by default, fp8-QK only when
+    // fa2_fp16qk=never AND fp8_fmha=on. Declines to FP16 WMMA FMHA otherwise.
     std::string fmha_fa2 = "on";
-    // FP16-QK FA2 for SHORT prefill (seq < fmha_prefill_threshold, hd=128):
-    // replaces the materialized cuBLAS+softmax path with the register-
-    // resident FA2 kernel running QK^T in f16 (mma.m16n8k16) instead of
-    // e4m3 — same numerical class as the cuBLAS reference (f16 inputs,
-    // f32 accumulate), so the short-seq e4m3 quality cliff (#511/#512)
-    // does not apply. O(n) memory: no S-matrix alloc. Declined configs
-    // (hd!=128, dual-head-dim Gemma-4) fall back to cuBLAS, never to the
-    // fp8 FMHA family. "never" restores the materialized path, at every
-    // sequence length: it declined the FA2 kernel below fmha_prefill_threshold
-    // and re-entered it above until #1676. The one exception is the explicit
-    // fp8-QK opt-in, "never" together with fp8_fmha="on", which is a different
-    // kernel mode and is what that pair is for.
+    // FP16-QK FA2 for short prefill (seq < fmha_prefill_threshold, hd=128): f16
+    // QK^T, f32 accumulate, avoids the e4m3 quality cliff (#511/#512). Declined
+    // configs fall back to cuBLAS; "never" restores the materialized path always.
     std::string fa2_fp16qk = "on";
-    // f16-accumulate QK^T in the FP16-QK FA2 kernel (#597). GeForce sm_120
-    // runs f16-src/f32-acc HMMA at 1/4 rate (#606); accumulating the score
-    // MMA in f16 lifts it to the full-rate class. Measured +4.7-5.0%
-    // pp4096 NVFP4 prefill (Qwen3-14B / 30B-A3B, 2026-06-11, chunk-2048
-    // era), decode neutral. Quality gate on a 5.8k teacher-forced corpus:
-    // 14B-NVFP4 PPL identical, 30B-A3B +0.10%, Q8_0 GGUF +0.013% —
-    // scores are softmaxed immediately, so the reduced accumulate
-    // precision stays in the noise. Default ON since 2026-06-11; set
-    // false to restore f32 accumulate. Only affects the fa2_fp16qk path,
-    // the fp8-QK path keeps f32 accumulate.
+    // f16-accumulate QK^T (#597): sm_120 runs f16-src/f32-acc HMMA at 1/4 rate
+    // (#606); f16 accumulate reaches full rate. Only affects the fa2_fp16qk
+    // path, not fp8-QK (keeps f32 accumulate). Default on.
     bool fa2_f16acc = true;
-    // f16-accumulate the PV MMA as well. Post-#673 the PV accumulate was
-    // the last 1/4-rate HMMA in the FA2 kernel, dominating its tensor-
-    // pipe time ~4:1; packing O as half2 also halves the O-fragment
-    // register footprint of the Bq=128 band. Measured (2026-06-11, nsys
-    // kernel sums): FA2 kernel −18% pp4096, e2e +9.7% 30B-A3B-NVFP4 /
-    // +3.7% 14B-NVFP4. Quality gate on a 14.8k teacher-forced corpus:
-    // 14B −0.06%, 30B-A3B −0.30%, Q8_0 +0.002% — all noise (O rows are
-    // convex combinations of V, so range is safe; the per-tile rescale
-    // rounding stays below the f16 output precision). Default ON since
-    // 2026-06-11; set false to restore f32 PV accumulate. Requires
-    // fa2_f16acc.
+    // f16-accumulate the PV MMA too (the last 1/4-rate HMMA in FA2); packing O
+    // as half2 halves the O-fragment register footprint. Safe: O rows are convex
+    // combinations of V. Requires fa2_f16acc. Default on.
     bool fa2_pv_f16acc = true;
-    // HD=256 FA2 port (Qwen3.6 hybrids / gemma-class): route head_dim=256
-    // prefill through the register-resident FA2 kernel (fp16-qk,
-    // Bq=64/TWOSLOT) instead of the SMEM-tiled WMMA FMHA / cuBLAS.
-    // Default ON since stage 3 (#930 measured: kernel 4.3x vs WMMA,
-    // e2e +10.6% pp4096 / +24.8% pp8192, PPL 10.44 vs 10.58 on
-    // Qwen3.6-35B; split-D stage 2 was refuted — the 4-warp instance is
-    // the keeper). Also gates the FP8-KV deterministic-cuBLAS skip for
-    // hd=256 models (engine_init_resolver fa2_serves_attention).
+    // HD=256 FA2 port (Qwen3.6 hybrids / gemma-class): routes head_dim=256
+    // prefill through the register-resident FA2 kernel (fp16-qk, Bq=64/TWOSLOT)
+    // instead of SMEM-tiled WMMA/cuBLAS. Also gates the FP8-KV cuBLAS skip at hd=256.
     bool fa2_hd256 = true;
-    // KV tile rows of the HD=256 FA2 instance, 64 or 32. At Bkv=64 the
-    // TWOSLOT tile is 67.6 KB of the 100 KB SM budget, so one 4-warp CTA
-    // per SM (8.3% occupancy, ncu 2026-08-31) although the registers
-    // allow two; Bkv=32 halves the tile and seats 2 CTAs/SM: FA2 kernel
-    // -11% at pp4096 on Qwen3.8-27B, e2e +0.1..0.4%, PPL +0.53% (2026-09-01,
-    // docs/roadmap.md). Opt-in on that trade. Register/spill numbers are
-    // owned by tools/kernel_resource_baseline.txt (ptxas, `make
-    // kernel-resources`): the shipped <64,256,true,false,64,...> instance
-    // holds 255 registers with a 96 B local frame, the Bkv=32 twin 246 with
-    // none; the 232 / 226 the 2026-08-31 ncu session quoted were an earlier
-    // build (AUDIT_arch_2026 A2-6).
+    // KV tile rows for the HD=256 FA2 instance: 64 or 32. At Bkv=64 the TWOSLOT
+    // tile is 67.6 KB of the 100 KB SM budget (1 CTA/SM); Bkv=32 halves it for
+    // 2 CTAs/SM. Register/spill data: tools/kernel_resource_baseline.txt.
     int fa2_hd256_bkv = 64;
-    // The dense (hd=128, Bq=128) FA2 instance at two CTAs per SM: TWOSLOT
-    // tile (35 KB) plus __launch_bounds__(256, 2) pinning the kernel to 128
-    // registers (137 unconstrained; local frame 40 B per the ptxas baseline,
-    // the 24 B once quoted here was pre-baseline). Qwen3-14B-NVFP4 pp4096,
-    // 3 alternating pairs under nsys: FA2 kernel sum 271.7/267.8/289.9 ->
-    // 244.2/244.8/252.2 ms (-10%), pp 23722/23661/22509 -> 24176/24097/24057
-    // tok/s; output bit-identical (2026-09-01, docs/roadmap.md). Default on.
+    // Dense (hd=128, Bq=128) FA2 at 2 CTAs/SM: TWOSLOT tile 35 KB, plus
+    // __launch_bounds__(256, 2) pins 128 registers (137 unconstrained, 40 B
+    // local frame per the ptxas baseline). Default on.
     bool fa2_dense_2cta = true;
-    // FP8 paged decode (HD=128): tokens per warp iteration. 4 = the multitok
-    // kernels, 1 = the plain kernel. Under 4 the Q heads of a KV head are
-    // grouped per CTA on a 16-lanes-per-row layout
-    // (attention_paged_fp8_multitok_gqa.cu, 2026-09-08: 32 x 1100 on 40/8
-    // heads 95.2 -> 56.4 us), the per-head four-token kernel
-    // (attention_paged_fp8_multitok.cu) serves the shapes it does not.
+    // FP8 paged decode (HD=128): tokens per warp iteration. 4 = multitok
+    // kernels (Q heads of a KV head grouped per CTA, 16-lanes-per-row layout),
+    // 1 = the plain per-head kernel serves shapes multitok does not.
     int paged_fp8_multitok = 4;
-    // NVFP4 paged decode (HD=128/256): tokens per warp iteration, same idea
-    // (attention_paged_nvfp4_multitok.cu); the Q heads of a KV head are grouped
-    // per CTA so each row is converted once (attention_paged_nvfp4_multitok_gqa.cu,
-    // 24/4 HD=256 at 1 x 32k 101.8 -> 74.4 us, 32 x 1100 92.9 -> 68.6). 1 = the
-    // scalar kernels.
+    // NVFP4 paged decode (HD=128/256): tokens per warp iteration. 4 = multitok
+    // kernels grouping a KV head's Q heads per CTA (each row converted once);
+    // 1 = the scalar kernels.
     int paged_nvfp4_multitok = 4;
-    // F16 paged decode (HD=128/256, GQA ratio 1..8, serving path without
-    // split-K): tokens per warp iteration on the multitok kernel
-    // (attention_paged_f16_multitok.cu), which also shares each KV row across
-    // the Q heads of one CTA. Microbench 32 x 1100: 32/8 HD=128 315 -> 98 us,
-    // 16/8 HD=256 665 -> 178 us; 32 x 4096 at the resident-bandwidth ceiling
-    // (1644 / 1669 GB/s). Split-K route too: batch 1 x 32k 197 -> 109 us, 64k
-    // 375 -> 203 us. 1 = the cooperative and per-head split-K kernels (2026-09-03).
+    // F16 paged decode (HD=128/256, GQA 1..8, non-split-K path): tokens per
+    // warp iteration on the multitok kernel, sharing each KV row across a
+    // CTA's Q heads. 1 = the cooperative and per-head split-K kernels.
     int paged_f16_multitok = 4;
-    // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile t attends
-    // (t+1)*Bq/Bkv KV tiles, 2..32 at 4096 tokens and Bq=128, and blockIdx.x
-    // ran the light tiles first, so the last CTAs of a head were the heaviest
-    // and the wave tail idled most SMs (ncu 2026-09-02, the 2-CTA instance at
-    // 335 us: tensor pipe 40..94% between SMs, math_pipe_throttle the top
-    // stall). Reversing the tile index per head starts the heavy tiles first.
-    // Output bit-identical: a tile's rows never depend on the CTA order.
+    // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile attends
+    // more KV tiles than an early one, so ascending order left the wave tail
+    // idling most SMs. Reversing the tile index per head is output bit-identical.
     bool fa2_heavy_first = true;
-    // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
-    // raw conversion is the #511 quality cliff; scaling Q and K to the
-    // full e4m3 range is the numerics class FlashInfer runs. Only
-    // takes effect on the fp8-QK path (fa2_fp16qk=never or declined).
-    // Experimental quality probe.
+    // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680): scales Q/K to
+    // the full e4m3 range (the FlashInfer numerics class) instead of raw
+    // conversion's #511 quality cliff. Only affects the fp8-QK path. Experimental.
     bool fp8_qk_scaled = false;
     std::string mxfp4 = "auto";
-    // #846 NVFP4-attention spike (SageAttention3 recipe). All three only
-    // take effect when the MXFP4 FMHA serves prefill (mxfp4 = "always").
-    // mxfp4_blockscale: per-16-element UE4M3 block scales applied by the
-    //   mxf4nvf4.block_scale MMA (vs legacy per-row software scales).
+    // #846 NVFP4-attention spike (SageAttention3 recipe); all three require the
+    // MXFP4 FMHA to serve prefill (mxfp4=always).
+    // mxfp4_blockscale: per-16-element UE4M3 block scales (mxf4nvf4.block_scale
+    // MMA) instead of legacy per-row software scales.
     // mxfp4_ksmooth: subtract the per-(batch,kv_head,channel) K mean before
-    //   quantization — the dropped Q·mean^T term is per-row-constant and
-    //   cancels under softmax. Auto-disabled when softcap > 0 (tanh breaks
-    //   the shift invariance). Requires mxfp4_blockscale.
-    // mxfp4_pv_fp4: P·V in NVFP4 too — P quantized per-row two-level
-    //   (rescaled to the full E4M3 scale range before 1x16 microscaling),
-    //   V per-16-block along KV. Requires mxfp4_blockscale.
-    // mxfp4_promote_budget: ThriftAttention-style outlier promotion
-    //   (arXiv 2605.23081) — per q-tile, the top-scoring fraction of
-    //   causally visible 64-token KV tiles (block-mean importance score
-    //   Q̄·K̄^T; sink + diagonal tiles force-included) is computed exactly
-    //   in FP32/FP16 instead of FP4. 0 = off, 1 = promote everything.
-    //   Requires mxfp4_blockscale; head_dim 64/128 only.
+    // quant; the dropped Q.mean^T term is row-constant and cancels under
+    // softmax. Auto-disabled when softcap>0. Requires mxfp4_blockscale.
+    // mxfp4_pv_fp4: P.V in NVFP4 too (P rescaled to the full E4M3 range,
+    // per-row two-level; V per-16-block along KV). Requires mxfp4_blockscale.
+    // mxfp4_promote_budget: ThriftAttention outlier promotion (arXiv 2605.23081):
+    // top-scoring fraction of causal 64-token KV tiles computed exact in
+    // FP32/FP16 (sink+diagonal force-included). 0=off, 1=all. Requires
+    // mxfp4_blockscale; head_dim 64/128 only.
     bool mxfp4_blockscale = false;
     bool mxfp4_ksmooth = false;
     bool mxfp4_pv_fp4 = false;
     float mxfp4_promote_budget = 0.0f;
-    // mxfp4_paged_kv: KV-append-quant chunked prefill (#846 follow-up) —
-    //   continuation chunks read K/V DIRECTLY from the paged NVFP4 KV
-    //   cache (quantization paid once at append; no gather→FP16 pass, no
-    //   in-kernel quant). Combines with mxfp4_promote_budget for outlier
-    //   promotion. Requires kv_cache.dtype=nvfp4, head_dim 128, single
-    //   sequence; engages independently of `mxfp4` mode.
+    // mxfp4_paged_kv: continuation prefill chunks read K/V directly from the
+    // paged NVFP4 KV cache (quantized once at append, no gather->FP16 pass).
+    // Requires kv_cache.dtype=nvfp4, head_dim 128, single sequence.
     bool mxfp4_paged_kv = false;
     bool mxfp4_fp16_fallback = false;
-    // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
-    // for every MXFP4 tensor. "pruned" skips MoE expert_*_packed and
-    // LM head (out_proj_) — those slots are either not read on the
-    // dispatch hot path (MoE expert FP16 cache is only consumed by
-    // executor_forward_moe.cu's pre-cached FP16 fallback, which is
-    // bypassed by the more efficient batch-dequant path for MXFP4)
-    // or routed through generic-dequant (LM head). Pruning is the
-    // Phase A1+A2 path — it
-    // unlocks Qwen3.5-27B MXFP4 load on 32 GiB VRAM by shrinking the
-    // ~48 GiB FP16 fallback to ~8-12 GiB.
+    // MXFP4->FP16 cache pruning: "legacy" caches FP16 for every MXFP4 tensor.
+    // "pruned" skips MoE expert_*_packed (bypassed by the batch-dequant path)
+    // and LM head (routed through generic-dequant); needed for Qwen3.5-27B MXFP4 on 32 GiB.
     std::string mxfp4_fp16_cache_policy = "legacy";
     bool force_cublas_decode = false;
-    // MLA absorbed-decode latent KV cache (DeepSeek-V2/V3, Phase 3). When
-    // off (default) the materialized Stage A path runs (full per-head K/V
-    // reconstructed at projection time + standard paged attention). When on,
-    // decode stores only the compressed latent + decoupled RoPE key and runs
-    // the mathematically-equivalent absorbed attention (~9x smaller per-token
-    // KV footprint). Prefill stays materialized; the latent cache is
-    // populated during prefill/decode. Single-sequence only (falls back to
-    // materialized otherwise). Env: none.
+    // MLA absorbed-decode latent KV (DeepSeek-V2/V3). Off = materialized Stage A
+    // (full per-head K/V reconstructed at projection, standard paged attention).
+    // On: stores only the compressed latent + decoupled RoPE key, single-sequence only.
     bool mla_absorb = false;
     bool no_qknorm_fused = false;
     bool splitk_pipe = true;
@@ -206,26 +108,13 @@ struct Attention {
     // kernel; A/B + rollback knob.
     bool fp8_tile_gqa = true;
     bool gate_concat = false;
-    // Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix. Caps the
-    // prefill context length that uses the fast cuBLAS attention path before
-    // falling back to FMHA (auto fmha_prefill_threshold = S-matrix cap + 1).
-    // 256 MiB caps ~32-head models at seq 2048 but high-head-count models
-    // (e.g. Qwen3-14B, 40 heads → ~1824) drop to the slower FMHA at 2048.
-    // Larger = longer prefill on the fast path, at the cost of KV headroom.
-    // Auto-shrinks if the alloc fails.
-    // 384 keeps the fast cuBLAS attention path up to seq 2048 for up to
-    // 48-head models (e.g. Qwen3-14B, 40 heads: +21% pp2048 vs the old 256
-    // cap which dropped it to FMHA at ~1824). Only allocates what the
-    // model's max_tokens×heads needs (capped here); +128 MiB vs 256 at most.
+    // Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps
+    // prefill context on the fast path before falling back to FMHA (auto
+    // fmha_prefill_threshold = cap+1). Auto-shrinks if the alloc fails. Default 384.
     int attn_scores_mib = 384;
-    // Sparse decode attention (Quest-class top-k page selection). 0 = off.
-    // When > 0, decode attention on full-attention layers reads only the
-    // top-scoring KV blocks (per-block key min/max bound against the query),
-    // up to this many tokens per sequence, selected device-side per step.
-    // Contexts at or below the budget run bit-identical to dense. v1 gates:
-    // F16/FP8 KV, uniform KV geometry, non-growable pool, non-MLA; SWA /
-    // StreamingLLM layers and spec verify chunks keep full attention.
-    // See docs/plans/2026-08-28-sparse-decode-attention.md.
+    // Sparse decode attention (Quest-class top-k page selection). 0=off; >0
+    // reads only the top-scoring KV blocks per step, bit-identical to dense at
+    // or below budget. v1 gates: F16/FP8 KV, uniform geometry, non-growable, non-MLA.
     int sparse_topk_tokens = 0;
     // Below this context length decode stays dense even when the budget is
     // exceeded: the selection's win only outgrows its overhead past ~12k on
@@ -236,16 +125,9 @@ struct Attention {
     // Blocks covering the last sparse_recent_tokens positions are always kept
     // (includes the partially filled tail block).
     int sparse_recent_tokens = 256;
-    // Page score: true = mean of the page's keys as the representative vector
-    // with their standard deviation as the offset term (arXiv 2605.27740),
-    // false = the Quest min/max corner bound. Both are
-    // sum_d (q_d*center_d + |q_d|*offset_d); only what the metadata pass
-    // stores per element differs, so the layout and the cost are the same.
-    // The corner bound is driven by whichever single token is most extreme in
-    // each dimension, which is what makes it rank badly at small budgets:
-    // Qwen3.8-27B-NVFP4, NIAH 5 depths x 2 lengths (81 908 / 126 908 tokens),
-    // corner 2/10 at a 4096 budget and 7/10 at 8192, mean+std 10/10 at both,
-    // wall time neutral (2026-09-12).
+    // Page score: true = mean of the page's keys with their stddev as offset
+    // (arXiv 2605.27740); false = the Quest min/max corner bound. Same formula
+    // sum_d(q*center+|q|*offset); corner ranks worse at small budgets (driven by one extreme token).
     bool sparse_score_meanstd = true;
     // Offset weight for sparse_score_meanstd. Larger keeps more of the
     // spread, 0 ranks on the mean alone. Ignored by the corner bound.

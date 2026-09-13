@@ -9,10 +9,9 @@
 
 namespace imp {
 
-// Per-call state for GraphExecutor::run_moe_ffn(). Bundles the locals that
-// were previously captured by the monolithic body so each MoE phase helper
-// can take a single MoeFfnContext& instead of a 20-arg parameter list.
-// Populated by moe_ffn_phase1/2/…; subsequent phases read/mutate it.
+// Per-call state for GraphExecutor::run_moe_ffn(): bundles locals previously captured by
+// the monolithic body so each MoE phase helper takes one MoeFfnContext& instead of a
+// 20-arg parameter list. Populated by moe_ffn_phase1/2/...; later phases read/mutate it.
 struct MoeFfnContext {
     // Shape / dtype parameters
     int n = 0;
@@ -45,19 +44,15 @@ struct MoeFfnContext {
     MoeRoutingResult routing{};
     bool residual_fused = false;  // true when decode-fast / fused scatter already added residual
 
-    // True if moe_gather has already populated moe_.gathered for this MoE
-    // call. Set to false in run_moe_ffn when the CUTLASS3x device-args path
-    // will fire (it consumes ctx.no via sorted_token_ids directly and doesn't
-    // need the gathered intermediate). If that path falls back to the legacy
-    // dispatcher, the legacy fallback calls moe_gather lazily and flips this
-    // back to true. Default true so paths that never check it always see a
-    // populated buffer.
+    // True if moe_gather already populated moe_.gathered for this call. Set false when the
+    // CUTLASS3x device-args path will fire (it consumes sorted_token_ids directly, no
+    // gathered intermediate needed); if that path falls back to legacy, moe_gather runs
+    // lazily and flips this back to true. Default true so unchecked paths see it populated.
     bool moe_gather_done = true;
 
-    // Host-resident NVFP4 experts staged into the device buffer for THIS
-    // layer. Filled by whichever prefill path reaches the layer first and
-    // reused by the later ones, so a layer is transferred once even when the
-    // CUTLASS attempt falls through to the legacy fallback.
+    // Host-resident NVFP4 experts staged into the device buffer for THIS layer. Filled by
+    // whichever prefill path reaches the layer first, reused by later ones: a layer
+    // transfers once even when the CUTLASS attempt falls through to legacy.
     StagedProj staged[kExpertProjCount]{};
     bool staged_done = false;
 };

@@ -72,25 +72,16 @@
 
 namespace imp {
 
-// Is this checkpoint tensor part of an MTP head? Checkpoints write the head
-// either as `mtp.*` or, with the outer prefix kept, as `model.mtp.*`.
-//
-// One rule, two callers: the divert decision in load_shard() and the presence
-// probe that tells the operator about a head it is NOT loading. Two places
-// asking the same question and answering differently is the defect class that
-// produced #1384 and #1443, so both go through here.
+// Checkpoint tensor is part of an MTP head if named mtp.* or model.mtp.* (outer prefix
+// kept). One rule, two callers (load_shard's divert decision, the presence probe) - both
+// must ask this shared question to avoid the #1384/#1443 defect class of disagreeing answers.
 inline bool name_is_mtp_tensor(std::string_view name) {
     return name.rfind("mtp.", 0) == 0 || name.rfind("model.mtp.", 0) == 0;
 }
 
-// Does this name make an `mtp.*` group a head imp can actually dispatch? It is
-// the projection fusing the embedding with the hidden state, and dispatch_mtp()
-// keys its two checkpoint shapes on exactly these two spellings. A probe that
-// accepted any `mtp.*` name would advertise a head that enabling then rejects,
-// which is a worse failure than saying nothing.
-// The two spellings, as constants, because dispatch_mtp() branches on the same
-// strings. Sharing them is what keeps probe and dispatch from drifting apart:
-// a test could only notice the drift afterwards, a shared constant prevents it.
+// Does this name make an mtp.* group a head imp can dispatch? It's the projection fusing
+// embedding+hidden state; dispatch_mtp() keys its two checkpoint shapes on exactly these
+// two spellings, shared as constants so probe and dispatch cannot drift apart.
 inline constexpr const char* kMtpHeadKeyEhProj = "mtp.layers.0.eh_proj.weight";
 inline constexpr const char* kMtpHeadKeyFc = "mtp.fc.weight";
 
@@ -147,23 +138,15 @@ struct MtpHead {
 
     Tensor final_norm;                      // mtp.norm.weight
 
-    // --- Nemotron-3.5 layout (see header comment) -----------------------------
-    // Per-expert 2-D weights instead of the packed 3-D pair above. Empty on the
-    // Qwen layout; when non-empty the forward pass indexes these directly and
-    // ignores experts_*_packed.
+    // Nemotron-3.5 layout: per-expert 2-D weights instead of the packed 3-D pair above. Empty
+    // on the Qwen layout; when non-empty the forward pass indexes these directly and ignores
+    // experts_*_packed.
     std::vector<Tensor> experts_up;    // [n_experts] each [d_ff_e, hidden]
     std::vector<Tensor> experts_down;  // [n_experts] each [hidden, d_ff_e]
-    // The same weights restacked contiguously at upload, so the decode GEMV can
-    // index them from a device-side expert id (gemv_f16_moe_decode) instead of
-    // the host reading routing back and issuing one GEMM per chosen expert.
-    // That host round trip is what kept the draft out of CUDA graph capture.
-    // The per-expert Tensors above become views into these slabs once packing
-    // has run. The slabs are a second copy in VRAM, not a re-pointing: the
-    // original per-expert allocations stay tracked and are only released at
-    // teardown, so the head costs file_bytes plus both slabs for the life of
-    // the process. Measured on Nemotron-3.5: 6317 MiB of device free for a head
-    // that is 2550 MiB on disk. Uploading straight into the slabs would remove
-    // the second copy and is not done yet.
+    // Weights restacked contiguously at upload so the decode GEMV indexes by device-side
+    // expert id (gemv_f16_moe_decode) instead of a host routing round trip, which had kept the
+    // draft out of CUDA graph capture. Per-expert Tensors become views into these slabs; the
+    // slabs are a SECOND copy in VRAM (original allocations stay tracked, released at teardown).
     Tensor experts_up_stacked;    // [n_experts, d_ff_e, hidden] FP16
     Tensor experts_down_stacked;  // [n_experts, hidden, d_ff_e] FP16
     // DeepSeek-style additive score bias on the router logits. Null when absent.
@@ -172,11 +155,9 @@ struct MtpHead {
     // a property of the checkpoint, so it is recorded rather than re-derived
     // from which tensors happen to be present at each use site.
     bool experts_non_gated = false;
-    // Qwen3.6's MTP attention is attn_output_gate=True: q_proj emits
-    // [num_heads, 2*head_dim] and the second half gates the output. Nemotron's
-    // does not, and its attention is NoPE — the hybrid's Mamba layers carry
-    // position, so applying RoPE here would rotate against the main model.
-    // Both default to the Qwen behaviour so that path is untouched.
+    // Qwen3.6 MTP attention is attn_output_gate=true: q_proj emits [num_heads, 2*head_dim],
+    // the second half gates the output. Nemotron's is not gated and is NoPE (position lives
+    // in the hybrid's Mamba layers; RoPE here would rotate against the main model).
     bool attn_output_gate = true;
     bool attn_rope = true;
 

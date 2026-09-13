@@ -1,34 +1,17 @@
 #pragma once
 
-// Provenance rules for the fused-projection scale split, as pure functions.
-//
-// A checkpoint may ship q|k|v as one `qkv_proj` tensor and gate|up as one
-// `gate_up_proj` (Phi-4-reasoning-plus-NVFP4 does both). weight_map.cpp splits
-// the DATA into imp's per-slot tensors and SLICES the `[rows, K/16]` scale plane
-// by output-row range, so each sibling reaches promotion with its own scale
-// tensor. What the siblings do share is the one `weight_global_scale` the
-// checkpoint gave the fused tensor: weight_map routes that scalar to all of
-// them, and it is the only per-tensor number they have in common.
-//
-// Two different facts, and conflating them is what this header exists to stop:
-//
-//   fused            the WEIGHT came from one checkpoint tensor. Says nothing
-//                    about where the scale bytes live: weight_upload gives every
-//                    scratch entry its own cudaMallocAsync, so the three planes
-//                    are three unrelated allocations.
-//   spans_one_plane  the loader's fix-up arm wrote sibling pointers as offsets
-//                    into the base's plane. This is the ONLY way siblings end up
-//                    sharing a base pointer, and the only case where a row
-//                    offset is a meaningful thing to assert.
-//
-// The fix-up arm itself used to fire on a predicate a separate-tensor checkpoint
-// also satisfies (base promoted, sibling not promoted, base has scales), so any
-// unrelated promotion failure on a sibling pointed its micro-scales into the
-// base's plane with the base's global scale. On Qwen3.8-27B that is w_up reading
-// 17408 x 320 = 5.57 MB past the end of w_gate's plane, logged as a normal split.
-//
-// Both functions are pure so the CPU lane can drive them; the loader supplies
-// the pointers.
+// Fused-projection scale split provenance. A checkpoint may ship q|k|v as one qkv_proj or
+// gate|up as one gate_up_proj; weight_map.cpp splits the DATA per-slot and SLICES the
+// [rows, K/16] scale plane by output-row range, but siblings share one
+// weight_global_scale (the only per-tensor number they have in common).
+// Two distinct facts:
+//   fused:           weight came from one checkpoint tensor (says nothing about scale
+//                     layout; each scratch entry gets its own cudaMallocAsync).
+//   spans_one_plane: the loader's fix-up arm wrote sibling pointers as offsets into the
+//                     base's plane (the only case a row offset is meaningful).
+// Conflating them let an unrelated promotion failure point a sibling's micro-scales into
+// the base's plane with the base's global scale (Qwen3.8-27B: w_up read 5.57 MB past
+// w_gate's plane, logged as a normal split).
 
 #include <cstdint>
 #include <cstring>
@@ -55,17 +38,11 @@ inline int64_t fused_split_needed_rows(const FusedSplitRequest& r) {
     return r.base_rows + static_cast<int64_t>(r.n_sibs) * r.sib_rows;
 }
 
-// True when the arm may fire. Declines are not errors: a checkpoint with
-// separate tensors declines every layer and serves normally.
-//
-// On today's producers the arm cannot fire in EITHER direction, and that is the
-// point rather than an oversight. weight_map slices the fused scale plane per
-// sibling, so a sibling either promotes on its own scale (the arm's predicate
-// needs an unpromoted sibling and never runs) or fails to promote for an
-// unrelated reason, in which case the base's plane covers only the base's rows
-// and the belt below declines. The arm is kept because it is the repair path for
-// a fused layout whose scale plane is NOT sliced per sibling, and because
-// deleting it would delete the belt that makes the wrong repair impossible.
+// True when the fix-up arm may fire. Declines are not errors: a checkpoint with separate
+// tensors declines every layer and serves normally. On today's producers the arm cannot
+// fire in either direction (weight_map already slices per sibling): kept as the repair
+// path for a fused layout whose scale plane is NOT sliced per sibling, and to keep the
+// wrong repair impossible.
 inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_not) {
     auto no = [&](const char* m) {
         if (why_not)
@@ -110,15 +87,11 @@ struct MergedScaleGroup {
     int64_t scale_row_bytes = 0;   // K_packed / 8
 };
 
-// The load-time assertion. Returns false and fills `err` when the group's scales
-// cannot be explained by the provenance the layer recorded.
-//
-// Non-fused groups get the one check that cannot false-positive: two distinct
-// allocations never share an address, so equal pointers are corruption. Their
-// offsets are deliberately not checked, and neither are the fused group's unless
-// the arm actually wrote them: an allocator is free to place two independent
-// scale planes exactly one plane apart, and asserting the offset would refuse a
-// checkpoint for being tidy.
+// Load-time assertion: false + err when the group's scales can't be explained by the
+// recorded provenance. Non-fused groups get the one check that can't false-positive
+// (two distinct allocations never share an address); offsets are checked only when the
+// fix-up arm actually wrote them, since a tidy allocator placing two planes adjacently
+// must not be refused.
 inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     auto fail = [&](const std::string& m) {
         if (err)
@@ -145,10 +118,9 @@ inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     }
 
     if (!g.spans_one_plane) {
-        // The sliced layout: every sibling owns a plane of exactly its own rows.
-        // A plane that is too small under-runs into the next allocation; one that
-        // is too large means the slice never happened and the sibling is reading
-        // its neighbours' rows as its own.
+        // Sliced layout: every sibling owns a plane of exactly its own rows. Too small under-runs
+        // into the next allocation; too large means the slice never happened and the sibling
+        // reads its neighbours' rows as its own.
         for (int i = 0; i < g.count; ++i) {
             if (g.m[i].plane_rows > 0 && g.m[i].plane_rows != g.m[i].rows)
                 return fail("sibling " + std::to_string(i) + " has " + std::to_string(g.m[i].rows) +

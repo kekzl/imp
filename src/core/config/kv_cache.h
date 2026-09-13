@@ -1,22 +1,8 @@
 #pragma once
 
-// KVCache configuration, one of the nine sections split out of
-// core/dispatch_policy.h on 2026-08-21.
-//
-// WHY. dispatch_policy.h aggregates all nine and is included by 23 translation
-// units, of which 21 touch two sections or fewer. Adding one field to it costs
-// 137.1 s of incremental rebuild, against 9.1 s for a small .cpp and 14.6 s for
-// the largest .cu the file-size gate polices. A TU that needs only this section
-// can include only this header and stop rebuilding when the others change.
-//
-// This is F-10 one level down, and dispatch_policy.h's own preamble records the
-// original: config.h was included by 22 files, 85 TUs transitively, and changed
-// 130 times in six months - "the highest build cost in the repo". Lifting nine
-// sections into an aggregate fixed that, and gave the aggregate the same
-// property for the same reason.
-//
-// Pure move: the contents below are byte-identical to their previous form, and
-// dispatch_policy.h includes every one of these, so no existing include breaks.
+// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// isolates a TU that touches only this section from the other eight's churn.
+// Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
 #include <cstdint>
 #include <string>
@@ -27,11 +13,9 @@
 namespace imp::cfg {
 
 struct KVCache {
-    // "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for models whose
-    // author declares kv_cache_quant_algo=FP8 AND whose arch family is
-    // verified safe for long-context FP8 KV (see kv_fp8_hint_default_safe).
-    // "fp16" forces FP16 (opt out of the hint). fp8|int8|int4|nvfp4|mxfp4
-    // force that dtype regardless of the hint.
+    // "auto" (default): keep FP16, upgrade to FP8 E4M3 when the model declares
+    // kv_cache_quant_algo=FP8 AND the arch family is hint-verified safe for
+    // long-context FP8 KV. "fp16" opts out; fp8|int8|int4|nvfp4|mxfp4 force it.
     std::string dtype = "auto";
     bool allow_nondeterministic_fp8 = false;
     // Legacy unconditional FP8 auto-upgrade: force FP8 E4M3 whenever the
@@ -42,97 +26,43 @@ struct KVCache {
     // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
     // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.
     int bitdecoding_residual_tokens = 0;
-    // BitDecoding TC path for NVFP4 paged attention QK. Default off, and
-    // since 2026-08-26 that is a measured verdict, not just caution: on the
-    // 32-stream Qwen3.8-27B-NVFP4 burst (3 alternating trials/arm) the TC
-    // path reads 954-997 tok/s aggregate against the scalar kernel's
-    // 1009-1050 (~-5%). See docs/plans/2026-08-24-qwen38-port.md, "NVFP4
-    // decode attention" - the same section records the refuted GQA-tile
-    // variant (branch perf/nvfp4-gqa-decode).
+    // BitDecoding TC path for NVFP4 paged attention QK. Default off: measured
+    // slower than the scalar kernel on 32-stream decode. See
+    // docs/plans/2026-08-24-qwen38-port.md.
     bool bitdecoding_qk = false;
-    // Growable KV pool: reserve address space for the pool the configuration
-    // asked for, commit physical memory for what the card can spare right now,
-    // and commit more as it frees up.
-    //
-    // What it fixes is a pool sized once, at the moment the free-VRAM reading
-    // is least trustworthy. A server started while another process still holds
-    // the card lands on the rescue floor and stays there for its whole life,
-    // cancelling every prompt past a few hundred tokens while reporting a
-    // successful load. With this, that server heals instead.
-    //
-    // Second use case (2026-08-27): long-context concurrency. The shadow plan
-    // commits conservatively (it charges the library-reserve constant and
-    // leaves forward scratch unmodelled), and the difference to the live-pass
-    // sizing becomes growth headroom the scheduler commits under aggregate
-    // admission pressure. Measured on Qwen3.8-27B-NVFP4, 32 concurrent
-    // 8k-prompt/512-token requests: wall 86.0 -> 65.2 s median (-24%), pool
-    // 2046 -> 6483 blocks. Prefill-bound bursts see no change.
-    //
-    // Needs CUDA virtual memory management on the device; where that is absent
-    // the pool is fixed and everything behaves exactly as before. Growth costs
-    // one driver mapping call per layer (measured 1.18 ms per 256 MiB) and
-    // happens at most once per growth event, not per step.
-    //
-    // Default on since 2026-09-07: the pool grows before the prefix cache is
-    // reclaimed, and every growth is capped at what is free above the
-    // allocator headroom at that moment (KVCache::try_grow_to), so it cannot
-    // overshoot into a WDDM spill. Qwen3.8-27B-NVFP4 plans 2301 blocks with
-    // 3013 MiB still free after warmup; the growth is what reaches them.
+    // Growable KV pool: reserves the configured address space, commits
+    // physical memory for what's free now, grows into more as it frees up.
+    // Fixes pools sized once at the least-trustworthy free-VRAM moment. Needs
+    // CUDA VMM; falls back to a fixed pool where absent. Growth is capped by
+    // KVCache::try_grow_to so it cannot overshoot into a WDDM spill. Default on.
     bool growable = true;
-    // Percent of the planned pool to COMMIT at startup when growable. 100
-    // commits whatever the residual clamp allowed and grows only if that was
-    // less than planned; 25 (default since vram.lazy_commit) commits a quarter
-    // and grows at admission, +25 % per step, into the same plan.
-    //
-    // Lower is the point of the whole mechanism. A successful cudaMalloc proves
-    // nothing about free VRAM on WSL2: measured on this box, a second server
-    // started against a card already holding 31.4 GiB took its full 10.2 GiB of
-    // KV anyway, which means it spilled into host memory and will decode at a
-    // fraction of the bandwidth with nothing reporting an error. Committing a
-    // fraction up front and growing into demand is the version of that decision
-    // that cannot silently overshoot.
+    // Percent of the planned pool to commit at startup when growable. 100
+    // commits whatever the residual clamp allowed, growing only if short; a
+    // lower value (default 25, since vram.lazy_commit) commits a fraction and
+    // grows at admission: a successful cudaMalloc proves nothing about free
+    // VRAM on WSL2 (a full-size commit can silently spill to host memory).
     int growable_initial_pct = 25;
-    // SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on
-    // every other layer, gemma-3 5:1 pattern) allocate only the trailing
-    // window in a small dedicated block group instead of full-length KV
-    // (~2x more KV tokens on gpt-oss, ~5-6x on gemma-3). Auto-disabled
-    // (logged) for models without SWA layers, INT8/INT4 KV, hybrids,
-    // MLA, StreamingLLM, green contexts, and deterministic mode.
-    // Numerically exact: PPL bit-parity vs full-length KV on gemma-3-12b
-    // and gpt-oss-20b (deterministic_gemm A/B, 2026-07-24).
-    // Tri-state: "auto" enables the savings only when prefix caching is
-    // off (one-shot imp-cli runs), so serving keeps warm-prefix TTFT;
-    // "on" forces sizing and disables prefix caching (freed window
-    // blocks cannot back prefix reuse — snapshot-based reuse is a
-    // follow-up); "off" disables. Legacy bools map to on/off.
+    // SWA-aware KV sizing: sliding-window layers allocate only the trailing
+    // window instead of full-length KV. Auto-disabled for models without SWA,
+    // INT8/INT4 KV, hybrids, MLA, StreamingLLM, deterministic mode. Numerically
+    // exact (PPL bit-parity vs full KV). Tri-state: "auto" only when prefix
+    // caching is off, "on" forces sizing and disables prefix caching, "off" disables.
     std::string swa_sizing = "auto";
 
-    // SWA window snapshots: device budget (MiB) for packed windowed-layer
-    // KV snapshots — what makes prefix caching valid under SWA sizing
-    // (freed window blocks cannot back reuse; the snapshot restores the
-    // trailing window at the reuse boundary, like the recurrent-state
-    // snapshots do for hybrids). One snapshot per prefill end, LRU.
-    // 0 = off: swa_sizing=auto then yields to prefix caching, and
-    // swa_sizing=on force-disables it.
+    // SWA window snapshots: device budget (MiB) for packed windowed-layer KV
+    // snapshots, what makes prefix caching valid under SWA sizing (freed window
+    // blocks can't back reuse otherwise). One snapshot per prefill end, LRU. 0 = off.
     int swa_snapshot_mb = 0;
 
-    // Pin the KV pool to exactly this many blocks; 0 = size it from the
-    // VRAM budget as usual. An operator sharing a card wants the pool to
-    // be a declared quantity rather than "whatever was left", and it is
-    // what makes the admission guardrail (I6) reachable from a config
-    // rather than only through the C API.
+    // Pin the KV pool to exactly this many blocks; 0 = size from the VRAM
+    // budget. Lets an operator sharing a card declare pool size explicitly and
+    // reach the admission guardrail (I6) from config, not only the C API.
     int max_blocks = 0;
 
-    // Tokens per KV block. 0 = auto = 16 for every model (since 2026-09-07;
-    // the 2026-03-23 rule "32 when n_kv_heads <= 4" was measured for the
-    // first time that day and lost 1.5 to 4.3 % tg128 on the 4-KV-head model
-    // it was meant for, docs/audit/PERF_LOG.md). An explicit value must be a
-    // multiple of 16 in [16, 256]: 16 is the
-    // token tile of the FP8 tensor-core decode kernel and the WMMA tile of
-    // the NVFP4 TC path; a block is also the prefix cache's reuse granularity
-    // and the smallest footprint a sequence can have, so larger blocks
-    // coarsen every prefix hit. Refused at load when outside that set, not
-    // silently rounded (AUDIT_arch_2026 B-5).
+    // Tokens per KV block. 0 = auto = 16 for every model. An explicit value
+    // must be a multiple of 16 in [16,256]: 16 is the FP8 TC decode tile and
+    // the NVFP4 WMMA tile, and the prefix cache's reuse granularity. Refused
+    // at load when outside that set, not silently rounded (AUDIT_arch_2026 B-5).
     int block_size = 0;
 
     SwaSizingMode swa_sizing_mode() const {

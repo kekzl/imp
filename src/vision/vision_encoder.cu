@@ -48,10 +48,9 @@ static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int
     auto handle = get_vision_cublas_handle();
     cublasSetStream(handle, stream);
 
-    // FP32 accumulation (FP16 in/out): the FFN down-projection sums thousands of
-    // terms; FP16 accumulation overflows for high-magnitude tokens (→ inf, then
-    // RMSNorm turns inf×0 into NaN). FP32 compute keeps the encoder numerically
-    // robust. alpha/beta must be float for COMPUTE_32F.
+    // FP32 accumulation (FP16 in/out): the FFN down-projection sums thousands of terms; FP16
+    // accumulation overflows for high-magnitude tokens (inf, then RMSNorm turns inf*0 into
+    // NaN). alpha/beta must be float for COMPUTE_32F.
     float f_alpha = alpha;
     float f_beta = beta;
 
@@ -323,10 +322,10 @@ __global__ void axial_pos_add_kernel(half* __restrict__ x, const half* __restric
     x[idx] = __float2half(__half2float(x[idx]) + ex + ey);
 }
 
-// gemma4v projector tail fused in FP32: out = rmsnorm((x*scale_factor - std_bias) * std_scale).
-// Gemma vision activations are large (absmax ~3000); the ×√D scale would overflow
-// FP16 (→ inf → NaN) if materialized, so the whole tail runs in FP32 registers and
-// only the RMS-normalized (small) result is written back as FP16.
+// gemma4v projector tail fused in FP32: out = rmsnorm((x*scale_factor - std_bias)*std_scale).
+// Gemma vision activations are large (absmax ~3000); the sqrt(D) scale would overflow FP16
+// if materialized, so the whole tail runs in FP32 registers, only the RMS-normalized
+// (small) result is written back as FP16.
 __global__ void gemma4v_tail_norm_kernel(const half* __restrict__ x, const half* __restrict__ std_bias,
                                          const half* __restrict__ std_scale, half* __restrict__ out, int D,
                                          float scale_factor, float eps) {
@@ -502,12 +501,10 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
 }
 
 bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t stream) {
-    // Capture/replay the full encoder forward as a CUDA graph. The 27-layer
-    // SigLIP ViT launches ~200+ kernels per image — graph replay eliminates
-    // the per-kernel launch overhead. The graph is keyed on (d_pixels,
-    // d_output); any pointer change invalidates the captured slot.
-    //
-    // [runtime] no_vision_graph = true forces the eager path (debugging).
+    // Captures/replays the full encoder forward as a CUDA graph: the 27-layer SigLIP ViT
+    // launches 200+ kernels per image, graph replay eliminates per-kernel launch overhead. Keyed
+    // on (d_pixels, d_output); any pointer change invalidates the captured slot.
+    // [runtime] no_vision_graph=true forces the eager path (debugging).
     const bool disable_graph = process_diag_no_vision_graph();
     if (disable_graph) {
         return encode_impl(d_pixels, d_output, stream);
@@ -546,10 +543,8 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
     extract_patches_kernel<<<np, 256, 0, stream>>>(d_pixels, d_patches_, img, img, ps, grid, grid, patch_dim);
     IMP_CUDA_CHECK_LAUNCH();
 
-    // ---- Step 2: Patch embedding: patches @ patch_embd_w^T + bias -> hidden ----
-    // patch_embd_w: [hidden_size, patch_dim]
-    // patches: [num_patches, patch_dim]
-    // hidden: [num_patches, hidden_size]
+    // Patch embedding: patches @ patch_embd_w^T + bias -> hidden. patch_embd_w
+    // [hidden_size,patch_dim]; patches [num_patches,patch_dim]; hidden [num_patches,hidden_size].
     vision_gemm(d_patches_, static_cast<const half*>(model_->patch_embd_w.data), d_hidden_, np, hd, patch_dim,
                 1.0f, 0.0f, stream);
 
@@ -600,22 +595,13 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             IMP_CUDA_CHECK_LAUNCH();
         }
 
-        // Multi-head attention via batched GEMM
-        // Reshape: [np, nh, head_dim] -> batched [nh, np, head_dim]
-        // Q, K, V are stored as [np, hd] = [np, nh * head_dim]
-        // For strided batched GEMM: treat as [nh, np, head_dim] with stride np*head_dim between heads
-        // But data is actually [np, nh, head_dim], so stride between heads = head_dim,
-        // and stride between rows = nh * head_dim.
-        // We need to transpose to [nh, np, head_dim] for standard batched GEMM.
-        // Instead, use the fact that cuBLAS supports arbitrary strides:
-        //   Q[h, i, :] = Q_flat[i * nh * head_dim + h * head_dim ... + head_dim-1]
-        //   stride_batch = head_dim (between heads within same row)
-        //   stride_row = nh * head_dim (between rows for same head)
+        // Multi-head attention via batched GEMM: Q/K/V stored [np,nh,head_dim]=[np,nh*head_dim].
+        // cuBLAS's arbitrary strides let this be treated as [nh,np,head_dim] without a physical
+        // transpose: stride_batch=head_dim (between heads, same row), stride_row=nh*head_dim
+        // (between rows, same head).
 
-        // scores = Q @ K^T: for each head h, scores[h] = Q_h @ K_h^T
-        // Q_h: [np, head_dim] with stride nh*head_dim, batch stride head_dim
-        // K_h: [np, head_dim] with stride nh*head_dim, batch stride head_dim
-        // scores: [nh, np, np]
+        // scores=Q@K^T per head h: Q_h/K_h [np,head_dim] with stride nh*head_dim, batch stride
+        // head_dim; scores [nh,np,np].
 
         float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
@@ -790,12 +776,9 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
     return true;
 }
 
-// ======================================================================
-//  gemma4v encoder — RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX
-//  RoPE, sandwich post-norms, GeGLU FFN, scale-1 attention, avg-pool(3)
-//  + ×√D + std-affine + pre-proj RMSNorm + linear projector.
-//  See docs/internals/vision_gemma4v_spec.md.
-// ======================================================================
+// gemma4v encoder: RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX RoPE, sandwich
+// post-norms, GeGLU FFN, scale-1 attention, avg-pool(3) + sqrt(D) + std-affine + pre-proj
+// RMSNorm + linear projector. See docs/internals/vision_gemma4v_spec.md.
 bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cudaStream_t stream) {
     const auto& cfg = model_->config;
     int np = cfg.num_patches;

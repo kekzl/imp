@@ -1,11 +1,8 @@
 #pragma once
 
-// WeightHandle is the per-weight storage/tier descriptor. It lives in core/
-// because src/compute/weight_dispatch.h takes it by reference: keeping it in
-// exec/ made compute/ include a higher layer, the one backward edge in an
-// otherwise forward compute -> exec relationship (40 files the other way).
-// WeightRegistry stays in exec/ — it is the executor's container, not a type
-// the kernels need.
+// WeightHandle (per-weight storage/tier descriptor) lives in core/ because
+// compute/weight_dispatch.h takes it by reference; keeping it in exec/
+// would make compute/ include a higher layer. WeightRegistry stays in exec/.
 
 #include "core/logging.h"
 #include "core/qtype.h"
@@ -25,20 +22,16 @@ struct WeightHandle {
     StorageTier prefill_tier = StorageTier::Undefined;  // M>1 GEMM dispatch
     StorageTier decode_tier = StorageTier::Undefined;   // M=1 GEMV dispatch
     int64_t shape[2] = {0, 0};
-    // Size in bytes of VRAM owned by this handle. Zero means storage is
-    // BORROWED (e.g. via the Phase-2 shim that points handles at wcache_
-    // entries). A non-zero value means this handle's PlanExecutor (Phase 4+)
-    // allocated the storage and is responsible for freeing it in the
-    // registry destructor. Never mix borrowed and owned storage on the same
-    // handle — the freer would double-free or leak.
+    // VRAM bytes owned by this handle. Zero = storage is BORROWED (e.g. points
+    // at a wcache_ entry). Non-zero = this handle's PlanExecutor allocated it
+    // and frees it in the registry destructor. Never mix borrowed and owned on
+    // the same handle: the freer would double-free or leak.
     int64_t owned_bytes = 0;
 
-    // Pointer to the ORIGINAL quantized weight bytes (in Model::gpu_allocations_),
-    // and its source qtype. Always borrowed (never freed by the handle).
-    // Used by weight_dispatch for the M=1 dp4a/mmvq fallback when primary_tier
-    // is FP16/FP8/NVFP4 but the source is a GGUF block-quant format and the
-    // small-M path on the original is faster than cuBLAS on the cached overlay.
-    // Phase 5 PR #1 Commit 5.1.3.a — used by the upcoming weight_dispatch shim.
+    // Pointer to the ORIGINAL quantized weight bytes (Model::gpu_allocations_)
+    // plus its source qtype. Always borrowed, never freed here. Used by
+    // weight_dispatch for the M=1 dp4a/mmvq fallback when the small-M path on
+    // the original is faster than cuBLAS on the cached overlay.
     const void* source_data = nullptr;
     QType source_qtype = QType::NONE;
     void* source_scales = nullptr;
@@ -74,23 +67,13 @@ struct WeightHandle {
         } mxfp4;
     } payload{};
 
-    // Phase 5 PR #1 Commit 5.1.4.a: can the original GGUF source bytes
-    // (source_data, owned by Model::gpu_allocations_) be safely freed once
-    // this handle is populated?
-    //
-    // Safe to drop when primary_tier provides BOTH a decode-fast kernel AND
-    // a prefill kernel that consume the overlay payload (not the original).
-    // Tiers that qualify: NVFP4 (gemv_nvfp4_kpar decode + dequant→cuBLAS prefill),
-    // CUTLASS_NVFP4 (NVFP4 GEMV decode + CUTLASS NVFP4 GEMM prefill), FP8
-    // (gemv_fp8 decode + cuBLAS FP8 GEMM prefill), MXFP4 (gemv_mxfp4 +
-    // CUTLASS MXFP4 GEMM).
-    //
-    // Tiers that do NOT qualify: FP16 (decode prefers dp4a on the original
-    // quant — see 5.1.3.c), FP32 (LM-head policy keeps original), Undefined.
-    //
-    // Predicate is conservative: returns true only when both source_data is
-    // present AND the tier covers both M=1 and M>1 paths. Actual freeing
-    // additionally requires dispatch-site audits — done in 5.1.4.b.
+    // Can the original GGUF source bytes (source_data) be safely freed once
+    // this handle is populated? Safe only when primary_tier has BOTH a
+    // decode-fast kernel AND a prefill kernel that consume the overlay payload:
+    // NVFP4, CUTLASS_NVFP4, FP8, MXFP4. NOT safe: FP16 (decode prefers dp4a on
+    // the original), FP32 (LM-head policy keeps original), Undefined.
+    // Conservative: true only when source_data is present AND the tier covers
+    // both M=1 and M>1 paths; actual freeing needs a dispatch-site audit too.
     bool can_drop_source() const {
         if (source_data == nullptr)
             return false;

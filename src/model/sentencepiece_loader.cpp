@@ -14,18 +14,13 @@ namespace imp {
 
 namespace {
 
-// ---- Protobuf wire-format primitives (proto2/proto3 binary encoding) ----
-//
-// Each field on the wire is `tag` (varint) followed by typed payload:
-//   wire_type 0 = varint   (int32/int64/uint32/uint64/sint32/sint64/bool/enum)
-//   wire_type 1 = fixed64  (double, fixed64, sfixed64)
+// Protobuf wire format (proto2/proto3): each field is tag(varint)+typed payload.
+//   wire_type 0 = varint (int32/int64/uint32/uint64/sint32/sint64/bool/enum)
+//   wire_type 1 = fixed64 (double, fixed64, sfixed64)
 //   wire_type 2 = length-delimited (string, bytes, sub-message, packed repeated)
-//   wire_type 5 = fixed32  (float, fixed32, sfixed32)
-//
-// `tag = (field_number << 3) | wire_type`.
-//
-// We only need a tiny subset for SentencePiece ModelProto; unknown fields
-// are skipped without error.
+//   wire_type 5 = fixed32 (float, fixed32, sfixed32)
+// tag = (field_number << 3) | wire_type. Only a tiny subset is needed for SentencePiece
+// ModelProto; unknown fields are skipped without error.
 
 class ProtoReader {
 public:
@@ -129,13 +124,10 @@ private:
     const char* err_ = nullptr;
 };
 
-// ---- ModelProto.SentencePiece sub-message ----
-//
-//   message SentencePiece {
-//     optional string piece = 1;
-//     optional float  score = 2;
-//     optional Type   type  = 3;     // enum NORMAL=1, UNKNOWN=2, CONTROL=3, ...
-//   }
+// ModelProto.SentencePiece sub-message:
+//   optional string piece = 1;
+//   optional float  score = 2;
+//   optional Type   type  = 3;   // NORMAL=1, UNKNOWN=2, CONTROL=3, ...
 struct SpPiece {
     std::string piece;
     float score = 0.0f;
@@ -196,16 +188,10 @@ bool parse_sentencepiece(const uint8_t* data, size_t size, SpPiece* out) {
     return r.ok();
 }
 
-// ---- ModelProto.TrainerSpec sub-message (only the fields we need) ----
-//
-//   message TrainerSpec {
-//     optional ModelType model_type = 3;     // UNIGRAM=1, BPE=2, WORD=3, CHAR=4
-//     optional int32 unk_id = 40 [default = 0];
-//     optional int32 bos_id = 41 [default = 1];
-//     optional int32 eos_id = 42 [default = 2];
-//     optional int32 pad_id = 43 [default = -1];
-//     // ... lots of other fields, all skipped
-//   }
+// ModelProto.TrainerSpec fields used here:
+//   optional ModelType model_type = 3;  // UNIGRAM=1, BPE=2, WORD=3, CHAR=4
+//   optional int32 unk_id=40[default=0], bos_id=41[default=1], eos_id=42[default=2],
+//   pad_id=43[default=-1]. Other fields are all skipped.
 struct SpTrainer {
     int32_t model_type = 0;  // UNKNOWN
     int32_t unk_id = 0;
@@ -285,12 +271,9 @@ bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel
         }
         uint32_t field = static_cast<uint32_t>(tag >> 3);
         uint32_t wire = static_cast<uint32_t>(tag & 0x7);
-        // ModelProto fields:
-        //   1 = repeated SentencePiece pieces
-        //   2 = TrainerSpec trainer_spec
-        //   3 = NormalizerSpec normalizer_spec
-        //   4 = SelfTestData self_test_data
-        //   5 = NormalizerSpec denormalizer_spec
+        // ModelProto fields: 1=repeated SentencePiece pieces, 2=TrainerSpec trainer_spec,
+        // 3=NormalizerSpec normalizer_spec, 4=SelfTestData self_test_data,
+        // 5=NormalizerSpec denormalizer_spec.
         if (field == 1 && wire == 2) {  // SentencePiece pieces (length-delimited)
             const uint8_t* p;
             size_t n;

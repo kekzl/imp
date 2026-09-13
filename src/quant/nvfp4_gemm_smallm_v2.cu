@@ -1,32 +1,21 @@
-// nvfp4_gemm_smallm_v2.cu — small-M NVFP4 GEMM v2: y[m, n] = W[n, :] @ x[m, :]
-// for M <= 32 activation rows, both sides packed NVFP4 in the PLAIN layout
-// (nibbles + linear FP8-UE4M3 micro-scales), computed with the native
-// block-scaled mma.sync.kind::mxf4nvf4 — no dequant anywhere, weights and
-// scales stream through an asynchronous multi-stage smem pipeline with one
-// producer warp (cp.async + mbarrier) and four consumer warps.
-//
-// Why v2 (docs/plans/2026-08-24-qwen38-port.md; gemm.h postmortem): the
-// W4A16 v1 kernel wins isolated (23.9 vs CUTLASS 41.4 us on M=32 N=5120
-// K=5120) and loses the real 32-stream step (45.8 us, -11% aggregate): its
-// synchronous SIMT loads are exposed to the GDN scan's L2 pressure. What
-// the shipping CUTLASS tile has that v1 lacks is an async pipeline; what
-// CUTLASS cannot give us is a CTA_M < 128 block-scaled tile (SF atom
-// static-asserts at 128 rows). v2 owns an M=32 tile natively:
-//   - block tile M32 x N64 x K256 per stage, 4-6 stage ring, ~15 KiB/stage
-//   - producer warp: cp.async.cg 16B chunks + cp.async.mbarrier.arrive;
-//     consumers never issue a global load
-//   - data stays 4-bit until the MMA; smem traffic is 4-bit + SF bytes
-//   - Marlin-style striped K-partitioning, fixed per shape, deterministic
-//     two-kernel split-K reduce (no atomics)
-//
-// Fragment/SF mappings are the CUTLASS SM120_16x8x64_TN_VS layouts,
-// cross-checked in-tree against src/compute/mxf4nvf4_qkt_validate.cu:
-//   A   (T32,V32)->(M16,K64): m = T1 + V1*8, k = T0*8 + V0 + V2*32
-//   B   (T32,V16)->(N8, K64): n = T1,        k = T0*8 + V0 + V1*32
-//   SFA lane t supplies the 4 K-group scales of row m = (t%2)*8 + t/4
-//   SFB lane t supplies the 4 K-group scales of row n = t/4
-// with T0 = t%4, T1 = t/4. The nibble order of the plain packed layout is
-// exactly the fragment register order, so operands are plain u32 loads.
+// Small-M NVFP4 GEMM v2: y[m,n] = W[n,:] @ x[m,:], M<=32, both sides packed NVFP4 PLAIN
+// layout (nibbles + linear FP8-UE4M3 micro-scales), computed with native block-scaled
+// mma.sync.kind::mxf4nvf4 (no dequant), weights/scales streamed through an async
+// multi-stage smem pipeline: one producer warp (cp.async+mbarrier), four consumer warps.
+// v2 owns an M=32 tile CUTLASS cannot give (SF atom static-asserts at 128 rows):
+//   block tile M32 x N64 x K256 per stage, 4-6 stage ring, ~15 KiB/stage
+//   producer: cp.async.cg 16B chunks + mbarrier.arrive; consumers never issue a global load
+//   data stays 4-bit until the MMA; smem traffic is 4-bit + SF bytes
+//   Marlin-style striped K-partitioning, fixed per shape, deterministic two-kernel
+//   split-K reduce (no atomics)
+// Fragment/SF mappings are CUTLASS SM120_16x8x64_TN_VS layouts (cross-checked against
+// src/compute/mxf4nvf4_qkt_validate.cu):
+//   A (T32,V32)->(M16,K64): m=T1+V1*8, k=T0*8+V0+V2*32
+//   B (T32,V16)->(N8,K64): n=T1, k=T0*8+V0+V1*32
+//   SFA lane t supplies the 4 K-group scales of row m=(t%2)*8+t/4
+//   SFB lane t supplies the 4 K-group scales of row n=t/4
+// with T0=t%4, T1=t/4. Nibble order of the plain packed layout matches the fragment
+// register order exactly, so operands are plain u32 loads.
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
@@ -45,11 +34,9 @@ constexpr int kNR = 64;        // N rows per CTA
 constexpr int kKT = 256;       // K elements per pipeline stage
 constexpr int kThreads = 160;  // 4 consumer warps + 1 producer warp
 
-// Row strides in smem. Nibble rows are padded 128 -> 144 bytes so the
-// consumers' u32 fragment loads hit 32 distinct banks (bank = (36r + off/4)
-// % 32 walks all banks across a warp); 144 = 9*16 keeps cp.async 16B
-// alignment. SF rows stay at 16 bytes — the only conflict there is a 2-way
-// on the SFA rows, one extra cycle on a 4-byte load.
+// Nibble rows padded 128->144 bytes so consumers' u32 fragment loads hit 32 distinct banks
+// (bank=(36r+off/4)%32 walks all banks across a warp); 144=9*16 keeps cp.async 16B
+// alignment. SF rows stay at 16 bytes (only a 2-way conflict on SFA rows, one extra cycle).
 constexpr int kNibStride = 144;
 constexpr int kSfStride = 16;
 
@@ -87,26 +74,21 @@ __device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t parity) {
         : "memory");
 }
 
-// Async-arrive: one arrive on the mbarrier once all prior cp.async of this
-// thread have completed. .noinc consumes one of the pre-initialized expected
-// arrivals (the memcpy_async pattern). Every arrival a phase needs is in the
-// init count (kFullArrivals); the track-only form (no .noinc, "increment now,
-// arrive later") is deliberately not used: its increment is ordered only
-// against the issuing thread, so when the producer's 32 arrivals land first
-// (a second-wave CTA behind a full LSU queue) the phase completes without the
-// helper warp's copies and the consumers read a stage whose weights have not
-// arrived. Measured: gate|up multi launch, 544 CTAs, M=24, 126 of 200 launches
-// bit-different (NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable).
+// .noinc consumes one of the pre-initialized expected arrivals (memcpy_async pattern);
+// every arrival a phase needs is in the init count (kFullArrivals). The track-only form
+// (no .noinc) is NOT used deliberately: its increment orders only against the issuing
+// thread, so a second-wave CTA's 32 producer arrivals landing first completes the phase
+// without the helper warp's copies, reading a stage whose weights haven't arrived
+// (measured: 126/200 launches bit-different, NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable).
 __device__ __forceinline__ void cp_async_mbar_arrive(uint64_t* bar) {
     const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
     asm volatile("cp.async.mbarrier.arrive.noinc.shared.b64 [%0];" ::"r"(a));
 }
 
-// Full-barrier arrivals per phase: 32 async arrives from the producer lanes
-// (their copies landed) plus 32 more, which are consumer warp 0's async
-// arrives on a prefetched first use and the producer's plain arrives
-// otherwise (stage 0 and every refill), so the count never depends on who
-// issued the weights.
+// Full-barrier arrivals per phase: 32 async arrives from producer lanes (their copies
+// landed) plus 32 more from consumer warp 0's async arrives (prefetched first use) or the
+// producer's plain arrives otherwise (stage 0, every refill) - the count never depends on
+// who issued the weights.
 constexpr uint32_t kFullArrivals = 64;
 
 // 16-byte global->shared async copy, zero-filling when src_bytes == 0
@@ -141,12 +123,11 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 
 // ---- kernel -----------------------------------------------------------------
 
-// Shared CTA body. All tensor-dependent values arrive resolved (w/y/ts/N/
-// n_base); the single-tensor and pair kernels differ only in how they resolve
-// them from blockIdx. Everything from barrier init through the epilogue is
-// identical to the shipped single-tensor kernel.
-// OutT: half (activations) or float (the batched LM head's logits, read as
-// float by the samplers; single-stripe shapes only).
+// Shared CTA body: all tensor-dependent values (w/y/ts/N/n_base) arrive resolved; the
+// single-tensor and pair kernels differ only in how they resolve them from blockIdx.
+// Everything from barrier init through the epilogue is identical to the shipped
+// single-tensor kernel. OutT: half (activations) or float (batched LM head logits, read as
+// float by samplers; single-stripe shapes only).
 template <int kStages, typename OutT>
 __device__ __forceinline__ void smallm_v2_cta_body(
     const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
@@ -165,12 +146,10 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         }
     }
     __syncthreads();
-    // PDL: trigger at CTA start. The dependent grid launches once every CTA
-    // of this grid has triggered or exited, so on a multi-wave grid it
-    // launches when the last wave has started (no pending CTA of this grid
-    // loses a slot) and on a single-wave grid it takes the idle SMs at once.
-    // Either way the dependent's producer warps fill their rings with
-    // weights while this grid still runs (the prefetch below).
+    // PDL: triggers at CTA start. The dependent grid launches once every CTA of this grid has
+    // triggered or exited: on a multi-wave grid that's when the last wave has started (no
+    // pending CTA loses a slot), on a single-wave grid it takes idle SMs immediately. Either
+    // way the dependent's producer warps fill their rings while this grid still runs.
     pdl_trigger();
 
     // Stripe of K-tiles owned by this CTA.
@@ -182,11 +161,11 @@ __device__ __forceinline__ void smallm_v2_cta_body(
 
     auto stage_base = [&](int s) { return smem + s * kStageBytes; };
 
-    // Per-lane chunk assignments are fixed; only the K offset advances.
-    // w nibbles: 64 rows x 8 16B-chunks = 512 -> 16/lane
-    // x nibbles: 32 rows x 8         = 256 -> 8/lane
-    // w scales:  64 rows x 1 16B     = 64  -> 2/lane
-    // x scales:  32 rows x 1         = 32  -> 1/lane
+    // Per-lane chunk assignments are fixed; only the K offset advances:
+    //   w nibbles: 64 rows x 8 16B-chunks = 512 -> 16/lane
+    //   x nibbles: 32 rows x 8            = 256 -> 8/lane
+    //   w scales:  64 rows x 1 16B        = 64  -> 2/lane
+    //   x scales:  32 rows x 1            = 32  -> 1/lane
     const int64_t w_row_bytes = static_cast<int64_t>(K) / 2;
     const int64_t sf_row_bytes = static_cast<int64_t>(K) / kMicroBlockSize;
     const int pre = min(kStages, iters);
@@ -242,13 +221,10 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             if (i == 0 || i >= pre)
                 mbar_arrive(&bar_full[s]);
         };
-        // Weights are immutable, so they may stream in BEFORE
-        // griddepcontrol.wait, i.e. while the predecessor grid still runs;
-        // only Xq (the predecessor's output) waits for the dependency. Stage
-        // 0's W comes from this warp ahead of its wait; stages 1..pre-1 come
-        // from consumer warp 0 (below) in parallel, so a CTA that launched
-        // late (dependency already resolved) still sees X0 queued right
-        // behind W0 and stage 0 lands as early as the unprefetched order did.
+        // Weights are immutable, so they may stream in BEFORE griddepcontrol.wait, i.e. while the
+        // predecessor grid still runs; only Xq (the predecessor's output) waits for the dependency.
+        // Stage 0's W comes from this warp ahead of its wait; stages 1..pre-1 come from consumer
+        // warp 0 in parallel, so a late-launched CTA still sees X0 queued right behind W0.
         if (iters > 0)
             issue_w(0);
         pdl_wait();
@@ -264,11 +240,9 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     } else {
         // ---- consumer warps: wait, MMA, release ----
         if (warp == 0) {
-            // Ring prefetch: W for stages 1..pre-1 before the grid
-            // dependency. This warp's 32 async arrives are the stage's second
-            // half of kFullArrivals, so its first phase cannot complete
-            // before these copies land, whatever order the producer's
-            // arrivals take.
+            // Ring prefetch: W for stages 1..pre-1 before the grid dependency. This warp's 32 async
+            // arrives are the stage's second half of kFullArrivals, so its first phase cannot complete
+            // before these copies land, regardless of the producer's arrival order.
             for (int i = 1; i < pre; ++i) {
                 issue_w(i);
                 cp_async_mbar_arrive(&bar_full[i]);
@@ -387,14 +361,12 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
                                       bar_empty);
 }
 
-// Sibling variant: two or three weight tensors sharing ONE quantized
-// activation, one launch. grid.x covers the n-tiles of the tensors back to
-// back; each CTA resolves which tensor it owns from the tile prefix sums and
-// runs the shared body unchanged. stripes == 1 for every member (the policy
-// is applied to the COMBINED tile count), so there is no workspace and no
-// reduce. Saves the launch fixed cost + tail wave per sibling per layer per
-// batched-decode step (FFN gate|up, GDN in|z), and folds the striped k/v
-// projections (16 tiles each, kernel + reduce) into q's single-stripe wave.
+// Sibling variant: two or three weight tensors sharing ONE quantized activation, one
+// launch. grid.x covers the tensors' n-tiles back to back; each CTA resolves which tensor
+// it owns from tile prefix sums, running the shared body unchanged. stripes==1 for every
+// member (policy applied to the COMBINED tile count), so no workspace, no reduce. Saves
+// launch fixed cost + tail wave per sibling (FFN gate|up, GDN in|z), folding striped k/v
+// projections into q's single-stripe wave.
 struct SmallMV2MultiArgs {
     const uint8_t* w[kSmallMV2MaxSiblings];
     const uint8_t* s[kSmallMV2MaxSiblings];
@@ -471,10 +443,9 @@ size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K) {
     return static_cast<size_t>(gemm_nvfp4_smallm_v2_stripes(N_out, K)) * kSmM * N_out * sizeof(float);
 }
 
-// y[m, n] = W[n, :] @ x[m, :], both sides plain NVFP4. M <= 32; K % 256 == 0;
-// N % 64 == 0. d_workspace: gemm_nvfp4_smallm_v2_workspace_bytes(N_out, K).
-// Xq rows >= M are never read (zero-filled in the pipeline), so Xq buffers
-// only need M rows.
+// y[m,n]=W[n,:]@x[m,:], both sides plain NVFP4. M<=32; K%256==0; N%64==0.
+// d_workspace: gemm_nvfp4_smallm_v2_workspace_bytes(N_out,K). Xq rows>=M are never read
+// (zero-filled in the pipeline), so Xq buffers only need M rows.
 namespace {
 
 template <int kStages, typename OutT>
@@ -548,11 +519,10 @@ bool gemm_nvfp4_smallm_v2_a4_f32(const NvFP4QuantResult& W, const NvFP4QuantResu
                                                    /*accumulate=*/false, /*stripes=*/1);
 }
 
-// Two or three sibling tensors (same K, same quantized activation), one
-// launch. The single-stripe policy applies to the combined n-tile count (the
-// k/v projections at 16 tiles each ride in q's 80-tile wave); a set below the
-// threshold gets `false` and the caller issues the single launches. No
-// workspace, no accumulate: every sibling call site writes fresh outputs.
+// Two or three sibling tensors (same K, same quantized activation), one launch;
+// single-stripe policy applies to the combined n-tile count (k/v at 16 tiles each ride
+// in q's 80-tile wave). A set below the threshold returns false and the caller issues
+// single launches. No workspace, no accumulate: every sibling writes a fresh output.
 bool gemm_nvfp4_smallm_v2_multi_a4(const SmallMV2Sibling* t, int count, const NvFP4QuantResult& Xq, int M,
                                    int K, cudaStream_t stream) {
     if (count < 2 || count > kSmallMV2MaxSiblings)

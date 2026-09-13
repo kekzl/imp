@@ -74,10 +74,9 @@ Expect expected_for(Slot s, int index, const VisionConfig& c) {
         case Slot::ProjBias:
         case Slot::Fc2Bias:
             return {1, h, 0};
-        // Merger norm placement is only visible in the shape: the main merger
-        // normalises BEFORE the 2x2 concat (width hidden_size), the DeepStack
-        // mergers AFTER it (width merge^2 * hidden_size). Getting this backwards
-        // normalises the wrong axis and still runs, so it is checked here.
+        // Merger norm placement is only visible in the shape: main merger normalises BEFORE the
+        // 2x2 concat (width hidden_size), DeepStack mergers AFTER it (width merge^2*hidden_size).
+        // Getting this backwards normalises the wrong axis and still runs, so it is checked here.
         case Slot::MergerNormWeight:
         case Slot::MergerNormBias:
             return {1, index < 0 ? h : m, 0};

@@ -1,22 +1,8 @@
 #pragma once
 
-// MoE configuration, one of the nine sections split out of
-// core/dispatch_policy.h on 2026-08-21.
-//
-// WHY. dispatch_policy.h aggregates all nine and is included by 23 translation
-// units, of which 21 touch two sections or fewer. Adding one field to it costs
-// 137.1 s of incremental rebuild, against 9.1 s for a small .cpp and 14.6 s for
-// the largest .cu the file-size gate polices. A TU that needs only this section
-// can include only this header and stop rebuilding when the others change.
-//
-// This is F-10 one level down, and dispatch_policy.h's own preamble records the
-// original: config.h was included by 22 files, 85 TUs transitively, and changed
-// 130 times in six months - "the highest build cost in the repo". Lifting nine
-// sections into an aggregate fixed that, and gave the aggregate the same
-// property for the same reason.
-//
-// Pure move: the contents below are byte-identical to their previous form, and
-// dispatch_policy.h includes every one of these, so no existing include breaks.
+// One of nine RuntimeConfig sections split from core/dispatch_policy.h:
+// isolates a TU that touches only this section from the other eight's churn.
+// Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
 #include <cstdint>
 #include <string>
@@ -30,79 +16,35 @@ struct MoE {
     bool skip = false;
     bool force_fp16_sync = false;
     bool no_expert_cache = false;
-    // Share of free VRAM the expert LRU cache may claim, in percent. The pool
-    // depth this yields is what decides how many tokens of routing history the
-    // cache can hold — 73 slots/layer on a 30B-A3B is ~3 tokens, which catches
-    // the ~45% next-token reuse but not the ~80%-within-8 band. Exposed so that
-    // trade is measurable rather than hardcoded; 15 is the long-standing value.
+    // Share of free VRAM the expert LRU cache may claim, percent. Sets how many
+    // tokens of routing history the cache holds (a 30B-A3B's 73 slots/layer is
+    // ~3 tokens). Exposed so the trade is measurable, not hardcoded.
     int expert_cache_budget_pct = 15;
-    // Copy host-resident NVFP4 experts into pinned host memory at load, so the
-    // per-expert H2D transfers become real DMAs instead of driver-staged
-    // copies. On WSL2 an mmap cannot be page-locked in place, which is why this
-    // is a copy rather than a registration (the GGUF packed path does the same
-    // thing at weight_upload.cu's Path A1).
-    //
-    // It is a TRADE, not a win, which is why it is off by default. Measured on
-    // Qwen3-30B-A3B-NVFP4 with all 48 MoE layers host-resident, SIX alternating
-    // paired rounds (the switch exists partly so the arms can alternate without
-    // a rebuild):
-    //   prefill pp512  276.6 -> 790.8 tok/s   2.9x
-    //   decode  tg256  no effect              3 pairs up, 3 down
-    //   model load     5.1 s -> 22.6 s        4.4x, for ~14 GiB of pinned copies
-    //
-    // The prefill figure is 2.9x rather than the +14.8 % first measured because
-    // this flag also gates whole-layer staging: the per-projection slabs it
-    // builds are what make one memcpy per projection possible, and a pageable
-    // source is driver-staged whatever its size. With this off, layer staging
-    // measures 252-286 tok/s, i.e. nothing, so its 324 MiB is not allocated.
-    // Decode is unaffected because its cache hits 96-98 % and barely transfers;
-    // prefill touches every expert and is what the transfers cost.
-    //
-    // Three paired rounds read decode as -33 % and that was noise: this path's
-    // own decode spread is wider than the effect (the off arm alone measured
-    // 34.7 to 66.1 tok/s across six runs). Do not re-derive this from fewer
-    // than six pairs.
+    // Copy host-resident NVFP4 experts into pinned host memory at load, so
+    // per-expert H2D becomes real DMA (on WSL2 an mmap can't be page-locked in
+    // place, so this copies rather than registers). A TRADE not a win: big
+    // prefill gain, much slower load, VRAM cost of the pinned copies. Off by
+    // default. Also gates whole-layer staging (needed for one memcpy per
+    // projection instead of many driver-staged pageable copies).
     bool pin_host_experts = false;
-    // Dispatch a STAGED host-resident layer through the CUTLASS grouped NVFP4
-    // prefill instead of the per-expert dequant fallback. Requires
-    // pin_host_experts (which is what makes staging possible at all).
-    //
-    // Measured on Qwen3-30B-A3B-NVFP4, all 48 MoE layers host-resident, six
-    // alternating paired rounds:
-    //   prefill pp512  663.2 -> 1563.9 tok/s   +136 %, 6/6 pairs, spread <1 %
-    //   decode  tg256   59.4 ->   37.7 tok/s   -36 %,  6/6 pairs
-    //
-    // Opt-in because that decode figure is real but NOT understood, and it
-    // reverses with context: at pp8 instead of pp512 the same arms measure
-    // 25.5 -> 30.6 tok/s, i.e. the staged path is FASTER. This code only runs
-    // at n > 1, so it cannot slow the decode kernels directly; what differs is
-    // the expert cache's state when decode inherits it (hit rate 91 % vs
-    // 92.9-98.4 % after a long prefill, 84.8 % vs 80.6 % after a short one).
-    // Until that is explained, a 2.4x prefill win does not get to impose an
-    // unexplained decode cost by default.
+    // Dispatch a staged host-resident MoE layer through the CUTLASS grouped
+    // NVFP4 prefill instead of the per-expert dequant fallback. Requires
+    // pin_host_experts. Opt-in: the measured prefill win comes with an
+    // unexplained decode regression (expert-cache hit-rate state differs when
+    // decode inherits it), so it does not get to impose that cost by default.
     bool staged_cutlass_prefill = false;
-    // Phase 2 (MoE host-offload Graphs design): assert device-side mirror
-    // == host-side LRU state after every cache mutation. Off by default;
-    // turn on via `moe.expert_cache_debug_parity = true` in imp.conf for
-    // CI / regression diagnosis. Has a meaningful cost (D2H readback of
-    // ~120 KiB per cache update) — never enable in perf runs.
+    // Phase 2: assert device-side mirror == host-side LRU state after every
+    // cache mutation. D2H readback per update (~120 KiB): never enable in perf
+    // runs, only CI/regression diagnosis.
     bool expert_cache_debug_parity = false;
-    // Phase 4 (async prefetch): at the start of layer L, issue async
-    // H2D for up to this many of layer L+1's most-recent (proj, expert)
-    // pairs that aren't currently cached. 0 disables the prefetcher
-    // (default — safety first, Phase 4 perf gains depend on workload
-    // and need per-model measurement). Sensible values: 3..16.
+    // Phase 4 async prefetch: at layer L, issue async H2D for up to this many
+    // of layer L+1's most-recent (proj, expert) pairs not currently cached.
+    // 0 = disabled (default). Sensible values 3..16.
     int prefetch_top_k = 0;
-    // Drop the "experts on host → graphs off" guard. Kept as an escape
-    // hatch, but measured 2026-08-11 it currently buys NOTHING: every MoE
-    // path serving host-resident experts reads routing on the host, so
-    // moe_host_args_capture_guard throws under capture and the runner
-    // aborts to per-step decode on every attempt. The older note here —
-    // "correct only when prefetch coverage matches router selection" —
-    // oversold it; capture never reaches the point where that would be the
-    // question. Making this real needs routing AND expert residency
-    // resolved device-side, and residency needs a host-issued H2D on a
-    // miss. See docs/roadmap.md.
+    // Escape hatch to drop the "experts on host -> graphs off" guard. Currently
+    // a no-op: every host-resident-expert MoE path reads routing on the host,
+    // so moe_host_args_capture_guard always throws under capture. Needs routing
+    // AND expert residency resolved device-side (host-issued H2D on a miss). See docs/roadmap.md.
     bool allow_graphs_under_offload = false;
     bool zero_workspace = false;
     bool no_shared_mlp = false;
@@ -118,28 +60,11 @@ struct MoE {
     bool nvfp4_smallM = false;
     // Threshold M for smallM kernel (clamped to [0,128]).
     int nvfp4_smallM_threshold = 64;
-    // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels
-    // (gemv_nvfp4_moe_{gate_up,decode}_mr<NR>). One warp computes one
-    // row, so threads-per-block = NR * 32. Higher NR amortizes block
-    // launch overhead at the cost of fewer concurrent CTAs. Valid
-    // values: 4, 8 (default), 16, 32. Other values fall back to 8.
-    //
-    // Swept 2026-09-06, interleaved arms, `imp-cli --bench` tg128, 3 rounds
-    // each. The knob only ever reaches single-sequence decode
-    // (`can_decode_fast` refuses n != 1) and greedy output is bit-identical
-    // across values (each row is one warp's own reduction), so it is a pure
-    // occupancy choice:
-    //   NR=16  -0.96 %   NR=32  -5.15 %  (Qwen3-Coder-30B-A3B-FP4, quiet host,
-    //                                     per-arm spread under 0.1 %)
-    // Those two are settled: do not re-litigate them. NR=4 is NOT settled. It
-    // led 8 of 9 paired runs (+0.67 % Coder-30B, +0.15 % Qwen3.6-35B), but a
-    // repeat an hour later spread +-1.5 % and handed one round to NR=8, which
-    // is larger than the whole claimed effect. A foreign GPU tenant (7-8 GiB,
-    // Windows-side, invisible to `docker ps`) was holding the card right after
-    // that repeat, so it cannot separate the knob from the host either way.
-    // The default stays at 8 until someone resolves 0.5 % against this host's
-    // noise floor; the 2026-07-13 sweep that read the class as refuted is not
-    // contradicted by what we have.
+    // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels: one warp
+    // computes one row (threads/block = NR*32). Valid: 4, 8 (default), 16, 32;
+    // others fall back to 8. Only reaches single-sequence decode
+    // (can_decode_fast refuses n!=1); output is bit-identical across values.
+    // NR=16/32 measured worse and are settled; NR=4 is NOT settled (noise-level effect).
     int mr_nr = 8;
 };
 }  // namespace imp::cfg

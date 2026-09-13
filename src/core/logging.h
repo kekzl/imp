@@ -19,11 +19,9 @@ enum class LogLevel : int {
 
 void log_set_level(LogLevel level);
 
-// "debug" | "info" | "warn" | "error" | "fatal" (case-insensitive) -> level.
-// Returns nullopt on anything else, so the caller can warn instead of silently
-// picking a level nobody asked for. A string_view because there is nothing to
-// own and nothing to null-check: the old signature took a const char* and had
-// to defend against nullptr.
+// "debug"|"info"|"warn"|"error"|"fatal" (case-insensitive) -> level; nullopt
+// on anything else so the caller can warn instead of silently picking a
+// level nobody asked for. string_view: nothing to own, nothing to null-check.
 [[nodiscard]] std::optional<LogLevel> log_level_from_string(std::string_view s);
 
 // Inline for zero-overhead log level check in hot paths.
@@ -61,14 +59,10 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
     } while (0)
 #define IMP_LOG_FATAL(...) ::imp::log_message(::imp::LogLevel::FATAL, __FILE__, __LINE__, __VA_ARGS__)
 
-// --- Precondition check ---
-// IMP_CHECK is the production-safe replacement for <cassert> assert(). Unlike
-// assert(), it does NOT vanish under NDEBUG. On failure it logs at FATAL and
-// aborts the process, surfacing internal-invariant violations in Release
-// builds the same way they would in Debug.
-//
-// Use for internal-API preconditions where violation = programmer error.
-// Do NOT use for user-input validation — return an ImpError code instead.
+// IMP_CHECK: production-safe replacement for assert() that does NOT vanish
+// under NDEBUG; on failure logs FATAL and aborts, surfacing internal-
+// invariant violations in Release the same as Debug. Use only for
+// programmer-error preconditions, not user-input validation (return an ImpError instead).
 #define IMP_CHECK(cond, ...)                       \
     do {                                           \
         if (!(cond)) {                             \
@@ -100,11 +94,10 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
         }                                                                            \
     } while (0)
 
-// Post-launch check: place immediately after a kernel `<<<>>>` launch. Surfaces
-// launch-time failures (invalid configuration, missing kernel image, OOM at
-// launch) at the launch site instead of at the next synchronizing call.
-// Uses cudaPeekAtLastError() so the sticky error is NOT cleared — existing
-// downstream IMP_CUDA_CHECK_* handling still sees and propagates it.
+// Post-launch check, place immediately after a kernel <<<>>> launch:
+// surfaces launch-time failures at the launch site instead of the next
+// sync. Uses cudaPeekAtLastError so the sticky error is NOT cleared;
+// downstream IMP_CUDA_CHECK_* still sees and propagates it.
 #define IMP_CUDA_CHECK_LAUNCH()                                                      \
     do {                                                                             \
         cudaError_t err_ = cudaPeekAtLastError();                                    \

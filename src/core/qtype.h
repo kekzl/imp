@@ -5,12 +5,9 @@
 
 namespace imp {
 
-// Unified data-type tag for tensors. Replaces the previous split between
-// the compute-side dtype enum and the block-quant qtype enum.
-//
-// Wire-stable values 0..31 match the on-disk block-quant numbering used by
-// GGUF and similar formats. Values >= 64 are engine-internal types that have
-// no on-disk representation.
+// Unified data-type tag for tensors, replacing the split compute-dtype/
+// block-quant-qtype enums. Wire-stable values 0..31 match the on-disk
+// block-quant numbering (GGUF etc.); values >= 64 are engine-internal, no on-disk form.
 enum class QType : uint16_t {
     // Wire-stable 0..31 (kompatibel mit GGUF block-quant Wire-Format)
     F32 = 0,
@@ -46,10 +43,9 @@ enum class QType : uint16_t {
     // (2026-05-17); the C-API aliases followed 2026-07-07.
 };
 
-// Does this source qtype benefit from an NVFP4 decode-cache conversion?
-// (> 4.5 bits/elem, or no fast native decode kernel.) Single source of truth
-// for the pre-dequant phases AND the VRAM-budget heuristic — keep any policy
-// change here so the two can't drift.
+// Does this source qtype benefit from an NVFP4 decode-cache conversion
+// (>4.5 bits/elem, or no fast native decode kernel)? Single source of truth
+// for both the pre-dequant phases and the VRAM-budget heuristic.
 inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
     switch (qt) {
         case QType::Q8_0:
@@ -63,10 +59,9 @@ inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
             return decode_all;
         case QType::IQ4_NL:
         case QType::IQ4_XS:
-            // i-quants have no dp4a/MMVQ decode kernels — without the NVFP4
-            // decode cache they fall to dequant->cuBLAS GEMV (uncapturable
-            // under graph capture, ~2x slower). Similar bit-width to Q4_K,
-            // but here the conversion is the only fast decode path.
+            // i-quants have no dp4a/MMVQ decode kernel: without the NVFP4 decode cache
+            // they fall to dequant->cuBLAS GEMV (uncapturable under graph capture,
+            // ~2x slower). Similar bit-width to Q4_K, but here NVFP4 is the only fast decode path.
             return true;
         default:
             return false;

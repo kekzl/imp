@@ -1,21 +1,13 @@
 #pragma once
 
-// T4 (forward-scratch) of the lifetime taxonomy
-// (docs/internals/MEMORY.md §A2/§A3.3).
-//
-// A LIFO stack over one Region. A forward pass opens a Mark on entry, every
-// intermediate takes from the stack, and the Mark's destructor rewinds. Two
-// failure modes are structurally impossible: it cannot fragment (LIFO), and it
-// cannot leak (the mark unwinds on the exception path too).
-//
-// It also produces the number the planner actually needs. Today the executor
-// derives its shared workspace from max(attn, ffn, moe, ssm) heuristics
-// recomputed in three places; a stack reports its true high-water mark from
-// warmup, so the plan can size it from a measurement instead of an estimate.
-//
-// This is what removes the per-request cudaMallocAsync traffic that measures at
-// +190 MiB of steady-state allocation across all three reference configs — the
-// entire I2 violation surface.
+// T4 (forward-scratch) of the lifetime taxonomy (MEMORY.md A2/A3.3): a LIFO stack over
+// one Region. A forward pass opens a Mark on entry, every intermediate takes from the
+// stack, and the Mark's destructor rewinds. Cannot fragment (LIFO) and cannot leak (the
+// mark unwinds on the exception path too).
+// Also produces the number the planner actually needs: instead of the executor deriving
+// its shared workspace from max(attn, ffn, moe, ssm) heuristics recomputed in three
+// places, a stack reports its true high-water mark from warmup, so the plan can size it
+// from a measurement.
 
 #include "memory/backend.h"
 #include "memory/span.h"

@@ -62,13 +62,10 @@ void dispatch_dp4a_gemv(QType qtype, const void* W, const block_q8_1* q8_1, cons
     }
 }
 
-// ---------------------------------------------------------------------------
-// GDN attention output-gate split: replaces nh × 2 cudaMemcpy2DAsync loop
-// with one launch. Source row layout per token is interleaved
-// [Q_h0 | Gate_h0 | Q_h1 | Gate_h1 | ...] each chunk of size hd; both
-// destinations are contiguous [n, nh*hd]. Grid: (n × nh) blocks of hd
-// threads — each block copies one (token, head) pair's Q + gate vectors.
-// ---------------------------------------------------------------------------
+// GDN attention output-gate split: replaces an nh*2 cudaMemcpy2DAsync loop
+// with one launch. Source row layout is interleaved [Q_h0|Gate_h0|...]
+// each hd-sized; both destinations are contiguous [n,nh*hd]. Grid: (n*nh)
+// blocks of hd threads, each copying one (token,head) pair's Q+gate vectors.
 template <typename T>
 __global__ __launch_bounds__(256) void attn_gate_split_interleaved_kernel(
     const T* __restrict__ src, T* __restrict__ q_dst, T* __restrict__ gate_dst, int n_tokens, int nh,
@@ -106,10 +103,9 @@ void attn_gate_split_interleaved(const void* src, void* q_dst, void* gate_dst, i
             nh, hd, q_out_dim);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        // FP32 fallback — uses uint32_t reinterpret since templated half→FP32
-        // dispatch requires another instantiation. For now log + fall through
-        // to caller's loop on unsupported dtype.
-        // (No FP32 path expected in attention compute; keep guard for safety.)
+        // FP32 fallback uses a uint32_t reinterpret (templated half->FP32 would
+        // need another instantiation): logs and falls through to the caller's
+        // loop on unsupported dtype. No FP32 path expected in attention compute; guard kept for safety.
     }
 }
 

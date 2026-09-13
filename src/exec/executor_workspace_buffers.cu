@@ -37,10 +37,8 @@
 
 namespace imp {
 
-// workspace_sizes.h stays CUDA-free, so it replicates these numbers rather
-// than including their definitions. Tie the copies to the originals HERE, where
-// both are visible: a layout change on either side becomes a compile error
-// instead of a silently under-sized arena.
+// workspace_sizes.h stays CUDA-free and replicates these sizes; static_assert here ties
+// both copies together so a layout drift is a compile error, not a bad arena size.
 static_assert(kExecBlockQ81Bytes == sizeof(block_q8_1),
               "exec_t2_demand's block_q8_1 stride drifted from compute/gemm.h");
 static_assert(kExecCublasWorkspaceBytes == kGemmCublasWorkspaceBytes,
@@ -63,16 +61,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         const size_t kva_out = static_cast<size_t>(cfg.kv_lora_rank + cfg.qk_rope_head_dim);
         const size_t kvb_out =
             static_cast<size_t>(cfg.n_heads) * (cfg.qk_nope_head_dim + cfg.v_head_dim);
-        // T2 (A7 step 4b.2), charged as `mla_scratch`. This quartet is the one
-        // tenant in this file with NO degradation contract: the two-step KV
-        // projection in executor_attention_qkv.cu dereferences all four
-        // unconditionally (cudaMemcpy2DAsync out of kv_a, GEMMs into kv_b), so a
-        // null is a device fault a few milliseconds later rather than a slower
-        // path. The pre-arena code logged an error and handed the null on
-        // anyway. It now FAILS THE LOAD instead: with the arena sized from
-        // exec_t2_demand, a member that cannot be served means the plan was
-        // wrong, and I6 says that is a typed refusal at load — not a downgrade
-        // and not a crash (docs/internals/MEMORY.md B5 point 2).
+        // T2 quartet (A7 step 4b.2, charged as mla_scratch): no degradation contract, both
+        // consumers dereference it unconditionally, so a null would fault mid-kernel. Load fails
+        // instead: a typed refusal, not a downgrade or crash (MEMORY.md B5.2).
         bool mla_ok = true;
         auto alloc = [&](void** p, size_t cols, const char* name) {
             size_t sz = T * cols * sizeof(half);
@@ -100,10 +91,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         IMP_LOG_INFO("MLA QKV scratch: kv_a+latent+k_rope+kv_b for max_tokens=%d (graph-safe)",
                      max_tokens_);
 
-        // Phase 3: absorbed-decode latent KV cache. Opt-in via attention.mla_absorb.
-        // Requires every layer's kv_b_proj to be FP16 (the absorbed path slices
-        // W_UK/W_UV directly from it); skip + warn otherwise so the materialized
-        // default stays unaffected.
+        // Phase 3 absorbed-decode latent KV cache, opt-in via attention.mla_absorb. Requires
+        // every layer's kv_b_proj FP16 (absorbed path slices W_UK/W_UV from it); else skip+warn.
         if (dispatch_policy().attention.mla_absorb && mla_absorb_max_seq_ > 0) {
             bool all_fp16 = true;
             for (int li = 0; li < cfg.n_layers; li++) {
@@ -124,13 +113,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     static_cast<size_t>(cfg.n_layers) * mla_absorb_layer_stride_ * sizeof(half);
                 size_t scores_bytes =
                     static_cast<size_t>(cfg.n_heads) * mla_absorb_max_seq_ * sizeof(float);
-                // Same tier, opposite contract to the quartet above: both
-                // consumers (executor_attention.cu's cache write, the absorbed
-                // decode kernel) test mla_absorb_cache_ for null and take the
-                // materialized path, so this one degrades and must not fail the
-                // load. exec_t2_demand charges it only when the opt-in flag is
-                // set — it is n_layers x FULL max_seq wide, ~1 GiB at ctx 32k
-                // against the quartet's tens of MiB.
+                // Same tier, opposite contract to the quartet above: both consumers null-check and take
+                // the materialized path, so this one degrades rather than failing the load. Charged only
+                // when mla_absorb is set; n_layers x full max_seq wide, ~1 GiB at ctx 32k.
                 auto cache_slab = engine_arena().take_bytes(cache_bytes);
                 auto scores_slab = engine_arena().take_bytes(scores_bytes);
                 if (cache_slab.empty() || scores_slab.empty()) {
@@ -159,11 +144,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Dequant scratch buffer for on-the-fly weight dequantization. Every
-    // consumer guards with dequant_gpu_supported(qtype) (GGUF block quants
-    // only), so weights outside that set can never need the scratch — on
-    // SafeTensors F16/NVFP4 models this skips the whole buffer (~85 MiB on
-    // Qwen3-14B-NVFP4).
+    // Dequant scratch for on-the-fly weight dequant. Every consumer guards with
+    // dequant_gpu_supported(qtype) (GGUF block quants only); SafeTensors F16/NVFP4 models
+    // skip this buffer entirely.
     {
         size_t max_weight_elems = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -187,25 +170,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Sampling result buffer: one SAMPLE_SCRATCH_BYTES slot PER batched decode
-    // sequence (result + multi-block partial scratch for both the greedy and
-    // the top-k/top-p paths; SAMPLE_SCRATCH_BYTES >= ARGMAX_SCRATCH_BYTES).
-    // Slot 0 keeps the historical single-sequence semantics; the batched
-    // decode path enqueues each sequence's sampler into its own slot and
-    // gathers all tokens with one pinned D2H + one sync (~66 KiB per slot).
-    // All sampling staging is allocated x2 (parity halves) so the pipelined
-    // batched decode can enqueue step N+1's samplers into one half while step
-    // N's gather from the other half is still in flight (engine_scheduler
-    // decode pipeline). Non-pipelined callers stay on parity 0, which is the
-    // exact pre-parity layout.
+    // One SAMPLE_SCRATCH_BYTES slot per batched decode sequence (result + multi-block
+    // partial scratch, greedy and top-k/top-p; SAMPLE_SCRATCH_BYTES >= ARGMAX_SCRATCH_BYTES).
+    // Slot 0 is the single-sequence layout. Allocated x2 (parity halves) so pipelined decode
+    // can enqueue step N+1 while step N's gather is still in flight.
     {
         sample_slots_ = std::max(1, max_logit_tokens_);
-        // T2 (A7 step 4b.2). max_logit_tokens_ is max(max_batch, 8) — the BATCH,
-        // not the context — so this is ~1 MiB, and exec_t2_demand now charges it
-        // as `sample_scratch` so the arena is SIZED for it rather than fitting by
-        // luck against slack. No direct-allocation fallback: the caller below
-        // already treats a null buffer as "no batched sampling" by zeroing
-        // sample_slots_, which is what a closed arena should mean (AUDIT B53).
+        // T2 (A7 step 4b.2): max_logit_tokens_ = max(max_batch, 8), the batch not the context,
+        // ~1 MiB; exec_t2_demand charges it as sample_scratch. No fallback: a null buffer means
+        // "no batched sampling", zeroing sample_slots_ (AUDIT B53).
         auto slab = engine_arena().take_bytes(2 * static_cast<size_t>(sample_slots_) *
                                               SAMPLE_SCRATCH_BYTES);
         if (slab.empty()) {
@@ -231,18 +204,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // Row-batched sampler args: pinned staging + device mirror (one H2D per
     // decode step for the whole batch).
     if (h_row_args_.empty() && d_sample_result_ && sample_slots_ > 0) {
-        // The device mirror is engine-persistent (T2): sized once from
-        // max_logit_tokens_ and reused every decode step, ~115 KiB. Taken from
-        // the arena with NO direct-allocation fallback, because the caller
-        // already has a real one — it falls back to per-row sampling, which is
-        // exactly what "the arena is closed" should mean here. Keeping a
-        // cudaMalloc for that case would leave the site on the I1 allowlist for
-        // a path that only runs without an engine (AUDIT B47, A7 step 4b.2).
-        //
-        // A re-configure (teardown frees h_row_args_, then a larger batch takes
-        // again) strands the superseded slab in the bump arena. Bounded and
-        // one-time per reconfigure, which is the same trade the MMVQ tenant
-        // makes — and 115 KiB against 120 MiB of arena slack.
+        // Device mirror is engine-persistent (T2), sized from max_logit_tokens_, ~115 KiB, reused
+        // every decode step. No direct-allocation fallback: null falls back to per-row sampling
+        // (AUDIT B47, A7 step 4b.2).
+        // A reconfigure strands the superseded slab in the bump arena (bounded, one-time; same
+        // trade as the MMVQ tenant): 115 KiB against 120 MiB arena slack.
         auto slab = engine_arena().take_bytes(2 * sizeof(TopkRowArgs) * sample_slots_);
         h_row_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
                                             2 * sizeof(TopkRowArgs) * sample_slots_);
@@ -323,13 +289,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              sizeof(block_q8_1);
             size_t d8_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * qscratch_.q8_1_rows *
                            sizeof(float);
-            // T2 (A7 step 4b.2). Engine-persistent: sized once from the model's
-            // max K and the batch, reused every decode step, never freed per
-            // request. exec_t2_demand charges the whole dp4a-staging family as
-            // `quant_scratch`, so the arena is SIZED for it instead of fitting it
-            // against slack. No direct-allocation fallback — every consumer
-            // already guards on null and takes the FP16 GEMV path, which is what
-            // "the arena is closed" has to mean here (AUDIT B47).
+            // T2 (A7 step 4b.2): engine-persistent, sized once from max K and batch, reused every
+            // decode step. exec_t2_demand charges the dp4a-staging family as quant_scratch. No
+            // fallback: consumers null-check and take the FP16 GEMV path (AUDIT B47).
             auto q8_slab = engine_arena().take_bytes(q8_1_sz);
             auto d8_slab = engine_arena().take_bytes(d8_sz);
             if (q8_slab.empty() || d8_slab.empty()) {
@@ -424,23 +386,18 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     {
         int nh = cfg.n_heads;
         int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh);
-        // Size splits proportional to max context blocks, capped at 128 (the
-        // GQA tile kernel runs grid.y = n_kv_heads instead of n_heads and
-        // recovers parallelism through the split count — see
-        // paged_attention_decode_fp8).
-        // The resolved block size (set_kv_block_size), which exec_t2_demand
-        // charged this from; kKVBlockSize would size it for the wrong geometry
-        // on n_kv_heads <= 4 models and under kv_cache.block_size (B-7).
+        // Size splits proportional to max context blocks, capped at 128: the GQA tile kernel
+        // runs grid.y = n_kv_heads and recovers parallelism via split count (paged_attention_decode_fp8).
+        // Charged from the resolved block size (set_kv_block_size); kKVBlockSize sizes the wrong
+        // geometry for n_kv_heads <= 4 models under kv_cache.block_size (B-7).
         int max_context_blocks = (max_tokens_ + kv_block_size_ - 1) / kv_block_size_;
         int max_splits = std::min(128, std::max(1, max_context_blocks));
         int partial_stride = 2 + hd;
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);
-        // T2 (A7 step 4b.2), charged as `splitk_scratch`. Engine-persistent and
-        // sized from shape + batch + context; paged_attention_set_splitk_scratch
-        // takes a null as "no split-K", and the kernel re-checks the size before
-        // it uses the buffer, so the arena being closed costs the split path and
-        // nothing else.
+        // T2 (A7 step 4b.2), charged as splitk_scratch: engine-persistent, sized from shape +
+        // batch + context. paged_attention_set_splitk_scratch treats null as "no split-K"; the
+        // kernel re-checks size before use, so a closed arena only costs the split path.
         auto slab = engine_arena().take_bytes(sz);
         if (slab.empty()) {
             IMP_LOG_WARN("Split-K scratch unavailable from the T2 arena (%zu bytes), split-K "
@@ -460,24 +417,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     {
         const auto& acfg = dispatch_policy().attention;
         if (acfg.sparse_topk_tokens > 0) {
-            // Scores row capacity must cover the MAX CONTEXT, not max_tokens_
-            // (the per-forward chunk cap, 4096) - sizing from max_tokens_
-            // silently disabled the whole feature past 4k context (the
-            // dispatch gate checks max_blocks_per_seq against this capacity).
-            // mla_absorb_max_seq_ carries the engine's effective max_seq_len
-            // for every model (executor_workspace.cu).
+            // Scores row capacity must cover the max context, not max_tokens_ (the per-forward chunk
+            // cap): sizing from max_tokens_ silently disables the feature past 4k context (dispatch
+            // gate checks max_blocks_per_seq against this capacity).
             const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;
-            // +16: the spec verify row tables carry 16 slack blocks past the
-            // context ceiling (engine_spec_capture.cpp table_cap "+ 16"); the
-            // dispatch gate compares the incoming table stride against this
-            // capacity, and without the margin every verify chunk failed it.
-            // Every token->block conversion uses the cache's REAL block size.
-            // It was kKVBlockSize (16) until #1819, so a model with
-            // n_kv_heads <= 4 (block size 32) got double the requested budget,
-            // engaged sparse at twice sparse_min_ctx, and doubled sink/recent -
-            // the startup line reported the 16-based arithmetic while the
-            // per-step ACTIVE line reported the real one. The arithmetic is a
-            // pure function so a CPU test can pin it at both block sizes.
+            // +16: spec verify row tables carry 16 slack blocks past the context ceiling
+            // (engine_spec_capture.cpp table_cap "+16"); dispatch gate compares stride against this.
+            // Every token->block conversion must use the cache's real block size, not kKVBlockSize:
+            // n_kv_heads <= 4 models use block size 32, not 16, or budgets silently double (#1819).
             const int kv_bs = kv_block_size_;
             const SparseGeometry geo =
                 sparse_geometry(acfg.sparse_topk_tokens, acfg.sparse_sink_tokens,
@@ -496,11 +443,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // identity copy up to that length.
             const int engage_blocks = geo.engage_blocks;
             const int table_blocks = engage_blocks;
-            // Row capacity covers batched decode AND spec verify chunks: chunk
-            // rows are presented as sequences, up to the 33-row chunk cap
-            // (engine_spec_capture.cpp chunk_cap = max(bucket_max, k+1, 33)).
-            // Sizing from max_batch alone left the gate dead for every chunk
-            // wider than the batch (n_seq=17 measured vs 8 rows, 2026-08-29).
+            // Row capacity covers batched decode AND spec verify chunks: chunk rows are sequences,
+            // up to the 33-row chunk cap (engine_spec_capture.cpp chunk_cap = max(bucket_max, k+1, 33)).
+            // Sizing from max_batch alone starves any chunk wider than the batch.
             const int max_batch = std::max(max_logit_tokens_, 33);
             const size_t scores_sz = (size_t)max_batch * max_ctx_blocks * sizeof(float);
             const size_t bt_sz = (size_t)max_batch * table_blocks * sizeof(int);
@@ -534,18 +479,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16.
-    // Only the materialized cuBLAS prefill fallback consumes this. On uniform-
-    // shape models without learned sinks whose head_dim FA2 covers (128 always,
-    // 256 behind attention.fa2_hd256), FP16-QK FA2 serves ALL prefill at-or-above
-    // cuBLAS at every length (hd=128: Qwen3-Coder-30B NVFP4 ~parity pp512, +24%
-    // pp1024, +52% pp2048, 2026-06-12; hd=256 rides the #930/#932 port) — the
-    // buffer is dead weight there, so skip it (reclaims up to ~380 MiB at
-    // batch8/ctx4096). Uniform per-layer shapes (GDN/Mamba2 hybrids: zeros on
-    // non-attention layers) take FA2 too since the #932 single-shot refinement.
-    // cuBLAS stays the reference for heterogeneous shapes (gemma-4 dual head_dim),
-    // learned sinks (gpt-oss), hd=256 with fa2_hd256 off, and the explicit
-    // fa2_fp16qk=never opt-out. See the run_attention dispatch (FA2 tried first).
+    // cuBLAS attention S-matrix workspace [n_heads, attn_seq, attn_seq] FP16; only the
+    // materialized cuBLAS prefill fallback uses it. Skip when FP16-QK FA2 serves all prefill
+    // (uniform per-layer shapes, no learned sinks, head_dim 128 or 256 with fa2_hd256).
+    // cuBLAS remains the reference for heterogeneous shapes, learned sinks, hd=256 without
+    // fa2_hd256, and fa2_fp16qk=never.
     if (fa2_serves_all_prefill()) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — "
                      "no S-matrix needed)");
@@ -589,16 +527,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using tiled WMMA FMHA fallback)");
     }
 
-    // Auto-derive fmha_prefill_threshold from S-matrix capacity. This only
-    // governs the cuBLAS-vs-tiled-FMHA boundary on the configs that still use
-    // the S-matrix (hd != 128, per-layer, sinks); on hd=128 FP16-QK FA2 is tried
-    // first and the threshold is moot (cap=0 → threshold=1). The dispatch uses
-    // `prefer_fmha = (n >= threshold)`, so the threshold is cap+1 — the chunk
-    // with n == cap, for which the S-matrix fits exactly, belongs to cuBLAS.
-    // (Historical note: the old "cuBLAS ~30% faster than FMHA at n == cap" was
-    // measured against the pre-#653/#673/#674 tiled FMHA, NOT FP16-QK FA2; FA2
-    // now matches cuBLAS at pp512 and beats it +24%/+52% at pp1024/pp2048 —
-    // measured 2026-06-12.)
+    // Auto-derive fmha_prefill_threshold from S-matrix capacity. Only matters for configs
+    // still using the S-matrix (hd != 128, per-layer, sinks); hd=128 tries FP16-QK FA2 first
+    // so the threshold is moot (cap=0 -> threshold=1). Dispatch uses prefer_fmha = (n >=
+    // threshold), so threshold = cap+1: the chunk with n == cap fits the S-matrix and goes to cuBLAS.
     if (dispatch_policy().attention.fmha_prefill_threshold == -1) {
         int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() + 1 : 1;
         const_cast<cfg::Attention&>(dispatch_policy().attention).fmha_prefill_threshold = auto_threshold;
@@ -624,10 +556,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // Staging buffer for host→device expert weight transfer. Its only
-        // consumers are the `!packed.on_device` branches of the legacy MoE
-        // forward, so skip it entirely when every packed expert tensor is
-        // device-resident (the common all-on-device load).
+        // Staging buffer for host->device expert weight transfer, used only by the legacy MoE
+        // forward's !packed.on_device branches. Skip entirely when every packed expert tensor is
+        // device-resident.
         size_t max_expert_raw = 0;
         bool any_host_packed_experts = false;
         bool nvfp4_host_experts = false;
@@ -647,15 +578,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 check(L.expert_down_packed, L.expert_down_packed.qtype);
                 check(L.expert_gate_packed, L.expert_gate_packed.qtype);
             }
-            // NVFP4-prequant checkpoints have no 3-D packed tensor at this
-            // point — their experts are per-expert 2-D tensors and Phase 3
-            // stamps the packed slot later, well after this runs. So size the
-            // pool off those instead, and off the FULL slot (packed weights +
-            // micro-scales), which is what an NVFP4 slot has to hold.
-            //
-            // The qtype is still INT8 here: Phase 0's promotion to NVFP4 runs
-            // in pre_dequant_weights(), which is init_kv_cache() — after this.
-            // is_nvfp4_prequant comes from config.json and is known already.
+            // NVFP4-prequant checkpoints have no 3-D packed tensor here: experts are per-expert 2-D
+            // tensors and Phase 3 stamps the packed slot later. Size the pool from those instead, off
+            // the full slot (packed weights + micro-scales).
+            // qtype is still INT8 here: promotion to NVFP4 runs in pre_dequant_weights()
+            // (init_kv_cache), after this. is_nvfp4_prequant comes from config.json, already known.
             if (model_->config().is_nvfp4_prequant) {
                 for (int li = 0; li < model_->n_layers(); li++) {
                     const auto& L = model_->layer(li);
@@ -696,11 +623,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // LRU expert cache: keeps recently-used host experts on GPU.
         // Only allocated when some experts reside on host (not all fit in VRAM).
         if (max_expert_raw > 0) {
-            // gpt-oss exemption: its MXFP4 experts are host-resident here only
-            // transiently — pre_dequant converts them to on-device NVFP4 +
-            // CUTLASS-grouped before the first forward. They are never
-            // host-offloaded at runtime, so the LRU cache must not be allocated
-            // (it would shadow the converted device experts → garbage output).
+            // gpt-oss exemption: its MXFP4 experts are host-resident here only transiently;
+            // pre_dequant converts them to on-device NVFP4 + CUTLASS-grouped before the first forward.
+            // Never host-offloaded at runtime, so the LRU cache must not be allocated (would shadow
+            // the converted device experts -> garbage output).
             bool has_host_experts = false;
             if (!model_->profile().is_gpt_oss) {
                 for (int li = 0; li < model_->n_layers(); li++) {
@@ -747,22 +673,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 IMP_LOG_INFO("Expert LRU cache disabled via moe.no_expert_cache (staging fallback)");
             }
 
-            // Whole-layer staging buffer for the NVFP4 host prefill. Sized for
-            // ONE layer and reused across layers — the forward is sequential,
-            // so each layer overwrites the previous one after its kernels have
-            // run on the same stream.
-            //
-            // This exists to make the transfers big. Per expert they are
-            // ~768 KiB + ~96 KiB, which does not reach PCIe bandwidth; a whole
-            // projection at once is one transfer of ~110 MiB. Same bytes, and
-            // it is the larger half of this path's prefill cost.
-            // Only useful together with `moe.pin_host_experts`, and measurably
-            // so: with pinning it is worth 2.5x on prefill, without it exactly
-            // nothing (252-286 tok/s either way). Large transfers only pay off
-            // from a pinned source — a pageable one is staged inside the driver
-            // whatever its size — and the per-projection slabs that make the
-            // experts contiguous in the first place are what pinning builds.
-            // So do not spend the VRAM when it cannot be spent well.
+            // Whole-layer staging buffer for NVFP4 host prefill, sized for one layer and reused
+            // across layers (forward is sequential, each layer overwrites the previous).
+            // Batches per-expert transfers (~768 KiB + ~96 KiB, below PCIe bandwidth) into one
+            // ~110 MiB projection transfer. Only effective with moe.pin_host_experts: large
+            // transfers pay off only from a pinned source.
             const auto& stage_cfg = model_->config();
             if (nvfp4_host_experts && stage_cfg.n_experts > 0 &&
                 dispatch_policy().moe.pin_host_experts) {
@@ -784,10 +699,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                             "one layer at a time)",
                             total / (1024.0 * 1024.0), stage_cfg.n_experts);
 
-                        // SfAtom scales + per-expert pointer arrays, so the
-                        // staged layer can take the CUTLASS device-args path
-                        // instead of the per-expert dequant fallback. Sized
-                        // from the largest projection; gate/up and down differ.
+                        // SfAtom scales + per-expert pointer arrays, so the staged layer takes the CUTLASS
+                        // device-args path instead of the per-expert dequant fallback. Sized from the largest
+                        // projection (gate/up and down differ).
                         const int64_t d_model = stage_cfg.d_model;
                         const int64_t eff_ff =
                             stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;
@@ -835,14 +749,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // ST-NVFP4 experts run the CUTLASS 3.x grouped path for ALL prefill
-        // sizes (StorageTier::CUTLASS_NVFP4 covers every expert on healthy
-        // loads); the buffers below only back the GGUF-family batch paths
-        // (FP16-cache batch, Q6_K FP8 batch, IMMA Q8 staging) and the
-        // post-CUTLASS NVFP4→FP16 dequant fallback. Skipping them frees
-        // ~640 MiB on Qwen3-30B-A3B-NVFP4 (3.5 GiB free at load) — the
-        // pathological CUTLASS-decline case falls through to the legacy
-        // per-expert path (slow but correct).
+        // ST-NVFP4 experts run the CUTLASS 3.x grouped path for all prefill sizes; the buffers
+        // below only back GGUF-family batch paths (FP16-cache batch, Q6_K FP8 batch, IMMA Q8
+        // staging) and the post-CUTLASS NVFP4->FP16 dequant fallback. Skipping them frees VRAM;
+        // CUTLASS-decline falls through to the legacy per-expert path (slow but correct).
         bool experts_st_nvfp4 = true;
         for (int i = 0; i < cfg.n_layers && experts_st_nvfp4; i++) {
             const auto& L = model_->layer(i);
@@ -858,18 +768,13 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
         } else
-        // Batch dequant buffer: sized for a chunk of experts (L2-resident strategy).
-        // We dequant a chunk of experts to FP16, then immediately GEMM while the
-        // FP16 data is still warm in L2 cache (~96 MB on RTX 5090). This avoids
-        // writing the FP16 intermediate to DRAM entirely, saving ~5x DRAM traffic.
-        // Skip allocation if experts are on host (batch dequant only useful for on-device experts).
+        // Batch dequant: sized for a chunk of experts (L2-resident strategy). Dequant a chunk to
+        // FP16 then GEMM while still warm in L2 (~96 MB on RTX 5090), avoiding an FP16 round-trip
+        // to DRAM. Skipped when experts are host-resident (only useful for on-device experts).
         if (!skip_batch_dequant) {
-            // Cap at the actual remaining free VRAM minus a reserve for KV
-            // cache + workspaces (init_kv_cache runs after this and sees what's
-            // left). On Nemotron-H NVFP4 (32 GiB GPU, 22 GiB model) the full
-            // n_experts target hit ~1.2 GiB and starved the KV cache → 16-block
-            // floor → long-prompt hang. Leaving ≥ 1 GiB free here covers
-            // vram_budget reserve (~768 MiB) plus a useful KV cache.
+            // Cap at remaining free VRAM minus a reserve for KV cache + workspaces (init_kv_cache
+            // runs after this and sees what's left). Leave >= 1 GiB free: covers vram_budget reserve
+            // (~768 MiB) plus a useful KV cache.
             size_t free_now = 0, total_now = 0;
             vram_budget_mem_get_info(&free_now, &total_now);
             constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
@@ -903,20 +808,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.batch_dequant_buf = nullptr;
                 moe_.batch_dequant_buf_size = 0;
             }
-            // A max_tokens x top_k x d_model FP32 "moe_fp32_down" scratch was
-            // allocated here for the Gemma-4 fp32_expert_down bisect flag,
-            // which had no writer since #319 (AUDIT_arch_2026 G-7): VRAM held
-            // by every GGUF MoE load for a path that could not run.
         } else {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
         }
 
-        // CUTLASS 3.x NVFP4 grouped activation staging. Auto-used for prefill
-        // (n > 1) on NVFP4-prequant MoE models — 4.6× speedup on Qwen3-Coder-30B-A3B-FP4.
-        // Decode (n == 1) keeps using the legacy per-expert GEMV. Max K = d_model,
-        // max_expanded = max_tokens * top_k. ~38 MiB on 128-experts / 4096 tokens.
+        // CUTLASS 3.x NVFP4 grouped activation staging: auto-used for prefill (n > 1) on
+        // NVFP4-prequant MoE models. Decode (n == 1) keeps the legacy per-expert GEMV.
+        // max K = d_model, max_expanded = max_tokens * top_k.
         if (cfg.n_experts > 0) {
             int top_k = cfg.n_experts_active;
             int max_expanded = max_tokens_ * top_k;
@@ -932,10 +832,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             if (moe_.cutlass3x_packed && moe_.cutlass3x_sf) {
                 moe_.cutlass3x_packed_size = packed_sz;
                 moe_.cutlass3x_sf_size = sf_sz;
-                // Device array of per-expert SFA base pointers for the fused quantize kernel.
-                // The last of the n_experts-sized MoE pointer arrays to move: same
-                // tier, same `moe_arrays` charge, and the fused quantize kernel
-                // already treats a null as "per-expert SFA bases unavailable".
+                // Device array of per-expert SFA base pointers for the fused quantize kernel. Last of the
+                // n_experts-sized MoE pointer arrays to move; same tier, same moe_arrays charge. The
+                // fused quantize kernel treats null as "per-expert SFA bases unavailable".
                 size_t sfa_ptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(uint8_t*);
                 if (auto sl = engine_arena().take_bytes(sfa_ptr_bytes); !sl.empty()) {
                     moe_.cutlass3x_sfa_ptrs = reinterpret_cast<uint8_t**>(sl.data());
@@ -964,13 +863,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // 3 arrays × n_experts void pointers = trivial memory (< 4 KB).
         // Eliminates cudaMallocAsync/FreeAsync from the hot path.
         if (cfg.n_experts > 0) {
-            // T2 for the whole cluster below (A7 step 4b.2). Each is sized from
-            // n_experts, none is ever freed per request, and each caller already
-            // treats a null pointer as "this optional path is off" — so no
-            // direct-allocation fallback, and the sites leave the I1 allowlist
-            // instead of moving (AUDIT B47). exec_t2_demand charges them as
-            // `moe_arrays`, so the arena is sized for them rather than absorbing
-            // them into slack.
+            // T2 for the cluster below (A7 step 4b.2): each sized from n_experts, never freed per
+            // request, and each caller treats null as "this optional path is off". No direct-
+            // allocation fallback; exec_t2_demand charges them as moe_arrays (AUDIT B47).
             size_t ptr_bytes = 3 * static_cast<size_t>(cfg.n_experts) * sizeof(void*);
             if (auto sl = engine_arena().take_bytes(ptr_bytes); !sl.empty()) {
                 moe_.d_work_ptrs = reinterpret_cast<void**>(sl.data());
@@ -1053,10 +948,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): the five
-    // per-(chunk, head) strip arrays + the FP32 inter-strip state. ~42 MiB at
-    // 32 value heads. Engine lifetime; on failure the route degrades to the
-    // fused scan (the dispatch checks for nullptr).
+    // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): five per-(chunk, head)
+    // strip arrays + FP32 inter-strip state, ~42 MiB at 32 value heads. Engine lifetime; on
+    // failure the route degrades to the fused scan (dispatch checks nullptr).
     if (has_gdn_ && dispatch_policy().gdn.chunkpar_scan && cfg.ssm_dt_rank > 0) {
         gdn_chunkpar_ws_bytes_ = gdn_scan_chunkpar_workspace_bytes(cfg.ssm_dt_rank);
         gdn_chunkpar_ws_ = vram_alloc(vram_alloc_, gdn_chunkpar_ws_bytes_, "gdn_chunkpar_ws");
@@ -1067,10 +961,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K
-    // partials + tickets for N = 2 x n_heads. The kernel resets its tickets,
-    // so one zeroing here is the whole initialisation. nullptr keeps the two
-    // cuBLAS calls.
+    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K partials +
+    // tickets for N = 2 x n_heads. Kernel resets its tickets, so zeroing here is the whole
+    // init. nullptr keeps the two cuBLAS calls.
     if (has_gdn_ && dispatch_policy().gdn.alpha_beta_smallm && cfg.ssm_dt_rank > 0) {
         gdn_ab_ws_bytes_ = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
         gdn_ab_ws_ = vram_alloc(vram_alloc_, gdn_ab_ws_bytes_, "gdn_ab_ws");
@@ -1106,11 +999,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             qscratch_.fp8_act_size = 0;
         }
         {
-            // T2 (A7 step 4b.2). These three are engine-lifetime, sized from
-            // init-time shapes, and each caller degrades on null — the reduction
-            // pair falls back to "the sync path" by its own log line. So no
-            // direct-allocation fallback and the sites leave the allowlist.
-            // exec_t2_demand charges them as `fp8_reduction`.
+            // T2 (A7 step 4b.2): engine-lifetime, sized from init-time shapes; each caller degrades
+            // on null (the reduction pair falls back to the sync path via its own log line). No
+            // direct-allocation fallback; exec_t2_demand charges them as fp8_reduction.
             auto sl = engine_arena().take_bytes(sizeof(float));
             qscratch_.d_act_scale = sl.empty() ? nullptr : reinterpret_cast<float*>(sl.data());
             if (!qscratch_.d_act_scale)
@@ -1145,15 +1036,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {
         int max_k = 0;
         int max_n = 0;
-        // NVFP4 prequant tensors carry K_packed = K_logical/2 in shape[1].
-        // Phase 0b promote runs AFTER this scratch-sizing pass, so the
-        // Tensor.qtype is still the on-disk byte type (INT8/U8) here, not
-        // QType::NVFP4. Use the model-level cfg flag to detect the format
-        // and scale up K accordingly. Without this, layer 11's o_proj on
-        // Gemma-4 (K_packed=4096, K_logical=8192) blows past sf scratch
-        // (1 MiB) and cudaMemsetAsync poisons the stream with invalid
-        // argument, falling back to dequant→cuBLAS for the rest of the
-        // forward pass — output collapses to "<strong><strong>..." loops.
+        // NVFP4 prequant tensors carry K_packed = K_logical/2 in shape[1]. Phase 0b promote runs
+        // after this scratch-sizing pass, so Tensor.qtype is still the on-disk byte type here,
+        // not QType::NVFP4. Use the model-level cfg flag to scale K accordingly: otherwise sf
+        // scratch undersizes and cudaMemsetAsync poisons the stream, collapsing output to loops.
         const bool nvfp4_prequant_2d_packed = cfg.is_nvfp4_prequant;
         auto track_2d = [&](const Tensor& w) {
             if (w.data && w.ndim >= 2) {
@@ -1171,16 +1057,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                                   &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
                 track_2d(*w);
             }
-            // MoE expert weights: per-expert tensors are [N, K] 2D. The 3D
-            // packed buffers expert_*_packed reshape to [n_experts, N, K] —
-            // we only care about (N, K) for activation scratch sizing.
-            // For Gemma-4-26B-A4B and similar MoE prequant SafeTensors, the
-            // expert down proj has K=8192 (d_ff) while the per-layer scan
-            // above only sees K=2816 (d_model) on attention/shared weights.
-            // Without this, M=3085+ prefill blows out the SF scratch buffer
-            // (sf_bytes=1.6 MiB > scratch=1 MiB), cudaMemsetAsync returns
-            // invalid argument, and the stream poisons every downstream
-            // kernel — output collapses to <strong><strong>... loops.
+            // MoE expert weights are per-expert [N, K] 2D; the 3D packed buffers reshape to
+            // [n_experts, N, K], only (N, K) matters for activation scratch sizing.
+            // Expert down proj K (d_ff) can exceed the per-layer scan's K (d_model, attention/shared
+            // weights); missing this blows out SF scratch and poisons the stream, collapsing output.
             for (const auto* expert_vec : {&L.expert_w_gate, &L.expert_w_up, &L.expert_w_down}) {
                 if (!expert_vec->empty())
                     track_2d((*expert_vec)[0]);
@@ -1235,14 +1115,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.cutlass_act_sf_size = 0;
                 qscratch_.cutlass_workspace_size = 0;
             } else {
-                // Pre-zero the SfAtom scale workspace once. The per-call
-                // quantize_fp16_nvfp4_cutlass_kernel only writes the M × K_groups
-                // valid SF cells; SfAtom padding bytes remain whatever they were
-                // before. Zeroing once here lets quantize_fp16_to_nvfp4_cutlass
-                // skip its per-call cudaMemsetAsync (saves ~1 launch per CUTLASS
-                // NVFP4 GEMM, ~6720 calls / 100 ms in Llama Q8 W1 prefill). Sync
-                // because executor init may finish before the first stream-bound
-                // call uses this buffer.
+                // Pre-zero the SfAtom scale workspace once: quantize_fp16_nvfp4_cutlass_kernel only
+                // writes the M x K_groups valid SF cells, leaving padding as whatever was there before.
+                // Zeroing once here lets the per-call path skip its own cudaMemsetAsync. Sync because
+                // executor init may finish before the first stream-bound call uses this buffer.
                 IMP_CUDA_CHECK_LOG(cudaMemset(qscratch_.cutlass_act_sf, 0,
                                               qscratch_.cutlass_act_sf_size));
                 IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
@@ -1253,13 +1129,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              qscratch_.cutlass_act_sf_size / (1024.0 * 1024.0),
                              qscratch_.cutlass_workspace_size / (1024.0 * 1024.0));
 
-                // MXFP4 activation buffers: shares packed data with NVFP4, only needs
-                // separate UE8M0 scale factors (SFVecSize=32 vs NVFP4's 16).
-                // Only allocate when the model actually carries MXFP4 weights
-                // (or attention.mxfp4 prefill is opt-in enabled). hardware-
-                // availability (cutlass_sm120_mxfp4_available) is necessary
-                // but not sufficient — was allocating ~0.5 MiB on every NVFP4
-                // model regardless of whether MXFP4 path would ever execute.
+                // MXFP4 activation buffers share packed data with NVFP4, only need separate UE8M0 scale
+                // factors (SFVecSize=32 vs NVFP4's 16). Allocate only when the model carries MXFP4
+                // weights (or attention.mxfp4 prefill is opt-in enabled); hardware availability alone is
+                // not sufficient.
                 bool has_mxfp4_weights = false;
                 for (int i = 0; i < cfg.n_layers && !has_mxfp4_weights; i++) {
                     const auto& L = model_->layer(i);
@@ -1308,28 +1181,19 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 }
 
 bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
-    // Iterate populated NVFP4 weight caches to find the largest single dequant
-    // target. The gemm_nvfp4 fallback dequantizes one weight at a time to FP16
-    // — the workspace only needs to fit the LARGEST single weight (N × K × 2
-    // bytes). MoE caches contribute per-expert weights (callers slice one
-    // expert at a time into a synthetic NvFP4QuantResult before invoking
-    // gemm_nvfp4 — see executor_forward_moe.cu).
-    // Weights above kCap don't get a workspace (an NVFP4 LM head would be
-    // ~1.5 GiB) — track the covered maximum separately so ONE oversized
-    // tensor no longer disables the workspace for every other weight (the
-    // all-or-nothing skip left Nemotron with no workspace at all, which is
-    // what made its verify-chunk capture fail: #855 census crash class).
+    // Largest single dequant target across NVFP4 weight caches: gemm_nvfp4 dequantizes one
+    // weight at a time to FP16, so the workspace only needs to fit the largest single weight
+    // (N x K x 2 bytes). Weights above kCap (512 MiB) get no workspace; track the covered
+    // maximum separately so one oversized tensor doesn't disable the workspace for every
+    // other weight (#855).
     constexpr size_t kCap = 512ULL * 1024 * 1024;  // 512 MiB
     size_t max_bytes = 0;         // largest ELIGIBLE dequant target
     size_t covered_bytes = 0;     // largest target we will actually cover
     size_t lm_head_bytes = 0;     // the excluded plane, for the log
-    // The LM head is not a candidate for the fallback this cap guards: at
-    // M > 1 executor_forward.cu serves it with the smallm v2 kernel, the
-    // CUTLASS NVFP4 GEMM or the batched K-par GEMV, and none of the three
-    // dequantizes the weight. Counting it made ONE plane that cannot reach the
-    // fallback disable prefill graph capture for every plane that can
-    // (Qwen3.8-27B-NVFP4: 2425 MiB LM head against a 170 MiB largest layer
-    // plane). See exec/dequant_cap.h.
+    // LM head is not a candidate for the fallback this cap guards: at M > 1 it is served by
+    // the smallm v2 kernel, the CUTLASS NVFP4 GEMM, or the batched K-par GEMV, none of which
+    // dequantizes the weight. Counting it would let one oversized plane disable prefill graph
+    // capture for every plane that can use it. See exec/dequant_cap.h.
     const void* lm_head_ptr = model_ ? model_->output_proj().data : nullptr;
     auto consider = [&](int64_t N, int64_t K) {
         size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(half);
@@ -1352,13 +1216,10 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
         consider_plane(ptr, moe.N, moe.K);  // single-expert dequant slice
     for (const auto& [ptr, cw] : wcache_.cutlass_nvfp4)
         consider_plane(ptr, cw.N, cw.K);
-    // SafeTensors NVFP4 prequant: per-tensor and per-expert NVFP4 storage lives
-    // on the Layer struct (qtype=NVFP4 with scales sidecar), not in wcache_.
-    // The gemm_nvfp4 fallback (executor_forward_moe.cu line ~2369 for MoE
-    // experts, and executor_kernels.cu:2052 for dense weights including shared
-    // experts) constructs a synthetic NvFP4QuantResult with N=t.shape[0],
-    // K=t.shape[1]*2 (logical, since shape[1] is FP4-packed bytes). Iterate
-    // every NVFP4 tensor on the layer to find the largest dequant target.
+    // SafeTensors NVFP4 prequant: per-tensor/per-expert NVFP4 storage lives on the Layer
+    // struct (qtype=NVFP4 with scales sidecar), not in wcache_. gemm_nvfp4 fallback
+    // constructs a synthetic NvFP4QuantResult with N=t.shape[0], K=t.shape[1]*2 (logical,
+    // since shape[1] is FP4-packed). Iterate every NVFP4 tensor on the layer for the largest.
     if (model_ != nullptr) {
         const int n_layers = model_->n_layers();
         for (int li = 0; li < n_layers; ++li) {
@@ -1428,12 +1289,10 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     if (covered_bytes == 0)
         return !nvfp4_dequant_uncapturable_;
 
-    // T2: take from the engine-persistent arena, whose capacity was sized to
-    // include exactly this buffer (exec/workspace_sizes.h). That is what keeps
-    // the pre-dequant cache build — which runs BEFORE this and expands into
-    // free VRAM — from leaving nothing behind (AUDIT B23). Fall back to a
-    // direct allocation when the arena is closed (bare GraphExecutor in tests)
-    // or short, exactly as the MMVQ tenant does.
+    // T2: taken from the engine-persistent arena, sized to include exactly this buffer
+    // (exec/workspace_sizes.h) so pre-dequant cache build doesn't leave nothing behind
+    // (AUDIT B23). Falls back to direct allocation when the arena is closed (bare
+    // GraphExecutor in tests) or short, like the MMVQ tenant.
     {
         auto slab = engine_arena().take_bytes(covered_bytes);
         if (!slab.empty()) {
@@ -1532,10 +1391,9 @@ void GraphExecutor::free_buffers() {
 
     // Free all weight caches (FP16, FP8, NVFP4, CUTLASS, fused KV/gate+up, migrated/overflow)
     {
-        // Registry-owned overlays (Phase 4.2): fused_kv / fused_gate_up
-        // storage is now owned by the WeightRegistry handles, not wcache_.
-        // The maps below are kept empty by `pre_dequant_weights`. This helper
-        // frees any handle whose `owned_bytes > 0`.
+        // Registry-owned overlays (Phase 4.2): fused_kv / fused_gate_up storage is owned by
+        // WeightRegistry handles, not wcache_. The maps below stay empty (pre_dequant_weights);
+        // this helper frees any handle with owned_bytes > 0.
         registry_.free_owned_storage(vram_alloc_);
         // Legacy loops — both maps must be empty now. Kept as a defensive
         // fallback in case a code path writes to them without going through
@@ -1691,10 +1549,8 @@ void GraphExecutor::free_buffers() {
         lm_head_cutlass_ = {};
         lm_head_cutlass_ready_ = false;
     }
-    // The MLA quartet and the absorbed cache are arena-owned since A7 step 4b.2 —
-    // no frees here; ~Engine closes the arena after every executor teardown. The
-    // quartet never had one to begin with, which nothing noticed because they are
-    // process-lifetime buffers.
+    // MLA quartet and absorbed cache are arena-owned since A7 step 4b.2: no frees here;
+    // ~Engine closes the arena after every executor teardown.
     mla_kv_a_buf_ = nullptr;
     mla_latent_buf_ = nullptr;
     mla_k_rope_buf_ = nullptr;
@@ -1743,12 +1599,10 @@ void GraphExecutor::free_buffers() {
     chunk_capture_k_ = nullptr;
     chunk_capture_v_ = nullptr;
     chunk_capture_ctx_ = 0;
-    // cudaFreeAsync, not cudaFree: the grow path in executor_attention_prefill.cu
-    // allocates these with cudaMallocAsync, and this teardown is the only place
-    // that used the sync API on them. Freeing a stream-ordered allocation
-    // synchronously returns success without returning the block to the async
-    // mempool (#834), so the 128 MiB looked reclaimed and was not. Null stream
-    // plus a sync below, matching ~Model.
+    // cudaFreeAsync, not cudaFree: the grow path (executor_attention_prefill.cu) allocates
+    // these with cudaMallocAsync, and a sync free on a stream-ordered allocation returns
+    // success without returning the block to the async mempool (#834). Null stream + sync,
+    // matching ~Model.
     if (chunk_eager_k_) {
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(chunk_eager_k_, nullptr));
         chunk_eager_k_ = nullptr;
@@ -1830,23 +1684,17 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     // FP16-QK FA2 serves every hd=128 chunk with no S-matrix.
     if (uniform && !sinks && hd_u == 128 && att.fa2_fp16qk != "never")
         return desired;
-    // The tiled FMHA dispatch serves chunks whose ctx_len crosses the
-    // threshold (and any chunk the S-matrix cannot hold) with no S-matrix --
-    // but only for head dims it actually covers. Without that check this
-    // returned `desired` unclamped on any model whose head_dim FMHA cannot
-    // serve (MLA is head_dim 192), and the cuBLAS fallback then aborted on its
-    // own S-matrix bound. See attention_dispatch_rules.h.
+    // Tiled FMHA dispatch serves chunks whose ctx_len crosses the threshold (or that the
+    // S-matrix cannot hold) with no S-matrix, but only for head dims it covers. Without this
+    // check, an unclamped head_dim (e.g. MLA's 192) reaches the cuBLAS fallback and aborts on
+    // its own S-matrix bound. See attention_dispatch_rules.h.
     if (uniform && !sinks && fmha_serves_head_dim(hd_u) && att.fmha_prefill_threshold > 0 &&
         offset + desired >= att.fmha_prefill_threshold)
         return desired;
-    // Heterogeneous per-layer shapes (Gemma-4 dual head_dim 256/512): every
-    // layer is served at ANY chunk×ctx — hd 128/256 ride FA2 per-layer, hd=512
-    // runs cuBLAS in workspace-sized q-row slices at S-overflow
-    // (attention_cublas_prefill_sliced), and the tiled FMHA covers the rest —
-    // so no global clamp is needed. The quadratic clamp below used to shrink
-    // EVERY layer's chunk to the hd=512 S-matrix capacity (~190 rows at 64k
-    // ctx), multiplying per-chunk cost (MoE dequant, launches) across the
-    // whole model.
+    // Heterogeneous per-layer shapes (e.g. Gemma-4 dual head_dim 256/512): every layer is
+    // served at any chunk x ctx (hd 128/256 via FA2 per-layer, hd=512 via cuBLAS in
+    // workspace-sized q-row slices, tiled FMHA covers the rest), so no global clamp is needed.
+    // A global clamp would shrink every layer's chunk to the smallest S-matrix capacity.
     if (!uniform && !sinks) {
         bool all_served = true;
         for (int x : cfg.head_dim_per_layer) {
@@ -1891,23 +1739,19 @@ bool GraphExecutor::chunk_capture_supported() const {
             break;
         }
     }
-    // FP16-QK FA2 is the only device-length chunked attention kernel. hd=256
-    // rides the #930 port (d_kv_len is a runtime kernel argument shared by
-    // every instance); the GDN/Mamba2 recurrent kernels stop state updates at
-    // the device chunk length (d_chunk_len), so hd=256 hybrids (Qwen3.5/3.6)
-    // are capture-eligible when the fa2_hd256 flag is on.
+    // FP16-QK FA2 is the only device-length chunked attention kernel. hd=256 rides the #930
+    // port (d_kv_len is a runtime kernel arg); GDN/Mamba2 recurrent kernels stop state
+    // updates at the device chunk length, so hd=256 hybrids are capture-eligible only when
+    // fa2_hd256 is on.
     if (hd_u != 128 && !(hd_u == 256 && dispatch_policy().attention.fa2_hd256))
         return false;
     if (dispatch_policy().attention.fa2_fp16qk == "never")
         return false;
-    // MoE: only the CUTLASS 3.x device-args grouped path records into a
-    // graph without host-side routing reads — every other MoE prefill path
-    // does a D2H+sync per layer to size the expert GEMMs (capture-illegal;
-    // guarded by moe_host_args_capture_guard). Require the static
-    // device-args conditions for every MoE layer. Models whose experts live
-    // in the data-borrow decode slabs (e.g. Nemotron-H NVFP4: expert ids not
-    // in the CUTLASS tier) fall out here until a device-args grouped GEMM
-    // exists for that layout (#847 follow-up).
+    // MoE: only the CUTLASS 3.x device-args grouped path records into a graph without
+    // host-side routing reads; every other MoE prefill path does a D2H+sync per layer to size
+    // expert GEMMs (capture-illegal, guarded by moe_host_args_capture_guard). Require static
+    // device-args conditions for every MoE layer; models with experts outside the CUTLASS
+    // tier fall out here until a device-args grouped GEMM exists for that layout (#847).
     bool any_moe = false;
     for (int i = 0; i < cfg.n_layers && !any_moe; ++i)
         any_moe = layer_has_moe(i);
@@ -1974,14 +1818,10 @@ bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
     if (nkv_u <= 0 || hd_u <= 0)
         return false;
     const size_t bytes = static_cast<size_t>(ctx_capacity) * nkv_u * hd_u * sizeof(half);
-    // T2 (A7 step 4b.2, the last exec/ holdout). It was left out because it
-    // grows and "a bump arena strands it" — true of a STAIRCASE of takes, not
-    // of taking the charged bound once, which is what happens here:
-    // exec_t2_demand charges 2 x capture_ctx_cap x nkv x hd halves and the
-    // caller asks for exactly that (engine_spec_capture.cpp clamps the cap to
-    // max_seq_len). It also closes this site's share of AUDIT B13 — both
-    // pointers are baked into the captured verify graph, and the cudaFree this
-    // replaces handed a replay a freed address.
+    // T2 (A7 step 4b.2, the last exec/ holdout): charges 2 x capture_ctx_cap x nkv x hd
+    // halves once (not a growing staircase of takes), matching what the caller asks for
+    // (engine_spec_capture.cpp clamps the cap to max_seq_len). Both pointers are baked into
+    // the captured verify graph, so cudaFree here would hand a replay a freed address (AUDIT B13).
     chunk_capture_ctx_ = 0;
     auto k_slab = engine_arena().take_bytes(bytes);
     auto v_slab = engine_arena().take_bytes(bytes);
@@ -2101,11 +1941,9 @@ void GraphExecutor::use_workspace(int slot) {
 }
 
 bool GraphExecutor::has_gguf_nvfp4_overlay() const {
-    // "GGUF class" for the overlap gate = any registered weight whose SOURCE
-    // is a GPU-dequantable GGUF qtype: those decode through the dp4a/dequant
-    // scratches that prefill shares. (`wcache_.nvfp4` is the wrong predicate —
-    // it is also populated on native-NVFP4 models as the secondary cache,
-    // which is how the first cut of this gate declined Qwen3.8-27B-NVFP4.)
+    // "GGUF class" for the overlap gate = any registered weight whose source is a
+    // GPU-dequantable GGUF qtype (decodes via the dp4a/dequant scratches prefill shares).
+    // wcache_.nvfp4 is the wrong predicate: it's also populated on native-NVFP4 models.
     for (size_t i = 0; i < registry_.size(); ++i)
         if (dequant_gpu_supported(registry_.handle(static_cast<TensorID>(i)).source_qtype))
             return true;

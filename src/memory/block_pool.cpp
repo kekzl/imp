@@ -79,10 +79,9 @@ MemError BlockPool::grow_slots(int new_num_blocks) {
         return MemError::InvalidArgument;  // slot-only pools; a backed pool owns memory
     if (new_num_blocks <= num_blocks_)
         return MemError::InvalidArgument;
-    // Append ids above the existing range. Nothing below moves, so every
-    // outstanding BlockRef, every block table and every prefix-cache entry
-    // keeps pointing at the same block: growth must be invisible to anything
-    // already holding a reference.
+    // Append ids above the existing range: nothing below moves, so every outstanding
+    // BlockRef, block table and prefix-cache entry keeps pointing at the same block. Growth
+    // must be invisible to anything already holding a reference.
     refcount_.resize(static_cast<size_t>(new_num_blocks), 0);
     free_list_.reserve(free_list_.size() + static_cast<size_t>(new_num_blocks - num_blocks_));
     for (int i = new_num_blocks - 1; i >= num_blocks_; --i)
@@ -144,10 +143,9 @@ void BlockPool::dec_ref_impl_(int id, bool strict) {
         return;
     int& rc = refcount_[static_cast<size_t>(id)];
     if (rc <= 0) {
-        // The int-based KV API tolerates a free of an already-free block
-        // (KVCache::free_block returns silently). Keep that exact behaviour
-        // for the raw path so the migration cannot change semantics; a drop
-        // through a BlockRef is strict, because there it IS a double-free.
+        // The int-based KV API tolerates a free of an already-free block (KVCache::free_block
+        // returns silently). Keep that exact behaviour for the raw path; a drop through a
+        // BlockRef is strict, because there it IS a double-free.
         if (!strict)
             return;
         IMP_LOG_ERROR("BlockPool: dec_ref on block %d with refcount %d (double release)", id, rc);

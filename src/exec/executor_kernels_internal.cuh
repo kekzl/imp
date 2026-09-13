@@ -35,10 +35,7 @@ __device__ __forceinline__ int kv_resolve_slot(const int* block_tables, int pos,
     return kv_get_block_id(block_tables, block_idx, token_idx, max_blocks_per_seq, n_sequences);
 }
 
-// ---------------------------------------------------------------------------
-// NVFP4 / MXFP4 KV cache write: FP4 E2M1 nibble quantizer (shared by the
-// nvfp4 and mxfp4_kv write kernels).
-// ---------------------------------------------------------------------------
+// NVFP4/MXFP4 KV cache write: FP4 E2M1 nibble quantizer, shared by the nvfp4 and mxfp4_kv write kernels.
 __device__ __forceinline__ uint8_t e2m1_quantize(float v, float inv_scale) {
     float n = v * inv_scale;
     uint8_t sign = (n < 0.0f) ? 0x8u : 0u;

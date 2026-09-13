@@ -1,32 +1,14 @@
 #pragma once
 
-// Activation-calibration statistics: the file the engine writes and
-// imp-quantize reads.
-//
-// One entry per (layer, weight kind) that the forward pass fed through
-// gemm_via_handle_, holding the mean absolute activation per INPUT channel:
-//
-//     mean_abs[j] = (1/rows) * sum_over_rows |x[row][j]|
-//
-// That vector is the whole input AWQ-class calibration needs. It is what
-// says which input channels a quantizer must protect, and it is the only
-// thing a forward pass can tell an offline quantizer that the weights
-// cannot say by themselves.
-//
-// Deliberately NOT a per-tensor Hessian: a diagonal (per-channel) statistic
-// is what the scale search below uses, and storing K floats per weight keeps
-// a calibration file for a 14B model in the low tens of MiB.
-//
-// Since IMPCAL02 an entry also carries the second moment,
-//
-//     mean_sq[j] = (1/rows) * sum_over_rows x[row][j]^2
-//
-// because that, not mean_abs squared, is what weights the layer's output
-// error: E[(sum_j dw_j x_j)^2] = sum_j dw_j^2 E[x_j^2] once the cross terms
-// are dropped, and E[x^2] exceeds E[|x|]^2 by exactly the variance. The
-// search used (mean_abs/s)^2 and therefore under-weighted the channels whose
-// activation is heavy-tailed rather than merely large. An IMPCAL01 file reads
-// back with mean_sq empty and the caller falls back to the old weight.
+// Activation-calibration statistics the engine writes and imp-quantize reads: one entry
+// per (layer, weight kind), mean_abs[j] = (1/rows)*sum|x[row][j]| per input channel -
+// the whole input AWQ-class calibration needs, and the only signal a forward pass gives an
+// offline quantizer beyond the weights themselves. Deliberately a per-channel diagonal
+// statistic, not a per-tensor Hessian: keeps a 14B-model calibration file in the low tens
+// of MiB. Since IMPCAL02 also carries mean_sq[j] = (1/rows)*sum x[row][j]^2, because that
+// (not mean_abs^2) weights the layer's output error via E[(sum dw_j x_j)^2] =
+// sum dw_j^2 E[x_j^2]; using (mean_abs/s)^2 under-weighted heavy-tailed channels. An
+// IMPCAL01 file reads back with mean_sq empty and the caller falls back to the old weight.
 
 #include <cstdint>
 #include <string>

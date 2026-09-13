@@ -1,9 +1,7 @@
-// Pre-dequant Phase 3 (MoE): MoE expert decode-cache build — gpt-oss
-// MXFP4→NVFP4 conversion, the GGUF / NVFP4-prequant expert caching driver,
-// and the per-projection contiguous native-NVFP4 cache builder.
-// Split out of pre_dequant_phase3_nvfp4_decode.cu to keep each .cu under the
-// kernel file-size threshold. See pre_dequant_internal.h / quant_pipeline.h
-// for shared declarations.
+// Pre-dequant Phase 3 (MoE): MoE expert decode-cache build, gpt-oss MXFP4->NVFP4
+// conversion, the GGUF/NVFP4-prequant expert caching driver, and the per-projection
+// contiguous native-NVFP4 cache builder. Split out to keep each .cu under the file-size
+// threshold.
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -31,35 +29,23 @@ namespace imp {
 
 using imp::pre_dequant_internal::nvfp4_beneficial;
 
-// Cache MoE expert weights — done after FP16 free so mode 2 has full budget.
-// Handles two sub-paths:
-//  - cache_moe_native_nvfp4: NVFP4-prequant SafeTensors (per-expert tensors)
-//    consolidated into one contiguous packed_data + scales buffer per layer
-//    per projection.
-//  - cache_moe_expert_nvfp4: GGUF / re-quant path, expert_*_packed is the
-//    3-D contiguous tensor.
-// ---------------------------------------------------------------------------
-// gpt-oss (#547): convert the HF-MXFP4 pre-packed experts (host-mmap'd
-// blocks/scales) into the native NVFP4 MoE cache. e2m1 nibbles are
-// bit-identical (linear pair order); ue8m0 scales expand 1→2 e4m3
-// micro-scales under a per-expert tensor scale. gate_up rows arrive
-// interleaved (g0,u0,g1,…) and are de-interleaved into separate gate/up
-// results, so the whole proven NVFP4-MoE machinery (CUTLASS grouped prefill,
-// gemv_nvfp4_moe decode, CUDA graphs) applies unchanged. Placeholder packed
-// tensors keyed on the converted device pointers let Phase 4 wire
-// nvfp4_moe_{gate,up,down}_ptr exactly like the Modelopt path.
-// ---------------------------------------------------------------------------
+// Cache MoE expert weights, done after FP16 free so mode 2 has full budget. Two
+// sub-paths: cache_moe_native_nvfp4 (NVFP4-prequant SafeTensors, per-expert tensors
+// consolidated into one contiguous buffer per layer per projection) and
+// cache_moe_expert_nvfp4 (GGUF / re-quant path, expert_*_packed is the 3-D tensor).
+// gpt-oss (#547): converts HF-MXFP4 pre-packed experts into the native NVFP4 MoE cache;
+// e2m1 nibbles are bit-identical (linear pair order), ue8m0 scales expand 1->2 e4m3
+// micro-scales under a per-expert tensor scale; interleaved gate_up rows are
+// de-interleaved so the proven NVFP4-MoE machinery applies unchanged.
 void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx) {
     int converted = 0;
 
-    // GGUF path helper: convert one host-resident ggml-MXFP4 expert tensor
-    // ([ne, N, K], separate per projection) into a device NvFP4MoEQuantResult.
-    // ggml type-39 packs each 32-element block as [scale(1) | qs(16)] with
-    // SPLIT nibble order (element j = low nibble of qs[j], j+16 = high nibble);
-    // type-31 packs [qs(16) | scale(1)] in LINEAR pair order. The converter
-    // expects linear pairs + a separate ue8m0 scale plane, so normalize here
-    // (mirrors weight_upload.cu's upload_qtype_mxfp4_). stride=1 because GGUF
-    // stores gate and up as distinct tensors (HF interleaves them, stride=2).
+    // GGUF path helper: converts one host-resident ggml-MXFP4 expert tensor into a device
+    // NvFP4MoEQuantResult. ggml type-39 packs [scale(1)|qs(16)] with SPLIT nibble order
+    // (element j = low nibble of qs[j], j+16 = high nibble); type-31 packs [qs(16)|scale(1)]
+    // in LINEAR pair order. Normalize to linear pairs + a separate ue8m0 scale plane
+    // (mirrors weight_upload.cu's upload_qtype_mxfp4_). stride=1: GGUF stores gate/up as
+    // distinct tensors (HF interleaves them, stride=2).
     auto gguf_convert = [&](const Tensor& t, float extra_scale, NvFP4MoEQuantResult& r,
                             std::vector<float>& ts) -> bool {
         if (!t.data || t.ndim < 3)
@@ -151,25 +137,20 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         auto install = [&](NvFP4MoEQuantResult& r, Tensor& packed_slot) {
             int64_t shp[3] = {r.n_experts, r.N, r.K};
             packed_slot = Tensor(r.packed_data, QType::NVFP4, 3, shp, /*on_device=*/true);
-            // wcache_ is the single owner (teardown frees via
-            // free_nvfp4_moe_result, like every other nvfp4_moe insert).
-            // Registering the pointers in Model::gpu_allocations_ as well made
-            // ~Model double-free all 9 per layer ("216/675 weight frees
-            // failed" on gpt-oss-20b) — harmless standalone, SIGSEGV under
-            // nsys's CUDA interception.
+            // wcache_ is the single owner (teardown frees via free_nvfp4_moe_result). Also
+            // registering these pointers in Model::gpu_allocations_ double-frees them at teardown
+            // (harmless standalone, but a SIGSEGV under nsys's CUDA interception).
             wcache_->nvfp4_moe[r.packed_data] = r;
         };
         install(g, L.expert_gate_packed);
         install(u, L.expert_up_packed);
         install(d, L.expert_down_packed);
 
-        // Per-expert CUTLASS_NVFP4 registration (#547 prefill): without it,
-        // covers_ids() rejects the CUTLASS 3.x grouped path and prefill runs
-        // the dequant->FP16->cuBLAS batch fallback (~38 GB of FP16 dequant
-        // writes per forward — pp512 ~1.9k vs ~15k+ tok/s). Mirrors
-        // cache_moe_native_nvfp4's re-stamp block: shared SfAtom buffer per
-        // projection + per-expert Tensor slices into the contiguous result so
-        // Phase 4's register_tensor() sees CUTLASS-tier wcache entries.
+        // Per-expert CUTLASS_NVFP4 registration (#547 prefill): without it, covers_ids() rejects
+        // the CUTLASS 3.x grouped path and prefill falls to the dequant->FP16->cuBLAS batch
+        // fallback. Mirrors cache_moe_native_nvfp4's re-stamp block: shared SfAtom buffer per
+        // projection + per-expert Tensor slices so Phase 4's register_tensor() sees CUTLASS-tier
+        // wcache entries.
         auto register_cutlass = [&](NvFP4MoEQuantResult& r, std::vector<Tensor>& experts,
                                     const std::vector<float>& h_ts) -> bool {
             if (!cutlass_sm120_nvfp4_available())
@@ -250,19 +231,12 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     if (wcache_->nvfp4_decode_mode == 2) {
         size_t free_mem = 0, total_mem = 0;
         vram_budget_mem_get_info(&free_mem, &total_mem);
-        // Reserve VRAM so the KV cache (sized after this in init_kv_cache)
-        // can fit `min_kv_tokens` (default 16K) + workspaces. Computed from
-        // the model's actual attention layout — the previous 1 GiB constant
-        // was over-cautious for hybrid models (Nemotron-H: 6/52 attn layers,
-        // <100 MiB KV at 16K) where it starved the NVFP4 MoE cache and
-        // forced decode through the legacy D2H-sync fallback.
-        //
-        // Capped at 1 GiB (the previous static value) so this can only
-        // RELEASE budget, never tighten it vs the previous behavior. Floor
-        // at 256 MiB to keep workspace + scratch room.
-        //
-        // moe.reserve_mib still overrides for manual tuning (range
-        // 128-4096 MiB).
+        // Reserve VRAM so the KV cache (sized after this in init_kv_cache) can fit
+        // min_kv_tokens (default 16K) + workspaces, computed from the model's actual attention
+        // layout rather than a flat constant (which starved hybrids with few attention layers).
+        // Capped at 1 GiB so this can only RELEASE budget vs the previous behavior; floored at
+        // 256 MiB for workspace/scratch room. moe.reserve_mib overrides for manual tuning
+        // (128-4096 MiB).
         int n_attn_layers = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             if (model_->layer(i).wq.data != nullptr &&
@@ -290,27 +264,20 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         IMP_LOG_DEBUG("MoE reserve: %.0f MiB (n_attn=%d, kv_heads=%d, hd=%d → %.0f MiB KV at 16K + 256 MiB workspace)",
                       kMoeReserve / (1024.0 * 1024.0), n_attn_layers, kv_heads, hd,
                       kv_reserve / (1024.0 * 1024.0));
-        // The runtime headroom must cover what the KV sizing subtracts, not just
-        // what the runtime touches. init_kv_cache computes its pool from
-        // (free - vram_allocator_headroom(total)); reserving less than that
-        // headroom here leaves a residual that is ENTIRELY headroom, so kv_room
-        // evaluates to 0 and the pool drops to the 16-block / 512-token floor
-        // however many blocks the plan granted. Qwen3.6-35B-A3B UD-Q4_K_M hit
-        // exactly that: 1088 MiB reserved here, 1630 MiB headroom subtracted
-        // there, KV 4096 -> 16 blocks and every generation cancelled at
-        // admission (#1251). Keep the 512 MiB as the floor for cards where 5%
-        // is smaller than that.
+        // The runtime headroom must cover what the KV sizing subtracts, not just what the
+        // runtime touches: init_kv_cache computes its pool from (free -
+        // vram_allocator_headroom(total)), so reserving less than that headroom here leaves a
+        // residual that is entirely headroom, dropping KV to the 16-block/512-token floor
+        // regardless of the plan (#1251). Keep 512 MiB as the floor for cards where 5% is
+        // smaller.
         const size_t kRuntimeHeadroom =
             std::max(static_cast<size_t>(512ULL * 1024 * 1024), vram_allocator_headroom(total_mem));
         size_t total_reserve = kMoeReserve + kRuntimeHeadroom;
         moe_budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
-        // Prequant models: the plan grants the MoE
-        // slab its measured demand, so the guarantee holds even when
-        // cudaMemGetInfo under-reports free after async frees (AUDIT B62 — it
-        // used to be a physically held balloon).
-        // The +128 MiB covers the borrow branch's small ts/ms-copy + SfAtom
-        // side allocations; the copy branch is net-zero per projection via
-        // the moe_logical_avail refund below.
+        // Prequant models: the plan grants the MoE slab its measured demand, so the guarantee
+        // holds even when cudaMemGetInfo under-reports free after async frees (AUDIT B62). The
+        // +128 MiB covers the borrow branch's small ts/ms-copy + SfAtom side allocations; the
+        // copy branch is net-zero per projection via the moe_logical_avail refund below.
         if (budget.mandatory_moe_bytes > 0) {
             size_t guaranteed = budget.mandatory_moe_bytes + 128ULL * 1024 * 1024;
             if (guaranteed > moe_budget) {
@@ -325,13 +292,11 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
                                                               : 0;
     }
     bool moe_budget_exhausted = false;
-    // Self-tracked logical budget for cache_moe_native_nvfp4 (NVFP4 prequant
-    // SafeTensors). cudaMemGetInfo doesn't reflect the per-expert cudaFree's
-    // promptly on this driver, so we track allocations and frees logically.
-    // Initial value is moe_budget plus the per-expert weights that the
-    // function will swap out — those sum to the cached size, so net per
-    // call is zero and all 40 layers fit if the initial budget covers one
-    // layer's worth of overhead.
+    // Self-tracked logical budget for cache_moe_native_nvfp4: cudaMemGetInfo doesn't reflect
+    // per-expert cudaFree's promptly on this driver, so track allocations/frees logically.
+    // Initial value is moe_budget plus the per-expert weights the function will swap out
+    // (they sum to the cached size, net per call is zero), so all layers fit if the initial
+    // budget covers one layer's overhead.
     size_t moe_logical_avail = moe_budget;
 
     const bool decode_all_moe = dispatch_policy().gemm.nvfp4_decode_all;
@@ -379,23 +344,15 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         dctx.nvfp4_moe_count++;
     };
 
-    // NVFP4-prequant SafeTensors path: experts arrive as per-expert tensors
-    // (expert_w_gate[e] / expert_w_up[e] / expert_w_down[e]) with NVFP4
-    // qtype + .scales / .tensor_scale sidecars promoted in Phase 0. The 3D
-    // expert_*_packed tensors are NULL (the loader only stamps them for
-    // GGUF and Gemma-4). Without this branch, cache_moe_expert_nvfp4 would
-    // early-return at `!packed.data` and the legacy FP16 dequant + cuBLAS
-    // sm_80 WMMA fallback fires per layer per token, killing CUDA Graphs.
-    //
-    // We allocate one contiguous packed_data + micro_scales + tensor_scales
-    // buffer per layer per projection, copy the per-expert pointers in,
-    // and stamp `packed.data` so wcache lookups (line below the layer loop)
-    // and the consumer dispatch in executor_forward_moe.cu (lookup via
-    // expert_*_packed.data) wire up automatically. After a successful copy
-    // for a layer the per-expert allocations are freed inline — at 35B-A3B
-    // the duplicate (per-expert + contiguous) would peak at ~30 GiB which
-    // doesn't fit in 32 GiB, and the legacy fallback can't fire for layers
-    // where nvfp4_moe_*_ptr is non-null anyway.
+    // NVFP4-prequant SafeTensors path: experts arrive as per-expert tensors with NVFP4
+    // qtype + .scales/.tensor_scale sidecars (Phase 0); the 3D expert_*_packed tensors are
+    // NULL (loader only stamps them for GGUF and Gemma-4). Without this branch,
+    // cache_moe_expert_nvfp4 early-returns at !packed.data and the legacy FP16 dequant +
+    // cuBLAS fallback fires per layer per token, killing CUDA Graphs.
+    // Allocate one contiguous packed_data + micro_scales + tensor_scales buffer per layer
+    // per projection, copy per-expert pointers in, stamp packed.data so wcache lookups and
+    // the consumer dispatch wire up automatically. Free the per-expert allocations inline
+    // after each layer's copy: keeping both would peak VRAM beyond budget.
 
     for (int i = 0; i < cfg.n_layers; i++) {
         // Need mutable access to expert_*_packed for cache_moe_native_nvfp4
@@ -408,9 +365,8 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
             g = cache_moe_native_nvfp4_(L.expert_gate_packed, L.expert_w_gate, stream, dctx, moe_budget_exhausted, moe_logical_avail);
             u = cache_moe_native_nvfp4_(L.expert_up_packed, L.expert_w_up, stream, dctx, moe_budget_exhausted, moe_logical_avail);
             d = cache_moe_native_nvfp4_(L.expert_down_packed, L.expert_w_down, stream, dctx, moe_budget_exhausted, moe_logical_avail);
-            // Non-gated MoE (e.g. Nemotron-H NemotronHForCausalLM): no gate
-            // projection exists, so g=0 is expected when up and down cached.
-            // Suppress the misleading warning in that case; expert_gemm's
+            // Non-gated MoE (e.g. Nemotron-H): no gate projection exists, so g=0 is expected when
+            // up and down are cached. Suppress the misleading warning in that case; expert_gemm's
             // wcache_->nvfp4_moe lookup handles the missing-gate path.
             bool non_gated = (L.expert_gate_packed.data == nullptr &&
                               (L.expert_w_gate.empty() ||
@@ -423,11 +379,9 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
             }
         }
 
-        // GGUF / re-quant path: only run when native didn't populate.
-        // For GGUF NVFP4-target models the source qtype is Q*_K/Q8_0 and
-        // packed.data is non-null; for prequant SafeTensors all three
-        // native calls succeeded above and these are no-ops because
-        // packed.data now points into wcache_->nvfp4_moe.
+        // GGUF/re-quant path: only run when native didn't populate. For GGUF NVFP4-target
+        // models the source qtype is Q*_K/Q8_0 and packed.data is non-null; for prequant
+        // SafeTensors all three native calls already succeeded and these are no-ops.
         if (!g)
             cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
         if (!u)
@@ -450,11 +404,10 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
 }
 
 
-// Extracted from nvfp4_decode_cache_moe_experts_ (was a 325-line [&] lambda).
-// Builds the contiguous NVFP4 decode cache for one MoE projection's experts;
-// see the declaration in executor.h for the full contract. The budget flags
-// (moe_budget_exhausted / moe_logical_avail) are threaded in so the per-layer
-// accounting is shared across the gate/up/down calls.
+// Extracted from nvfp4_decode_cache_moe_experts_ (was a 325-line lambda). Builds the
+// contiguous NVFP4 decode cache for one MoE projection's experts (full contract in
+// executor.h). Budget flags (moe_budget_exhausted/moe_logical_avail) are threaded in so
+// per-layer accounting is shared across the gate/up/down calls.
 bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts,
                                             cudaStream_t stream, Nvfp4DecodeContext& dctx,
                                             bool& moe_budget_exhausted, size_t& moe_logical_avail) {
@@ -464,26 +417,20 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             return false;
         if (packed.data && wcache_->nvfp4_moe.count(packed.data))
             return false;
-        // Host-resident experts are the expert cache's business, not this one.
-        // Both branches below build a DEVICE decode cache: the borrow branch
-        // points at resident bytes, and the fallback copies the experts into a
-        // contiguous device buffer with cudaMemcpyDeviceToDevice — which fails
-        // with "invalid argument" on a host source, leaving the buffer
-        // uninitialised and the layer decoding from garbage. It is also the
-        // opposite of what the placement asked for: it would pull back into
-        // VRAM exactly the experts that were moved out of it.
+        // Host-resident experts are the expert cache's business, not this one. Both branches
+        // below build a DEVICE decode cache via cudaMemcpyDeviceToDevice, which fails with
+        // "invalid argument" on a host source, leaving the buffer uninitialised and the layer
+        // decoding from garbage; it would also pull back into VRAM exactly the experts that were
+        // moved out of it.
         if (!experts[0].on_device)
             return false;
-        // ZERO-COPY decode cache (LEAD-2): NVFP4-prequant SafeTensors upload the
-        // per-expert weights AND scales into contiguous VRAM (one buffer per
-        // projection, sliced per expert). When that holds we point an
-        // NvFP4MoEQuantResult directly at the existing buffers — no 15 GiB
-        // contiguous duplicate, no per-expert copy. Only the tiny per-expert
-        // tensor_scales array is allocated. This engages the fast
-        // gemv_nvfp4_moe_* decode kernels (base + expert_stride) instead of the
-        // CUTLASS grouped GEMM, which under-utilizes the GPU at M=1 decode.
-        // Guarded by a strict contiguity + shape check; on any mismatch we fall
-        // through to leaving the experts on the CUTLASS path (prior behavior).
+        // ZERO-COPY decode cache: NVFP4-prequant SafeTensors upload per-expert weights AND
+        // scales into contiguous VRAM already (one buffer per projection, sliced per expert).
+        // When that holds, point an NvFP4MoEQuantResult directly at the existing buffers (no
+        // duplicate, no per-expert copy); only the tiny tensor_scales array is allocated. This
+        // engages the fast gemv_nvfp4_moe_* decode kernels instead of the CUTLASS grouped GEMM,
+        // which under-utilizes the GPU at M=1 decode. Guarded by a strict contiguity/shape
+        // check; on mismatch, fall through to leaving the experts on the CUTLASS path.
         if (wcache_->cutlass_nvfp4.count(experts[0].data)) {
           if (dispatch_policy().gemm.nvfp4_moe_decode) {
             const int ne_z = static_cast<int>(experts.size());
@@ -493,10 +440,9 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             if (K_z % 16 == 0 && N_z > 0 && experts[0].scales) {
                 const size_t e_packed = static_cast<size_t>(N_z) * Kp_z;
                 const size_t e_ms = static_cast<size_t>(N_z) * (K_z / 16);
-                // Data must be contiguous to borrow it zero-copy (the big ~15 GiB
-                // win). Scales are small (~1/16 of weights) — copy them into a
-                // contiguous buffer if they aren't already, so non-contiguous
-                // scale uploads still take the fast path.
+                // Data must be contiguous to borrow it zero-copy (the big win). Scales are small
+                // (~1/16 of weights): copy them into a contiguous buffer if they aren't already, so
+                // non-contiguous scale uploads still take the fast path.
                 bool data_contig = true, scales_contig = true, shapes_ok = true;
                 std::vector<float> h_ts(ne_z);
                 for (int e = 0; e < ne_z; ++e) {
@@ -548,18 +494,13 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         packed = Tensor(experts[0].data, QType::NVFP4, 3, shp, /*on_device=*/true);
                         wcache_->nvfp4_moe[experts[0].data] = r;
                         dctx.nvfp4_moe_count++;
-                        // The contiguous micro-scale copy is now the single
-                        // source for every consumer (decode cache via
-                        // r.micro_scales; CUTLASS prefill reads its own
-                        // Phase-0 SfAtom buffers, never the raw scales; the
-                        // Phase-4 registry snapshot runs after this and
-                        // picks up re-stamped pointers). Free the scattered
-                        // per-expert source scales — they were resident
-                        // TWICE, ~1.7 GiB across 144 groups on
-                        // Qwen3-30B-A3B-NVFP4 — and re-stamp the layer
-                        // tensors + per-expert nvfp4 wcache entries onto
-                        // the copy slices. Mirrors the non-borrow branch's
-                        // free-after-copy below.
+                        // The contiguous micro-scale copy becomes the single source for every consumer
+                        // (decode
+                        // cache via r.micro_scales; CUTLASS prefill reads its own Phase-0 SfAtom buffers,
+                        // never the raw scales). Free the scattered per-expert source scales (they were
+                        // resident TWICE) and re-stamp the layer tensors + per-expert nvfp4 wcache entries
+                        // onto
+                        // the copy slices. Mirrors the non-borrow branch's free-after-copy below.
                         if (d_ms_copy) {
                             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                             auto* mut_model = const_cast<Model*>(model_);
@@ -571,10 +512,10 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                                                static_cast<size_t>(e) * e_ms;
                                 if (old_sc && mut_model->is_base_gpu_allocation(old_sc)) {
                                     mut_model->release_gpu_allocation(old_sc);
-                                    // cudaFreeAsync, NOT cudaFree: on this stack a
-                                    // sync free of a stream-ordered allocation
-                                    // returns success without returning the block
-                                    // to the async mempool (#834) — the "freed"
+                                    // cudaFreeAsync, NOT cudaFree: on this stack a sync free of a
+                                    // stream-ordered allocation
+                                    // returns success without returning the block to the async mempool
+                                    // (#834); the "freed"
                                     // VRAM would be phantom.
                                     IMP_CUDA_CHECK_LOG(cudaFreeAsync(old_sc, stream));
                                     freed += e_ms;
@@ -609,12 +550,10 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             return false;
 
         int ne = static_cast<int>(experts.size());
-        // SafeTensors NVFP4 prequant: per-expert weight tensor on-disk
-        // dtype is U8 (loader → INT8 → Phase-0 promote → NVFP4) and shape
-        // is [N, K_packed] where K_packed = K_logical/2 (two FP4 nibbles
-        // per byte). The same packed-shape convention is what the
-        // existing executor_attention.cu / executor_ffn.cu NVFP4 dispatch
-        // expects when computing `tmp.K = hw->shape[1] * 2`. Match that.
+        // SafeTensors NVFP4 prequant: per-expert weight tensor on-disk dtype is U8 (loader ->
+        // INT8 -> Phase-0 promote -> NVFP4), shape [N, K_packed] where K_packed = K_logical/2
+        // (two FP4 nibbles per byte). Matches what executor_attention.cu/executor_ffn.cu expect
+        // when computing tmp.K = hw->shape[1] * 2.
         int64_t N = experts[0].shape[0];
         int64_t K_packed = experts[0].shape[1];
         int64_t K = K_packed * 2;  // logical inner dim
@@ -628,17 +567,12 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         size_t total_ts = static_cast<size_t>(ne) * sizeof(float);
         size_t add_bytes = total_packed + total_ms + total_ts;
 
-        // Self-tracked logical budget. cudaMemGetInfo does NOT reflect
-        // cudaFree's of upload-time per-expert weights in time on this
-        // driver — after ~5 layers it reports free=0 even though the
-        // heap has ~5 GiB freed but not yet reclaimed. The previous
-        // per-call cudaMemGetInfo gate aborted at ~7 layers (21/120
-        // entries) and left layers 7-39 on the legacy fallback path
-        // with D2H expert_offsets sync, killing CUDA graph capture and
-        // pinning decode at ~30 tok/s. Track the budget logically:
-        // initialised once from cudaMemGetInfo, decremented on alloc,
-        // incremented after per-expert frees below — net per-call
-        // change is zero so all 40 layers fit.
+        // Self-tracked logical budget: cudaMemGetInfo does not reflect cudaFree's of upload-time
+        // per-expert weights in time on this driver, reporting free=0 while the heap has GiB
+        // freed but not yet reclaimed. A per-call cudaMemGetInfo gate aborted early and left
+        // later layers on the legacy fallback (D2H expert_offsets sync), killing CUDA graph
+        // capture. Track the budget logically instead: init once from cudaMemGetInfo, decrement
+        // on alloc, increment after per-expert frees; net per-call change is zero.
         if (add_bytes > moe_logical_avail) {
             moe_budget_exhausted = true;
             IMP_LOG_INFO(
@@ -703,10 +637,9 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         r.expert_stride_packed = expert_packed_bytes;
         r.expert_stride_ms = expert_ms_bytes;
 
-        // Stamp the packed Tensor so wcache_->nvfp4_moe key + consumer
-        // wiring (expert_*_packed.data lookup) work uniformly with the
-        // GGUF path. Logical K (NOT K/2) per cache_moe_expert_nvfp4
-        // convention at shape[2].
+        // Stamp the packed Tensor so wcache_->nvfp4_moe key + consumer wiring
+        // (expert_*_packed.data lookup) works uniformly with the GGUF path. Logical K (NOT K/2)
+        // per cache_moe_expert_nvfp4 convention at shape[2].
         int64_t shape[3] = {static_cast<int64_t>(ne), N, K};
         packed = Tensor(d_packed, QType::NVFP4, 3, shape, /*on_device=*/true);
 
@@ -714,33 +647,25 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         dctx.nvfp4_moe_total += add_bytes;
         dctx.nvfp4_moe_count++;
 
-        // Free per-expert GPU allocations now — the legacy fallback path
-        // (executor_forward_moe.cu:expert_gemm + chunked_dequant_gemm) can
-        // no longer fire for this layer because nvfp4_moe_*_ptr is non-null
-        // after the cache populates and stamps `packed`. Without freeing,
-        // we hold the same NVFP4 weights twice (per-expert + contiguous);
-        // the duplicate exhausts VRAM around layer 33 of Qwen3.6-35B-A3B
-        // and breaks layers 33-39's fast path. Per-layer free keeps total
-        // overhead bounded — only the just-copied 384 expert pointers are
-        // released, and only after the contiguous copy succeeded.
-        //
-        // Sync the stream so the in-flight D2D copies (which read from
-        // experts[e].data / .scales) finish before we cudaFree the source.
+        // Free per-expert GPU allocations now: the legacy fallback path can no longer fire for
+        // this layer once nvfp4_moe_*_ptr is non-null after the cache stamps packed. Without
+        // freeing, the same NVFP4 weights are held twice (per-expert + contiguous), exhausting
+        // VRAM partway through a large model's layers. Per-layer free bounds the overhead to
+        // only the just-copied expert pointers, and only after the contiguous copy succeeded.
+        // Sync the stream first: the in-flight D2D copies read experts[e].data/.scales, which
+        // must finish before the source is cudaFree'd.
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         auto* mut_model = const_cast<Model*>(model_);
         size_t freed_bytes = 0;
         for (int e = 0; e < ne; ++e) {
             auto& w = experts[e];
-            // Only free BASE allocations (1:1 with cudaMallocAsync). Fused-projection
-            // experts (e.g. Qwen3.6-35B-A3B gate_up) carry OFFSET scale pointers into a
-            // shared buffer; an unguarded cudaFree on an offset returns "invalid
-            // argument" (8415x error flood on Qwen3.6-35B-A3B-NVFP4 — non-fatal but a
-            // small leak + log spam). Mirror the line-528 / Phase-4b drop-source guard.
-            // cudaFreeAsync, NOT cudaFree (#834): a sync free of a stream-
-            // ordered allocation returns success without returning the block
-            // to the async mempool on this stack — the freed_bytes would be
-            // phantom. Stream-ordered on `stream` also sequences the frees
-            // behind the copies above without a device sync.
+            // Only free BASE allocations (1:1 with cudaMallocAsync). Fused-projection experts carry
+            // OFFSET scale pointers into a shared buffer; an unguarded cudaFree on an offset returns
+            // "invalid argument" (non-fatal but a small leak + log spam). Mirrors the line-528 /
+            // Phase-4b drop-source guard.
+            // cudaFreeAsync, NOT cudaFree (#834): a sync free of a stream-ordered allocation on this
+            // stack returns success without returning the block to the pool. Stream-ordered on
+            // `stream` also sequences the frees behind the copies above without a device sync.
             if (w.data) {
                 if (mut_model->is_base_gpu_allocation(w.data)) {
                     mut_model->release_gpu_allocation(w.data);
@@ -761,16 +686,12 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         }
         moe_logical_avail += freed_bytes;
 
-        // Re-stamp per-expert Tensors to slice into the contiguous packed +
-        // micro-scale buffers and register CUTLASS_NVFP4 entries so the MoE
-        // prefill fast path (executor_forward_moe.cu CUTLASS 3.x grouped
-        // branch) can fire instead of dequant→FP16→cuBLAS. The cleanup loop
-        // above nulled experts[e].data because the original per-expert
-        // source allocs were freed; the executor needs valid slice pointers
-        // for register_tensor() and the per-expert wcache_->cutlass_nvfp4
-        // lookup. Without this block, expert_*_ids[e] = kInvalidTensorID
-        // (because t.data == nullptr) and covers_ids() rejects the fast
-        // path → 88% of prefill time is spent in dequantize_nvfp4_moe_kernel.
+        // Re-stamp per-expert Tensors to slice into the contiguous packed + micro-scale buffers
+        // and register CUTLASS_NVFP4 entries so the MoE prefill fast path can fire instead of
+        // dequant->FP16->cuBLAS. The cleanup loop above nulled experts[e].data (per-expert
+        // source freed); the executor needs valid slice pointers for register_tensor() and the
+        // wcache_->cutlass_nvfp4 lookup. Without this, expert_*_ids[e] = kInvalidTensorID and
+        // covers_ids() rejects the fast path.
         if (cutlass_sm120_nvfp4_available()) {
             // Phase 0 may have already created per-expert CUTLASS entries
             // (with SfAtom scales). If so, just re-stamp the expert Tensors
@@ -786,11 +707,10 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 if (d_sfatom) {
                     convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
                                                        static_cast<int>(K), stream);
-                    // The per-expert slices below are handed out with
-                    // sf_borrowed=true, so free_cutlass_nvfp4_weight skips
-                    // them; without this the base pointer had no owner at all
-                    // and leaked one SfAtom slab per (layer, projection) for
-                    // the life of the process (AUDIT B5/L1).
+                    // Per-expert slices below are handed out with sf_borrowed=true, so
+                    // free_cutlass_nvfp4_weight skips them; without this the base pointer had no owner and
+                    // leaked one SfAtom slab per (layer, projection) for the life of the process (AUDIT
+                    // B5/L1).
                     wcache_->owned_sf_slabs.push_back(d_sfatom);
                 }
             }

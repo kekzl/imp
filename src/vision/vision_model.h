@@ -32,9 +32,8 @@ struct VisionConfig {
     int temporal_patch_size = 1;  // still images repeat along this axis
     int out_hidden_size = 0;      // merger output width (the LM's d_model)
     // Side of the LEARNED position-embedding grid (48 for Qwen3-VL, from
-    // num_position_embeddings = 2304). A real image rarely has this grid, so the
-    // table is resampled per image — this is the SOURCE resolution, not the
-    // image's.
+    // num_position_embeddings=2304). A real image rarely matches this grid, so the table is
+    // resampled per image; this is the SOURCE resolution, not the image's.
     int pos_embed_grid = 0;
     // Vision blocks whose hidden state is tapped for DeepStack. NOTE these index
     // VISION blocks; the LM-side injection happens at LM layers 0..n-1, a
@@ -42,11 +41,10 @@ struct VisionConfig {
     std::vector<int> deepstack_indexes;
 };
 
-// Qwen3-VL patch merger: norm -> fc1 -> GELU -> fc2. The main merger normalises
-// BEFORE the 2x2 concat (norm width = hidden_size) and each DeepStack merger
-// normalises AFTER it (norm width = hidden_size * merge_size^2). Upstream calls
-// that flag `use_postshuffle_norm`; here the norm tensor's own width says which
-// it is, so nothing needs to be remembered.
+// Qwen3-VL patch merger: norm->fc1->GELU->fc2. Main merger normalises BEFORE the 2x2 concat
+// (norm width=hidden_size); each DeepStack merger normalises AFTER it (width=hidden_size*
+// merge_size^2). Upstream flags this as use_postshuffle_norm; here the norm tensor's own
+// width says which, so nothing needs remembering.
 struct VisionMergerWeights {
     Tensor norm_w, norm_b;
     Tensor fc1_w, fc1_b;
@@ -99,11 +97,9 @@ struct VisionModel {
 
     int lm_d_model = 0;  // LLM hidden dimension (from mm_proj output)
 
-    // Both towers are T2 arena tenants now (F-12), so a VisionModel owns no device
-    // memory and needs no teardown of its own. The old per-tensor cudaFree list is
-    // gone with the last raw cudaMalloc in this path; the note it carried — that a
-    // VisionModel outliving the allocator it borrowed from is a use-after-free — is
-    // answered by the arena outliving every model it served.
+    // Both towers are T2 arena tenants (F-12): VisionModel owns no device memory and needs no
+    // teardown of its own. The old per-tensor cudaFree list (and its use-after-free hazard) is
+    // gone; the arena outliving every model it served is what answers that.
     ~VisionModel();
 };
 

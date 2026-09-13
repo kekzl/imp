@@ -8,20 +8,10 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// FP16 <-> FP8 E4M3 conversion utilities.
-//
-// FP8 E4M3 layout (8 bits): 1 sign | 4 exponent | 3 mantissa
-//   bias = 7
-//   normal value   : (-1)^s * 2^(e-7) * (1 + m/8)    e in [1,14]
-//   subnormal value: (-1)^s * 2^(-6)  * (m/8)         e == 0, m != 0
-//   zero           : s=0|1, e=0, m=0
-//   NaN            : e=15, m != 0    (no infinity in E4M3)
-//   max normal     : +/- 448  (e=14, m=7 -> 2^7 * 1.875)
-//
-// We use the CUDA native __nv_fp8_e4m3 type (CUDA 12+).  Software fallback
-// helpers are kept below for host-side unit tests only.
-// ---------------------------------------------------------------------------
+// FP8 E4M3 layout (8 bits): 1 sign|4 exponent|3 mantissa, bias=7.
+//   normal: (-1)^s * 2^(e-7) * (1+m/8), e in [1,14]. subnormal: (-1)^s*2^-6*(m/8), e=0,m!=0.
+//   zero: e=0,m=0. NaN: e=15,m!=0 (no infinity). max normal: +-448 (e=14,m=7).
+// CUDA native __nv_fp8_e4m3 (CUDA 12+) is used; software fallback below is for host tests.
 
 // ---- Software fallback helpers (always compiled for host-side unit tests) --
 
@@ -42,10 +32,8 @@ __device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h) {
         return (uint8_t)(sign << 7);  // +/- 0
     }
 
-    // --- Re-bias exponent: FP16 bias = 15, FP8 E4M3 bias = 7 ---------------
-    // Effective unbiased exponent:
-    //   FP16 normal : e_unbiased = exp - 15
-    //   FP16 subnorm: needs normalisation first
+    // Re-biases exponent: FP16 bias=15, FP8 E4M3 bias=7. FP16 normal: e_unbiased=exp-15;
+    // FP16 subnormal needs normalisation first.
 
     float val = __half2float(*reinterpret_cast<const half*>(&h));
     float abs_val = fabsf(val);

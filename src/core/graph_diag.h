@@ -1,10 +1,8 @@
 #pragma once
 
-// Diagnostics for CUDA-graph capture/replay (Milestone A1).
-// Activated via imp.conf:
-//   [diagnostics] graph_diag = true        — post-launch error checks + logging
-//   [diagnostics] graph_dump_dir = "<path>" — dump verbose DOT per graph
-// Off by default; no overhead when unset.
+// CUDA-graph capture/replay diagnostics. imp.conf: [diagnostics] graph_diag
+// = true (post-launch error checks + logging), graph_dump_dir = "<path>"
+// (verbose DOT per graph). Off by default, zero overhead when unset.
 
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -61,11 +59,9 @@ inline void check_post_launch(cudaStream_t stream, const char* label) {
     }
 }
 
-// Dump verbose DOT of a captured graph if IMP_GRAPH_DUMP is set.
-// The label is appended to the configured path to disambiguate multiple graphs.
-// On WSL2, cudaGraphDebugDotPrint may return an error that sets the sticky
-// CUDA error state; we always clear it with cudaGetLastError so downstream
-// checks don't see a stale error.
+// Dump verbose DOT of a captured graph if IMP_GRAPH_DUMP is set; label
+// disambiguates multiple graphs. On WSL2 cudaGraphDebugDotPrint may set the
+// sticky CUDA error state; always cleared via cudaGetLastError after.
 inline void dump_graph(cudaGraph_t g, const char* label) {
     const char* base = dump_path();
     if (!base || !g)

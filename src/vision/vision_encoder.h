@@ -15,10 +15,9 @@ public:
     // Initialize workspace buffers. lm_d_model = LLM hidden dim.
     [[nodiscard]] bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream);
 
-    // Device bytes init() takes from the T2 arena, answerable from config alone so
-    // Engine::init can size the arena before the mmproj is loaded. taken_bytes()
-    // reports what was actually taken; a test asserts they agree, because these are
-    // two expressions of one buffer list and nothing else stops them drifting.
+    // Device bytes init() takes from the T2 arena, answerable from config alone so Engine::init
+    // can size the arena before the mmproj loads. taken_bytes() reports what was actually taken;
+    // a test asserts they agree, since nothing else stops them drifting.
     static size_t demand_bytes(const VisionConfig& cfg);
     size_t taken_bytes() const { return taken_bytes_; }
 
@@ -47,10 +46,9 @@ private:
     int* d_pos_x_ = nullptr;         // [num_patches] axial column index (gemma4v)
     int* d_pos_y_ = nullptr;         // [num_patches] axial row index (gemma4v)
 
-    // CUDA graph for the full encoder forward. Topology is fixed once model
-    // and workspace sizes are known; only the input/output pointers change
-    // across calls. The graph is invalidated when those pointers differ from
-    // the ones baked in at capture time.
+    // CUDA graph for the full encoder forward: topology fixed once model/workspace sizes are
+    // known, only input/output pointers change across calls. Invalidated when those pointers
+    // differ from the ones baked in at capture time.
     CudaGraphRunner encode_graph_;
     const half* graph_d_pixels_ = nullptr;
     half* graph_d_output_ = nullptr;

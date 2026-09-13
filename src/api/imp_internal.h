@@ -12,10 +12,9 @@
 
 namespace imp {
 
-// Nothing throws across the C ABI. Every `ImpError imp_*()` body runs inside
-// this or an equivalent inline try/catch; tools/check_api_guard.py gates the
-// convention (AUDIT_arch_2026 G-10: 4 of 23 entry points had no catch, and
-// the invariant was 19 hand-copied blocks).
+// Nothing throws across the C ABI: every ImpError imp_*() body runs inside
+// this (or an equivalent) try/catch, gated by tools/check_api_guard.py
+// (AUDIT_arch_2026 G-10: 4 of 23 entry points had no catch).
 template <class F>
 ImpError api_guard(const char* fn, F&& body) noexcept {
     try {
@@ -30,11 +29,9 @@ ImpError api_guard(const char* fn, F&& body) noexcept {
     }
 }
 
-// Forward-declared on purpose. ImpContext_T only stores an Engine, and pulling
-// runtime/engine.h in here put it in front of every TU that includes this header
-// — most of which never touch Engine at all. The out-of-line destructor below is
-// what makes the forward declaration legal: std::unique_ptr needs the complete
-// type where the deleter is instantiated, and that is now imp_api.cpp alone.
+// Forward-declared deliberately: ImpContext_T only stores an Engine, and
+// including runtime/engine.h here would hit every TU that includes this
+// header. The out-of-line destructor makes the forward declaration legal.
 class Engine;
 }  // namespace imp
 

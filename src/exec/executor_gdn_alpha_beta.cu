@@ -1,10 +1,8 @@
-// Batched-decode GDN alpha/beta projections: one launch for both.
-//
-// At 2 <= M <= 32 the two [n_heads, d_model] FP16 weights went through
-// gemm() as two cuBLAS GEMMs, nvjet + splitKreduce each: 4 launches per GDN
-// layer, none PDL-registered. gemm_f16_narrow_smallm runs both in one
-// split-K tensor-core launch. Output layout is the two-call one (alpha at
-// ssm_dt_buf_, beta at the 256-byte-aligned offset), so the scan is untouched.
+// Batched-decode GDN alpha/beta: one launch for both instead of two
+// cuBLAS GEMMs (nvjet+splitKreduce each, 4 launches/layer, none
+// PDL-registered), via gemm_f16_narrow_smallm's split-K tensor-core
+// launch. Output layout matches the two-call form (alpha at ssm_dt_buf_,
+// beta at the 256-byte-aligned offset), so the scan is untouched.
 
 #include "compute/gemm_f16_narrow_smallm.h"
 #include "core/dispatch_policy.h"
@@ -17,11 +15,11 @@ namespace imp {
 
 namespace {
 
-// FP16 device pointer of an FP16-resident weight: the dequant cache entry when
-// the source was BF16/quantized, else the FP16 source itself (tier Undefined:
-// the Qwen3.8 alpha/beta are dequantized NVFP4 -> F16 at load and sit in no
-// cache, so gemm_via_handle_ ran them through the uncached fallback = gemm()).
-// nullptr = not resident as FP16, or a different shape than expected.
+// FP16 device pointer of an FP16-resident weight: the dequant cache entry
+// when the source was BF16/quantized, else the FP16 source itself (tier
+// Undefined: Qwen3.8 alpha/beta are dequantized NVFP4->F16 at load and sit
+// in no cache, so gemm_via_handle_ runs them through the uncached
+// fallback). nullptr = not FP16-resident, or a different shape than expected.
 const half* fp16_weight_ptr(const WeightCaches& wcache, const WeightHandle& h, int64_t N, int64_t K) {
     if ((h.primary_tier != StorageTier::FP16 && h.primary_tier != StorageTier::Undefined) ||
         h.shape[0] != N || h.shape[1] != K)

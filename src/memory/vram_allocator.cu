@@ -35,10 +35,9 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroo
         return nullptr;
 
     if (initialized_ && !bypass_headroom && !can_allocate(bytes)) {
-        // Headroom check failed — but check if physical GPU memory suffices.
-        // For models that use nearly all VRAM (e.g. Nemotron-30B at 29+ GiB),
-        // the 10% headroom is too conservative. Critical allocations (workspace,
-        // SSM state, dequant scratch) should still succeed if CUDA has memory.
+        // Headroom check failed, but check if physical GPU memory suffices: for models using
+        // nearly all VRAM, the 10% headroom is too conservative. Critical allocations
+        // (workspace, SSM state, dequant scratch) should still succeed if CUDA has memory.
         size_t free_mem = 0, total_mem = 0;
         vram_budget_mem_get_info(&free_mem, &total_mem);
         if (free_mem >= bytes + (64 << 20)) {  // 64 MiB minimum safety
@@ -69,12 +68,11 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroo
         alloc_map_[ptr] = {bytes, pool};
     }
     allocated_.fetch_add(bytes, std::memory_order_relaxed);
-    // Attribution (criterion 6). Every allocation through here already carries
-    // the tag its caller chose, and free() looks the bytes back up — so the
-    // report can name the charge instead of leaving it in the residual. Doing
-    // it HERE rather than at each call site is what makes it complete: the
-    // executor's auxiliary buffers alone are 15 call sites in one file, and
-    // none of them was accounted before.
+    // Attribution (criterion 6): every allocation through here already carries the tag its
+    // caller chose, and free() looks the bytes back up, so the report can name the charge
+    // instead of leaving it in the residual. Doing it HERE rather than at each call site is
+    // what makes it complete (the executor's auxiliary buffers alone are 15 call sites in
+    // one file, none previously accounted).
     MemAccount::instance().note(pool, static_cast<std::ptrdiff_t>(bytes));
 
     return ptr;

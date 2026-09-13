@@ -76,12 +76,9 @@ __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const h
     }
 }
 
-// Convert FP32 → FP16 with per-row dynamic scaling.
-// Each row is independently scaled so max_abs maps to ≤65000, preserving
-// the ratio between elements.  Since subsequent operations (RMSNorm) are
-// scale-invariant per row, this produces correct normalized output even
-// when the FP32 residual stream far exceeds FP16 range.
-// Launch: <<<n_rows, 256, 256 * sizeof(float)>>>
+// FP32->FP16 with per-row dynamic scaling: each row scaled independently
+// so max_abs maps to <=65000, preserving inter-element ratio. Correct
+// since RMSNorm is scale-invariant per row, even when the FP32 residual far exceeds FP16 range.
 __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
                                                                     half* __restrict__ out, int rows,
                                                                     int cols) {
@@ -115,12 +112,10 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
         row_out[c] = __float2half(row_in[c] * inv_scale);
 }
 
-// Fused RMSNorm + FP32 accumulator add + FP32→FP16 row-scale conversion.
-// Replaces 3 separate kernels in the post-norm FP32 accumulator path:
-//   rmsnorm(input, weight, tmp) → fp32_accum_add(accum, tmp) → fp32_to_fp16_rowscale(accum, out)
-// Saves 2 kernel launches + 2 DRAM round-trips per invocation.
-// Uses same register-cached, warp-level reduction pattern as rmsnorm_quantize_q8_1.
-// Launch: <<<n_rows, 256>>>
+// Fused RMSNorm + FP32-accumulator-add + FP32->FP16 row-scale conversion,
+// replacing 3 separate kernels in the post-norm FP32 accumulator path
+// (saves 2 launches + 2 DRAM round-trips). Same register-cached, warp-level reduction as
+// rmsnorm_quantize_q8_1.
 __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     const half* __restrict__ input,   // [n, d_model] pre-norm data (e.g. GEMV output)
     const half* __restrict__ norm_w,  // [d_model] RMSNorm weights
@@ -306,14 +301,10 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 // Host-side helpers
 // ---------------------------------------------------------------------------
 
-// Plain device-to-device buffer copy as a KERNEL. cudaMemcpyAsync D2D goes
-// through the WDDM DMA submission path on this WSL2 host and blocks the
-// calling thread ~165 us per call; per-MoE-layer residual copies made that
-// ~8 ms of blocked host time per decode step at n=16 (nsys 2026-07-12). A
-// kernel launch costs ~10 us and stays fully stream-async. 16-byte
-// vectorized; falls back to the driver copy for unaligned buffers
-// (activation buffers are 256-byte-aligned pool allocations, so the fast
-// path is the norm).
+// D2D copy as a KERNEL instead of cudaMemcpyAsync: on this WSL2 host D2D
+// goes through the WDDM DMA submission path and blocks the calling thread
+// ~165 us/call, costly per-MoE-layer at n=16. A kernel launch costs ~10 us
+// and stays stream-async. 16-byte vectorized; falls back to the driver copy for unaligned buffers.
 __global__ void device_copy_v4_kernel(const uint4* __restrict__ src, uint4* __restrict__ dst, size_t n4) {
     size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     pdl_wait();

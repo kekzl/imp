@@ -1,20 +1,11 @@
 #pragma once
 
-// The per-token grid math of the Qwen3-VL encoder, on the host.
-//
-// Two things the encoder needs before it can run a single GEMM, both pure
-// integer/float arithmetic over the patch grid, and both easy to get subtly
-// wrong in a way that still produces a running encoder:
-//
-//   - the (row, col) each token sits at, which is NOT its raster position —
-//     tokens come out of the patchifier grouped by spatial-merge block;
-//   - how to resample the learned square position-embedding table (48x48 for
-//     Qwen3-VL) onto this image's grid, expressed as four gather taps and four
-//     weights per token.
-//
-// Kept on the host and in its own file because it is the part with a real
-// oracle: a bilinear resample of an affine table must reproduce the affine
-// function exactly, which pins taps and weights independently of each other.
+// Per-token grid math of the Qwen3-VL encoder (host-side): the (row,col) each token sits at
+// (NOT raster position, since the patchifier groups tokens by spatial-merge block), and how
+// to resample the learned square position-embedding table (48x48) onto this image's grid as
+// four gather taps + weights per token. Kept on the host with its own oracle: a bilinear
+// resample of an affine table must reproduce the affine function exactly, pinning taps and
+// weights independently.
 
 #include <cstdint>
 #include <expected>
@@ -37,11 +28,10 @@ struct QwenVisionGrid {
 
 inline constexpr int kQwenVisionPosTaps = 4;
 
-// `grid_h`/`grid_w` count patches and must both be multiples of `merge`:
-// smart_resize guarantees that, and a grid that is not would silently drop the
-// tail of the last merge block. `pos_side` is the side of the learned table.
-// Returns the error text instead of a grid, so a half-filled grid is not a
-// value that exists.
+// grid_h/grid_w count patches and must both be multiples of merge (smart_resize
+// guarantees this; otherwise the tail of the last merge block would silently drop).
+// pos_side is the learned table's side. Returns the error text instead of a grid, so a
+// half-filled grid cannot exist as a value.
 [[nodiscard]] std::expected<QwenVisionGrid, std::string> qwen3vl_build_vision_grid(int grid_h, int grid_w,
                                                                                    int merge, int pos_side);
 

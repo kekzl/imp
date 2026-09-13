@@ -274,10 +274,9 @@ struct Token {
     std::string value;
     bool trim_left = false;   // whitespace control: strip left
     bool trim_right = false;  // whitespace control: strip right
-    // TEXT only: this token began at the start of a source line. Needed by
-    // lstrip_blocks, because trim_blocks has usually already eaten the newline
-    // by then - the token is pure indentation and cannot tell on its own
-    // whether it is a line indent or the tail of a line with content on it.
+    // TEXT-only: true when this token began at the start of a source line. Needed for
+    // lstrip_blocks since trim_blocks usually already ate the newline, so pure indentation
+    // can't tell line-indent from line-tail on its own.
     bool line_start = false;
 };
 
@@ -306,11 +305,9 @@ public:
                 // Apply trim: strip trailing whitespace from last TEXT token
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
-                // A comment is a block tag for lstrip_blocks/trim_blocks too
-                // (#1572). Skipping it here left a comment line's indentation
-                // and its newline in the prompt, which is how Nemotron-3-Nano's
-                // template put 20 spaces in front of `<|im_start|>assistant`
-                // while every other family rendered byte-exact.
+                // A comment is a block tag for lstrip_blocks/trim_blocks too (#1572). Skipping it left the
+                // comment line's indentation and newline in the prompt (Nemotron-3-Nano put 20 spaces
+                // before <|im_start|>assistant while other families rendered byte-exact).
                 if (!trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     lstrip_block_indent(tokens.back().value, tokens.back().line_start);
                 // Skip leading whitespace after comment
@@ -343,11 +340,9 @@ public:
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
 
-                // lstrip_blocks (#1572): whitespace from the start of a line up
-                // to a block tag is indentation, not output. Same reason as
-                // trim_blocks above - transformers sets lstrip_blocks=True, and
-                // without it an indented `{% if %}` leaks its indentation into
-                // the prompt.
+                // lstrip_blocks (#1572): whitespace from line-start up to a block tag is indentation, not
+                // output. transformers sets lstrip_blocks=True; without this an indented {% if %} leaks
+                // its indentation into the prompt.
                 if (!is_expr && !trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     lstrip_block_indent(tokens.back().value, tokens.back().line_start);
 
@@ -384,13 +379,9 @@ public:
     }
 
 private:
-    // Drop a trailing run of spaces/tabs, but only when it is the whole
-    // indentation of a line: `\n    {% if %}` loses it, `{{ x }} {% endfor %}`
-    // does not. Matches Jinja's lstrip_blocks.
-    //
-    // `line_start` is what separates them when the run reaches the front of the
-    // token. Treating that as a line start unconditionally ate the separator in
-    // `{% for x in items %}{{ x }} {% endfor %}` and rendered "ab" for "a b ".
+    // Drops a trailing run of spaces/tabs only when it is the WHOLE line indentation (matches
+    // Jinja's lstrip_blocks). `line_start` distinguishes "\n    {% if %}" (dropped) from
+    // "{{ x }} {% endfor %}" (kept, since the run isn't at the line front).
     static void lstrip_block_indent(std::string& text, bool line_start) {
         size_t i = text.size();
         while (i > 0 && (text[i - 1] == ' ' || text[i - 1] == '\t'))
@@ -426,14 +417,10 @@ private:
                     Token close;
                     close.type = (close_tag == "}}") ? TokenType::EXPR_CLOSE : TokenType::STMT_CLOSE;
                     tokens.push_back(close);
-                    // trim_blocks (#1572): the newline that ends the line a block
-                    // tag sits on is part of the tag, not of the output. Jinja
-                    // defaults this off, but transformers renders every chat
-                    // template with trim_blocks=True, so a template written
-                    // against HF emits one spurious newline per block tag here.
-                    // `-%}` already ate all following whitespace and returned
-                    // above; this is the plain `%}` case. Statement tags only -
-                    // `{{ }}` is unaffected in Jinja too.
+                    // trim_blocks (#1572): the newline ending a block-tag line is part of the tag, not
+                    // output.
+                    // Jinja defaults this off but transformers renders with trim_blocks=True. Plain "%}" case
+                    // only; "-%}" already ate trailing whitespace. Statement tags only, {{ }} is unaffected.
                     if (close_tag == "%}") {
                         if (pos < src_.size() && src_[pos] == '\r')
                             pos++;
@@ -852,13 +839,9 @@ public:
     const std::string& unknown_tag() const { return unknown_tag_; }
 
 private:
-    // The template comes out of the model file (`chat_template` in
-    // tokenizer_config.json), so its nesting is not the operator's either.
-    // `parse_primary` recurses back into `parse_expr` on '(' and statement
-    // bodies recurse through `parse_node`, both with no bound, so a template
-    // of 100 000 '(' overflows the stack during load. 256 is far past any
-    // real chat template; the deepest in this tree is 6.
-    //
+    // Template nesting comes from the checkpoint (chat_template in tokenizer_config.json), not
+    // the operator: parse_primary/parse_node recurse with no bound, so 100000 '(' overflows the
+    // stack at load. 256 is far past any real template (deepest here: 6).
     static constexpr int kMaxParseDepth = 256;
     int depth_ = 0;
     bool too_deep_ = false;
@@ -950,10 +933,8 @@ private:
             return parse_set();
         if (check(TokenType::IDENT, "macro"))
             return parse_macro();
-        // {% generation %}/{% endgeneration %} mark the assistant span for
-        // training masks. They contribute nothing to the rendered text and
-        // HF's renderer ignores them, so they are a no-op rather than a
-        // refusal.
+        // {% generation %}/{% endgeneration %} mark the assistant span for training masks; they
+        // contribute nothing to rendered text and HF's renderer ignores them too. No-op, not refusal.
         if (check(TokenType::IDENT, "generation") || check(TokenType::IDENT, "endgeneration")) {
             while (!at_end() && !check(TokenType::STMT_CLOSE))
                 advance();
@@ -964,10 +945,9 @@ private:
             // text right after the tag.
             return std::make_unique<TextNode>(std::string());
         }
-        // Anything else is a tag this engine does not implement, or an
-        // unbalanced end tag. Skipping it silently produced a wrong prompt
-        // with no error, and made ChatTemplate's "fall back to the hardcoded
-        // template" path unreachable (#1565): parse() could not fail.
+        // Any other tag is unimplemented or an unbalanced end tag. Silently skipping it produced a
+        // wrong prompt with no error and made ChatTemplate's hardcoded-fallback path unreachable
+        // (#1565): parse() could not fail.
         unknown_tag_ = peek().value;
         if (unknown_tag_.empty())
             unknown_tag_ = "<empty>";
@@ -1052,11 +1032,9 @@ private:
                 MacroNode::Param param;
                 param.name = peek().value;
                 advance();
-                // Optional default: =expr. The lexer emits ASSIGN for a bare
-                // '=' and OP only for "==" (#1566): testing for OP "=" matched
-                // nothing, so the '=' and the default expression were consumed
-                // as two extra positional parameters and the named one bound
-                // to none.
+                // Optional default: =expr. The lexer emits ASSIGN for a bare '=', OP only for "==" (#1566);
+                // testing OP "=" matched nothing, so '=' and the default expr were consumed as two extra
+                // positional params and the named one bound to none.
                 if (check(TokenType::ASSIGN)) {
                     advance();
                     param.default_value = parse_expr();
@@ -1157,12 +1135,9 @@ private:
             advance();
         }
 
-        // Block form: {% set x %}...{% endset %} captures the rendered body.
-        // Gemma-4's shipped chat_template.jinja builds captured_content this
-        // way. Without it the '=' branch below ran parse_expr() on '%}', the
-        // body rendered inline into the output, and the variable stayed
-        // unset - so `captured_content | trim | length > 0` was always false
-        // (#1565).
+        // Block form {% set x %}...{% endset %} captures the rendered body (Gemma-4's template
+        // uses this for captured_content). Without this the '=' branch ran parse_expr() on '%}',
+        // the body rendered inline, and the variable stayed unset (#1565).
         if (!check(TokenType::ASSIGN)) {
             node->is_block = true;
             if (check(TokenType::STMT_CLOSE))
@@ -1649,14 +1624,10 @@ private:
 // Evaluator
 // ============================================================================
 
-// Evaluation is bounded the way parsing is (Parser::kMaxParseDepth). The AST
-// depth caps every recursion except one: a macro calling itself goes
-// eval_call -> call_macro -> render_node -> eval -> eval_call with no node
-// depth to stop it, and `range(10000000000)` materialises one Value per
-// element. Both arrive in `tokenizer.chat_template`, i.e. out of the
-// checkpoint (AUDIT_arch_2026 F1-9). Jinja2 raises on Python's recursion
-// limit and minja caps loop iterations; here the evaluator throws and
-// Template::render turns it into the documented empty string plus error().
+// Evaluation is bounded like parsing (kMaxParseDepth), except macro self-recursion
+// (eval_call->call_macro->render_node->eval->eval_call, no node-depth stop) and
+// range(10000000000) materializing one Value per element. Both come from the checkpoint's
+// chat_template (AUDIT_arch_2026 F1-9); evaluator throws, render() returns "" + error().
 struct EvalBudgetExceeded : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
@@ -2043,11 +2014,9 @@ private:
                 Value left = eval(*bin.left);
                 return Value(!left.is_none());
             }
-            // "is undefined" is the exact inverse and must NOT be answered by
-            // value truthiness: a variable stamped `false` is defined. Without
-            // this branch it fell through to the generic "is X" equality path
-            // and became `x == undefined`, where `false == none` compares true
-            // — so an explicit false read as "caller said nothing".
+            // "is undefined" is the exact inverse of truthiness and must not use value truthiness: a
+            // variable stamped false is still defined. Falling through to generic equality made
+            // `false == none` compare true, reading an explicit false as "caller said nothing".
             if (test_name == "undefined") {
                 if (auto* var = dynamic_cast<const VariableExpr*>(bin.left.get()))
                     return Value(!is_defined(var->name));
@@ -2856,14 +2825,10 @@ bool Template::parse(const std::string& source_in) {
     error_.clear();
     nodes_.clear();
 
-    // Match Jinja2's keep_trailing_newline=False default — the setting HF
-    // transformers and vLLM use when applying chat templates: strip a single
-    // trailing newline from the template source. Without this, a template file
-    // that ends in a newline (Qwen3-Coder's chat_template.jinja ends
-    // "{%- endif %}\n") renders "<|im_start|>assistant\n\n"; that extra blank
-    // line makes the model emit an immediate EOS (empty completion) on
-    // borderline multi-turn contexts. Templates without a trailing newline
-    // (Qwen3 / Modelopt) are unaffected. Strips one \n, \r\n, or \r.
+    // Matches Jinja2's keep_trailing_newline=False (HF transformers/vLLM default): strips one
+    // trailing \n, \r\n, or \r from the template source. Without it a template ending in a
+    // newline renders an extra blank line before "assistant", causing an immediate EOS on
+    // borderline multi-turn contexts.
     std::string source = source_in;
     if (source.size() >= 2 && source[source.size() - 2] == '\r' && source.back() == '\n')
         source.erase(source.size() - 2);

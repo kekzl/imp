@@ -1,19 +1,6 @@
-// ============================================================================
-// GGUF loader.
-//
-// STATUS: LEGACY / MAINTENANCE MODE (2026-05-24).
-//   GGUF is supported for compatibility but is no longer the active dev surface.
-//   Priority is NVFP4 + SafeTensors (Qwen3.6-35B-A3B-NVFP4, Qwen3-8B-NVFP4-cortecs,
-//   Gemma-4-26B-A4B-it-NVFP4, etc.) — that's where the hero-model perf work lives.
-//
-//   For GGUF bugs, ship the cleanup fix (load errors, missing pointer replaces,
-//   resource cleanup cascades) and move on. Don't sink session time chasing
-//   residual quality issues — especially on community MXFP4 quants, which have
-//   a track record of being subtly broken (see qwen35_27b_mxfp4_ima_2026_04_25
-//   and qwen35_4b_mxfp4_load_partial_fix_2026_05_24 memory notes). If the next
-//   debug step requires comparing against an external reference engine
-//   (llama.cpp / HF Transformers), declare done and defer.
-// ============================================================================
+// STATUS: LEGACY/MAINTENANCE MODE. GGUF is supported for compatibility only; NVFP4+SafeTensors
+// is the active dev surface. For GGUF bugs: ship the cleanup fix and move on, do not chase
+// quality issues on community MXFP4 quants or require an external reference engine.
 
 #include "model/gguf_loader.h"
 #include "model/model_limits.h"
@@ -44,10 +31,8 @@
 
 namespace imp {
 
-// The reportable family of a tensor name: its first path segment, with any
-// digit run collapsed to N. `v.blk.12.attn_q.weight` and `v.blk.13.…` both
-// become `v`, so a dropped subtree is one line instead of hundreds. A name with
-// no dot is its own family.
+// Reportable family of a tensor name: first path segment with digit runs collapsed to N.
+// Groups a dropped subtree into one line instead of hundreds; a name with no dot is its own family.
 std::string gguf_name_family(const std::string& name) {
     const size_t dot = name.find('.');
     std::string head = (dot == std::string::npos) ? name : name.substr(0, dot);
@@ -69,12 +54,9 @@ std::string gguf_name_family(const std::string& name) {
 // Host half/bf16 <-> float helpers for the gpt-oss 2^-4 residual rescale live in
 // core/fp_bits.h, the tree's single copy of them (see test_fp_bits.cpp).
 
-// Format tables (gguf_blck_size / gguf_type_size / gguf_row_size /
-// gguf_type_to_qtype / gguf_type_name), the BinaryReader / GGUFValue plumbing,
-// metadata-value decoding, tensor-info parsing, and tensor bounds checks live
-// in gguf_parse.cpp. Tensor → weight-slot assignment lives in
-// gguf_tensor_assign.cpp. Shared declarations are in gguf_loader_internal.h.
-// This TU keeps the top-level load orchestration only.
+// Format tables, BinaryReader/GGUFValue, metadata decoding, tensor-info parsing, and bounds
+// checks live in gguf_parse.cpp. Tensor -> weight-slot assignment in gguf_tensor_assign.cpp.
+// Shared declarations in gguf_loader_internal.h. This TU: top-level load orchestration only.
 
 // ---- Main GGUF loader ----
 
@@ -142,10 +124,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // 3. Parse metadata key-value pairs
     std::unordered_map<std::string, GGUFValue> metadata;
-    // Clamp the reserve to what the file could physically hold (each KV pair is
-    // at least a 8-byte string-length prefix + 4-byte type tag = 12 bytes).
-    // Without this, a corrupt kv_count=2^60 would reserve petabytes and OOM
-    // before a single read ever fails.
+    // Clamp reserve to what the file could hold: each KV pair is >= 12 bytes (8-byte len prefix
+    // + 4-byte type tag). Without this, kv_count=2^60 reserves petabytes before a read fails.
     metadata.reserve(std::min<uint64_t>(kv_count, reader.remaining() / 12));
 
     for (uint64_t i = 0; i < kv_count && !reader.failed(); i++) {
@@ -273,10 +253,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                     read_gguf_value(sreader, vtype);
                 }
 
-                // Parse shard tensor infos. A truncated shard appends fewer than
-                // stensor_count entries, and `size() - stensor_count` below then
-                // wraps (AUDIT_arch_2026 F1-11): the primary shard checks this,
-                // so does this one.
+                // Truncated shard appends fewer than stensor_count entries; size() - stensor_count then
+                // wraps (AUDIT_arch_2026 F1-11). Primary shard checks this; so does this one.
                 parse_tensor_infos(sreader, stensor_count, tensor_infos);
                 if (sreader.failed()) {
                     IMP_LOG_ERROR("GGUF shard %d tensor info truncated: %s", shard, shard_path);
@@ -318,15 +296,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     std::string arch_str = (it_arch != metadata.end()) ? it_arch->second.str_val : "llama";
     cfg.arch = parse_model_arch(arch_str);
 
-    // #818: encoder-only models (BERT-family embedders like nomic-bert) would
-    // fall through to the generic-decoder path, load "successfully", report
-    // healthy, and then hit a CUDA illegal memory access on the first request
-    // (causal-LM prefill + sampling on a model with no LM head), poisoning the
-    // CUDA context for the whole process. Fail loudly at load instead.
-    // nomic-bert has a dedicated encoder path (#836): rotary positions,
-    // post-LN, mean pooling — served by the encoder forward. Other encoder
-    // archs (classic BERT/bge/e5: learned absolute positions + token-type
-    // sequences + CLS pooling) stay rejected until implemented.
+    // Encoder-only models (BERT-family, e.g. nomic-bert) fall through to the decoder path and
+    // hit a CUDA IMA on first request (#818) if not rejected at load. nomic-bert has a dedicated
+    // encoder path (#836); other encoder archs stay rejected until implemented.
     if (is_encoder_only_arch(arch_str) && cfg.arch != ModelArch::NOMIC_BERT) {
         throw std::runtime_error("encoder-only architecture '" + arch_str +
                                  "' is not supported (imp runs causal decoder LMs; "
@@ -358,11 +330,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     };
 
     cfg.n_layers = static_cast<int>(get_uint("block_count"));
-    // `block_count` is the file's claim about itself: capped HERE, before the
-    // per-layer arrays below (swa_layers, head_dim_per_layer) are sized from
-    // it. The check used to run 300 lines later, after those resizes
-    // (AUDIT_arch_2026 F1-5). The expert count gets the same check once it is
-    // read, before anything is sized from it.
+    // block_count is the file's claim about itself; capped here before per-layer arrays
+    // (swa_layers, head_dim_per_layer) are sized from it. Expert count gets the same check
+    // once read, before anything is sized from it.
     {
         std::string dim_err;
         if (!validate_declared_dimensions(cfg, &dim_err)) {
@@ -528,12 +498,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // the loaded tensor shapes, not GGUF metadata.
     }
 
-    // gpt-oss: alternating attention — even layers use sliding-window (128),
-    // odd layers use full attention. HF encodes this via layer_types[]; the
-    // GGUF omits the per-layer array (only a scalar attention.sliding_window),
-    // so derive the documented gpt-oss pattern here. Without swa_layers the
-    // ModelProfile resolves attn=standard and every layer runs full attention
-    // → wrong output (PPL ~3000 instead of ~4.7).
+    // gpt-oss: alternating attention, even layers sliding-window(128), odd layers full. HF
+    // encodes this via layer_types[]; GGUF only has a scalar attention.sliding_window, so derive
+    // the pattern here. Without swa_layers every layer runs full attention (PPL ~3000 vs ~4.7).
     if (cfg.arch == ModelArch::GPT_OSS) {
         if (cfg.sliding_window <= 0)
             cfg.sliding_window = static_cast<int>(get_uint("attention.sliding_window", 128));
@@ -667,10 +634,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         IMP_LOG_INFO("Partial RoPE: rope_dim=%d (full head_dim=%d)", cfg.rope_dim, cfg.head_dim);
     }
 
-    // 7. Allocate layers and assign weights
-    //
-    // `block_count` and the expert count are GGUF metadata, so they are the
-    // file's claim about itself and are checked before they size anything.
+    // block_count and expert count are the file's claim about itself; both checked before
+    // anything is sized from them.
     {
         std::string dim_err;
         if (!validate_declared_dimensions(cfg, &dim_err)) {
@@ -689,27 +654,16 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
 
     int assigned = 0, skipped = 0;
-    // What was skipped, grouped by name family, so a whole dropped subtree is
-    // one greppable line rather than 355 DEBUG lines nobody sees at the default
-    // level. `src/model/CLAUDE.md` names this exact failure: "A silently
-    // skipped tensor is the failure mode here", and "a skip reported only [at
-    // DEBUG] is not reported". The SafeTensors side got its breakdown in #1929;
-    // this is the same report on the GGUF path.
-    //
-    // Latent rather than live on anything present: a GGUF header parse over all
-    // 15 local checkpoints finds zero unassigned tensors in every text model and
-    // exactly one in the reranker (`cls.output.weight`), which imp is right to
-    // ignore because /v1/rerank scores from the yes/no token logits and never
-    // reads a classification head.
+    // Skipped tensors grouped by name family so a dropped subtree is one greppable line instead
+    // of hundreds of DEBUG lines. src/model/CLAUDE.md: "a skip reported only at DEBUG is not
+    // reported." SafeTensors got its breakdown in #1929; this mirrors it for GGUF.
     std::map<std::string, int> skipped_families;
 
     for (const auto& info : tensor_infos) {
-        // Reject tensors whose [offset, offset+size) window escapes the mapped
-        // file before we ever form a pointer into it. A corrupt offset or a
-        // dim product that overflows would otherwise yield a wild pointer that
-        // weight_upload later reads — an out-of-bounds read / crash on a
-        // malformed file. Skipping leaves the slot null; downstream load fails
-        // cleanly (missing-weight path) instead of faulting.
+        // Reject tensors whose [offset, offset+size) escapes the mapped file before forming a
+        // pointer into it. A corrupt offset/dim-product overflow would otherwise yield a wild
+        // pointer that weight_upload reads. Skip leaves the slot null; load fails via the
+        // missing-weight path instead of faulting.
         if (!gguf_tensor_in_bounds(info)) {
             IMP_LOG_ERROR(
                 "GGUF tensor '%s' out of bounds (offset=%lu, limit=%zu) — skipping; file is corrupt",
@@ -923,10 +877,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                          cfg.expert_shared_d_ff);
         }
 
-        // Gemma 4: convert top-level rope_freqs (a freq DIVISOR table for global
-        // layers) into pre-computed effective per-pair frequencies, then fan out
-        // to every global layer. The kernel's `longrope_inv_freqs` parameter
-        // expects ready-to-use freq values, so do the math on the host.
+        // Gemma-4: convert top-level rope_freqs (a per-pair frequency DIVISOR for global layers)
+        // into precomputed effective frequencies, fanned to every global layer. The kernel's
+        // longrope_inv_freqs expects ready-to-use values.
         if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty() &&
             model->layers_[0].rope_freqs.data != nullptr &&
             model->layers_[0].rope_freqs.qtype == QType::F32) {
@@ -936,10 +889,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             const float* divisors = static_cast<const float*>(src.data);
             float theta_global = cfg.rope_theta;  // 1e6 for Gemma 4
 
-            // Pre-compute effective per-pair frequencies = theta^(-2*pair/hd)/divisor[pair]
-            // and present them via the layer's rope_freqs slot. The kernel reads
-            // these directly as the freq value (longrope_inv_freqs path), no further
-            // theta math. Memory is leaked deliberately (4 KB total, model-lifetime).
+            // Precompute effective per-pair freq = theta^(-2*pair/hd)/divisor[pair]; the kernel reads
+            // these directly via longrope_inv_freqs, no further theta math. Leaked deliberately:
+            // 4 KB total, model-lifetime.
             float* effective = new float[n_pairs];
             for (int p = 0; p < n_pairs; ++p) {
                 float exp_p = -2.0f * static_cast<float>(p) / static_cast<float>(hd_global);
@@ -979,25 +931,15 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         }
     }
 
-    // gpt-oss residual-stream 2^-4 rescale (#547, GGUF parity with the
-    // SafeTensors loader). gpt-oss's huge activations overflow imp's FP16
-    // hidden state (hidden L2 reaches ±inf by ~L23 → NaN logits / garbage
-    // decode). Scaling every contributor to the residual stream by 2^-4 is
-    // exact for the model output: the FP16/RMSNorm path is scale-invariant and
-    // the lm_head reads only normed values. Contributors handled elsewhere:
-    //   - embeddings: cfg.embed_scale = 2^-4 (arch registry)
-    //   - expert down weights: tensor_scales in the MXFP4→NVFP4 converter
-    //     (pre_dequant_phase3_nvfp4_decode.cu)
-    // Handled here, host-side (GGUF is mmap'd read-only, so scale into fresh
-    // host_owned_buffers_): attention output Wo + o_bias, and expert down bias.
+    // gpt-oss residual-stream 2^-4 rescale (#547): FP16 hidden overflows to inf/NaN without it.
+    // RMSNorm/lm_head are scale-invariant so scaling every residual contributor is exact.
+    // Handled elsewhere: embeddings (cfg.embed_scale), expert down weights (tensor_scales in
+    // pre_dequant_phase3_nvfp4_decode.cu). Handled here into fresh host_owned_buffers_ (GGUF
+    // mmap is read-only): attention Wo + o_bias, expert down bias.
     if (cfg.arch == ModelArch::GPT_OSS) {
-        // The GGUF tensor `blk.N.post_attention_norm.weight` is gpt-oss's
-        // PRE-FFN norm (llama convention: post_attention_layernorm gates the
-        // FFN/MoE input — see weight_map.cpp's SafeTensors mapping → ffn_norm).
-        // The generic 4-part handler routed it to post_attn_norm (the Gemma-3
-        // sandwich-norm slot), so the MoE ran on the UN-normalized residual →
-        // router logits ~10x too large → wrong expert selection → garbage.
-        // Move it to ffn_norm (gpt-oss has no sandwich norm).
+        // gpt-oss's blk.N.post_attention_norm.weight is its PRE-FFN norm (llama convention routes
+        // post_attention_layernorm to ffn_norm), not the Gemma-3 sandwich-norm slot post_attn_norm.
+        // Move to ffn_norm; gpt-oss has no sandwich norm.
         for (auto& ly : model->layers_) {
             if (!ly.ffn_norm.data && ly.post_attn_norm.data) {
                 ly.ffn_norm = ly.post_attn_norm;
@@ -1005,13 +947,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             }
         }
 
-        // ×2^-4 helpers for each dtype a gpt-oss residual contributor (Wo, o_bias,
-        // expert down bias) can appear in across GGUF quants. All scale in the float
-        // domain (gguf_*_to_float * 0.0625, then back) — exact for normals, correct
-        // for denormals/underflow. (The earlier exponent-bit-subtract was wrong for
-        // small fp16 block scales — see the helper comment near the top of the file.)
-        // For Q8_0 only the per-block fp16 d is scaled; the int8 quants are untouched.
-        // All write into fresh host_owned_buffers_ (the GGUF mmap is read-only).
+        // x2^-4 helpers per dtype for gpt-oss residual contributors (Wo, o_bias, expert down bias).
+        // All scale in the float domain (gguf_*_to_float * 0.0625, back), correct across denormals.
+        // Q8_0: only the per-block fp16 d is scaled, int8 quants untouched. Writes into fresh
+        // host_owned_buffers_ (GGUF mmap is read-only).
         auto scale_f32 = [&](Tensor& t) -> bool {
             int64_t n = t.numel();
             float* dst = static_cast<float*>(std::malloc(sizeof(float) * n));

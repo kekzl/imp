@@ -1,10 +1,6 @@
-// Pre-dequant Phase 4: tensor registry.
-// Walks the model's WeightMap and registers each tensor's role +
-// runtime location in the GraphExecutor's tensor table. Also builds
+// Pre-dequant Phase 4: tensor registry. Walks the model's WeightMap and registers each
+// tensor's role + runtime location in the GraphExecutor's tensor table. Also builds
 // per-layer NVFP4 device-args caches for the MoE prefill fast path.
-//
-// Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
-// refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
 #include "exec/quant_pipeline.h"
@@ -31,31 +27,23 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     (void)stream;  // unused but kept for signature consistency
     // Build WeightRegistry from wcache_ contents (phase-2 shim).
     registry_->clear();
-    // Explicit kind overrides t.kind which is UNKNOWN after weight_upload.cu
-    // creates fresh Tensor descriptors (TensorKind is not preserved through
-    // the upload code paths). Phase 5 plan-driven allocation requires kind to
-    // be correct, so we pass it explicitly from the field position.
+    // Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cu creates fresh
+    // Tensor descriptors (TensorKind is not preserved through upload). Phase 5 plan-driven
+    // allocation requires kind to be correct, so pass it explicitly from the field position.
     auto register_tensor = [&](const Tensor& t, TensorKind kind) -> TensorID {
         if (!t.data)
             return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(*wcache_, t.data);
-        // FP8 decode SIDECAR (gemm.fp8_ssm_proj): the wcache fp8 entry must
-        // not become the primary tier — prefill and M>1 verify chunks stay on
-        // the full-precision source (quality), only the M=1 decode GEMV takes
-        // the FP8 copy. Demote BEFORE the payload borrow below, or the union
-        // would carry an fp8 payload into FP16 paths.
-        // A native F16 resident with an fp8 entry is always the sidecar (the
-        // phase-2 prefill cache never keys F16 sources). A quantized (GGUF)
-        // source is the sidecar only when the entry carries per-row scales —
-        // the sidecar's marker — since the phase-2 FP8 *prefill* cache also
-        // keys quantized sources (per-tensor scale) and must stay primary.
-        // A native-FP8 source (Modelopt MIXED_PRECISION) is the third way in
-        // here, and it matches neither test above: its qtype is FP8_E4M3, not
-        // F16, and dequant_gpu does not handle it. It is decidedly a sidecar —
-        // the entry borrows the checkpoint's bytes and sm_120 has no FP8
-        // prefill GEMM to run them through, so prefill must take the FP16
-        // companion or it reaches cuBLAS raw (status 15). The entry says so
-        // itself rather than being inferred from a scale layout.
+        // FP8 decode SIDECAR (gemm.fp8_ssm_proj): the wcache fp8 entry must not become the
+        // primary tier; prefill and M>1 verify chunks stay on the full-precision source, only
+        // the M=1 decode GEMV takes the FP8 copy. Demote BEFORE the payload borrow below, or the
+        // union would carry an fp8 payload into FP16 paths.
+        // Sidecar detection: a native F16 resident with an fp8 entry is always the sidecar (the
+        // phase-2 prefill cache never keys F16 sources). A quantized (GGUF) source is the
+        // sidecar only when the entry carries per-row scales (the phase-2 FP8 prefill cache
+        // keys quantized sources with a per-tensor scale and must stay primary). A native-FP8
+        // source (Modelopt) is a third case, always a sidecar: sm_120 has no FP8 prefill GEMM
+        // for it, so prefill must take the FP16 companion or reach cuBLAS raw (status 15).
         bool fp8_decode_sidecar = false;
         if (tier == StorageTier::FP8) {
             auto it = wcache_->fp8.find(t.data);
@@ -80,12 +68,11 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         borrow_payload_from_wcache(h, *wcache_, t.data);
 
         // Dual-tier dispatch: pick the best tier per operation type.
-        // Prefill (M>1): FP16 cuBLAS > FP8 cuBLAS > CUTLASS NVFP4 > source dequant
-        // Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
-        //
-        // Native NVFP4: all dense weights get FP16 prefill (dequanted at load)
-        // to avoid FP8 precision loss that compounds across 36 layers.
-        // Decode uses source NVFP4 data for GEMV (single-token, no compounding).
+        //   Prefill (M>1): FP16 cuBLAS > FP8 cuBLAS > CUTLASS NVFP4 > source dequant
+        //   Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
+        // Native NVFP4: all dense weights get FP16 prefill (dequanted at load) to avoid FP8
+        // precision loss compounding across layers; decode uses source NVFP4 (single-token, no
+        // compounding).
         h.prefill_tier = tier;
         h.decode_tier = tier;
         if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp16.count(t.data)) {
@@ -178,15 +165,12 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     const_cast<Model*>(model_)->tok_emb_id = register_tensor(model_->token_embedding(),
                                                              TensorKind::TOK_EMBED);
 
-    // Register fused KV / gate+up overlays. Layer-keyed (not pointer-keyed)
-    // because a fused tensor is built fresh — the source pointers (wk, wv)
-    // are the *unfused* weights and don't appear in any per-tensor wcache_ map.
-    //
-    // Ownership transfer (Phase 4.2): the registry handle takes ownership of
-    // the GPU pointer. `h.owned_bytes` is set to the allocation size so the
-    // registry destructor (`free_owned_storage`) will free it. The wcache_
-    // map entry is erased after transfer so that the workspace cleanup's
-    // wcache_->fused_kv loop becomes a no-op — no double-free.
+    // Register fused KV / gate+up overlays, layer-keyed (not pointer-keyed): a fused tensor
+    // is built fresh, so the unfused source pointers (wk, wv) don't appear in any
+    // per-tensor wcache_ map.
+    // Ownership transfer (Phase 4.2): the handle takes ownership of the GPU pointer
+    // (h.owned_bytes = allocation size, freed by free_owned_storage); the wcache_ map entry
+    // is erased after transfer so workspace cleanup's wcache_->fused_kv loop is a no-op.
     auto register_fused = [&](TensorKind kind, const Tensor& t) -> TensorID {
         if (!t.data)
             return kInvalidTensorID;
@@ -206,23 +190,19 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             L.fused_gate_up_id = register_fused(TensorKind::FUSED_GATE_UP, it->second);
         }
     }
-    // Transfer storage ownership: clear the wcache_->fused_kv / fused_gate_up
-    // maps so the legacy cleanup loops in executor_workspace_buffers.cu find
-    // them empty. The underlying pointers live on in the registry handles
-    // and are freed by `registry_->free_owned_storage()` in workspace cleanup.
+    // Transfer storage ownership: clear wcache_->fused_kv / fused_gate_up so the legacy
+    // cleanup loops in executor_workspace_buffers.cu find them empty. The underlying
+    // pointers live on in the registry handles, freed by registry_->free_owned_storage() in
+    // workspace cleanup.
     wcache_->fused_kv.clear();
     wcache_->fused_gate_up.clear();
 
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)", registry_->size());
 
-    // Phase 4 (Option C) overlay diagnostic: report ideal vs actual overlay
-    // population. The plan enumerates every quantize-able tensor at its
-    // preferred tier ("ideal overlay"). The registry tracks tensors actually
-    // cached by the runtime ("actual overlay"). Native GGUF blocks (Q4_K_M,
-    // Q5_K_M, Q6_K, Q8_0, MXFP4) stay as mmap'd `Model::gpu_allocations_`
-    // and are dequantized per kernel call — they bypass the overlay layer
-    // entirely, so the diff between plan and registry is informational, not
-    // an error.
+    // Phase 4 (Option C) overlay diagnostic: report ideal (plan-enumerated) vs actual
+    // (runtime-cached) overlay population. Native GGUF blocks bypass the overlay layer
+    // entirely (mmap'd, dequantized per kernel call), so the plan/registry diff is
+    // informational, not an error.
     {
         // Stage 1: reuse the persistent plan built at the top of
         // pre_dequant_weights() instead of re-running plan_storage a third time.
@@ -265,10 +245,9 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             "(uncached %zu remain as native GGUF blocks)",
             registry_count, plan_overlay, plan_overlay > registry_count ? plan_overlay - registry_count : 0);
 
-        // When there is a registry/plan gap, surface the by-kind delta so the
-        // missing TensorKinds are immediately visible. Helps when adding a new
-        // model that has tensor kinds the runtime caches but plan_storage
-        // doesn't yet enumerate (or vice versa).
+        // When there is a registry/plan gap, surface the by-kind delta so missing TensorKinds
+        // are immediately visible: helps when a new model has tensor kinds the runtime caches
+        // but plan_storage doesn't yet enumerate (or vice versa).
         if (registry_count < plan_overlay) {
             int plan_per_kind[std::to_underlying(TensorKind::COUNT)] = {0};
             int registry_per_kind[std::to_underlying(TensorKind::COUNT)] = {0};
@@ -303,24 +282,16 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             wcache_->cutlass_mxfp4.size(), wcache_->nvfp4_moe.size(), wcache_->fused_kv.size(),
             wcache_->fused_gate_up.size());
 
-        // Stage 1 plan-vs-actual parity diagnostic: for every plan entry whose
-        // tier is an overlay, compare the planned tier against the tier the
-        // legacy build path actually produced (inferred from which wcache map
-        // the source pointer landed in). A mismatch means switching this
-        // builder to plan-driven would change behaviour — it MUST be understood
-        // (expected budget-eviction, or a real arch-rule the plan doesn't yet
-        // encode) before that builder is migrated. Pure diagnostic; logs only.
-        // The planned tier here is the post-downgrade tier; budget eviction
-        // (planned overlay → actual native/uncached) is the common benign case.
+        // Stage 1 plan-vs-actual parity diagnostic: for every plan entry whose tier is an
+        // overlay, compare the planned tier against the tier the legacy build path actually
+        // produced. A mismatch means switching this builder to plan-driven would change
+        // behaviour and must be understood (expected budget-eviction, or a real arch-rule the
+        // plan doesn't yet encode) before migration. Pure diagnostic; logs only.
         {
-            // "Present in the planned tier's map?" — NOT first-hit. A GGUF weight
-            // legitimately appears in BOTH wcache_->nvfp4 (its tier) AND
-            // wcache_->cutlass_nvfp4 (the dead G3 SF buffer); first-hit would
-            // falsely flag it. We ask: did the legacy build put this source into
-            // the map the plan chose? If yes → matched (extra overlays are a
-            // separate G3 concern). If it landed in a DIFFERENT map → real
-            // mismatch (the plan and the legacy path disagree on tier). If it
-            // landed nowhere → evicted (budget / native fallback, benign).
+            // "Present in the planned tier's map?", not first-hit: a GGUF weight legitimately
+            // appears in BOTH wcache_->nvfp4 (its tier) AND wcache_->cutlass_nvfp4 (the dead G3 SF
+            // buffer); first-hit would falsely flag it. Matched = landed in the map the plan chose;
+            // different map = real tier mismatch; nowhere = evicted (budget/native fallback, benign).
             auto present_in = [&](StorageTier t, const void* src) -> bool {
                 switch (t) {
                     case StorageTier::FP16: return wcache_->fp16.count(src) > 0;
@@ -364,27 +335,20 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             IMP_LOG_INFO("Phase-4 plan/actual parity: matched=%d mismatch=%d evicted=%d",
                          matched, mismatch, evicted);
         }
-        // Native layer counterpart to the overlay diagnostic: tensors uploaded
-        // as their on-disk format and dispatched through qtype-specific kernels
-        // (no tier choice, no cascade-bug class). gpu_allocations_ tracks every
-        // GPU pointer the Model owns — Q4_K_M / Q5_K_M / Q6_K / Q8_0 / MXFP4
-        // blocks, norms, embeddings, scratch buffers. Together with the overlay
-        // counts above this gives the full Option-C two-layer storage picture.
+        // Native layer counterpart to the overlay diagnostic: tensors uploaded in their on-disk
+        // format and dispatched through qtype-specific kernels (no tier choice). gpu_allocations_
+        // tracks every GPU pointer the Model owns; together with the overlay counts this gives
+        // the full Option-C two-layer storage picture.
         IMP_LOG_INFO(
             "Phase-4 native: %zu Model::gpu_allocations_ pointers "
             "(GGUF blocks + norms + scratch — bypass the overlay layer)",
             model_->gpu_allocations_.size());
 
-        // Decode-redundancy diagnostic: how many bytes of original GGUF the
-        // overlay tier (NVFP4 / CUTLASS_NVFP4 / FP8 / MXFP4) covers for DECODE.
-        // This is an UPPER BOUND, not freeable VRAM: M>1 prefill still reads the
-        // GGUF source for these weights — Q8_0/Q4_K via IMMA raw-read on the
-        // source, Q6_K/Q5_K via on-the-fly dequant or CUTLASS — so the source
-        // stays resident under the current strict-quality-neutral prefill paths.
-        // (The earlier "could be freed / deferred to 5.1.4.b" wording was wrong
-        // since IMMA raw-read prefill #617; Phase 4b correctly frees nothing for
-        // these, see its source-pointer guard.) FP16-cached weights keep the
-        // original for dp4a decode and are not counted.
+        // Decode-redundancy diagnostic: how many bytes of original GGUF the overlay tier
+        // (NVFP4/CUTLASS_NVFP4/FP8/MXFP4) covers for DECODE. An UPPER BOUND, not freeable VRAM:
+        // M>1 prefill still reads the GGUF source for these weights under the current
+        // strict-quality-neutral prefill paths (IMMA raw-read, on-the-fly dequant, or CUTLASS).
+        // FP16-cached weights keep the original for dp4a decode and are not counted.
         {
             size_t decode_redundant_count = 0;
             size_t decode_redundant_bytes = 0;
@@ -406,19 +370,12 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays.
-    // -----------------------------------------------------------------------
-    // The CUTLASS 3.x device-args dispatch (Phase 3c-full Step 2b,
-    // moe.nvfp4_device_args) consumes per-expert weight pointers as
-    // device-resident arrays. Per-call host iteration + 3× cudaMemcpyAsync
-    // (~3 KiB total) was the residual overhead blocking full CUDA-graph
-    // capture of the MoE prefill. Build the caches once here while the
-    // handle payloads are guaranteed populated; the forward path then uses
-    // the device pointers directly.
-    //
-    // Conditions: model is MoE (ne > 0) and at least one layer has all three
-    // projections backed by CUTLASS NVFP4 handles (post-Phase-3 setup).
+    // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays. The CUTLASS
+    // 3.x device-args dispatch (moe.nvfp4_device_args) consumes per-expert weight pointers
+    // as device-resident arrays; per-call host iteration + cudaMemcpyAsync was the residual
+    // overhead blocking full CUDA-graph capture of the MoE prefill. Build the caches once
+    // here while handle payloads are populated; the forward path then uses device pointers
+    // directly. Requires the model be MoE and at least one layer fully CUTLASS-NVFP4-backed.
     {
         const int ne = cfg.n_experts;
         const int n_layers = cfg.n_layers;
@@ -464,12 +421,11 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         int built_layers = 0;
         int host_resident_layers = 0;  // intentionally not built (force_host or budget offload)
         std::vector<int> failed_layers;
-        // The loader pre-sizes the expert id vectors on EVERY layer of a
-        // hybrid model (SSM/attention layers carry all-invalid ids), so
-        // "has expert ids" must mean "has at least one VALID id" — the
-        // empty()-based checks misclassified all 29 Nemotron-H non-MoE
-        // layers as MoE-eligible (tripping the QW8 abort) and left the
-        // non-gated gate projection permanently "present but failed".
+        // The loader pre-sizes the expert id vectors on EVERY layer of a hybrid model
+        // (SSM/attention layers carry all-invalid ids), so "has expert ids" must mean "has at
+        // least one VALID id": an empty()-based check misclassifies non-MoE layers as
+        // MoE-eligible (tripping the QW8 abort) and leaves the non-gated gate projection
+        // permanently "present but failed".
         auto any_valid_id = [](const std::vector<TensorID>& ids) {
             return std::any_of(ids.begin(), ids.end(),
                                [](TensorID id) { return id != kInvalidTensorID; });
@@ -486,11 +442,10 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 // without counting against the must-populate gate.
                 continue;
             }
-            // Host-resident layers (host-offload / force_host_experts) by
-            // design have no CUTLASS NVFP4 weight payload — the per-layer
-            // fallback dispatch is the intended path. Don't count these as
-            // QW8 build failures. Detect via either packed-tensor (GGUF Path A)
-            // or per-expert tensor (SafeTensors Path B) staying on host.
+            // Host-resident layers (host-offload / force_host_experts) by design have no CUTLASS
+            // NVFP4 weight payload; the per-layer fallback dispatch is the intended path, not a QW8
+            // build failure. Detect via either packed-tensor (GGUF Path A) or per-expert tensor
+            // (SafeTensors Path B) staying on host.
             const bool packed_host = (L.expert_up_packed.data && !L.expert_up_packed.on_device);
             bool per_expert_host = false;
             if (!packed_host && !L.expert_w_up.empty()) {
@@ -504,11 +459,10 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 continue;
             }
             ++eligible_layers;
-            // Non-gated experts (RELU² — Nemotron-H) have no gate projection:
-            // gate ids are absent (empty or all-invalid). The empty()-only
-            // check left c.ready=false on every Nemotron-H layer, silently
-            // forcing the per-call H2D fallback dispatch (and, under graph
-            // capture, a memcpy node reading a dead stack buffer — #860).
+            // Non-gated experts (RELU^2, e.g. Nemotron-H) have no gate projection: gate ids are
+            // absent (empty or all-invalid). An empty()-only check left c.ready=false on every such
+            // layer, silently forcing the per-call H2D fallback dispatch and, under graph capture, a
+            // memcpy node reading a dead stack buffer (#860).
             const bool gate_absent = !any_valid_id(L.expert_gate_ids);
             bool g_ok = !gate_absent &&
                         build_proj(L.expert_gate_ids, c.d_gate_B_ptrs,
@@ -525,21 +479,14 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 failed_layers.push_back(li);
             }
         }
-        // QW8 from the phase-5 review §2.1 (archived in #604): hard-fail (not log-INFO)
-        // when the NVFP4 da_cache populates <100% of MoE-eligible layers.
-        // Partial coverage means the per-layer fallback fires for the missing
-        // layers and decode silently regresses ~5× on Qwen3-Coder / Gemma-4
-        // NVFP4 (per moe_prefill_graphs_plan_2026_05_10 + cuda_graphs_moe_works).
-        // A partial build is almost always a load-time symptom of a
-        // mismatched expert layout or a budget that fell short of needed
-        // device allocations — the right response is to fail loud at init
-        // rather than ship the user a slow build.
-        // Only abort on *partial* coverage of device-resident MoE layers
-        // (the genuine "silent 5× regression" case). If nothing built at
-        // all, this model isn't going through the NVFP4 MoE da_cache path
-        // at runtime — log INFO and continue (covers --no-nvfp4 on GGUF
-        // MoE, Q4_K_M / Q6_K MoE without prequant scales, and synthetic
-        // force_host_experts spikes).
+        // QW8 (#604): hard-fail (not log-INFO) when the NVFP4 da_cache populates <100% of
+        // MoE-eligible layers. Partial coverage means the per-layer fallback fires for the
+        // missing layers and decode silently regresses there; a partial build is almost always a
+        // load-time symptom of a mismatched expert layout or an insufficient budget, so fail
+        // loud at init rather than ship a slow build. Only abort on PARTIAL coverage; if nothing
+        // built at all, this model isn't going through the NVFP4 MoE da_cache path at
+        // runtime, so log INFO and continue (covers --no-nvfp4, GGUF MoE without prequant
+        // scales, force_host_experts).
         if (eligible_layers > 0 && built_layers > 0 && built_layers < eligible_layers) {
             std::string failed_str;
             for (size_t i = 0; i < failed_layers.size() && i < 16; ++i) {
@@ -576,16 +523,12 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     }
 }
 
-// Free a GGUF source allocation only when NO path still reads it. The guard
-// below (try_mark) frees a source iff it's a base allocation AND not present in
-// wcache_->nvfp4 / wcache_->cutlass_nvfp4. For decode-cached weights the source
-// IS present in those maps (keyed on the source pointer), so they are correctly
-// SKIPPED — M>1 prefill reads the GGUF source (IMMA raw-read / dequant /
-// CUTLASS) under the strict-quality-neutral prefill paths. Net effect today:
-// near-zero sources freed, by design — the decode-redundancy diagnostic in
-// Phase 4 is an upper bound, not freeable VRAM. The mark also sets
-// Tensor.dropped_source so any raw-deref path that DID lose its source would
-// log a coverage-gap warning instead of reading freed memory.
+// Free a GGUF source allocation only when NO path still reads it: try_mark frees a
+// source iff it's a base allocation AND not present in wcache_->nvfp4 /
+// wcache_->cutlass_nvfp4. Decode-cached weights ARE present there (M>1 prefill still
+// reads the GGUF source), so they are correctly SKIPPED; near-zero sources freed today,
+// by design. Also sets Tensor.dropped_source so any raw-deref path that lost its source
+// logs a coverage-gap warning instead of reading freed memory.
 void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     const ModelConfig& cfg, cudaStream_t stream) {
     auto* mut_model = const_cast<Model*>(model_);
@@ -653,11 +596,9 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             "allocations.",
             marked_count, marked_bytes / (1024.0 * 1024.0),
             skipped_shared_count, skipped_shared_bytes / (1024.0 * 1024.0));
-        // Drain async frees. cudaFreeAsync returns allocations to the pool
-        // WITHOUT releasing physical pages (no WDDM page release → no
-        // cuBLAS status-14). The pool retains the memory for reuse by
-        // future cudaMallocAsync calls. Physical reclaim is deferred to
-        // Model::~Model which trims the pool after all weights are freed.
+        // Drain async frees: cudaFreeAsync returns allocations to the pool WITHOUT releasing
+        // physical pages (no WDDM page release, no cuBLAS status-14). Physical reclaim is
+        // deferred to Model::~Model, which trims the pool after all weights are freed.
         cudaStreamSynchronize(stream);
         IMP_LOG_INFO("Phase-4b: async pool reclaimed %.2f MiB (retained in pool)",
                      marked_bytes / (1024.0 * 1024.0));

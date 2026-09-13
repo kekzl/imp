@@ -1,25 +1,12 @@
 #pragma once
-// Sticky CUDA error classification (AUDIT_arch_2026 D-1, #874).
-//
-// A device fault inside a kernel (illegal address, launch failure, ...)
-// poisons the process-wide CUDA context: every later runtime call returns the
-// same error and nothing clears it. Every IMP_CUDA_CHECK_* in the hot path is
-// log-only, so without an explicit host signal the next forward() logged
-// "Cleared stale error", the sampler returned the previous step's pinned
-// tokens and the server answered 200 with /health ok. These three are the
-// only places that turn a sticky error into a host signal:
-//
-//   cuda_error_is_unrecoverable(e)   the class table; a recoverable or unknown
-//                                    class never stops the server
-//   cuda_clear_or_throw(where)       forward() pre-check: a benign pending
-//                                    error is cleared as before and returned
-//                                    for the log line, a sticky class throws
-//   cuda_sync_or_throw(err, where)   a failed stream/event sync means the host
-//                                    buffer the caller is about to read was
-//                                    never written; any failure throws
-//
-// The throw lands in BatchingEngine's step() catch (or the C API boundary),
-// which re-probes the device and decides faulted-or-recover.
+// Sticky CUDA error classification (AUDIT_arch_2026 D-1, #874): a device
+// fault poisons the process-wide CUDA context, and hot-path IMP_CUDA_CHECK_*
+// is log-only, so without an explicit signal the server could log a cleared
+// error and still answer 200 with stale tokens.
+// cuda_error_is_unrecoverable(e): the class table; recoverable/unknown never stops the server.
+// cuda_clear_or_throw(where): pre-check; benign error cleared, sticky class throws.
+// cuda_sync_or_throw(err, where): failed sync means the host buffer was never written; always throws.
+// Throw lands in BatchingEngine::step()'s catch (or the C API boundary), which re-probes and decides.
 #include <cuda_runtime_api.h>
 #include <stdexcept>
 #include <string>

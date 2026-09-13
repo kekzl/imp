@@ -1,8 +1,6 @@
-// Pre-dequant Phase 3 (CUTLASS / MXFP4): NVFP4→CUTLASS sm_120 conversion,
-// native MXFP4 registration, and the MXFP4→FP16 decode fallback.
-// Split out of pre_dequant_phase3_nvfp4_decode.cu to keep each .cu under the
-// kernel file-size threshold. See pre_dequant_internal.h / quant_pipeline.h
-// for shared declarations.
+// Pre-dequant Phase 3 (CUTLASS/MXFP4): NVFP4->CUTLASS sm_120 conversion, native MXFP4
+// registration, and the MXFP4->FP16 decode fallback. Split out to keep each .cu under
+// the kernel file-size threshold.
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -33,10 +31,9 @@ namespace imp {
 
 using imp::pre_dequant_internal::deduct_budget;
 
-// Phase 3b: convert NVFP4 weights into CUTLASS sm_120 block-scaled format.
-// Must run after FP16-free; the CUTLASS cache approximately doubles NVFP4
-// VRAM (repacked data + SfAtom scales).  Budget-aware: stops if VRAM
-// budget runs out and emits an info line.
+// Phase 3b: convert NVFP4 weights into CUTLASS sm_120 block-scaled format. Must run
+// after FP16-free; the CUTLASS cache approximately doubles NVFP4 VRAM (repacked data +
+// SfAtom scales). Budget-aware: stops if VRAM runs out and logs an info line.
 void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget,
                                                   size_t& remaining_budget, cudaStream_t stream) {
     // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
@@ -45,20 +42,15 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         size_t free_mem = 0, total_mem = 0;
         vram_budget_mem_get_info(&free_mem, &total_mem);
-        // Intentionally NOT using dctx.safety_reserve here: populating
-        // cutlass_nvfp4 in mode 2 destabilised CUDA-graph capture on
-        // Qwen3-14B Q6_K (bimodal 97 vs 145 tok/s decode across trials).
-        // The dense in-loop safety relaxation already delivers the +15%
-        // decode win; the CUTLASS path stays conservative until the
+        // Intentionally NOT using dctx.safety_reserve here: populating cutlass_nvfp4 in mode 2
+        // destabilised CUDA-graph capture on some models. The dense in-loop safety relaxation
+        // already delivers its decode win; the CUTLASS path stays conservative until the
         // capture-failure root cause is understood.
         size_t kCtReserve = vram_reserve_floor(total_mem);
         ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
-        // Prequant models: the plan grants the SF slab its measured demand, so
-        // the budget is floored at it even when cudaMemGetInfo under-reports
-        // free (async frees are reclaimed late on this driver). Floor, don't
-        // trust live-free below the guarantee. This used to be backed by a
-        // physical balloon the Engine held across init; the floor alone carries
-        // it now (AUDIT B62).
+        // Prequant models: the plan grants the SF slab its measured demand, so the budget is
+        // floored at it even when cudaMemGetInfo under-reports free (async frees reclaim late on
+        // this driver). Floor, don't trust live-free below the guarantee (AUDIT B62).
         if (budget.mandatory_sf_bytes > ct_budget) {
             IMP_LOG_INFO("CUTLASS NVFP4 cache: budget floored at guaranteed %.1f MiB "
                          "(live-free-derived %.1f MiB under-reports)",
@@ -71,21 +63,18 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
                         ? (remaining_budget - wcache_->nvfp4_bytes)
                         : 0;
     }
-    // SfAtom scale factors share ONE slab allocation (each entry borrows a
-    // sub-region) instead of a per-tensor cudaMalloc+cudaMemsetAsync (#734). MoE
-    // experts additionally convert in ONE batched launch per (layer,projection)
-    // group instead of one launch per expert: on a 128-expert MoE that collapses
-    // ~18.6k convert launches into ~144. Pass 1 sizes the slab (contiguous MoE
-    // groups first, then per-tensor dense / non-contiguous entries) under the
-    // SAME skip + VRAM-budget rules; pass 2 converts each into its slab offset.
+    // SfAtom scale factors share ONE slab allocation (each entry borrows a sub-region)
+    // instead of a per-tensor cudaMalloc+cudaMemsetAsync (#734). MoE experts convert in one
+    // batched launch per (layer,projection) group instead of one per expert. Pass 1 sizes
+    // the slab (contiguous MoE groups first, then per-tensor entries); pass 2 converts each
+    // into its slab offset.
     constexpr size_t kSfAlign = 256;  // keep each entry's SF base CUTLASS-aligned
     auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
 
-    // Identify contiguous MoE expert groups from the model. The grouping comes
-    // from the model because wcache_->nvfp4_moe is not populated until a later
-    // phase. The loader's contiguity invariant is re-checked here; any group
-    // that is non-contiguous, non-uniform, or partly absent from the decode
-    // cache falls back to the per-tensor path below (correctness over speed).
+    // Identify contiguous MoE expert groups from the model (wcache_->nvfp4_moe isn't
+    // populated yet). The loader's contiguity invariant is re-checked here; any group that
+    // is non-contiguous, non-uniform, or partly absent from the decode cache falls back to
+    // the per-tensor path (correctness over speed).
     struct MoeGroup {
         const void* base_ms;
         int ne, N, K;
@@ -158,12 +147,10 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
             if (grouped.count(ptr))
                 continue;  // converted by a batched MoE group above
-            // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1
-            // prefill uses IMMA raw-read on the GGUF source — the CUTLASS GEMM
-            // path is never reached for them, so the SF buffer is dead VRAM.
-            // Today that is Q8_0 with q8_imma_enabled. CUTLASS stays for native-
-            // NVFP4 (prefill IS CUTLASS) and Q6_K/Q5_K. Decode is unaffected:
-            // decode_tier stays NVFP4 (the plain wcache_->nvfp4 GEMV).
+            // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1 prefill uses IMMA
+            // raw-read on the GGUF source (today: Q8_0 with q8_imma_enabled) since the CUTLASS GEMM
+            // path is never reached for them. CUTLASS stays for native-NVFP4 and Q6_K/Q5_K. Decode
+            // is unaffected (decode_tier stays NVFP4, the plain wcache_->nvfp4 GEMV).
             const auto* pe = storage_plan_.entry_of(ptr);
             if (pe && pe->source_qtype == QType::Q8_0 && dispatch_policy().gemm.q8_imma_enabled) {
                 ++ct_skipped_dead;
@@ -245,11 +232,10 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     }
 }
 
-// Phase 3c-native: register MXFP4 GGUF weights directly in CUTLASS cache.
-// Bypasses NVFP4 — the GGUF data is unpacked into E2M1 + SfAtom UE8M0 on
-// GPU. Allocates the MXFP4 activation scratch once if any layer carries
-// MXFP4 weights, then runs an optional NVFP4->MXFP4 conversion pass for
-// models with `use_mxfp4`.
+// Phase 3c-native: register MXFP4 GGUF weights directly in the CUTLASS cache, bypassing
+// NVFP4 (GGUF data unpacked into E2M1 + SfAtom UE8M0 on GPU). Allocates the MXFP4
+// activation scratch once if any layer carries MXFP4 weights, then runs an optional
+// NVFP4->MXFP4 conversion pass for models with use_mxfp4.
 void QuantPipeline::nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream) {
     // These bypass NVFP4 entirely — the GGUF data is unpacked into
     // separate E2M1 data + SfAtom UE8M0 scales on GPU.
@@ -320,10 +306,10 @@ void QuantPipeline::nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cf
         }
     }
 
-    // Convert NVFP4 weights to MXFP4 (UE8M0 scales) if MXFP4 prefill is enabled.
-    // Same packed FP4 data (borrowed), only allocates new scale factor buffers.
-    // Note: Hadamard rotation requires MR-GPTQ pre-rotated weights (SafeTensors).
-    // For GGUF models, we use direct scale conversion (no rotation).
+    // Convert NVFP4 weights to MXFP4 (UE8M0 scales) if MXFP4 prefill is enabled: same packed
+    // FP4 data (borrowed), only new scale-factor buffers. Hadamard rotation requires
+    // MR-GPTQ pre-rotated weights (SafeTensors); GGUF models use direct scale conversion
+    // (no rotation).
     if (wcache_->use_mxfp4 && qscratch_->mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
         int mx_count = 0;
         size_t mx_total = 0;
@@ -348,10 +334,9 @@ void QuantPipeline::nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cf
     }
 }
 
-// Native MXFP4 GGUF unpack + FP16 fallback dequant. Registers MXFP4 weights
-// directly in the CUTLASS cache, then for GDN / forced-fallback models
-// dequants them into a bulk FP16 buffer and rewrites model weight pointers
-// so the dispatch path sees FP16 instead of raw MXFP4 blocks.
+// Native MXFP4 GGUF unpack + FP16 fallback dequant. Registers MXFP4 weights directly in
+// the CUTLASS cache, then for GDN/forced-fallback models dequants them into a bulk FP16
+// buffer and rewrites model weight pointers so dispatch sees FP16 instead of raw MXFP4.
 void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream) {
 int mx_native = 0;
 size_t mx_native_bytes = 0;
@@ -391,10 +376,10 @@ if (mx_native > 0) {
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     wcache_->cutlass_mxfp4_bytes += mx_native_bytes;
     wcache_->use_mxfp4 = true;
-    // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the
-    // model's source buffers — a second engine on this model handle cannot
-    // re-run the unpack (it would read the already-compacted layout as raw
-    // blocks → illegal access, #830). Engine::init rejects it up front.
+    // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the model's source
+    // buffers: a second engine on this model handle cannot re-run the unpack (it would read
+    // the already-compacted layout as raw blocks, illegal access, #830). Engine::init
+    // rejects a second engine up front.
     const_cast<Model*>(model_)->mark_sources_consumed();
     // Also suspend-unsupported: a weight snapshot would capture the compacted
     // bytes and the resume replay would compact them again.
@@ -410,15 +395,10 @@ if (mx_native > 0) {
             IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e));
     }
 
-    // Check if MXFP4 GEMV is available (linear_scales populated).
-    // GDN models force the FP16 fallback because — although every
-    // linear projection in executor_ssm_gdn.cu *does* now go through
-    // gemm_dispatch — the MXFP4 prefill dispatch path for GDN-shape
-    // weights (notably Qwen3.5-27B's ssm_out at K=6144 N=5120, and
-    // FFN at K=17408 N=5120) hits a cuBLAS-INTERNAL_ERROR (status
-    // 14) cascade we have not yet root-caused. Tracking in
-    // qwen35_27b_mxfp4_ima_2026_04_25.md. Until that's resolved,
-    // honor the historical fallback path.
+    // GDN models force the FP16 fallback: although every linear projection in
+    // executor_ssm_gdn.cu now routes through gemm_dispatch, the MXFP4 prefill path for
+    // GDN-shape weights hits a cuBLAS-INTERNAL_ERROR (status 14) cascade, not yet
+    // root-caused. Honor the fallback until resolved.
     bool force_fallback = dispatch_policy().attention.mxfp4_fp16_fallback;
     bool has_gdn = (cfg.ssm_inner_size > 0);
     bool mxfp4_gemv_available = !force_fallback && !has_gdn;
@@ -433,18 +413,12 @@ if (mx_native > 0) {
                      mx_native);
     }
 
-    // Dequant MXFP4 → FP16 for decode (only when MXFP4 GEMV not available).
-    // Single bulk allocation to avoid CUDA heap fragmentation.
-    //
-    // Phase A2:
-    // when attention.mxfp4_fp16_cache_policy == "pruned", skip
-    // tensor slots that aren't read on the dispatch hot path —
-    // MoE expert_*_packed (consumed only by executor_forward_moe.cu's
-    // pre-cached FP16 path, which the MXFP4 batch-dequant route
-    // bypasses) and the LM head out_proj_ (routed through
-    // generic-dequant). For Qwen3.5-27B MXFP4 this shrinks
-    // the FP16 fallback from ~48 GiB to ~8-12 GiB and unblocks
-    // load on 32 GiB VRAM.
+    // Dequant MXFP4 -> FP16 for decode (only when MXFP4 GEMV unavailable). Single bulk
+    // allocation to avoid CUDA heap fragmentation.
+    // Phase A2: when attention.mxfp4_fp16_cache_policy == "pruned", skip tensor slots not
+    // read on the dispatch hot path (MoE expert_*_packed, consumed only by the pre-cached
+    // FP16 path the MXFP4 batch-dequant route bypasses; the LM head out_proj_, routed
+    // through generic-dequant) to shrink the FP16 fallback substantially.
     std::unordered_set<const void*> pruned_skip_ptrs;
     const bool pruned_policy =
         (dispatch_policy().attention.mxfp4_fp16_cache_policy == "pruned");
@@ -488,35 +462,25 @@ if (mx_native > 0) {
 
     void* d_fp16_bulk = nullptr;
     if (fp16_total > 0) {
-        // Pre-flight VRAM check: WSL2/WDDM cudaMalloc happily pages over
-        // the device boundary into host RAM. cuBLASLt then fails at
-        // runtime when it can't allocate its internal workspace → status
-        // 14 (INVALID_VALUE) followed by a confusing downstream illegal
-        // memory access (observed on Qwen3.5-27B-mxfp4 GDN where the
-        // 12 GiB MXFP4 raw + 48 GiB FP16 fallback exceed 32 GiB VRAM).
-        // Refuse the alloc instead of paging — keeps the failure mode
-        // legible.
+        // Pre-flight VRAM check: WSL2/WDDM cudaMalloc happily pages over the device boundary
+        // into host RAM; cuBLASLt then fails at runtime when it can't allocate its internal
+        // workspace (status 14 INVALID_VALUE) followed by a confusing downstream illegal memory
+        // access. Refuse the alloc instead of paging, to keep the failure mode legible.
         size_t free_mem = 0, total_mem = 0;
         vram_budget_mem_get_info(&free_mem, &total_mem);
         constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
         bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                               fp16_total + kRuntimeHeadroom > free_mem);
-        // The "force anyway despite oversubscription" path is gone —
-        // attention.mxfp4_fp16_fallback is a plain bool now. Opting in via
-        // imp.conf still gets gated by this oversubscribe check (matching the
-        // old IMP_MXFP4_FP16_FALLBACK=1 semantics); the legacy =force escape
-        // hatch is obsolete, so oversubscription is always refused here.
+        // The "force anyway despite oversubscription" path is gone: attention.mxfp4_fp16_fallback
+        // is a plain bool now. Opting in via imp.conf is still gated by this oversubscribe check
+        // (matching the old IMP_MXFP4_FP16_FALLBACK=1 semantics); oversubscription is always
+        // refused here.
         if (oversubscribe) {
-            // We are inside `if (!mxfp4_gemv_available)`: the native MXFP4
-            // GEMV is unavailable (GDN weights / forced / non-linear scales),
-            // so this FP16 fallback is the ONLY valid decode path for these
-            // weights. Skipping it does NOT degrade gracefully — decode then
-            // runs against weights with no usable kernel and emits uniform
-            // logits → token-0 ("!") garbage (#934). The earlier "downstream
-            // will bail" assumption was false. Fail loud at load instead: the
-            // VRAM budget reserves this fallback up front (vram_budget.cpp), so
-            // reaching here means the model genuinely does not fit — surface
-            // that instead of serving garbage.
+            // Inside `if (!mxfp4_gemv_available)`: this FP16 fallback is the ONLY valid decode path
+            // for these weights (native MXFP4 GEMV unavailable). Skipping it does not degrade
+            // gracefully: decode runs against weights with no usable kernel and emits uniform
+            // logits -> token-0 garbage (#934). Fail loud at load instead: the VRAM budget reserves
+            // this fallback up front, so reaching here means the model genuinely does not fit.
             throw std::runtime_error(
                 "MXFP4 FP16 decode fallback would oversubscribe VRAM (need " +
                 std::to_string(fp16_total / (1024 * 1024)) + " MiB + " +
@@ -555,13 +519,11 @@ if (mx_native > 0) {
             void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
             offset += fp16_bytes;
 
-            // GPU-side dequant via dequant_mxfp4_to_fp16. The previous CPU
-            // fallback indexed `(r*bpr+b)*17` + `blk[16]`, which assumed
-            // GGUF interleaved 17-byte block layout — but weight_upload.cu
-            // splits to [data(N*bpr*16) | scales(N*bpr)] before GPU upload,
-            // so the CPU path read scale bytes from inside data and produced
-            // garbage FP16. The GPU kernel below reads the split layout
-            // correctly (data first, scales at offset N*K/2).
+            // GPU-side dequant via dequant_mxfp4_to_fp16. weight_upload.cu splits to
+            // [data(N*bpr*16) | scales(N*bpr)] before GPU upload; a CPU-side path assuming GGUF's
+            // interleaved 17-byte block layout would read scale bytes from inside data and produce
+            // garbage FP16. The GPU kernel reads the split layout correctly (data first, scales at
+            // offset N*K/2).
             dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
             int64_t shape[2] = {mw.N, mw.K};
             wcache_->fp16[ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
@@ -606,13 +568,10 @@ if (mx_native > 0) {
         }
         replace_weight(const_cast<Model*>(model_)->out_proj_,
                        const_cast<Model*>(model_)->out_proj_.qtype);
-        // Tok-embed table — when weight tying is on (Qwen3.5-4B / others), it
-        // shares the same GPU storage as out_proj_, so its data pointer is
-        // already a key in wcache_->fp16. Without this replace, the embedding
-        // lookup reads the raw MXFP4 bytes as FP16 → garbage hidden state from
-        // token 0 → garbage logits → token-0 spam output. Also harmless when
-        // the embedding is FP16 (the lookup misses, qtype guard is satisfied
-        // anyway).
+        // Tok-embed table: when weight tying is on, it shares GPU storage with out_proj_, so its
+        // data pointer is already a key in wcache_->fp16. Without this replace, the embedding
+        // lookup reads raw MXFP4 bytes as FP16, producing garbage hidden state and token-0 spam
+        // from the first token. Harmless when the embedding is already FP16.
         replace_weight(const_cast<Model*>(model_)->tok_emb_,
                        const_cast<Model*>(model_)->tok_emb_.qtype);
         IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers",

@@ -18,11 +18,9 @@
 
 namespace imp {
 
-// ─────────────────────────────────────────────────────────────────────
-// Tags — the unit of reporting for I7 (capacity and occupancy are separate
-// concepts with separate reporting). One tag per thing an operator would
-// recognise in a `--mem-report` line, not one per allocation site.
-// ─────────────────────────────────────────────────────────────────────
+// Tags: the unit of reporting for I7 (capacity and occupancy are separate concepts,
+// reported separately). One tag per thing an operator recognizes in --mem-report, not
+// one per allocation site.
 enum class RegionTag {
     ModelResident,        // T1 arena: weights + the pre-dequant weight caches
     EnginePersistent,     // T2 arena: workspaces, cuBLAS/CUTLASS, graph buffers
@@ -48,28 +46,19 @@ enum class MemError {
 
 const char* mem_error_name(MemError);
 
-// ─────────────────────────────────────────────────────────────────────
-// Allocation phase (I2). Monotonic within a model's lifetime; the engine
-// drives it. `Serving` means warmup is done and steady state has begun —
-// from that point on, asking the driver for memory is a defect.
-//
-// Debug builds abort on a Serving-phase acquisition so the offending call
-// site is caught in CI. Release builds count it, log once per tag, and
-// proceed: a production server must not die over an accounting bug. The
-// counter is the I2 acceptance test (criterion 3) and the migration progress
-// bar — it starts non-zero and must reach zero.
-// ─────────────────────────────────────────────────────────────────────
+// Allocation phase (I2), monotonic within a model's lifetime, driven by the engine.
+// Serving means warmup is done; asking the driver for memory after that is a defect.
+// Debug builds abort on a Serving-phase acquisition; release builds count it, log once
+// per tag, and proceed. The counter is the I2 acceptance test and must reach zero.
 enum class AllocPhase { Loading, Planning, Serving };
 
 AllocPhase alloc_phase();
 void set_alloc_phase(AllocPhase);
 
-// Record a device allocation made while serving. Backend::acquire() calls
-// this itself; the --wrap interposer (memory/alloc_interpose.cpp) calls it for
-// allocations that never went through Backend at all, which is what makes
-// steady_state_allocations() authoritative rather than merely indicative.
-// `site` is the caller's return address when available (symbolize with
-// addr2line), nullptr otherwise.
+// Record a device allocation made while serving. Backend::acquire() calls this itself;
+// the --wrap interposer (alloc_interpose.cpp) calls it for allocations that never went
+// through Backend, making steady_state_allocations() authoritative rather than
+// indicative. `site` is the caller's return address (symbolize with addr2line) or null.
 void note_serving_allocation(RegionTag tag, size_t bytes, const void* site = nullptr);
 
 // A commit into a growable region's reservation while serving. Planned by
@@ -102,17 +91,12 @@ private:
 
 class Backend;
 
-// ─────────────────────────────────────────────────────────────────────
-// Region — the only type in imp that holds a raw device pointer obtained
-// from the driver. Move-only, RAII: the destructor returns it to the backend
-// that produced it. A tier allocator owns exactly one (or a few) of these and
-// hands out views into them; nothing else ever sees one.
-//
-// `reserved` >= `committed`. They differ only for growable backends (VMM),
-// where `reserved` is the virtual address range and `committed` is the
-// physical memory currently mapped into it. For the cudaMalloc backend they
-// are always equal.
-// ─────────────────────────────────────────────────────────────────────
+// Region: the only type holding a raw device pointer from the driver. Move-only, RAII:
+// the destructor returns it to its backend. A tier allocator owns one (or a few) and
+// hands out views; nothing else ever sees one.
+// `reserved` >= `committed`; they differ only for growable (VMM) backends, where
+// reserved is virtual address range and committed is mapped physical memory. Equal for
+// the cudaMalloc backend.
 class Region {
 public:
     Region() = default;
@@ -165,11 +149,9 @@ struct BackendStats {
     size_t capacity = 0;         // 0 = "whatever the device has"
 };
 
-// ─────────────────────────────────────────────────────────────────────
-// Backend — physical acquisition. Fails cleanly; never throws, never aborts
-// on an out-of-memory condition (I6: exhaustion is a typed, recoverable
-// value, not a crash deep inside a kernel launch).
-// ─────────────────────────────────────────────────────────────────────
+// Backend: physical acquisition. Fails cleanly; never throws, never aborts on
+// out-of-memory (I6: exhaustion is a typed, recoverable value, not a crash deep inside a
+// kernel launch).
 class Backend {
 public:
     virtual ~Backend() = default;
@@ -178,38 +160,26 @@ public:
     // Consults the phase guard before doing anything.
     AcquireResult acquire(size_t bytes, size_t alignment, RegionTag tag);
 
-    // Reserve `reserve_bytes` of address space and commit `initial_commit` of
-    // it. The region's base() is then stable for the whole reservation, which
-    // is what lets a graph-captured pointer survive growth (I3). Backends that
-    // cannot do this return MemError::NotGrowable and the caller falls back to
-    // a fixed acquire().
+    // Reserve reserve_bytes of address space and commit initial_commit of it. The region's
+    // base() is then stable for the whole reservation, which is what lets a graph-captured
+    // pointer survive growth (I3). Backends that cannot do this return NotGrowable and the
+    // caller falls back to a fixed acquire().
     AcquireResult acquire_growable(size_t reserve_bytes, size_t initial_commit, size_t alignment,
                                    RegionTag tag);
 
-    // Grow/shrink a growable region in place, keeping `base()` stable.
-    // Returns MemError::NotGrowable on backends that cannot (cudaMalloc).
-    //
-    // Non-virtual, like acquire(): it counts the growth (note_planned_commit)
-    // and then dispatches to do_commit(). A growable pool committing pages on
-    // the request path acquires physical memory exactly as acquire() does, and
-    // it used to be counted by none of the three I2 instruments (#1649).
+    // Grow/shrink a growable region in place, keeping base() stable. Returns NotGrowable on
+    // backends that cannot (cudaMalloc). Non-virtual: it counts the growth
+    // (note_planned_commit) then dispatches to do_commit(), so a growable pool committing
+    // pages on the request path is counted like acquire() is (previously missed, #1649).
     MemError commit(Region& region, size_t new_committed);
 
-    // Commit (or release) one interior range of a growable region.
-    //
-    // A paged pool does not grow at its end. The KV pool lays its blocks out
-    // per layer, so adding blocks extends every layer's sub-range at once and
-    // the committed set is a set of interior prefixes, not one. commit() alone
-    // could only express that by committing everything up to the last layer,
-    // which is the whole reservation.
-    //
-    // `offset` and `bytes` are rounded OUT to the backend's granularity, so a
-    // caller must keep its sub-ranges granule-aligned if two of them must not
-    // share pages. The KV pool pads its per-layer strides for exactly that
-    // reason: padding costs address space, which is free, and never physical
-    // memory.
-    //
-    // Also non-virtual, and guarded, for the same reason as commit().
+    // Commit (or release) one interior range of a growable region. A paged pool does not
+    // grow at its end: the KV pool lays blocks out per layer, so growth extends every
+    // layer's sub-range at once, and the committed set is multiple interior prefixes, not
+    // one; commit() alone can only express that by committing up to the last layer.
+    // offset and bytes round OUT to the backend's granularity; callers needing separated
+    // sub-ranges must keep them granule-aligned (the KV pool pads per-layer strides for
+    // exactly that, which costs only address space).
     MemError commit_range(Region& region, size_t offset, size_t bytes);
     virtual MemError decommit_range(Region& region, size_t offset, size_t bytes);
 
@@ -258,12 +228,9 @@ private:
 // rather than being the default here.
 Backend& cuda_malloc_backend();
 
-// The growable backend (CUDA VMM), or nullptr where the device cannot do it.
-// A pointer rather than a reference because "this card has no virtual memory
-// management" is a real answer that callers have to be able to fall back from,
-// not a startup failure. See vmm_backend.cpp for what was measured on sm_120a
-// before it was trusted, in particular that a captured CUDA graph survives
-// growth and that decommit actually returns VRAM on WSL2.
+// The growable backend (CUDA VMM), or nullptr where the device cannot do it. A pointer
+// rather than a reference because "no virtual memory management" is a real answer
+// callers must fall back from, not a startup failure.
 Backend* vmm_backend();
 
 }  // namespace imp

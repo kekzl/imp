@@ -1,9 +1,8 @@
 #pragma once
 
-// File-local helpers shared across the executor_attention.cu translation unit
-// (split out from executor_attention.cu to keep each TU under the file-size
-// gate). Included only by executor_attention.cu and its dispatch fragments;
-// the static helpers below assume single-TU inclusion.
+// File-local helpers shared across the executor_attention.cu TU, split out
+// to keep each TU under the file-size gate. Included only by
+// executor_attention.cu and its dispatch fragments; static helpers assume single-TU inclusion.
 
 #include "exec/attention_dispatch_rules.h"
 #include "exec/executor_kernels.h"
@@ -24,13 +23,11 @@ namespace imp {
 
 // is_dp4a_qtype() and dispatch_dp4a_gemv() are defined in executor_kernels.h
 
-// FP16-QK FA2 for SHORT prefill (seq below fmha_prefill_threshold): replaces
-// the materialized cuBLAS+softmax path with the register-resident FA2 kernel
-// in f16-QK mode. Same numerical class as the cuBLAS reference (f16 inputs,
-// f32 accumulate) — the short-seq e4m3 quality cliff (#511/#512) does not
-// apply, and no [n × ctx] S-matrix is materialized. Declined configs
-// (hd!=128, non-F16, chunk continuation) return false → caller stays on
-// cuBLAS; the fp8 FMHA family is intentionally NOT a fallback here.
+// FP16-QK FA2 for SHORT prefill (seq < fmha_prefill_threshold): register-
+// resident FA2 in f16-QK mode instead of materialized cuBLAS+softmax; same
+// numerical class as cuBLAS (f16 in, f32 accumulate), avoids the e4m3
+// quality cliff (#511/#512), no S-matrix. Declined configs (hd!=128,
+// non-F16, chunk continuation) return false; the fp8 FMHA family is NOT a fallback here.
 static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
                                    const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
                                    float scale, int sliding_window, float softcap, int q_offset,
@@ -41,23 +38,15 @@ static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, 
     // Other head dims decline as before; the kernel wrapper re-checks the gate.
     if (hd != 128 && !(hd == 256 && rcfg.attention.fa2_hd256))
         return false;
-    // Chunk CONTINUATION (q_offset > 0, queries attend gathered past KV) is
-    // declined: the f16-QK kernel produces wrong attention there on the
-    // Llama family (teacher-forced NLL 0.29 → 7.13 on Llama-3.2-3B at
-    // chunk=64; greedy output token-identical to single-shot once routed to
-    // cuBLAS instead). Qwen3 was bit-exact through the same path, so this is
-    // a conservative blanket decline until the kernel's q_offset handling is
-    // root-caused (issue #548) — first chunks (q_offset == 0, the original #525 use case)
-    // keep the fast path.
-    // Chunk continuations (q_offset > 0) were declined here as a #553
-    // mitigation for catastrophic NLL on the Llama family. Root cause
-    // (#548) was NOT this kernel: the pinned prefill staging
-    // (h_pf_token_ids_/h_pf_positions_) was rewritten by the host while
-    // earlier chunks' H2D copies were still queued — the fully-async FA2
-    // path let the host run far enough ahead to hit it, the cuBLAS path's
-    // implicit syncs hid it. Fixed via pf_staging_evt_ in
-    // engine_scheduler.cpp; kernel-level q_offset parity is locked by
-    // FmhaFA2Test.FP16QK_Chunked_*.
+    // Chunk CONTINUATION (q_offset>0) declines the f16-QK kernel: wrong
+    // attention on the Llama family at chunk boundaries (conservative blanket
+    // decline pending kernel-level root cause, #548). First chunks
+    // (q_offset==0) keep the fast path.
+    // Root cause of the original #553 symptom was NOT this kernel: pinned
+    // prefill staging (h_pf_token_ids_/h_pf_positions_) was rewritten by the
+    // host while earlier chunks' H2D copies were still queued; the async FA2
+    // path exposed it, cuBLAS's implicit syncs hid it. Fixed via
+    // pf_staging_evt_ in engine_scheduler.cpp; q_offset parity is locked by FmhaFA2Test.FP16QK_Chunked_*.
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
     int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
     Tensor q4 = q.reshape(4, q4s);
@@ -113,10 +102,10 @@ static void dispatch_gemv_qkv_fused(QType qtype, const void* W_q, const void* W_
 static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv_bytes) {
     if (!kv_ptr || kv_bytes == 0 || !stream)
         return;
-    // Query device limits once. persistingL2CacheMaxSize caps how much of L2 can
-    // persist (hitRatio target); accessPolicyMaxWindowSize caps the attribute's
-    // address-window extent. Setting num_bytes above the window cap returns
-    // cudaErrorInvalidValue, which poisons the stream for every subsequent kernel.
+    // Query device limits once: persistingL2CacheMaxSize caps persistable L2
+    // (hitRatio target), accessPolicyMaxWindowSize caps the attribute's
+    // address-window extent. num_bytes above the window cap returns
+    // cudaErrorInvalidValue, poisoning the stream for every later kernel.
     static size_t max_persist = 0;
     static size_t max_window = 0;
     if (max_persist == 0) {
@@ -143,14 +132,12 @@ static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv
     attr.accessPolicyWindow.hitRatio = ratio;
     attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-    // L2 persistence is a best-effort perf hint. A failed set (e.g. num_bytes vs
-    // the per-context persisting-L2 reservation left in a different state by a
-    // previously-loaded model in this process) returns cudaErrorInvalidValue,
-    // which the runtime records as a STICKY per-context error — it then poisons
-    // every subsequent kernel in this forward (the CUTLASS/MoE GEMMs bail on a
-    // pending error → degenerate garbage). Drain it immediately so a perf hint
-    // can never corrupt correctness. (Cross-model repro: a GDN/SSM model loaded
-    // before this one garbled the output until this drain was added.)
+    // L2 persistence is a best-effort perf hint. A failed set (e.g. a
+    // different model's leftover per-context persisting-L2 reservation)
+    // returns cudaErrorInvalidValue, which the runtime records as a STICKY
+    // per-context error, poisoning every later kernel in this forward
+    // (CUTLASS/MoE GEMMs bail on a pending error -> degenerate garbage). Drain
+    // it immediately so a perf hint can never corrupt correctness.
     if (cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr) != cudaSuccess)
         (void)cudaGetLastError();
 }

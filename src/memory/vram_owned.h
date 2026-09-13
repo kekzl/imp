@@ -1,30 +1,19 @@
 #pragma once
 
-// An owning handle for a VRAMAllocator allocation.
-//
-// `VRAMAllocator` says of itself, in its own destructor, that it is "a tracker,
-// not an owner" (vram_allocator.cu). Ownership therefore lives with the caller,
-// spelled as a raw pointer member plus a free somewhere else, and that spelling
-// is what the 2026-08-21 campaign kept finding defects in: four device pointers
-// freed through an allocator that had not produced them (#1505), a 128 MiB
-// cudaMallocAsync block released with cudaFree so it never returned to the async
-// pool, and 469 direct allocation sites outside src/memory/ that
-// tools/check_alloc_pairs.py has to re-derive from source text on every run.
-//
-// A grep-based gate catches those after they are written. This type makes them
-// not compile: the allocation carries the allocator that produced it, and the
-// only way to release it is through that same allocator.
-//
-// `AUDIT.md` R7 records that earlier audits referred to a `VramOwned` type that
-// did not exist. It exists now.
-//
+// An owning handle for a VRAMAllocator allocation. VRAMAllocator is "a tracker, not an
+// owner" of itself; ownership otherwise lives with the caller as a raw pointer plus a
+// free elsewhere, a spelling that kept producing defects: pointers freed through the
+// wrong allocator, an async block released with cudaFree so it never returned to the
+// pool, and direct allocation sites outside src/memory/ that a grep-based gate can only
+// catch after they are written.
+// This type makes them not compile: the allocation carries the allocator that produced
+// it, and the only way to release it is through that same allocator.
 //   VramOwned<int32_t> buf(vram_alloc_, n, "banned_tokens");
 //   if (!buf) return nullptr;              // allocation failed, nothing leaked
 //   cudaMemcpyAsync(buf.get(), ..., buf.bytes(), ...);
 //   // freed by ~VramOwned, through vram_alloc_, exactly once
-//
-// Move-only on purpose. A copy would be a double free, and there is no sane
-// deep-copy semantic for device memory that this type should be choosing.
+// Move-only on purpose: a copy would be a double free, and there is no sane deep-copy
+// semantic for device memory this type should be choosing.
 
 #include <cstddef>
 #include <utility>

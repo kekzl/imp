@@ -1,19 +1,13 @@
 #pragma once
 
-// One formula for the recurrent (SSM/GDN) state footprint, and the message an
-// operator reads when the pool does not fit.
-//
-// The formula lived twice and the two copies disagreed. `runtime/vram_budget.cpp`
-// charged `conv_channels * (conv_kernel - 1) * 4` with no alignment; the
-// allocator in `memory/ssm_state.cu` took
-// `align256(conv_channels * conv_kernel * 4) + align256(h bytes)` per layer.
-// On Qwen3.8-27B-NVFP4 (48 GDN layers, conv_kernel 4, 64 slots) that is 4968 MiB
-// planned against 5088 MiB allocated: the plan was 120 MiB short of the
-// allocation it was supposed to bound, in the direction that oversubscribes the
-// card (docs/internals/MEMORY.md D14).
-//
-// The allocator's shape is the one that wins, because it is the one that
-// reaches cudaMalloc. Header-only and free of CUDA so the CPU lane pins it.
+// One formula for the recurrent (SSM/GDN) state footprint, and the message an operator
+// reads when the pool does not fit. The formula used to live twice and disagree:
+// runtime/vram_budget.cpp charged conv_channels*(conv_kernel-1)*4 with no alignment,
+// while memory/ssm_state.cu's allocator took
+// align256(conv_channels*conv_kernel*4) + align256(h bytes) per layer, planning short of
+// what it actually allocates (the direction that oversubscribes the card, MEMORY.md D14).
+// The allocator's shape wins, because it is the one that reaches cudaMalloc. Header-only
+// and CUDA-free so the CPU lane pins it.
 
 #include "core/qtype.h"
 
@@ -68,21 +62,18 @@ inline size_t ssm_pool_bytes(const SsmStateGeometry& g, int slots, int reserved_
     return ssm_bytes_per_slot(g) * static_cast<size_t>(n);
 }
 
-// Whether a failed state-pool allocation must stop the load. A model with
-// recurrent layers whose state slab is missing does not degrade: every GDN
-// layer reads a null pointer and the output is garbage for every request,
-// while the only signal used to be one WARN at startup ("Failed to init SSM
-// state, continuing without it"). A dense model has no such layers and is
-// unaffected, which is the distinction this predicate exists to make.
+// Whether a failed state-pool allocation must stop the load. A model with recurrent
+// layers whose state slab is missing does not degrade: every GDN layer reads a null
+// pointer and the output is garbage for every request, while the only signal used to be
+// one WARN at startup. A dense model has no such layers and is unaffected.
 inline bool must_refuse_without_ssm_state(int n_ssm_layers, bool pool_init_ok) {
     return n_ssm_layers > 0 && !pool_init_ok;
 }
 
-// What the operator is told when the pool is refused. Pure, so the CPU lane can
-// pin the four things that make the refusal actionable: which pool, how big,
-// how many slots it was for, and the knob that shrinks it. The old message was
-// `Failed to allocate SSM state pool (%zu bytes)` - a byte count with no slot
-// count, no free figure and no lever.
+// What the operator is told when the pool is refused. Pure, so the CPU lane can pin the
+// four things that make the refusal actionable: which pool, how big, how many slots it
+// was for, and the knob that shrinks it. The old message was a byte count with no slot
+// count, no free figure, no lever.
 inline std::string ssm_pool_failure_message(size_t bytes, int slots, int reserved_slots, int n_ssm_layers,
                                             size_t free_bytes) {
     constexpr double kMiB = 1024.0 * 1024.0;

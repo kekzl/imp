@@ -1,11 +1,8 @@
-// executor_sampling.cu — the per-row and row-batched sampling family of
-// GraphExecutor, moved VERBATIM out of executor.cu on 2026-08-27 (the batched
-// greedy/penalty stash pushed that TU over the 600-LOC kernel hard threshold;
-// this is the compile-time-isolation split the filesize gate asks for:
-// sampling edits no longer re-ptxas the forward paths). Only mechanical
-// changes: the shared apply_constraint_mask helper now comes from
-// executor_sampling_internal.h, and the one in-family ban_logits_kernel call
-// goes through launch_ban_logits (the kernel stays in executor.cu).
+// Per-row and row-batched sampling family, moved VERBATIM out of
+// executor.cu (batched greedy/penalty stash pushed that TU over the
+// 600-LOC kernel hard threshold). Mechanical split only: apply_constraint_mask
+// now comes from executor_sampling_internal.h; the in-family ban_logits_kernel call goes through
+// launch_ban_logits.
 
 #include "exec/executor.h"
 #include "exec/executor_sampling_internal.h"
@@ -54,13 +51,10 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
         if (st.n_logit_bias > 0 && st.logit_bias != nullptr)
             apply_logit_bias(lp, vocab, st.logit_bias, st.n_logit_bias, stream);
         apply_constraint_mask(st, lp, vocab, stream);
-        // Ban special tokens (chat template delimiters etc.). MUST happen
-        // before sampling — without this, greedy can pick a banned token
-        // (e.g. Gemma-4 NVFP4 picks `<|channel>` as the natural argmax) and
-        // the request finishes immediately because is_stop_token treats banned
-        // tokens as stop tokens. forward() (line 88) already does this; the
-        // sample_from_logits / sample_single_from_logits / use_event_sync
-        // prefill paths historically forgot to. Match forward()'s impl.
+        // Bans special tokens before sampling, MUST happen first: without it
+        // greedy can pick a banned token (e.g. Gemma-4 NVFP4 picks <|channel>) and
+        // the request finishes immediately since is_stop_token treats banned
+        // tokens as stop tokens. forward() already does this; match its impl in every sampling entry point.
         if (st.banned_tokens != nullptr && st.n_banned_tokens > 0) {
             float neg_inf = -1e30f;
             for (int bi = 0; bi < st.n_banned_tokens; bi++) {
@@ -109,27 +103,19 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
                                                stream));
         }
     } else {
-        // Batched decode: n_tokens == n_sequences, each row is one sequence's
-        // logits. Enqueue every sequence's penalty+sampler chain back-to-back
-        // into per-sequence scratch slots, then gather ALL tokens with ONE
-        // pinned D2H + ONE stream sync. The previous per-sequence readback
-        // (pageable 4-byte D2H + cudaStreamSynchronize each) serialized the
-        // batch against ~200 us host round-trips: at n=16 sustained load that
-        // was ~3 ms host time per decode step = 29% GPU idle (nsys,
-        // 2026-07-12). Kernels, parameter normalization, and per-sequence
-        // seeds are identical to the fallback loop, so tokens are
-        // bit-identical.
+        // Batched decode: enqueues every sequence's penalty+sampler chain into
+        // per-sequence scratch slots, then gathers ALL tokens with ONE pinned D2H
+        // + ONE stream sync, replacing a per-sequence readback that serialized the
+        // batch against host round-trips. Kernels, normalization and seeds match the fallback loop, so tokens
+        // are bit-identical.
         const bool greedy = (state.temperature <= 0.0f || state.top_k == 1);
         const int top_k = state.top_k > 0 ? state.top_k : 50;
         const float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
-        // Eligibility is batch-uniform (depends only on shared sampling params
-        // and vocab), so decide BEFORE applying any penalties — no sequence is
-        // ever half-processed across the two paths.
-        //
-        // No top_k term any more (#1654): sample_topk_topp_async enqueues the
-        // CUB regime too, so a top_k over SAMPLE_MAX_TOP_K no longer drops the
-        // whole batch onto the per-sequence synchronous path. It used to, and
-        // that cost 14.5% of aggregate throughput at six sequences.
+        // Eligibility is batch-uniform (depends only on shared sampling params +
+        // vocab), decided BEFORE applying any penalties, so no sequence is ever
+        // half-processed across the two paths. sample_topk_topp_async now enqueues
+        // the CUB regime too (#1654), so a large top_k no longer drops the whole batch onto the synchronous
+        // path.
         const bool can_batch = d_sample_result_ && h_sample_pinned_.as<int32_t>() && n_seq <= sample_slots_;
         if (can_batch) {
             for (int i = 0; i < n_seq; i++) {
@@ -182,10 +168,9 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
     return tokens;
 }
 
-// Device copy of the engine-static banned-token list (same host array every
-// step): uploaded once per list identity, then served from the cache for
-// every row of every step. nullptr when the list is empty or the device copy
-// could not be taken.
+// Device copy of the engine-static banned-token list (same host array
+// every step): uploaded once per list identity, then served from cache for
+// every row of every step. nullptr when the list is empty or the copy failed.
 const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStream_t stream) {
     if (state.banned_tokens == nullptr || state.n_banned_tokens <= 0)
         return nullptr;
@@ -214,10 +199,8 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
 }
 
 // Shared per-row logits filter chain (penalties, DRY, token bans, logit
-// bias, forced token, schema/json masks, min-p, typical-p) — used by both
-// the synchronous sample_single_from_logits and the enqueue-only
-// sample_single_from_logits_async (which declines the host-blocking
-// logit-bias mode before calling this).
+// bias, forced token, schema/json masks, min-p, typical-p), used by both
+// the synchronous sample_single_from_logits and the enqueue-only async variant.
 void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceState& state,
                                        cudaStream_t stream) {
     if (state.penalty_tokens != nullptr && state.n_penalty_tokens > 0) {
@@ -234,10 +217,9 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
         apply_dry_penalty(lp, vocab, state.host_penalty_tokens, state.n_penalty_tokens, state.dry_multiplier,
                           state.dry_base, state.dry_allowed_length, state.dry_penalty_last_n, stream);
     }
-    // Ban special tokens. The list is engine-static (same host array every
-    // step), so cache the device copy instead of re-allocating + re-uploading
-    // it per row per step — at n=16 that was 16 cudaMallocAsync/H2D/FreeAsync
-    // triplets per decode step for identical bytes.
+    // Bans special tokens; the list is engine-static, so the device copy is
+    // cached instead of re-allocated/re-uploaded per row per step (was 16
+    // cudaMallocAsync/H2D/FreeAsync triplets per decode step at n=16 for identical bytes).
     if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
         if (const int32_t* d_ban = banned_cache_(state, stream))
             launch_ban_logits(lp, d_ban, state.n_banned_tokens, vocab, stream);
@@ -293,21 +275,18 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const Inf
 
 bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const InferenceState& state,
                                                     int slot_idx, cudaStream_t stream) {
-    // Enqueue-only per-row sampling for the batched decode loop: filters +
-    // sampler land on the stream writing into scratch slot `slot_idx`; the
-    // caller gathers ALL rows' tokens with collect_sampled_tokens (one pinned
-    // D2H + one sync). The synchronous per-row readback cost ~850 us of
-    // blocked host time per sequence per step at n=16 sustained serving
-    // (pageable 4-byte D2H + stream sync each, nsys 2026-07-12).
+    // Enqueue-only per-row sampling for batched decode: filters+sampler write
+    // into scratch slot `slot_idx`; caller gathers ALL rows with
+    // collect_sampled_tokens (one pinned D2H + one sync). Replaces a
+    // synchronous per-row readback that cost significant blocked host time at n=16 sustained serving.
     if (!d_sample_result_ || !h_sample_pinned_.as<int32_t>() || slot_idx < 0 || slot_idx >= sample_slots_)
         return false;
     // Parity offset: the pipelined decode enqueues into the half selected by
     // set_sample_parity while the other half's gather is still in flight.
     const int abs_slot = sample_parity_ * sample_slots_ + slot_idx;
-    // Sync-only sampling modes decline BEFORE any filter is applied, so the
-    // caller can re-run this row through sample_single_from_logits untouched:
-    // mirostat mutates host-side mu every step; logit_bias does per-entry
-    // host read-modify-write on the logits.
+    // Sync-only sampling modes (mirostat, logit_bias) decline BEFORE any
+    // filter is applied, so the caller can re-run this row through
+    // sample_single_from_logits untouched: both need host-side read-modify-write per step.
     if (state.mirostat == 2)
         return false;
     if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
@@ -321,18 +300,11 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     const bool greedy = (state.temperature <= 0.0f || state.top_k == 1);
     const int top_k = state.top_k > 0 ? state.top_k : 50;
     const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
-    // Penalty stash: when the row's filter chain is EMPTY past the penalties
-    // and the engine-static ban list (no DRY / bias / forced token /
-    // constrainer / min-p / typical-p), the penalty launch is order-free
-    // against every other stashed row and joins one batched vocab sweep at
-    // flush; the ban rides in the same sweep (PenaltyRowArgs::banned - order
-    // against the penalties is immaterial, -1e30 stays -1e30). Any active
-    // later stage keeps the whole chain inline — the per-row order (penalties
-    // first) must hold, and the flush runs after this call returns. Measured
-    // reason (2026-08-31, 32-stream serving on Qwen3.8-27B-NVFP4, nsys
-    // node-trace): the server's default repetition_penalty 1.05 plus the
-    // 19 banned special tokens put every row on the inline chain - 2
-    // launches per row per step with ~4 us gaps, ~0.45 ms of a 17 ms step.
+    // Penalty stash: when a row's filter chain is empty past penalties + the
+    // engine-static ban list, its penalty launch is order-free against other
+    // stashed rows and joins one batched vocab sweep at flush (ban rides the
+    // same sweep). Any active later stage (DRY/bias/forced/constrainer/min-p/
+    // typical-p) keeps the whole chain inline, since per-row order (penalties first) must hold.
     const bool ban_present = state.banned_tokens != nullptr && state.n_banned_tokens > 0;
     const int32_t* d_ban = ban_present ? banned_cache_(state, stream) : nullptr;
     const bool tail_empty =
@@ -345,10 +317,10 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     const bool pen_active = state.penalty_tokens != nullptr && state.n_penalty_tokens > 0 &&
                             (state.repetition_penalty != 1.0f || state.frequency_penalty != 0.0f ||
                              state.presence_penalty != 0.0f);
-    // The penalty stash is only sound when this row's SAMPLER is also batched
+    // The penalty stash is only sound when the row's SAMPLER is also batched
     // (flush order: penalties -> greedy -> top-k). A sampler that launches
-    // immediately (top_k > SAMPLE_MAX_TOP_K) would read logits before the
-    // stashed penalty sweep — keep that row's chain inline.
+    // immediately (top_k > SAMPLE_MAX_TOP_K) would read logits before the stashed penalty sweep, so that
+    // row's chain stays inline.
     const bool sampler_batches =
         greedy ? (d_greedy_args_ && !h_greedy_args_.empty())
                : (h_row_args_.as<TopkRowArgs>() && d_row_args_ && eff_top_k <= SAMPLE_MAX_TOP_K);
@@ -374,11 +346,10 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
         }
         stashed_filters = true;  // chain past penalties (+ban) is empty: nothing to enqueue
     }
-    // No blanket CUB-regime refusal any more (#1654): sample_topk_topp_async
-    // enqueues that regime now. Only the ROW-PARALLEL stash below is still
-    // limited to SAMPLE_MAX_TOP_K - launch_topk_topp_rows takes top_k in
-    // [1, SAMPLE_MAX_TOP_K] by contract - so a larger k skips the stash and
-    // enqueues per row instead of dropping the caller onto a synchronous path.
+    // No blanket CUB-regime refusal (#1654): sample_topk_topp_async enqueues
+    // that regime now. Only the ROW-PARALLEL stash is limited to
+    // SAMPLE_MAX_TOP_K (launch_topk_topp_rows's contract); a larger k skips
+    // the stash and enqueues per row instead of dropping onto a synchronous path.
     if (!stashed_filters)
         apply_row_filters_(lp, vocab, state, stream);
     pending_sample_vocab_ = vocab;
@@ -499,10 +470,9 @@ const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t s
     return h_sample_pinned_.as<int32_t>() + base;
 }
 
-// Event-based split of collect_sampled_tokens for the pipelined decode:
-// flush + strided D2H + event record, NO stream sync. The engine enqueues
-// the NEXT step's work after this and only waits on the event — so the wait
-// covers exactly this gather, not the freshly enqueued step.
+// Event-based split of collect_sampled_tokens for pipelined decode: flush
+// + strided D2H + event record, NO stream sync. The engine enqueues the
+// next step's work after this and only waits on the event, so the wait covers exactly this gather.
 bool GraphExecutor::gather_sampled_tokens_async(int n_slots, cudaStream_t stream) {
     if (!sample_pipeline_ready() || n_slots <= 0 || n_slots > sample_slots_) {
         n_pending_topk_rows_ = 0;

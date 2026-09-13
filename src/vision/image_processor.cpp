@@ -1,9 +1,7 @@
-// stb's default is 1 << 24 per side, bounded only by w*h*3 <= INT_MAX: a
-// 700 KB PNG of a 26000x26000 flat image decodes to ~2 GiB of host RGB per
-// request part before any resize looks at it (AUDIT_arch_2026 F2-4). 16384
-// is far above every tower's useful input (Qwen3-VL smart_resize tops out
-// around 1000 patches of 32 px); a larger picture is refused by stbi_load
-// before the allocation.
+// stb's default (1<<24/side, bounded only by w*h*3<=INT_MAX) lets a 700 KB PNG of a
+// 26000x26000 flat image decode to ~2 GiB of host RGB before any resize (AUDIT_arch_2026
+// F2-4). 16384 is far above every tower's useful input; a larger picture is refused by
+// stbi_load before the allocation.
 #define STBI_MAX_DIMENSIONS 16384
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -100,10 +98,9 @@ bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchify
     if (!rs.ok)
         return false;
 
-    // Upstream resamples with PIL BICUBIC. Catmull-Rom is the closest filter stb
-    // offers; the two are not bit-identical and do not need to be — a resampling
-    // difference of this size is far below what the encoder is sensitive to, and
-    // claiming PIL parity would be false.
+    // Upstream resamples with PIL BICUBIC; Catmull-Rom is the closest filter stb offers. Not
+    // bit-identical, and doesn't need to be: the resampling difference is far below what the
+    // encoder is sensitive to.
     std::vector<uint8_t> resized(static_cast<size_t>(rs.height) * rs.width * 3);
     if (!stbir_resize(rgb, width, height, width * 3, resized.data(), rs.width, rs.height, rs.width * 3,
                       STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM))

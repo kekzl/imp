@@ -36,10 +36,9 @@ static void dispatch_gemv_residual(QType qtype, const void* W, const block_q8_1*
     }
 }
 
-// LM head dp4a GEMV dispatch: y = W @ x with FP32 output (logits).
-// Shared by executor_forward.cu (production forward_logits) and
-// executor_perplexity.cu (teacher-forced eval) — the eval path MUST use the
-// same kernels as production or PPL stops measuring what serving does.
+// LM head dp4a GEMV dispatch: y = W @ x with FP32 output (logits). Shared
+// by production forward_logits and the perplexity eval path: eval MUST use
+// the same kernels as production or PPL stops measuring what serving does.
 static void dispatch_gemv_fp32(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
                                float* y, int M, int K, cudaStream_t stream) {
     switch (qtype) {

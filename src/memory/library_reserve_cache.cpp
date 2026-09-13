@@ -102,10 +102,9 @@ bool library_reserve_cache_store(const std::string& path, const LibraryReserveKe
     if (!replaced)
         entries.emplace_back(k, bytes);
 
-    // Write to a sibling temp then rename: two processes starting together must
-    // not leave a half-written cache behind, and a torn file would be read as
-    // "no entry" on the next boot — silently losing the measurement rather than
-    // noisily failing.
+    // Write to a sibling temp then rename: two processes starting together must not leave a
+    // half-written cache behind, and a torn file would silently read as "no entry" on the
+    // next boot rather than failing noisily.
     const std::string tmp = path + ".tmp";
     {
         std::ofstream out(tmp, std::ios::trunc);

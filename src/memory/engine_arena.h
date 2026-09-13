@@ -1,23 +1,14 @@
 #pragma once
 
-// The process-global engine-persistent (T2) arena
-// (docs/internals/MEMORY.md §A2/§A3.3).
-//
-// T2 holds what lives for the process: executor workspaces, the cuBLAS/CUTLASS
-// scratch, graph buffers, per-kernel scratch that is sized once at init. None
-// of it is individually freed, which is exactly why a bump arena fits: the
-// failure mode becomes under-provisioning (visible, reported) instead of a
-// leak (invisible).
-//
-// It is a process global rather than an Engine member because its tenants are
-// file-scope statics in compute/ and exec/ that have no Engine to reach
-// through — the same reason gemm.cu's cuBLAS workspace is a static today.
-// Single-engine-per-process is the supported deployment (see vram_query.h),
-// and Engine::init/~Engine own the open/close.
-//
-// Sizing is provisional: kEngineArenaDefaultBytes covers the current tenants
-// with room to spare, and `high_water()` reports what was actually used so
-// the planner (A4) can take the number over when A7 step 4 completes.
+// The process-global engine-persistent (T2) arena (MEMORY.md A2/A3.3): executor
+// workspaces, cuBLAS/CUTLASS scratch, graph buffers, per-kernel scratch sized once at
+// init. None is individually freed, so a bump arena's failure mode is under-provisioning
+// (visible, reported), never a leak.
+// Process-global rather than an Engine member because its tenants are file-scope statics
+// in compute/ and exec/ with no Engine to reach through. Single-engine-per-process is the
+// supported deployment; Engine::init/~Engine own open/close.
+// Sizing is provisional: kEngineArenaDefaultBytes covers current tenants with room to
+// spare; high_water() reports actual use for the planner (A4) to take over (A7 step 4).
 
 #include "memory/arena.h"
 
@@ -32,10 +23,9 @@ class Backend;
 // thing that breaks a model, and high_water() makes the real number visible.
 constexpr size_t kEngineArenaDefaultBytes = 64ull * 1024 * 1024;
 
-// Open/close. Idempotent-safe: opening twice is an error, closing when
-// unopened is a no-op. Called from Engine::init and ~Engine.
-// lazy: see ArenaAllocator::open. The backend must be growable for it to
-// take effect (vmm_backend()); a cudaMalloc backend opens fixed.
+// Open/close. Idempotent-safe: opening twice is an error, closing when unopened is a
+// no-op. Called from Engine::init and ~Engine. lazy: see ArenaAllocator::open; the
+// backend must be growable for it to take effect, a cudaMalloc backend opens fixed.
 MemError engine_arena_open(Backend& backend, size_t capacity = kEngineArenaDefaultBytes, bool lazy = false);
 void engine_arena_close();
 

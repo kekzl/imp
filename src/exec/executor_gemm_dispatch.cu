@@ -1,11 +1,9 @@
 // executor_gemm_dispatch.cu — GEMM dispatch entry for the executor.
 #include "core/dispatch_policy.h"
 #include <utility>
-//
 // Extracted from executor_kernels.cu (D3, structural-debt audit): the
-// WeightHandle-keyed GEMM dispatch (GraphExecutor::gemm_via_handle_) and its
-// uncached dequant->cuBLAS safety-net fallback. Pulled out of the kernel
-// grab-bag so the dispatch path lives on its own.
+// WeightHandle-keyed GEMM dispatch (gemm_via_handle_) and its uncached
+// dequant->cuBLAS safety-net fallback, pulled out of the kernel grab-bag.
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "exec/gemm_kernel_registry.h"
@@ -36,11 +34,8 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Uncached fallback: safety net for weights without a WeightHandle
 // (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
-// ---------------------------------------------------------------------------
 static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
                                             Tensor& output, const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
@@ -59,10 +54,10 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
         if (qs->dequant != nullptr && dequant_gpu_supported(qtype) && !weight.dropped_source) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
-            // The one degradation that lands on the per-token path was the
-            // silent one (AUDIT_arch_2026 A2-8): every decode step here
-            // dequantises and copies the whole weight before the GEMM. Said
-            // once per process, with the size, so a trace can be read.
+            // The one degradation landing on the per-token path was silent
+            // (AUDIT_arch_2026 A2-8): every decode step here dequantizes and copies
+            // the whole weight before the GEMM. Warned once per process, with the size, so a trace can catch
+            // it.
             static bool s_warned_full_dequant = false;
             if (!s_warned_full_dequant) {
                 s_warned_full_dequant = true;
@@ -129,13 +124,10 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
-// ---------------------------------------------------------------------------
-// prefill_routes_cutlass_nvfp4_ — conservative mirror of gemm_via_handle_'s
-// M>1 routing: true only when the dispatch is guaranteed to reach the
-// CUTLASS NVFP4 prefill block below (which quantizes the input into the
-// shared activation scratch). Every earlier-return route in gemm_via_handle_
-// must answer false here.
-// ---------------------------------------------------------------------------
+// Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
+// the dispatch is guaranteed to reach the CUTLASS NVFP4 prefill block
+// (which quantizes input into the shared activation scratch). Every
+// earlier-return route in gemm_via_handle_ must answer false here.
 bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     if (id == kInvalidTensorID)
         return false;
@@ -162,13 +154,11 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     return qscratch_.cutlass_act_data != nullptr && qscratch_.cutlass_act_sf != nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// gemm_via_handle_ — WeightHandle dispatch for all registered weights.
-// M>1 routes through weight_dispatch. M=1 beta=0 routes through gemv_dispatch
+// gemm_via_handle_: WeightHandle dispatch for all registered weights. M>1
+// routes through weight_dispatch. M=1 beta=0 routes through gemv_dispatch
 // or tier-specific handlers. M=1 beta!=0 routes through weight_dispatch
-// (cuBLAS GEMM with beta). Undefined tier (budget-exhausted) reconstructs
-// the weight Tensor from the handle and uses the uncached dequant fallback.
-// ---------------------------------------------------------------------------
+// (cuBLAS with beta). Undefined tier (budget-exhausted) reconstructs the
+// weight Tensor from the handle and uses the uncached dequant fallback.
 void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                      Tensor& output, const GemmContext& ctx) {
     const auto& h = registry_.handle(id);
@@ -291,19 +281,14 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
 
-        // Spec-verify chunk (#998): read the NVFP4 decode overlay in one
-        // weight pass per MR<=4 tile instead of dequantizing the source. On
-        // GGUF K-quants (no direct small-M kernel, e.g. Q6_K) the per-chunk
-        // dequant made a verify step cost ~7x a decode step (dequant_q6k =
-        // 52% of the tg window at ctx 2048, tg −39% vs spec-off). Reading
-        // the same weights as decode also aligns verify argmax with what
-        // the decode path would emit. M cap = largest capture bucket (33).
-        // Scoped to dequantable GGUF sources: native-ST NVFP4 weights already
-        // read NVFP4 directly via the CUTLASS prefill block below (and the
-        // prefill_routes_cutlass_nvfp4_ mirror above must stay in sync with
-        // every earlier return here — dequantable sources answer false there).
-        // speculative.verify_smallm hands the chunk to the small-M block
-        // below instead (one weight sweep per chunk), as on native NVFP4.
+        // Spec-verify chunk (#998): reads the NVFP4 decode overlay in one weight
+        // pass per MR<=4 tile instead of dequantizing the source (GGUF K-quants
+        // with no direct small-M kernel, e.g. Q6_K, otherwise pay ~7x a decode
+        // step per verify). Also aligns verify argmax with the decode path. M cap
+        // = largest capture bucket (33). Scoped to dequantable GGUF sources;
+        // native-ST NVFP4 weights read NVFP4 directly via the CUTLASS block below
+        // (prefill_routes_cutlass_nvfp4_ must answer false here for those).
+        // speculative.verify_smallm routes the chunk to the small-M block instead.
         if (ctx.spec_verify_small_m && !dispatch_policy().speculative.verify_smallm &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 && input.qtype == QType::F16 &&
             output.qtype == QType::F16 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
@@ -319,22 +304,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 return;
             }
         }
-        // #1055: native ST-NVFP4 verify chunks. The CUTLASS prefill block
-        // below serves them correctly but at ~51% of the weight-sweep
-        // bandwidth for tiny M (measured 200 launches x 39-51 us per bucket-17
-        // verify). The batched GEMV reads the weight once per MR=4 activation
-        // tile, so it only wins in the single-tile regime — hard cap M <= 4
-        // (bucket 3 + the 4-row edge); larger chunks stay on CUTLASS (5+
-        // weight sweeps at M=17 would be ~3.5x worse). Same weight + linear
-        // micro-scales the M=1 decode GEMV reads (source_data/source_scales),
-        // but NOT the same kernel, and there is no argmax parity: decode takes
-        // gemv_nvfp4_kpar (32-lane warp_k_loop K-partition) for shapes
-        // 10240x5120 and 12288x5120 while the verify chunk takes
-        // gemm_nvfp4_batched here, and the FFN shapes 17408x5120 / 5120x17408
-        // never reach this file at decode at all, because the n==1-gated fused
-        // NVFP4 kernels in executor_ffn.cu serve them there. Measured on
-        // Qwen3.8-27B-NVFP4: a speculative arm does not reproduce the
-        // non-speculative greedy output, see docs/LIMITATIONS.md.
+        // #1055: native ST-NVFP4 verify chunks. The CUTLASS prefill block serves
+        // them correctly but at low bandwidth for tiny M; the batched GEMV reads
+        // the weight once per MR=4 tile, winning only in the single-tile regime:
+        // hard cap M<=4, larger chunks stay on CUTLASS. Same weight + linear
+        // micro-scales as the M=1 decode GEMV, but NOT the same kernel (decode
+        // uses gemv_nvfp4_kpar, verify uses gemm_nvfp4_batched); no argmax parity
+        // with non-speculative greedy output either way (docs/LIMITATIONS.md).
         if (ctx.spec_verify_small_m && !dispatch_policy().speculative.verify_smallm &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 &&
@@ -353,19 +329,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             return;
         }
 
-        // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default ON since v2):
-        // batched decode at n_seq <= 32 used to run these through the
-        // CUTLASS 128x128 block-scaled tile — 40 CTAs on the N=5120 shapes,
-        // 41.4 us for a 14 MB weight read (19% of the floor). impl 2 (the
-        // default) is the native mxf4nvf4 producer/consumer pipeline on the
-        // SAME plain weight bytes the M=1 decode GEMVs read — measured
-        // +16.0% aggregate at 32 streams / +36.0% at 8 on Qwen3.8-27B-NVFP4
-        // (gemm.h has the numbers); impl 1 keeps the refuted W4A16
-        // dequant+HMMA kernel for A/B. Both read quantized activations
-        // (same numerics family as the CUTLASS path). Spec-verify chunks
-        // keep their documented paths (argmax parity, #1055). The weight is
-        // the native NVFP4 source or, on decode rows of a GGUF source, its
-        // NVFP4 decode overlay (smallm_weight_, #1897).
+        // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default on): batched decode at
+        // n_seq<=32. impl 2 (default) is the native mxf4nvf4 producer/consumer
+        // pipeline on the SAME plain weight bytes the M=1 decode GEMVs read (vs
+        // the CUTLASS 128x128 block-scaled tile it replaces); impl 1 keeps the
+        // refuted W4A16 dequant+HMMA kernel for A/B. Spec-verify chunks keep their
+        // documented paths (#1055). Weight is the native NVFP4 source or, on
+        // decode rows of a GGUF source, its NVFP4 decode overlay (smallm_weight_, #1897).
         NvFP4QuantResult nv;
         if (dispatch_policy().gemm.nvfp4_smallm &&
             (!ctx.spec_verify_small_m || dispatch_policy().speculative.verify_smallm) &&
@@ -382,31 +352,27 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             // a native source, the dequant route on a GGUF one);
             // prewarm_smallm_workspace sizes both scratches at init.
             ensure_smallm_ws_(need, ctx.stream);
-            // A4: quantize the activation rows into the executor scratch
-            // (plain layout, unit tensor scale) and read both sides packed.
-            // The FP16 variant lost ~11% e2e to L2 eviction of its 327 KiB
-            // x tile; packed x is ~92 KiB. Scratch sized for K_max on first
-            // eager use, like the split-K workspace.
+            // A4: quantizes activation rows into the executor scratch (plain layout,
+            // unit tensor scale) and reads both sides packed. The FP16 variant lost to
+            // L2 eviction of its large x tile; packed x is far smaller. Scratch sized
+            // for K_max on first eager use, like the split-K workspace.
             const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
             ensure_smallm_xq_(xq_need, ctx.stream);
             if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
                 uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
                 uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
-                // Shared-activation skip: the call site marked this input as
-                // already quantized by the PREVIOUS dispatch (act-quant hint,
-                // same mechanism the CUTLASS prefill block uses), and the
-                // scratch tag confirms the scratch still holds exactly that
-                // quantize. Saves one quantize launch + a [M,K] FP16 read per
-                // second member of a gate/up, q/k/v or GDN in/z pair.
+                // Shared-activation skip: the call site marked this input as already
+                // quantized by the PREVIOUS dispatch (act-quant hint), and the scratch tag
+                // confirms it still holds exactly that quantize. Saves one quantize launch
+                // + a [M,K] FP16 read per second member of a gate/up, q/k/v or GDN in/z pair.
                 const bool tag_match = smallm_xq_src_ == input.data && smallm_xq_src_m_ == M &&
                                        smallm_xq_src_k_ == K;
                 const bool hint_match = ctx.act_quant_hint_data != nullptr &&
                                         ctx.act_quant_hint_data == input.data &&
                                         ctx.act_quant_hint_m == M && ctx.act_quant_hint_k == K;
-                // Producer fusion (fused rmsnorm/swiglu + quantize) accepts a
-                // matching tag without a hint: the producer re-tags on the
-                // very write that produced the FP16 buffer, so the pointer
-                // cannot hold newer content than the scratch.
+                // Producer fusion (fused rmsnorm/swiglu+quantize) accepts a matching tag
+                // without a hint: the producer re-tags on the very write that produced the
+                // FP16 buffer, so the pointer cannot hold newer content than the scratch.
                 const bool prequant = tag_match && (hint_match || smallm_xq_from_producer_);
                 if (!prequant) {
                     quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
@@ -445,12 +411,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 return;
         }
 
-        // dp4a dense: compute directly from Q4_K/Q5_K blocks (0.55 B/elem)
-        // instead of the FP16 cache (2.0 B/elem). Weight-stationary with
-        // TILE_M=16 → re-reads weight ceil(M/16) times. Only wins at small
-        // M where the GEMM is memory-bound (M ≤ 64). At M=512, cuBLAS FP16
-        // with tensor cores + single weight read is faster.
-        // sm_120 caps smem at 99 KiB — K up to ~4400 fits.
+        // dp4a dense: computes directly from Q4_K/Q5_K blocks (0.55 B/elem)
+        // instead of the FP16 cache (2.0 B/elem). Weight-stationary TILE_M=16, so
+        // it re-reads the weight ceil(M/16) times; only wins at small M (<=64,
+        // memory-bound). sm_120 smem cap 99 KiB fits K up to ~4400.
         if (prefill == StorageTier::FP16 && ctx.beta == 0.0f && M <= 64) {
             const auto* qs = ctx.qscratch;
             if (qs && qs->q8_1_prefill_buf && qs->d8_prefill_buf) {
@@ -488,12 +452,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 gemm(input, fp16_it->second, output, 1.0f, ctx.beta, ctx.stream);
                 return;
             }
-            // FP16-resident or dequantable source with no cache entry — the
-            // source IS the weight (e.g. one whose only cache is the
-            // fp8_ssm_proj decode sidecar: F16 on native hybrids, Q8_0 on GGUF
-            // hybrids). Route through the uncached fallback exactly as the
-            // pre-sidecar Undefined tier did (block quants dequant→cuBLAS);
-            // falling further through would hand a null payload to cuBLAS.
+            // FP16-resident or dequantable source with no cache entry: the source IS
+            // the weight (e.g. only the fp8_ssm_proj decode sidecar exists). Routes
+            // through the uncached fallback exactly as the pre-sidecar Undefined tier
+            // did; falling further through would hand cuBLAS a null payload.
             if (h.source_data &&
                 (h.source_qtype == QType::F16 || h.source_qtype == QType::BF16 ||
                  dequant_gpu_supported(h.source_qtype))) {
@@ -518,31 +480,22 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
     }
 
-    // ---- GGUF source with an NVFP4 *decode* overlay: dequant for prefill ----
-    // A weight whose primary tier is NVFP4/CUTLASS_NVFP4 but whose source is a
-    // dequantable GGUF quant (Q8_0/Q6_K/Q5_K) carries the NVFP4 cache as a
-    // DECODE-ONLY overlay (mode 1 additive). For prefill (M>1) we must dequant
-    // the ORIGINAL Q*_K source to FP16 — running prefill on the 4-bit NVFP4
-    // overlay corrupts the prompt context and degenerates output. This path is
-    // reached only when no FP16/FP8 prefill cache exists (the checks above
-    // return first when one does), i.e. on sm_120 where FP8 prefill is disabled
-    // (PR #428). Decode rows read the NVFP4 cache: M=1 in the decode switch
-    // above, 2..32 rows (batched decode) in the small-M block (#1897).
-    // Native NVFP4 SafeTensors models are excluded: their source_qtype is
-    // NVFP4/F16, which dequant_gpu_supported() rejects → they use the CUTLASS
-    // path below as before.
+    // GGUF source with an NVFP4 decode-only overlay (mode 1 additive): for
+    // prefill (M>1) must dequant the ORIGINAL Q*_K source to FP16, since
+    // running prefill on the 4-bit NVFP4 overlay corrupts the prompt context
+    // and degenerates output. Reached only when no FP16/FP8 prefill cache
+    // exists (sm_120 disables FP8 prefill, #428). Decode rows read the NVFP4
+    // cache instead (M=1 and 2..32-row small-M, #1897). Native NVFP4
+    // SafeTensors models are excluded (source_qtype rejected by dequant_gpu_supported()) and use the CUTLASS
+    // path.
     if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
-        // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled, default off): fused
-        // dequant on the int8 tensor cores instead of the materialize-to-FP16
-        // → cuBLAS round-trip (the dominant Q8_0 prefill tax, see
-        // docs/archive/prefill_gap_2026_06_07.md §4.1). Covers beta=0 and the
-        // beta=1 residual-add form; declines (shape / capture-guard) fall
-        // through to the dequant fallback below.
-        // M >= 2 (was >= 64): below 64 the dequant tax dominates even harder —
-        // an M=9 spec-decode verify chunk re-dequantized the ENTIRE model every
-        // step (56% of GPU time, issue #667). The IMMA kernel zero-fills M-tail
-        // rows, and the MoE path already runs it at per-expert M≈32.
+        // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled): fused dequant on int8
+        // tensor cores instead of materialize-to-FP16 -> cuBLAS. Covers beta=0 and
+        // the beta=1 residual-add form; declines fall through to the dequant
+        // fallback. M>=2 (was >=64): below 64 the dequant tax dominates even
+        // harder (an M=9 spec-decode verify chunk re-dequantized the entire model
+        // every step, #667). The IMMA kernel zero-fills M-tail rows; MoE already runs it at per-expert M~32.
         const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 &&
                                    M >= 2 && input.stride[0] == h.shape[1] &&
                                    output.stride[0] == h.shape[0];
@@ -560,12 +513,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                   ctx.stream, ctx.beta))
                 return;
         }
-        // NOTE: dense Q6_K is deliberately NOT routed through IMMA — measured
-        // 2026-06-07 on Qwen3-14B-Q6_K: 4.5k vs 6.6k pp512 for the
-        // dequant→cuBLAS-fp16acc path. The half-MMA split halves the int8
-        // rate, and on large dense shapes full-rate f16-acc HMMA wins; the
-        // fusion saving only dominates in the MoE regime (64% dequant tax),
-        // where Q6_K-IMMA ships (down_proj, see the MoE batch path).
+        // Dense Q6_K is deliberately NOT routed through IMMA: the half-MMA split
+        // halves the int8 rate, and full-rate f16-acc HMMA wins on large dense
+        // shapes; the fusion saving only dominates in the MoE regime (high dequant tax), where Q6_K-IMMA
+        // ships instead.
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         gemm_dispatch_uncached_fallback(input, weight, output, ctx);
         return;
@@ -599,11 +550,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                      ctx.act_quant_hint_data == input.data &&
                                      ctx.act_quant_hint_m == M &&
                                      ctx.act_quant_hint_k == static_cast<int>(input.shape[1]));
-            // Thread beta through: the cutlass_nvfp4 handler cannot honour a
-            // nonzero beta and DECLINES on it (its epilogue bakes beta=0) —
-            // without this line a beta=1 dispatch that reached here would
-            // silently overwrite the residual instead of falling through to
-            // a beta-honouring handler.
+            // Threads beta through: the cutlass_nvfp4 handler cannot honour a nonzero
+            // beta (epilogue bakes beta=0) and DECLINES on it. Without this, a beta=1
+            // dispatch reaching here would silently overwrite the residual instead of
+            // falling through to a beta-honouring handler.
             args.beta = ctx.beta;
             GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, false};
             if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
@@ -621,17 +571,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     }
 
     // Native-NVFP4 prefill (M>1) safety net: dequant the packed weight to FP16
-    // and run cuBLAS. Reached when the fast CUTLASS-NVFP4 path above declined
-    // (e.g. kernel shape/workspace decline) and there is no FP16/FP8 prefill
-    // companion — the source is native NVFP4, which dequant_gpu_supported()
-    // rejects, so the GGUF-overlay dequant (above) was skipped too. Without
-    // this, dispatch falls through to imp::gemm_dispatch → the generic gemm(),
-    // which sees the raw packed NVFP4 payload (QType::INT8-typed bytes) and
-    // hands cuBLAS an unsupported FP16×INT8 GEMM → CUBLAS_STATUS_NOT_SUPPORTED
-    // (status 15) → silent repeated-token garbage + downstream IMA. This hit
-    // the Qwen3.6-35B-A3B-NVFP4 shared-expert gate/up projections (the only
-    // native-NVFP4 dense weights routed through gemm_via_handle_). Slower than
-    // CUTLASS but correct; only fires on the decline.
+    // and run cuBLAS. Reached when the fast CUTLASS-NVFP4 path declines and
+    // there is no FP16/FP8 prefill companion (native source rejected by
+    // dequant_gpu_supported()). Without this, dispatch falls to the generic
+    // gemm(), which hands cuBLAS an unsupported FP16xINT8 GEMM
+    // (CUBLAS_STATUS_NOT_SUPPORTED) -> silent repeated-token garbage + IMA
+    // (hit Qwen3.6-35B-A3B-NVFP4's shared-expert gate/up). Slower than CUTLASS but correct; only fires on
+    // decline.
     if (M > 1 && h.source_data && h.source_scales &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4) &&
         (h.source_qtype == QType::NVFP4 || h.source_qtype == QType::INT8)) {
@@ -650,22 +596,16 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                        ws_.shared(), ws_.shared_size(), ctx.stream);
 }
 
-// ---------------------------------------------------------------------------
-// Producer-side NVFP4 quantize fusion (batched decode).
-//
-// The small-M block above quantizes its FP16 input into smallm_xq_ once per
-// consumer GROUP (the act-quant hint dedupes pair members). The producer
-// fusion moves that quantize into the kernel that WRITES the FP16 buffer
-// (fused rmsnorm / swiglu), killing the separate launch and the [M,K] FP16
-// re-read. Gate mirrors the small-M route conditions; when any of them
-// fails the caller runs the unfused kernels and the dispatch quantizes as
-// before.
-// ---------------------------------------------------------------------------
-// Grow the small-M GEMM workspace / activation-quantize scratch. Neither
-// allocates while `stream` is capturing (allocate_smallm_scratch sizes both
-// at init from the T2 arena; growth past that plan is the lazy fallback);
-// an xq resize invalidates the shared-activation tag. An arena slab is
-// never freed: it belongs to the arena.
+// Producer-side NVFP4 quantize fusion (batched decode): the small-M block
+// quantizes its FP16 input into smallm_xq_ once per consumer GROUP (act-
+// quant hint dedupes pair members); the producer fusion instead quantizes
+// inside the kernel that WRITES the FP16 buffer (fused rmsnorm/swiglu),
+// killing the separate launch and the [M,K] re-read. Gate mirrors the
+// small-M route conditions; any failure falls back to unfused kernels.
+// ensure_smallm_ws_ grows the small-M workspace/xq scratch: never
+// allocates while `stream` is capturing (allocate_smallm_scratch sizes
+// both from the T2 arena at init; growth past that is the lazy fallback).
+// An arena slab is never freed here; it belongs to the arena.
 void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
     if (need <= smallm_ws_bytes_)
         return;

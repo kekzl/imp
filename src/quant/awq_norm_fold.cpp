@@ -22,11 +22,10 @@ float awq_fold_norm_value(float g, float s, NormOffset off) {
 }
 
 float awq_fold_gain_error(float g, float s, NormOffset off, const std::string& dtype) {
-    // Measured against what the tensor ALREADY holds, not against the caller's
-    // float: the source of a fold is a stored value, and a bound that also
-    // charged the fold for the source's own representation would have no s at
-    // which it is satisfied. With this, s = 1 is exact by construction, which
-    // is what makes the clamp below terminate on a divisor instead of on zero.
+    // Measured against what the tensor ALREADY holds, not the caller's float: the fold's
+    // source is a stored value, and a bound charging the fold for the source's own
+    // representation would have no s where it's satisfied. This makes s=1 exact by
+    // construction, letting the clamp below terminate on a divisor rather than on zero.
     g = awq_round_to_dtype(g, dtype);
     const float want = awq_norm_gain(g, off) / s;
     if (want == 0.0f || !std::isfinite(want))
@@ -40,13 +39,10 @@ float awq_clamp_norm_divisor(float g, float s, NormOffset off, const std::string
         return 1.0f;
     if (awq_fold_gain_error(g, s, off, dtype) <= tol)
         return s;
-    // s = 1 always holds: the source value is already in the tensor's dtype, so
-    // storing it back is exact. That is the floor of this search, which is why
-    // a channel is never deleted - the worst case is that it keeps its weights.
-    //
-    // Bisect geometrically, because s is a multiplicative quantity and the
-    // search has to work in both directions (AWQ normalises the group so both
-    // s > 1 and s < 1 occur). `lo` always satisfies the bound, `hi` never does.
+    // s=1 always holds (the source value is already in the tensor's dtype, storing it back is
+    // exact), so a channel is never deleted, only kept as-is in the worst case. Bisects
+    // geometrically since s is multiplicative and must search both directions (AWQ can
+    // normalise a group either way); `lo` always satisfies the bound, `hi` never does.
     float lo = 1.0f, hi = s;
     for (int i = 0; i < 40; i++) {
         const float mid = std::sqrt(lo * hi);

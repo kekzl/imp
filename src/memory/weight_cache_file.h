@@ -1,26 +1,17 @@
 #pragma once
 
-// On-disk warm weight cache — cold-boot companion to the suspend-to-RAM
-// snapshot (weight_snapshot.h).
-//
-// At the end of a fully-cold weight upload, the TRANSFORMED upload records
-// (host BF16→FP16 conversions, GPU dequants, split layouts — everything whose
-// device bytes differ from the model file) are copied D2H once and persisted
-// into a dedicated cache directory (~/.cache/imp/warm by default). Raw-from-source records are deliberately NOT stored: a
-// cold re-upload from the model file mmap is byte-equivalent and costs the
-// same, so the cache stays small (near-zero for raw-served GGUF quants and
-// NVFP4-prequant SafeTensors; ~model-size only for BF16-dense checkpoints,
-// which is exactly where it saves the most startup time).
-//
-// At the next boot the cache is loaded into a WeightSnapshot and armed for
-// the upload pass — the same per-key restore machinery as suspend/resume,
-// with the same safety property: any miss or mismatch falls back to the
-// normal cold path per tensor.
-//
-// Staleness guards: format version, model arch + layer count, and a content
-// fingerprint of the model path (total regular-file bytes + newest mtime).
-// The file is written atomically (tmp + rename) and is best-effort in both
-// directions — any failure just means a normal cold load.
+// On-disk warm weight cache: cold-boot companion to the suspend-to-RAM snapshot
+// (weight_snapshot.h). At the end of a fully-cold weight upload, the TRANSFORMED upload
+// records (host BF16->FP16 conversions, GPU dequants, split layouts) are copied D2H once
+// and persisted into a dedicated cache directory. Raw-from-source records are
+// deliberately NOT stored: a cold re-upload from the model file mmap is byte-equivalent
+// and costs the same, so the cache stays small.
+// At the next boot the cache loads into a WeightSnapshot and arms for the upload pass,
+// the same per-key restore machinery as suspend/resume; any miss or mismatch falls back
+// to the normal cold path per tensor.
+// Staleness guards: format version, model arch + layer count, and a content fingerprint
+// of the model path (total regular-file bytes + newest mtime). Written atomically
+// (tmp + rename); best-effort in both directions.
 
 #include <memory>
 #include <string>
@@ -30,10 +21,9 @@ namespace imp {
 class Model;
 class WeightSnapshot;
 
-// "<dir>/<model-basename>-<path-hash>.impwcache" where dir is cache_dir
-// ([warm_cache] dir) or, when empty, the default cache directory
-// ($XDG_CACHE_HOME/imp/warm, else ~/.cache/imp/warm, else
-// /tmp/imp-warm-cache). The directory is created best-effort.
+// "<dir>/<model-basename>-<path-hash>.impwcache" where dir is cache_dir ([warm_cache]
+// dir) or, when empty, the default cache directory. The directory is created
+// best-effort.
 std::string weight_cache_path_for(const std::string& model_path, const std::string& cache_dir = {});
 
 struct WeightCacheFingerprint {

@@ -15,10 +15,9 @@ namespace imp {
 
 namespace {
 
-// F16 is already the target and F32 is a plain narrowing; anything else means
-// this checkpoint is not what the loader thinks. `out` is a caller-owned
-// staging buffer reused across tensors, so it stays an out-parameter; only the
-// failure path moves into the return type.
+// F16 is already the target and F32 is a plain narrowing; anything else means this
+// checkpoint isn't what the loader thinks. `out` is a caller-owned staging buffer reused
+// across tensors (stays an out-parameter); only the failure path moves into the return type.
 std::expected<void, std::string> to_fp16(const Tensor& t, std::vector<half>& out) {
     const int64_t n = t.numel();
     out.resize(static_cast<size_t>(n));
@@ -47,11 +46,10 @@ std::expected<void, std::string> to_fp16(const Tensor& t, std::vector<half>& out
 }  // namespace
 
 std::expected<size_t, std::string> qwen3vl_upload_vision_tower(VisionModel& model) {
-    // Collected first, applied last: on any failure every Tensor still points at
-    // the host mapping, which is the only state the caller can safely drop the
-    // tower from. The arena takes are not rewound on that path — it is a bump
-    // allocator — but a failed tower upload ends vision for this engine anyway,
-    // and the bytes go back when the arena closes.
+    // Collected first, applied last: on any failure every Tensor still points at the host
+    // mapping, the only state the caller can safely drop the tower from. Arena takes are not
+    // rewound on that path (a bump allocator), but a failed tower upload ends vision for this
+    // engine anyway, and the bytes return when the arena closes.
     struct Pending {
         Tensor* slot;
         void* device;

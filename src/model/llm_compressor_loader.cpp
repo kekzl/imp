@@ -119,10 +119,9 @@ bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp) {
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters, bool keep_vision) {
     std::string out = in;
 
-    // Step 0: vision tensors the caller asked to keep leave untouched. They are
-    // returned BEFORE the rename steps on purpose — the vision mapper matches
-    // the literal checkpoint spelling, so a prefix strip or a `.weight_packed`
-    // rename here would silently unmap a slot rather than fail.
+    // Step 0: vision tensors the caller asked to keep are left untouched, returned BEFORE the
+    // rename steps - the vision mapper matches the literal checkpoint spelling, so a prefix
+    // strip or .weight_packed rename here would silently unmap the slot instead of failing.
     if (keep_vision && name_is_vision(out)) {
         counters.vision_kept++;
         return {NameTranslation::EMIT, std::move(out)};
@@ -134,10 +133,9 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         return {NameTranslation::SKIP, ""};
     }
 
-    // Step 2: count Gemma-4 extras (still emitted — weight_map routes them to
-    // layer.{ffn_gate_inp_scale, expert_down_scale, layer_out_scale}, which the
-    // forward path applies to make the model coherent). Phase 1 skipped these
-    // because the runtime wiring wasn't validated yet; Phase 2 enables them.
+    // Step 2: counts Gemma-4 extras (.layer_scalar, .per_expert_scale), still emitted -
+    // weight_map routes them to the {ffn_gate_inp,expert_down,layer_out}_scale slots the
+    // forward path applies.
     if (ends_with(out, ".layer_scalar") || ends_with(out, ".per_expert_scale")) {
         counters.gemma4_extras++;
     } else if (ends_with(out, ".scale")) {
@@ -147,13 +145,9 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         }
     }
 
-    // Step 3: prefix strip. Two multimodal wrappers seen in the wild:
-    //   (a) Gemma-4-style: `model.language_model.<rest>` → `model.<rest>`
-    //   (b) Mistral3-style: `language_model.<rest>` → `<rest>` (so e.g.
-    //       `language_model.model.layers.0.q.weight_packed` becomes
-    //       `model.layers.0.q.weight_packed`, and `language_model.lm_head.weight`
-    //       becomes `lm_head.weight`).
-    // (a) wins when both could match because it is a strict superset prefix.
+    // Step 3: prefix strip. Gemma-4: model.language_model.<rest> -> model.<rest>. Mistral3:
+    // language_model.<rest> -> <rest> (e.g. lm_head.weight keeps no prefix). (a) wins when
+    // both could match: it is a strict superset prefix.
     static constexpr const char kGemma4Prefix[] = "model.language_model.";
     static constexpr size_t kGemma4PrefixLen = sizeof(kGemma4Prefix) - 1;
     static constexpr const char kMistral3Prefix[] = "language_model.";
@@ -218,10 +212,9 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
     std::vector<std::string> ignore_list;
     bool seen_quant_mod = false;
 
-    // Indent-aware tracking for the elaborate `config_groups: group_0: weights: {...}`
-    // schema (Mistral3 / SmoothQuant pipelines). When weights_indent >= 0 we are
-    // inside the `weights:` block of `config_groups.group_0` and capture the
-    // numeric quantization signature.
+    // Indent-aware tracking for the config_groups: group_0: weights: {...} schema
+    // (Mistral3/SmoothQuant). weights_indent>=0 means inside that block; captures the numeric
+    // quantization signature.
     int config_groups_indent = -1;
     int weights_indent = -1;
     int weights_num_bits = -1;
@@ -330,11 +323,9 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
     }
 
     if (scheme != "NVFP4" && scheme != "NVFP4_W4A16") {
-        // Soft fail: returning false signals "no NVFP4 metadata to apply".
-        // The SafeTensors loader treats that as "load with whatever the wire
-        // dtype gives us" — typically FP16/BF16/FP8. That keeps inference
-        // alive for unsupported llm-compressor schemes (W8A8-INT8, FP8, …)
-        // instead of hard-blocking the load.
+        // Soft fail: false means "no NVFP4 metadata to apply". The SafeTensors loader then loads
+        // with whatever wire dtype gives (typically FP16/BF16/FP8), keeping unsupported
+        // llm-compressor schemes (W8A8-INT8, FP8, ...) alive instead of hard-blocking the load.
         IMP_LOG_WARN(
             "recipe.yaml scheme '%s' is not natively supported by imp "
             "(only NVFP4 / NVFP4_W4A16). Falling back to the on-wire dtype; "
@@ -387,10 +378,9 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
     if (!jobj_get_string(*qc, "quant_method", method) || method != "compressed-tensors")
         return false;
 
-    // The scheme lives in config_groups; a checkpoint may carry several, and
-    // NVFP4 is claimed only if one of them is NVFP4-shaped. The five fields
-    // tested here are the same ones vLLM's _is_nvfp4_format() reads, so a
-    // checkpoint the two engines disagree about cannot arise from this check.
+    // The scheme lives in config_groups; a checkpoint may carry several, NVFP4 claimed only if
+    // one is NVFP4-shaped. The five fields tested match vLLM's _is_nvfp4_format(), so the two
+    // engines cannot disagree about a checkpoint from this check.
     int group_size = 0;
     bool found_nvfp4 = false;
     std::string other_scheme;
@@ -418,10 +408,9 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
         }
     }
     if (!found_nvfp4) {
-        // Same soft fail as the recipe path: load with the wire dtype rather
-        // than block. Logged rather than silent, because a compressed-tensors
-        // checkpoint whose scheme this build cannot serve is the case that
-        // otherwise arrives as "some unquantized model".
+        // Same soft fail as the recipe path: load with the wire dtype rather than block. Logged,
+        // not silent - an unsupported compressed-tensors scheme otherwise arrives as "some
+        // unquantized model".
         std::string fmt;
         jobj_get_string(*qc, "format", fmt);
         IMP_LOG_WARN(

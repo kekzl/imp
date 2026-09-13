@@ -25,23 +25,15 @@ struct NameTranslation {
     std::string out_name;  // populated when action == EMIT
 };
 
-// Apply rename + prefix-strip + skip rules deterministically. Increments
-// the matching counter. Pure apart from counter mutation.
-//
-// `keep_vision` = the checkpoint declares a vision tower this build supports
-// (HFConfigLoader::probe_vision_tower). Vision tensors are then EMITted under
-// their original name — no prefix strip, no suffix rename — because the vision
-// mapper dispatches on the literal `model.visual.<slot>` spelling, exactly like
-// the MTP head does. Default false keeps the historical behaviour, so a
-// text-only llm-compressor checkpoint translates identically to before.
+// Applies rename + prefix-strip + skip rules deterministically; increments the matching
+// counter. keep_vision (probe_vision_tower) keeps vision tensors under their literal name,
+// no strip/rename, matching the MTP head; default false is unchanged text-only behavior.
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters,
                                bool keep_vision = false);
 
-// True if the given tensor name would be SKIP'd by translate_name. Exposed so
-// the SafeTensors loader can skip an entire shard whose contents are unused
-// (e.g. model_visual.safetensors when no mmproj is configured). Must be called
-// with the same `keep_vision` as translate_name — otherwise the shard holding
-// the tower is dropped before translate_name ever sees a tensor from it.
+// True if translate_name would SKIP this name. Lets the SafeTensors loader drop a whole
+// shard whose contents are unused (e.g. model_visual.safetensors with no mmproj). Must
+// pass the same keep_vision as translate_name or the tower's shard is dropped unseen.
 bool name_is_skipped(const std::string& in, bool keep_vision = false);
 
 // True if the name belongs to a vision tower / multimodal projector. Split out
@@ -51,19 +43,10 @@ bool name_is_vision(const std::string& in);
 // True if the name belongs to an embedded MTP draft head.
 bool name_is_mtp(const std::string& in);
 
-// True when NOTHING in this load will read the tensor, so a shard made only of
-// such names can be dropped unread.
-//
-// This is a DIFFERENT question from name_is_skipped(), and conflating the two
-// is what lost the MTP head on every sharded compressed-tensors checkpoint:
-// translate_name() SKIPs `mtp.*` because those tensors do not belong in the
-// main tensor map, but load_shard() then diverts them into the MTP map — they
-// are skipped and still used. A drop predicate that asks "is it skipped" throws
-// away the shard carrying the draft head before anyone looks at it, and the
-// only symptom is that spec-decode silently never engages.
-//
-// `keep_mtp` is the caller's `load_mtp_head`, i.e. whether an MTP map is being
-// collected at all; `keep_vision` mirrors it for the tower.
+// True only when NOTHING in this load will read the tensor, distinct from name_is_skipped():
+// translate_name() SKIPs mtp.* (not for the main tensor map) but load_shard() still diverts
+// them into the MTP map, so "skipped" != "unused". Conflating the two lost the MTP head on
+// sharded checkpoints. keep_mtp mirrors the caller's load_mtp_head, keep_vision the tower.
 bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp);
 
 // Emit one INFO log summarizing what translate_name() did across a shard.
@@ -75,26 +58,15 @@ void log_summary(const TranslationCounters& counters);
 // missing file, parse error, or unsupported scheme.
 bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg);
 
-// `quantization_config.ignore` from config.json, nothing else. recipe.yaml
-// records the RUN's patterns, config.json the module names they expanded to;
-// the two are not interchangeable (`re:.*router` full-matches `...router`, not
-// the `...router.proj` a checkpoint carries). Returns false when the file, the
-// block or the list is absent or empty.
+// quantization_config.ignore from config.json only, nothing else. recipe.yaml records the
+// RUN's patterns, config.json the expanded module names (re:.*router matches ...router,
+// not ...router.proj); the two are not interchangeable. False if file/block/list is absent.
 bool read_config_ignore_list(const std::string& model_dir, std::vector<std::string>& out);
 
-// The same, from `quantization_config` in config.json.
-//
-// recipe.yaml is llm-compressor's own record of the RUN; the checkpoint's
-// declaration lives in config.json, which is what HuggingFace and vLLM read and
-// the only one a re-upload is guaranteed to carry. Detecting the format from
-// the recipe alone means a compressed-tensors checkpoint published without it
-// is read as Modelopt — and the two store the tensor scale as reciprocals of
-// each other, so every weight comes out scaled by amax²/36 with nothing
-// failing. Measured on a checkpoint imp-quantize itself wrote: perplexity
-// 31.05 against 1.2e47.
-//
-// Returns false when the config declares a scheme this build does not serve as
-// NVFP4 (int4 pack-quantized, W8A8, …), same soft-fail contract as above.
+// recipe.yaml is llm-compressor's RUN record; config.json's quantization_config is the
+// checkpoint's own declaration (read by HF/vLLM, guaranteed on any re-upload). Reading a
+// compressed-tensors checkpoint as Modelopt scales weights by the reciprocal, wrong by
+// amax^2/36. False when the scheme isn't served as NVFP4 (int4 pack-quantized, W8A8, ...).
 bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg);
 
 }  // namespace imp::llm_compressor
