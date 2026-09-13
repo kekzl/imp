@@ -33,7 +33,7 @@ __device__ __forceinline__ float ue4m3_decode(uint8_t s) {
 
 // ---------------------------------------------------------------------------
 // Reference kernel: scalar FFMA Q.K dot on NVFP4 KV
-// (mirrors imp's current path at attention_paged_nvfp4.cu:142-153).
+// (mirrors imp's current path at attention_paged_nvfp4.cu:125-136).
 // Q: half [HEAD_DIM]                — single query, single head (decode shape)
 // K: uint8 [seqlen_kv, HEAD_DIM/2]  — packed NVFP4 (2 elems per byte)
 // K_scales: uint8 [seqlen_kv, HEAD_DIM/16]  — UE4M3 per 16-element group

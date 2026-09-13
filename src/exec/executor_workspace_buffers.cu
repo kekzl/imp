@@ -1818,7 +1818,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
         }
     }
     // #1675: a sink model routes straight to the FP16 WMMA FMHA tier
-    // (attention_dispatch.cu:86-92) since #992, and that tier needs no
+    // (attention_dispatch.cu:65-71) since #992, and that tier needs no
     // S-matrix. All three no-clamp returns below excluded sinks, so gpt-oss
     // took the quadratic clamp for a reason the dispatch stopped having - the
     // chunk collapsing with offset, at no benefit. The condition mirrors the

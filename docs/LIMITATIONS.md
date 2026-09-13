@@ -133,7 +133,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   enforced as a one-member enum.
 
 - **JSON Schema: `enum`/`const` members must be strings.** The FSM emits enums as quoted string
-  content (`schema_constrain.cu:790`); `{"enum":[1,2]}` is a `400`. Before #1564 it constrained
+  content (`schema_constrain.cu:733`); `{"enum":[1,2]}` is a `400`. Before #1564 it constrained
   the model to the empty string.
 
 - **JSON Schema: `additionalProperties` as a schema object reads as `true`.** Boolean form
@@ -142,7 +142,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   (everything after it, `properties` included, discarded; request downgraded to `json_object`).
 
 - **A `pattern` the regex engine cannot compile is not enforced; the request still returns 200.**
-  `compile_patterns()` warns and leaves the node unconstrained (`json_schema.cpp:558`). A
+  `compile_patterns()` warns and leaves the node unconstrained (`json_schema.cpp:535`). A
   top-level `regex` constraint is refused at admission; this path has no admission screen.
 
 - **Calibrated KV-cache scales in checkpoints are not read.** Six local checkpoints carry

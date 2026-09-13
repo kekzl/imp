@@ -2,7 +2,7 @@
 // reference, both anchored to an fp64 CPU reference.
 //
 // hd=512 is the Gemma-4 global-attention layer geometry (and Qwen3.5-27B, see
-// attention_cublas.cu:423). Before this test the tiled WMMA FMHA declined
+// attention_cublas.cu:376). Before this test the tiled WMMA FMHA declined
 // hd=512 and every hd=512 layer fell to the materialized cuBLAS path. The
 // dispatch closes that gap with a Bq=16/Bkv=16 instantiation; this test is the
 // validator's parity gate: the new fused kernel must (a) actually run at hd=512

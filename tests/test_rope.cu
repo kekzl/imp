@@ -267,7 +267,7 @@ TEST(RoPETest, YarnLongContextPositionsMatchDoubleReference) {
         std::vector<float> q_ref(q_host), k_ref(k_host);
         for (int i = 0; i < head_dim / 2; i++) {
             // The kernel passes inv_scaling = 1/scaling as rope_yarn's freq_scale
-            // (rope.cu:165, :93), so the oracle must too.
+            // (rope.cu:160, :93), so the oracle must too.
             const double inv_scaling = 1.0 / (double)scaling;
             const double theta_extrap = (double)pos / std::pow((double)theta, (2.0 * i) / head_dim);
             const double theta_interp = inv_scaling * theta_extrap;
@@ -288,7 +288,7 @@ TEST(RoPETest, YarnLongContextPositionsMatchDoubleReference) {
         int* pos_dev = to_device(pos_host.data(), pos_host.size());
         Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
         Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
-        // corr_dims is read on the HOST (rope.cu:167), so this is a host array.
+        // corr_dims is read on the HOST (rope.cu:162), so this is a host array.
         rope_forward(Q, K, pos_dev, head_dim, theta, scaling, /*rope_dim=*/0, /*neox=*/false, ext_factor,
                      attn_factor, corr);
         CUDA_CHECK(cudaDeviceSynchronize());

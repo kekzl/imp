@@ -484,7 +484,7 @@ private:
                     skip_ws();
                     while (!eof() && peek() != ']') {
                         // #1564: a non-string enum member has no representation - the FSM emits
-                        // enum as quoted string content (schema_constrain.cu:790). Refuse rather
+                        // enum as quoted string content (schema_constrain.cu:733). Refuse rather
                         // than constrain to something else.
                         if (peek() != '"') {
                             fail(
