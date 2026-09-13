@@ -39,7 +39,7 @@ struct AnthropicSSE {
     }
 
     // #1657: builds the SSE frame once per block and only escapes the token per call - dumping a
-    // json object per token violates the hot-path rule (utils.h:167-168) that
+    // json object per token violates the hot-path rule (utils.h:105-106) that
     // /v1/chat/completions already avoids via SSEChunkWriter.
     bool emit_delta(const std::string& prefix, const std::string& suffix, const std::string& text) {
         hot_buf.clear();
