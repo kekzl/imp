@@ -1,20 +1,14 @@
 // Prefill pacing under decode: how many prompt rows one engine step may
 // prefill while other sequences decode.
 //
-// runtime.prefill_chunk_decode_cap bounds ONE chunk forward so a concurrent
-// DECODER's inter-token gap stays bounded during another session's ingest
-// (#1643). That cap looks only at whether anyone decodes, not at how many
-// wait: on a 32-stream burst the second step already has a decoder, and from
-// there every step prefills one capped chunk while 30 clients wait for their
-// first token; the decoders being protected are the burst's own first
-// finishers. With runtime.prefill_cap_fairness = W the cap scales by
-// W x waiting / decoding once W x waiting exceeds decoding, clamped to the
-// full chunk: W is how many waiters one decoder's smoothness is worth. W = 1
-// is the symmetric rule (31 waiting behind 1 decoder run the full chunk, 16
-// behind 16 keep the cap); W = 4 (the default) keeps a burst at the full
-// chunk until fewer than a quarter of the wave still waits. The protection
-// scenario (31 decoders, one ingest) is unchanged for every W below 31, and
-// W = 0 turns the scaling off.
+// runtime.prefill_chunk_decode_cap bounds one chunk so a decoder's
+// inter-token gap stays bounded during concurrent ingest (#1643). It counts
+// only whether anyone decodes, not how many wait, so a waiting burst can
+// starve behind its own first finishers.
+// runtime.prefill_cap_fairness = W scales the cap by W x waiting / decoding
+// once that ratio exceeds 1, clamped to the full chunk. W = 1 is symmetric,
+// W = 4 (default) relaxes once under a quarter of the wave still waits,
+// W = 0 disables scaling.
 //
 // CUDA-free and RuntimeConfig-free so the CPU lane can pin the table.
 #pragma once

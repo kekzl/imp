@@ -13,7 +13,7 @@
 //     measured zero (B26).
 //
 // What is left is plain cudaMalloc/cudaFree, which is exactly what the
-// remaining per-request sites use (engine_graph_decode.cpp:308/316/341). This
+// remaining per-request sites use (engine_graph_decode.cpp:284/316/341). This
 // file closes that hole without touching a single call site: the linker
 // redirects imp's references to __wrap_*, we record and forward to __real_*.
 //

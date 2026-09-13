@@ -8,7 +8,7 @@ namespace {
 // Occurrence-list cap per gram key. Voting cost per drafted token is
 // O(survivors); degenerate histories (whitespace runs, separator-heavy
 // tables) would otherwise accumulate thousands of occurrences of the same
-// gram. Most recent occurrences are kept — they track local phrasing best.
+// gram. Most recent occurrences are kept: they track local phrasing best.
 constexpr int kMaxOccurrences = 64;
 }  // namespace
 
@@ -38,7 +38,7 @@ void SuffixDraftIndex::append(std::span<const int32_t> toks) {
     const int total = static_cast<int>(hist_.size());
     // A gram window [end - min_match, end) is new iff it covers at least one
     // appended token, i.e. end > total - n (windows straddling the boundary
-    // included — they were not indexable before this append).
+    // included: they were not indexable before this append).
     for (int end = std::max(min_match_, total - n + 1); end <= total; ++end) {
         auto& occ = index_[gram_hash_at_(end)];
         if (static_cast<int>(occ.size()) >= kMaxOccurrences)

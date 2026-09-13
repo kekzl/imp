@@ -9,14 +9,12 @@ namespace imp {
 // Token-Recycling adjacency drafter (Token Recycling, ACL 2025, arXiv
 // 2408.08696; plan: docs/plans/2026-07-22-token-recycling-spec-tree.md).
 //
-// Engine-scoped, cross-request table `token -> top-M likely successors`
-// (MRU/rank ordered, -1 = empty). Fed from (a) emitted-token bigrams and
-// (b) the model's own per-step top-K logit ids harvested in the verify
-// chunk. Unlike suffix/n-gram prompt-lookup it fires on unigram context —
-// the last emitted token has almost always been seen — so it drafts on
-// fresh reasoning text where suffix matching finds nothing. Drafts are
-// verified losslessly (greedy argmax accept), so a wrong draft can only
-// cost speed, never token identity.
+// Engine-scoped, cross-request table token -> top-M successors (MRU/rank
+// ordered, -1 = empty), fed from emitted-token bigrams and the model's
+// per-step top-K logit ids from the verify chunk. Fires on unigram context,
+// so it drafts fresh reasoning text where suffix/n-gram matching finds
+// nothing. Verified losslessly (greedy argmax accept): a wrong draft only
+// costs speed, never token identity.
 //
 // Host memory: vocab_size * slots * 4 B (150k vocab @ M=8 ≈ 4.8 MiB).
 class TokenRecycleTable {
@@ -35,9 +33,9 @@ public:
 
     // Follow the front-slot successor chain from t0 for up to k tokens.
     // Stops early when a token has no successors, or (min_streak > 0) when
-    // its front slot has not been CONFIRMED min_streak times — a verify step
+    // its front slot has not been CONFIRMED min_streak times: a verify step
     // costs ~1.4x a decode step, so precision beats recall (#1055). Cycles
-    // are allowed — bounded by k; the lossless verify is the safety net.
+    // are allowed, bounded by k; the lossless verify is the safety net.
     std::vector<int32_t> draft_linear(int32_t t0, int k, int min_streak = 0) const;
 
     // Multi-candidate draft (route (a) of the spec-tree plan): up to

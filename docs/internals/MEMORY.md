@@ -178,8 +178,8 @@ And it was never a constant: the same model measured 5612 / 7839 / 7942 MiB at `
 ### A1.6 Verified-dead and verified-clean (do not re-chase)
 
 - **`ArenaAllocator` / `PoolAllocator`** (`src/core/allocator.{h,cpp}`, 68 + 100 LOC): zero references in `src/ include/ tools/ tests/`. Dead. They implement bump-arena and fixed-block-pool disciplines, two of the five tiers this design needs, and were never wired to anything.
-- **`Buffer`** (`src/core/buffer.{h,cpp}`): exactly **one** producer (`engine.cpp:699`, vision embeddings) and one holder (`Request::vision_emb`). A single-purpose helper, not a general RAII layer.
-- **COW-fork / Best-of-N does not exist.** Grep for `cow|copy_on_write|fork_seq|best_of|n_best` across `src/ tools/` returns one hit, a comment in `scheduler.cpp:117` about a *hypothetical* site. The dispatch's "block with three referents" referents are **sequence block table + prefix-cache hash table + pin set** (plus the on-disk persisted cache), not a fork (A5.1).
+- **`Buffer`** (`src/core/buffer.{h,cpp}`): exactly **one** producer (`engine.cpp:617`, vision embeddings) and one holder (`Request::vision_emb`). A single-purpose helper, not a general RAII layer.
+- **COW-fork / Best-of-N does not exist.** Grep for `cow|copy_on_write|fork_seq|best_of|n_best` across `src/ tools/` returns one hit, a comment in `scheduler.cpp:81` about a *hypothetical* site. The dispatch's "block with three referents" referents are **sequence block table + prefix-cache hash table + pin set** (plus the on-disk persisted cache), not a fork (A5.1).
 - **No persistent GEMM autotuning state.** `src/compute/gemm.cu` contains no file I/O; the cuBLASLt algo cache is a process-local map rebuilt every start. Prefill variance across process starts is therefore not explained by persisted autotune state; the algo-selection share measured 3.50 % (the 2.6x once quoted here was a carried-forward citation, see `docs/PERF.md`). Question closed; not a memory-design input.
 
 ### A1.7 Per-site inventory by subsystem
@@ -273,7 +273,7 @@ All of it lives in `src/memory/`. Nothing above L1 calls the driver.
 - Commit physical pages in coarse chunks (64-256 MiB, multiples of the 2 MiB granularity) as the free-list runs dry.
 - Decommit chunks when a chunk's blocks are all free and the pool has been under-subscribed for N steps.
 
-The pool cannot be mis-sized because it is no longer sized: bounded by the reservation, backed on demand. The planner's job shrinks from "predict the residual exactly" to "prove the maximum commitment fits". The `kv_max_blocks` clamp ladder (`vram_budget.cpp:455-539`) collapses to one check. Addresses stay stable under VMM, so I3 holds and graph-captured KV pointers remain valid across growth; plain `cudaMalloc` growth cannot offer that.
+The pool cannot be mis-sized because it is no longer sized: bounded by the reservation, backed on demand. The planner's job shrinks from "predict the residual exactly" to "prove the maximum commitment fits". The `kv_max_blocks` clamp ladder (`vram_budget.cpp:379-437`) collapses to one check. Addresses stay stable under VMM, so I3 holds and graph-captured KV pointers remain valid across growth; plain `cudaMalloc` growth cannot offer that.
 
 *Why step 7 and not step 1:*
 
@@ -446,7 +446,7 @@ This is also the sharpest argument for **I4**: within a process, free VRAM only 
 
 1. It sizes the KV pool from a free-VRAM number that still contains ~3.9 GiB of library reservation claimed later (F4).
 2. The pre-dequant phases then re-derive **their own** reserves from live free VRAM again. That is #1100: "the KV pool is allocated before the cache build, so its bytes are already gone from free_vram, and every one of them then came out of the decode cache a second time."
-3. The engine works around the ordering with a **balloon**: a physical `cudaMalloc` held across `init_weights` purely to hide bytes from the KV planner, released just before phase 3 (`engine_weight_upload.cpp:325`, `engine_kv_cache_init.cpp:434`).
+3. The engine works around the ordering with a **balloon**: a physical `cudaMalloc` held across `init_weights` purely to hide bytes from the KV planner, released just before phase 3 (`engine_weight_upload.cpp:278`, `engine_kv_cache_init.cpp:370`).
 4. Six incident-driven clamps stack on the result: `target_blocks`, the post-weight `max_fit_blocks` backstop, `min_kv_blocks`, the `kv_fraction` affordability cap, the SWA batch-shaped charge, and the `#1103` allocator-headroom floor.
 
 ### A4.2 The replacement
@@ -566,7 +566,7 @@ Current state, verified:
 
 Interaction with I3: everything a graph captures is a `StableSpan`, so it comes from T1-T4, all arena- or pool-backed and never moving. The `workspace_generation` invalidation hook stays as a belt-and-braces assert; it should never fire.
 
-Interaction with `cudaDeviceGraphMemTrim`: **measured 2026-07-29, already zero.** `cudaDeviceGetGraphMemAttribute` reports `used=0.0 / reserved=0.0 / high_since_serving=0.0 MiB` after 12 serving requests on the dense config, so no captured region allocates today. Consequences, settled: the trim calls at `cuda_graph.cu:366,1291` are dead code (pure deletion, not a step-5 deliverable), and graph memory is **not** part of the 20-39 % residual (AUDIT B26/B27).
+Interaction with `cudaDeviceGraphMemTrim`: **measured 2026-07-29, already zero.** `cudaDeviceGetGraphMemAttribute` reports `used=0.0 / reserved=0.0 / high_since_serving=0.0 MiB` after 12 serving requests on the dense config, so no captured region allocates today. Consequences, settled: the trim calls at `cuda_graph.cu:339,1291` are dead code (pure deletion, not a step-5 deliverable), and graph memory is **not** part of the 20-39 % residual (AUDIT B26/B27).
 
 ### A5.3 cuBLAS / CUTLASS workspaces
 
@@ -782,7 +782,7 @@ Measured at server defaults (Qwen3-4B Q8_0, `--max-batch 8`, `runtime.max_seq_le
   KV: live 4096 blocks -> plan 2048 blocks (4608 -> 2304 MiB)
 ```
 
-**The live pass gives the KV pool exactly twice what the configuration asks for.** `needed_blocks = ceil(4096/16) x 8 = 2048`; `vram_budget.cpp:457` sets `target_blocks = needed_blocks * 2` for every non-mode-2 strategy. 2304 MiB of the pool cannot be reached by any request the server will accept: 8 concurrent sequences at the advertised context fill 2048 blocks and stop.
+**The live pass gives the KV pool exactly twice what the configuration asks for.** `needed_blocks = ceil(4096/16) x 8 = 2048`; `vram_budget.cpp:379` sets `target_blocks = needed_blocks * 2` for every non-mode-2 strategy. 2304 MiB of the pool cannot be reached by any request the server will accept: 8 concurrent sequences at the advertised context fill 2048 blocks and stop.
 
 Invisible on the dense config (14 GiB free either way). It stops being invisible where the incidents happened: the surplus is drawn from the same post-weight headroom the pre-dequant caches compete for, and it is the same order of magnitude as the library reserve the pass cannot see. #1100 and #1103 are both cases of that headroom being mis-divided.
 

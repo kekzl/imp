@@ -1,19 +1,16 @@
 #pragma once
 
 // A7 step 2b (docs/internals/MEMORY.md): run plan_memory() alongside
-// compute_vram_budget(), log both, and attribute the difference — WITHOUT
+// compute_vram_budget(), log both, attribute the difference, without
 // applying anything.
 //
-// The comparison is deliberately narrow. Both sides are fed the SAME demand
-// figures (weight-cache estimate, SSM footprint, workspace estimate), which
-// the old pass already computes and now publishes. What is compared is
-// therefore the *allocation policy*: how the residual is distributed, whether
-// the admission floor is honoured, and what the plan charges that the old pass
-// cannot see. Migrating the demand estimates themselves is step 6.
+// Both sides are fed the same demand figures (weight-cache, SSM footprint,
+// workspace estimate); what is compared is the allocation policy: residual
+// distribution, admission-floor honoring, and charges the old pass cannot
+// see. Migrating the demand estimates themselves is step 6.
 //
-// The probe carries plain scalars rather than Model/EngineConfig on purpose:
-// this header stays CUDA-free and dependency-free, so the whole thing is
-// testable in the CPU lane.
+// Plain scalars, not Model/EngineConfig: keeps this header CUDA-free and
+// dependency-free, testable in the CPU lane.
 
 #include "memory/plan.h"
 
@@ -34,10 +31,10 @@ struct ShadowPlanProbe {
     size_t mandatory_cache_bytes = 0;
     size_t ssm_state_bytes = 0;
     size_t engine_persistent_bytes = 0;
-    // The pools the plan reads from FeatureSet and nobody used to write. The
-    // snapshot store was the loud one: `server.recurrent_snapshot_mb` (256 MiB
-    // by default) is cudaMalloc'd AFTER the KV pool is sized, so the plan sized
-    // the pool over memory another tenant of the same init was about to take.
+    // Pools the plan reads from FeatureSet: server.recurrent_snapshot_mb
+    // (256 MiB default) is cudaMalloc'd AFTER the KV pool is sized, so the
+    // plan must account for it or size the KV pool over memory another
+    // tenant is about to take.
     size_t recurrent_snapshot_bytes = 0;
     size_t spec_decode_bytes = 0;
     size_t residual_ring_bytes = 0;
@@ -65,7 +62,7 @@ struct ShadowPlanProbe {
 PlanInput shadow_plan_input(const ShadowPlanProbe& probe);
 
 // Human-readable comparison: what the live budget chose, what the plan would
-// choose, and the attribution of the gap. Pure — returns the text, does not log.
+// choose, and the attribution of the gap. Pure: returns the text, does not log.
 std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& shadow,
                                int live_kv_blocks);
 

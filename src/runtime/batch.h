@@ -59,11 +59,10 @@ public:
 
     // Allocate pool for the given max configuration. Call once at init.
     // with_swa_tables adds a second block-table region for the SWA-group
-    // tables (kv_cache.swa_sizing) — same stride, stable pointer.
-    // The pool is one contiguous engine-lifetime slab out of the T2 arena, sized
-    // entirely from config. demand_bytes() is the ONLY place that sum lives —
-    // allocate() calls it too — so Engine::init can reserve for it before the
-    // pool exists without a second formula that could drift.
+    // tables (kv_cache.swa_sizing): same stride, stable pointer.
+    // One contiguous engine-lifetime slab from the T2 arena, sized from config.
+    // demand_bytes() is the single source of that size formula; allocate()
+    // calls it too, so Engine::init can reserve before the pool exists.
     static size_t demand_bytes(int max_batch_size, int max_blocks_per_seq, bool with_swa_tables);
 
     void allocate(int max_batch_size, int max_blocks_per_seq, bool with_swa_tables);
@@ -101,17 +100,10 @@ private:
     int max_batch_size_ = 0;
     int max_blocks_per_seq_ = 0;
 
-    // Track block_table changes for single-seq decode: skip re-upload when the
-    // CONTENT is unchanged. The previous proxy (block count + first block ID)
-    // broke under prefix caching: a prefix-HIT request starts with the SAME
-    // reused first block and can have the same count as the previous request
-    // while differing in the middle (e.g. [0,1,4,3,2] after reuse+eviction vs
-    // [0,1,2,3,4]) — the skip then left the decode running on the previous
-    // request's table, writing KV into the wrong physical blocks (issue #536:
-    // greedy prefix-hit diverged from fresh prefill; the same silent-stale
-    // class was misdiagnosed as "FP rounding from different physical
-    // addresses" when prefix caching was first turned off). A host-side
-    // vector compare of <=max_blocks ints costs nanoseconds per decode step.
+    // Track block_table content for single-seq decode: skip re-upload only
+    // when content is unchanged. A (count, first-block-ID) proxy fails under
+    // prefix-caching reuse+eviction reordering (#536). Compare costs
+    // nanoseconds per decode step for <=max_blocks ints.
     std::vector<int> last_upload_block_tables_;
     std::vector<int> last_upload_block_tables_swa_;
 };
@@ -124,11 +116,8 @@ public:
 
     // Add a prefill sequence (multiple tokens). swa_block_table (optional) is
     // the parallel SWA-group table; pass an empty span when SWA sizing is off.
-    //
-    // Spans, not (pointer, count): the tables are host arrays, and the pair
-    // form let the scheduler pass a null pointer together with a non-zero
-    // count when SWA sizing was inactive but the sequence had blocks. Harmless
-    // only because build() re-checked the pointer.
+    // Spans, not (pointer, count): build() re-checks the pointer, so a null
+    // pointer with a nonzero count (SWA inactive) stays harmless.
     void add_prefill_sequence(std::span<const int32_t> tokens, std::span<const int> block_table,
                               int start_pos, std::span<const int> swa_block_table = {});
 

@@ -10,7 +10,7 @@ TokenRecycleTable::TokenRecycleTable(int vocab_size, int slots)
       succ_(static_cast<size_t>(vocab_size) * slots, -1),
       streak_(static_cast<size_t>(vocab_size), 0) {}
 
-// MRU slot shuffle only — returns true when `next` was already recorded
+// MRU slot shuffle only: returns true when `next` was already recorded
 // (a RE-observation). Streak accounting stays with the callers.
 bool TokenRecycleTable::promote_(int32_t prev, int32_t next) {
     int32_t* r = row_(prev);
@@ -39,9 +39,8 @@ void TokenRecycleTable::observe_pair(int32_t prev, int32_t next) {
     if (!valid_(prev) || !valid_(next))
         return;
     // Streak = the front slot is a RE-observed pair (seen before, not
-    // necessarily consecutively — consecutive-only measured ~zero recall on
-    // fresh reasoning text: 2 drafts in 1024 tokens). A brand-new successor
-    // resets it.
+    // necessarily consecutively: consecutive-only misses most fresh
+    // reasoning text). A brand-new successor resets it.
     streak_[prev] = promote_(prev, next)
                         ? static_cast<uint8_t>(std::min(255, streak_[prev] + 1))
                         : uint8_t{0};

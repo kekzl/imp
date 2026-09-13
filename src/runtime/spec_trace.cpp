@@ -56,10 +56,10 @@ void spec_trace_emit_verify(int p0, int t0, const std::vector<int32_t>* draft, i
         s += std::to_string(argmax[j]) + (j + 1 < chunk_len ? "," : "");
     s += "]";
 
-    // The top-2 gap is the whole reason this file exists. The bonus token off
-    // the last chunk row decides whether generation stops, and
-    // docs/LIMITATIONS.md records it coming out as <|im_end|> where
-    // single-token decode keeps writing - without ever saying by how much.
+    // The top-2 gap is the whole reason this file exists: the bonus token
+    // off the last chunk row decides whether generation stops, and
+    // docs/LIMITATIONS.md notes it can read <|im_end|> without saying by
+    // how much.
     if (d_logits != nullptr && !h_logits.empty() && exec != nullptr) {
         exec->project_logits_all(chunk_len, d_logits, stream);
         const size_t v = static_cast<size_t>(vocab);

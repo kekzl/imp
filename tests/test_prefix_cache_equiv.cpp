@@ -440,7 +440,7 @@ TEST(PrefixEquivTest, RollbackOfPartialAllocationDropsItsHashes) {
 // DIFFERENT pictures produce byte-identical token sequences. `content_salt`
 // seeds the hash chain with the image content so the two chains diverge at
 // block 0; both production call sites pass `req->vision_content_hash`
-// (engine_scheduler.cpp:598, scheduler.cpp:88).
+// (engine_scheduler.cpp:567, scheduler.cpp:64).
 //
 // Nothing exercised it: no test in the suite passed a non-zero salt, so the
 // parameter could be dropped entirely and the suite stayed green — the second
@@ -493,7 +493,7 @@ TEST(PrefixEquivTest, ContentSaltSeparatesIdenticalTokenPrefixes) {
 //
 //   (a) probe == reuse. longest_cached_prefix_blocks() is a read-only oracle
 //       the hybrid snapshot lookup uses to pick a restore boundary BEFORE
-//       allocating (engine_sampling_stop.cpp:337/405). It checks only the hash
+//       allocating (engine_sampling_stop.cpp:302/405). It checks only the hash
 //       table; allocate_blocks_with_prefix() additionally rejects an entry
 //       whose block is ref-0-and-not-cached (:509). If those two ever disagree,
 //       the snapshot boundary is chosen for a prefix that is not actually

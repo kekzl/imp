@@ -344,7 +344,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     dctx.mode_str = (wcache_->nvfp4_decode_mode == 1) ? "additive" : "only";
 
     // Compute the shared mode-2 safety reserve once. Mode 1 keeps the upfront
-    // 10% headroom (see vram_budget.cpp:50), so its budget arithmetic already
+    // 10% headroom (see vram_budget.cpp:47), so its budget arithmetic already
     // protects against shared/system-memory fallback; the in-loop safety is a
     // backstop only. Mode 2 omits the upfront 10% to fit larger weight caches
     // and previously paid for it with a 10% in-loop safety (3.2 GiB on a 32 GiB

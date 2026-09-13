@@ -2,26 +2,21 @@
 
 // The per-request half of the speculation contract.
 //
-// `speculative.mtp_k` is the SERVER's default depth, and a request picks a
-// depth within it: anything from 0 (off for this request) up to the armed
-// chain. What no request can do is turn the head ON where the process armed
-// nothing, because the checkpoint's MTP tensors are ~0.79 GiB uploaded at load
-// time and the decision to upload them is made before an engine exists
-// (tools/common/mtp_auto.*). Such a request gets an ANSWER SAYING SO, not a
-// silent plain decode: the reason travels back in
-// `usage.completion_tokens_details.imp_spec_declined`, on all three dialects.
+// speculative.mtp_k is the server default; a request picks a depth in
+// [0, armed_k] but cannot turn the head on where the process armed nothing
+// (MTP tensors ~0.79 GiB, uploaded at load before an engine exists,
+// tools/common/mtp_auto.*). A declined request gets the reason back in
+// usage.completion_tokens_details.imp_spec_declined, never a silent decode.
 //
-// Kept as a pure function so the truth table is testable without a GPU, a
-// model or a live Engine, and so the server and the engine cannot disagree
-// about what a request asked for: both call this with the same inputs.
+// Pure function: testable without a GPU, model or Engine; server and engine
+// share the same truth table by calling this with the same inputs.
 
 namespace imp {
 
-// Wire ceiling for a per-request depth. The device chain buffer
-// (kMtpMaxChainK, src/compute/mtp_forward.h) is the real bound; this header
-// stays free of the CUDA include chain (Engine forward-declares the workspace
-// for the same reason), so the two are tied by a static_assert in
-// engine_spec_mtp.cpp rather than by an include.
+// Wire ceiling for a per-request depth. The real bound is the device chain
+// buffer (kMtpMaxChainK, src/compute/mtp_forward.h); this header stays free
+// of the CUDA include chain, so the two are tied by a static_assert in
+// engine_spec_mtp.cpp instead of an include.
 inline constexpr int kSpecRequestMaxMtpK = 16;
 
 enum class SpecDecline {
@@ -54,9 +49,8 @@ constexpr const char* spec_decline_name(SpecDecline d) {
 }
 
 // One-line explanation per reason, for the response and the log. The
-// concurrency decline is the one an operator actually hits: MTP auto stays off
-// whenever the server takes concurrent requests, and until now the only trace
-// of that decision was a startup INFO line.
+// concurrency decline is the one an operator actually hits: MTP auto stays
+// off whenever the server takes concurrent requests.
 constexpr const char* spec_decline_detail(SpecDecline d) {
     switch (d) {
         case SpecDecline::kNone:

@@ -12,12 +12,11 @@
 
 namespace imp {
 
-// Device staging for one batched verify step, sized once from
-// max_batch_size: [tok | pos | row ctx | seq | out | snap | chunk_len, snap_n],
-// the per-row block tables, the argmax output (pinned host twins), and the
-// spare recurrent slots: reserved pool slots past the multi-candidate ones,
-// one per batch slot, held for a request's lifetime (accept swaps it with
-// the live slot).
+// Device staging for one batched verify step, sized once from max_batch_size:
+// [tok | pos | row ctx | seq | out | snap | chunk_len, snap_n], per-row block
+// tables, argmax output (pinned host twins), and spare recurrent slots
+// (reserved pool slots past the multi-candidate ones, one per batch slot,
+// held for a request's lifetime; accept swaps it with the live slot).
 struct BatchVerifyState {
     int cap_seq = 0;
     int cap_rows = 0;
@@ -29,27 +28,26 @@ struct BatchVerifyState {
     std::unordered_map<int, int> spare_of;  // req.id -> spare slot
     std::vector<int> free;
     // Factored spare (speculative.factored_spare,
-    // docs/plans/2026-09-12-factored-verify-spare.md): the drafted row as
-    // (g, k, delta) per (layer, slot, head) plus one conv tap per
-    // (layer, slot), instead of a second full recurrent slot. Both pools are
-    // indexed by recurrent SLOT because a request keeps its slot across steps
-    // while its batch position moves.
+    // docs/plans/2026-09-12-factored-verify-spare.md): drafted row as (g, k,
+    // delta) per (layer, slot, head) plus one conv tap per (layer, slot),
+    // instead of a second full recurrent slot. Indexed by recurrent SLOT: a
+    // request keeps its slot across steps while its batch position moves.
     float* d_fac = nullptr;
     void* d_tap = nullptr;  // half
     int fac_stride = 0;     // floats per (slot, head)
     int64_t fac_layer_stride = 0;
     int64_t tap_layer_stride = 0;
-    // Slots whose row the NEXT forward must apply, i.e. the requests whose
-    // draft was accepted. Rebuilt every verify; the device twin is what the
-    // conv tap apply walks, and the recurrent half reads the 0 sentinel a
-    // clear writes into the rows that are not on this list.
+    // Slots whose row the NEXT forward must apply (drafts accepted last
+    // verify). Rebuilt every verify; the device twin drives the conv tap
+    // apply, and the recurrent half reads the 0 sentinel a clear writes into
+    // rows not listed.
     std::vector<int> pending;
     int* d_pending = nullptr;
     // Rows that must be cleared before anything can apply them: this verify's
-    // rejected groups, plus slots released since the last one (a request that
-    // finished right after an accept leaves a row behind). Separate device
-    // buffer from d_pending because the forward's tap apply may still be
-    // reading that one when the clear is queued.
+    // rejected groups, plus slots released since the last one (e.g. a request
+    // that finished right after an accept). Separate device buffer from
+    // d_pending: the forward's tap apply may still be reading that one when
+    // the clear is queued.
     std::vector<int> clear_slots;
     int* d_clear = nullptr;
     // Pinned staging for the two slot lists. A pageable cudaMemcpyAsync would
@@ -61,14 +59,14 @@ struct BatchVerifyState {
 };
 
 // One request's MTP binding: the ACTIVE one lives in Engine::mtp_active_
-// (req >= 0), the others park in MtpBindPool::binds while another request
-// is active. With one KV slot (batched verify off) a new request evicts the
-// parked one, the behaviour the single workspace always had.
+// (req >= 0); others park in MtpBindPool::binds while another request is
+// active. With one KV slot (batched verify off) a new request evicts the
+// parked one.
 //
 // Sync invariant of the active binding: ws->mtp_pos == req->context_len() - 1;
-// pair i is (emb(t_{i+1}), h_i), history holds the covered tokens t_0..t_P
-// (size == mtp_pos + 1); pending is the chain drafted for draft_ctx
-// (context_len it targets), chains the multi-candidate form ([0] == pending).
+// pair i is (emb(t_{i+1}), h_i); history holds tokens t_0..t_P (size ==
+// mtp_pos + 1); pending is the chain drafted for draft_ctx (the context_len
+// it targets); chains is the multi-candidate form ([0] == pending).
 struct MtpBind {
     int req = -1;
     int slot = 0;

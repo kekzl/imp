@@ -14,10 +14,8 @@
 
 namespace imp {
 
-// =====================================================================
-// CUDA Graph decode helpers — async and conditional-graph variants
-// for the production decode path.
-// =====================================================================
+// CUDA graph decode helpers: async and conditional-graph variants for the
+// production decode path.
 
 const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
     return upload_id_list_once(d_banned_tokens_, banned_token_ids_, vram_alloc_, "banned_tokens", stream);
@@ -42,14 +40,9 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     if (remaining <= 0)
         return 0;
 
-    // Book for the burst that is about to run, not for the whole generation
-    // (#1636). The caller clamps the launch to runtime.decode_burst (128), to
-    // 16 while another request waits, or to speculative.miss_burst (8); the
-    // reservation was not clamped with it, so an 8192-token default booked 512
-    // blocks on the first decode step of an answer that may emit 40 tokens.
-    // append_block reclaims cached prefix blocks when the free pool is empty,
-    // so that reservation was paid for out of the prefix cache the next turn
-    // was going to hit. The loop relaunches per burst anyway.
+    // Reserves for the burst about to run, not the whole generation (#1636): the
+    // launch is clamped to runtime.decode_burst (128), 16 while another request
+    // waits, or speculative.miss_burst (8); the loop relaunches per burst anyway.
     int reserve_tokens = remaining;
     if (step_limit > 0)
         reserve_tokens = std::min(reserve_tokens, step_limit);
@@ -82,10 +75,9 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
         return 0;
     int steps = std::min(capped, remaining);
 
-    // SWA-aware sizing: the loop runs on-device with no host trim mid-burst,
-    // so the WHOLE burst span must have live SWA blocks. Clamp the burst to
-    // the span the SWA group is sized for (the loop relaunches afterwards)
-    // and prepare the range up front.
+    // SWA-aware sizing: the loop runs on-device with no host trim mid-burst, so
+    // the WHOLE burst span needs live SWA blocks. Clamp to the SWA group's sized
+    // span (the loop relaunches afterwards) and prepare the range up front.
     if (swa_sizing_active_) {
         steps = std::min(steps, swa_burst_cap_tokens_);
         if (steps <= 0)
@@ -105,10 +97,9 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
     gcfg.initial_position = req.context_len() - 1;
     gcfg.eos_id = tok ? tok->eos_id() : -1;
     gcfg.stop_ids = chat_template_.stop_token_ids();
-    // Banned tokens (e.g. <pad>, <unk>) should also stop the graph loop.
-    // The ban_logits_kernel sets them to -1e30 before sampling, but if
-    // they still leak through (FP32 precision edge cases with 262K vocab),
-    // the stop check catches them as a safety net.
+    // Banned tokens (<pad>, <unk>) also stop the graph loop: ban_logits_kernel
+    // sets them to -1e30 before sampling, but this catches any that leak through
+    // (FP32 precision edge cases with 262K vocab) as a safety net.
     for (int32_t bid : banned_token_ids_) {
         gcfg.stop_ids.push_back(bid);
     }
@@ -122,18 +113,14 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
     gcfg.frequency_penalty = req.frequency_penalty;
     gcfg.presence_penalty = req.presence_penalty;
     gcfg.repeat_last_n = req.repeat_last_n;
-    // Seed penalty history from existing output tokens
     if (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f || req.presence_penalty != 0.0f) {
         if (!req.output_tokens.empty()) {
             gcfg.penalty_history = req.output_tokens;
         }
     }
-    // Think tracking: device-side in post_decode_step_kernel. Enabled whenever a
-    // single-token </think> id is known (think_end_id_ >= 0), so the conditional
-    // loop runs for reasoning models instead of falling back to eager decode.
-    // Provides EOS/stop suppression while inside the block + a post-</think>
-    // grace window (matches the eager should_stop path). think_budget_limit stays
-    // opt-in (only when the request set a budget).
+    // Think tracking (post_decode_step_kernel, device-side): enabled whenever
+    // think_end_id_ >= 0, so reasoning models use the conditional loop instead of
+    // eager decode. Mirrors the eager should_stop grace window; budget is opt-in.
     if (think_end_id_ >= 0) {
         gcfg.think_start_id = think_start_id_;
         gcfg.think_end_id = think_end_id_;
@@ -142,13 +129,9 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
         gcfg.token_is_whitespace = d_token_is_whitespace_;
         gcfg.vocab_size = static_cast<int>(token_is_whitespace_.size());
         if (req.think_budget > 0.0f) {
-            // The loop's device-side counter starts at 0 every launch; with
-            // bounded bursts (n-gram speculation think-phase) the request
-            // relaunches mid-think, so the per-launch limit must be the
-            // REMAINING budget or every burst would re-grant the full one.
-            // The SAME limit the eager sampler enforces (think_logic::think_limit):
-            // the fraction alone cut thinking earlier than the documented
-            // reserve rule and ignored runtime.think_answer_reserve.
+            // Device counter starts at 0 every launch; bounded bursts relaunch mid-think,
+            // so the per-launch limit is the REMAINING budget (full grant per burst would
+            // over-count). Same think_logic::think_limit the eager sampler enforces.
             const int full = think_logic::think_limit(req.max_tokens, req.think_budget,
                                                       runtime_config_.runtime.think_answer_reserve);
             bool thinking_now = false;
@@ -213,7 +196,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
 
-    // Recurrent state for SSM/GDN layers — pointers are constant for
+    // Recurrent state for SSM/GDN layers: pointers are constant for
     // single-sequence decode, so they're safe to bake into the graph.
     fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
     bind_mrope_single_(state_template, *req, stream);
@@ -251,10 +234,8 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
 bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
                                          cudaStream_t stream, int step_limit) {
     // Constrained requests (json_mode / json_schema / enforced tool call) can
-    // NEVER run here: the loop samples device-side and applies no FSM mask.
-    // The step_decode flags block them, but the spec-ngram burst hooks call
-    // this directly — without this guard a tool-enforced request decoded a
-    // full unmasked generation (#1002).
+    // NEVER run here: the loop samples device-side with no FSM mask. Guards the
+    // spec-ngram burst hooks, which call this directly, bypassing step_decode (#1002).
     if (req->constraints || req->json_mode || !req->json_schema.empty() ||
         !req->regex_pattern.empty() || !req->grammar.empty() || !req->tool_constraint_tools.empty())
         return false;
@@ -264,14 +245,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         return false;
     step_limit = burst_launch_step_limit(step_limit, remaining);
 
-    // Fast relaunch: a parked runner from a previous burst of the SAME
-    // request keeps its captured graph — reseed device state instead of
-    // recapturing (the burst-hybrid n-gram speculation path relaunches every
-    // few tokens; a full setup costs ~10-20 ms per launch).
-    // #683 postscript: the "rearm emits a wrong token" artifact was the
-    // fresh-captured loop writing KV one slot too high (setup() position
-    // off-by-one) — the correctly-positioned rearm then collided with the
-    // shifted layout. Both paths share the eager first-forward semantics now.
+    // Fast relaunch: a parked runner from a previous burst of the SAME request
+    // keeps its captured graph, reseeding device state instead of recapturing
+    // (full setup costs ~10-20 ms/launch). Rearm and fresh-capture share the same eager first-forward semantics (#683).
     if (runtime_config_.speculative.burst_rearm && async_graph_runner_.is_setup() &&
         async_parked_req_id_ >= 0) {
         const auto& bt = kv_manager_->block_table(req->id);
@@ -283,7 +259,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                             (async_d_block_tables_swa_ != nullptr && swa_bt.size() == bt.size());
         if (async_parked_req_id_ == req->id && async_d_block_tables_ != nullptr && swa_ok &&
             static_cast<int>(bt.size()) <= async_bt_capacity_) {
-            // Verify steps may have appended KV blocks since the park —
+            // Verify steps may have appended KV blocks since the park:
             // refresh the table contents (pointer/capacity baked in graph).
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(async_d_block_tables_, bt.data(),
                                                bt.size() * sizeof(int), cudaMemcpyHostToDevice,
@@ -320,7 +296,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
             }
         }
         // Rearm impossible (table outgrew capacity / context past ceiling /
-        // upload failure) — tear down and rebuild below.
+        // upload failure): tear down and rebuild below.
         async_graph_runner_.cleanup();
         release_async_block_tables_();
         async_parked_req_id_ = -1;
@@ -329,15 +305,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
-    // Size the buffer for everything this request can still reach, not for the
-    // table it happens to have now (#1647). Both this allocation and the
-    // `max_blocks_per_seq` baked into the graph below are what the rearm fast
-    // path checks against, and since #1636 the KV reservation is clamped to the
-    // current burst - so the table grows by a block every kv_bs tokens and a
-    // capacity sized to today's table is outgrown by the NEXT burst, by
-    // construction. That is the 8 `cudaGraphInstantiate` at 8.35 ms mean
-    // against a single `cudaGraphExecUpdate` the issue measured. It costs one
-    // int per block: an 8192-token ceiling is 2 KiB.
+    // Sized for everything this request can still reach, not today's table
+    // (#1647): since #1636 the KV reservation is clamped per burst, so today's
+    // table size is always outgrown by the next burst. One int/block: 2 KiB at an 8192-token ceiling.
     const int bt_kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     int bt_ctx_ceiling = req->context_len() +
                          std::max(0, req->max_tokens - static_cast<int>(req->output_tokens.size()));
@@ -353,10 +323,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     int* d_bt = pooled ? d_agl_block_tables_ : nullptr;
     if (!pooled && cudaMalloc(&d_bt, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess)
         return false;
-    // The tail past the live table is never read (the kernels iterate over
-    // max_context_len and use max_blocks_per_seq as the row stride), but a
-    // zeroed tail keeps a stray index pointing at block 0 rather than at
-    // whatever the allocator returned.
+    // The tail past the live table is never read (kernels iterate over
+    // max_context_len, stride by max_blocks_per_seq), but zeroing it keeps a
+    // stray index pointing at block 0 rather than whatever the allocator returned.
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_bt, 0, static_cast<size_t>(bt_capacity) * sizeof(int), stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt, full_bt.data(), max_blocks_per_seq * sizeof(int),
                                        cudaMemcpyHostToDevice, stream));
@@ -389,7 +358,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     state_template.max_blocks_per_seq = bt_capacity;
     state_template.is_prefill = false;
 
-    // Recurrent state for SSM/GDN layers — pointers are constant for
+    // Recurrent state for SSM/GDN layers: pointers are constant for
     // single-sequence decode, so they're safe to bake into the graph.
     fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
     bind_mrope_single_(state_template, *req, stream);
@@ -408,18 +377,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     if (runtime_config_.diagnostics.spec_trace)
         IMP_LOG_INFO("[burst-launch] FRESH seed=%d ctx=%d limit=%d remaining=%d", (int)first_token,
                      req->context_len(), step_limit, remaining);
-    // Capture a ceiling for the whole generation, not for this burst (#1647).
-    // `rearm()` refuses when `context_len + step_limit` passes
-    // `initial_context_len + max_steps`, and since #1636 `remaining` is the
-    // KV reservation for the CURRENT burst - so the captured ceiling is two or
-    // three bursts wide and the loop recaptures forever. Measured on
-    // `imp-cli --bench --bench-pp 16 --bench-reps 3 --max-tokens 128`: 44 rearm
-    // attempts, 36 of them refused here and rebuilt.
-    //
-    // Only when the launch is bounded. With `step_limit == 0` the on-device
-    // loop runs to `max_steps` with no host in between, and the KV blocks are
-    // reserved per burst - raising the ceiling there would let it decode past
-    // the blocks it has.
+    // Captures a ceiling for the WHOLE generation, not this burst (#1647):
+    // rearm() refuses once context_len + step_limit exceeds initial_context_len
+    // + max_steps. Only when step_limit > 0; with step_limit == 0 the KV blocks are reserved per burst already, so no extra ceiling is needed.
     int capture_steps = remaining;
     if (step_limit > 0) {
         int span = req->max_tokens - static_cast<int>(req->output_tokens.size());
@@ -461,24 +421,14 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     return true;
 }
 
-// =====================================================================
-// Pipelined constrained decode (json_mode / json_schema, single seq).
-//
-// The conditional graph loop can't run constrained requests (the grammar
-// FSM is host-side), and the eager path leaves the GPU idle during every
-// host turnaround. This mode splits the step: per tick the host enqueues
-// [banned+mask+sample+advance] for the forward already in flight AND the
-// NEXT forward (a CudaGraphRunner replay reading the freshly sampled
-// token from device memory), then waits only for the sampled token. The
-// GPU is already deep in forward N+1 while the host updates the FSM for
-// token N and computes the next mask.
-// =====================================================================
+// Pipelined constrained decode (json_mode / json_schema, single seq): the
+// conditional graph loop cannot run constrained requests (host-side FSM), so
+// this splits each tick, enqueuing the NEXT forward before waiting only for the sampled token, keeping the GPU busy during host FSM/mask turnaround.
 
 bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream) {
-    // SWA-aware sizing: the pipeline captures a decode graph with a baked
-    // block-table pointer + jump-ahead chunk, neither wired for the per-step
-    // SWA table rewrite. Fall back to eager constrained decode (step_decode,
-    // which threads the SWA table) — correct, just not pipelined.
+    // SWA-aware sizing: the captured decode graph bakes the block-table pointer
+    // and jump-ahead chunk, neither wired for the per-step SWA table rewrite.
+    // Falls back to eager constrained decode (step_decode threads the SWA table): correct, just not pipelined.
     if (swa_sizing_active_)
         return false;
     int budget = prepare_graph_loop(req);
@@ -489,10 +439,9 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
     auto& p = cpipe_;
-    // Device state from the serving metadata pool; cudaMalloc stays as the
-    // fallback for a pool that failed at init (invariant I2). The pinned
-    // landing and the event outlive one pipeline: acquired on the first
-    // launch, kept across teardowns, released by ~Engine.
+    // Device state from the serving metadata pool; cudaMalloc is the fallback
+    // for a pool that failed at init (invariant I2). Pinned landing + event
+    // outlive one pipeline: acquired on first launch, released by ~Engine.
     p.pooled = d_cp_block_tables_ != nullptr && max_blocks_per_seq <= pool_bt_cap_;
     bool ok = true;
     if (p.pooled) {
@@ -527,15 +476,12 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_pos, &pos, sizeof(int), cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice, stream));
 
-    // The engine-owned copy, uploaded at init (build_banned_token_list); the
-    // pipeline used to upload and free a private one per launch.
+    // Engine-owned copy, uploaded at init (build_banned_token_list).
     p.d_banned = const_cast<int32_t*>(banned_tokens_device_(stream));
 
-    // Decode workspace (mirrors step_decode_forward's single-seq path).
-    // Without a dedicated decode workspace (no green contexts on sm_120),
-    // jump-ahead chunks (#844) share THIS workspace with the captured
-    // graph — pre-size it for the largest chunk NOW, before capture bakes
-    // the buffer pointer, so no later resize can reallocate under the graph.
+    // Decode workspace (mirrors step_decode_forward). Without a dedicated
+    // workspace (no green contexts on sm_120), jump-ahead chunks (#844) share
+    // this one with the captured graph: pre-size for the largest chunk before capture bakes the buffer pointer, so no later resize can reallocate under it.
     if (executor_->has_decode_workspace())
         executor_->use_workspace(1);
     const int ws_tokens = (!executor_->has_decode_workspace() &&
@@ -570,7 +516,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     st.frequency_penalty = req->frequency_penalty;
     st.presence_penalty = req->presence_penalty;
     st.repeat_last_n = req->repeat_last_n;
-    // Constraint hooks — the request's manager was prepared at admission.
+    // Constraint hooks: the request's manager was prepared at admission.
     st.schema_constrainer = req->constraints ? req->constraints->schema_constrainer() : nullptr;
     st.json_constrainer = req->constraints ? req->constraints->json_constrainer() : nullptr;
     st.regex_constrainer = req->constraints ? req->constraints->regex_constrainer() : nullptr;
@@ -609,19 +555,16 @@ int Engine::step_constrained_pipeline() {
     }
 
     cudaStream_t stream = decode_stream();
-    // Jump-ahead span consumption (#844): while fnext > 0, the tick's
-    // logits come from the drafted chunk's precomputed rows — no forward
-    // runs, no device pos advance (repointed absolutely at span exit).
+    // Jump-ahead span consumption (#844): while fnext > 0, the tick's logits
+    // come from the drafted chunk's precomputed rows, no forward runs, no
+    // device pos advance (repointed absolutely at span exit).
     const bool consuming = p.fnext > 0;
 
-    // 1. Mask + sample this tick's logits: the in-flight forward's (normal
-    //    tick, and the first span tick — the forward already in flight
-    //    predicts the draft's first position), or a precomputed draft row.
-    //    The constraint mask is host-computed from the FSM state after the
-    //    last harvested token and uploaded stream-ordered behind the
-    //    producer of those logits.
+    // 1. Mask + sample this tick's logits: from the in-flight forward (normal
+    //    tick, or the first span tick, whose forward already predicts the
+    //    draft's first position), or a precomputed draft row. Mask is host-computed from FSM state, uploaded stream-ordered behind the logits' producer.
     p.state.seed = engine_internal::compute_step_seed(*req);
-    // Remaining output allowance for the force-close mask (#1104) — the
+    // Remaining output allowance for the force-close mask (#1104): the
     // pipeline keeps its own InferenceState, so it must be refreshed per tick.
     p.state.constrain_remaining_tokens = req->max_tokens - static_cast<int>(req->output_tokens.size());
     // Think-budget enforcement (mirrors fill_sampling_params): when the
@@ -642,7 +585,7 @@ int Engine::step_constrained_pipeline() {
             p.state.n_d_banned_tokens = stop_mask_.n();
         }
     }
-    // Token-history penalties — per-tick upload, exactly like the eager path.
+    // Token-history penalties: per-tick upload, exactly like the eager path.
     p.state.penalty_tokens = nullptr;
     p.state.n_penalty_tokens = 0;
     upload_penalties(*req, p.state, stream);
@@ -661,10 +604,9 @@ int Engine::step_constrained_pipeline() {
         launch_pipeline_advance(p.d_pos, p.d_ctx, stream);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(p.ev, stream));
 
-    // 2. Enqueue the NEXT forward before the host knows the token — it reads
+    // 2. Enqueue the NEXT forward before the host knows the token: it reads
     //    d_token (just written by the sampler) on the GPU timeline. While
-    //    consuming a drafted span, the chunk already covers the positions
-    //    ahead — no forward until the span exits.
+    //    consuming a drafted span, positions ahead are already covered, no forward until the span exits.
     bool more = (p.produced + 1 < p.budget) &&
                 (static_cast<int>(req->output_tokens.size()) + 1 < req->max_tokens);
     if (more && !consuming)
@@ -675,11 +617,11 @@ int Engine::step_constrained_pipeline() {
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(p.ev));
     int32_t token = *p.h_token.as<int32_t>();
 
-    // 4. Harvest — mirrors step_decode_process_outputs for one token.
+    // 4. Harvest: mirrors step_decode_process_outputs for one token.
     req->output_tokens.push_back(token);
     p.produced++;
     if (consuming && p.fnext >= 2)
-        p.jumped_tokens++;  // sampled from a precomputed row — no forward ran
+        p.jumped_tokens++;  // sampled from a precomputed row, no forward ran
     track_think_state(*req, token);
     if (req->constraints)
         req->constraints->update(token);
@@ -694,7 +636,7 @@ int Engine::step_constrained_pipeline() {
         return -1;
     }
     if (!more) {
-        // KV budget exhausted — drain and let the eager path continue.
+        // KV budget exhausted: drain and let the eager path continue.
         teardown_constrained_pipeline(/*synchronize=*/true);
         return 0;
     }
@@ -702,7 +644,7 @@ int Engine::step_constrained_pipeline() {
     if (consuming) {
         if (p.fnext <= p.frows && token == p.fdraft[p.fnext - 1]) {
             // On draft: this token's KV came from the chunk and the row
-            // predicting the next position is already materialized — the
+            // predicting the next position is already materialized, so the
             // next tick stays forward-free.
             p.fnext++;
             return 1;
@@ -714,11 +656,9 @@ int Engine::step_constrained_pipeline() {
                          token, tk ? tk->decode_token(token).c_str() : "?", want,
                          want >= 0 && tk ? tk->decode_token(want).c_str() : "<bonus>");
         }
-        // Span exit: the sampled token diverged from the draft (its KV slot
-        // holds the drafted token's KV) or it is the free token after a
-        // fully-matched span (no KV yet either way). Repoint the pipeline
-        // and replay — the forward rewrites the correct KV and produces the
-        // next tick's logits. Stale draft KV beyond d_ctx is never read.
+        // Span exit: the sampled token diverged from the draft, or it is the free
+        // token after a fully-matched span. Repoint the pipeline and replay: the
+        // forward rewrites correct KV. Stale draft KV beyond d_ctx is never read.
         const int pos = p.fbase_pos + p.fnext - 1;
         const int ctx = pos + 1;
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_token, &token, sizeof(int32_t),
@@ -735,11 +675,9 @@ int Engine::step_constrained_pipeline() {
         return 1;
     }
 
-    // Jump-ahead (#844), two-step: a pending draft is confirmed token by
-    // token for free (these ticks' forwards run regardless); after
-    // kJumpFreeVerify matches the speculative chunk over the remainder is
-    // committed. A diverging token drops the draft at zero GPU cost. Then
-    // probe the FSM for the next forced span.
+    // Jump-ahead (#844), two-step: a pending draft is confirmed token by token
+    // for free; after kJumpFreeVerify matches, the speculative chunk over the
+    // remainder is committed. A diverging token drops the draft at zero GPU cost.
     if (!p.fpending.empty()) {
         if (token == p.fpending[p.fpend_cursor]) {
             if (++p.fpend_cursor >= kJumpFreeVerify) {
@@ -763,12 +701,9 @@ int Engine::step_constrained_pipeline() {
     return 1;
 }
 
-// Jump-ahead (#844) probe: derive the forced continuation TEXT from the
-// schema FSM (chars every legal completion must spell — token-level forcing
-// is vacuous on BPE vocabs, where ':' / ':"' / ':{"' all spell the same
-// skeleton) and pend its canonical tokenization. Host-only; the chunk is
-// only committed after the next tick confirms the draft's first token for
-// free (see step_constrained_pipeline).
+// Jump-ahead (#844) probe: derives the forced continuation TEXT from the
+// schema FSM (token-level forcing is vacuous on BPE vocabs: ':', ':"', ':{"'
+// all spell the same skeleton). Host-only; committed only after step_constrained_pipeline confirms the draft's first token for free.
 void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
     auto& p = cpipe_;
     const auto& ccfg = runtime_config_.constrained;
@@ -779,7 +714,7 @@ void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
     // wiring here (spec-ngram gates it out for the same reason).
     if (ssm_state_ || !supports_chunked_prefill_())
         return;
-    // Think-budget forcing owns the next step — don't compete with it.
+    // Think-budget forcing owns the next step; don't compete with it.
     if (p.state.force_token >= 0)
         return;
 
@@ -807,15 +742,9 @@ void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
                      static_cast<int>(p.fpending.size()), text.c_str());
 }
 
-// Jump-ahead (#844) commit: the pipeline just confirmed the draft's first
-// kJumpFreeVerify tokens for free, and the in-flight forward for the last
-// of them will produce the logits predicting the next draft position. Run
-// ONE speculative teacher-forced chunk over the rest of the pending draft:
-// KV for every draft position plus
-// a materialized logits row predicting each following position. Later ticks
-// masked-sample from those rows (see step_constrained_pipeline) instead of
-// running forwards. Stream-ordered behind the in-flight forward; pure on
-// any failure — nothing emitted, no FSM advance.
+// Jump-ahead (#844) commit: runs ONE speculative teacher-forced chunk over
+// the rest of the pending draft (KV + a logits row per position); later
+// ticks masked-sample from those rows. Stream-ordered; pure on any failure, nothing emitted, no FSM advance.
 void Engine::constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_t stream) {
     auto& p = cpipe_;
 
@@ -852,9 +781,8 @@ void Engine::constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_
         }
     }
     // With a dedicated decode workspace the chunk runs on the prefill slot
-    // (the captured graph's buffers are untouched); without one it shares
-    // the graph's workspace — pre-sized to kJumpRowsCap at launch, so this
-    // resize can only shrink bookkeeping, never reallocate under the graph.
+    // (captured graph's buffers untouched); without one it shares the graph's
+    // workspace, pre-sized to kJumpRowsCap, so this resize can only shrink bookkeeping, never reallocate under the graph.
     const bool dual_ws = executor_->has_decode_workspace();
     if (dual_ws)
         executor_->use_workspace(0);

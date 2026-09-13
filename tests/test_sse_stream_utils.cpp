@@ -275,7 +275,7 @@ TEST(HarmonySplit, CommentaryCountsAsReasoning) {
 // above). The bug: a model that re-deliberates after closing its first <think>
 // block leaked that second reasoning pass into `content` on the streaming path,
 // because the CONTENT-phase re-entry was a token-id compare that never fires for
-// Qwen3.6's multi-BPE markers (request.h:84-90). The fix adds a text-scan
+// Qwen3.6's multi-BPE markers (request.h:78-84). The fix adds a text-scan
 // re-entry + overlap holdback so the second pass is re-routed to reasoning.
 
 using imp::server::StreamReasoningSplitter;

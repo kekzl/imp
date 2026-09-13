@@ -119,7 +119,7 @@ KV-cache VRAM reservation:
 
 - `--max-seq-len` / `--min-kv-tokens` control the reservation. Auto targets
   ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific
-  overrides (Gemma-4 -> FP16 KV via the `engine.cpp:547` carve-out).
+  overrides (Gemma-4 -> FP16 KV via the `engine.cpp:500` carve-out).
 - `--min-kv-tokens` overrides the defensive 80% cap: trades FP16 weight-cache
   capacity for more context.
 - Planner envelope in imp.conf `[vram]`: `kv_fraction` (default 0.8, KV share

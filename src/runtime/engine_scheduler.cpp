@@ -5,8 +5,7 @@
 //
 // Prefill execution lives in engine_prefill.cpp (serial chunked path) and
 // engine_prefill_ragged.cpp (cross-sequence ragged path); the pipelined
-// batched decode (bd_pipe_) in engine_decode_pipeline.cpp — all split out
-// 2026-08-26 when this TU hit 2230 code LOC.
+// batched decode (bd_pipe_) lives in engine_decode_pipeline.cpp.
 //
 // Decode chain:
 //   step_decode → decode_build_inference_state_ → step_decode_forward
@@ -14,8 +13,6 @@
 //
 // Async graph resume:
 //   step_async_graph_resume — for the CUDA-graph-captured decode path.
-//
-// Extracted from engine.cpp in Phase 4 of the architecture refactor roadmap.
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
@@ -60,15 +57,9 @@ using engine_internal::free_prefill_buffers;
 // =====================================================================
 
 // The resolved-dispatch summary must survive EVERY exit from the step body,
-// which is why the body is wrapped instead of ending with the call.
-//
-// #1205 put log_resolved_dispatch_once_() before the final `return` of step().
-// That is the one exit the decode path almost never takes: once the async
-// conditional graph loop is armed — the normal graphs-ON decode route — every
-// subsequent step() returns from the `async_result == 1` fast path below, so the
-// recorded decode tier was set and then never read. A full prefill+decode E2E run
-// on Qwen3.6-35B-A3B-NVFP4 printed no summary line at all. The feature built to
-// make silent routing visible was itself silent.
+// which is why the body is wrapped instead of ending with the call (#1205):
+// once the async conditional graph loop is armed, decode returns from the
+// `async_result == 1` fast path below and never reaches a trailing call.
 bool Engine::step() {
     const bool more = step_impl_();
     log_resolved_dispatch_once_();
@@ -82,11 +73,9 @@ struct OutsideTiming {
 };
 OutsideTiming g_ot;
 
-// Post-norm hidden for the MTP chain draft: one [1, d_model] FP16 row from the
-// T2 arena, re-taken when the model's d_model outgrows it. It used to be a
-// function-local static sized from the FIRST model in the process, never
-// resized, so a swap to a wider model wrote past it (AUDIT_arch_2026 B-3).
-// Direct allocation only when the arena is closed (no engine in a bare test).
+// Post-norm hidden for the MTP chain draft: one [1, d_model] FP16 row from
+// the T2 arena, re-taken when the model's d_model outgrows it. Direct
+// allocation only when the arena is closed (no engine in a bare test).
 void* s_h_normed = nullptr;
 size_t s_h_normed_cap = 0;
 bool s_h_normed_owned = false;
@@ -214,13 +203,10 @@ bool Engine::step_impl_() {
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
 }
 
-// The one answer site for graph eligibility (F-14).
-//
-// Eight sites across four TUs can turn graphs off. They stay where they are —
-// two of them depend on state that does not exist until weight upload and
-// warmup respectively — but they all route the *decision* through here, so the
-// reason survives the call and prints in the resolved-dispatch summary instead
-// of scrolling past in an init transcript.
+// The one answer site for graph eligibility (F-14). Eight sites across four
+// TUs can turn graphs off; they route the decision through here so the
+// reason survives and prints in the resolved-dispatch summary instead of
+// scrolling past in an init transcript.
 void Engine::demote_graphs_(GraphDemotionReason reason) {
     if (!config_.use_cuda_graphs) {
         // Already off. Keep the first reason: it is the one that describes the
@@ -249,17 +235,11 @@ void Engine::promote_graphs_() {
 }
 
 // One-shot summary of the kernels this model ACTUALLY resolved to (#1205).
-//
-// Emitted after the first step that has seen both a prefill and a decode, so
-// every chain has had a chance to record. Everything here is read back from
-// compute/dispatch_record.h — i.e. from the branches that ran, not from a
-// prediction — so it cannot drift away from the dispatch the way a second copy
-// of the routing rules would.
-//
-// Why this exists: the prefill chain has six tiers and the MoE chain five, and
-// every one of them declines by returning `false` with no log. Before this,
-// a model silently taking a slower or lower-quality path left no trace, which
-// made every future routing regression invisible.
+// Emitted after the first step that has seen both a prefill and a decode.
+// Read back from compute/dispatch_record.h (the branches that ran, not a
+// prediction), so it cannot drift from the routing rules. The prefill chain
+// has six tiers and the MoE chain five; every one declines by returning
+// `false` with no log otherwise.
 void Engine::log_resolved_dispatch_once_() {
     if (dispatch_dump_done_)
         return;
@@ -312,12 +292,9 @@ int Engine::step_async_graph_resume() {
         // Incremental harvest (#754): poll the mapped ring buffer instead of
         // blocking until the whole burst retires, so tokens reach the caller
         // (server SSE / imp_decode_step) as the device loop produces them.
-        // The old cudaStreamSynchronize surfaced a burst's tokens only when
-        // it finished — which is why streaming requests had to be excluded
-        // from the loop entirely (every token arrived in burst-sized groups).
         // The micro-poll waits for AT LEAST one new token per step() so the
         // imp_decode_step zero-token retry bound (8) never trips; the device
-        // loop runs ahead regardless — this only throttles the host to the
+        // loop runs ahead regardless, this only throttles the host to the
         // same per-token cadence as eager decode.
         if (async_pending_cursor_ >= static_cast<int>(async_pending_tokens_.size()) &&
             async_graph_runner_.launch_in_flight()) {
@@ -367,12 +344,10 @@ int Engine::step_async_graph_resume() {
         // Keep the captured graph + block-table buffer parked so the next
         // burst of this request rearms instead of recapturing (~10-20 ms per
         // capture). Fully torn down on request finish or when a different
-        // request launches (the FRESH path cleans a foreign park). This used
-        // to be gated on spec_ngram_enabled_ — the burst-hybrid path was the
-        // frequent relauncher — but the KV reservation clamps every burst to
-        // ~128 steps (#1636), so a spec-OFF generation relaunched just as
-        // often and paid a full recapture each time: 78 rebuilds x 27.8 ms in
-        // a 116 s batch=1 bench window (nsys 2026-08-27), ~1.9% of wall.
+        // request launches (the FRESH path cleans a foreign park). Not gated
+        // on spec_ngram_enabled_: the KV reservation clamps every burst to
+        // ~128 steps regardless (#1636), so a spec-OFF generation relaunches
+        // just as often.
         const bool park = saved_req && !generation_done;
         if (park) {
             async_parked_req_id_ = saved_req->id;
@@ -448,19 +423,16 @@ bool Engine::supports_chunked_prefill_() const {
     const auto& cfg = model_->config();
     // Out-of-scope archs. Hybrid GDN+MoE / Mamba2+MoE archs (QWEN35*,
     // QWEN36_MOE, NEMOTRON_H_MOE) ARE supported. Gemma-4 (SWA + dual
-    // head_dim 256/512) is now supported via:
-    //   - cuBLAS softmax sliding_window param (PR feat(attn): sliding_window),
-    //   - per-layer dispatch through the rectangular cuBLAS prefill path
-    //     (every layer call uses its own nh/nkv/hd from layer-local vars).
-    // GEMMA3 (SWA, uniform head_dim/kv_heads, sliding_window_pattern) reuses the
-    // same per-layer cuBLAS sliding_window dispatch as GEMMA4 and passes the
-    // uniformity gates below; verified coherent on gemma-3-12b-it-Q4_K_M.
+    // head_dim 256/512) is supported via cuBLAS softmax sliding_window plus
+    // per-layer dispatch (each layer call uses its own nh/nkv/hd). GEMMA3
+    // (SWA, uniform head_dim/kv_heads) reuses the same per-layer dispatch and
+    // passes the uniformity gates below.
     if (model_->profile().is_llama4) return false;       // MoE + SWA, untested
     // Per-layer attention shape uniformity gate. Hybrid archs (QWEN35*, QWEN36_MOE,
     // NEMOTRON_H_MOE) populate n_kv_heads_per_layer with zeros for non-attention
-    // layers — uniformity here means all *nonzero* values agree. Truly heterogeneous
-    // shapes (Gemma-4 dual head_dim 256/512) are now allowed because the chunked
-    // path dispatches per-layer with the correct nh/nkv/hd from layer-local vars.
+    // layers: uniformity here means all *nonzero* values agree. Gemma-4 (dual
+    // head_dim 256/512) is allowed because the chunked path dispatches
+    // per-layer with the correct nh/nkv/hd from layer-local vars.
     auto first_nonzero_int = [](const std::vector<int>& v) -> int {
         for (int x : v) if (x > 0) return x;
         return 0;
@@ -501,15 +473,12 @@ int Engine::resolve_prefill_chunk_size_() const {
     if (explicit_val < 0 && runtime_config_.runtime.prefill_chunk_size >= 0)
         explicit_val = runtime_config_.runtime.prefill_chunk_size;
     if (explicit_val < 0) {
-        // Default 2048 since 2026-06-11. Chunked prefill re-reads
-        // every weight once per chunk, so the memory-bound GEMMs pay the
-        // weight traffic per chunk: at pp4096, 512-token chunks cost
-        // NVFP4-MoE −43% prefill vs 2048 (14.8k -> 26.2k tok/s) and dense
-        // −19% at pp2048 (17.6k -> 21.7k). chunk=0 measured equal to 2048,
-        // so 2048 is the sweet spot that still bounds workspace VRAM and
-        // multi-request interleaving latency. Hybrids stay safe: step_prefill
-        // clamps to executor max_tokens (256/512), and step_prefill_one
-        // clamps n × ctx_len into the attn-scores capacity.
+        // Default 2048. Chunked prefill re-reads every weight once per
+        // chunk, so smaller chunks pay more weight-traffic overhead; 2048 is
+        // the sweet spot that still bounds workspace VRAM and multi-request
+        // interleaving latency. Hybrids stay safe: step_prefill clamps to
+        // executor max_tokens (256/512), and step_prefill_one clamps
+        // n × ctx_len into the attn-scores capacity.
         return supports_chunked_prefill_() ? 2048 : 0;
     }
     if (explicit_val == 0)
@@ -594,7 +563,7 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     ppl_capture_ = PplCapture{};
 
     // IMP_PPL_DUMP=1: sparse per-position NLL (first 16, every 16th, tail).
-    // IMP_PPL_DUMP=full: every position — needed for cross-mode forensics;
+    // IMP_PPL_DUMP=full: every position, needed for cross-mode forensics:
     // the sparse form hid that per-position values diverge between chunked
     // and single-shot runs (#655).
     if (!runtime_config_.diagnostics.ppl_dump.empty()) {
@@ -616,15 +585,11 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     const int counted = last - first + 1;
     double ppl = std::exp(h_nll / static_cast<double>(counted));
     // A run that produced no NLL at all reports PPL = exp(0) = 1.0000, which
-    // reads as a perfect score. That is the worst direction for a defect to
-    // fail in, and it happened: an aborted run ("perplexity failed:
-    // insufficient KV capacity") logged `mean_nll=0.0000 PPL=1.0000` on the
-    // next line, and anyone grepping for the PPL line reads the failure as a
-    // result. Exactly zero summed NLL over a non-empty span is impossible for a
-    // real forward (every position contributes a positive term), so it is the
+    // reads as a perfect score, the worst direction for a defect to fail in.
+    // Exactly zero summed NLL over a non-empty span is impossible for a real
+    // forward (every position contributes a positive term), so it is the
     // signature of a buffer nobody filled. Say that instead of printing a
-    // number. The CLI's own result line is already unreachable on failure
-    // (imp-cli/main.cpp), so this closes the log-reader's path, not a gate's.
+    // number; the CLI's own result line is already unreachable on failure.
     if (counted > 0 && h_nll == 0.0) {
         IMP_LOG_WARN("perplexity_nll: n=%d counted=%d but the summed NLL is exactly 0 - "
                      "no forward filled this buffer. NOT a perplexity of 1.0; the run failed.",
@@ -665,14 +630,11 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         if (new_block < 0 && kv_cache_raw_ != nullptr) {
             // A growable pool gets one chance to answer with memory before
             // the sequence is cancelled. Admission alone is not enough: a
-            // generation that was admitted can still outgrow the pool
-            // block by block, and without this a pool that started small
-            // cancelled every long generation mid-decode — measured, a
-            // synthetic 8192-token run produced ZERO tokens where a fixed
-            // pool produced 354 tok/s.
-            //
-            // Grown in coarse steps rather than one block at a time: the
-            // cost is per driver mapping call, not per byte.
+            // generation that was admitted can still outgrow the pool block
+            // by block, and without this a pool that started small cancelled
+            // every long generation mid-decode. Grown in coarse steps rather
+            // than one block at a time: the cost is per driver mapping call,
+            // not per byte.
             const int have = kv_cache_raw_->total_blocks();
             if (kv_cache_raw_->ceiling_blocks() > have) {
                 kv_cache_raw_->try_grow_to(have + std::max(64, have / 4));
@@ -681,17 +643,15 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         }
         if (new_block < 0) {
             // KV exhausted: append_block already reclaimed cached blocks, so
-            // the free pool AND all reclaimable cached blocks are empty. The
-            // old fallback evicted an LRU sequence — but every lru_order_
-            // entry is LIVE and imp has no recompute path, so evicting one
-            // (a current-batch member, or a still-active sequence beyond
-            // max_batch_size) silently corrupted it (use-after-free once it
-            // ran). Reject-newest instead: cancel THIS sequence and leave the
-            // others' KV intact. StreamingLLM auto-enable (above) already
-            // handles the graceful FP16 case before we reach here.
-            // Log loudly: this used to be a silent cancel that surfaced as a
-            // bare "internal error" at the API (Gemma-4-12B at ctx 16384 on a
-            // 1024-block FP16-KV pool cost a debugging session to attribute).
+            // the free pool AND all reclaimable cached blocks are empty.
+            // Reject-newest, not LRU eviction: every lru_order_ entry is LIVE
+            // and imp has no recompute path, so evicting one (a current-batch
+            // member, or a still-active sequence beyond max_batch_size) is a
+            // use-after-free once it runs. Cancel THIS sequence and leave the
+            // others' KV intact; StreamingLLM auto-enable (above) already
+            // handles the graceful FP16 case before we reach here. Log
+            // loudly: a silent cancel here surfaces as a bare API "internal
+            // error" that is expensive to attribute.
             int pool_blocks = kv_cache_raw_ ? kv_cache_raw_->total_blocks() : 0;
             IMP_LOG_ERROR(
                 "KV pool exhausted at decode: seq %d needs block %d but the %d-block pool has "
@@ -726,16 +686,14 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
 
     // Auto-activate StreamingLLM when KV cache is nearly exhausted.
     // Only fires once (guards on !streaming_kv_enabled) and only for FP16
-    // KV — quantized variants don't support sentinel-block skipping yet.
+    // KV: quantized variants don't support sentinel-block skipping yet.
     // Never under SWA sizing (streaming_kv_auto is cleared at init there).
     if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
         // Reclaimable prefix-cache blocks are free for this purpose: the
         // allocator takes them before it fails. Counting only the free list
-        // against the blocks LIVE sequences hold fired on a pool that was
-        // 1/3 cached-but-reclaimable (Llama-3.2-3B, 32 x 1000-token streams,
-        // 3000-block pool: "0/2016 free" with 984 reclaimable), and the
-        // one-way graph demotion below then cost 40% of decode throughput
-        // for the rest of the process (2026-09-03).
+        // against blocks LIVE sequences hold fires falsely on a pool that is
+        // mostly cached-but-reclaimable, and the one-way graph demotion below
+        // then costs real decode throughput for the rest of the process.
         auto st = kv_manager_->stats();
         int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
         int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
@@ -755,10 +713,9 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         const bool kv_is_f16 = kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16;
         if (kv_pressure_warns_no_streaming_valve(st.free_blocks, reclaimable, pool_total, kv_is_f16) &&
             !kv_pressure_no_valve_warned_.test_and_set(std::memory_order_relaxed)) {
-            // The `if` below declined here and logged nothing. On this model's
-            // default KV dtype that made the whole valve dead code, and the
-            // next visible event was the hard cancel further up once the pool
-            // ran dry (AUDIT_arch_2026 C-4 follow-up).
+            // Without this warn, a model whose KV dtype has no valve fails
+            // silently here; the next visible event is the hard cancel
+            // further up once the pool runs dry (AUDIT_arch_2026 C-4).
             IMP_LOG_WARN(
                 "KV cache >90%% full (%d free + %d reclaimable of %d blocks) and StreamingLLM is "
                 "unavailable on kv_cache.dtype=%s (sentinel-block skipping is F16-only): there is "
@@ -877,9 +834,8 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                    // token, and one device-side burst desyncs the MTP cache
                    // for the rest of the generation (the sync gate then skips
                    // feeding forever, #847). This think-burst was the one loop
-                   // site without the MTP exclusion the process_outputs launch
-                   // has - measured on Qwen3.8-27B-NVFP4: drafted_total 1 vs
-                   // 436 over a 768-token essay, 84.7 vs 104.3 tok/s.
+                   // site missing the MTP exclusion the process_outputs
+                   // launch has.
                    !(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, decode_batch[0]->id)) &&
                    spec_verify_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
                    spec_burst_launch_ok_(*decode_batch[0]) &&
@@ -895,7 +851,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             // Budgeted think interior: the loop handles the budget device-
             // side in bounded bursts so the host catches the think→answer
             // transition and resumes verification in the draft-rich answer
-            // region. Fixed burst (the miss counter stays untouched — these
+            // region. Fixed burst (the miss counter stays untouched: these
             // are not draft misses, and inflating it would instantly trip
             // give-up on the first real probe after </think>).
             auto& sreq = decode_batch[0];
@@ -936,19 +892,14 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     }
 
     // #1003 stage 1: at batch > 1 (dense, non-recurrent), ONE request per
-    // step may run its spec verify while the rest decode batched below —
-    // round-robin in cyclic id order (the hybrid-rotation pattern), so every
-    // eligible request gets verify turns under sub-agent fan-out instead of
-    // silently losing speculation to the batch-size-1 dispatch gate above.
-    // The verify emits that request's tokens for this step; it is removed
-    // from this step's batched decode and rejoins next step.
+    // step may run its spec verify while the rest decode batched below,
+    // round-robin in cyclic id order, so every eligible request gets verify
+    // turns. The verify emits that request's tokens for this step; it is
+    // removed from this step's batched decode and rejoins next step.
     // The entry question is "is there a draft source", not "is the n-gram
-    // matcher on". Demanding speculative.ngram here switched round-robin
-    // verify off for exactly the configuration the MTP recipe prescribes
-    // (`speculative.mtp_k=2` PAIRED with `speculative.ngram=false`,
-    // docs/MODELS.md), so an MTP-drafting server lost batched speculation to
-    // the flag that arms the head. The recurrent term below hid it on the
-    // hybrids; on every dense model it was live.
+    // matcher on": demanding speculative.ngram here breaks the MTP recipe
+    // (`speculative.mtp_k=2` paired with `speculative.ngram=false`,
+    // docs/MODELS.md).
     // Batched verify on the hybrid (speculative.batch_verify): every decoding
     // request forwards its last token and one draft in a single step; the
     // step emits for every row and replaces the batched decode below. Any
@@ -1001,8 +952,8 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             }
         }
         // Adaptive yield cadence: empty turns (shallow drafts / no candidate)
-        // back the pipeline-break interval off exponentially — a draft-poor
-        // batch measured -1.5..-2.7% from fruitless chain breaks alone.
+        // back the pipeline-break interval off exponentially, since fruitless
+        // chain breaks cost a draft-poor batch real throughput.
         spec_rr_yield_interval_ = verified ? 8 : std::min(spec_rr_yield_interval_ * 2, 64);
         if (verified && decode_batch.empty())
             return;
@@ -1010,12 +961,11 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     }
 
     // SSM/GDN: the recurrent scan kernels are single-sequence, so decode one
-    // sequence per step. The old resize(1) kept the OLDEST active request
-    // every step — concurrent sessions serialized head-of-line (the first
-    // request ran to completion before the second produced a token). Rotate
-    // the slice holder round-robin every hybrid_decode_quantum tokens
-    // instead; the decode graphs re-capture for the new sequence's state
-    // slot on rotation (~10-20 ms), which the quantum amortizes.
+    // sequence per step. Rotate the slice holder round-robin every
+    // hybrid_decode_quantum tokens (keeping one active request every step
+    // would serialize concurrent sessions head-of-line); the decode graphs
+    // re-capture for the new sequence's state slot on rotation, which the
+    // quantum amortizes.
     hybrid_decode_waiting_ = false;
     // Batched GDN decode runs all of them in one step; the rotation below is
     // the fallback for when it is off or unavailable (no slot table). See
@@ -1035,7 +985,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                                             hybrid_slice_start_ >=
                                         quantum);
             if (rotate) {
-                // Next request in cyclic id order after the current holder —
+                // Next request in cyclic id order after the current holder:
                 // ids are monotonically increasing, so this is admission
                 // round-robin.
                 int next = 0;
@@ -1139,7 +1089,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.n_sequences = gpu_batch.n_sequences;
 
     // Batched GDN decode: hand the recurrent kernels one slot id per sequence.
-    // Only for a genuine multi-sequence decode step — a single sequence keeps
+    // Only for a genuine multi-sequence decode step: a single sequence keeps
     // the pointer null and takes the path it always took.
     state.ssm_seq_slots = nullptr;
     state.ssm_n_seq = 1;
@@ -1215,13 +1165,10 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
                 residual_meta_h_counts_[i] = rs.fill_count;
                 residual_meta_h_widxes_[i] = rs.write_idx;
             }
-            // The buffer is persistent and sized for max_batch_size (#1648):
-            // a per-step cudaMallocAsync address was baked into a captured
-            // graph that is replayed, and nothing invalidated the graph when
-            // the allocator handed back a different one. Stride by the
-            // CAPACITY, not by N, so the three sub-arrays keep fixed offsets
-            // across steps whatever the batch width - a graph captured at one
-            // N stays correct at another.
+            // The buffer is persistent and sized for max_batch_size (#1648).
+            // Stride by the CAPACITY, not by N, so the three sub-arrays keep
+            // fixed offsets across steps whatever the batch width: a graph
+            // captured at one N stays correct at another.
             if (residual_meta_d_buf_ != nullptr && N <= residual_meta_capacity_) {
                 int* base = residual_meta_d_buf_;
                 const ptrdiff_t stride = residual_meta_capacity_;
@@ -1267,11 +1214,10 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
 
     // Check if any request needs logprobs or constrained mode
-    // ONE flag for "this batch is driven by a host-side constraint FSM".
-    // It used to be two (json / schema) and every consumer only ever asked for
-    // their disjunction — which meant a new constrainer had to be remembered in
-    // both, and regex (#1091) was in neither, so a regex request could never
-    // reach the constrained pipeline and silently stayed on the eager path.
+    // ONE flag for "this batch is driven by a host-side constraint FSM":
+    // every consumer only asks for the disjunction anyway, and a new
+    // constrainer added to only one of several checks (regex, #1091) could
+    // silently miss the constrained pipeline and stay on the eager path.
     needs_logprobs = false;
     needs_constrained = false;
     for (const auto& r : valid_decode) {
@@ -1287,8 +1233,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     // The single-sequence state carries the request's constrainers (the
     // graph-loop / constrained-pipeline launch paths read them from state);
     // batched decode attaches them per row in sample_decode_rows_, so
-    // constraints stay enforced at batch>1 (previously they were silently
-    // dropped whenever a constrained request shared a decode batch).
+    // constraints stay enforced at batch>1.
     for (auto& r : valid_decode)
         ensure_constraints_(r);
     if (valid_decode.size() == 1 && valid_decode[0]->constraints) {
@@ -1334,13 +1279,9 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
     // Two-pass batched sampling: pass 1 ENQUEUES every row's filter+
     // sampler chain into its own scratch slot (stream-ordered, so the
     // shared d_penalty_tokens_ upload/consume pairs stay correct); pass 2
-    // gathers all tokens with ONE pinned D2H + ONE stream sync. The
-    // previous per-row synchronous readback blocked the engine thread
-    // ~850 us per sequence per step (pageable 4-byte D2H + sync each) —
-    // 29% GPU idle at n=16 sustained serving (nsys, 2026-07-12). Rows
-    // with sync-only sampling modes (mirostat, logit_bias, CUB-regime
-    // top_k) decline untouched in pass 1 and sample synchronously after
-    // the gather.
+    // gathers all tokens with ONE pinned D2H + ONE stream sync. Rows with
+    // sync-only sampling modes (mirostat, logit_bias, CUB-regime top_k)
+    // decline untouched in pass 1 and sample synchronously after the gather.
     std::vector<int> sync_rows;
     // Device-resident penalty histories (#1755): row i's history lives in
     // slot hist_slot[i]; after the gather ONE kernel appends this step's
@@ -1368,7 +1309,7 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
             if (slot >= 0 && need <= penalty_hist_cap_) {
                 auto& hs = penalty_hist_state_[slot];
                 if (hs.synced != need) {
-                    // Full (re)sync — first batch entry of this request, or
+                    // Full (re)sync: first batch entry of this request, or
                     // the host history diverged (sync-row step, think strip).
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_hist_ + (size_t)slot * penalty_hist_cap_,
                                                        req->output_tokens.data(),
@@ -1380,7 +1321,7 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
                 per_state.n_penalty_tokens = need;
                 pen_row_slot[i] = slot;
             } else if (d_penalty_tokens_ && (size_t)need <= d_penalty_tokens_capacity_) {
-                // No slot pool — the old shared-buffer upload path.
+                // No slot pool: the old shared-buffer upload path.
                 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
                                                    (size_t)need * sizeof(int32_t), cudaMemcpyHostToDevice,
                                                    dec_stream));
@@ -1434,7 +1375,7 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
                         penalty_hist_state_[pen_append.slots[i]].synced = pen_append.offs[i] + 1;
             }
         } else {
-            // Collector unavailable (no slot buffers) — every row falls
+            // Collector unavailable (no slot buffers): every row falls
             // back to the synchronous path below.
             sync_rows.clear();
             for (int i = 0; i < n; i++)
@@ -1489,12 +1430,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             g_step_timing.outside +=
                 std::chrono::duration<double, std::micro>(tp0 - g_step_timing.last_end).count();
     }
-    // Switch workspace for decode. The historical slot-1 path was bs==1 only
-    // (its 2026-03 shape, pre-continuous-batching); under prefill overlap
-    // the batched step runs there too — the warmup sized slot 1 and the
-    // per-slot quant scratches for max_batch, and the workspace choice must
-    // be a pure function of (flags, batch size) so graph captures stay
-    // consistent with replays.
+    // Switch workspace for decode. Slot 1 serves bs==1, and under prefill
+    // overlap also small batches (warmup sized slot 1 and the per-slot quant
+    // scratches for max_batch). The workspace choice must be a pure function
+    // of (flags, batch size) so graph captures stay consistent with replays.
     const bool slot1 = executor_->has_decode_workspace() &&
                        (valid_decode.size() == 1 ||
                         (overlap_ready_ &&
@@ -1584,16 +1523,12 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         decode_batch_pool_.is_allocated()) {
         auto& graph_runner = decode_graph_pool_[graph_idx];
 
-        // P5 §2.2 M4: pow-2 bucket the max_blocks_per_seq before comparing.
-        // The decode_batch_pool_ padding (engine.cpp:2456-2468) already lifts
-        // batch.max_blocks_per_seq to pool_max, so in practice this comparison
-        // never trips during steady-state decode — but if a future path
-        // bypasses the pool (e.g. spec-decode verify), pow-2 bucketing caps
-        // the re-capture frequency to log2(max_blocks) events per decode
-        // instead of one per 16-token boundary. Re-capture cost is
-        // dominated by the eager forward that builds the new graph
-        // (~5-10 ms on Qwen3-8B Q8_0) so the bucket pays back across long
-        // contexts.
+        // Pow-2 bucket the max_blocks_per_seq before comparing. The decode
+        // batch pool padding already lifts batch.max_blocks_per_seq to
+        // pool_max, so this rarely trips during steady-state decode; if a
+        // future path bypasses the pool (e.g. spec-decode verify), pow-2
+        // bucketing caps the re-capture frequency to log2(max_blocks) events
+        // instead of one per 16-token boundary.
         auto bucket_pow2 = [](int x) -> int {
             if (x <= 1) return 1;
             int b = 1;
@@ -1603,27 +1538,22 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         const int bucketed_max_blocks = bucket_pow2(gpu_batch.max_blocks_per_seq);
         if (bucketed_max_blocks != last_decode_max_blocks_per_graph_[graph_idx]) {
             // Topology stable across max_blocks growth (same kernels, only
-            // grid dims / params differ) — cudaGraphExecUpdate handles this
+            // grid dims / params differ): cudaGraphExecUpdate handles this
             // without tearing down the exec + graph mem pool.
             graph_runner.invalidate_for_update();
             last_decode_max_blocks_per_graph_[graph_idx] = bucketed_max_blocks;
         }
         // #948: the decode-attention LAUNCH topology derives from
-        // max_context_len on the host (split-K num_splits / GQA-vs-split-K
-        // kernel choice, scratch clamping) and is baked into the capture. The
-        // max_blocks bucket above was meant to catch context growth but never
-        // trips — the decode batch pool pads max_blocks_per_seq to the pool
-        // stride. Re-derive the graph when the pow2 context bucket GROWS past
-        // the captured one: a graph captured at ctx≈35 replayed at ctx≈2400
-        // dereferences a stale-topology kernel and wedges the engine with an
-        // illegal memory access. Growth-only (monotonic high-water mark,
-        // ~log2(max ctx) captures per process — an on-any-change trigger
-        // re-captured 1-2x per request under short/long ping-pong): replaying
-        // a large-ctx capture for a SHORT request is safe, surplus split-K
-        // splits write their empty-split sentinels and the reduce merges
-        // them; the reverse direction is the crash. cudaGraphExecUpdate
-        // absorbs same-topology re-captures; a kernel-choice change fails
-        // the update and re-instantiates.
+        // max_context_len on the host (split-K num_splits, GQA vs split-K
+        // kernel choice, scratch clamping) and is baked into the capture.
+        // The max_blocks bucket above never trips (the pool pads to its
+        // stride); this pow2 context bucket is the trigger that actually
+        // fires as context grows. Growth-only (monotonic high-water mark):
+        // replaying a large-ctx capture for a short request is safe (empty
+        // split-K splits write sentinels), but the reverse dereferences a
+        // stale-topology kernel (illegal memory access). cudaGraphExecUpdate
+        // absorbs same-topology re-captures; a kernel-choice change
+        // re-instantiates.
         const int bucketed_max_ctx = bucket_pow2(max_ctx);
         if (bucketed_max_ctx > last_decode_max_ctx_per_graph_[graph_idx]) {
             graph_runner.invalidate_for_update();
@@ -1643,7 +1573,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 decode_graph_recurrent_slot_ = slot;
             }
         }
-        // Graph captures ONLY forward_logits — sampling runs eager after
+        // Graph captures ONLY forward_logits, sampling runs eager after
         Tensor logits_out;
         graph_runner.set_decode_fn(
             [this, &state, &logits_out](cudaStream_t s) { executor_->forward_logits(state, logits_out, s); });
@@ -1689,14 +1619,12 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         gpu_batch.free();
     }
 
-    // (The residual metadata buffer is persistent since #1648 - allocated once
-    // beside d_kv_slot_buf_ and freed with it in the destructor. Freeing it per
-    // step is what made a replayed graph hold a dangling address.)
+    // The residual metadata buffer is persistent since #1648 (allocated once
+    // beside d_kv_slot_buf_, freed with it in the destructor).
 
-    // Phase 3.5 telemetry: measure MTP-draft prediction accuracy without
-    // changing generation. Single-sequence only (batch=1 simplifies hidden-
-    // state addressing). Skipped when MTP is disabled or the workspace was
-    // allocated without attention dims (older callers).
+    // Measures MTP-draft prediction accuracy without changing generation.
+    // Single-sequence only (batch=1 simplifies hidden-state addressing).
+    // Skipped when MTP is disabled or the workspace lacks attention dims.
     if (mtp_spec_decode_enabled() && model_ && model_->mtp_.has_value() &&
         model_->mtp_->loaded && gpu_batch.n_sequences == 1 && !tokens.empty()) {
         const int32_t next_token = tokens[0];
@@ -1723,7 +1651,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         const int cur_pos = valid_decode[0]->context_len() - 1;
         // Verify any pending predictions whose intended position is cur_pos.
         if (!mtp_pending_chain_.empty()) {
-            // Drop stale (intended < cur_pos) — shouldn't happen in K=1 path
+            // Drop stale (intended < cur_pos): shouldn't happen in K=1 path
             // but possible if the engine skips/restarts mid-chain.
             mtp_pending_chain_.erase(
                 std::remove_if(mtp_pending_chain_.begin(), mtp_pending_chain_.end(),
@@ -1823,13 +1751,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Device-side chain, the same one mtp_feed_pairs_ uses: each step's
             // argmax lands in ws->d_chain_tokens[k] and feeds step k+1's
             // embedding lookup on device, so ONE drain replaces K host
-            // round-trips. Without it every drafted token ends in a
-            // cudaStreamSynchronize and the GPU idles while the host issues the
-            // next step — measured on Qwen3.8-27B, ~6 ms of the 6.85 ms per
-            // drafted token was that dead time rather than kernel work.
-            //
-            // The probe needs its top-w on the host per step, so it keeps the
-            // round-trip path; it is a measurement mode, not a serving one.
+            // round-trips (each drafted token would otherwise end in a
+            // cudaStreamSynchronize while the GPU idles). The probe needs its
+            // top-w on the host per step, so it keeps the round-trip path; it
+            // is a measurement mode, not a serving one.
             const bool device_chain = !want_probe && ws->d_chain_tokens != nullptr && ws->n_experts == 0 &&
                                       K <= imp::kMtpMaxChainK;
             if (device_chain) {
@@ -1852,7 +1777,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     for (int k = 0; k < launched; ++k) {
                         const int prediction = h_chain[k];
                         if (prediction < 0 || prediction >= vocab_size)
-                            break;  // NaN-logits guard — keep the valid prefix
+                            break;  // NaN-logits guard: keep the valid prefix
                         // topk stays unset: -1 is the "not a candidate"
                         // sentinel the width tally compares against, and a
                         // zero-filled array would count token id 0 as a hit.
@@ -1889,7 +1814,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             }
             // Roll back the speculative cache writes from K-1 chained steps.
             // The first chained step (k=0) IS the real "next step" prediction
-            // and matches what would have been drafted in K=1 mode — keep it.
+            // and matches what would have been drafted in K=1 mode, keep it.
             ws->mtp_pos = std::min(ws->mtp_pos, mtp_pos_before + 1);
             // Verify-consumer bookkeeping (#847): the kept pair covers
             // next_token; the chain IS the draft for the next verify step.
@@ -1996,7 +1921,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                       req->context_len(), req->context_len() - 1, next_token,
                       tok->decode_token(next_token).c_str());
 
-        // Advance the FSM before finish_request — finishing returns the
+        // Advance the FSM before finish_request: finishing returns the
         // request's ConstraintManager to the engine pool.
         if (req->constraints)
             req->constraints->update(next_token);
@@ -2004,7 +1929,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
             if (bd_pipe_.in_flight) {
                 // A chained step is in flight and still WRITES this row's
-                // next KV slot — mark FINISHED (stream delivery proceeds)
+                // next KV slot: mark FINISHED (stream delivery proceeds)
                 // but defer the KV/slot release to the pipeline drain.
                 req->status = RequestStatus::FINISHED;
                 bd_pipe_.deferred_release.push_back(req);
@@ -2020,7 +1945,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     // Think budget is now handled device-side in post_decode_step_kernel.
     if (allow_loop && decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 &&
         !offload_mgr_ && config_.use_cuda_graphs &&
-        // A PARKED runner (burst-hybrid speculation) is setup but idle — it
+        // A PARKED runner (burst-hybrid speculation) is setup but idle: it
         // must be allowed back in here, or bursts only ever fire once. A park
         // for a DIFFERENT request is torn down inside the launch.
         (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0) && !needs_logprobs &&
@@ -2033,7 +1958,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         const bool async_compatible = dreq->logit_bias.empty() && dreq->mirostat == 0 &&
                                       dreq->dry_multiplier == 0.0f && dreq->min_p == 0.0f &&
                                       dreq->typical_p >= 1.0f &&
-                                      // Phase 3.5 MTP telemetry hooks the per-step path; the async
+                                      // MTP telemetry hooks the per-step path; the async
                                       // conditional-graph loop bypasses it. Stay eager when MTP is on
                                       // so accuracy measurement covers the whole generation.
                                       !mtp_spec_decode_enabled() &&
@@ -2068,22 +1993,19 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                                        : spec_effective_miss_burst_(*dreq);
                 if (spec_limit < 0) spec_limit = 0;
             }
-            // #754 RESOLVED: streaming requests run the loop too, since
-            // step_async_graph_resume now polls the mapped ring buffer and
-            // surfaces tokens per-step while the burst is still running —
-            // SSE stays real per-token (previously the blocking per-burst
-            // sync delivered tokens only in burst-sized groups, so streaming
-            // had to stay on per-step decode and paid the +27-45% loop win).
+            // #754: streaming requests run the loop too, since
+            // step_async_graph_resume polls the mapped ring buffer and
+            // surfaces tokens per-step while the burst is still running, so
+            // SSE stays real per-token.
             //
             // F-A2: a request with speculation off would run the UNBOUNDED
-            // on-device loop (spec_limit == 0) all the way to max_tokens —
+            // on-device loop (spec_limit == 0) all the way to max_tokens;
             // is_cancelled()/timeout are only polled between bursts, so a
-            // client disconnect couldn't interrupt it and burned a full
-            // generation. Bound it to runtime.decode_burst so the worker
-            // regains control to re-poll cancellation; output is identical
-            // (same decode, chunked + relaunched, exactly like the
-            // speculation burst path). Speculation keeps its own miss_burst
-            // limit; <=0 restores the old unbounded behavior.
+            // client disconnect could not interrupt it. Bound it to
+            // runtime.decode_burst so the worker regains control to re-poll
+            // cancellation; output is identical (same decode, chunked and
+            // relaunched). Speculation keeps its own miss_burst limit; <=0
+            // restores the unbounded behavior.
             int launch_limit = spec_limit;
             // Bound only in the default (non-deterministic) serving mode.
             // The fully-on-device unbounded loop is the one decode path that
@@ -2099,13 +2021,12 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                 launch_limit = runtime_config_.runtime.decode_burst;
             // Admission-aware burst: while another request is waiting (still
             // pending admission or mid-prefill), Engine::step short-circuits
-            // to the resume path for the whole burst — the waiting request's
-            // prefill only advances between bursts, inflating its TTFT by
-            // ~0.5-1 s per 128-token burst. Shorten the burst so scheduling
-            // work interleaves every few tokens; the full burst returns when
-            // nothing is waiting. Deterministic mode is exempt (same
-            // reasoning as decode_burst above — reproducible evals are
-            // single-stream, nothing ever waits).
+            // to the resume path for the whole burst, inflating the waiting
+            // request's TTFT by ~0.5-1 s per 128-token burst. Shorten the
+            // burst so scheduling work interleaves every few tokens; the
+            // full burst returns when nothing is waiting. Deterministic mode
+            // is exempt (same reasoning as decode_burst above: reproducible
+            // evals are single-stream, nothing ever waits).
             if (!runtime_config_.runtime.deterministic &&
                 (scheduler_->has_pending() || !sched_prefill_batch_.empty())) {
                 constexpr int kBusyBurst = 16;
@@ -2128,19 +2049,19 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     }
 
     // Constrained requests (json_mode / json_schema / regex / GBNF grammar)
-    // can't run the conditional loop (the FSM is host-side) — launch the
+    // can't run the conditional loop (the FSM is host-side): launch the
     // pipelined constrained decode instead: per tick the host enqueues
     // mask+sample AND the next forward, hiding FSM/mask latency under GPU
     // compute. This matters most for the two newest constrainers, whose cold
-    // masks walk the whole vocabulary. masked_sample_async
-    // covers banned tokens + greedy/top-k/top-p only — penalties or any
-    // host-side sampling feature stays on the eager path.
+    // masks walk the whole vocabulary. masked_sample_async covers banned
+    // tokens + greedy/top-k/top-p only: penalties or any host-side sampling
+    // feature stays on the eager path.
     if (allow_loop && decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 &&
         !offload_mgr_ && config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active &&
         !needs_logprobs && needs_constrained) {
         auto& dreq = valid_decode[0];
-        // rep/freq/presence penalties and think_budget ARE supported (uploaded /
-        // forced per tick like the eager path) — the server defaults
+        // rep/freq/presence penalties and think_budget ARE supported (uploaded
+        // or forced per tick like the eager path): the server defaults
         // (repetition_penalty 1.05, think_budget 0.5) must not block the
         // pipeline. min_p/typical_p/mirostat/DRY/logit_bias stay eager.
         const bool pipeline_compatible =

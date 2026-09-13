@@ -1,15 +1,8 @@
 #pragma once
 
-// Pure (GPU-free) decision logic for the think/stop state machine.
-//
-// These free functions hold the host-side reasoning of engine_sampling_stop.cpp
-// (think-budget recount, text-tail </think> detection, post-think grace period)
-// and engine_workspace_warmup.cpp (think-token-type acceptance), extracted so the
-// branchy logic can be unit-tested on the CPU without standing up an Engine + GPU.
-//
-// The Engine methods are thin wrappers that supply tokenizer/model state and
-// call into here. Behaviour must stay byte-identical to the wrappers — these are
-// a seam, not a redesign.
+// Pure (GPU-free) decision logic for the think/stop state machine, shared by
+// engine_sampling_stop.cpp and engine_workspace_warmup.cpp for CPU unit tests.
+// Engine methods are thin wrappers; behaviour must stay byte-identical to them.
 
 #include <cstdint>
 #include <string>
@@ -18,25 +11,9 @@
 
 namespace imp::think_logic {
 
-// --- Prompt-tail seed (Engine::add_request) ---
-//
-// Chat templates for Qwen3 / Qwen3.5 / Qwen3.6 / Qwen3.8 / DeepSeek-R1 end the
-// generation prompt with `<think>\n`, so generation starts INSIDE a think block
-// and the output carries no opener. Two request flags follow from that tail and
-// both must be set: `in_think_block` (stop suppression) and `started_in_think`
-// (the budget recount seed). add_request set only the first, so on that path
-// count_reasoning_tokens started outside think, returned 0 and
-// should_force_think_end never fired.
-//
-// SCOPE: imp-server never had that hole. `build_imp_request_`
-// (tools/imp-server/handlers_chat_core.cpp) sets both flags from
-// `enable_thinking` for all three dialects, and add_request only ever sets them
-// to true, so the server path was already correct. This closes the same hole
-// for `imp-cli` and embedded `src/api` callers, which set neither.
-//
-// Precedence: `</think>` shares a suffix with `<think>`, so an opener counts as
-// "last" only when it appears AFTER any closer (`open_pos > close_pos + 1`
-// skips the `</` the closer contributes).
+// Chat templates (Qwen3.x, DeepSeek-R1) end the prompt with `<think>\n`: set
+// in_think_block AND started_in_think together (Engine::add_request), or the
+// budget recount misses the seed. Opener is "last" only if open_pos > close_pos+1.
 struct ThinkSeed {
     bool in_think = false;          // suppress stop tokens; the block is open
     bool started_in_think = false;  // the budget recount starts in-think
@@ -50,26 +27,15 @@ inline ThinkSeed seed_from_prompt_tail(std::string_view tail) {
     return ThinkSeed{open_is_last, open_is_last};
 }
 
-// --- Warmup: should <think> be treated as a control/think token? ---
-//
-// Mirrors engine_workspace_warmup.cpp's acceptance test. <think>/</think> are
-// the think markers ONLY when <think> is a special token, not plain text:
-//   - GGUF metadata tags them CONTROL (type 3)  -> accept
-//   - Qwen3 GGUFs tag them USER_DEFINED (type 4) -> accept (was the day-N bug:
-//     requiring CONTROL left think_end_id_ == -1, so the budget never fired)
-//   - Nemotron has "<think>" at ID 12 tagged NORMAL (type 1) -> reject
-// When the tokenizer carries no type table, fall back to the heuristic
-// "lives in the top 1% of the vocab id range" (added/special tokens cluster there).
-//
-// `start_id` < 0 means the literal "<think>" is absent -> never a think model.
-//
-// `is_added` == the token was declared in tokenizer.json's added_tokens array.
-// Qwen3/Qwen3.x NVFP4 SafeTensors ship <think>/</think> as added tokens with
-// special=false (is_special=false), so the is_special gate alone left
-// think_end_id_ == -1 and forced those reasoning models onto the eager decode
-// path (no conditional-graph loop, −27..36% decode). An *added* marker is a
-// deliberate control marker even when special=false; only a NORMAL BPE piece
-// that merely spells "<think>" (Nemotron ID 12, not added) must stay rejected.
+// <think>/</think> count as think markers only when <think> is a special
+// token, not plain text (engine_workspace_warmup.cpp mirrors this test):
+//   - GGUF CONTROL (type 3) or USER_DEFINED (type 4) -> accept
+//   - NORMAL (type 1, e.g. Nemotron ID 12) -> reject
+// No type table: fall back to "top 1% of vocab id range" heuristic.
+// start_id < 0 -> "<think>" absent, never a think model.
+// is_added (tokenizer.json added_tokens) counts as a control marker even
+// with special=false (Qwen3.x NVFP4 SafeTensors); only a NORMAL BPE piece
+// that merely spells "<think>" stays rejected.
 inline bool accept_think_token(int32_t start_id, bool has_token_types, bool is_special, bool is_added,
                                int vocab_size) {
     if (start_id < 0)
@@ -79,15 +45,9 @@ inline bool accept_think_token(int32_t start_id, bool has_token_types, bool is_s
     return start_id > vocab_size * 99 / 100;
 }
 
-// --- Think-budget recount (fill_sampling_params) ---
-//
-// Walk the emitted output and count the tokens generated while inside a think
-// block. The opener may live in the PROMPT (injected <think>\n prefix), in which
-// case the output has no opener and the recount must START in-think
-// (`started_in_think`) or the budget never fires.
-//
-// `currently_thinking_out` receives the in/out think state at the end of the
-// scan (the budget only fires while still thinking).
+// Counts tokens generated while inside a think block (fill_sampling_params).
+// The opener may live in the PROMPT (`<think>\n`); recount must start in-think
+// (started_in_think) or the budget never fires. currently_thinking_out returns final state.
 inline int count_reasoning_tokens(const std::vector<int32_t>& output_tokens, int32_t think_start_id,
                                   int32_t think_end_id, bool started_in_think, bool& currently_thinking_out) {
     bool currently_thinking = started_in_think;
@@ -104,65 +64,32 @@ inline int count_reasoning_tokens(const std::vector<int32_t>& output_tokens, int
     return n_reasoning;
 }
 
-// Cap on how many tokens the budget reserves for the answer. `think_budget` is a
-// FRACTION of max_tokens, which over-reserves once max_tokens is generous: at
-// 0.5 it hands half of a 4000-token budget to the answer even though a reasoning
-// model's final answer is usually short. The forced </think> that this early
-// limit triggers is the dominant cause of reasoning bleeding into `content`
-// (BUGREPORT-qwen36-reasoning-leaks-into-content): the model is cut off
-// mid-thought and keeps reasoning past the forced close. Capping the reserve lets
-// the model think up to `max_tokens - kMaxAnswerReserve`, so it force-closes only
-// when the answer floor is actually at risk — eliminating the premature cut (and
-// its leak) whenever the model finishes thinking naturally within that window.
-// The default of `runtime.think_answer_reserve`, which is the configurable
-// value every caller passes in. Kept as the fallback for callers that have no
-// RuntimeConfig at hand and as the documented default.
+// Floor under the fractional think_budget: a pure fraction over-reserves at
+// large max_tokens and forces early </think>, causing reasoning to bleed into
+// content. Fallback default for runtime.think_answer_reserve when no RuntimeConfig is at hand.
 inline constexpr int kMaxAnswerReserve = 256;
 
-// ...but a FLAT cap makes the answer length independent of max_tokens, and that
-// is its own bug. `think_limit` takes the LATER of the two limits, so once
-// max_tokens > 2*kMaxAnswerReserve the reserve always wins and the answer is
-// pinned at 256 tokens forever: raising max_tokens buys the model more thinking
-// room and never one token more of answer. Measured on Qwen3.6-35B-A3B-NVFP4,
-// same request, only max_tokens varied — 600/1500/3000/4096 returned
-// 935/1084/968/934 characters, five times the budget for fifty more characters,
-// and never `finish_reason: "stop"` (#1248). A structured answer that needs more
-// than 256 tokens is truncated mid-field, so nothing downstream can parse it.
-//
-// The flat cap encodes "a reasoning model's final answer is usually short",
-// which holds for prose and fails for structured output. An operator asking for
-// 4096 tokens is saying they expect a long answer, so the reserve follows them:
-// a quarter of the budget, never below the flat floor. Below 1024 this changes
-// nothing — which is where the leak the cap was introduced for was reported.
-//
-// `reserve` is `runtime.think_answer_reserve` (default kMaxAnswerReserve). A
-// negative value is not a smaller reserve, it is a corrupted config that would
-// hand the model MORE than max_tokens of thinking room, so it clamps to 0
-// (= "no floor", the fractional budget alone decides).
+// think_limit takes the LATER of the fractional budget and max_tokens minus
+// answer_reserve_for's reserve (max_tokens/4, floored at kMaxAnswerReserve, #1248).
+// reserve = runtime.think_answer_reserve; negative clamps to 0 (never adds thinking room).
 inline constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve) {
     const int floor = reserve > 0 ? reserve : 0;
     const int scaled = max_tokens / 4;
     return scaled > floor ? scaled : floor;
 }
 
-// The reasoning-token limit every enforcement path must agree on: the LATER of
-// the fractional budget and "everything but the answer reserve". Three paths
-// enforce it (the eager sampler, the CUDA-graph loop's device counter, and the
-// n-gram/scheduler gates) and the graph loop used to compute the fraction ALONE,
-// so it cut thinking earlier than the documented rule: at max_tokens 1024 it
-// fired at 512 where the host rule allows 768. One function, so
-// runtime.think_answer_reserve reaches all of them.
+// Reasoning-token limit shared by all enforcement paths (eager sampler,
+// CUDA-graph device counter, n-gram/scheduler gates): the LATER of the
+// fractional budget and max_tokens minus the answer reserve.
 inline constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve) {
     const int frac_limit = static_cast<int>(max_tokens * think_budget);
     const int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
     return frac_limit > reserve_limit ? frac_limit : reserve_limit;
 }
 
-// Should the sampler force a </think> token this step? True when budgeting is
-// active, a </think> id exists, the model is still thinking, and the reasoning
-// count has reached the limit. The limit is the LATER of the fractional budget
-// and "everything but a capped answer reserve" — so a larger max_tokens only ever
-// grants MORE thinking room, never less (strictly fewer forced cuts).
+// True when budgeting is active, a </think> id exists, still thinking, and the
+// reasoning count reached think_limit (LATER of fraction / reserve-based cap),
+// so a larger max_tokens only ever grants more thinking room, never less.
 inline bool should_force_think_end(float think_budget, int32_t think_end_id, int max_tokens,
                                    const std::vector<int32_t>& output_tokens, int32_t think_start_id,
                                    bool started_in_think, int answer_reserve = kMaxAnswerReserve) {
@@ -175,14 +102,9 @@ inline bool should_force_think_end(float think_budget, int32_t think_end_id, int
     return currently_thinking && n_reasoning >= limit;
 }
 
-// --- Text-tail </think> / <think> detection (track_think_state fallback) ---
-//
-// For tokenizers that ship <think>/</think> as added_tokens with special=False
-// (Qwen3.6, Qwen3-Coder NVFP4 SafeTensors): there is no single token id, the
-// markers arrive split across multiple BPE pieces (e.g. ['</','think','>']).
-// We accumulate decoded pieces in a sliding window and match the literal string.
-//
-// Holds exactly the state track_think_state mutates on a Request.
+// Fallback for tokenizers that ship <think>/</think> as added_tokens with
+// special=False (Qwen3.6, Qwen3-Coder NVFP4): no single token id, so markers
+// arrive split across BPE pieces, matched via a sliding decoded-text window (mirrors track_think_state on Request).
 struct TextThinkState {
     bool in_think_block = false;
     std::string think_text_tail;
@@ -215,20 +137,9 @@ struct TextThinkState {
     }
 };
 
-// --- Post-</think> grace period (should_stop) ---
-//
-// After the think block closes, a too-eager stop is suppressed ONLY while the
-// model has not yet produced any real answer content: numerically-noisy NVFP4
-// quants can close an empty thinking block in ~3 tokens and then EOS to a
-// zero-content completion. The grace releases the instant a real (non-stop)
-// token appears (`content_after_think`) — so a complete short answer like
-// "Paris" or "VIOLET-2218" stops cleanly on its own `<|im_end|>` instead of
-// being padded/repeated. `kMinAnswerAfterThink` is a HARD CAP: even with no
-// content, the grace lifts after that many tokens so a model that only emits
-// stops still finishes (bounded), it is not a minimum answer length.
-// `think_exit_idx` is the output index at which think last closed (-1 if never),
-// `output_size` the current output length, `content_after_think` whether a
-// non-stop token has been emitted since that exit.
+// Suppresses a too-eager stop after </think> only until real content appears
+// (content_after_think) - NVFP4 noise can close an empty think block in ~3
+// tokens then EOS. kMinAnswerAfterThink is a HARD CAP (not a min answer length): grace lifts after that many tokens regardless of content.
 inline constexpr int kMinAnswerAfterThink = 16;
 
 // post_decode_step_kernel (cuda_graph.cu) evaluates the same rules on device.
@@ -245,15 +156,9 @@ IMP_THINK_HD inline bool grace_blocks_stop(int think_exit_idx, int output_size, 
     return tokens_since_exit < kMinAnswerAfterThink;
 }
 
-// --- Sampler-side stop mask (fill_sampling_params, post_decode_step_kernel) ---
-//
-// Wherever should_stop would SUPPRESS a stop token, mask it before sampling
-// instead: a suppressed stop stays in the context, and on Qwen3.8-27B a
-// near-tie inside the think block then picks <|endoftext|>, the model
-// continues as a new document ("Human: ...") and content ends empty
-// (AUDIT_qwen38_nvfp4 P3). Bounded: in-think only while a budget can force
-// </think> (`budget_can_close` = think_budget > 0 and a </think> id exists),
-// after the close only for the kMinAnswerAfterThink grace window.
+// Masks a stop token before sampling wherever should_stop would suppress it
+// (fill_sampling_params, post_decode_step_kernel): a suppressed stop left in
+// context can pick <|endoftext|> on a near-tie (AUDIT_qwen38_nvfp4 P3). Bounded: in-think only while budget_can_close, else the kMinAnswerAfterThink grace window.
 IMP_THINK_HD inline bool stop_mask_active(bool in_think, bool budget_can_close, int think_exit_idx,
                                           int output_size, bool content_after_think, bool ignore_eos) {
     if (ignore_eos)
@@ -263,12 +168,9 @@ IMP_THINK_HD inline bool stop_mask_active(bool in_think, bool budget_can_close, 
     return grace_blocks_stop(think_exit_idx, output_size, content_after_think);
 }
 
-// Does a decoded token piece count as real answer content for the grace above?
-// A token whose decoded text is empty or pure whitespace (newlines/spaces the
-// model routinely emits right after </think>, e.g. "\n" / "\n\n") must NOT
-// release the grace — otherwise a model that closes think, emits a newline,
-// then stops yields a 0-content completion (the post-#798 regression). Only a
-// token with at least one non-whitespace byte is real content.
+// Whitespace-only decoded text (e.g. "\n" right after </think>) must NOT count
+// as real content or release the grace, or a stop right after it yields a
+// 0-content completion (#798). Only a token with a non-whitespace byte counts.
 inline bool piece_is_whitespace(const std::string& piece) {
     return piece.find_first_not_of(" \t\n\r\f\v") == std::string::npos;
 }

@@ -1,44 +1,26 @@
-// =============================================================================
-// engine_spec_capture.cpp — graph-captured verify chunk (#847)
-// =============================================================================
+// engine_spec_capture.cpp: graph-captured verify chunk (#847).
 //
-// The eager verify forward pays ~1800 kernel launches per cycle in host
-// launch pacing (~8 ms on Qwen3-Coder-30B after the #854 LM-head batching).
-// This module captures the chunk forward into one CUDA graph per padded
-// chunk length ("bucket") and replays it every verify step.
+// Capture mode (InferenceState::ctx_capacity > 0): kernels read real lengths
+// from device (context_lens[0], d_past_len) instead of baking q_offset/ctx_len;
+// grids and K/V scratch size once for ctx_capacity; per-step values refresh via
+// H2D (d_spec_tokens_/positions_/block_table_/context_len_/past_len_).
 //
-// Replay across context growth is the hard part: the chunked-continuation
-// attention path historically baked q_offset/ctx_len into gather grids,
-// scratch sizes and FA2 kernel arguments. In capture mode (InferenceState::
-// ctx_capacity > 0) those kernels read the REAL lengths from device instead
-// (context_lens[0] and d_past_len), grids and the persistent K/V scratch are
-// sized once for ctx_capacity, and everything that varies per step lives in
-// device buffers the engine refreshes via H2D before each replay
-// (d_spec_tokens_/positions_/block_table_/context_len_/past_len_).
+// Bucketing pads drafts to {9, 17, 33, k_max+1} tokens with copies of t0;
+// padded rows sit after every real row (invisible under causal masking) and
+// are dropped by the same rollback as rejected drafts; verify reads argmax
+// rows [0, real_chunk_len) only.
 //
-// Bucketing: drafts are padded up to {9, 17, 33, k_max+1} tokens with copies
-// of t0. Padded rows sit at positions AFTER every real row, so causal masking
-// makes them invisible to the real rows; their KV entries are dropped by the
-// same rollback that drops rejected drafts. The verify consumes argmax rows
-// [0, real_chunk_len) only.
+// Hybrids (SSMState): pad rows would corrupt conv/scan state in place, so
+// chunk kernels read the real chunk length from device (d_chunk_len) and stop
+// state updates at the last real row; slab pointers (seq_base(slot)) are
+// baked in, so the graph cache key includes the recurrent slot.
 //
-// Hybrids (SSMState): the recurrent state has no causal-masking escape — pad
-// rows would advance the conv tail and scan state in place. The chunk
-// kernels therefore read the real chunk length from device (InferenceState::
-// d_chunk_len, refreshed per step like the other lengths) and stop the state
-// updates at the real last row. The slab pointers (seq_base(slot)) are baked
-// into the graph, so the cache key includes the recurrent slot.
-//
-// Safety: the first use of a bucket runs eager through the SAME capture-mode
-// code path (cuBLASLt/CUTLASS algo warmup — census PR #855 showed only the
-// first chunk per shape fails capture); the second use captures. Any capture
-// or launch failure falls back to the eager forward, and repeated failures
-// doom capture for the process (the census crash class — e.g. a forward that
-// syncs on host — would otherwise retry forever). Graphs hold raw pointers
-// into the executor workspace and the engine's spec staging buffers; both
-// invalidate the graph cache when they move (workspace_generation, and
-// free_spec_buffers_ → free_spec_graphs_).
-// =============================================================================
+// First use of a bucket runs eager through the same capture-mode path (algo
+// warmup); second use captures. Capture/launch failure falls back to eager;
+// repeated failures permanently disable capture for the process. Graphs bake
+// pointers into the executor workspace and spec staging buffers; both
+// invalidate the cache on move (workspace_generation; free_spec_buffers_ ->
+// free_spec_graphs_).
 
 #include "compute/gemm.h"
 #include "core/logging.h"
@@ -54,16 +36,10 @@
 
 namespace imp {
 
-// Pre-size everything on the speculative verify path that would otherwise be
-// allocated lazily during serving (A7 step 5.4). After the T2 slot pool these
-// were the ONLY device allocations the --wrap interposer still saw — nine of
-// them, each at "1 call" per process: the chunk-capture K/V scratch, the
-// consolidated spec staging block, and the verify argmax/penalty scratch.
-//
-// None of them is per-request; they are one-shot capacity resolutions that
-// happen at first use instead of at init. Doing them here turns a surprise
-// mid-serving claim into a planned one, which is the difference that #1103 was
-// about — the caches lost that race against the KV pool.
+// Pre-sizes the speculative-verify allocations (chunk-capture K/V scratch,
+// consolidated spec staging block, verify argmax/penalty scratch) that would
+// otherwise be taken lazily during serving, avoiding a race against the KV
+// pool for capacity (#1103).
 //
 // Capacity comes from the same expressions the runtime uses, evaluated at
 // their maxima; a later call with a smaller request hits the >= guards inside
@@ -74,11 +50,9 @@ void Engine::prewarm_spec_scratch_() {
     if (!spec_on || !executor_)
         return;
 
-    // Resolves spec_capture_ctx_cap_ and, through it, the chunk-capture K/V
-    // scratch. Called through spec_capture_ready_ on purpose: it carries the
-    // eligibility guards (host-offload, residual KV, the census probe), and
-    // duplicating them here would be a second copy to keep in sync. ctx_padded
-    // = 1 passes, so the call is a side-effect-only resolution.
+    // Goes through spec_capture_ready_ (not a direct resolve) so its
+    // eligibility guards (host-offload, residual KV, census probe) are not
+    // duplicated; ctx_padded=1 makes this a side-effect-only call.
     if (scfg.capture)
         (void)spec_capture_ready_(1);
 
@@ -120,15 +94,13 @@ int Engine::spec_capture_ctx_tier_(int ctx_padded) const {
 
 int Engine::spec_capture_bucket_(int chunk_len) const {
     const int cap = std::max(chunk_len, spec_capture_bucket_max_());
-    // 3/5 buckets (#964): the decode-attention verify route derives its
-    // split-K count from the PADDED row count at capture time — a 2-row
-    // draft padded to 9 rows baked 5 splits instead of 21 and the per-CTA
-    // KV walk grew 4x (251 vs 65 us/layer at 16k). Finer buckets keep the
-    // baked split geometry close to the real chunk; pad rows attend 1 token.
-    // 4 = the token-recycling depth-3 chunk (#1055): exactly one batched-GEMV
-    // weight sweep (MR=4); padding it into 5 pays a second sweep.
-    // 6 / 8 = the W=2 multi-candidate chunk at depth 2 / 3 (W * (1 + depth)
-    // rows); rounding those to 9 padded a third of the rows for nothing.
+    // 3/5 buckets (#964): split-K count derives from the PADDED row count at
+    // capture time, so finer buckets keep it close to the real chunk (a 2-row
+    // draft padded to 9 baked 5 splits instead of 21, KV walk grew 4x).
+    // 4 = token-recycling depth-3 chunk (#1055): one batched-GEMV weight
+    // sweep (MR=4); padding to 5 pays a second sweep.
+    // 6/8 = W=2 multi-candidate chunk at depth 2/3 (W*(1+depth) rows);
+    // rounding to 9 wastes a third of the rows.
     for (int b : {3, 4, 5, 6, 8, 9, 17, 33}) {
         if (chunk_len <= b && b <= cap)
             return b;
@@ -144,11 +116,9 @@ bool Engine::spec_capture_ready_(int ctx_padded) {
     // chunk, diagnostics only).
     if (runtime_config_.diagnostics.spec_capture_probe)
         return false;
-    // SSMState hybrids are capture-eligible: the recurrent chunk kernels
-    // read the real chunk length from device (InferenceState::d_chunk_len)
-    // so pad rows never advance the committed state, and the graph cache is
-    // keyed on the recurrent slot (the slab pointers are baked). MoE
-    // host-offload syncs on the host per layer.
+    // SSMState hybrids ARE capture-eligible (pad rows read chunk length from
+    // device, cache keyed on the recurrent slot); MoE host-offload is not: it
+    // syncs on the host per layer.
     if (offload_mgr_)
         return false;
     // BitDecoding residual KV advances ring state on the host per forward.
@@ -190,26 +160,21 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         spec_capture_ws_gen_ = ws_gen;
     }
 
-    // Hybrids bake the recurrent-slab pointers (seq_base(slot)) into the
-    // graph — key it on the slot so a slot change gets its own graph.
-    // The batched verify (ssm_out_slots) addresses every slot through device
-    // tables, so its graphs bake no slab pointer: keyed like a dense model.
+    // Hybrids bake the recurrent slab pointer (seq_base(slot)) into the
+    // graph, so slot is part of the cache key. Batched verify addresses
+    // slots via device tables (no baked pointer), so it keys like a dense
+    // model.
     const bool batched_verify = state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
     const int rec_slot = (state.ssm_state && !batched_verify) ? state.ssm_seq_id : -1;
     const int grouped_rows = state.ssm_grouped_chunk() ? state.ssm_seq_tokens : 0;
     auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity, rec_slot, grouped_rows}];
     if (slot.exec) {
-        // diagnostics.spec_capture_fidelity: a cached graph must compute the same
-        // thing an eager forward of the same state computes. Run eager, restore
-        // the recurrent slab from the pre-chunk copy (a non-hybrid needs no
-        // restore — re-running the chunk rewrites the same KV rows with the same
-        // inputs), replay the cached graph, diff the row-0 logits. Generation
-        // continues from the graph, so a run under this flag still produces what
-        // production would. Measured 2026-08-20: 0/400 differing on
-        // Qwen3.8-27B-NVFP4 and Qwen3.6-35B-A3B-NVFP4, 45/400 on
-        // NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4.
-        // (Not for the batched verify: its eager forward moves the live slots
-        // in place, so a second forward of the same state cannot be staged.)
+        // diagnostics.spec_capture_fidelity: verifies a cached graph reproduces
+        // an eager forward of the same state (restores the recurrent slab
+        // pre-replay; non-hybrids need no restore) and diffs the row-0 logits.
+        // Not used for the batched verify: its eager forward mutates live
+        // slots in place, so a second forward of the same state cannot be
+        // staged.
         if (runtime_config_.diagnostics.spec_capture_fidelity && model_ && !batched_verify) {
             const bool hybrid_restore = state.ssm_state != nullptr && spec_state_scratch_ != nullptr &&
                                         rec_slot >= 0;
@@ -272,10 +237,10 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         }
     };
 
-    // Permanent telemetry (ConditionalRunner precedent): the first-use gap of
-    // a bucket is the largest inter-token gap a warm server still shows
-    // (39-93 ms on Qwen3.8-27B-NVFP4 against 10.7 ms steps), and only a
-    // server log prices it without CUPTI inflation.
+    // Permanent telemetry: the first-use gap of a bucket is the largest
+    // inter-token gap a warm server still shows (39-93 ms vs 10.7 ms steady
+    // steps on Qwen3.8-27B-NVFP4); only a server log prices it without CUPTI
+    // inflation.
     const auto t_cap0 = std::chrono::steady_clock::now();
     cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
     if (err != cudaSuccess) {
@@ -345,15 +310,11 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
     return true;
 }
 
-// =============================================================================
-// #847 graph-captured-verify feasibility probe (diagnostics.spec_capture_probe)
-// =============================================================================
-// Stream-captures the chunk forward, instantiates and launches the graph once,
-// then destroys it. Any failure (capture-illegal call inside the forward,
-// instantiate error — the cuBLASLt status-14 class) falls back to the eager
-// forward, so the verify step always completes. Capture+instantiate every
-// chunk is NOT a perf path; this only answers "is the verify forward
-// capturable, and from which chunk on" per model class.
+// #847 graph-captured-verify feasibility probe (diagnostics.spec_capture_probe).
+// Capture/instantiate failure (e.g. the cuBLASLt status-14 class) falls back
+// to eager, so the verify step always completes. NOT a perf path: answers
+// only whether the forward is capturable, and from which chunk, per model
+// class.
 void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
                                          cudaStream_t stream) {
     static long probes = 0, launched = 0;

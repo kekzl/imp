@@ -261,7 +261,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   (`temperature: 0` or `top_k: 1`); a think budget disables it inside the think block, and the
   server defaults `think_budget` to 0.5, so on a reasoning model it never runs out of the box.
   Penalties are not a blocker at the default `repeat_last_n: 0`. Six request features disable it
-  outright in one condition (`src/runtime/engine_spec_ngram.cpp:295-297`): `logprobs`,
+  outright in one condition (`src/runtime/engine_spec_ngram.cpp:281-283`): `logprobs`,
   `json_mode`, `json_schema`, `regex_pattern`, `grammar`, `tool_constraint_tools` (the verify
   chunk replicates no FSM masks). Consequence: every tool call and every structured output runs
   without speculation, and `logprobs` cannot observe what speculation does. Other engines have
@@ -285,7 +285,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
   prefill; imp saves the state at block boundaries in a `RecurrentSnapshotStore` (a few device
   slots, evicted entries kept in a pinned host tier, `server.recurrent_snapshot_host_mb`) and
   restores it on a prefix hit, overwriting the state slab
-  (`src/runtime/engine_sampling_stop.cpp:297`). Lookup
+  (`src/runtime/engine_sampling_stop.cpp:262`). Lookup
   keys on the KV prefix hash, but every chat request begins with the same chat-template header, so
   the first block matches across unrelated prompts, and the restored state was produced under
   different chunk boundaries on a non-bit-reproducible forward. Measured (Qwen3.8-27B-NVFP4,
@@ -495,7 +495,7 @@ All seven were green in `FEATURES.md` without a gate until #1680.
 
   Structural cause, not a kernel defect: in a speculative arm every emitted token comes out of the
   multi-row verify chunk, none out of the single-token decode step (chunk built at
-  `src/runtime/engine_spec_ngram.cpp:740,751`, only emit site `:988`). Proven by an image whose
+  `src/runtime/engine_spec_ngram.cpp:717,751`, only emit site `:988`). Proven by an image whose
   `n == 1` decode path emitted pure garbage while its speculative arm stayed byte-identical to
   stock. Decode and chunk also dispatch different kernels per shape: 10240x5120 and 12288x5120
   take `gemv_nvfp4_kpar` (32-lane `warp_k_loop`) at decode and `gemm_nvfp4_batched` in the chunk;

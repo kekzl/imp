@@ -1,9 +1,5 @@
-// Engine prefill execution: step_prefill driver, per-request chunked
-// prefill (step_prefill_one), KV-block allocation and metadata upload.
-//
-// Split out of engine_scheduler.cpp on 2026-08-26 (the file had doubled to
-// 2230 code LOC past its allowlist rationale). Pure move: the function bodies
-// are byte-identical to their previous form in that file.
+// Engine prefill execution: step_prefill driver, per-request chunked prefill
+// (step_prefill_one), KV-block allocation and metadata upload.
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
@@ -31,19 +27,13 @@ namespace imp {
 using engine_internal::build_logprob_info;
 using engine_internal::free_prefill_buffers;
 
-// =====================================================================
-// step_prefill — process all prefill requests
-// =====================================================================
-
 void Engine::step_prefill(cudaStream_t stream) {
     int resolved = resolve_prefill_chunk_size_();
     int effective_chunk = (resolved > 0) ? resolved : executor_->max_tokens();
-    // Hard cap: chunk size must never exceed the executor's max_tokens
-    // (which is itself capped to 2048 for SSM/GDN hybrids to bound workspace
-    // VRAM — executor_workspace.cu:252). Without this clamp, a server-side
-    // prefill_chunk_size default (handlers.cpp) would overflow the
-    // workspace and crashes with `n_tokens (X) exceeds max_tokens (Y)` →
-    // `terminate: reshape: numel mismatch` on long prompts to e.g. Qwen3.6.
+    // Hard cap: chunk size must never exceed the executor's max_tokens (itself
+    // capped to 2048 for SSM/GDN hybrids, executor_workspace.cu:252). Without
+    // this a server-side prefill_chunk_size default overflows the workspace
+    // (`n_tokens (X) exceeds max_tokens (Y)` -> reshape numel mismatch).
     if (effective_chunk > executor_->max_tokens()) {
         effective_chunk = executor_->max_tokens();
     }
@@ -54,14 +44,11 @@ void Engine::step_prefill(cudaStream_t stream) {
     }
 
     // Decode-aware chunking: prefill and decode share one CUDA stream, so
-    // every chunk forward inserts its full latency (~40-80 ms at 2048)
-    // between two decode steps of every concurrently DECODING session. Cap
-    // the chunk while decoders are active so their inter-token latency stays
-    // bounded during another session's ingest; the full chunk (and its
-    // better weight-traffic amortization) returns as soon as nobody decodes.
-    // With runtime.prefill_cap_fairness = W the cap scales by W x waiting /
-    // decoding (prefill_pacing.h): a burst's 30 waiters are not paced behind
-    // its 2 first finishers. 0 when nobody decodes.
+    // every chunk forward inserts its latency (~40-80 ms at 2048) between two
+    // decode steps of concurrently DECODING sessions. Caps the chunk while
+    // decoders are active; full chunk returns once nobody decodes.
+    // runtime.prefill_cap_fairness=W scales the cap by W x waiting/decoding
+    // (prefill_pacing.h), so a burst's waiters aren't paced behind its first finishers. 0 when nobody decodes.
     const int configured_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
     const int decode_cap = paced_prefill_cap(configured_cap, effective_chunk,
                                              static_cast<int>(sched_prefill_batch_.size()),
@@ -80,20 +67,12 @@ void Engine::step_prefill(cudaStream_t stream) {
         effective_chunk = capped;
     }
 
-    // Decode-aware batching: the size cap above bounds ONE chunk, this bounds
-    // how much prefill runs per step before the decoders get their turn
-    // (#1643). The budget is TOKEN-charged, not forward-counted: the old
-    // count cap of 1 was measured on ~5.2k-token ingests, where one forward
-    // IS the whole latency story - but it also serialised 31 concurrent
-    // ~110-token prompts to one per engine step, which starved a burst
-    // arrival for seconds (TTFT up to 8 s at 32 streams; the decoders being
-    // protected were the burst's own first finishers). Each forward charges
-    // at least kPrefillForwardFloorTokens, because a short forward's cost is
-    // launch-bound (64 layers), not token-bound - so a 1024 budget admits at
-    // most 4 small forwards (~100 ms stall, the same bound the size cap
-    // targets) and exactly 1 full-sized chunk (the #1643 schedule,
-    // unchanged). Starting index rotates so the ingests that do not run this
-    // step are the ones that ran last step.
+    // Decode-aware batching: bounds how much prefill runs per step before
+    // decoders get their turn (#1643). TOKEN-charged, not forward-counted: a
+    // count cap starves many small concurrent prompts to one per step (a short
+    // forward is launch-bound, not token-bound, hence the
+    // kPrefillForwardFloorTokens charge per forward).
+    // Starting index rotates so the ingests skipped this step are the ones that ran last step.
     const size_t n_prefill = sched_prefill_batch_.size();
     const int batch_cap = runtime_config_.runtime.prefill_batch_decode_cap;
     // The count cap bounds FORWARDS: a ragged group is one forward however
@@ -107,11 +86,8 @@ void Engine::step_prefill(cudaStream_t stream) {
 
     // Rotation is by request ID, not by index: requests LEAVE the batch as
     // their prefill completes, so an index-based rotor drifts over the
-    // shrunken list and systematically jumps a moving cohort (measured as
-    // 5 of 32 burst requests starved to wave-end TTFT while the budget had
-    // room). The rotor remembers the last-served id and starts just past
-    // it; ids are admission-ordered, so this is a clean round-robin under
-    // membership churn.
+    // shrunken list and systematically starves a moving cohort. The rotor
+    // remembers the last-served id and starts just past it (ids are admission-ordered).
     size_t start = 0;
     for (size_t i = 0; i < n_prefill; i++) {
         if (sched_prefill_batch_[i]->id > sched_prefill_last_id_) {
@@ -121,26 +97,16 @@ void Engine::step_prefill(cudaStream_t stream) {
     }
     size_t ran = 0;
     // Cross-sequence ragged prefill (runtime.prefill_batch): eligible requests
-    // are collected and run as ONE ragged forward after the loop; ineligible
-    // ones keep the serial path. Selection order, budget accounting and the
-    // rotor are identical either way, with one pricing difference: the
-    // 256-token launch-cost floor is charged once per FORWARD, so ragged
-    // members charge their real chunk tokens (the group shares one launch
-    // set; a 30-row continuation tail priced at 256 was measured burning a
-    // whole engine step per 2-3 tails on a 32-stream burst). The step's
-    // inserted latency still scales with total rows, which the token budget
-    // continues to bound.
+    // run as ONE ragged forward after the loop; ineligible ones keep the serial
+    // path. Selection order, budget accounting and the rotor are identical
+    // either way, except the 256-token launch-cost floor is charged once per
+    // FORWARD, so ragged members charge their real chunk tokens instead.
     const bool ragged_mode = prefill_ragged_enabled_();
     std::vector<std::shared_ptr<Request>> ragged_batch;
     bool ragged_floor_charged = false;
     // Rows the ragged forward can still take this step. step_prefill_ragged_
-    // packs its members up to effective_chunk rows in total and clamps each
-    // member to what is left, so a member is charged the rows it will get,
-    // not its full chunk. Charging the full chunk refused the next prompt
-    // after a continuation tail (a 58-row tail left 966 of a 1024 budget,
-    // the next prompt's 1024-row chunk did not fit) and the step ran the
-    // tail alone: 32 x ~1080-token prompts took 54 prefill steps for 34
-    // forwards' worth of rows, half of them launch-bound tails.
+    // packs members up to effective_chunk rows total, clamping each to what is
+    // left, so a member is charged the rows it will get, not its full chunk.
     int ragged_rows_left = std::min(effective_chunk, executor_->max_tokens());
     // Mixed prefill+decode step (runtime.prefill_mixed_decode): the decoders
     // ride this step's ragged forward as one-row members, so their rows come
@@ -176,13 +142,9 @@ void Engine::step_prefill(cudaStream_t stream) {
             charge = std::max(kPrefillForwardFloorTokens, chunk_tokens);
         }
         // `budgeted`, not `token_budget > 0`: an exhausted budget must break,
-        // not disarm the check (that bug ran the whole batch after charge 4).
+        // not disarm the check (a zero budget must still stop the loop).
         // A member joining an existing ragged group is bounded by the rows the
-        // forward has left, not by the token budget: the group's first member
-        // was charged the launch floor, and that floor otherwise refused the
-        // next prompt's chunk (a 5-row snapshot tail charged 256 left 768 of
-        // a 1024 budget, the next 1019-row chunk did not fit, the step ran a
-        // handful of tails alone).
+        // forward has left, not by the token budget - the group's first member already paid the launch floor.
         const bool joins_group = rides_ragged && !ragged_batch.empty();
         if (budgeted && ran > 0 && !joins_group && charge > token_budget)
             break;
@@ -215,18 +177,12 @@ void Engine::step_prefill(cudaStream_t stream) {
         sched_prefill_last_id_ = -1;
 }
 
-// =====================================================================
-// step_prefill_one — process a single prefill request
-// =====================================================================
-
 // Allocate KV blocks for a prefill step. Two sub-paths:
-//   - prefix caching: try allocate_blocks_with_prefix, evict + retry on
-//     budget pressure, advance `offset` past the reused prefix.
-//   - plain: allocate `additional` blocks, evict + retry, cancel on hard
-//     failure.
-// Returns false on unrecoverable failure (req->status already set to
-// CANCELLED). On prefix-cache reuse, mutates offset / chunk_len /
-// is_last_chunk / ctx_len in place.
+//   - prefix caching: allocate_blocks_with_prefix, evict + retry on budget
+//     pressure, advance `offset` past the reused prefix.
+//   - plain: allocate `additional` blocks, evict + retry, cancel on hard failure.
+// Returns false on unrecoverable failure (req->status already CANCELLED). On
+// prefix-cache reuse, mutates offset/chunk_len/is_last_chunk/ctx_len in place.
 bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_bs, int total_input,
                                          int effective_chunk, int& offset, int& chunk_len,
                                          bool& is_last_chunk, int& ctx_len, cudaStream_t pf_stream) {
@@ -234,30 +190,22 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     int prefix_reused = 0;
     int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
 
-    // Perplexity capture must forward EVERY position — a prefix-cache hit
-    // skips the reused prefix's forward, leaving those NLL slots at 0.
-    // Embedding requests mean-pool EVERY position's hidden state — a
-    // prefix-cache hit would skip the reused prefix's forward and silently
-    // bias the pooled vector (#1005). Same class as the ppl_capture guard.
-    // An image request participates only through its content hash: the cache is
-    // addressed by TOKEN IDS, every image token carries the SAME id, and two
-    // different pictures would otherwise share a long prefix and the second one
-    // would answer about the first one's picture. A request that carries an
-    // image but reports no hash is excluded outright — a missed plumbing site
-    // must degrade to "no reuse", never to "the previous picture".
+    // Perplexity capture must forward EVERY position: a prefix-cache hit skips
+    // the reused prefix's forward, leaving those NLL slots at 0.
+    // Embedding requests mean-pool EVERY position's hidden state: a hit would
+    // skip the reused forward and silently bias the pooled vector (#1005).
+    // An image request participates only through its content hash (cache is
+    // addressed by TOKEN IDS, every image token shares one id): a request with
+    // an image but no hash is excluded outright, degrading to "no reuse", never to "the previous picture".
     const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb ||
                            req->n_vision_tokens > 0;
     const bool cacheable = !has_image || req->vision_content_hash != 0;
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
-        // Hybrid models cap reuse at the recurrent-snapshot boundary, exactly
-        // as the scheduler's admission path does (scheduler.cpp). This branch
-        // passed -1 (unlimited) with no snapshot lookup at all: a KV prefix
-        // reused past the last snapshot carries attention KV the recurrent
-        // state never saw, and the continuation would decode from a zeroed GDN
-        // state. Unreachable today because the scheduler pre-allocates every
-        // admitted request, which is exactly why it must not be left as a
-        // second policy waiting for the first caller that skips admission.
+        // Hybrid models cap reuse at the recurrent-snapshot boundary, same as
+        // the scheduler's admission path (scheduler.cpp): reuse past the last
+        // snapshot would decode from a zeroed GDN state. Unreachable today
+        // (scheduler pre-allocates every admitted request) but must stay guarded for a caller that skips admission.
         const int max_reuse =
             (recurrent_snapshots_ && ssm_state_) ? hybrid_prefix_reuse_limit_(*req) : -1;
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, max_reuse,
@@ -287,11 +235,9 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
                 req->prefill_offset = offset;
                 chunk_len = total_input - offset;
                 is_last_chunk = true;
-                // Re-apply the offset-aware S-matrix clamp: the caller computed
-                // effective_chunk for the pre-skip offset, and a cuBLAS-served
-                // chunk at the new (larger) offset may need to be smaller
-                // (n × ctx_len ≤ s_cap²). The upfront servability check in
-                // step_prefill_one guarantees ≥ kv_bs fits at any offset.
+                // Re-apply the offset-aware S-matrix clamp: effective_chunk was
+                // computed for the pre-skip offset, but a cuBLAS-served chunk at
+                // the new offset may need to shrink (n × ctx_len ≤ s_cap²).
                 int max_chunk = executor_->max_safe_prefill_chunk(offset, effective_chunk, kv_bs);
                 if (max_chunk > 0 && max_chunk < effective_chunk)
                     effective_chunk = max_chunk;
@@ -304,14 +250,10 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
             }
         }
 
-        // hybrid_prefix_reuse_limit_ attached a snapshot when it computed the
-        // cap above, and that snapshot is only valid if the prefill actually
-        // resumes at the snapshot's OWN boundary. The scheduler drops it on a
-        // mismatch (scheduler.cpp) and this branch had no counterpart: the skip
-        // here is `prefix_reused - 1` blocks and then clamped, so a restore at
-        // block b could be paired with a prefill resuming at block b-1, i.e. a
-        // recurrent state one block ahead of the KV it continues from. Dropping
-        // it costs a full prefill; keeping it corrupts the answer silently.
+        // hybrid_prefix_reuse_limit_ attached a snapshot valid only if the
+        // prefill resumes at its OWN boundary. Since the skip here is
+        // `prefix_reused - 1` blocks then clamped, a mismatch could pair a
+        // restore at block b with a prefill resuming at b-1 (state one block ahead of its KV) - dropping costs a prefill, keeping corrupts silently.
         if (req->recurrent_restore && req->recurrent_restore->n_tokens != req->cached_tokens) {
             IMP_LOG_WARN(
                 "PrefixCache: seq %d snapshot boundary %d != %d skipped tokens - discarding the "
@@ -323,9 +265,8 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
         int additional = num_blocks - existing;
         if (additional > 0) {
             // allocate_blocks already reclaims cached blocks; if it still fails
-            // the KV cache is genuinely exhausted. The old evict_lru fallback
-            // freed a LIVE sequence (no recompute path) → silent corruption.
-            // Reject-newest: cancel this request, leave in-flight ones intact.
+            // the KV cache is genuinely exhausted. Reject-newest: cancel this
+            // request, leave in-flight ones intact (evicting a live sequence corrupts silently).
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
                 kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
                 req->cancel_reason = CancelReason::KvCapacity;
@@ -338,11 +279,9 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     return true;
 }
 
-// Upload prefill metadata to device. Uses the prefill_pool_ pre-allocated
-// buffers when chunk_len fits; otherwise falls back to cudaMallocAsync and
-// frees on any allocation failure. Pinned staging buffers are used for the
-// token_ids / positions H2D copies when available (avoids internal
-// pageable→pinned copy inside cuMemcpy).
+// Upload prefill metadata to device: uses the prefill_pool_ pre-allocated
+// buffers when chunk_len fits, else falls back to cudaMallocAsync (freed on
+// failure). Pinned staging buffers avoid an internal pageable->pinned copy.
 bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::vector<int>& block_table,
                                       const std::vector<int>& swa_block_table, int chunk_len, int offset,
                                       int ctx_len, cudaStream_t pf_stream, int32_t*& d_token_ids,
@@ -399,16 +338,11 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
         }
     }
 
-    // Use pinned staging buffers when available (avoids internal pageable->pinned copy).
     // PINNED sources are truly asynchronous: the H2D reads the buffer when the
-    // copy EXECUTES (in stream order, behind all prior chunks' kernels), not
-    // when it is enqueued. Before rewriting the staging for this chunk, wait
-    // until the previous chunk's copies have actually run — otherwise a host
-    // that runs several fully-async chunks ahead (FA2 attention path, no
-    // implicit syncs) uploads chunk c+N's tokens/positions for chunk c
-    // (#548: catastrophic chunked-prefill NLL, timing/arch-dependent).
-    // Pageable sources below (block_table, ctx_len) are safe by CUDA
-    // semantics (captured before cudaMemcpyAsync returns).
+    // copy EXECUTES (stream order), not when enqueued. Must wait for the
+    // previous chunk's copies to run first, or a host running several
+    // fully-async chunks ahead uploads chunk c+N's data for chunk c (#548).
+    // Pageable sources below (block_table, ctx_len) are safe by CUDA semantics.
     if (pf_staging_evt_ && (h_pf_token_ids_.as<int32_t>() || h_pf_positions_.as<int>()) &&
         chunk_len <= config_.max_seq_len)
         IMP_CUDA_CHECK_LOG(cudaEventSynchronize(pf_staging_evt_));
@@ -460,11 +394,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int offset = req->prefill_offset;
 
     // Out-of-scope archs (Gemma-3/4 SWA, Llama-4, sub-byte KV) lack a paged
-    // chunked-prefill path, so the chunked-prefill branch in
-    // executor_attention.cu aborts on chunk 2+ (q_offset > 0 + per_layer
-    // shapes). Reject prompts > effective_chunk gracefully here instead of
-    // letting them hit std::abort. Real fix is the paged hybrid-prefill
-    // kernel (roadmap).
+    // chunked-prefill path: executor_attention.cu aborts on chunk 2+. Reject
+    // prompts > effective_chunk gracefully here instead of hitting std::abort.
+    // Real fix is the paged hybrid-prefill kernel (roadmap).
     if (offset == 0 && total_input > effective_chunk && !supports_chunked_prefill_()) {
         IMP_LOG_ERROR(
             "Prompt has %d tokens but max_tokens=%d on hybrid/out-of-scope arch — "
@@ -475,11 +407,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
 
     // Admission heads-up: the KV pool is often VRAM-clamped below the requested
-    // max_seq_len. A prompt that fills the pool prefills fine and is then
-    // cancelled on its first block append mid-decode (reject-newest) — flag it
-    // here once, at submit time, where it is actionable. req->max_tokens is NOT
-    // usable here (imp_prefill seeds a 4096 placeholder; decode_step drives the
-    // real stop), so gate on the prompt leaving less than one block of headroom.
+    // max_seq_len, so a prompt that fills it prefills fine then gets cancelled
+    // mid-decode. Flag it here, at submit time, where it is actionable.
+    // req->max_tokens is NOT usable here (imp_prefill seeds a 4096 placeholder).
     if (offset == 0 && kv_cache_raw_) {
         int64_t pool_tokens = static_cast<int64_t>(kv_cache_raw_->total_blocks()) * kv_bs;
         if (pool_tokens > 0 && total_input > pool_tokens - kv_bs) {
@@ -493,14 +423,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
 
     // Clamp effective_chunk so the chunked-attention S-matrix cannot overflow
-    // (cuBLAS stores an [nh, n, ctx_len] score matrix; n × ctx_len ≤ s_cap²).
-    // max_safe_prefill_chunk mirrors the executor dispatch and only clamps
-    // chunks that will actually land on cuBLAS (learned sinks → gpt-oss,
-    // heterogeneous shapes → Gemma-4); chunks served by the O(n) FA2/FMHA
-    // family pass through unclamped. The clamp is offset-aware: early chunks
-    // stay large and only late chunks shrink (previously EVERY chunk was
-    // clamped to the final-chunk worst case cap²/total_input — e.g. 32-token
-    // chunks across an entire 128k prompt on hd=256 hybrids).
+    // (cuBLAS stores an [nh, n, ctx_len] matrix; n × ctx_len ≤ s_cap²).
+    // max_safe_prefill_chunk mirrors the executor dispatch, clamping only
+    // chunks landing on cuBLAS (learned sinks → gpt-oss, heterogeneous shapes
+    // → Gemma-4); O(n) FA2/FMHA chunks pass unclamped. Offset-aware: early
+    // chunks stay large, only late chunks shrink.
     if (executor_) {
         if (offset == 0 && total_input > kv_bs) {
             // Upfront servability check: if even a kv_bs-sized final chunk
@@ -522,7 +449,6 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             effective_chunk = max_chunk;
     }
 
-    // Determine chunk boundaries
     int chunk_len = total_input - offset;
     bool is_last_chunk = true;
     if (chunk_len > effective_chunk) {
@@ -530,13 +456,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         is_last_chunk = false;
     }
 
-    // Snapshot boundary (hybrid recurrent state / SWA window): end a chunk
-    // exactly at the largest block-aligned prompt position so the state there
-    // can be captured — the snapshot is only restorable where reused KV
-    // blocks cover the whole prefix, and only full blocks are cacheable. The
-    // extra tail chunk is at most block_size-1 tokens, and it is a second
-    // eager chunk plus a sync on the TTFT path, so prompts under
-    // server.snapshot_min_prompt_tokens take no boundary (snapshot_boundary.h).
+    // Snapshot boundary (hybrid recurrent state / SWA window): end a chunk at
+    // the largest block-aligned prompt position so state there can be
+    // captured (only full blocks are cacheable). Extra tail chunk is at most
+    // block_size-1 tokens; prompts under server.snapshot_min_prompt_tokens skip the boundary (snapshot_boundary.h).
     const int snap_end = snapshot_end_(*req);
     if (snap_end > offset && snap_end < offset + chunk_len) {
         chunk_len = snap_end - offset;
@@ -556,10 +479,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // blocks that fell out of the window happens after the chunk commits.
     if (swa_sizing_active_) {
         // SWA snapshot restore (prefix-cache hit): fill the window blocks at
-        // exactly the reused-prefix boundary BEFORE the continuation chunk's
-        // gathers read them. Without the restored window the reused global
-        // prefix is unusable (windowed layers would attend holes) — treat a
-        // failed restore like a swa_prepare failure below.
+        // the reused-prefix boundary BEFORE the continuation chunk's gathers
+        // read them - a failed restore is treated like a swa_prepare failure below.
         if (req->swa_restore && offset > 0 && offset == req->cached_tokens) {
             const auto rt0 = std::chrono::steady_clock::now();
             const auto& entry = *req->swa_restore;
@@ -607,14 +528,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
     // First chunk of a request is where its image becomes device-resident: the
     // layout needs the prompt's final token sequence, which only exists now.
-    // The CLI leaves its image pending on the engine; the server puts it on the
-    // request itself. Both end up in `encode_qwen_image_for_`.
+    // CLI leaves the image pending on the engine; server puts it on the request; both end up in `encode_qwen_image_for_`.
     if (offset == 0) {
         (void)attach_qwen_image_(*req);
-        // The legacy global-image path (imp_set_image + the mmproj pipeline)
-        // never puts anything on the request, so the prefix-cache guard below
-        // cannot see it. Stamp the hash here, or an interactive session that
-        // switches pictures would match the previous one's blocks.
+        // The legacy global-image path (imp_set_image + mmproj pipeline) never
+        // puts anything on the request, so the prefix-cache guard can't see it.
+        // Stamp the hash here, or a session switching pictures matches stale blocks.
         if (req->vision_content_hash == 0 && vision_.has_input() && vision_.is_available())
             req->vision_content_hash = pending_image_hash_;
     }
@@ -639,13 +558,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         state.vision_embeddings = req->vision_emb->as<half>();
         state.vision_token_id = req->vision_token_id;
         state.n_vision_tokens = req->n_vision_tokens;
-        // The kernels index placeholders within the chunk they are handed, so
-        // they need to know how many this request already placed. A long enough
-        // prompt puts an image across a chunk boundary (chunks default to 2048),
-        // and without this the second chunk would re-use the image's FIRST
-        // embeddings — the wrong region of the picture, with nothing failing.
-        // Counted over the whole prompt so a prefix-cache hit, which starts at
-        // `cached_tokens`, is covered by the same arithmetic.
+        // The kernels index placeholders within the chunk they're handed, so
+        // they need how many this request already placed. A long prompt can
+        // put an image across a chunk boundary; without this the second chunk
+        // re-uses the FIRST embeddings silently. Counted over the whole prompt so a prefix-cache hit (starts at `cached_tokens`) is covered too.
         state.vision_emb_offset = image_tokens_before(req->input_tokens, req->vision_token_id, offset);
         state.n_deepstack = std::min<int>(static_cast<int>(req->deepstack_emb.size()),
                                           InferenceState::kMaxDeepStack);
@@ -670,14 +586,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
     fill_sampling_params(*req, state);
 
-    // Constraints via the per-request ConstraintManager. The old engine-global
-    // manager was re-prepared here for EVERY prefill (constrained or not),
-    // which clobbered the FSM of any concurrently decoding constrained
-    // request. Prepare once on first need; later chunks reuse the state.
-    // thinking_open = req->in_think_block: if the prompt already closed the
-    // <think> block (e.g. /no_think emits an empty <think></think> in the
-    // prompt), no </think> is ever generated — the preamble gate must enforce
-    // immediately instead of absorbing prose until the budget.
+    // Constraints via the per-request ConstraintManager: prepared once on
+    // first need, later chunks reuse the state (the old engine-global manager
+    // re-prepared on EVERY prefill, clobbering concurrently decoding requests' FSM).
+    // thinking_open = req->in_think_block: if the prompt already closed
+    // <think> (e.g. /no_think), the preamble gate must enforce immediately instead of absorbing prose until the budget.
     ensure_constraints_(req);
     if (req->constraints) {
         state.json_constrainer = req->constraints->json_constrainer();
@@ -689,15 +602,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // Penalties
     upload_penalties(*req, state, pf_stream);
 
-    // Recurrent state (SSM/GDN)
     // Reset on the first chunk of a new request so previous-request state
-    // doesn't leak in.  Subsequent chunks must NOT reset — the recurrent
-    // state built during earlier chunks must carry forward. The first chunk
-    // starts at cached_tokens (> 0 on a prefix-cache hit, where "reset"
-    // restores the matching recurrent snapshot instead of zeroing).
+    // doesn't leak in; subsequent chunks must NOT reset. First chunk starts at
+    // cached_tokens (>0 on a prefix-cache hit: "reset" restores the snapshot instead of zeroing).
     fill_recurrent_state(*req, state, /*reset=*/(offset == req->cached_tokens), pf_stream);
 
-    // Vision embeddings on first chunk.
     if (req->vision_emb && offset == 0) {
         // Per-request (server batched path): the worker encoded req->image into
         // req->vision_emb on admission, so vision batches with text.
@@ -706,10 +615,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         state.n_vision_tokens = req->n_vision_tokens;
     } else if (vision_.has_input() && vision_.is_available() && offset == 0) {
         // Global path: the C-API (imp_set_image) / imp-cli set ONE image on the
-        // engine for the next generation; its request carries no per-request
-        // embeddings, so bind the global ones. (Restores the pre-per-request
-        // binding the server no longer uses — imp_prefill_with_params builds a
-        // bare request, so without this the CLI's image was silently ignored.)
+        // engine for the next generation with no per-request embeddings, so
+        // bind the global ones (imp_prefill_with_params builds a bare request).
         state.vision_embeddings = vision_.embeddings();
         state.vision_token_id = vision_.soft_token_id();
         state.n_vision_tokens = vision_.num_image_tokens();
@@ -721,39 +628,27 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
         Tensor logits_out;
 
-        // Prefill graph capture (opt-in, Phase 4 of MoE-prefill-graphs work).
-        // Conditions: env-gated, pool path (stable device buffers), and
-        // chunk shape stable (in practice all non-last chunks share chunk_len
-        // = prefill_chunk_size). H2D upload happened above on pf_stream
-        // *before* this wrapper — captured region is forward_logits only,
-        // analogous to the decode graph pattern.
+        // Prefill graph capture (opt-in): env-gated, pool path (stable device
+        // buffers), chunk shape stable (non-last chunks share chunk_len =
+        // prefill_chunk_size). Captured region is forward_logits only, analogous to the decode graph pattern.
         const bool prefill_graph_enabled = runtime_config_.runtime.prefill_graph;
         // The M>1 NVFP4 dequant fallback lazy-cudaMallocs when its workspace
-        // couldn't be pre-allocated (largest weight > cap) — illegal under CUDA
-        // graph capture (cublasLt status 14 → cascading "previous error during
-        // capture"). Run prefill eager for those models (Qwen3.6-35B pp>=4096).
+        // couldn't be pre-allocated - illegal under CUDA graph capture
+        // (cublasLt status 14, cascading capture failure). Run eager for those models (Qwen3.6-35B pp>=4096).
         // The recurrent-snapshot boundary chunk has a request-dependent odd
-        // shape (prompt mod chunk size) — capturing it churns the prefill
-        // graph every request AND the odd-M cuBLAS call can lazily allocate
-        // workspace, which is illegal under capture (cublasLt status 14 →
-        // cascading capture failure, observed on GGUF mxfp4 GDN). Run eager.
+        // shape: capturing it churns the graph every request, and the odd-M
+        // cuBLAS call can lazily allocate workspace, illegal under capture. Run eager.
         const bool ends_at_snapshot = (snap_end > 0 && offset + chunk_len == snap_end);
         // moe_prefill_uncapturable: legacy host-args MoE prefill (GGUF Q*_K
-        // MoE) reads routing on the host — its capture guard throws and the
-        // aborted capture costs a wasted forward per chunk. Run eager (#874).
-        // Quantized KV append runs a dynamic-scale reduction with a D2H
-        // absmax sync per chunk — illegal under capture (the capture aborts
-        // every chunk, spamming errors and wasting one forward per chunk).
-        // F16 KV is the only append path that captures cleanly; run the rest
-        // eager.
+        // MoE) reads routing on the host - its capture guard throws, wasting a forward per chunk. Run eager (#874).
+        // Quantized KV append runs a dynamic-scale reduction with a D2H absmax
+        // sync per chunk, illegal under capture. F16 KV is the only append path
+        // that captures cleanly; run the rest eager.
         const bool kv_append_capturable = (config_.kv_cache_dtype == QType::F16);
         // Continuation chunks (offset > 0) bake ctx_len/q_offset as host args
-        // into the attention launches, so a replay only fits the exact same
-        // offset — which never repeats within a request. Replaying chunk 1's
-        // graph for chunk 2+ attended with chunk-1 geometry and silently
-        // truncated long-context prefill (#981: teacher-forced PPL
-        // 8.30 -> 15.35 past chunk 2). Capture only the offset-0 chunk, whose
-        // geometry DOES repeat across requests; continuations run eager.
+        // into attention launches, so a replay only fits that exact offset,
+        // which never repeats within a request. Replaying chunk 1's graph for
+        // chunk 2+ silently truncated long-context prefill (#981). Capture only the offset-0 chunk; continuations run eager.
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
                                  kv_append_capturable && offset == 0 && !ends_at_snapshot &&
                                  !executor_->nvfp4_dequant_uncapturable() &&
@@ -774,12 +669,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             }
         } else {
             // `runtime.prefill_graph` defaults to true, but seven conditions
-            // gate the capture and none of them logged anything, so a model
-            // that never captures looked exactly like one that does. Report
-            // the failing condition once per process: measured on
-            // Qwen3-8B-Q8_0 and Qwen3-Coder-30B-A3B-NVFP4, neither ever
-            // captured a prefill chunk, and finding out which gate closed
-            // took a source read plus three A/Bs.
+            // gate the capture with no logging, so a model that never captures
+            // looked identical to one that does. Report the failing condition once per process.
             static bool logged_no_prefill_capture = false;
             if (prefill_graph_enabled && !logged_no_prefill_capture) {
                 logged_no_prefill_capture = true;
@@ -802,7 +693,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
 
-        // Embedding pooling for this chunk (#1005) — hidden_ still holds it.
+        // Embedding pooling for this chunk (#1005): hidden_ still holds it.
         if (req->embedding_request)
             embed_accumulate_chunk_(*req, chunk_len, pf_stream);
 
@@ -819,7 +710,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         req->prefill_offset = offset + chunk_len;
         IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d", req->id, offset, offset + chunk_len,
                       total_input);
-        // The chunk ended exactly at the snapshot boundary — capture the
+        // The chunk ended exactly at the snapshot boundary: capture the
         // recurrent state / SWA window now, before the next chunk advances it.
         if (snap_end > 0 && req->prefill_offset == snap_end) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
@@ -838,10 +729,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         score_capture_(*req, score_logits, pf_stream);
         finish_request(req);
     } else if (req->embedding_request) {
-        // Embedding request (#1005): last chunk — forward, pool, finish.
-        // No sampling, no DECODING transition; the request rides the normal
-        // finish path (KV free + prefix-hash registration, so re-embedding
-        // the same document becomes a prefix-cache hit for OTHER requests).
+        // Embedding request (#1005): last chunk forward, pool, finish. No
+        // sampling, no DECODING transition; rides the normal finish path (KV
+        // free + prefix-hash registration), so re-embedding the same document hits the cache for OTHER requests.
         Tensor logits_unused;
         executor_->forward_logits(state, logits_unused, pf_stream);
         if (!pf_pool_used) {
@@ -874,12 +764,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             last_logits = last_logits.reshape(1, vocab_shape);
 
             // Ban special tokens (e.g. Gemma-4 <|channel>) before greedy
-            // argmax — otherwise the natural-argmax channel marker triggers
-            // is_stop_token and the request finishes with 0 completion
-            // tokens. Same logic as GraphExecutor::forward (executor.cu:88)
-            // and apply_pre_sample (executor.cu) but inline here because
-            // sample_greedy_device runs on raw logits without going through
-            // either of those wrappers.
+            // argmax, or the channel marker triggers is_stop_token and the
+            // request finishes with 0 completion tokens. Same logic as
+            // GraphExecutor::forward/apply_pre_sample (executor.cu), inlined here because sample_greedy_device runs on raw logits.
             if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
                 float* lp = static_cast<float*>(last_logits.data);
                 int vocab = static_cast<int>(last_logits.shape[0]);
@@ -894,9 +781,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             }
 
             // Under overlap the decode batch owns the parity slots of
-            // d_sample_result_ — the prefill sample gets its own slot
-            // (allocated at warmup whenever overlap is ready; the shared
-            // slot remains the serial-path default).
+            // d_sample_result_, so the prefill sample gets its own slot
+            // (allocated at warmup when overlap is ready; shared slot is the serial-path default).
             int32_t* sample_slot =
                 d_prefill_sample_ ? d_prefill_sample_ : executor_->d_sample_result();
             sample_greedy_device(last_logits, sample_slot, h_sample_pinned_.as<int32_t>(),
@@ -932,9 +818,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
 
         // Block-aligned prompt: the snapshot boundary coincides with the last
-        // chunk's end — capture after the forward (the sampling above only
-        // reads logits, never the recurrent state; the SWA window blocks are
-        // not mutated until the first decode step).
+        // chunk's end, capture after the forward (sampling only reads logits,
+        // never the recurrent state; SWA window blocks aren't mutated until the first decode step).
         if (snap_end == total_input) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
             maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
@@ -943,7 +828,6 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         if (req->mirostat == 2)
             req->mirostat_mu = state.mirostat_mu;
 
-        // Extract logprobs
         if (req->logprobs && prefill_logits_out.data != nullptr) {
             int vocab_size = static_cast<int>(prefill_logits_out.shape[prefill_logits_out.ndim - 1]);
             executor_->ensure_logits_pinned(vocab_size);
@@ -959,11 +843,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                                               model_->tokenizer()));
         }
 
-        // Teacher-forced NLL for the LAST chunk's positions (imp_perplexity).
-        // After sampling + logprob extraction: the partial pass overwrites the
-        // logits_ workspace, so it must run once nothing reads this chunk's
-        // logits anymore. hidden_ still holds the chunk (forward_logits only
-        // slices the last token for the production LM head).
+        // Teacher-forced NLL for the LAST chunk (imp_perplexity), after
+        // sampling + logprob extraction: the partial pass overwrites logits_,
+        // so it must run once nothing else reads this chunk's logits.
         if (ppl_capture_.active) {
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
@@ -976,13 +858,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]", (int)req->output_tokens.size(),
                       req->context_len(), next_token, tok->decode_token(next_token).c_str());
 
-        // MTP: feed the last chunk's (token, hidden) pairs — earlier chunks
+        // MTP: feed the last chunk's (token, hidden) pairs, earlier chunks
         // were fed inside the chunked-prefill branch above; the final pair
         // uses the just-sampled next_token and seeds the pending draft chain.
         if (mtp_spec_decode_enabled())
             mtp_prefill_feed_chunk(*req, offset, chunk_len, next_token);
 
-        // Update constraint FSM
         if (req->constraints)
             req->constraints->update(next_token);
 

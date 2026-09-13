@@ -1,16 +1,16 @@
 // Cross-sequence ragged prefill (runtime.prefill_batch, roadmap 0(d)).
 //
-// A burst of K short prompts otherwise prefills ONE sequence per forward —
-// launch-bound (64 layers x ~100 launches at M~120), measured at ~25% of a
-// 32-stream burst wave's wall. This path concatenates the next chunk of each
-// eligible request into ONE ragged forward: GEMMs/norms/elementwise/RoPE run
-// over the concatenated rows, attention and the GDN conv loop per sequence
-// inside the executor, the GDN scan batches sequences via the row-offset
-// table (gdn.h ragged contract, shipped in #1779).
+// A burst of K short prompts otherwise prefills ONE sequence per forward:
+// launch-bound (64 layers x ~100 launches at M~120), ~25% of a 32-stream
+// burst wave's wall. This path concatenates the next chunk of each eligible
+// request into ONE ragged forward: GEMMs/norms/elementwise/RoPE run over the
+// concatenated rows, attention and the GDN conv loop per sequence inside the
+// executor, the GDN scan batches sequences via the row-offset table (gdn.h
+// ragged contract, #1779).
 //
-// Scope (phase 1): plain text generation requests only. Vision, embeddings,
-// rerank scoring, logprobs and constrained decoding stay serial per request;
-// Mamba2 and MLA models, MTP, perplexity capture, SWA sizing, residual KV and
+// Scope (phase 1): plain text generation only. Vision, embeddings, rerank
+// scoring, logprobs and constrained decoding stay serial per request;
+// Mamba2/MLA models, MTP, perplexity capture, SWA sizing, residual KV and
 // the fp32_scan/ref_kernel GDN routes disable the path entirely.
 
 #include "runtime/engine.h"
@@ -85,9 +85,8 @@ void Engine::mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders
     // Dense only (a recurrent state has no one-row ragged route), and only
     // when nothing else owns the decode batch: a pipelined step in flight,
     // the constrained pipeline, the MoE offload manager, or prefill/decode
-    // stream overlap. A PARKED async runner is fine (a running one never
-    // reaches step_prefill: step_impl_ resumes it first); the rider's eager
-    // token between two bursts is what a separate decode step is today.
+    // stream overlap. A PARKED async runner is fine: step_impl_ resumes a
+    // running one before step_prefill is reached.
     const char* why = nullptr;
     if (ssm_state_)
         why = "recurrent model";
@@ -281,13 +280,11 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
 
     // Device metadata from the serving metadata pool (engine_kv_cache_init.cpp):
     // fixed regions for max_seq_len rows and max_batch_size tables, so a wave
-    // uploads without allocating (invariant I2; this path used to be six
-    // cudaMallocAsync per wave, AUDIT_arch_2026 B-4). The wave is bounded by
-    // the row budget and the batch size, so the stream-ordered allocs below
-    // are the fallback for a pool that failed at init, not for an oversized
-    // wave. RAII either way, not a manual cleanup call: forward_logits and
-    // the sampling epilogue below can throw (n_tokens guard, CUDA errors
-    // translated at the API boundary), and the frees must run on that unwind.
+    // uploads without allocating (invariant I2, AUDIT_arch_2026 B-4). The wave
+    // is bounded by the row budget and batch size, so the allocs below are a
+    // fallback for a pool that failed at init, not for an oversized wave.
+    // RAII, not a manual cleanup call: forward_logits and the sampling
+    // epilogue can throw, and the frees must run on that unwind.
     const bool pooled = d_rg_token_ids_ != nullptr && total <= rg_rows_cap_ && n_seq <= rg_seq_cap_ &&
                         static_cast<int>(max_blocks) <= pool_bt_cap_;
     struct RaggedMeta {
@@ -452,8 +449,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     // Riders: each one's single row is its sequence's last row, so logits
     // rows [n_pf, n_seq) are theirs in order. Sampled and delivered by the
     // decode path (per-request sampler, penalty histories, stop logic,
-    // streaming), which is what makes a mixed step indistinguishable from a
-    // prefill step followed by a decode step.
+    // streaming) so a mixed step is indistinguishable from prefill followed
+    // by decode.
     if (n_riders > 0) {
         InferenceState dstate;
         dstate.is_prefill = false;

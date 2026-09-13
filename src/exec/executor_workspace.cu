@@ -49,7 +49,7 @@ namespace imp {
 //
 // Reading dispatch_policy() and freeing through vram_alloc_ from a destructor is
 // safe by declaration order, not by luck: Engine declares dispatch_policy_
-// (engine.h:352) and vram_alloc_ (engine.h:342) before executor_ (engine.h:377),
+// (engine.h:319) and vram_alloc_ (engine.h:311) before executor_ (engine.h:340),
 // so the executor is destroyed first and both are still alive. Reordering those
 // members would turn this into a use-after-free.
 void GraphExecutor::dump_moe_expert_hist_() {

@@ -25,9 +25,7 @@ namespace {
 //   key = 3.14           floats
 //   # comment            line comment
 //
-// This is a minimal subset of TOML — enough for imp.conf which is flat
-// (no nested tables, no arrays). When the project picks up tomlplusplus
-// the parser body here can be replaced without touching the call sites.
+// Minimal subset of TOML: flat only, no nested tables or arrays.
 
 std::string trim(const std::string& s) {
     size_t b = 0, e = s.size();
@@ -45,11 +43,8 @@ std::string strip_quotes(const std::string& s) {
     return s;
 }
 
-// #1627: these returned `fallback` for anything they did not recognise, with
-// no signal, so `--set server.prefix_cache=disabled` kept the default and said
-// nothing. The key half was already rejected; the value half was not, and 157
-// of the 185 bound keys go through these three. `ok` is set to false on a value
-// the parser cannot read, and the caller turns that into a rejection.
+// #1627: `ok` is set to false when a value cannot be parsed, so the caller
+// can reject it instead of silently keeping the default.
 bool parse_bool(const std::string& v, bool fallback, bool* ok = nullptr) {
     if (v == "true" || v == "True" || v == "1" || v == "yes" || v == "on")
         return true;
@@ -101,17 +96,17 @@ float parse_float(const std::string& v, float fallback, bool* ok = nullptr) {
 }
 
 // Apply a single dotted key (e.g. "kv_cache.dtype") with raw value string.
-// Returns false when the key is not bound — the caller decides what that
-// means: an imp.conf may legitimately carry a key this build does not know,
-// a `--set` on the command line is a typo and must not pass silently.
+// Returns false when the key is not bound: an imp.conf may legitimately
+// carry a key this build does not know, but a `--set` typo must not pass
+// silently.
 bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw,
                bool* value_ok = nullptr) {
     std::string val = strip_quotes(trim(raw));
 
-    // Typed key binders. Each binds one dotted key to its destination field;
-    // the field's type selects the parser, and the compiler rejects a key bound
-    // to a wrong-typed field. First match wins (the `matched` guard mirrors the
-    // old else-if short-circuit); unknown keys fall through to the warning.
+    // Typed key binders: each binds one dotted key to its destination field;
+    // the field's type selects the parser, and the compiler rejects a
+    // wrong-typed binding. First match wins (`matched` guard); unknown keys
+    // fall through to the warning.
     bool matched = false;
     bool value_ok_local = true;
     auto B = [&](const char* k, bool& f) {
@@ -140,10 +135,9 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.deterministic_gemm", cfg.runtime.deterministic_gemm);
     if (!matched && dotted_key == "runtime.deterministic") {
         cfg.runtime.deterministic = parse_bool(val, cfg.runtime.deterministic, &value_ok_local);
-        // Full determinism implies deterministic GEMM algo selection — the
+        // Full determinism implies deterministic GEMM algo selection: the
         // compute kernels gate routing/sampling determinism on the same
-        // process_diag_deterministic_gemm() snapshot, so this one switch
-        // covers GEMM + MoE routing + top-k sampling.
+        // process_diag_deterministic_gemm() snapshot.
         if (cfg.runtime.deterministic)
             cfg.runtime.deterministic_gemm = true;
         matched = true;
@@ -319,10 +313,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);
     B("gemm.nvfp4_moe_decode", cfg.gemm.nvfp4_moe_decode);
 
-    // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5
-    // Track A of the architecture refactor. Per-model knobs no longer live
-    // on the global RuntimeConfig singleton — they are now populated by the
-    // GGUF / SafeTensors loader or the engine init resolver onto the model.
+    // [gemma4] section: per-model knobs live in ModelConfig::Overrides::Gemma4,
+    // populated by the GGUF/SafeTensors loader or the engine init resolver.
 
     // [generation]
     B("generation.no_logit_softcap", cfg.generation.no_logit_softcap);
@@ -433,8 +425,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.mtp_adaptive_k", cfg.speculative.mtp_adaptive_k);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);
     F("speculative.mtp_econ_min_emit", cfg.speculative.mtp_econ_min_emit);
-    // #1638: read at engine_scheduler.cpp:1422 and :2882, its own comment calls
-    // it a "kill switch for A/B", and it was bound to no key at all.
+    // #1638: also read at engine_scheduler.cpp:1363 and :2882 ("kill switch for A/B").
     B("speculative.batch_rr", cfg.speculative.batch_rr);
     B("speculative.batch_verify", cfg.speculative.batch_verify);
     B("speculative.factored_spare", cfg.speculative.factored_spare);
@@ -466,19 +457,15 @@ std::string home_dir() {
     return {};
 }
 
-// Env seeding, deliberately minimal. imp.conf + --set replaced the old
-// ~30-var legacy IMP_* surface (retired 2026-07-07 — no producers existed);
-// only the two vars with real in-repo producers remain:
-//   IMP_DETERMINISTIC — set by tests (test_determinism_e2e, test_lora) to
+// Env seeding, deliberately minimal: only vars with real in-repo producers.
+//   IMP_DETERMINISTIC: set by tests (test_determinism_e2e, test_lora) to
 //     inject determinism through the public API without a config file.
-//   IMP_FMHA_FA2 — set by the roofline A/B harness (tools/roofline/roofline.py)
+//   IMP_FMHA_FA2: set by the roofline A/B harness (tools/roofline/roofline.py)
 //     to toggle the FA2 prefill kernel per subprocess.
-// Three trace vars are seeded here as of #1207 (IMP_SPEC_TRACE, IMP_JUMP_TRACE,
-// IMP_PPL_DUMP). They had crept back as raw getenv() calls at their use sites —
-// unreachable from imp.conf/--set and undocumented. Seeding keeps the shell
-// habit working while making the keys first-class.
+// IMP_SPEC_TRACE / IMP_JUMP_TRACE / IMP_PPL_DUMP (#1207) are seeded too, so
+// the raw getenv() habit at their use sites stays reachable from imp.conf/--set.
 void seed_from_env(RuntimeConfig& cfg) {
-    // runtime.deterministic — IMP_DETERMINISTIC: '1'/'true' enables full
+    // runtime.deterministic: IMP_DETERMINISTIC '1'/'true' enables full
     // reproducibility (also implies deterministic_gemm).
     if (const char* e = std::getenv("IMP_DETERMINISTIC")) {
         cfg.runtime.deterministic = parse_bool(e, cfg.runtime.deterministic);
@@ -486,22 +473,20 @@ void seed_from_env(RuntimeConfig& cfg) {
             cfg.runtime.deterministic_gemm = true;
     }
 
-    // attention.fmha_fa2 — IMP_FMHA_FA2: '1' enables the register-resident FA2
+    // attention.fmha_fa2: IMP_FMHA_FA2 '1' enables the register-resident FA2
     // prefill kernel (A/B vs the legacy FP8 FMHA), '0' forces it off.
     if (const char* e = std::getenv("IMP_FMHA_FA2"))
         cfg.attention.fmha_fa2 = (std::atoi(e) != 0) ? "on" : "never";
 
-    // diagnostics.spec_trace / jump_trace / ppl_dump — presence-is-truth for the
-    // two booleans (the old getenv() call sites tested `if (getenv(...))`, so an
-    // empty value counted as ON; keep that so existing shell habits behave).
+    // diagnostics.spec_trace / jump_trace / ppl_dump: presence-is-truth
+    // (empty value counts as ON) to match old shell/getenv() habits.
     if (std::getenv("IMP_SPEC_TRACE"))
         cfg.diagnostics.spec_trace = true;
     if (std::getenv("IMP_JUMP_TRACE"))
         cfg.diagnostics.jump_trace = true;
     if (const char* e = std::getenv("IMP_PPL_DUMP"))
         cfg.diagnostics.ppl_dump = e;
-    // diagnostics.worker_timing — IMP_WORKER_TIMING: '1' as the old
-    // batching_engine.cpp read had it (AUDIT_arch_2026 J-10).
+    // diagnostics.worker_timing: IMP_WORKER_TIMING '1' (AUDIT_arch_2026 J-10).
     if (const char* e = std::getenv("IMP_WORKER_TIMING"))
         cfg.diagnostics.worker_timing = parse_bool(e, cfg.diagnostics.worker_timing);
 }
@@ -538,7 +523,7 @@ bool RuntimeConfig::load_from_file(const std::string& path) {
     int line_no = 0;
     while (std::getline(ifs, line)) {
         ++line_no;
-        // Strip comment from '#' onwards (unless inside quotes — we ignore that
+        // Strip comment from '#' onwards (unless inside quotes, ignored as an
         // edge case for the minimal parser; quote a value with " to keep #).
         size_t hash = line.find('#');
         if (hash != std::string::npos) {
@@ -626,15 +611,12 @@ RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
 
 // ---- Pending-config handoff (tool main → Engine::init) ------------------
 //
-// Replaces the former RuntimeConfig::current()/install() singleton
-// (Phase 5 Track D follow-up, 2026-05-20). The static storage now lives
-// for at most one Engine construction: tool main stashes the loaded
-// config via set_pending_runtime_config(); imp_context_create() takes
-// it via take_pending_runtime_config() and hands it to Engine::init.
-// If the take() call finds no pending config (library users that never
-// called the setter), it returns a freshly loaded RuntimeConfig (with
-// the seed_from_env() legacy IMP_* compat path) so behavior matches
-// the historical first-touch-of-singleton initialization.
+// Static storage lives for at most one Engine construction: tool main
+// stashes the loaded config via set_pending_runtime_config();
+// imp_context_create() takes it via take_pending_runtime_config() and
+// hands it to Engine::init. If nothing is pending (library users that
+// never called the setter), returns a freshly loaded RuntimeConfig with
+// the seed_from_env() legacy IMP_* compat path.
 
 namespace {
 RuntimeConfig& pending_slot() {
@@ -657,7 +639,7 @@ RuntimeConfig take_pending_runtime_config() {
         pending_set() = false;
         return std::move(pending_slot());
     }
-    // No tool-main install — fall back to env-seeded defaults so tests
+    // No tool-main install: fall back to env-seeded defaults so tests
     // and library users that skip RuntimeConfig::load() still observe
     // legacy IMP_* env values.
     RuntimeConfig cfg;

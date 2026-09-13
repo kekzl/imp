@@ -14,26 +14,22 @@
 
 namespace imp {
 
-// runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local"
-// Selects the cudaStreamCaptureMode
-// used by CudaGraphCapture::begin_capture and the ConditionalRunner body-graph
-// capture. Probed at first call and cached.
+// runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local": selects the
+// cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and the ConditionalRunner
+// body-graph capture. Probed at first call and cached.
 //
-// Why "relaxed" became the default (M3-probe, 2026-05-16): CUTLASS 3.x grouped
-// GEMM was observed to silently HANG under cudaStreamCaptureModeGlobal during
-// NVFP4 MoE prefill capture (Blocker B in prefill_graph_blockers_2026_05_14
-// memo). Relaxed drops the cross-thread synchronization constraint that the
-// CUTLASS collective scheduler is suspected to deadlock on, and is a strict
-// superset of capturable behaviors — the decode fast path that previously
-// worked under "global" continues to work under "relaxed".
+// "relaxed" is the default: CUTLASS 3.x grouped GEMM silently HANGS under
+// cudaStreamCaptureModeGlobal during NVFP4 MoE prefill capture (Blocker B,
+// prefill_graph_blockers_2026_05_14 memo). Relaxed drops the cross-thread synchronization
+// constraint CUTLASS's collective scheduler is suspected to deadlock on, and is a strict
+// superset of capturable behaviors, so the decode fast path still works under it.
 cudaStreamCaptureMode get_capture_mode() {
     static cudaStreamCaptureMode cached = []() {
         const std::string& mode = process_diag_graph_capture_mode();
         const bool prefill_graph = process_diag_prefill_graph_enabled();
         if (mode == "global") {
-            // Warn loudly when the user has both opted into prefill_graph AND
-            // the known-deadlocking strict capture mode — most common cause of
-            // a silent hang at first NVFP4 MoE prefill replay.
+            // Warn loudly when the user has both opted into prefill_graph AND the known-deadlocking
+            // strict capture mode: most common cause of a silent hang at first NVFP4 MoE prefill replay.
             if (prefill_graph) {
                 IMP_LOG_WARN(
                     "CudaGraphCapture: runtime.graph_capture_mode=\"global\" + "
@@ -63,13 +59,12 @@ cudaStreamCaptureMode get_capture_mode() {
 }
 
 // ---------------------------------------------------------------------------
-// apply_pdl_edges — convert kernel→kernel edges to PDL edges in a graph
+// apply_pdl_edges: convert kernel→kernel edges to PDL edges in a graph
 // ---------------------------------------------------------------------------
 int apply_pdl_edges(cudaGraph_t graph) {
     if (!graph)
         return 0;
 
-    // 1. Enumerate all nodes
     size_t num_nodes = 0;
     cudaError_t err = cudaGraphGetNodes(graph, nullptr, &num_nodes);
     if (err != cudaSuccess || num_nodes == 0)
@@ -80,7 +75,7 @@ int apply_pdl_edges(cudaGraph_t graph) {
     if (err != cudaSuccess)
         return 0;
 
-    // 2. Build set of kernel nodes (use linear scan — node counts are small)
+    // Build set of kernel nodes (linear scan: node counts are small).
     std::vector<cudaGraphNode_t> kernel_nodes;
     kernel_nodes.reserve(num_nodes);
     for (size_t i = 0; i < num_nodes; i++) {
@@ -92,7 +87,6 @@ int apply_pdl_edges(cudaGraph_t graph) {
     if (kernel_nodes.size() < 2)
         return 0;
 
-    // 3. Enumerate all edges with edge data
     size_t num_edges = 0;
     err = cudaGraphGetEdges(graph, nullptr, nullptr, nullptr, &num_edges);
     if (err != cudaSuccess || num_edges == 0)
@@ -104,7 +98,6 @@ int apply_pdl_edges(cudaGraph_t graph) {
     if (err != cudaSuccess)
         return 0;
 
-    // Helper: check if a node is a kernel node
     auto is_kernel = [&](cudaGraphNode_t n) -> bool {
         for (const auto& kn : kernel_nodes) {
             if (kn == n)
@@ -113,15 +106,10 @@ int apply_pdl_edges(cudaGraph_t graph) {
         return false;
     };
 
-    // 4. Replace default kernel→kernel edges with PDL edges, but ONLY when the
-    //    CONSUMER kernel is PDL-registered. A programmatic edge lets the
-    //    consumer launch before the producer completes, so the consumer must
-    //    be a kernel that calls pdl_wait() before touching global memory
-    //    (core/pdl_device.cuh contract); registration is that promise.
-    //    Until 2026-08-31 the check was on the SOURCE, which was harmless only
-    //    because no kernel triggered early - with producers now calling
-    //    pdl_trigger(), an unregistered consumer on a programmatic edge would
-    //    read stale data.
+    // Replace default kernel→kernel edges with PDL edges, but ONLY when the CONSUMER kernel is
+    // PDL-registered: a programmatic edge lets the consumer launch before the producer completes,
+    // so the consumer must call pdl_wait() before touching global memory (core/pdl_device.cuh
+    // contract); registration is that promise.
     cudaGraphEdgeData pdl_edge{};
     pdl_edge.from_port = cudaGraphKernelNodePortProgrammatic;
     pdl_edge.to_port = 0;
@@ -135,17 +123,10 @@ int apply_pdl_edges(cudaGraph_t graph) {
         if (!is_kernel(from[i]) || !is_kernel(to[i]))
             continue;
 
-        // Check if the source kernel has PDL enabled.
-        // NOTE: cudaGraphKernelNodeGetParams returns kparams.func = nullptr
-        // for kernel nodes added via the driver-API form (CUkernel handle
-        // rather than a host __global__ symbol pointer) AND sets the global
-        // CUDA last-error to "invalid device function". That error is benign
-        // in our flow — we just want to look up the host pointer in the PDL
-        // registry, so a null func means "not in registry, skip it". We
-        // clear the error immediately so it doesn't surface as a stale
-        // error two function frames up at the start of the next forward
-        // pass (which used to log every request as
-        // "Cleared stale error before forward: invalid device function").
+        // Check if the source kernel has PDL enabled. cudaGraphKernelNodeGetParams returns
+        // kparams.func = nullptr for driver-API kernel nodes (CUkernel handle, not a host
+        // __global__ symbol pointer) and sets the CUDA last-error to "invalid device function":
+        // benign here, a null func just means "not in registry, skip it". Clear the error immediately.
         cudaKernelNodeParams kparams{};
         cudaError_t kerr = cudaGraphKernelNodeGetParams(to[i], &kparams);
         if (kerr != cudaSuccess || !kparams.func || !pdl::is_enabled(kparams.func)) {
@@ -154,17 +135,14 @@ int apply_pdl_edges(cudaGraph_t graph) {
             continue;
         }
 
-        // Remove old default edge
         err = cudaGraphRemoveDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
         if (err != cudaSuccess)
             continue;
 
-        // Add PDL edge
         err = cudaGraphAddDependencies(graph, &from[i], &to[i], &pdl_edge, 1);
         if (err != cudaSuccess) {
-            // Rollback: re-add the default edge. If rollback fails the graph
-            // has lost an edge entirely — surface it so the eventual
-            // instantiate/launch failure can be traced back.
+            // Rollback: re-add the default edge. If rollback fails the graph has lost an edge
+            // entirely, surface it so the eventual instantiate/launch failure can be traced back.
             cudaError_t rb_err = cudaGraphAddDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
             if (rb_err != cudaSuccess) {
                 IMP_LOG_ERROR(
@@ -183,9 +161,6 @@ int apply_pdl_edges(cudaGraph_t graph) {
     return converted;
 }
 
-// ---------------------------------------------------------------------------
-// CudaGraphCapture
-// ---------------------------------------------------------------------------
 
 CudaGraphCapture::~CudaGraphCapture() { reset(); }
 
@@ -305,10 +280,8 @@ bool CudaGraphCapture::end_capture_and_update() {
             capture_stream_ = nullptr;
             return true;
         }
-        // Update failed (topology changed) — fall through to reinstantiate.
-        // Clear the sticky per-thread error the failed update left behind:
-        // this fallback is expected and handled, but the stale error used to
-        // linger until engine teardown's leak net cleared it (WARN noise).
+        // Update failed (topology changed): fall through to reinstantiate. Clear the sticky
+        // per-thread error the failed update left behind; this fallback is expected and handled.
         (void)cudaGetLastError();
         graph_exec_.reset();
     }
@@ -333,8 +306,8 @@ void CudaGraphCapture::abort_capture() {
     if (!capture_stream_)
         return;
     cudaGraph_t g = nullptr;
-    // EndCapture on an invalidated capture returns an error and g stays null —
-    // either way the stream leaves capture state, which is the point here.
+    // EndCapture on an invalidated capture returns an error and g stays null: either way the
+    // stream leaves capture state, which is the point here.
     (void)cudaStreamEndCapture(capture_stream_, &g);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (g)
@@ -363,10 +336,9 @@ void CudaGraphCapture::reset() {
     graph_.reset();
     capture_stream_ = nullptr;
     captured_ = false;
-    // Release the per-device graph memory pool. Without this, instantiated
-    // graphs (esp. for 128-expert MoE models) hold reserved VRAM until process
-    // exit, which compounds across re-captures (config changes, batch size
-    // changes). Trim is a no-op when the pool is already empty.
+    // Release the per-device graph memory pool. Without this, instantiated graphs (esp.
+    // 128-expert MoE models) hold reserved VRAM until process exit, compounding across
+    // re-captures. Trim is a no-op when the pool is already empty.
     if (had_exec) {
         int dev = 0;
         cudaGetDevice(&dev);
@@ -374,9 +346,6 @@ void CudaGraphCapture::reset() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CudaGraphRunner
-// ---------------------------------------------------------------------------
 
 bool CudaGraphRunner::execute(cudaStream_t stream) {
     if (!decode_fn_) {
@@ -417,11 +386,10 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         try {
             decode_fn_(stream);
         } catch (const std::exception& e) {
-            // #874: the forward threw while the stream was capturing (e.g. the
-            // MoE host-args guard, or cuBLAS failing under capture). The
-            // capture MUST be closed here — unwinding past it leaves the
-            // stream capturing forever and every later op on it fails with
-            // "operation failed due to a previous error during capture".
+            // #874: the forward threw while the stream was capturing (e.g. the MoE host-args
+            // guard, or cuBLAS failing under capture). The capture MUST be closed here: unwinding
+            // past it leaves the stream capturing forever and every later op fails with a
+            // capture-invalidated error.
             IMP_LOG_ERROR(
                 "CudaGraphRunner: forward threw during capture (%s) — aborting "
                 "capture and falling back to per-step decode.",
@@ -452,12 +420,10 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
         capture_count_++;
         step_count_++;
-        // During graph capture the kernels are recorded but NOT executed.
-        // Replay immediately so this step produces actual results.
-        // Short-circuit order matters: the injected failure must PREVENT the
-        // replay, not follow a successful one. Launching the graph and then
-        // resetting it destroys the graphExec while the async replay is still
-        // in flight.
+        // During graph capture the kernels are recorded but NOT executed; replay immediately so
+        // this step produces actual results. Short-circuit order matters: the injected failure
+        // must PREVENT the replay, not follow a successful one, since launching then resetting
+        // the graph destroys the graphExec while the async replay is still in flight.
         const bool inject_fail = fail_next_replay_for_test_;
         fail_next_replay_for_test_ = false;
         const bool replay_ok = !inject_fail && graph_.replay(stream);
@@ -466,15 +432,12 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
                 "CudaGraphRunner: first replay after capture failed — falling back "
                 "to per-step decode (up to 15x slower).");
             graph_.reset();
-            // The capture recorded the launches WITHOUT executing them (see the
-            // comment above), so this step has produced nothing yet. Every other
-            // failure path in this function re-runs decode_fn_ for exactly that
-            // reason; this one used to return false instead, and four of the five
-            // execute() call sites ignore the return value. engine_scheduler.cpp
-            // then finds logits_out.data == nullptr and falls back to
-            // get_logits_view(), i.e. the PREVIOUS step's logits — greedy repeats
-            // the token. capture_failed_ marks it eager for good: a first-replay
-            // failure is structural, so retrying would skip a forward every step.
+            // The capture recorded the launches WITHOUT executing them, so this step has produced
+            // nothing yet; every failure path here re-runs decode_fn_ for that reason. Returning
+            // without re-running leaves logits_out.data == nullptr, so engine_scheduler.cpp falls
+            // back to the PREVIOUS step's logits (greedy repeats the token). capture_failed_ marks
+            // it eager for good: a first-replay failure is structural, retrying would skip a
+            // forward every step.
             capture_failed_ = true;
             decode_fn_(stream);
             return true;
@@ -490,7 +453,6 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
             "to per-step decode (up to 15x slower). Will attempt re-capture.");
         graph_.reset();
         step_count_ = 0;  // restart warmup
-        // Fall back to direct execution
         decode_fn_(stream);
         return true;
     }
@@ -523,9 +485,9 @@ void CudaGraphRunner::invalidate() {
 }
 
 void CudaGraphRunner::invalidate_for_update() {
-    // Keep graph_exec_ alive so the next capture can run cudaGraphExecUpdate
-    // in-place. Skip warmup on the next execute() by leaving step_count_ at
-    // warmup_steps_ — cuBLAS autotuning already ran during the prior capture.
+    // Keep graph_exec_ alive so the next capture can run cudaGraphExecUpdate in-place. Skip
+    // warmup on the next execute() by leaving step_count_ at warmup_steps_: cuBLAS autotuning
+    // already ran during the prior capture.
     graph_.drop_graph_keep_exec();
     graph_.mark_needs_recapture();
     step_count_ = warmup_steps_;
@@ -533,7 +495,7 @@ void CudaGraphRunner::invalidate_for_update() {
 }
 
 // ---------------------------------------------------------------------------
-// CudaGraphConditionalRunner — GPU-autonomous decode loop
+// CudaGraphConditionalRunner: GPU-autonomous decode loop
 // ---------------------------------------------------------------------------
 
 // Device-side enable flag for post_decode_step_kernel tracing.
@@ -584,10 +546,9 @@ __global__ void post_decode_step_kernel(
             eff_max = lim;
     }
 
-    // Track think state on device. Active whenever a </think> id is known
-    // (think_end_id >= 0), independent of the budget — it drives EOS/stop
-    // suppression inside the block and the post-</think> grace window. The
-    // reasoning-token counter only matters for the budget (budget_limit > 0).
+    // Track think state on device. Active whenever a </think> id is known (think_end_id >= 0),
+    // independent of the budget: it drives EOS/stop suppression inside the block and the
+    // post-</think> grace window. The reasoning-token counter only matters for the budget.
     const bool track_think = (think_end_id >= 0);
     if (track_think) {
         if (token == think_start_id) {
@@ -602,11 +563,9 @@ __global__ void post_decode_step_kernel(
         }
     }
 
-    // Post-</think> content detection: the first real answer token (non-stop,
-    // non-marker) emitted after the exit step releases the grace, so a complete
-    // short answer stops on its own EOS instead of being padded/repeated. Must
-    // run before the grace check below. step > exit_step skips the </think>
-    // token itself (set this same invocation).
+    // Post-</think> content detection: the first real answer token (non-stop, non-marker)
+    // emitted after the exit step releases the grace, so a complete short answer stops on its
+    // own EOS. Must run before the grace check below; step > exit_step skips the </think> token itself.
     if (track_think && d_content_after_think && d_think_exit_step && *d_think_exit_step >= 0 &&
         step > *d_think_exit_step && token != think_start_id && token != think_end_id) {
         bool tok_is_stop = (token == eos_id);
@@ -638,26 +597,23 @@ __global__ void post_decode_step_kernel(
     *d_context_len = new_ctx;
     *d_step_counter = step + 1;
 
-    // Flush the ring buffer write to system-scope memory before publishing the
-    // host-visible counter. Without this, on WSL2 (and in principle any system
-    // where mapped-pinned writes are not strongly ordered w.r.t. the host) the
-    // host can observe the incremented counter while still reading the stale
-    // previous token from the ring — producing corrupted streamed output.
+    // Flush the ring buffer write to system-scope memory before publishing the host-visible
+    // counter: without it, on WSL2 (mapped-pinned writes not strongly ordered w.r.t. the host)
+    // the host can read the incremented counter while the ring still holds the stale previous
+    // token, corrupting streamed output.
     __threadfence_system();
 
     // Update mapped step counter (host-visible, for polling)
     *d_ring_step_counter = step + 1;
 
-    // Check stop conditions.
-    // Suppress stop tokens (EOS, <|im_end|>) while inside <think> block — the
-    // model may emit them during reasoning, stopping prematurely — and for a
-    // grace window after </think> closes (numerically-noisy NVFP4 quants can
-    // close an empty block in ~3 tokens then EOS to a 0-content completion).
+    // Check stop conditions. Suppress stop tokens (EOS, <|im_end|>) while inside <think> (the
+    // model may emit them mid-reasoning) and during a grace window after </think> closes
+    // (numerically-noisy NVFP4 quants can close an empty block in ~3 tokens then EOS to a
+    // 0-content completion).
     bool in_think = (track_think && d_in_think && *d_in_think);
     // Grace blocks the stop only while no real answer content has appeared yet
-    // (content_after_think == 0); the moment a genuine answer token is emitted,
-    // the model's own stop is honoured. think_grace_tokens stays a hard cap for
-    // the no-content case so generation is still bounded.
+    // (content_after_think == 0); once a genuine answer token is emitted, the model's own stop
+    // is honoured. think_grace_tokens stays a hard cap for the no-content case.
     bool grace = (think_grace_tokens > 0 && d_think_exit_step && *d_think_exit_step >= 0 &&
                   (step - *d_think_exit_step) < think_grace_tokens &&
                   (!d_content_after_think || *d_content_after_think == 0));
@@ -682,9 +638,9 @@ __global__ void post_decode_step_kernel(
                                   : 0;
     }
 
-    // Think budget: break loop to return to CPU for force_token injection.
-    // Gated on budget_limit > 0 — without it, limit 0 would make every in-think
-    // step satisfy (count >= 0) and break the loop on the first reasoning token.
+    // Think budget: break loop to return to CPU for force_token injection. Gated on
+    // budget_limit > 0: without it, limit 0 would make every in-think step satisfy (count >= 0)
+    // and break the loop on the first reasoning token.
     if (think_budget_limit > 0 && in_think && *d_think_count >= think_budget_limit) {
         should_stop = true;
     }
@@ -710,12 +666,10 @@ __global__ void post_decode_step_kernel(
                 step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
         }
         cudaGraphSetConditional(handle, 0);  // break WHILE loop
-        // Publish burst completion to the host. This is the ONLY loop exit,
-        // so the polling host (try_finish_burst) keys teardown off this flag
-        // — cudaStreamQuery reports the stream idle while the conditional
-        // WHILE graph is still iterating on this platform, so it must not be
-        // trusted. The fence orders the flag after this step's ring/counter
-        // writes above.
+        // Publish burst completion to the host. This is the ONLY loop exit, so the polling host
+        // (try_finish_burst) keys teardown off this flag: cudaStreamQuery reports the stream idle
+        // while a conditional WHILE graph is still iterating on this platform, so it must not be
+        // trusted. The fence orders the flag after this step's ring/counter writes above.
         __threadfence_system();
         *d_burst_done = 1;
     }
@@ -728,10 +682,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     cleanup();  // release any prior state
     config_ = std::move(config);
 
-    // Propagate IMP_GRAPH_DIAG to device-side tracing in post_decode_step_kernel.
-    // Done once per setup(); cheap enough to not bother caching. Symbol write
-    // is skipped in the normal (non-diag) path to avoid perturbing CUDA error
-    // state in pre-launch phases.
+    // Propagate IMP_GRAPH_DIAG to device-side tracing in post_decode_step_kernel. Done once per
+    // setup(); cheap enough to not bother caching. Symbol write is skipped in the normal
+    // (non-diag) path to avoid perturbing CUDA error state in pre-launch phases.
     if (graph_diag::enabled()) {
         int v = 1;
         cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int));
@@ -746,12 +699,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                   "graph slot sample scratch is out of sync with SAMPLE_SCRATCH_BYTES");
 
     // ---- Take a T2 slot, or fall back to owning the buffers ----
-    // Every buffer below used to be a cudaMalloc/cudaFree pair per burst — the
-    // whole of the steady-state allocation traffic the --wrap interposer still
-    // saw after the earlier fixes (A7 step 5.3). The slot is held for exactly
-    // the length of the burst, which is what makes its addresses safe to bake
-    // into the captured graph. If the pool declines (closed, exhausted, or a
-    // capacity exceeded) the original path runs unchanged.
+    // Every buffer below is otherwise a cudaMalloc/cudaFree pair per burst (A7 step 5.3): the
+    // slot is held for exactly the length of the burst, which is what makes its addresses safe
+    // to bake into the captured graph. If the pool declines, the original path runs unchanged.
     {
         GraphSlotCaps need;
         need.max_steps = config_.max_steps;
@@ -762,9 +712,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     slotted = slot_.valid();
 
     // ---- Allocate device state ----
-    // Must be SAMPLE_SCRATCH_BYTES — both samplers write multi-block partial
-    // reduction arrays after the result token (greedy argmax: ARGMAX scratch;
-    // top-k/top-p: the larger SAMPLE scratch). SAMPLE_SCRATCH_BYTES covers both.
+    // Must be SAMPLE_SCRATCH_BYTES: both samplers write multi-block partial reduction arrays
+    // after the result token (greedy argmax: ARGMAX scratch; top-k/top-p: the larger SAMPLE
+    // scratch). SAMPLE_SCRATCH_BYTES covers both.
     if (slotted) {
         const GraphSlotView& sv = slot_.view();
         d_token_id_ = static_cast<int32_t*>(sv.sample_scratch);
@@ -794,7 +744,6 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             goto fail;
     }
 
-    // Stop token IDs
     if (!config_.stop_ids.empty()) {
         if (slotted) {
             d_stop_ids_ = slot_.view().stop_ids;
@@ -811,9 +760,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         }
     }
 
-    // Think-state counters (device-side). Allocated whenever think tracking is
-    // active (a </think> id is known), not only for budgets — the in_think flag
-    // and exit-step drive EOS/stop suppression + the post-</think> grace window.
+    // Think-state counters (device-side). Allocated whenever think tracking is active (a
+    // </think> id is known), not only for budgets: the in_think flag and exit-step drive
+    // EOS/stop suppression + the post-</think> grace window.
     if (config_.think_end_id >= 0) {
         if (slotted) {
             const GraphSlotView& sv = slot_.view();
@@ -893,7 +842,6 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 if (err != cudaSuccess)
                     goto fail;
             }
-            // Copy prefix history to the beginning of the penalty ring
             if (penalty_prefix_len_ > 0) {
                 err = cudaMemcpyAsync(d_penalty_ring_, config_.penalty_history.data(),
                                       penalty_prefix_len_ * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
@@ -955,12 +903,10 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
 
     // ---- Initialize device state ----
     {
-        // Same semantics as the eager decode step and rearm(): the loop's
-        // first forward processes first_token at slot initial_position with
-        // the context window covering it (#683 — the former +1 here shifted
-        // every fresh-captured loop's KV writes and RoPE one slot too high;
-        // the next correct-positioned writer, e.g. the spec-ngram verify
-        // chunk, then overwrote the burst's last KV entry).
+        // Same semantics as the eager decode step and rearm(): the loop's first forward processes
+        // first_token at slot initial_position with the context window covering it. A +1 here
+        // shifted every fresh-captured loop's KV writes and RoPE one slot too high, so the next
+        // correct-positioned writer (e.g. spec-ngram verify) overwrote the burst's last KV entry (#683).
         int init_pos = config_.initial_position;
         int init_ctx = config_.initial_context_len;
         int init_step = 0;
@@ -1024,11 +970,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         body_state.top_p = config_.top_p;
         body_state.top_k = config_.top_k;
         body_state.seed = config_.seed;
-        // max_context_len drives kernel-path selection in paged_attention_decode.
-        // The split-K pipeline kernel is broken when captured into a conditional
-        // WHILE body (bisect 2026-04-16), but the dispatch now detects stream
-        // capture and falls back to the non-pipeline split-K — safe to use the
-        // real value here.
+        // max_context_len drives kernel-path selection in paged_attention_decode. The split-K
+        // pipeline kernel is broken when captured into a conditional WHILE body, but the dispatch
+        // detects stream capture and falls back to the non-pipeline split-K: safe to use the real value here.
         body_state.max_context_len = config_.initial_context_len + config_.max_steps;
 
         // Penalty parameters for device-side application in forward_decode_async
@@ -1042,7 +986,6 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         }
 
         // ---- Construct CUDA graph with conditional WHILE node ----
-        // 1. Create top-level graph
         cudaGraph_t raw_graph = nullptr;
         err = cudaGraphCreate(&raw_graph, 0);
         if (err != cudaSuccess) {
@@ -1055,7 +998,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         }
         graph_.reset(raw_graph);
 
-        // 2. Create conditional handle (default value = 1 = "continue looping")
+        // Create conditional handle (default value = 1 = "continue looping").
         err = cudaGraphConditionalHandleCreate(&handle_, graph_, 1, cudaGraphCondAssignDefault);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
@@ -1066,7 +1009,6 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             goto fail;
         }
 
-        // 3. Add conditional WHILE node
         cudaGraphNodeParams cond_params{};
         cond_params.type = cudaGraphNodeTypeConditional;
         cond_params.conditional.handle = handle_;
@@ -1083,11 +1025,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             goto fail;
         }
 
-        // 4. Get body graph
         cudaGraph_t body_graph = cond_params.conditional.phGraph_out[0];
 
         // 5. Capture decode body into body_graph via stream capture
-        // Sync stream before capture to ensure all prior work is complete
         cudaStreamSynchronize(stream);
 
         err = cudaStreamBeginCaptureToGraph(stream, body_graph, nullptr, nullptr, 0,
@@ -1103,14 +1043,11 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
 
         graph_diag::g_phase = graph_diag::Phase::CAPTURE;
 
-        // 5a. Forward decode step: embedding → layers → norm → LM head → sample
-        //     Writes sampled token to d_token_id_. The h_mapped parameter receives
-        //     a D2H copy each iteration (harmless scratch write; the real ring buffer
-        //     write is in post_decode_step_kernel below).
-        // NOTE: the h_mapped scratch must NOT alias h_step_counter_ — the
-        // polling harvest (poll_new_tokens) reads the counter concurrently,
-        // and this per-iteration D2H token copy would transiently overwrite
-        // it with a token id, making the host over-read the ring.
+        // 5a. Forward decode step: embedding → layers → norm → LM head → sample. Writes sampled
+        // token to d_token_id_. The h_mapped parameter receives a D2H copy each iteration
+        // (harmless scratch write; the real ring buffer write is in post_decode_step_kernel below).
+        // NOTE: h_mapped scratch must NOT alias h_step_counter_: poll_new_tokens reads the counter
+        // concurrently, and this per-iteration D2H copy would transiently overwrite it with a token id.
         executor->forward_decode_async(body_state, d_token_id_, h_decode_scratch_, stream);
 
         // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
@@ -1128,7 +1065,6 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      d_step_limit_, d_burst_done_mapped_, handle_);
         IMP_CUDA_CHECK_LAUNCH();
 
-        // 5c. End capture
         cudaGraph_t captured_body = nullptr;
         err = cudaStreamEndCapture(stream, &captured_body);
         graph_diag::g_phase = graph_diag::Phase::NORMAL;
@@ -1152,12 +1088,11 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         graph_diag::dump_graph(body_graph, "capture.cond_body");
         graph_diag::dump_graph(graph_, "capture.cond_top");
 
-        // 6. Instantiate the top-level graph, or patch the parked exec in place.
-        // The topology is the same for every request (one WHILE node around one
-        // captured decode step); only kernel parameters differ (block-table
-        // pointer, sampling values, step ceiling, the conditional handle), and
-        // cudaGraphExecUpdate rewrites those without a fresh instantiation.
-        // Anything the driver refuses falls through to cudaGraphInstantiate.
+        // Instantiate the top-level graph, or patch the parked exec in place. The topology is the
+        // same for every request (one WHILE node around one captured decode step); only kernel
+        // parameters differ (block-table pointer, sampling values, step ceiling, conditional handle),
+        // and cudaGraphExecUpdate rewrites those without a fresh instantiation; anything the driver
+        // refuses falls through to cudaGraphInstantiate.
         bool updated = false;
         const auto t_inst0 = std::chrono::steady_clock::now();
         if (spare_exec_) {
@@ -1273,11 +1208,10 @@ std::vector<int32_t> CudaGraphConditionalRunner::wait_and_get_tokens(cudaStream_
 
     cudaError_t sync_err = cudaStreamSynchronize(stream);
     launched_ = false;
-    // F-A17: a swallowed sync error here means the mapped step-counter / ring
-    // buffer below hold stale or garbage data — surface it instead of emitting
-    // bogus tokens. Returning empty lets the worker's step() error path handle
-    // it (and the F-A3 poison check classify it) rather than misattributing the
-    // failure to a later checked call.
+    // F-A17: a swallowed sync error here means the mapped step-counter / ring buffer below hold
+    // stale or garbage data, so surface it instead of emitting bogus tokens. Returning empty
+    // lets the worker's step() error path handle it (F-A3 poison check) rather than
+    // misattributing the failure to a later checked call.
     if (sync_err != cudaSuccess) {
         IMP_LOG_ERROR("AsyncGraphLoop: stream sync failed (%s) — discarding burst",
                       cudaGetErrorString(sync_err));
@@ -1293,10 +1227,9 @@ std::vector<int32_t> CudaGraphConditionalRunner::wait_and_get_tokens(cudaStream_
 }
 
 int CudaGraphConditionalRunner::poll_new_tokens(std::vector<int32_t>& out_tokens) {
-    // Use atomic acquire load on step counter — ensures all prior GPU writes
-    // to the ring buffer are visible before we read the counter value.
-    // This is critical on WSL2 where mapped pinned memory writes from the GPU
-    // may not be immediately visible without a memory barrier.
+    // Use atomic acquire load on step counter: ensures all prior GPU writes to the ring buffer
+    // are visible before we read the counter value. Critical on WSL2, where mapped pinned
+    // memory writes from the GPU may not be immediately visible without a memory barrier.
     int current_step = __atomic_load_n(h_step_counter_, __ATOMIC_ACQUIRE);
     int new_count = current_step - last_read_step_;
     for (int i = last_read_step_; i < current_step; i++) {
@@ -1309,14 +1242,13 @@ int CudaGraphConditionalRunner::poll_new_tokens(std::vector<int32_t>& out_tokens
 bool CudaGraphConditionalRunner::try_finish_burst(cudaStream_t stream) {
     if (!launched_)
         return true;
-    // Key off the device-published done flag, NOT cudaStreamQuery — the query
-    // reports the stream idle while the conditional WHILE graph is still
-    // iterating (observed on WSL2/sm_120), and tearing the loop's buffers
-    // down on that signal corrupts generation. The kernel's stop path is the
+    // Key off the device-published done flag, NOT cudaStreamQuery: the query reports the stream
+    // idle while the conditional WHILE graph is still iterating (WSL2/sm_120), and tearing the
+    // loop's buffers down on that signal corrupts generation. The kernel's stop path is the
     // only loop exit and publishes the flag behind a system fence.
     if (!h_burst_done_ || __atomic_load_n(h_burst_done_, __ATOMIC_ACQUIRE) == 0)
         return false;
-    // Loop broke — drain the graph epilogue (near-instant) and surface errors
+    // Loop broke: drain the graph epilogue (near-instant) and surface errors
     // with the same contract as wait_and_get_tokens (F-A17).
     cudaError_t sync_err = cudaStreamSynchronize(stream);
     launched_ = false;
@@ -1330,9 +1262,8 @@ bool CudaGraphConditionalRunner::try_finish_burst(cudaStream_t stream) {
 void CudaGraphConditionalRunner::finish_burst_blocking(cudaStream_t stream) {
     if (!launched_)
         return;
-    // Fallback for a device loop that stopped making progress without
-    // publishing the done flag (graph error paths never reach the stop
-    // kernel) — block until the stream drains and surface the error.
+    // Fallback for a device loop that stopped making progress without publishing the done flag
+    // (graph error paths never reach the stop kernel): block until the stream drains and surface the error.
     cudaError_t sync_err = cudaStreamSynchronize(stream);
     launched_ = false;
     if (sync_err != cudaSuccess) {

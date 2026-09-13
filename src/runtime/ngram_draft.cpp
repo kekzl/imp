@@ -13,11 +13,10 @@ NgramDraft ngram_draft(std::span<const int32_t> hist, int k, int min_match, int 
     if (max_match < min_match)
         max_match = min_match;
 
-    // Single backward pass over candidate end positions of the matched
-    // n-gram. `end` is the index one past the candidate occurrence, i.e.
-    // hist[end-m .. end) is compared against the suffix hist[n-m .. n).
-    // We first test the cheap min_match window, then extend backwards up
-    // to max_match to rank candidates by match length.
+    // Single backward pass over candidate end positions. `end` is one past
+    // the candidate occurrence: hist[end-m .. end) compared against the
+    // suffix hist[n-m .. n). Test the cheap min_match window first, then
+    // extend backwards to max_match to rank candidates by match length.
     const int32_t* suffix = hist.data() + n - min_match;
     int best_end = -1;
     int best_len = 0;

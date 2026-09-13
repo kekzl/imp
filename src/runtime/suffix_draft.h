@@ -10,24 +10,12 @@
 namespace imp {
 
 // Suffix-indexed prompt-lookup drafting (SuffixDecoding-style, arXiv
-// 2411.04975). Same query contract as ngram_draft() — "longest suffix
-// match → continuation" — with three upgrades:
-//
-//   1. O(1) amortized matching: every min_match-gram of the history is
-//      hash-indexed as tokens arrive, instead of an O(n) backward scan
-//      per verify step (the scan also required rebuilding the full
-//      input++prediction++output vector each step).
-//   2. Frequency-voted continuations: the draft follows the majority
-//      next-token across ALL occurrences of the matched suffix, not the
-//      single most recent one (ties: longer context match, then recency).
-//   3. Adaptive draft length: a continuation backed by strong evidence —
-//      multiple agreeing occurrences, or a maximal-length (max_match)
-//      context match such as the OpenAI `prediction` region — extends
-//      past the base k up to k_max.
-//
-// The index owns a copy of the history (append-only; the engine feeds
-// input ++ prediction ++ output incrementally). Host memory only:
-// ~4 B/token history + ~16 B/token index — a few MiB at 128k context.
+// 2411.04975). Same contract as ngram_draft(): longest suffix match ->
+// continuation. O(1) amortized hash-indexed matching, majority-vote
+// continuation across occurrences (ties: longer match, then recency),
+// adaptive length up to k_max on strong evidence. History is append-only,
+// fed as input ++ prediction ++ output. Memory: ~4B/token history +
+// ~16B/token index (a few MiB at 128k context).
 class SuffixDraftIndex {
 public:
     SuffixDraftIndex(int min_match, int max_match);

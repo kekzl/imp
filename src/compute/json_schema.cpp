@@ -470,7 +470,7 @@ private:
                 // on '{'. The key loop then saw '{' instead of ',', broke, and
                 // every key after this one was dropped - including
                 // `properties`, which downgrades the request to json_object at
-                // constraint_manager.cpp:149. Consume the value either way.
+                // constraint_manager.cpp:138. Consume the value either way.
                 skip_ws();
                 if (peek() == 't' || peek() == 'f') {
                     node->additional_properties = parse_bool();

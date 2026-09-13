@@ -1,16 +1,13 @@
-// =============================================================================
-// engine_spec_batch_verify.cpp - batched speculative verify on the GDN hybrid
-// =============================================================================
+// engine_spec_batch_verify.cpp: batched speculative verify on the GDN hybrid.
 //
 // One forward per decode step for N requests, 2 rows each: the request's last
 // emitted token and its draft. Group g runs the GDN layers on its live slot
-// L_g, commits the 2-row state into the request's spare slot P_g and the 1-row
-// state in place into L_g (compute/gdn.h out_slots / snap_slots). Accept
-// swaps L_g and P_g on the host; reject keeps L_g. No state copies, no
-// replay: the verify depth is 1 (docs/plans/2026-09-11-batched-mtp-verify.md).
+// L_g, commits the 2-row state into the request's spare slot P_g and the
+// 1-row state in place into L_g (compute/gdn.h out_slots / snap_slots).
+// Accept swaps L_g and P_g on the host; reject keeps L_g. No state copies, no
+// replay: verify depth is 1 (docs/plans/2026-09-11-batched-mtp-verify.md).
 // Attention rows take the decode-attention route with per-row block tables
 // and context lengths, the same shape as the multi-candidate chunk.
-// =============================================================================
 
 #include "core/logging.h"
 #include "exec/executor.h"
@@ -119,11 +116,10 @@ bool Engine::ensure_batch_verify_bufs_() {
     return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_);
 }
 
-// Factored spare pools (speculative.factored_spare). Sized over the LIVE slots
-// only: the point of the factored form is that no spare slot exists, so the
-// rows are addressed by the same slot ids the scheduler hands out.
-// A failure here disables the factored path and leaves the slot-swapping one,
-// rather than failing the verify: the two are interchangeable by construction.
+// Factored spare pools (speculative.factored_spare), sized over the LIVE
+// slots only: rows are addressed by the same slot ids the scheduler hands
+// out. A failure here falls back to slot-swapping rather than failing the
+// verify (the two are interchangeable by construction).
 bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv) {
     return cfg.speculative.factored_spare && bv.d_fac != nullptr;
 }
@@ -280,8 +276,8 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
         if (batch.size() < 2)
             return "batch_of_one";
         // The factored form carries the drafted row as (g, k, delta) plus a
-        // conv tap, so it reserves no slots by design and this gate would
-        // refuse every batch on the strength of that (2026-09-12).
+        // conv tap, so it reserves no slots by design; this gate must not
+        // refuse every batch on that basis alone.
         if (!factored_spare_active(runtime_config_, bv_) && ssm_state_->n_reserved() - spec_mc_reserved_slots_() <= 0)
             return "no_spare_slots";
         if (swa_sizing_active_ || config_.streaming_kv_enabled)
@@ -365,11 +361,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     if (n_drafted == 0)
         return decline("no_draft_in_batch");
 
-    // Per-row penalties: the sampler's device history slots (one per
-    // request, host output_tokens the truth). Row 2g penalizes the history
-    // (ends with t0), row 2g+1 the history plus the draft, which is written
-    // at the slot's end below; after the step the emitted tokens land there
-    // from the pinned argmax buffer, so the slot stays in sync.
+    // Per-row penalties use the sampler's device history slots (host
+    // output_tokens is the truth). Row 2g penalizes the history (ends with
+    // t0), row 2g+1 the history plus the draft (written at the slot's end
+    // below); emitted tokens land there afterward, keeping the slot in sync.
     std::vector<const int32_t*> pen_hist(static_cast<size_t>(2 * N), nullptr);
     std::vector<int> pen_n(static_cast<size_t>(2 * N), 0), pen_slot(N, -1), pen_need(N, 0);
     std::vector<float> pen_v(static_cast<size_t>(6 * N), 0.0f);
@@ -669,11 +664,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         kv_manager_->touch(req->id);
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
-        // State: the spare holds the state after [t0, draft], the live slot
-        // the state after t0. Accept = the spare becomes the live slot.
-        // Factored: there is no spare. The scan wrote a row for EVERY group,
-        // so accept keeps it for the next step to apply and anything else has
-        // to clear it, or the state advances by a token nobody accepted.
+        // State: the spare holds [t0, draft], the live slot holds t0; accept
+        // swaps the spare in. Factored: no spare, the scan wrote a row for
+        // EVERY group, so accept keeps it for the next step and anything
+        // else must clear it (else state advances by a token nobody accepted).
         const bool take = matched == 1 && req->status != RequestStatus::FINISHED;
         if (factored)
             (take ? bv_.pending : bv_.clear_slots).push_back(live[g]);

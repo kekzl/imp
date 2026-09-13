@@ -18,9 +18,8 @@ struct InferenceState;
 // net for exception paths that unwound past an active capture (#874).
 void abort_stream_capture(cudaStream_t stream);
 
-// Shared graph-capture helpers:
-// the process-wide capture mode (relaxed by default — global deadlocks the
-// CUTLASS grouped GEMM), and the kernel→kernel PDL edge rewrite.
+// Shared graph-capture helpers: the process-wide capture mode (relaxed by default; global
+// deadlocks the CUTLASS grouped GEMM), and the kernel→kernel PDL edge rewrite.
 cudaStreamCaptureMode get_capture_mode();
 int apply_pdl_edges(cudaGraph_t graph);
 
@@ -35,10 +34,9 @@ public:
     bool is_captured() const { return captured_; }
     void reset();
 
-    // End capture and update the existing exec in-place if possible.
-    // Falls back to full re-instantiate if topology changed or no exec
-    // exists. Skips cudaDeviceGraphMemTrim on fast path to avoid churn
-    // during frequent re-captures (e.g. KV block table growth).
+    // End capture and update the existing exec in-place if possible; falls back to full
+    // re-instantiate if topology changed or no exec exists. Skips cudaDeviceGraphMemTrim on the
+    // fast path to avoid churn during frequent re-captures (e.g. KV block table growth).
     bool end_capture_and_update();
 
     // Release graph_ only (keep graph_exec_ alive for in-place update).
@@ -50,10 +48,9 @@ public:
     // enabling cudaGraphExecUpdate against the retained exec.
     void mark_needs_recapture() { captured_ = false; }
 
-    // Close an in-flight capture without keeping its graph (#874). Called
-    // when the captured fn throws mid-capture: the stream must be taken out
-    // of capture state or every later async op on it fails with
-    // cudaErrorStreamCaptureInvalidated until process restart.
+    // Close an in-flight capture without keeping its graph (#874): called when the captured fn
+    // throws mid-capture, since the stream must be taken out of capture state or every later
+    // async op fails with cudaErrorStreamCaptureInvalidated until process restart.
     void abort_capture();
 
 private:
@@ -90,60 +87,47 @@ public:
     // Next execute() will re-capture. Fully destroys exec_ and graph_.
     void invalidate();
 
-    // Soft invalidate: keep graph_exec_ alive so the next capture can try
-    // cudaGraphExecUpdate in-place. Use when topology is unchanged (e.g.
-    // only kernel params / grid dims differ). Skips the warmup step on the
-    // next execute() since cuBLAS algorithms are already tuned.
+    // Soft invalidate: keep graph_exec_ alive so the next capture can try cudaGraphExecUpdate
+    // in-place. Use when topology is unchanged (e.g. only kernel params / grid dims differ);
+    // skips the warmup step on the next execute() since cuBLAS algorithms are already tuned.
     void invalidate_for_update();
 
     // Check if graph is ready for replay
     bool is_ready() const { return graph_.is_captured(); }
 
-    // Replay the captured graph WITHOUT the capture/warmup state machine and
-    // WITHOUT needing a decode_fn. Used by the pipelined batched decode to
-    // re-enqueue the forward for step N+1 after the device-side chain
-    // advance — there is nothing new to capture, only a replay is valid.
-    // Returns false (and resets, so the next execute() re-captures) when no
-    // captured graph exists or the replay fails; the caller must then skip
-    // the chained step and fall back to the per-step path.
+    // Replay the captured graph WITHOUT the capture/warmup state machine or a decode_fn: used
+    // by the pipelined batched decode to re-enqueue the forward for step N+1 after the
+    // device-side chain advance. Returns false (and resets, so next execute() re-captures) when
+    // no captured graph exists or the replay fails; caller falls back to the per-step path.
     bool replay_only(cudaStream_t stream);
-    // True when the next execute() runs graph kernels: either captured, or it
-    // will capture immediately (process-warm via mark_process_warm, no eager
-    // warmup steps pending, no prior capture failure). Scheduler gates that
-    // pick the async loop / pipelines by pool readiness must use THIS, not
-    // is_ready(): gating on is_captured() enters those paths one step later
-    // on the process's FIRST request than on every later one — a numerically
-    // different kernel mix for that step, and a greedy flip on near-ties
-    // (the 30B-NVFP4-MoE temp=0 flipper).
+    // True when the next execute() runs graph kernels: either already captured, or it will
+    // capture immediately (process-warm via mark_process_warm, no eager warmup steps pending,
+    // no prior capture failure). Scheduler gates that pick the async loop / pipelines by pool
+    // readiness must use THIS, not is_ready(): gating on is_captured() enters those paths one
+    // step later on the process's FIRST request, a numerically different kernel mix that flips
+    // greedy output on near-ties (the 30B-NVFP4-MoE temp=0 flipper).
     bool graph_path_available() const {
         return !capture_failed_ && (graph_.is_captured() || step_count_ >= warmup_steps_);
     }
 
-    // Get stats
     int replay_count() const { return replay_count_; }
     int capture_count() const { return capture_count_; }
 
-    // Configuration
     void set_warmup_steps(int n) { warmup_steps_ = n; }
-    // Mark process-level lazy init (cuBLAS autotuning, workspaces) as already
-    // done: the next execute() captures immediately instead of running the
-    // once-per-runner eager warmup step. Engine::warmup() calls this after
-    // tearing down the warmup graphs — otherwise that eager step lands in the
-    // FIRST real request only, and its kernel mix differs numerically (FP
-    // order) from the captured graph every later request replays: on near-tie
-    // logits greedy output became request-order dependent (the documented
-    // 30B-NVFP4-MoE temp=0 flipper).
+    // Mark process-level lazy init (cuBLAS autotuning, workspaces) as already done: the next
+    // execute() captures immediately instead of running the once-per-runner eager warmup step.
+    // Engine::warmup() calls this after tearing down the warmup graphs; otherwise that eager step
+    // lands only in the FIRST real request with a numerically different kernel mix (FP order),
+    // making greedy output request-order dependent on near-tie logits (30B-NVFP4-MoE flipper).
     void mark_process_warm() {
         if (step_count_ < warmup_steps_)
             step_count_ = warmup_steps_;
     }
 
-    // Test-only: make the next post-capture replay report failure, so the
-    // first-replay-failure path can be exercised. A genuine cudaGraphLaunch
-    // failure right after a successful cudaGraphInstantiate cannot be provoked
-    // from outside without relying on undefined behaviour, and that path used to
-    // skip the forward pass entirely (see cuda_graph.cu). Never set in
-    // production code.
+    // Test-only: make the next post-capture replay report failure, so the first-replay-failure
+    // path can be exercised. A genuine cudaGraphLaunch failure right after a successful
+    // cudaGraphInstantiate cannot be provoked from outside without UB (see cuda_graph.cu).
+    // Never set in production code.
     void set_fail_next_replay_for_test() { fail_next_replay_for_test_ = true; }
 
 private:
@@ -163,15 +147,10 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Conditional WHILE graph runner: GPU-autonomous multi-token decode loop.
-//
-// For single-sequence decode, captures the entire decode loop as a CUDA
-// graph with a conditional WHILE node. The GPU generates N tokens without
-// any host interaction. Tokens are streamed to the host via mapped pinned
-// memory ring buffer.
-//
-// Requires CUDA 12.4+ (conditional graph nodes). Falls back gracefully
-// if graph construction fails (e.g., layer offloading active).
+// Conditional WHILE graph runner: GPU-autonomous multi-token decode loop. For single-sequence
+// decode, captures the entire loop as a CUDA graph with a conditional WHILE node; the GPU
+// generates N tokens with no host interaction, streamed via a mapped pinned memory ring buffer.
+// Requires CUDA 12.4+ (conditional graph nodes); falls back gracefully if construction fails.
 // ---------------------------------------------------------------------------
 class CudaGraphConditionalRunner {
 public:
@@ -180,10 +159,9 @@ public:
 
     struct Config {
         int max_steps = 0;              // max tokens to generate
-        // Position/context of the loop's FIRST forward — identical semantics
-        // to the eager decode step and rearm(): first_token is processed at
-        // slot initial_position with initial_context_len covering it
-        // (callers pass req.context_len()-1 / req.context_len()).
+        // Position/context of the loop's FIRST forward, identical semantics to the eager decode
+        // step and rearm(): first_token is processed at slot initial_position with
+        // initial_context_len covering it (callers pass req.context_len()-1 / req.context_len()).
         int initial_context_len = 0;
         int initial_position = 0;
         int eos_id = -1;                // EOS token ID
@@ -198,11 +176,10 @@ public:
         int32_t think_start_id = -1;    // <think> token ID
         int32_t think_end_id = -1;      // </think> token ID
         bool initial_in_think = false;  // true if already inside <think> block
-        // Post-</think> grace: suppress EOS/stop for this many tokens after the
-        // think block closes, matching think_logic::kMinAnswerAfterThink on the
-        // eager path. Guards against numerically-noisy NVFP4 quants that close an
-        // empty think block in ~3 tokens then EOS to a 0-content completion.
-        // 0 = no think tracking in the loop (set >0 whenever think_end_id >= 0).
+        // Post-</think> grace: suppress EOS/stop for this many tokens after the think block closes,
+        // matching think_logic::kMinAnswerAfterThink on the eager path. Guards against
+        // numerically-noisy NVFP4 quants that close an empty think block in ~3 tokens then EOS to
+        // a 0-content completion. 0 = no think tracking (set >0 whenever think_end_id >= 0).
         int think_grace_tokens = 0;
         // Device per-token "decodes to whitespace-only" mask (size vocab_size,
         // nullptr = treat nothing as whitespace). A whitespace/newline token
@@ -210,11 +187,9 @@ public:
         const uint8_t* token_is_whitespace = nullptr;
         int vocab_size = 0;
         bool ignore_eos = false;        // don't stop on EOS/stop tokens (benchmark mode)
-        // Per-launch step cap read from device memory (0 = unbounded, i.e.
-        // max_steps). Unlike max_steps it is NOT baked into the captured
-        // graph: rearm() can change it between launches, which makes bounded
-        // "burst" launches cheap (no recapture). max_steps stays the capacity
-        // ceiling (ring buffer size, max_context_len).
+        // Per-launch step cap read from device memory (0 = unbounded, i.e. max_steps). Unlike
+        // max_steps it is NOT baked into the captured graph: rearm() can change it between launches,
+        // making bounded "burst" launches cheap (no recapture); max_steps stays the capacity ceiling.
         int step_limit = 0;
         // Penalty parameters (applied to logits before sampling each iteration)
         float repetition_penalty = 1.0f;
@@ -237,15 +212,13 @@ public:
     // Launch the graph. Returns immediately.
     bool launch(cudaStream_t stream);
 
-    // Re-seed device state for another bounded launch WITHOUT recapturing the
-    // graph (the expensive part of setup). first_token is forwarded at
-    // `position` with context length `context_len` (physical values, no +1
-    // applied inside). step_limit bounds this launch (0 = max_steps);
-    // think_limit is the REMAINING think budget for this launch (0 = no
-    // budget; the device counter restarts at 0 every launch, so the caller
-    // passes full_budget - tokens_already_thought). Returns false when no
-    // graph is built, a launch is still in flight, or context_len would
-    // exceed the captured ceiling — caller falls back to a full setup().
+    // Re-seed device state for another bounded launch WITHOUT recapturing the graph. first_token
+    // is forwarded at `position` with context length `context_len` (physical values, no +1
+    // applied inside). step_limit bounds this launch (0 = max_steps); think_limit is the
+    // REMAINING think budget (0 = no budget; device counter restarts at 0 every launch, so the
+    // caller passes full_budget - tokens_already_thought). Returns false when no graph is built,
+    // a launch is in flight, or context_len would exceed the captured ceiling; caller falls back
+    // to a full setup().
     bool rearm(int32_t first_token, int position, int context_len, int step_limit, bool in_think,
                int think_limit, cudaStream_t stream);
 
@@ -262,12 +235,10 @@ public:
     // Appends new tokens to out_tokens. Returns count of new tokens.
     int poll_new_tokens(std::vector<int32_t>& out_tokens);
 
-    // Non-blocking burst-completion check: returns true once the device loop
-    // published its done flag (the kernel stop path is the only loop exit),
-    // then drains the graph epilogue and clears the launched flag. A stream
-    // error is surfaced like wait_and_get_tokens (F-A17) and still ends the
-    // burst — tokens already read through poll_new_tokens stand.
-    // Deliberately NOT cudaStreamQuery-based: the query reports the stream
+    // Non-blocking burst-completion check: true once the device loop publishes its done flag
+    // (the kernel stop path is the only loop exit), then drains the epilogue and clears the
+    // launched flag. Stream errors surface like wait_and_get_tokens (F-A17); tokens already read
+    // via poll_new_tokens stand. Deliberately NOT cudaStreamQuery-based: it reports the stream
     // idle while a conditional WHILE graph is still iterating.
     bool try_finish_burst(cudaStream_t stream);
 
@@ -280,12 +251,10 @@ public:
 
     void cleanup();
 
-    // cleanup() parks the instantiated exec instead of destroying it, so the
-    // next setup() can patch it in place with cudaGraphExecUpdate (same
-    // topology: one WHILE node around one captured decode step) instead of
-    // paying cudaGraphInstantiate (10-44 ms per request on Qwen3.8-27B, a
-    // stall right after the first token). Engine teardown and a poisoned
-    // context drop it here.
+    // cleanup() parks the instantiated exec instead of destroying it, so the next setup() can
+    // patch it in place with cudaGraphExecUpdate (same topology: one WHILE node around one
+    // captured decode step) instead of paying cudaGraphInstantiate (10-44 ms per request, a
+    // stall right after the first token). Engine teardown and a poisoned context drop it here.
     void drop_spare() { spare_exec_.reset(); }
 
     bool is_setup() const { return static_cast<bool>(exec_); }
@@ -319,12 +288,10 @@ private:
     int* d_penalty_count_ = nullptr;     // [1] device-side total penalty token count
     int penalty_prefix_len_ = 0;         // number of pre-populated history tokens
 
-    // Mapped pinned memory for zero-copy host readback
-    // The four mapped-pinned buffers below are EITHER views into a graph-slot
-    // lease (the pool owns them) or owned here when the pool declines. The
-    // owners are these T5b buffers; the raw pointers stay views either way, so
-    // "did I own this?" is answered by the type instead of by which teardown
-    // branch you are in (memory/host_pinned.h).
+    // Mapped pinned memory for zero-copy host readback. The four buffers below are EITHER views
+    // into a graph-slot lease (pool-owned) or owned here when the pool declines; owners are these
+    // T5b buffers, so "did I own this?" is answered by the type, not by which teardown branch
+    // you are in (memory/host_pinned.h).
     PinnedBuffer owned_ring_, owned_step_counter_, owned_burst_done_, owned_decode_scratch_;
     int32_t* h_ring_buffer_ = nullptr;      // host pointer to ring buffer
     int32_t* d_ring_buffer_ = nullptr;      // device pointer to same ring buffer
@@ -336,17 +303,14 @@ private:
     // host must not use it to decide teardown.
     int* h_burst_done_ = nullptr;           // host pointer to done flag
     int* d_burst_done_mapped_ = nullptr;    // device pointer to same flag
-    // Dedicated scratch for forward_decode_async's per-iteration D2H token
-    // copy. This used to alias h_step_counter_ — harmless when tokens were
-    // only harvested after a full-burst sync, but a polling host could read
-    // the transient token id as the step counter and over-read the ring.
+    // Dedicated scratch for forward_decode_async's per-iteration D2H token copy: must not alias
+    // h_step_counter_, or a polling host could read the transient token id as the step counter
+    // and over-read the ring.
     int32_t* h_decode_scratch_ = nullptr;
 
-    // T2 slot backing every pointer above (A7 step 5.3). When the lease is
-    // valid nothing here is individually owned and cleanup() only returns the
-    // lease; when the pool declines, setup() allocates as it always did and
-    // cleanup() frees. The pointers themselves are identical either way, so
-    // nothing downstream can tell the difference.
+    // T2 slot backing every pointer above (A7 step 5.3): when the lease is valid nothing here is
+    // individually owned and cleanup() only returns the lease; when the pool declines, setup()
+    // allocates and cleanup() frees. Pointers are identical either way.
     GraphSlotLease slot_;
 
     Config config_;

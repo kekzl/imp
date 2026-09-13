@@ -1,12 +1,4 @@
-// Engine init phase: paged KV cache allocation.
-// Decides block geometry (block_size=16), allocates blocks per KV dtype
-// (FP16/FP8/INT8/INT4/NVFP4/MXFP4), wires up KVCacheManager. Also
-// initialises the BitDecoding residual FP16 cache (opt-in), SSM/GDN
-// state, pre-dequant weight caches, decode batch pool, prefill metadata
-// pool + pinned staging, and reports VRAM usage.
-//
-// Extracted from engine.cpp in Phase 4 of the architecture refactor
-// roadmap. Method remains Engine:: with declaration in engine.h.
+// Engine init phase: paged KV cache allocation. Declaration in engine.h.
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
@@ -34,11 +26,9 @@
 
 namespace imp {
 
-// Stable identity hash of the loaded model: FNV-1a over config identity
-// scalars plus a small sample of real weight bytes (LM head, token embeddings,
-// layer-0 and mid-layer Q projections). The weight sample is what distinguishes
-// two same-shape fine-tunes (identical config) that the geometry checks cannot.
-// Used only to gate the persisted prefix cache (cold-path, twice per process).
+// Stable model identity hash: FNV-1a over config scalars + weight bytes
+// (LM head, embeddings, layer-0/mid Q proj) - distinguishes same-shape fine-tunes.
+// Gates the persisted prefix cache only (cold path, twice per process).
 uint64_t Engine::model_fingerprint_() const {
     auto fnv = [](uint64_t h, const void* p, size_t n) {
         const auto* b = static_cast<const uint8_t*>(p);
@@ -87,7 +77,6 @@ bool Engine::init_kv_cache() {
     const auto& mcfg = model_->config();
     int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
 
-    // Build KV layer mapping for hybrid models
     int n_attn_layers = 0;
     std::vector<int> kv_layer_map(mcfg.n_layers, -1);
     for (int i = 0; i < mcfg.n_layers; i++) {
@@ -102,19 +91,17 @@ bool Engine::init_kv_cache() {
     int n_kv_layers = n_attn_layers;
     IMP_LOG_INFO("KV cache layers: %d attention out of %d total", n_kv_layers, mcfg.n_layers);
 
-    // Resolved in init_resolve_kv_block_size_(), which runs before the
-    // executor sizes its workspaces - anything sized there needs the real
-    // value, not kKVBlockSize. The fallback keeps this function correct if it
-    // is ever reached on a path that skipped the resolver.
+    // Resolved in init_resolve_kv_block_size_() before the executor sizes its
+    // workspaces - anything sized there needs the real value, not kKVBlockSize.
+    // Fallback keeps this function correct if that resolver was skipped.
     if (config_.kv_block_size <= 0)
         config_.kv_block_size = kKVBlockSize;
     const int kv_bs = config_.kv_block_size;
     int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
 
-    // ── SWA-aware KV sizing gate (kv_cache.swa_sizing) ────────────────
-    // Sliding-window layers get a small dedicated block group instead of
-    // full-length KV. Resolve the gate + geometry before the VRAM budget so
-    // the budget charges SWA layers window-cost, not context-cost.
+    // SWA-aware KV sizing gate (kv_cache.swa_sizing): sliding-window layers get
+    // a small dedicated block group instead of full-length KV. Resolved before
+    // the VRAM budget so it charges window-cost, not context-cost.
     swa_sizing_active_ = false;
     swa_window_max_ = 0;
     int n_swa_layers = 0;
@@ -172,11 +159,9 @@ bool Engine::init_kv_cache() {
                                  ? runtime_config_.runtime.decode_burst
                                  : 512;
             swa_burst_cap_tokens_ = std::max(chunk_peak, burst_peak);
-            // Prefix caching cannot reuse freed window blocks on its own.
-            // With a SWA snapshot budget the two coexist (the store below
-            // restores the window at the reuse boundary); without one, only
-            // an explicit "on" reaches this point — honor the forced opt-in
-            // by disabling prefix caching.
+            // Prefix caching cannot reuse freed window blocks. With a SWA
+            // snapshot budget the two coexist (window restored at reuse
+            // boundary); otherwise honor the forced opt-in by disabling it.
             if (config_.use_prefix_caching && runtime_config_.kv_cache.swa_snapshot_mb <= 0) {
                 config_.use_prefix_caching = false;
                 IMP_LOG_INFO("kv_cache.swa_sizing=on: prefix caching disabled (freed window "
@@ -184,22 +169,16 @@ bool Engine::init_kv_cache() {
                              "to combine)");
             }
             // StreamingLLM auto-enable frees middle blocks of the GLOBAL
-            // table — redundant and conflicting here.
+            // table, redundant and conflicting here.
             config_.streaming_kv_auto = false;
         }
     }
     const int swa_live_tokens =
         swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
 
-    // VRAM budget. Nothing is held back from effective_free_vram() any more
-    // (the balloon is gone, AUDIT B62): the prequant reserve charges KV the full
-    // measured cache demand and phase 3 is floored at it.
-    // Charge what the first forward actually claimed LAST time, if we know
-    // (AUDIT B41/B49). The plan needs this number before the forward that
-    // produces it, so a single run cannot both measure and use it — but the
-    // value is stable per (model, quant path, library stack) and invariant to
-    // batch and context, so remembering it is enough. Explicit
-    // vram.library_reserve_mb always wins; a miss leaves the constant in place.
+    // VRAM budget: KV charges the full measured cache demand, phase 3 floors at
+    // it (no held-back reserve, AUDIT B62). library_reserve_mb caches the first
+    // forward's actual claim (stable per model/quant/library); explicit config wins.
     if (config_.library_reserve_mb < 0 && runtime_config_.vram.library_reserve_cache != "off") {
         const std::string path = runtime_config_.vram.library_reserve_cache.empty()
                                      ? library_reserve_cache_default_path()
@@ -214,20 +193,17 @@ bool Engine::init_kv_cache() {
         bool remembered_found = false;
         const size_t remembered = library_reserve_cache_load(path, key, &remembered_found);
         if (remembered_found) {
-            // `remembered > 0` was the test here, which discarded a recorded
-            // ZERO and charged the 3900 MiB constant instead — on exactly the
-            // models whose first forward claims nothing. B43 fixed this shape in
-            // the reporter; the loader kept it (AUDIT B70).
+            // A recorded ZERO reserve is valid (not "missing") - models whose
+            // first forward claims nothing (AUDIT B70).
             config_.library_reserve_mb = static_cast<int>(remembered >> 20);
             IMP_LOG_INFO("library reserve: %d MiB from the measurement cache (%s) — the default "
                          "constant is %zu MiB",
                          config_.library_reserve_mb, path.c_str(),
                          kMeasuredLibraryReserveBytes >> 20);
         } else if (!path.empty()) {
-            // No entry: the plan is about to charge the constant. Say so HERE,
-            // before the pools are sized, instead of only reporting the
-            // mismatch after the first forward — by then the KV pool has
-            // already been sized around a reserve the model may not want.
+            // No entry: log the constant charge HERE, before pools are sized -
+            // reporting only after the first forward would be too late, the KV
+            // pool would already be sized around an unwanted reserve.
             IMP_LOG_INFO("library reserve: no measurement for this model in %s — planning with the "
                          "%zu MiB constant. It is recorded after the first forward; mount that "
                          "path (or set vram.library_reserve_cache) to keep it across restarts.",
@@ -241,30 +217,20 @@ bool Engine::init_kv_cache() {
                                            swa_live_tokens, n_swa_layers, &native_cache_demand(),
                                            ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,
                                            runtime_config_.gemm.moe_imma_prefill);
-    // Cap the IMMA prefill planes at what the pass just charged for them. They
-    // are taken lazily on each Q8_0 weight's first prefill, so without this the
-    // cache takes whatever the KV pool leaves free — a different amount on
-    // every start, and the reason the spill victim followed the startup path
-    // (#1899). Set before the pool is sized so a mid-init prefill (warmup,
-    // graph prewarm) is already bounded.
+    // Cap the IMMA prefill planes at what the pass just charged: they are taken
+    // lazily on each Q8_0 weight's first prefill, so uncapped the cache would
+    // take whatever KV leaves free, varying per start (#1899). Set before sizing.
     mmq_q8_imma_set_plane_budget(vram_budget.imma_plane_bytes);
-    // A7 step 2 — APPLIED. The KV block count now comes from plan_memory(), not
-    // from the live-free-derived pass. What made that safe is three changes, in
-    // this order: the balloon stopped hiding bytes from the live read (B62), the
-    // unexplained `* 2` that was the whole live-vs-plan divergence went (B65),
-    // and V8 now asserts the live pass never exceeds the plan (B66). Today the
-    // two produce the SAME number on every measured config, so this changes
-    // where the number comes from rather than what it is — and the
-    // measured-residual clamp further down can still only shrink it, which is
-    // what keeps a plan that is wrong about the device from overcommitting.
+    // KV block count comes from plan_memory(), not the live-free-derived pass
+    // (B62/B65/B66). The residual clamp below can only shrink it further, never
+    // grow it, so a plan wrong about the device cannot overcommit.
     int max_blocks = 0;
     {
         ShadowPlanProbe probe;
         probe.distributable_bytes = effective_free_vram();
-        // Steady-state demand only: the transient init headroom folded into
-        // the estimate is free again by the time the pool is sized, and
-        // charging it here handed the "optional caches" everything down to
-        // the one-sequence floor — 128 KV blocks while GiBs sat free (#1765).
+        // Steady-state demand only: transient init headroom is free again by
+        // pool-sizing time. Charging it starved optional caches to a 128-block
+        // floor while GiBs sat idle (#1765).
         probe.weight_cache_demand =
             vram_budget.weight_cache_estimate_bytes > vram_budget.weight_cache_transient_bytes
                 ? vram_budget.weight_cache_estimate_bytes - vram_budget.weight_cache_transient_bytes
@@ -276,21 +242,17 @@ bool Engine::init_kv_cache() {
                                       vram_budget.imma_plane_bytes;
         probe.ssm_state_bytes = vram_budget.ssm_footprint_bytes;
         // The recurrent snapshot store cudaMallocs server.recurrent_snapshot_mb
-        // AFTER this plan and after the KV pool is sized, so the pool used to be
-        // sized over 256 MiB that another tenant of the same init was about to
-        // take. Charged here at the figure the store will actually claim: whole
-        // slots of one sequence's state, never more than the budget.
+        // AFTER KV sizing, so charge it here: whole slots of one sequence's
+        // state, never more than the budget.
         if (mcfg.ssm_inner_size > 0 && config_.use_prefix_caching &&
             runtime_config_.server.recurrent_snapshot_mb > 0 && vram_budget.ssm_footprint_bytes > 0) {
             const size_t slots =
                 static_cast<size_t>(config_.max_batch_size) + static_cast<size_t>(std::max(0, ssm_reserved_slots));
             const size_t per_seq = slots > 0 ? vram_budget.ssm_footprint_bytes / slots : 0;
             const size_t budget = static_cast<size_t>(runtime_config_.server.recurrent_snapshot_mb) << 20;
-            // The store pre-allocates WHOLE slots of one sequence's state and
-            // stops at the budget, so the device charge is
-            // floor(budget / per_seq) * per_seq, not the raw budget. The host
-            // tier (server.recurrent_snapshot_host_mb) is pinned HOST memory
-            // and is not a VRAM charge.
+            // Whole slots only, stopped at budget: device charge is
+            // floor(budget/per_seq)*per_seq, not raw budget. Host tier
+            // (server.recurrent_snapshot_host_mb) is pinned HOST memory, not VRAM.
             probe.recurrent_snapshot_bytes = per_seq > 0 ? (budget / per_seq) * per_seq : 0;
         }
         if (executor_) {
@@ -298,11 +260,9 @@ bool Engine::init_kv_cache() {
             probe.workspace_estimate_available = true;
         }
         probe.vision_tower_unmodelled = !config_.mmproj_path.empty();
-        // config_.library_reserve_mb, NOT the runtime-config field: the loader
-        // above writes the REMEMBERED measurement into the former, and reading
-        // the latter here meant the plan kept charging the 3900 MiB constant
-        // while the live pass used the measured 0. Two fields, one number, and
-        // the plan was on the wrong one (AUDIT B70).
+        // Use config_.library_reserve_mb, NOT the runtime-config field: the
+        // loader above writes the remembered measurement into the former only
+        // (AUDIT B70).
         probe.library_reserve_bytes = config_.library_reserve_mb < 0
                                           ? kMeasuredLibraryReserveBytes
                                           : static_cast<size_t>(config_.library_reserve_mb) << 20;
@@ -329,15 +289,9 @@ bool Engine::init_kv_cache() {
         } else if (plan.ok) {
             max_blocks = plan.plan.kv.blocks;
             if (max_blocks != vram_budget.kv_max_blocks) {
-                // Not a failure — the two are allowed to differ, and the plan is
-                // the one that charges what the live read cannot see. Logged
-                // because a silent divergence is how the old pass drifted.
-                // The live figure is the pre-floor one: kv_max_blocks may have
-                // been raised by min_kv_tokens, and printing that under "live
-                // pass would have said" reported a lower bound of the
-                // configuration as a reading (#1747). Both are named when they
-                // differ, so a rescued pass is distinguishable from one that
-                // disagreed.
+                // Plan and live pass may legitimately differ (plan charges what
+                // the live read cannot see) - logged so divergence isn't silent.
+                // Live figure is pre-floor: kv_max_blocks may already be raised by min_kv_tokens (#1747).
                 const int live_raw = vram_budget.kv_blocks_pre_floor > 0 ? vram_budget.kv_blocks_pre_floor
                                                                          : vram_budget.kv_max_blocks;
                 if (live_raw != vram_budget.kv_max_blocks) {
@@ -348,11 +302,9 @@ bool Engine::init_kv_cache() {
                 }
             }
         } else {
-            // The plan refuses this configuration. D8 argues that should fail
-            // the load, and it does when an explicit --vram-budget is installed
-            // (the check further down). Without one, falling back to the live
-            // pass keeps the pre-existing best-effort behaviour rather than
-            // turning a plan gap into a refusal to serve.
+            // Plan refuses this configuration: fails the load only when an
+            // explicit --vram-budget is installed (check further down, D8).
+            // Otherwise falls back to the live pass (best-effort, not a refusal).
             max_blocks = vram_budget.kv_max_blocks;
             IMP_LOG_WARN("KV blocks: the plan rejects this configuration — falling back to the "
                          "live-derived %d blocks. The report above says what it could not fit.",
@@ -360,12 +312,9 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // Sparse decode attention prices its key min/max pool INTO the block
-    // count: the pool is a fixed fraction of the K+V bytes (nkv*hd*4 bytes
-    // per block per layer) and is allocated AFTER this sizing — unpriced it
-    // is a silent 6-12% overcommit, and on WSL2/WDDM that does not fail, it
-    // SPILLS (the #1103 cliff; measured 2026-08-29 at 689 MiB "free": every
-    // prefill kernel uniformly +11%).
+    // Sparse decode attention's key min/max pool (nkv*hd*4 bytes/block/layer)
+    // is allocated AFTER this sizing and must be priced in: unpriced it is a
+    // silent 6-12% overcommit that spills on WSL2/WDDM rather than failing (#1103).
     if (runtime_config_.attention.sparse_topk_tokens > 0) {
         const QType kvt = config_.kv_cache_dtype;
         const bool eligible = (kvt == QType::F16 || kvt == QType::FP8_E4M3) && !mcfg.is_mla() &&
@@ -384,14 +333,9 @@ bool Engine::init_kv_cache() {
                              "WSL2/WDDM spills silently",
                              static_cast<double>(mm_per_block) * max_blocks / (1024.0 * 1024.0));
             } else {
-                // Auto-sized pools: the metadata is charged post-plan like the
-                // BitDecoding residual buffer - deflating the block count here
-                // broke the admission guarantee (a 32k request was cancelled
-                // against a demand-floored pool), and the sizing figures do
-                // not distinguish demand-bound from VRAM-bound (the shadow
-                // plan charges conservative reserves either way). Pricing it
-                // INSIDE plan_memory is the open follow-up; until then the
-                // size is named so a tight configuration can be re-pinned.
+                // Auto-sized pools: charged post-plan like the BitDecoding
+                // residual buffer - deflating the block count here broke the
+                // admission guarantee. Pricing inside plan_memory is the open follow-up.
                 IMP_LOG_INFO("sparse decode attention: key min/max pool adds %.1f MiB after the KV "
                              "sizing (%.2f%% of the K+V pool)",
                              static_cast<double>(mm_per_block) * max_blocks / (1024.0 * 1024.0),
@@ -400,18 +344,11 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // ── Weight caches are built BEFORE the KV pool (A7 step 6.4) ──────
-    // Measured on gpt-oss-20b-mxfp4 at server defaults: sizing KV first from
-    // an ESTIMATE of the cache demand left the card at exactly 0 MiB free —
-    // the estimate was ~1.6 GiB low, and the caches took the difference out
-    // of the reserve. At 0 free, WSL2/WDDM spills into host memory (the exact
-    // hazard VRAMAllocator's own docstring names) and decode collapses from
-    // ~345 tok/s to 25 tok/s. Leaving as little as 1 GiB free restores it.
-    // So the caches, whose demand is bounded by the model, go first, and the
-    // KV pool — the elastic tier — takes what is actually left (AUDIT B23).
-    //
-    // The two profile gates below must come with them: both feed flags the
-    // cache build reads (wcache_->use_fp8) or that graph capture depends on.
+    // Weight caches build BEFORE the KV pool (A7 step 6.4): caches have bounded
+    // demand and go first, KV (elastic) takes what's left - reversed order can
+    // starve caches to 0 free and spill on WSL2/WDDM (AUDIT B23).
+    // The profile gates below must stay with the caches: they set flags the
+    // cache build and graph capture depend on (wcache_->use_fp8).
     // GDN detection
     {
         if (model_->profile().is_gdn) {
@@ -421,10 +358,9 @@ bool Engine::init_kv_cache() {
                 IMP_LOG_INFO(
                     "GDN model: CUDA graphs disabled (disabled earlier by caller or expert offload)");
             }
-            // GDN recurrent state accumulates small precision errors per token.
-            // FP8 E4M3 (3-bit mantissa) amplifies these through the delta rule
-            // scan, causing degenerate output after ~50 special tokens in
-            // multi-turn chat.  Force FP16 weights for GDN prefill.
+            // GDN recurrent state accumulates precision errors per token. FP8
+            // E4M3's 3-bit mantissa amplifies these through the delta-rule scan,
+            // causing degenerate output after ~50 tokens in multi-turn chat.
             if (config_.use_fp8_prefill) {
                 if (config_.dual_path_quant) {
                     IMP_LOG_WARN(
@@ -441,59 +377,40 @@ bool Engine::init_kv_cache() {
 
     // (Gemma 4 FP8 prefill disabled earlier, before executor init)
 
-    // Pure Mamba2 SSM layers (ssm_in without gdn_gate) used to demote graphs
-    // here, on the assumption that the recurrent state was not capture-safe.
-    // It is: the scan's device work is all stream-async, and the state lives in
-    // one pool allocated once, so replay writes it in place exactly as an eager
-    // step does. Measured 2026-08-12 on this box, decode, spec off:
-    //   Nemotron-3.5-Lightning  126.2 -> 365.6 tok/s
-    //   Nemotron-3-Nano         127.2 -> 381.7 tok/s
-    // with 45/45 degen_suite, a clean 700-token generation, multi-turn, and
-    // four concurrent requests keeping their states apart. `AUDIT_ARCH` called
-    // this "eager decode by design" and docs/MODELS.md called the model
-    // "arch-limited" — both were describing this demotion, not the
-    // architecture. `runtime.cuda_graphs=never` remains the way out.
+    // Pure Mamba2 SSM layers (ssm_in without gdn_gate) are capture-safe: the
+    // scan is stream-async and the state lives in one pool allocated once, so
+    // graph replay writes it in place exactly as eager. runtime.cuda_graphs=never opts out.
 
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
 
-    // Both facts this needs exist only now: Phase 0 (inside pre_dequant) has
+    // Requires two facts that exist only now: Phase 0 (inside pre_dequant) has
     // labelled host-resident NVFP4 experts, and the expert cache was sized in
-    // init_weights(). Refusing here rather than at weight-upload time is the
-    // point — see verify_host_expert_placement().
+    // init_weights(). Refusing here, not at weight-upload time, is the point.
     executor_->verify_host_expert_placement();
 
-    // KV now takes the MEASURED residual, not a predicted one. This can only
-    // shrink the pool relative to the budget's projection, never grow it, so
-    // it cannot overcommit; and it keeps the allocator's headroom free, which
-    // is what everything allocated after this point needs to succeed.
+    // KV takes the MEASURED residual, not a predicted one: this can only shrink
+    // the pool relative to the budget's projection, never grow it, so it cannot
+    // overcommit, and keeps the allocator headroom free for later allocations.
     const size_t per_block_total_bytes =
         static_cast<size_t>(n_kv_layers) *
         kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
-    // The ceiling a growable pool reserves for. The live pass sized what the
-    // device could hold (vram_budget.kv_max_blocks); the shadow plan above may
-    // have committed less because it charges conservative reserves (the 3900
-    // MiB library constant, unmodelled forward scratch). A growable pool starts
-    // at the plan's commit and may grow back toward the live figure under
-    // admission pressure - without this max() the plan's clamp was also the
-    // ceiling and kv_cache.growable was a no-op on planned loads (measured:
-    // 32x8k stuck at 2046 blocks with a 6483-block live sizing and ~6 GB idle).
-    // An operator pin (kv_cache.max_blocks) is a ceiling, not a floor: with the
-    // pool growable by default a pinned pool must not grow past the pin (the
-    // exhaustion tests pin 16 blocks and expect the typed refusal, and a pin
-    // only ever caps what auto would have granted).
+    // Ceiling for a growable pool: starts at the plan's commit (may be less than
+    // the live-derived kv_max_blocks due to conservative reserves) and grows
+    // toward the live figure under admission pressure - without this max() growable
+    // was a no-op on planned loads.
+    // kv_cache.max_blocks is a ceiling, not a floor: with growable on by default,
+    // a pinned pool must never grow past the pin.
     const int kv_blocks_planned = config_.kv_cache_max_blocks > 0
                                       ? max_blocks
                                       : std::max(max_blocks, vram_budget.kv_max_blocks);
     if (per_block_total_bytes > 0) {
         size_t free_now = 0, total_now = 0;
         vram_budget_mem_get_info(&free_now, &total_now);
-        // The IMMA prefill planes are still OUTSTANDING here: they are taken on
-        // each Q8_0 weight's first prefill, i.e. during warmup, after this
-        // reading. Charging them keeps the residual pass from handing the pool
-        // bytes the very next forward claims (#1899) — the mechanism behind the
-        // card sitting at 0 MiB free after init on Qwen3-8B-Q8_0.
+        // IMMA prefill planes are still OUTSTANDING here (taken on each Q8_0
+        // weight's first prefill, during warmup). Charging them here keeps the
+        // residual pass from handing the pool bytes the next forward claims (#1899).
         const size_t imma_used = mmq_q8_imma_plane_bytes_used();
         const size_t imma_outstanding = vram_budget.imma_plane_bytes > imma_used
                                             ? vram_budget.imma_plane_bytes - imma_used
@@ -516,11 +433,9 @@ bool Engine::init_kv_cache() {
                          headroom / (1024.0 * 1024.0));
             max_blocks = sizing.blocks;
         }
-        // The floor is a rescue, not a size: nothing was left to size the pool
-        // from, so every request longer than the floor will be cancelled at
-        // admission while the load still reports success. The hard failure
-        // below only fires with an explicit --vram-budget, so without this the
-        // default path learns about it from cancelled generations (#1251).
+        // The floor is a rescue, not a size: requests longer than it will be
+        // cancelled at admission even though the load reports success. The hard
+        // failure below fires only with an explicit --vram-budget (#1251).
         if (sizing.floored) {
             // Kept, not just logged: the server has to be able to answer for
             // this after the log line has scrolled away.
@@ -535,18 +450,12 @@ bool Engine::init_kv_cache() {
                 static_cast<double>(sizing.blocks) * kv_bs, max_blocks_planned,
                 static_cast<double>(sizing.blocks) * kv_bs);
         }
-        // The quiet half of the same fault: the pool is a real size — not the
-        // floor — and still holds less than one max_seq_len sequence, so the
-        // load reports success and every full-length request is cancelled at
-        // admission. With an explicit --vram-budget the check below turns this
-        // into a hard failure; without one the path stays best-effort by
-        // design, so it has to at least say so (#1251).
-        //
-        // Only for an operator-set max_seq_len. An AUTO value is a projection
-        // that this clamp is *expected* to undercut — init_compute_max_seq_len_
-        // sizes the GGUF path from raw free VRAM on purpose and leaves the
-        // overshoot for exactly this clamp to absorb. Warning there would fire
-        // on healthy loads and bury the case that is a fault.
+        // Quiet half of the same fault: pool is real-sized (not floored) but
+        // holds less than one max_seq_len sequence - load reports success while
+        // every full-length request is cancelled at admission (#1251).
+        // Only warn for an operator-set max_seq_len: an AUTO value is expected to
+        // be undercut by this clamp (init_compute_max_seq_len_ sizes from raw
+        // free VRAM on purpose), so warning there would bury real faults.
         if (vram_budget_bytes() == 0 && max_seq_len_explicit_ &&
             kv_pool_verdict(sizing, config_.max_seq_len, kv_bs) ==
                 KvPoolVerdict::ShortOfOneSequence) {
@@ -568,15 +477,10 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // I6, plan-time half: an explicit --vram-budget that cannot hold one
-    // full-length sequence produces a process that loads fine and then cancels
-    // every request ("needs 32 KV blocks but cache capacity is 16"). That is
-    // the right runtime answer but the wrong time to learn it — the load has
-    // already been paid for. Fail here, naming the arithmetic, so the operator
-    // can raise the budget instead of reading scheduler errors.
-    //
-    // Only when a budget is installed. Without one this is the pre-existing
-    // best-effort path and must keep its current behaviour.
+    // I6, plan-time half: an explicit --vram-budget too small for one
+    // full-length sequence must fail HERE (naming the arithmetic), not load
+    // successfully and cancel every request later.
+    // Only when a budget is installed - without one this stays the pre-existing best-effort path.
     if (vram_budget_bytes() > 0 && per_block_total_bytes > 0) {
         const int blocks_per_seq = kv_blocks_per_sequence(config_.max_seq_len, kv_bs);
         if (max_blocks < blocks_per_seq) {
@@ -596,18 +500,16 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // The clamp above answered "what fits right now". A growable pool keeps the
-    // pre-clamp number as its ceiling and commits the clamped one, so the
-    // reading that is wrong most often — free VRAM while another process is
-    // still letting go of the card — stops being final.
+    // The clamp above answers "what fits right now"; a growable pool keeps the
+    // pre-clamp number as its ceiling and commits the clamped one, so a reading
+    // skewed by another process still releasing VRAM is not final.
     const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
     // What the pool was actually built with; the retry loop below may lower it.
     int kv_ceiling_effective = kv_ceiling_blocks;
     if (kv_ceiling_blocks > 0) {
-        // Commit a fraction on purpose, where the operator asked for it. The
-        // clamp above answers "what fits" from a reading that is wrong in both
-        // directions on this platform, and starting under it is the only way to
-        // be sure the pool is resident rather than spilled.
+        // Commit a fraction on purpose when the operator asked: the clamp above
+        // answers "what fits" from a reading that is wrong in both directions on
+        // this platform, so starting under it is the only way to stay resident.
         const int pct = std::clamp(runtime_config_.kv_cache.growable_initial_pct, 1, 100);
         if (pct < 100) {
             const int initial = std::max(16, max_blocks / 100 * pct);
@@ -649,7 +551,6 @@ bool Engine::init_kv_cache() {
             std::vector<int> per_layer_hd(n_kv_layers, 0);
             std::vector<char> per_layer_swa(swa_sizing_active_ ? n_kv_layers : 0, 0);
             for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
-                // Only attention layers get KV cache entries
                 int attn_nkv = (l < (int)mcfg.n_kv_heads_per_layer.size()) ? mcfg.n_kv_heads_per_layer[l]
                                                                            : mcfg.n_kv_heads;
                 if (kv_layer_map[l] < 0)
@@ -678,18 +579,11 @@ bool Engine::init_kv_cache() {
     };
 
     // #1662: a pool that does not fit is a smaller pool, not a dead process.
-    //
-    // Everything that sizes this pool runs BEFORE the allocation - the planner,
-    // the clamp, the residual re-sizing - so all of it is working from a
-    // projection. #1631 fixed one wrong projection; the arms in #1662 show that
-    // even the planner's own correct projection is not sufficient on its own
-    // (library_reserve_mb=6100 plans 9977 blocks and OOMs, 7460 plans 7079 and
-    // serves). Halving down to the 16-block floor is the backstop for the next
-    // one: the operator gets a smaller KV pool instead of 537 error lines.
-    //
-    // Only the pool retries. The weight caches are already built at this point
-    // and the model's source tensors may be consumed, so a retry one level up
-    // (imp_context_create) cannot rebuild this engine at all.
+    // Every sizing input above is a projection and can still be wrong (#1631,
+    // #1662); halving down to the 16-block floor is the backstop.
+    // Only the pool retries - weight caches are already built and the model's
+    // source tensors may be consumed, so a retry one level up (imp_context_create)
+    // cannot rebuild this engine.
     std::unique_ptr<KVCache> kv_cache;
     {
         constexpr int kKVFloorBlocks = 16;
@@ -734,12 +628,10 @@ bool Engine::init_kv_cache() {
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
-    // Is the pool where the driver says it is? A successful allocation proves
-    // nothing on WSL2/WDDM: the pool can sit in host memory and serve at a
-    // sixth of the bandwidth with /health ok and nothing logged (#1103,
-    // AUDIT_arch_2026 B-6). One copy inside the fresh, all-zero pool, a few
-    // hundred microseconds once; a WARN and a gauge, never a refusal, because
-    // the threshold is one driver on one card.
+    // A successful allocation proves nothing on WSL2/WDDM: the pool can sit in
+    // host memory at a sixth of the bandwidth with /health ok and nothing logged
+    // (#1103, AUDIT_arch_2026 B-6). One cheap copy inside the fresh pool, then a
+    // WARN and a gauge, never a refusal - the threshold is one driver on one card.
     {
         const double gbps = kv_cache_raw_->probe_residency();
         if (gbps > 0.0 && gbps < kKvPoolSpillGbps) {
@@ -758,13 +650,10 @@ bool Engine::init_kv_cache() {
         swa_sizing_active_ = kv_manager_->swa_sizing_enabled();
     }
 
-    // BitDecoding Phase 3: residual FP16 cache (opt-in).
-    //
-    // Ring state (write_idx / fill_count per slot) lives in device memory
-    // (kv_manager_->d_residual_widx_ptr / d_residual_fc_ptr). Updated by a
-    // tiny advance_residual_state_kernel at the end of forward_logits; the
-    // residual write/read kernels read the state at execution time. This
-    // makes the whole path graph-capture-safe — graphs stay enabled.
+    // BitDecoding Phase 3: residual FP16 cache (opt-in). Ring state (write_idx/
+    // fill_count per slot) lives in device memory, updated by
+    // advance_residual_state_kernel at the end of forward_logits - keeps the
+    // whole path graph-capture-safe.
     {
         const auto& rcfg = runtime_config_;
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
@@ -777,14 +666,9 @@ bool Engine::init_kv_cache() {
                 std::vector<int> init_slots(max_seqs, -1);
                 cudaMemcpy(d_kv_slot_buf_, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice);
                 d_kv_slot_last_uploaded_.assign(max_seqs, -1);
-                // Same treatment for the multi-sequence metadata (#1648). It
-                // used to be cudaMallocAsync'd per decode step, and its address
-                // was baked into a captured forward_logits graph that is then
-                // REPLAYED - with none of the graph-invalidation triggers
-                // watching it. That only ever worked because the default pool's
-                // release threshold is pinned to UINT64_MAX so the same address
-                // came back; a pool setting, not an invariant the graph path
-                // asserts. Three [max_batch_size] int arrays, allocated once.
+                // Same treatment for the multi-sequence metadata (#1648): must
+                // be allocated ONCE, not per decode step - a captured
+                // forward_logits graph bakes the address and nothing invalidates it on reuse.
                 size_t meta_bytes = static_cast<size_t>(3) * max_seqs * sizeof(int);
                 if (cudaMalloc(&residual_meta_d_buf_, meta_bytes) == cudaSuccess) {
                     residual_meta_capacity_ = max_seqs;
@@ -798,13 +682,11 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // Sparse decode attention (attention.sparse_topk_tokens): enable the
-    // per-block key min/max metadata pool. Gates - F16/FP8/NVFP4 KV (metadata
-    // reads keys back from the cache; NVFP4 unpacks the nibbles and applies
-    // the UE4M3 group scale, #1818), non-MLA, token_recycling off
-    // (copy_blocks_device does not copy metadata); enable_key_minmax itself
-    // refuses per-layer geometry and growable pools. A refused gate disables
-    // the feature loudly and changes nothing else.
+    // attention.sparse_topk_tokens: per-block key min/max metadata pool.
+    // Gates: F16/FP8/NVFP4 KV only (NVFP4 unpacks nibbles + UE4M3 scale, #1818);
+    // non-MLA; token_recycling off (copy_blocks_device doesn't copy metadata);
+    // enable_key_minmax also refuses per-layer geometry and growable pools.
+    // A refused gate disables the feature loudly and changes nothing else.
     if (runtime_config_.attention.sparse_topk_tokens > 0) {
         const QType kvt = config_.kv_cache_dtype;
         const char* refuse = nullptr;
@@ -836,10 +718,9 @@ bool Engine::init_kv_cache() {
             pin_pct > 0 ? std::max(1, kv_manager_->kv_cache()->total_blocks() * pin_pct / 100) : 0;
         kv_manager_->set_pin_budget_blocks(pin_budget);
         IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
-        // Persistent cache is dense-only: restored KV blocks are only usable
-        // for hybrids together with a recurrent-state snapshot, and snapshots
-        // are not persisted. (For hybrids the recurrent-snapshot store below
-        // must also come up, or caching is turned back off.)
+        // Persistent cache is dense-only: restored KV blocks are usable for
+        // hybrids only together with a recurrent-state snapshot, and snapshots
+        // are not persisted (the recurrent-snapshot store below must also come up).
         if (mcfg.ssm_inner_size == 0 && !config_.prefix_cache_path.empty()) {
             int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path,
                                                           model_fingerprint_(), stream_);
@@ -855,7 +736,6 @@ bool Engine::init_kv_cache() {
         executor_->set_offload_manager(offload_mgr_.get());
     scheduler_->set_kv_manager(kv_manager_.get());
 
-    // SSM state
     if (mcfg.ssm_inner_size > 0) {
         int n_ssm = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
@@ -879,11 +759,9 @@ bool Engine::init_kv_cache() {
             if (ssm_pool_ok && ssm_state_->lazy() && scheduler_)
                 scheduler_->set_admission_gate([this] { return recurrent_slot_admissible_(); });
             if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
-                // NOT "continuing without it". A GDN/SSM layer whose recurrent
-                // state is missing reads a null slab: the model produces
-                // garbage for every request, and the only signal was one WARN
-                // at startup. SSMState::init has already logged the bytes, the
-                // slots, the free figure and the lever.
+                // NOT "continuing without it": a GDN/SSM layer with a missing
+                // recurrent state reads a null slab and produces garbage for
+                // every request. SSMState::init already logged bytes/slots/lever.
                 ssm_state_.reset();
                 throw std::runtime_error(
                     "SSM/GDN state pool allocation failed and this model has " +
@@ -913,10 +791,8 @@ bool Engine::init_kv_cache() {
         }
 
         // Recurrent-state snapshots: KV block reuse alone cannot skip prefill
-        // for a recurrent model (the state at the skip boundary would be
-        // zero), so hybrid prefix caching needs the snapshot store. Without
-        // it, turn prefix caching back off — retaining hashed blocks that can
-        // never be reused just churns the pool.
+        // for a recurrent model (state at the skip boundary would be zero), so
+        // hybrid prefix caching needs the snapshot store, or it must turn back off.
         if (kv_manager_->prefix_caching_enabled()) {
             int budget_mb = runtime_config_.server.recurrent_snapshot_mb;
             if (ssm_state_ && budget_mb > 0) {
@@ -942,13 +818,10 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // SWA window snapshots (kv_cache.swa_snapshot_mb): under SWA sizing,
-    // global-layer KV blocks alone cannot back a prefix-cache hit — the
-    // windowed layers' earlier blocks were trailing-freed, so the reused
-    // prefix would leave their window as holes. The store keeps the packed
-    // window at each prefill-end prefix hash and restores it at admission.
-    // Without a working store the coexistence the gate allowed is invalid —
-    // fall back to prefix caching off (mirrors the hybrid rule above).
+    // kv_cache.swa_snapshot_mb: under SWA sizing, global-layer KV blocks alone
+    // cannot back a prefix-cache hit (windowed layers' earlier blocks were
+    // trailing-freed, leaving holes). The store keeps the packed window at each
+    // prefill-end prefix hash and restores it at admission; without a working store, fall back to prefix caching off.
     if (swa_sizing_active_ && kv_manager_->prefix_caching_enabled()) {
         const int budget_mb = runtime_config_.kv_cache.swa_snapshot_mb;
         if (budget_mb > 0 && kv_manager_->enable_swa_snapshots()) {
@@ -971,10 +844,9 @@ bool Engine::init_kv_cache() {
         if (!swa_snapshots_) {
             kv_manager_->set_prefix_caching_enabled(false);
             config_.use_prefix_caching = false;
-            // Say WHY and WHAT TO DO. A budget below one snapshot silently costs
-            // prefix caching — strictly worse than swa_snapshot_mb=0, which keeps
-            // caching and yields the SWA savings instead. Without the required
-            // size in the message there is no way to tell those apart from a log.
+            // A budget below one snapshot silently costs prefix caching, worse
+            // than swa_snapshot_mb=0 (which keeps caching, drops SWA savings).
+            // Name the required size or the two cases are indistinguishable in the log.
             const size_t need_mb = (kv_manager_->swa_snapshot_bytes() + (1u << 20) - 1) >> 20;
             if (budget_mb > 0 && static_cast<size_t>(budget_mb) < need_mb) {
                 IMP_LOG_WARN("Prefix caching DISABLED: kv_cache.swa_snapshot_mb=%d is below one "
@@ -992,11 +864,9 @@ bool Engine::init_kv_cache() {
 
     cudaStreamSynchronize(stream_);
 
-    // Coverage check: for prequant MoE models the nvfp4_moe decode cache is
-    // all-or-nothing (predicate mirrors executor_forward_moe.cu
-    // nvfp4_covers_layer) — one uncovered layer makes decode fall to the
-    // host-args legacy path, which throws under CUDA-graph capture and
-    // aborts the WHOLE decode graph. Surface partial coverage loudly.
+    // Coverage check: for prequant MoE, the nvfp4_moe decode cache is
+    // all-or-nothing (mirrors executor_forward_moe.cu nvfp4_covers_layer). One
+    // uncovered layer falls to host-args legacy, which throws under graph capture.
     if (mcfg.is_nvfp4_prequant && mcfg.n_experts > 0) {
         int moe_layers = 0, covered = 0;
         for (int i = 0; i < mcfg.n_layers; i++) {
@@ -1026,18 +896,14 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // Pre-allocate the gemm_nvfp4 fallback dequant workspace. Sized from
-    // wcache_.nvfp4 which is populated by pre_dequant_weights above, so this
-    // call must come AFTER. Lets the M>1 fallback path (used by future
-    // multi-token verify / spec-decode) run inside CUDA stream capture
-    // without crashing on cudaMalloc.
+    // Pre-allocate the gemm_nvfp4 fallback dequant workspace, sized from
+    // wcache_.nvfp4 (populated above, so must come AFTER pre_dequant_weights).
+    // Lets the M>1 fallback path run inside CUDA stream capture without cudaMalloc.
     (void)executor_->allocate_nvfp4_dequant_workspace();
-    // Build the CUTLASS NVFP4 LM head for batched-decode tensor-core GEMM. Only
-    // batched decode (n>1) consumes it, so skip the SfAtom-scale VRAM (19-47 MiB
-    // depending on vocab×d_model) when max_batch_size can never reach n>1; the
-    // perplexity harness lazy-builds it for its own measurement path. Must come
-    // AFTER pre_dequant_weights so the NVFP4 decode cache exists, and before
-    // decode-graph capture so the captured topology includes it.
+    // CUTLASS NVFP4 LM head for batched-decode GEMM: only n>1 decode consumes
+    // it, so skip the 19-47 MiB SfAtom-scale VRAM when max_batch_size==1 (the
+    // perplexity harness lazy-builds its own). Must run AFTER pre_dequant_weights
+    // and BEFORE decode-graph capture so the captured topology includes it.
     if (config_.max_batch_size > 1)
         executor_->build_lm_head_cutlass_(stream_);
     if (config_.use_fp8_prefill)
@@ -1046,9 +912,9 @@ bool Engine::init_kv_cache() {
     // Pre-allocate decode batch pool + penalty buffer
     decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq,
                                 /*with_swa_tables=*/swa_sizing_active_);
-    // The "can the verify run" gate lives inside the callee now: gating here on
-    // the SPARE SLOT COUNT left speculative.factored_spare, which reserves none
-    // by design, with no staging at all and every step refused (2026-09-12).
+    // The "can the verify run" gate lives inside the callee: gating here on the
+    // spare slot count left speculative.factored_spare permanently disabled
+    // (it reserves none by design).
     if (!ensure_batch_verify_bufs_())  // init-time staging
         IMP_LOG_WARN("spec-batch: staging buffers unavailable - batched verify stays off");
     {
@@ -1082,9 +948,8 @@ bool Engine::init_kv_cache() {
     {
         init_serving_metadata_pool_(max_blocks, kv_ceiling_effective, kv_bs);
 
-        // Pinned host staging buffers for prefill
-        // T5b: an empty buffer means "no staging", which the prefill path already
-        // tests for (memory/host_pinned.h).
+        // T5b: an empty buffer means "no staging", which the prefill path
+        // already tests for (memory/host_pinned.h).
         h_pf_positions_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
                                                 static_cast<size_t>(config_.max_seq_len) * sizeof(int));
         h_pf_token_ids_ = PinnedBuffer::acquire(
@@ -1113,28 +978,21 @@ bool Engine::init_kv_cache() {
     return true;
 }
 
-// Serving metadata pool: the per-chunk / per-request int arrays every forward
-// path uploads (token ids, positions, block tables, context lengths), one
-// allocation at init carved into a fixed region per path, so no path allocates
-// while serving (invariant I2, MEMORY.md A3.2). Each region is the worst case
-// its path can reach:
+// Serving metadata pool: one allocation at init per forward path (token ids,
+// positions, block tables, context lengths), so nothing allocates while
+// serving (I2, MEMORY.md A3.2). Each region sized to its path's worst case:
 //   serial prefill      one chunk of max_seq_len rows, one block table
-//   ragged prefill      max_seq_len rows in total, max_batch_size tables
-//   graph loops         one block table each for the sync loop, the async
-//                       loop and the constrained pipeline, plus the
-//                       pipeline's sampled token, position and context
-// The regions are disjoint on purpose: the async loop keeps its table across
-// scheduler steps (parked rearm), so it cannot share with a ragged prefill
-// that runs in between. Layout: runtime/serving_metadata_layout.h.
+//   ragged prefill      max_seq_len rows total, max_batch_size tables
+//   graph loops         one block table each for sync/async/constrained loops,
+//                       plus the pipeline's sampled token, position, context
+// Regions are disjoint: the async loop keeps its table across scheduler steps,
+// so it cannot share with a ragged prefill running in between. Layout: runtime/serving_metadata_layout.h.
 void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effective, int kv_bs) {
-    // A block table can grow to the entire KV pool (max_blocks), to the
-    // CEILING of a growable pool ("the entire pool" is then a moving number:
-    // sized from the initial commit, the pool grew to serve a 25 222-token
-    // prompt and the upload failed with `prefill memcpy block_tables failed:
-    // invalid argument`), and the async loop sizes its table from the
-    // request's max_tokens ceiling, which max_seq_len bounds and the pool does
-    // not. Four bytes per block of a pool that may never exist, which is
-    // nothing.
+    // A block table can grow to the entire KV pool (max_blocks) or to the
+    // CEILING of a growable pool - "the entire pool" is a moving number as the
+    // pool grows past its initial commit. The async loop sizes from the
+    // request's max_tokens ceiling (bounded by max_seq_len, not the pool).
+    // Four bytes per block of a pool that may not exist: cheap to over-allocate.
     const int bt_cap = std::max(
         {max_blocks, kv_ceiling_effective, (config_.max_seq_len + kv_bs - 1) / kv_bs});
     const int seq_cap = std::max(1, config_.max_batch_size);
@@ -1172,12 +1030,9 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     pool_bt_cap_ = bt_cap;
     rg_rows_cap_ = config_.max_seq_len;
     rg_seq_cap_ = seq_cap;
-    // The M-RoPE position uploads (engine_qwen3vl.cpp) are the same family
-    // and grew on demand: the first 2k-row chunk took 24 KB from the arena
-    // while serving (I2 gate phase B). Sized once here to what bind_mrope_
-    // can be asked for: prefill rows up to the executor's chunk ceiling,
-    // decode rows up to the batch ceiling. bind_mrope_ never regrows a
-    // buffer that fits.
+    // M-RoPE position uploads (engine_qwen3vl.cpp) are sized once here, up to
+    // what bind_mrope_ can be asked for: prefill rows to the executor's chunk
+    // ceiling, decode rows to the batch ceiling. bind_mrope_ never regrows a fitting buffer.
     if (model_->config_.has_mrope()) {
         const int rows = std::max(1, executor_ ? executor_->max_tokens() : config_.max_seq_len);
         d_mrope_prefill_ = static_cast<int32_t*>(

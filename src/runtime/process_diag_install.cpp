@@ -9,10 +9,10 @@ void process_diag_install(const RuntimeConfig& cfg) {
     // Copy-modify-set: fields that no RuntimeConfig key feeds (test hooks such
     // as paged_*_hpc, force_splitk_fallback) keep whatever a setter put there.
     ProcessDiag d = process_diag_current();
-    // Log level first, so anything this function or its callers log afterwards
-    // already obeys it. An unknown word warns rather than silently picking a
-    // level: the whole point of this key is that the level used to be
-    // unsettable, and a typo that quietly resolves to INFO would restore that.
+    // Log level first, so anything this function or its callers log
+    // afterwards already obeys it. An unknown word warns rather than
+    // silently picking a level: a typo that resolves to INFO would make
+    // this key effectively unsettable.
     {
         if (const auto lvl = log_level_from_string(cfg.diagnostics.log_level)) {
             log_set_level(*lvl);

@@ -4,8 +4,6 @@
 
 // Internal helpers shared across engine_*.cpp translation units.
 // Not part of any public API; included only by src/runtime/engine*.cpp.
-//
-// Phase 4 of the architecture-refactor roadmap (archived: docs/archive/README.md)
 
 #include "runtime/engine.h"
 #include "runtime/request.h"
@@ -21,12 +19,9 @@
 namespace imp::engine_internal {
 
 // Free prefill metadata buffers when not using the pre-allocated pool.
-//
-// `d_block_tables_swa` is part of the set and had no parameter here, so on a
-// sliding-window model the fallback path allocated one per chunk and freed it
-// only when an allocation failed: every SUCCESSFUL chunk leaked it (#1644).
-// nullptr is fine, cudaFreeAsync ignores it, which is what the non-SWA callers
-// pass.
+// d_block_tables_swa may be nullptr; cudaFreeAsync ignores it, which is
+// what non-SWA callers pass. Omitting it here leaked one buffer per
+// successful chunk on SWA models (#1644).
 inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_block_tables,
                                  int* d_block_tables_swa, int* d_context_lens, cudaStream_t stream) {
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, stream));
