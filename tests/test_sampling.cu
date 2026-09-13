@@ -502,6 +502,48 @@ TEST(SamplerSeeding, ConsecutiveSeedsDoNotAllDrawTheSameToken) {
     free_gpu_tensor(d_logits);
 }
 
+// Graph decode bakes one seed into the capture; the per-step draw comes from the device salt
+// (d_position_). Seed s with salt t must draw exactly the host token of seed s + t, on both
+// sides of the SAMPLE_MAX_TOP_K = 128 split.
+TEST(SamplerSeeding, DeviceSaltDrawsLikeTheHostStepSeed) {
+    const int V = 4096;
+    std::vector<float> h(V);
+    std::mt19937 rng(7);
+    std::normal_distribution<float> nd(0.0f, 2.0f);
+    for (auto& v : h)
+        v = nd(rng);
+    h[1000] = 12.0f;
+    h[2000] = 11.9f;
+    h[3000] = 11.8f;
+    Tensor d_logits = make_logits(h.data(), h.size());
+
+    int32_t* d_result = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES), cudaSuccess);
+    int* d_salt = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_salt, sizeof(int)), cudaSuccess);
+    int32_t* h_token = nullptr;
+    ASSERT_EQ(cudaHostAlloc(&h_token, sizeof(int32_t), cudaHostAllocDefault), cudaSuccess);
+
+    const unsigned base = 5000u;
+    for (int top_k : {128, 256}) {
+        std::map<int32_t, int> hist;
+        for (int t = 0; t < 200; ++t) {
+            ASSERT_EQ(cudaMemcpy(d_salt, &t, sizeof(int), cudaMemcpyHostToDevice), cudaSuccess);
+            sample_topk_topp_device(d_logits, top_k, 0.95f, 1.0f, base, d_result, h_token, nullptr, d_salt);
+            ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+            const int32_t want = sample_topk_topp(d_logits, top_k, 0.95f, 1.0f, base + t);
+            ASSERT_EQ(*h_token, want) << "top_k=" << top_k << " salt=" << t << ": salted draw != seed + salt";
+            hist[*h_token]++;
+        }
+        EXPECT_GT(hist.size(), 1u) << "top_k=" << top_k << ": the salt does not reach the draw";
+    }
+
+    cudaFreeHost(h_token);
+    cudaFree(d_salt);
+    cudaFree(d_result);
+    free_gpu_tensor(d_logits);
+}
+
 // #1142: cub::DeviceTopK::MaxPairs filled output on the first call, wrote nothing on the
 // second (still cudaSuccess), then failed permanently from the fourth - unchecked, so the
 // sampler drew from a stale buffer, a token loop on a real model. Every prior test missed it

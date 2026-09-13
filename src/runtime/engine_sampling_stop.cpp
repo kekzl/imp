@@ -3,6 +3,7 @@
 // (SSM/GDN), is_stop_token, track_think_state (<think> budget), should_stop (aggregate EOS/max_tokens/stop_strings).
 
 #include "runtime/engine.h"
+#include "runtime/engine_internal.h"
 #include "runtime/batch.h"
 #include "runtime/snapshot_boundary.h"
 #include "runtime/think_stop_logic.h"
@@ -118,7 +119,7 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     state.temperature = req.temperature;
     state.top_p = req.top_p;
     state.top_k = req.top_k;
-    state.seed = req.seed;
+    state.seed = engine_internal::compute_step_seed(req);
     state.min_p = req.min_p;
     state.typical_p = req.typical_p;
     state.repetition_penalty = req.repetition_penalty;

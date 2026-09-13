@@ -144,6 +144,9 @@ struct InferenceState {
     float top_p = 1.0f;
     int top_k = 0;
     int seed = -1;
+    // Device int the sampler adds to `seed` each step (graph loop: d_position_). nullptr = none;
+    // when set, `seed` is used raw, negative included.
+    const int* d_seed_salt = nullptr;
     float min_p = 0.0f;
     float typical_p = 1.0f;  // Locally typical sampling (1.0 = disabled)
     float repetition_penalty = 1.0f;
