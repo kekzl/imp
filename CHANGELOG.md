@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+- The web UI offers a `reasoning effort` select when the loaded model's chat template names the values; `GET /v1/models` carries them as `meta.reasoning_effort` `{values, default}`. Qwen3.8-27B: `xhigh`, `medium`, `low` (default `xhigh`); gpt-oss names only a default and gets no select. (#2017)
+
 ### Changed
 - `make test-server` starts with `tools/analysis/chat_probe.py`: 12 turns with the web UI request (temperature 0.7, no seed, thinking on) plus 6 unseeded repeats, and stops on FAIL. Qwen3.8-27B-NVFP4-vllm: v0.41.0 fails it (repeats 1/6 distinct, 44 s), v0.41.1 passes (6/6, 43 s). (#2015)
 
