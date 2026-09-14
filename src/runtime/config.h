@@ -300,6 +300,13 @@ struct RuntimeConfig {
         // turn two eager chunks plus a sync. 0 = snapshot every
         // block-aligned prompt.
         int snapshot_min_prompt_tokens = 256;
+        // Hybrid models also snapshot the recurrent state at the END of every
+        // generation (prompt + reply, an unaligned position; its partial KV
+        // block is kept with it), so the next turn that resends the whole
+        // transcript restores there instead of at the prompt boundary and
+        // prefills only the new message. Costs one slab copy plus a sync per
+        // finished request. Off when the sparse key min/max pool is on.
+        bool transcript_snapshot = true;
         // Green Contexts / prefill-decode overlap streams in the server
         // engine. OFF by default (suspected memSyncDomain race on sm_120
         // fallback streams, gemma-3-12b IMA); opt in via [server] green_contexts = true.

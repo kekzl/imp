@@ -700,5 +700,74 @@ TEST(KVCacheTest, ResidencyProbeCoversTheCommittedPrefixOfAGrowablePool) {
     EXPECT_GT(cache.probe_residency(), kKvPoolSpillGbps);
 }
 
+// Transcript snapshot support: a finished sequence's PARTIAL last block is cached under the
+// engine's transcript key, a later sequence holds it across its own allocation (no reclaim
+// may hand it out first) and clones it into its own block at the same index.
+TEST(KVCacheManagerTest, PartialBlockHoldAndClone) {
+    SKIP_IF_NO_CUDA();
+    auto mgr = MakeManagerWithMemory(/*max_blocks=*/8, /*n_layers=*/2);
+    mgr->set_prefix_caching_enabled(true);
+    KVCache* cache = mgr->kv_cache();
+    const int bs = cache->block_size();
+    const size_t bb = cache->block_bytes();
+
+    // Seq 1: two full blocks plus a 5-token tail.
+    std::vector<int32_t> t1(static_cast<size_t>(2 * bs + 5));
+    std::iota(t1.begin(), t1.end(), 1000);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(1, t1), 0);
+    const int tail_src = mgr->block_table(1)[2];
+    ASSERT_GE(tail_src, 0);
+    std::vector<uint8_t> pattern(bb);
+    for (size_t i = 0; i < bb; ++i)
+        pattern[i] = static_cast<uint8_t>(i * 7 + 3);
+    for (int l = 0; l < 2; ++l) {
+        ASSERT_EQ(cudaMemcpy(cache->k_ptr(l, tail_src), pattern.data(), bb, cudaMemcpyHostToDevice), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(cache->v_ptr(l, tail_src), pattern.data(), bb, cudaMemcpyHostToDevice), cudaSuccess);
+    }
+    mgr->register_block_hashes(1, t1);
+    const size_t key = 0x5EED5EED5EED5EEDULL;
+    mgr->register_partial_block(1, t1, key);
+    mgr->free_sequence(1);
+    EXPECT_EQ(mgr->num_cached_blocks(), 3) << "the partial block must be cached with the two full ones";
+
+    // Unknown key: nothing to hold; clone without a hold: refused.
+    EXPECT_EQ(mgr->hold_cached_block(key ^ 1, 2), -1);
+    EXPECT_FALSE(mgr->clone_held_block(2, 2, nullptr));
+
+    // Seq 2 resends the transcript plus a full block: reuses the two full blocks, gets a fresh
+    // third block, clones the held tail into it.
+    ASSERT_EQ(mgr->hold_cached_block(key, 2), tail_src);
+    std::vector<int32_t> t2 = t1;
+    for (int i = 0; i < bs; ++i)
+        t2.push_back(5000 + i);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(2, t2), 2);
+    const int tail_dst = mgr->block_table(2)[2];
+    ASSERT_GE(tail_dst, 0);
+    ASSERT_NE(tail_dst, tail_src) << "the tail must be this sequence's own block, never the cached one";
+    ASSERT_TRUE(mgr->clone_held_block(2, 2, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<uint8_t> got(bb);
+    for (int l = 0; l < 2; ++l) {
+        ASSERT_EQ(cudaMemcpy(got.data(), cache->k_ptr(l, tail_dst), bb, cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(got, pattern) << "K layer " << l;
+        ASSERT_EQ(cudaMemcpy(got.data(), cache->v_ptr(l, tail_dst), bb, cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(got, pattern) << "V layer " << l;
+    }
+
+    // The hold outlives a full reclaim of the cache: the source block is never handed out
+    // while seq 2 may still be copying from it.
+    while (mgr->evict_cached_block()) {
+    }
+    // Pool of 8: seq 2 holds 4, the held source is 1, so exactly 3 are allocatable.
+    ASSERT_TRUE(mgr->allocate_blocks(3, 3));
+    EXPECT_FALSE(mgr->allocate_blocks(5, 1)) << "the held source block was handed out";
+    for (int id : mgr->block_table(3))
+        EXPECT_NE(id, tail_src) << "a held block was re-allocated";
+    mgr->free_sequence(2);  // drops the hold: the block is free now
+    mgr->free_sequence(3);
+    ASSERT_TRUE(mgr->allocate_blocks(4, 8)) << "every block, the ex-held one included, is allocatable again";
+    mgr->free_sequence(4);
+}
+
 }  // namespace
 }  // namespace imp

@@ -114,6 +114,21 @@ public:
     // these blocks. `tokens` is the full token sequence.
     void register_block_hashes(int seq_id, std::span<const int32_t> tokens, size_t content_salt = 0);
 
+    // Transcript snapshots (hybrid models, engine finish path): the recurrent state at the
+    // END of a generation sits at an unaligned position n, and its last KV block is partial,
+    // so register_block_hashes() leaves it out. These three keep that block reusable:
+    //  - register_partial_block: hash the seq's block n/bs under `key` (the engine's
+    //    transcript key, never a full-block chain hash) so free_sequence caches it.
+    //  - hold_cached_block: take a reference to the cached block under `key` for seq_id
+    //    (returns its id, -1 = not cached) so no reclaim can hand it out before the copy.
+    //  - clone_held_block: copy the held block into seq_id's own block at block_index on
+    //    `stream` (KV + scales; the key min/max metadata is NOT copied, the engine refuses the
+    //    path when that pool is on). The hold drops in free_sequence().
+    void register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key);
+    int hold_cached_block(size_t key, int seq_id);
+    bool clone_held_block(int seq_id, int block_index, cudaStream_t stream);
+    void release_held_block(int seq_id);
+
     // Number of cached (unreferenced) blocks in the hash table.
     int num_cached_blocks() const;
 
@@ -372,6 +387,10 @@ private:
 
     // seq_id -> ordered list of block ids.
     std::unordered_map<int, SeqBlocks> seq_blocks_;
+
+    // seq_id -> reference on the cached partial block its transcript restore clones from
+    // (hold_cached_block); dropped by release_held_block / free_sequence.
+    std::unordered_map<int, BlockRef> held_blocks_;
 
     // SWA-aware sizing state: seq_id -> positional SWA-group block table (parallel to
     // seq_blocks_, -1 holes outside the trailing window). Only populated when

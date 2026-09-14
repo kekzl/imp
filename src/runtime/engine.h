@@ -1327,9 +1327,9 @@ private:
     void track_think_state(Request& req, int32_t token) const;
     bool should_stop(Request& req, int32_t token) const;
 
-    // Think token IDs (cached from chat template init, -1 if not a think model)
-    int32_t think_start_id_ = -1;
-    int32_t think_end_id_ = -1;
+    // Think token IDs (cached from chat template init, -1 if not a think model);
+    // think_newline_id_ = the "\n" a forced think end emits before </think>.
+    int32_t think_start_id_ = -1, think_end_id_ = -1, think_newline_id_ = -1;
     // gpt-oss Harmony reasoning: the analysis channel carries chain-of-thought
     // and closes with <|end|> (mapped to think_end_id_ above); there is no
     // <think> opener. Set so the answer-headroom budget can force the analysis
@@ -1356,7 +1356,8 @@ private:
     }
     void upload_penalties(const Request& req, InferenceState& state, cudaStream_t stream);
     void fill_sampling_params(Request& req, InferenceState& state) const;
-    void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
+    // False only on a reset whose transcript-snapshot tail block is gone (caller cancels).
+    bool fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
     // Scheduler admission gate: the slot the next acquire will hand out is
@@ -1373,14 +1374,17 @@ private:
     // Recurrent-state snapshots (hybrid prefix caching, engine_sampling_stop.cpp):
     // admission hook (longest restorable prefix, in blocks) + save/position helpers.
     int hybrid_prefix_reuse_limit_(Request& req);
-    int hybrid_snapshot_end_(const Request& req) const;  // block-aligned save position, 0 = none
     void maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
+    // Transcript snapshot at request finish (server.transcript_snapshot): the state after
+    // every forwarded token, keyed by transcript_snapshot_key(); the partial tail block stays
+    // cached with it and fill_recurrent_state clones it on the restore.
+    bool transcript_snapshot_active_() const;
+    void maybe_save_transcript_snapshot_(const Request& req, std::span<const int32_t> tokens, cudaStream_t stream);
     // SWA window snapshots (kv_cache.swa_snapshot_mb, engine_sampling_stop.cpp):
     // same admission/save pattern as the hybrid pair, but the state is the
     // packed windowed-layer KV instead of the recurrent slab.
     int swa_prefix_reuse_limit_(Request& req);
     int snapshot_end_(const Request& req) const;  // hybrid or SWA save position, 0 = none
-    void maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
     void maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
                                        cudaStream_t stream, bool hard_sync);
     void finish_request(std::shared_ptr<Request>& req);

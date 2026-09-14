@@ -12,12 +12,16 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Added
+- Hybrid (GDN/SSM) models snapshot the recurrent state at the END of every reply (`server.transcript_snapshot`, default on): the state after the last forwarded token plus its partial KV block, so the next turn that resends the transcript restores there instead of at the prompt's block boundary. Qwen3.8-27B-NVFP4-vllm, 1 stream, 5 turns, reasoning resent: cached_tokens 285/863/1195/2595 of 310/888/1223/2620 (turns 2-5) vs 0/304/880/1152 before; turn-5 TTFT 156 -> 49 ms. State drift vs a cold prefill within the chunk-shape controls (`HybridRestoreChainTest.TranscriptRestoreStateStaysClose`).
+- Chat: a prior assistant message's `reasoning_content` reaches the Jinja template (Qwen3.8 renders it, `preserve_thinking` default); the web UI and `chat_probe.py` send the reply back with it. Before, the field was dropped on the OpenAI route (the Anthropic shim built it for nothing).
 - The web UI offers a `reasoning effort` select when the loaded model's chat template names the values; `GET /v1/models` carries them as `meta.reasoning_effort` `{values, default}`. Qwen3.8-27B: `xhigh`, `medium`, `low` (default `xhigh`); gpt-oss names only a default and gets no select. (#2017)
 
 ### Changed
 - `make test-server` starts with `tools/analysis/chat_probe.py`: 12 turns with the web UI request (temperature 0.7, no seed, thinking on) plus 6 unseeded repeats, and stops on FAIL. Qwen3.8-27B-NVFP4-vllm: v0.41.0 fails it (repeats 1/6 distinct, 44 s), v0.41.1 passes (6/6, 43 s). (#2015)
 
 ### Fixed
+- A forced think end (think budget) emits `"\n"` then `</think>`, the way the model closes on its own and the template renders a prior turn; the bare `</think>` re-tokenized one token off, so a budget-cut reply's KV was never reusable (Qwen3.8-27B: forced end at token 100 of 200 now re-tokenizes 200/200).
+- Batched decode: every row's sampling state is a copy of the batch state, and the banned list and logit bias were only assigned when non-empty, so a row could inherit row 0's in-think stop mask or logit bias. Both are assigned unconditionally now.
 - Chat templates: a parenthesised list `(a, b, c)` is a tuple, not its first element. The Qwen3.8 template's `reasoning_effort not in ('xhigh', 'medium', 'low')` warned `Unexpected reasoning effort low` on every low/medium request and let `high` pass; rendered prompts were unaffected. (#2016)
 
 ## [0.41.1] - 2026-09-14

@@ -1,6 +1,7 @@
 #include "runtime/scheduler.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/kv_cache.h"
+#include "memory/recurrent_snapshot_store.h"
 #include "core/logging.h"
 #include <algorithm>
 #include <chrono>
@@ -182,6 +183,13 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                             // byte-identical tokens+positions and quantizing identical FP16
                             // is deterministic. A future input-dependent re-quant needs COW here first.
                             skip = total - 1;
+                        // A transcript snapshot ends inside the block after the reused
+                        // ones: continue there, the engine clones its tail block.
+                        if (req->recurrent_restore) {
+                            const int n = req->recurrent_restore->n_tokens;
+                            if (n > skip && n < total && n / bs == reused)
+                                skip = n;
+                        }
                         req->prefill_offset = skip;
                         // Reporting: usage prompt_tokens_details / Anthropic
                         // cache_read_input_tokens read this off the request.
