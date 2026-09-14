@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-09-14
+
 ### Fixed
 - Sampling at temperature > 0 without a request `seed` drew every CUDA-graph decode step, and every request, from one fixed uniform (`42u`), so each uncertain step took the same non-top rank. Qwen3.8-27B-NVFP4-vllm, "hey babe!" at temperature 0.7: reasoning opened with JSON in 8/8 samples, 1/8 after; two identical requests no longer return byte-identical text. (#2013)
 
