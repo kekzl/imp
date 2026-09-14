@@ -128,6 +128,22 @@ TEST(JinjaTest, IfElse) {
     EXPECT_EQ(tpl.render({{"x", Value(false)}}), "B");
 }
 
+// A parenthesised list is a tuple (Qwen3.8: `x not in ('xhigh', 'medium', 'low')`). Read as its
+// first element, `in` became a substring test: 'low' raised the template error, 'high' passed.
+TEST(JinjaTest, TupleLiteralMembership) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if x not in ('xhigh', 'medium', 'low') %}bad{% else %}ok{% endif %}"));
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("low"))}}), "ok");
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("xhigh"))}}), "ok");
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("high"))}}), "bad");
+}
+
+TEST(JinjaTest, ParenthesisedExpressionStaysScalar) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ (1 + 2) * 3 }}"));
+    EXPECT_EQ(tpl.render({}), "9");
+}
+
 TEST(JinjaTest, IfElif) {
     Template tpl;
     ASSERT_TRUE(tpl.parse("{% if x == 1 %}A{% elif x == 2 %}B{% else %}C{% endif %}"));
