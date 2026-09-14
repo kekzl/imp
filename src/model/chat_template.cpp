@@ -1,4 +1,5 @@
 #include "model/chat_template.h"
+#include "model/reasoning_effort_spec.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 
@@ -166,6 +167,8 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
     use_jinja_ = false;
     mentions_thinking_ = false;  // resolved below once the Jinja engine is up
     tool_xml_dialect_ = false;
+    reasoning_effort_values_.clear();
+    reasoning_effort_default_.clear();
 
     // Try Jinja2 rendering if template string provided
     if (!jinja_str.empty()) {
@@ -188,6 +191,8 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             tool_xml_dialect_ = jinja_str.find("<parameter=") != std::string::npos &&
                                 jinja_str.find("<function=") != std::string::npos &&
                                 probe_render_teaches_xml_tools(tokenizer);
+            // Served as /v1/models meta.reasoning_effort (model/reasoning_effort_spec.h).
+            parse_reasoning_effort_spec(jinja_str, reasoning_effort_values_, reasoning_effort_default_);
         } else {
             IMP_LOG_WARN("Jinja2 parse failed (%s), falling back to hardcoded template",
                          tpl->error().c_str());

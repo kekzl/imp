@@ -593,6 +593,19 @@
   .field input[type="number"]:focus-visible { outline: none; border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
   .field.check { grid-template-columns: 1fr auto; }
   .field input[type="checkbox"] { accent-color: var(--ember); width: 16px; height: 16px; margin: 0; cursor: pointer; }
+  .field[hidden] { display: none; }
+  .field.effort { grid-template-columns: 1fr auto; }
+  .field select {
+    width: 100%;
+    padding: 5px 6px;
+    background: var(--panel);
+    border: 1px solid var(--line2);
+    border-radius: var(--r1);
+    color: var(--paper);
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .field select:focus-visible { outline: none; border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
 
   details.sys summary {
     font-size: 12.5px;
@@ -744,6 +757,10 @@
         <label for="thinking">thinking</label>
         <input type="checkbox" id="thinking" checked>
       </div>
+      <div class="field effort" id="effortbox" hidden>
+        <label for="effort">reasoning effort</label>
+        <select id="effort"></select>
+      </div>
       <details class="sys" id="sysbox">
         <summary id="syslabel">system prompt</summary>
         <textarea id="system" rows="3" placeholder="Sent as the system message of every request."></textarea>
@@ -779,7 +796,8 @@ let controller = null;   // AbortController for the in-flight stream
 
 // Parameters survive a reload; the conversation deliberately does not.
 const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
-const paramIds = ["temp", "maxtok", "thinking", "system"];
+const paramIds = ["temp", "maxtok", "thinking", "effort", "system"];
+let savedEffort = "";  // restored once the loaded model's choices exist
 
 function loadParams() {
   let saved = {};
@@ -790,6 +808,7 @@ function loadParams() {
     if (box.type === "checkbox") box.checked = !!saved[id];
     else box.value = saved[id];
   }
+  savedEffort = typeof saved.effort === "string" ? saved.effort : "";
   try { promptBox.value = sessionStorage.getItem(DRAFT_KEY) || ""; } catch { /* fine */ }
   if (promptBox.value) promptBox.dispatchEvent(new Event("input"));
   reflectSystem();
@@ -1155,6 +1174,7 @@ function requestBody() {
   const system = el("system").value.trim();
   if (system) messages.push({ role: "system", content: system });
   messages.push(...history);
+  const effort = el("effortbox").hidden ? "" : el("effort").value;
   return {
     model: modelName || "imp",
     messages,
@@ -1163,6 +1183,7 @@ function requestBody() {
     temperature: parseFloat(el("temp").value),
     max_tokens: parseInt(el("maxtok").value, 10),
     enable_thinking: el("thinking").checked,
+    ...(effort ? { reasoning_effort: effort } : {}),
   };
 }
 
@@ -1414,10 +1435,28 @@ window.addEventListener("resize", drawStrip);
 
 /* ---------- connection -------------------------------------------- */
 
+// reasoning_effort choices the loaded model's chat template names (/v1/models meta); hidden for
+// any other model, including one the picker would swap in.
+function renderEffort(loaded) {
+  const spec = loaded && loaded.id === modelName ? loaded.meta?.reasoning_effort : null;
+  const box = el("effortbox"), sel = el("effort");
+  box.hidden = !(spec?.values?.length);
+  if (box.hidden) return;
+  const keep = sel.value || savedEffort;
+  sel.replaceChildren(...["", ...spec.values].map((v) => {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v || `default (${spec.default})`;
+    return o;
+  }));
+  sel.value = spec.values.includes(keep) ? keep : "";
+}
+
 function renderModels() {
   const loaded = models.find((m) => m.loaded) ?? null;
   contextLen = loaded?.max_model_len ?? loaded?.meta?.n_ctx_train ?? 0;
   if (!models.find((m) => m.id === modelName)) modelName = (loaded ?? models[0])?.id ?? null;
+  renderEffort(loaded);
 
   if (models.length <= 1) {
     const span = document.createElement("span");
@@ -1442,7 +1481,7 @@ function renderModels() {
     o.selected = m.id === modelName;
     sel.append(o);
   }
-  sel.addEventListener("change", () => { modelName = sel.value; });
+  sel.addEventListener("change", () => { modelName = sel.value; renderEffort(loaded); });
   el("model").replaceWith(sel);
 }
 

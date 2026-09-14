@@ -6,6 +6,7 @@
 // hand-rebuilt parallel one. CPU lane: no vocab/model needed.
 
 #include "model/chat_template.h"
+#include "refs/harmony_template_jinja.h"
 #include "refs/qwen38_template_jinja.h"
 
 #include <gtest/gtest.h>
@@ -70,6 +71,32 @@ std::vector<ChatMessage> one_user_turn() {
 std::string render_with(const ChatTemplate& tpl, const Tokenizer& tok, const std::string& effort) {
     return tpl.render_jinja(tok, one_user_turn(), /*add_generation_prompt=*/true,
                             /*suppress_thinking=*/false, /*force_thinking=*/false, effort);
+}
+
+// ---- what the template advertises (served as /v1/models meta.reasoning_effort) ----
+
+TEST(Qwen38ReasoningEffort, TemplateAdvertisesItsValuesAndDefault) {
+    Tokenizer tok = make_tokenizer();
+    ChatTemplate tpl = make_template(tok);
+    EXPECT_EQ(tpl.reasoning_effort_values(), (std::vector<std::string>{"xhigh", "medium", "low"}));
+    EXPECT_EQ(tpl.reasoning_effort_default(), "xhigh");
+}
+
+// gpt-oss names a default ("medium") but no list: nothing to offer as a choice.
+TEST(Qwen38ReasoningEffort, HarmonyAdvertisesDefaultOnly) {
+    Tokenizer tok = make_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok, harmony_golden::k_chat_template_jinja));
+    EXPECT_TRUE(tpl.reasoning_effort_values().empty());
+    EXPECT_EQ(tpl.reasoning_effort_default(), "medium");
+}
+
+TEST(Qwen38ReasoningEffort, TemplateWithoutEffortAdvertisesNothing) {
+    Tokenizer tok = make_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok, "{{ messages[0].content }}"));
+    EXPECT_TRUE(tpl.reasoning_effort_values().empty());
+    EXPECT_TRUE(tpl.reasoning_effort_default().empty());
 }
 
 // ---- the template's own default, with no caller opinion ----

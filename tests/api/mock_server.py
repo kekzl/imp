@@ -160,7 +160,9 @@ class MockHandler(BaseHTTPRequestHandler):
                     "created": int(time.time()),
                     "owned_by": "imp",
                     "max_model_len": MOCK_MAX_SEQ_LEN,        # vLLM convention
-                    "meta": {"n_ctx_train": MOCK_MAX_SEQ_LEN},  # llama.cpp convention
+                    "meta": {"n_ctx_train": MOCK_MAX_SEQ_LEN,   # llama.cpp convention
+                             # the loaded template's reasoning_effort list (imp; absent without one)
+                             "reasoning_effort": {"values": ["xhigh", "medium", "low"], "default": "xhigh"}},
                 }],
             })
         elif path == "/props":

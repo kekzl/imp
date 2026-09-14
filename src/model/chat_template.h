@@ -88,6 +88,10 @@ public:
     // True when a raw Jinja template is driving rendering (mentions_thinking
     // is only meaningful evidence in that case).
     bool has_jinja() const { return use_jinja_; }
+    // reasoning_effort as the Jinja source spells it: the literal list it checks against and its
+    // default(...). Empty when the template names no list (gpt-oss: default "medium" only).
+    const std::vector<std::string>& reasoning_effort_values() const { return reasoning_effort_values_; }
+    const std::string& reasoning_effort_default() const { return reasoning_effort_default_; }
     // True when the Jinja template teaches the Qwen-Coder/Qwen3.6 XML tool-call body
     // (<function=NAME><parameter=KEY>, raw-text values) instead of the ChatML JSON body.
     bool tool_xml_dialect() const { return tool_xml_dialect_; }
@@ -165,6 +169,8 @@ private:
     bool use_jinja_ = false;
     bool mentions_thinking_ = false;
     bool tool_xml_dialect_ = false;
+    std::vector<std::string> reasoning_effort_values_;
+    std::string reasoning_effort_default_;
 
     // Jinja2-based apply: render template, split on control tokens, encode
     bool probe_render_mentions_think(const Tokenizer& tok) const;

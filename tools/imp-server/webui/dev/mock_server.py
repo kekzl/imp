@@ -124,7 +124,8 @@ class H(BaseHTTPRequestHandler):
                              "loaded": m == STATE["loaded"]}
                     if m == STATE["loaded"]:
                         entry["max_model_len"] = ARGS.ctx
-                        entry["meta"] = {"n_ctx_train": ARGS.ctx}
+                        entry["meta"] = {"n_ctx_train": ARGS.ctx,
+                                         "reasoning_effort": {"values": ["xhigh", "medium", "low"], "default": "xhigh"}}
                     data.append(entry)
             self._json(200, {"object": "list", "data": data})
         else:
