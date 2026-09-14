@@ -73,6 +73,16 @@ class TestModelsEndpoint:
             assert entry["max_model_len"] > 0
             assert entry["meta"]["n_ctx_train"] == entry["max_model_len"]
 
+    def test_models_reasoning_effort_shape(self, client):
+        # meta.reasoning_effort is present only when the loaded chat template names its list.
+        for entry in client.get("/v1/models").json()["data"]:
+            effort = entry.get("meta", {}).get("reasoning_effort")
+            if effort is None:
+                continue
+            assert entry.get("loaded", True)
+            assert effort["values"] and all(isinstance(v, str) and v for v in effort["values"])
+            assert effort["default"] in effort["values"]
+
 
 class TestContextProbes:
     """Context-window auto-detection endpoints for OpenAI-compatible clients."""

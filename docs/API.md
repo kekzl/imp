@@ -28,7 +28,7 @@ all of them at once.
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
-| `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false` |
+| `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`) |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
 | `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md) |
 | `GET /` | ✅ | built-in chat UI |
@@ -278,7 +278,7 @@ Three knobs, and only one of them caps tokens:
 |---|---|---|
 | `think_budget` / `--think-budget` | OpenAI | FRACTION of `max_tokens` (default 0.5) the model may spend reasoning |
 | `thinking.budget_tokens` | Anthropic | a token count, converted to that same fraction (`N / max_tokens`, clamped to 1.0); `0` disables thinking |
-| `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8) |
+| `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8). The loaded model's values: `/v1/models` `meta.reasoning_effort` |
 
 Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches
 `max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction,

@@ -231,12 +231,17 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     // kv_capacity_tokens = what the pool can actually hold, not max_seq_len (the plan); they can
     // differ hugely on a tight card (#1542). Growable pools report their ceiling, not current commit.
     long long kv_capacity_tokens = -1;
+    std::vector<std::string> effort_values;
+    std::string effort_default;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
             model_name = state.model_name;
             max_seq_len = state.max_seq_len;
+            // The template's own reasoning_effort list, read under the lock only (skipped on a snapshot).
+            effort_values = state.chat_tpl.reasoning_effort_values();
+            effort_default = state.chat_tpl.reasoning_effort_default();
             if (state.ctx && state.ctx->engine) {
                 if (const auto* kv = state.ctx->engine->kv_cache())
                     kv_capacity_tokens = kv_capacity_ceiling_tokens(kv->total_blocks(), kv->ceiling_blocks(),
@@ -263,6 +268,8 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
             model["max_model_len"] = max_seq_len;               // vLLM convention
             model["meta"] = {{"n_ctx_train", max_seq_len}};     // llama.cpp convention
         }
+        if (!effort_values.empty())
+            model["meta"]["reasoning_effort"] = {{"values", effort_values}, {"default", effort_default}};
         data.push_back(std::move(model));
     }
 
@@ -289,12 +296,16 @@ void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, 
     bool loaded = false;
     std::string model_name;
     int max_seq_len = 0;
+    std::vector<std::string> effort_values;
+    std::string effort_default;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
             model_name = state.model_name;
             max_seq_len = state.max_seq_len;
+            effort_values = state.chat_tpl.reasoning_effort_values();
+            effort_default = state.chat_tpl.reasoning_effort_default();
         } else {
             ServerState::ObsStatus snap = state.model_status_snapshot();
             loaded = snap.loaded;
@@ -313,6 +324,8 @@ void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, 
             model["max_model_len"] = max_seq_len;
             model["meta"] = {{"n_ctx_train", max_seq_len}};
         }
+        if (!effort_values.empty())
+            model["meta"]["reasoning_effort"] = {{"values", effort_values}, {"default", effort_default}};
         res.set_content(dump_safe(model), "application/json");
         return;
     }
