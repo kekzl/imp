@@ -1579,10 +1579,21 @@ private:
             return std::make_unique<VariableExpr>(std::move(name));
         }
 
-        // Parenthesized expression or tuple
+        // Parenthesized expression; a comma after the first element makes it a tuple, evaluated as an array
         if (check(TokenType::LPAREN)) {
             advance();
             auto expr = parse_expr();
+            if (check(TokenType::COMMA)) {
+                auto tuple = std::make_unique<ArrayExpr>();
+                tuple->elements.push_back(std::move(expr));
+                while (check(TokenType::COMMA)) {
+                    advance();
+                    if (check(TokenType::RPAREN))
+                        break;  // trailing comma
+                    tuple->elements.push_back(parse_expr());
+                }
+                expr = std::move(tuple);
+            }
             if (check(TokenType::RPAREN))
                 advance();
             return expr;
