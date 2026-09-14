@@ -34,6 +34,15 @@
 // while handle_messages delegates through the OpenAI shim.
 extern thread_local bool g_in_anthropic_shim;
 
+// Reasoning a client sends back on a prior assistant message (OpenAI
+// reasoning_content; the Anthropic shim folds thinking blocks into it). Handed to
+// the Jinja template as message.reasoning_content; "" when absent.
+static std::string prior_reasoning(const json& msg) {
+    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string())
+        return msg["reasoning_content"].get<std::string>();
+    return "";
+}
+
 // Populates ctx.params/log_*/req_id/snap.tpl_family (early best-effort). Returns false with a
 // 400 JSON error on validation failure; true means proceed to state snapshot + tokenize.
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
@@ -385,7 +394,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             }
             std::string reconstructed = reconstruct_tool_call_output(ctx.snap.tpl_family, msg["tool_calls"],
                                                                      content_str, tool_xml_dialect);
-            ctx.params.chat_msgs.push_back({"assistant", reconstructed});
+            ctx.params.chat_msgs.push_back({"assistant", reconstructed, prior_reasoning(msg)});
         } else if (msg.contains("content") && msg["content"].is_array()) {
             // OpenAI multimodal format: content is array of parts
             std::string text_parts;
@@ -454,7 +463,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             if (msg.contains("content") && !msg["content"].is_null()) {
                 content = msg["content"].get<std::string>();
             }
-            ctx.params.chat_msgs.push_back({role, content});
+            ctx.params.chat_msgs.push_back({role, content, prior_reasoning(msg)});
         }
     }
 

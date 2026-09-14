@@ -28,6 +28,10 @@ const char* chat_template_family_name(ChatTemplateFamily family);
 struct ChatMessage {
     std::string role;  // "system", "user", "assistant"
     std::string content;
+    // Prior assistant reasoning the client sent back (OpenAI reasoning_content, Anthropic
+    // thinking blocks). Jinja templates decide whether to render it (Qwen3.8 keeps it by
+    // default); the built-in families ignore it.
+    std::string reasoning_content;
 };
 
 struct ToolFunction {

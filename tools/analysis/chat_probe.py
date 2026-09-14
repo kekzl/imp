@@ -129,7 +129,11 @@ def main():
     for i, text in enumerate(TURNS, 1):
         history.append({"role": "user", "content": text})
         content, reasoning, finish = webui_request(url, model, history, args.timeout)
-        history.append({"role": "assistant", "content": content})
+        # The web UI sends the reply back with its reasoning (assistantMsg() in index.html).
+        msg = {"role": "assistant", "content": content}
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        history.append(msg)
         hard, soft = turn_faults(content, reasoning, finish)
         status = "FAIL" if hard else ("soft" if soft else "ok  ")
         print(f"[{status}] turn {i:2d} finish={finish} reasoning={len(reasoning)} content={len(content)}"

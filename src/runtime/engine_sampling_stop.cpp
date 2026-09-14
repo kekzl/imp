@@ -140,17 +140,18 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     state.mirostat_eta = req.mirostat_eta;
     state.mirostat_mu = req.mirostat_mu;
 
-    // Logit bias
-    if (!req.logit_bias.empty()) {
-        state.logit_bias = req.logit_bias.data();
-        state.n_logit_bias = static_cast<int>(req.logit_bias.size());
-    }
+    // Logit bias (unconditional for the same reason as the banned list below).
+    state.logit_bias = req.logit_bias.empty() ? nullptr : req.logit_bias.data();
+    state.n_logit_bias = static_cast<int>(req.logit_bias.size());
 
-    // Banned tokens (chat template special tokens that must not be generated)
-    if (!banned_token_ids_.empty()) {
-        state.banned_tokens = banned_token_ids_.data();
-        state.n_banned_tokens = static_cast<int>(banned_token_ids_.size());
-    }
+    // Banned tokens (chat template special tokens that must not be generated).
+    // Assigned unconditionally: batched decode fills every row's state from a
+    // copy of the batch state, and an empty list left row 0's stop mask
+    // (below) on every other row, so a row that had closed its think block
+    // could not stop while row 0 was still thinking (17 x "</think> + answer"
+    // measured on Qwen3.8-27B at 8 streams).
+    state.banned_tokens = banned_token_ids_.empty() ? nullptr : banned_token_ids_.data();
+    state.n_banned_tokens = static_cast<int>(banned_token_ids_.size());
 
     // Force </think> via logit manipulation when the budget is exceeded: the
     // model generates it itself so it lands in the KV cache correctly. Scans
@@ -174,7 +175,11 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
             state.force_token = harmony_force_seq_[0];
             req.harmony_force_idx = 1;
         } else {
-            state.force_token = think_end_id_;  // <think> models: single </think>
+            // <think> models: "\n" then </think>, the way the model ends reasoning on its own
+            // and the template renders a prior turn (reasoning + "\n</think>"). A bare forced
+            // </think> re-tokenizes one token off and the reply's KV is never reusable.
+            const bool nl_done = think_newline_id_ < 0 || req.output_tokens.back() == think_newline_id_;
+            state.force_token = nl_done ? think_end_id_ : think_newline_id_;
         }
     }
 
@@ -313,10 +318,10 @@ void Engine::release_recurrent_slot_(int req_id) {
     recurrent_slot_of_.erase(it);
 }
 
-void Engine::fill_recurrent_state(const Request& req, InferenceState& state, bool reset,
+bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, bool reset,
                                   cudaStream_t stream) {
     if (!ssm_state_)
-        return;
+        return true;
     int slot;
     if (reset) {
         slot = acquire_recurrent_slot_(req.id);  // fresh slot for a new sequence
@@ -336,7 +341,16 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
             if (req.recurrent_restore && req.recurrent_restore->data &&
                 recurrent_snapshots_ &&
                 recurrent_snapshots_->entry_bytes() == ssm_state_->per_seq_bytes()) {
-                                // cudaMemcpyDefault: the entry is a device slab or, from the
+                // Transcript snapshot (unaligned): its partial tail block comes with the
+                // state, cloned into this request's own block before the chunk appends to it.
+                const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+                const int n = req.recurrent_restore->n_tokens;
+                if (n % bs != 0 && !kv_manager_->clone_held_block(req.id, n / bs, stream)) {
+                    IMP_LOG_ERROR("RecurrentSnapshot: tail block of the %d-token transcript restore for req %d is gone",
+                                  n, req.id);
+                    return false;
+                }
+                // cudaMemcpyDefault: the entry is a device slab or, from the
                 // store's host tier, pinned host memory (H2D on the stream).
                 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
                     ssm_state_->seq_base(slot), req.recurrent_restore->data,
@@ -349,6 +363,7 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
             }
         }
     }
+    return true;
 }
 
 // ─── Recurrent-state snapshots (hybrid prefix caching) ──────────────────
@@ -374,26 +389,80 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
     // At least one token must remain to forward (the model needs logits).
     int max_b = std::min(cached, (total - 1) / bs);
+    kv_manager_->release_held_block(req.id);
     for (int b = max_b; b >= 1; --b) {
+        // Transcript snapshot (unaligned, saved at finish) before the aligned entry: it
+        // reaches further into the same block. Its full blocks are the LAST cached ones (the
+        // tail block is cached under the transcript key, never as a full-block hash), so only
+        // b == max_b can carry one.
+        if (b == max_b && transcript_snapshot_active_()) {
+            const int base = b * bs;
+            const auto toks = std::span<const int32_t>(req.input_tokens);
+            for (int m = std::min(bs - 1, total - 1 - base); m >= 1; --m) {
+                const size_t key = transcript_tail_key(hashes[b - 1], toks.subspan(static_cast<size_t>(base), m));
+                auto entry = recurrent_snapshots_->find(key);
+                if (!entry || entry->n_tokens != base + m)
+                    continue;
+                if (kv_manager_->hold_cached_block(key, req.id) < 0)
+                    continue;  // the tail block was reclaimed; the state alone cannot restore
+                req.recurrent_restore = std::move(entry);
+                return b;
+            }
+        }
         auto entry = recurrent_snapshots_->find(hashes[b - 1]);
         if (entry && entry->n_tokens == b * bs) {
             req.recurrent_restore = std::move(entry);
             return b;
         }
     }
+    IMP_LOG_DEBUG("RecurrentSnapshot: no restorable prefix for req %d (%d/%d blocks cached, %d tokens)", req.id,
+                  cached, total / bs, total);
     return 0;
 }
 
-int Engine::hybrid_snapshot_end_(const Request& req) const {
+bool Engine::transcript_snapshot_active_() const {
     if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
-        return 0;
-    if (!supports_chunked_prefill_())
-        return 0;
-    if (req.vision_emb || req.image || vision_.has_input())
-        return 0;
+        return false;
+    if (!runtime_config_.server.transcript_snapshot || !supports_chunked_prefill_())
+        return false;
+    // copy_blocks_device leaves the key min/max metadata behind; a cloned tail block
+    // would score with stale pages.
+    if (kv_cache_raw_ && kv_cache_raw_->key_minmax_enabled())
+        return false;
+    // Factored spare: the accepted draft row sits in the factor buffer, not the slab, so
+    // the slab at finish is one token short of the transcript.
+    if (factored_spare_active(runtime_config_, bv_))
+        return false;
+    return true;
+}
+
+void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const int32_t> forwarded,
+                                             cudaStream_t stream) {
+    if (!transcript_snapshot_active_())
+        return;
+    if (req.vision_emb || req.image || req.n_vision_tokens > 0 || vision_.has_input())
+        return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    return snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
-                             runtime_config_.server.snapshot_min_prompt_tokens);
+    const int n = static_cast<int>(forwarded.size());
+    if (n < bs || n < runtime_config_.server.snapshot_min_prompt_tokens)
+        return;
+    const size_t key = transcript_snapshot_key(forwarded, bs);
+    if (key == 0 || recurrent_snapshots_->contains(key))
+        return;  // same transcript already stored (e.g. restored at exactly this position)
+    auto it = recurrent_slot_of_.find(req.id);
+    if (it == recurrent_slot_of_.end())
+        return;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream))
+        return;
+    // The tail block must survive free_sequence: hash it now, under the same key.
+    kv_manager_->register_partial_block(req.id, forwarded, key);
+    // release_recurrent_slot_ runs right after and the next tenant's prefill writes the
+    // slot on another stream: the copy must be complete before this returns.
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    IMP_LOG_DEBUG("RecurrentSnapshot: saved %d-token transcript state for req %d (%d/%d slots) in %.1f ms", n,
+                  req.id, recurrent_snapshots_->size(), recurrent_snapshots_->capacity(),
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
 void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
@@ -456,9 +525,9 @@ int Engine::swa_prefix_reuse_limit_(Request& req) {
 }
 
 int Engine::snapshot_end_(const Request& req) const {
-    if (ssm_state_)
-        return hybrid_snapshot_end_(req);
-    if (!swa_snapshots_ || !swa_snapshots_->enabled())
+    // Hybrid: the recurrent store must be live; otherwise the SWA store.
+    if (ssm_state_ ? !(recurrent_snapshots_ && recurrent_snapshots_->enabled())
+                   : !(swa_snapshots_ && swa_snapshots_->enabled()))
         return 0;
     if (!supports_chunked_prefill_())
         return 0;
@@ -467,12 +536,6 @@ int Engine::snapshot_end_(const Request& req) const {
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     return snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
                              runtime_config_.server.snapshot_min_prompt_tokens);
-}
-
-void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
-    (void)snap_end;  // recomputed from the span (block floor)
-    maybe_save_swa_snapshot_span_(req.id, std::span<const int32_t>(req.input_tokens), stream,
-                                  /*hard_sync=*/false);
 }
 
 // Core save: snapshots the seq's live window at the block-floor of `tokens`.

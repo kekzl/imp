@@ -123,6 +123,10 @@ bool Engine::init_features() {
             if (accept) {
                 think_start_id_ = ts;
                 think_end_id_ = te;
+                // The newline the model puts before its own </think> (and the template renders
+                // before it in a prior turn): a forced think end emits it first.
+                const auto nl = ptok->encode("\n", /*no_prefix=*/true);
+                think_newline_id_ = nl.size() == 1 ? nl[0] : -1;
             } else if (chat_template_.family() == ChatTemplateFamily::HARMONY) {
                 // gpt-oss Harmony: reasoning lives in the analysis channel and closes with <|end|>;
                 // the model emits <|channel|>analysis<|message|> itself (no <think> opener, so

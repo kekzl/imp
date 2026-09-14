@@ -543,10 +543,12 @@ static jinja::Value::Array build_jinja_messages(const std::vector<ChatMessage>& 
         if (suppress_thinking && m.role == "system") {
             content += " /no_think";
         }
-        msg_arr.push_back(jinja::Value::object({
+        auto obj = jinja::Value::object({
             {"role", jinja::Value(m.role)},
             {"content", jinja::Value(content)},
-        }));
+        });
+        if (!m.reasoning_content.empty()) obj.set("reasoning_content", jinja::Value(m.reasoning_content));
+        msg_arr.push_back(std::move(obj));
     }
     return msg_arr;
 }

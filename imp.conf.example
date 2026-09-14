@@ -733,6 +733,12 @@ recurrent_snapshot_host_mb = 2048
 # sync: 35-token prompt TTFT floor 36 -> 22 ms unsplit on Qwen3.8-27B-NVFP4,
 # the turn-2 saving of a 32-token prefix is under 3 ms). 0 = always snapshot.
 snapshot_min_prompt_tokens = 256
+# Hybrid models also snapshot the recurrent state at the END of every
+# generation (prompt + reply, unaligned; the partial KV block is kept with
+# it): a next turn that resends the whole transcript restores there and
+# prefills only the new message. One slab copy plus a sync per finished
+# request. Off when the sparse key min/max pool is on.
+transcript_snapshot = true
 # OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
 # URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every
 # generation request becomes one SERVER span (queue / prefill / decode

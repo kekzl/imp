@@ -421,6 +421,190 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
         << "). The restore itself is wrong, not the boundary count.";
 }
 
+// Transcript restore (server.transcript_snapshot): turn 1 is a prompt plus 60 greedy tokens,
+// turn 2 resends prompt + reply + new text and restores at the reply's last forwarded token
+// (an unaligned position; its partial KV block is cloned). The warm state after turn 2's
+// prefill is measured against a cold prefill of the same prompt. The warm history (turn-1
+// chunks, then one token per decode step) is a prefill chunked at every reply token, so the
+// bound is the chunk-shape control, with one-token chunks as the second control.
+TEST_P(HybridRestoreChainTest, TranscriptRestoreStateStaysClose) {
+    if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
+        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: " << imp_test::kEnvModelGdn
+                     << " points at a model with ssm_inner_size == 0.";
+
+    const ChainArm arm = GetParam();
+    RuntimeConfig rc;
+    rc.gdn.state_bf16 = arm.state_bf16;
+    rc.gdn.chunkpar_scan = arm.chunkpar;
+    rc.runtime.deterministic = true;
+    set_pending_runtime_config(rc);
+
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = kMaxSeqLen;
+    cfg.max_batch_size = 1;
+    cfg.enable_cuda_graphs = 1;
+    cfg.use_prefix_caching = 1;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    SSMState* ssm = engine->ssm_state();
+    ASSERT_NE(ssm, nullptr);
+    ASSERT_NE(engine->kv_cache(), nullptr);
+    const int kv_bs = engine->kv_cache()->block_size();
+    const QType h_dtype = ssm->h_dtype();
+    const int n_layers = ssm->n_ssm_layers();
+    ASSERT_GT(n_layers, 0);
+    const size_t per_seq = ssm->per_seq_bytes();
+    const size_t per_layer = per_seq / static_cast<size_t>(n_layers);
+    const size_t h_bytes = ssm->h_bytes();
+    ASSERT_GT(per_layer, h_bytes);
+    const size_t conv_bytes = per_layer - h_bytes;
+
+    auto tokenize = [&](const std::string& text) {
+        std::vector<int32_t> out(8192);
+        int n = 0;
+        EXPECT_EQ(imp_tokenize(model_, text.c_str(), out.data(), &n, static_cast<int>(out.size())),
+                  IMP_SUCCESS);
+        out.resize(n > 0 ? n : 0);
+        return out;
+    };
+    // State is captured the moment the prompt is through (first sampled token present): for
+    // turn 2 that is the state after the restore plus the tail prefill, before any decode.
+    auto run = [&](const std::vector<int32_t>& tokens, int max_tokens, std::vector<uint8_t>* out_state,
+                   int* out_cached) {
+        auto req = std::make_shared<Request>();
+        req->input_tokens = tokens;
+        req->max_tokens = max_tokens;
+        req->temperature = 0.0f;
+        req->top_p = 1.0f;
+        req->top_k = 0;
+        req->ignore_eos = true;
+        req->status = RequestStatus::PENDING;
+        engine->add_request(req);
+        bool captured = false;
+        for (int i = 0; i < 8192; ++i) {
+            if (req->status == RequestStatus::FINISHED || req->status == RequestStatus::CANCELLED)
+                break;
+            (void)engine->step();
+            if (!captured && out_state && !req->output_tokens.empty()) {
+                const int slot = engine->recurrent_slot(req->id);
+                if (slot >= 0) {
+                    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+                    IMP_CUDA_CHECK_LOG(
+                        cudaMemcpy(out_state->data(), ssm->seq_base(slot), per_seq, cudaMemcpyDeviceToHost));
+                    captured = true;
+                }
+            }
+        }
+        EXPECT_EQ(req->status, RequestStatus::FINISHED);
+        if (out_state)
+            EXPECT_TRUE(captured);
+        if (out_cached)
+            *out_cached = req->cached_tokens;
+        return req->output_tokens;
+    };
+    auto go_cold = [&]() {
+        while (engine->kv_manager()->evict_cached_block()) {}
+        engine->clear_recurrent_snapshots();
+    };
+    auto measure = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b,
+                       std::vector<LayerDrift>& rows) {
+        rows.assign(n_layers, LayerDrift{});
+        for (int l = 0; l < n_layers; ++l) {
+            const void* ca = ssm->conv_state_in(const_cast<uint8_t*>(a.data()), l);
+            const void* cb = ssm->conv_state_in(const_cast<uint8_t*>(b.data()), l);
+            const void* ha = ssm->h_state_in(const_cast<uint8_t*>(a.data()), l);
+            const void* hb = ssm->h_state_in(const_cast<uint8_t*>(b.data()), l);
+            diff_span(ca, cb, conv_bytes / sizeof(float), QType::F32, &rows[l].conv_max, &rows[l].conv_rel);
+            diff_span(ha, hb, h_bytes / dtype_size(h_dtype), h_dtype, &rows[l].h_max, &rows[l].h_rel);
+        }
+    };
+    auto worst_h_rel = [&](const std::vector<LayerDrift>& rows) {
+        double best = 0.0;
+        for (int l = 0; l < n_layers; ++l)
+            best = std::max(best, rows[l].h_rel);
+        return best;
+    };
+    auto run_chunked = [&](const std::vector<int32_t>& tokens, int chunk, std::vector<uint8_t>* out_state) {
+        const int saved = engine->mutable_runtime_config().runtime.prefill_chunk_size;
+        engine->mutable_runtime_config().runtime.prefill_chunk_size = chunk;
+        auto tok = run(tokens, kGreedy, out_state, nullptr);
+        engine->mutable_runtime_config().runtime.prefill_chunk_size = saved;
+        return tok;
+    };
+
+    // Turn 1: opening + three turns of text, 60 greedy tokens. Turn 2: the transcript + one more.
+    constexpr int kReply = 60;
+    std::vector<int32_t> prompt1 = tokenize(kOpening + turn_text(0) + turn_text(1) + turn_text(2));
+    ASSERT_GE(static_cast<int>(prompt1.size()), engine->runtime_config().server.snapshot_min_prompt_tokens);
+    go_cold();
+    int c1 = -1;
+    const std::vector<int32_t> reply = run(prompt1, kReply, nullptr, &c1);
+    ASSERT_EQ(static_cast<int>(reply.size()), kReply);
+    EXPECT_EQ(c1, 0);
+    std::vector<int32_t> prompt2 = prompt1;
+    prompt2.insert(prompt2.end(), reply.begin(), reply.end());
+    const std::vector<int32_t> next = tokenize(turn_text(3));
+    prompt2.insert(prompt2.end(), next.begin(), next.end());
+    const int n = static_cast<int>(prompt1.size()) + kReply - 1;
+
+    std::vector<uint8_t> warm_state(per_seq);
+    int warm_cached = -1;
+    const std::vector<int32_t> warm_tok = run(prompt2, kGreedy, &warm_state, &warm_cached);
+    EXPECT_EQ(warm_cached, n) << "turn 2 did not restore at the reply's last forwarded token";
+
+    // References: cold, cold again (noise floor), cold chunked at one block, cold chunked at
+    // one token (every reply token was its own decode step in the warm arm).
+    go_cold();
+    std::vector<uint8_t> cold_state(per_seq);
+    int cold_cached = -1;
+    const std::vector<int32_t> cold_tok = run(prompt2, kGreedy, &cold_state, &cold_cached);
+    EXPECT_EQ(cold_cached, 0) << "the cold reference is not cold";
+    go_cold();
+    std::vector<uint8_t> cold2_state(per_seq);
+    const std::vector<int32_t> cold2_tok = run(prompt2, kGreedy, &cold2_state, nullptr);
+    go_cold();
+    std::vector<uint8_t> block_state(per_seq);
+    const std::vector<int32_t> block_tok = run_chunked(prompt2, kv_bs, &block_state);
+    go_cold();
+    std::vector<uint8_t> token_state(per_seq);
+    const std::vector<int32_t> token_tok = run_chunked(prompt2, 1, &token_state);
+
+    std::vector<LayerDrift> rows;
+    auto row = [&](const char* name, const std::vector<uint8_t>& a, const std::vector<uint8_t>& b,
+                   bool greedy_ok) {
+        measure(a, b, rows);
+        double conv_max = 0.0, conv_rel = 0.0, h_max = 0.0;
+        for (int l = 0; l < n_layers; ++l) {
+            conv_max = std::max(conv_max, rows[l].conv_max);
+            conv_rel = std::max(conv_rel, rows[l].conv_rel);
+            h_max = std::max(h_max, rows[l].h_max);
+        }
+        const double h_rel = worst_h_rel(rows);
+        std::printf("[transcript] %-28s %6d %11.3e %11.3e %11.3e %11.3e %6d\n", name,
+                    static_cast<int>(prompt2.size()), conv_max, conv_rel, h_max, h_rel, greedy_ok ? 1 : 0);
+        return h_rel;
+    };
+    std::printf("\n[transcript] model=%s requested=%s chunkpar=%d h_dtype=%s prompt1=%d reply=%d cached=%d\n",
+                path_.c_str(), arm.state_bf16 ? "bf16" : "fp32", arm.chunkpar ? 1 : 0, qtype_name(h_dtype),
+                static_cast<int>(prompt1.size()), kReply, warm_cached);
+    std::printf("[transcript] %-28s %6s %11s %11s %11s %11s %6s\n", "arm", "tokens", "conv_maxabs",
+                "conv_relL2", "h_maxabs", "h_relL2", "greedy");
+    const double noise = row("control cold-vs-cold", cold2_state, cold_state, cold2_tok == cold_tok);
+    const double blocked = row("control blockchunk-vs-cold", block_state, cold_state, block_tok == cold_tok);
+    const double tokened = row("control tokenchunk-vs-cold", token_state, cold_state, token_tok == cold_tok);
+    const double warm = row("transcript-restore-vs-cold", warm_state, cold_state, warm_tok == cold_tok);
+    std::fflush(stdout);
+
+    EXPECT_EQ(cold2_tok, cold_tok) << "two cold runs disagreed: the table is noise";
+    EXPECT_LT(noise, 1e-9);
+    const double control = std::max(blocked, tokened);
+    EXPECT_LE(warm, 2.0 * control + 1e-9)
+        << "the transcript restore drifted further from cold than a cold prefill chunked at every "
+           "block or every token: " << warm << " vs " << control << " relative L2 (h dtype "
+        << qtype_name(h_dtype) << "). The restored state or its tail block is wrong.";
+}
+
 INSTANTIATE_TEST_SUITE_P(Arms, HybridRestoreChainTest,
                          ::testing::Values(ChainArm{true, true}, ChainArm{true, false}, ChainArm{false, true},
                                            ChainArm{false, false}),

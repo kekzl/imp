@@ -216,7 +216,11 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         // Reset (or snapshot-restore) the recurrent state on the first chunk;
         // later chunks carry it forward. Captures the slot for the batched
         // scan / per-seq conv.
-        fill_recurrent_state(*req, state, /*reset=*/(offset == req->cached_tokens), stream);
+        if (!fill_recurrent_state(*req, state, /*reset=*/(offset == req->cached_tokens), stream)) {
+            cancel_sequence_(req);
+            req->status = RequestStatus::CANCELLED;
+            continue;
+        }
 
         geoms.push_back({req, offset, chunk_len, ctx_len, is_last, snap_end, state.ssm_seq_id});
     }
@@ -418,7 +422,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
                       static_cast<int>(req->input_tokens.size()));
         if (g.snap_end > 0 && req->prefill_offset == g.snap_end) {
             maybe_save_recurrent_snapshot_(*req, g.snap_end, stream);
-            maybe_save_swa_snapshot_(*req, g.snap_end, stream);
+            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, stream, /*hard_sync=*/false);
         }
         if (!g.is_last)
             continue;

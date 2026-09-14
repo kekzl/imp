@@ -372,4 +372,106 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
            "cold prefill that forwards the same tokens through the same chunk boundaries";
 }
 
+// Transcript snapshot (server.transcript_snapshot): at finish the recurrent state covers
+// prompt + reply minus the final sample, an UNALIGNED position whose last KV block is partial.
+// A turn that resends the whole transcript must restore there (cached_tokens == that
+// position), and with the knob off it must fall back to the prompt's block boundary.
+// Tokens are not compared against a cold arm here: the warm state's history (turn-1 chunks,
+// then one token per decode step) has no cold chunking that reproduces it (SETTLED.md
+// 2026-09-09); the state itself is measured in test_hybrid_restore_chain.cu.
+TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
+    if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
+        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: transcript snapshots are a hybrid path; "
+                        "run this against IMP_TEST_MODEL_GDN (make test-e2e does).";
+
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 2048;
+    cfg.max_batch_size = 1;
+    cfg.enable_cuda_graphs = 1;
+    cfg.use_prefix_caching = 1;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    imp::Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    ASSERT_NE(engine->kv_cache(), nullptr);
+    const int kv_bs = engine->kv_cache()->block_size();
+    const int min_snap = engine->runtime_config().server.snapshot_min_prompt_tokens;
+
+    std::vector<int32_t> full(4096);
+    int n_full = 0;
+    ASSERT_EQ(imp_tokenize(model_, kLongPrompt, full.data(), &n_full, static_cast<int>(full.size())),
+              IMP_SUCCESS);
+    ASSERT_GE(n_full, 512 + 100);
+    full.resize(n_full);
+
+    auto run = [&](const std::vector<int32_t>& tokens, int max_tokens, int* cached_tokens) {
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens = tokens;
+        req->max_tokens = max_tokens;
+        req->temperature = 0.0f;
+        req->top_p = 1.0f;
+        req->top_k = 0;
+        req->ignore_eos = true;
+        req->status = imp::RequestStatus::PENDING;
+        engine->add_request(req);
+        for (int i = 0; i < 4096; ++i) {
+            if (req->status == imp::RequestStatus::FINISHED || req->status == imp::RequestStatus::CANCELLED)
+                break;
+            (void)engine->step();
+        }
+        EXPECT_EQ(req->status, imp::RequestStatus::FINISHED)
+            << "request did not finish (status " << static_cast<int>(req->status) << ")";
+        if (cached_tokens)
+            *cached_tokens = req->cached_tokens;
+        return req->output_tokens;
+    };
+    auto go_cold = [&]() {
+        ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+        while (engine->kv_manager()->evict_cached_block()) {
+        }
+        engine->clear_recurrent_snapshots();
+    };
+
+    const int prompt_len = std::min((n_full / kv_bs) * kv_bs, 32 * kv_bs);
+    ASSERT_GE(prompt_len, min_snap) << "the prompt must be long enough to snapshot at all";
+    const std::vector<int32_t> prompt1(full.begin(), full.begin() + prompt_len);
+    // 39 forwarded reply tokens: prompt_len + 39 is unaligned for every block size in use.
+    constexpr int kReply = 40;
+    const int n = prompt_len + kReply - 1;
+    ASSERT_NE(n % kv_bs, 0);
+
+    // Turn 1: prompt, 40 greedy tokens. Turn 2: the whole transcript plus 100 new tokens.
+    go_cold();
+    int c1 = -1;
+    const std::vector<int32_t> reply = run(prompt1, kReply, &c1);
+    ASSERT_EQ(static_cast<int>(reply.size()), kReply);
+    EXPECT_EQ(c1, 0) << "the first turn cannot hit a cache it is populating";
+    std::vector<int32_t> prompt2 = prompt1;
+    prompt2.insert(prompt2.end(), reply.begin(), reply.end());
+    prompt2.insert(prompt2.end(), full.begin() + prompt_len, full.begin() + prompt_len + 100);
+    int c2 = -1;
+    const std::vector<int32_t> out2 = run(prompt2, 16, &c2);
+    EXPECT_EQ(c2, n) << "turn 2 must restore at the reply's last forwarded token (unaligned), "
+                        "not at a block boundary (kv_bs=" << kv_bs << ", prompt=" << prompt_len << ")";
+    EXPECT_EQ(static_cast<int>(out2.size()), 16);
+
+    // A third turn on top of the second: the chain continues from the new reply end.
+    std::vector<int32_t> prompt3 = prompt2;
+    prompt3.insert(prompt3.end(), out2.begin(), out2.end());
+    prompt3.insert(prompt3.end(), full.begin() + prompt_len + 100, full.begin() + prompt_len + 140);
+    int c3 = -1;
+    (void)run(prompt3, 8, &c3);
+    EXPECT_EQ(c3, static_cast<int>(prompt2.size()) + 15) << "turn 3 must restore at the end of reply 2";
+
+    // The destructive opposite: with the knob off, the same two turns restore at the prompt's
+    // block boundary, one block short of the aligned prompt (snapshot_boundary.h).
+    go_cold();
+    engine->mutable_runtime_config().server.transcript_snapshot = false;
+    (void)run(prompt1, kReply, nullptr);
+    int c_off = -1;
+    (void)run(prompt2, 16, &c_off);
+    engine->mutable_runtime_config().server.transcript_snapshot = true;
+    EXPECT_EQ(c_off, imp::snapshot_boundary(prompt_len, kv_bs, min_snap))
+        << "with transcript snapshots off, turn 2 must fall back to the prompt-boundary snapshot";
+}
+
 }  // namespace

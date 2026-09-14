@@ -262,7 +262,11 @@ def main():
     # conv half of the same spare, tap stash plus window advance against the window definition.
     # 1112 -> 1113: DeviceSaltDrawsLikeTheHostStepSeed (test-compute, GPU, no model): the graph decode's
     # device seed salt must draw the host token of seed + salt on both sides of the k=128 split.
-    PINNED = 1113
+    # 1113 -> 1116: transcript snapshot (hybrid finish-state restore): KVCacheManagerTest
+    # PartialBlockHoldAndClone (test-kv, GPU, no model), PrefixCacheE2ETest
+    # HybridTranscriptRestoreContinuesAtReplyEnd and HybridRestoreChainTest
+    # TranscriptRestoreStateStaysClose (test-e2e, GDN container of make test-e2e).
+    PINNED = 1116
 
     text = CMAKE.read_text()
     mods = module_sources(text)

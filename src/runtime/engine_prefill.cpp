@@ -605,7 +605,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // Reset on the first chunk of a new request so previous-request state
     // doesn't leak in; subsequent chunks must NOT reset. First chunk starts at
     // cached_tokens (>0 on a prefix-cache hit: "reset" restores the snapshot instead of zeroing).
-    fill_recurrent_state(*req, state, /*reset=*/(offset == req->cached_tokens), pf_stream);
+    if (!fill_recurrent_state(*req, state, /*reset=*/(offset == req->cached_tokens), pf_stream)) {
+        // Not KV pressure: the transcript snapshot's tail block is gone (#1641 class).
+        cancel_sequence_(req);
+        req->status = RequestStatus::CANCELLED;
+        return;
+    }
 
     if (req->vision_emb && offset == 0) {
         // Per-request (server batched path): the worker encoded req->image into
@@ -714,7 +719,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // recurrent state / SWA window now, before the next chunk advances it.
         if (snap_end > 0 && req->prefill_offset == snap_end) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
-            maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
+            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, pf_stream, /*hard_sync=*/false);
         }
     } else if (!req->score_token_ids.empty()) {
         // Rerank scoring (/v1/rerank): a cross-encoder reads its verdict from
@@ -822,7 +827,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // never the recurrent state; SWA window blocks aren't mutated until the first decode step).
         if (snap_end == total_input) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
-            maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
+            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, pf_stream, /*hard_sync=*/false);
         }
 
         if (req->mirostat == 2)

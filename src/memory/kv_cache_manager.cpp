@@ -292,6 +292,7 @@ void KVCacheManager::free_sequence(int seq_id) {
     // Before the early return: a reservation outlives the block table it was
     // taken against, and an orphan keeps subtracting from can_allocate().
     decode_reservations_.erase(seq_id);
+    release_held_block(seq_id);
 
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end())
@@ -649,6 +650,60 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
         parent_hash = block_hash;
     }
 }
+
+void KVCacheManager::register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key) {
+    if (!prefix_caching_enabled_ || key == 0)
+        return;
+    const int bs = cache_->block_size();
+    const int n = static_cast<int>(tokens.size());
+    if (n % bs == 0)
+        return;  // no partial block: the full-block chain covers everything
+    auto it = seq_blocks_.find(seq_id);
+    if (it == seq_blocks_.end())
+        return;
+    const int block_id = it->second.id_at(static_cast<size_t>(n / bs));
+    if (block_id < 0 || block_id_to_hash_.count(block_id) != 0)
+        return;
+    if (block_hash_to_id_.find(key) != block_hash_to_id_.end())
+        return;  // same transcript already cached
+    block_hash_to_id_[key] = block_id;
+    block_id_to_hash_[block_id] = key;
+}
+
+int KVCacheManager::hold_cached_block(size_t key, int seq_id) {
+    release_held_block(seq_id);
+    auto hit = block_hash_to_id_.find(key);
+    if (hit == block_hash_to_id_.end())
+        return -1;
+    const int block_id = hit->second;
+    if (cache_->ref_count(block_id) == 0) {
+        // Stale entry on a free-listed block (allocate_blocks_with_prefix drops these too).
+        block_id_to_hash_.erase(block_id);
+        block_hash_to_id_.erase(hit);
+        return -1;
+    }
+    held_blocks_.emplace(seq_id, cache_->share_block(block_id));
+    return block_id;
+}
+
+bool KVCacheManager::clone_held_block(int seq_id, int block_index, cudaStream_t stream) {
+    auto held = held_blocks_.find(seq_id);
+    if (held == held_blocks_.end() || !held->second)
+        return false;
+    auto it = seq_blocks_.find(seq_id);
+    if (it == seq_blocks_.end())
+        return false;
+    const int dst = it->second.id_at(static_cast<size_t>(block_index));
+    const int src = held->second.id();
+    if (dst < 0 || src < 0 || dst == src)
+        return false;
+    if (cache_->ref_count(dst) != 1)
+        return false;  // the destination must be this sequence's own block
+    cache_->copy_blocks_device(&src, &dst, 1, stream);
+    return true;
+}
+
+void KVCacheManager::release_held_block(int seq_id) { held_blocks_.erase(seq_id); }
 
 int KVCacheManager::num_cached_blocks() const { return static_cast<int>(cached_blocks_lru_.size()); }
 

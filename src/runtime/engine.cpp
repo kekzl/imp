@@ -348,6 +348,9 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             // at the last snapshot boundary). Must run before free_sequence
             // recycles the blocks; hard_sync because they're re-allocatable the moment it returns.
             maybe_save_swa_snapshot_span_(req->id, forwarded, stream_, /*hard_sync=*/true);
+            // Hybrid twin: the recurrent state over the same span, so the next
+            // turn restores at the end of this reply instead of at the prompt boundary.
+            maybe_save_transcript_snapshot_(*req, forwarded, stream_);
         } else {
             kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
         }

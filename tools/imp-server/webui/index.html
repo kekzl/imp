@@ -1214,7 +1214,14 @@ async function run(text) {
   const swapping = models.length > 1 && !models.find((m) => m.id === modelName)?.loaded;
   if (swapping) setState("busy", "loading " + modelName);
 
-  let answer = "", thinking = null, finish = null, usage = null, requestId = null;
+  let answer = "", reasoning = "", thinking = null, finish = null, usage = null, requestId = null;
+  // The reply goes back into the history WITH its reasoning: the model's own
+  // template keeps prior thinking (Qwen3.8 preserve_thinking), and a resent
+  // transcript that matches the generated tokens restores the recurrent
+  // state at the end of the reply instead of re-prefilling it.
+  const assistantMsg = () =>
+    reasoning ? { role: "assistant", content: answer, reasoning_content: reasoning }
+              : { role: "assistant", content: answer };
 
   // Re-typesetting on every token would burn the frame budget at 150 tok/s, so
   // repaints are coalesced to one per animation frame.
@@ -1281,6 +1288,7 @@ async function run(text) {
             // Thinking stays raw text: it is working-out, not typeset prose.
             if (!thinking) thinking = thinkPane(turn);
             thinking.body.append(delta.reasoning_content);
+            reasoning += delta.reasoning_content;
             if (nTokens === 0) setState("busy", "thinking");
           }
           if (delta.content) {
@@ -1297,16 +1305,16 @@ async function run(text) {
       }
     }
 
-    history.push({ role: "assistant", content: answer });
+    history.push(assistantMsg());
     setState("ok", "idle");
   } catch (err) {
     if (err.name === "AbortError") {
-      history.push({ role: "assistant", content: answer });
+      history.push(assistantMsg());
       setState("ok", "stopped");
     } else if (answer || thinking) {
       // The stream broke after tokens arrived: keep what the model said, and
       // say that it is a fragment.
-      history.push({ role: "assistant", content: answer });
+      history.push(assistantMsg());
       setState("down", "error");
       fault("The stream ended early.", err.message, requestId ? "request id " + requestId : "");
     } else {
