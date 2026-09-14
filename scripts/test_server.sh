@@ -2,7 +2,7 @@
 # Stage 3 of the test gate (local, GPU-only): the only place handlers.cpp/batching_engine and
 # the OpenAI+Anthropic wire protocols run end to end against a live model. Every battery's exit
 # code gates (unlike coverage_server.sh, which runs the same batteries with || true).
-# Hard gates: exercise_all_endpoints.py, test_server_robustness.py (#712),
+# Hard gates: tools/analysis/chat_probe.py (web UI defaults, fail fast), exercise_all_endpoints.py, test_server_robustness.py (#712),
 # test_server_0token_battery.py (#710), test_server_embed_chat_interleave.sh,
 # test_server_logprobs.py, test_server_ignore_eos.py, test_server_messages_stream.py,
 # test_server_vision_and_utf8.py (#1198/#1197), test_server_metrics.py.
@@ -66,6 +66,14 @@ fi
 
 export IMP_BASE="http://localhost:$PORT" IMP_MODEL="$MODEL"
 export IMP_HOST=localhost IMP_PORT="$PORT" IMP_TEST_MODEL="$MODEL"
+
+# Web UI defaults first (temp 0.7, no seed, thinking on, 12 turns, ~2 min), fail fast: every
+# battery below runs at temp 0 or seeded and passed the fixed sampler draw of v0.41.0 (#2013).
+echo "== chat probe (web UI defaults) =="
+if ! python3 tools/analysis/chat_probe.py --url "http://localhost:$PORT" --model "$MODEL"; then
+    echo "test-server: FAIL - chat probe (web UI defaults), remaining batteries not run"
+    exit 1
+fi
 
 fails=()
 run() {  # run <label> <cmd...>
