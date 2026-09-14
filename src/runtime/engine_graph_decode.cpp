@@ -106,7 +106,7 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
     gcfg.temperature = req.temperature;
     gcfg.top_p = req.top_p;
     gcfg.top_k = req.top_k;
-    gcfg.seed = req.seed;
+    gcfg.seed = engine_internal::compute_step_seed(req);
     gcfg.ignore_eos = req.ignore_eos;
     // Penalty parameters for device-side application inside the graph loop
     gcfg.repetition_penalty = req.repetition_penalty;

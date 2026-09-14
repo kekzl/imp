@@ -119,9 +119,11 @@ void sampling_reset_penalty_counts();
 // (cudaHostAllocMapped). Returns immediately; host polls *h_mapped for readback.
 void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped,
                           cudaStream_t stream = nullptr);
+// d_seed_salt: device int added to seed inside the kernel, so a captured graph draws a new
+// quantile every step (nullptr = seed as is).
 void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
                              unsigned int seed, int32_t* d_result, int32_t* h_mapped,
-                             cudaStream_t stream = nullptr);
+                             cudaStream_t stream = nullptr, const int* d_seed_salt = nullptr);
 
 // Apply repetition / frequency / presence penalties to logits in-place.
 // token_ids: device array of previously generated tokens.
