@@ -266,7 +266,7 @@ def main():
     # PartialBlockHoldAndClone (test-kv, GPU, no model), PrefixCacheE2ETest
     # HybridTranscriptRestoreContinuesAtReplyEnd and HybridRestoreChainTest
     # TranscriptRestoreStateStaysClose (test-e2e, GDN container of make test-e2e).
-    # 1116 -> 1117: HybridBatchedDecodeTest.RowsOfOnePromptDecodeIdentically (test-e2e, GDN container of
+    # 1116 -> 1117: HybridBatchedDecodeTest.RowsDecodeIndependentlyOfTheirOrder (test-e2e, GDN container of
     # make test-e2e): engine-level batch invariance of the batched GDN decode.
     PINNED = 1117
 

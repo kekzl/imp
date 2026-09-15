@@ -1,8 +1,11 @@
 // Batched GDN decode (runtime.gdn_batched_decode) at the ENGINE level, greedy under
-// runtime.deterministic. Asserted: eight rows of ONE prompt in a batch decode identically
-// (per-row plumbing: slot table, conv state, residual and alpha/beta paths, sampling state
-// copies). Printed only: how many rows of eight different prompts differ from their solo run,
-// which the M=1 (GEMV) vs small-M (GEMM) rounding makes a near-tie count, not a defect.
+// runtime.deterministic. Asserted: eight different prompts admitted in reverse row order give
+// every request the tokens it got in forward order (per-row plumbing: slot table, conv state,
+// residual and alpha/beta paths, sampling state copies), and eight rows of ONE prompt decode
+// identically. Mutation-validated 2026-09-15: row 1 reading row 0's state slot passes the
+// one-prompt arm (same prompt, same state) and fails the reversed-order arm on 4 of 8 prompts.
+// Printed only: how many rows differ from their solo run, which the M=1 (GEMV) vs small-M
+// (GEMM) rounding makes a near-tie count, not a defect.
 // Context: Qwen3.8-27B-NVFP4-vllm at 8 thinking sessions re-closes its think block and repeats
 // the answer on 2-5 rows, never solo, never with gdn_batched_decode=false; rows there ARE
 // row-invariant too, so that defect needs a quality oracle (#2019). Needs IMP_TEST_MODEL_GDN;
@@ -62,7 +65,7 @@ protected:
 
 }  // namespace
 
-TEST_F(HybridBatchedDecodeTest, RowsOfOnePromptDecodeIdentically) {
+TEST_F(HybridBatchedDecodeTest, RowsDecodeIndependentlyOfTheirOrder) {
     if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
         GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: " << imp_test::kEnvModelGdn
                      << " points at a model with ssm_inner_size == 0.";
@@ -176,6 +179,32 @@ TEST_F(HybridBatchedDecodeTest, RowsOfOnePromptDecodeIdentically) {
     }
     EXPECT_EQ(row_mismatch, 0) << row_mismatch << " of " << kRows - 1
                                << " rows with the SAME prompt decoded differently from row 0";
+
+    // Row-order invariance, the half a slot mix-up cannot hide from: the same eight prompts
+    // admitted in reverse order must give every request the tokens it got in the first batch.
+    // Identical prompts share a state, so a row reading a neighbour's slot passes the check
+    // above (mutant survived 2026-09-15); different prompts in a different row order do not.
+    std::vector<std::shared_ptr<Request>> rev;
+    for (int i = kRows - 1; i >= 0; --i)
+        rev.push_back(make_req(i));
+    for (auto& r : rev)
+        engine->add_request(r);
+    drain(rev);
+    int order_mismatch = 0;
+    for (int i = 0; i < kRows; ++i) {
+        const auto& got = rev[static_cast<size_t>(kRows - 1 - i)]->output_tokens;  // prompt i
+        const auto& ref = batch[static_cast<size_t>(i)]->output_tokens;
+        size_t first = 0;
+        while (first < got.size() && first < ref.size() && got[first] == ref[first])
+            ++first;
+        if (got != ref) {
+            ++order_mismatch;
+            std::printf("[batched] reversed order: prompt %d (row %d) diverges from row %d at token %zu\n", i,
+                        kRows - 1 - i, i, first);
+        }
+    }
+    EXPECT_EQ(order_mismatch, 0) << order_mismatch << " of " << kRows
+                                 << " prompts decoded differently in reversed row order";
     std::printf("[batched] identical-prompt rows vs solo: %s\n",
                 same[0]->output_tokens == solo[0] ? "row 0 equals solo" : "row 0 differs from solo");
 }
