@@ -124,7 +124,8 @@ struct RuntimeConfig {
         // Lets GDN hybrids into the mixed step: a decoding row rides the ragged
         // prefill as a one-token continuation chunk (its live slot, the chunked-
         // prefill route). Measured NEGATIVE, Qwen3.8-27B 32 x 1k prompts x 300:
-        // 868.6/869.7/874.1 off vs 840.6/822.5/831.5 on (-4.6%). Mamba2 stays out.
+        // 868.6/869.7/874.1 off vs 840.6/822.5/831.5 on (-4.6%); a 4400-token late
+        // ingest beside 31 streams: their ITL max 126-128 -> 181-184 ms. Mamba2 stays out.
         bool prefill_mixed_decode_hybrid = false;
         // Batched decode: enqueue the penalty-history append behind the sampler
         // flush BEFORE the host waits on the token gather (event split), instead
