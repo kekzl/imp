@@ -121,6 +121,11 @@ struct RuntimeConfig {
         // admit (vision, logprobs, constraints, MTP) keeps the whole batch
         // on the separate decode step (docs/roadmap.md, Server and latency).
         bool prefill_mixed_decode = true;
+        // Lets GDN hybrids into the mixed step: a decoding row rides the ragged
+        // prefill as a one-token continuation chunk (its live slot, the chunked-
+        // prefill route). Measured NEGATIVE, Qwen3.8-27B 32 x 1k prompts x 300:
+        // 868.6/869.7/874.1 off vs 840.6/822.5/831.5 on (-4.6%). Mamba2 stays out.
+        bool prefill_mixed_decode_hybrid = false;
         // Batched decode: enqueue the penalty-history append behind the sampler
         // flush BEFORE the host waits on the token gather (event split), instead
         // of after the sync. nsys at 32 streams read 62 us of GPU idle on each

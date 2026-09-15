@@ -72,6 +72,9 @@ bool Engine::prefill_ragged_req_ok_(const Request& req) const {
 bool Engine::mixed_rider_ok_(const Request& r) const {
     if (r.status != RequestStatus::DECODING || r.output_tokens.empty() || !prefill_ragged_req_ok_(r))
         return false;
+    // A hybrid rider needs its live recurrent slot in the ragged slot table.
+    if (ssm_state_ && recurrent_slot_of_.find(r.id) == recurrent_slot_of_.end())
+        return false;
     // The rider's row is a one-token continuation chunk at its context end;
     // the cuBLAS-only attention configs size their S-matrix from it.
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -88,7 +91,10 @@ void Engine::mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders
     // stream overlap. A PARKED async runner is fine: step_impl_ resumes a
     // running one before step_prefill is reached.
     const char* why = nullptr;
-    if (ssm_state_)
+    // GDN hybrids: a rider is a one-token continuation chunk of its ragged row, the
+    // route chunked prefill already takes (slot state + conv window per row). Gated
+    // by runtime.prefill_mixed_decode_hybrid; Mamba2 never reaches here (model gate).
+    if (ssm_state_ && !runtime_config_.runtime.prefill_mixed_decode_hybrid)
         why = "recurrent model";
     else if (bd_pipe_.in_flight)
         why = "decode pipeline in flight";
@@ -233,8 +239,19 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     if (n_riders > 0) {
         // One-row continuation at the context end: the token to feed is the
         // last sampled one, its KV block was prepared by decode_prepare_kv_.
-        for (auto& r : *riders)
-            geoms.push_back({r, r->context_len() - 1, 1, r->context_len(), false, 0, 0, true});
+        for (auto& r : *riders) {
+            // A hybrid rider carries its live recurrent slot (state and conv window),
+            // exactly like a later chunk of a chunked prefill; slot 0 belongs to someone else.
+            int slot = 0;
+            if (ssm_state_) {
+                auto it = recurrent_slot_of_.find(r->id);
+                if (it == recurrent_slot_of_.end())
+                    throw std::runtime_error(
+                        "mixed step: a hybrid rider has no recurrent slot (mixed_rider_ok_ gate)");
+                slot = it->second;
+            }
+            geoms.push_back({r, r->context_len() - 1, 1, r->context_len(), false, 0, slot, true});
+        }
     }
     if (geoms.size() == 1) {
         // A single survivor gains nothing from the ragged plumbing — run it

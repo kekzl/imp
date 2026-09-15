@@ -421,9 +421,18 @@ TEST_F(HybridBatchedDecodeTest, ThinkCloseRepeatsBatchedVsSolo) {
         auto req = std::make_shared<Request>();
         // Prompt 1 thinks longest; on rows 3 and 7 it keeps the LAST enqueued row in-think while the
         // others answer, the order the aliasing needed (the last upload won for every stashed row).
+        // IMP_TEST_PROMPT_PAD=N prepends N filler sentences (~14 tokens each) to the user turn: long
+        // prompts split at the snapshot boundary into a big chunk plus a 1-2 row tail chunk, the
+        // shape the mixed hybrid step met in the 1k-prompt burst.
+        std::string filler;
+        if (const char* pad = std::getenv("IMP_TEST_PROMPT_PAD"))
+            for (int k = 0; k < std::atoi(pad); ++k)
+                filler +=
+                    "A translation lookaside buffer caches recent page mappings so most loads skip the "
+                    "walk. ";
         const std::string text = "<|im_start|>system\nSession " + std::to_string(i) +
-                                 ". Answer briefly.<|im_end|>\n<|im_start|>user\n" + kPrompts[(i + 2) % 4] +
-                                 "<|im_end|>\n<|im_start|>assistant\n<think>\n";
+                                 ". Answer briefly.<|im_end|>\n<|im_start|>user\n" + filler +
+                                 kPrompts[(i + 2) % 4] + "<|im_end|>\n<|im_start|>assistant\n<think>\n";
         req->input_tokens = tok->encode(text, true);
         req->max_tokens = kSteps;
         req->temperature = 0.0f;
