@@ -10,6 +10,8 @@ is a tokenization seam; cached_tokens == turn-1 tokens + prompt - 1 is a transcr
 
   python3 tools/analysis/think_loop_probe.py http://127.0.0.1:8080 8 [dump_dir]
   EXTRA_JSON='{"enable_thinking": false}' ...   # merged into every request body
+  NOLP=1 ...   # no logprobs: the rows qualify for the decode pipeline (a logprobs row never
+               # does), re-closes are counted as "</think>" text inside content, no re-tokenize
 """
 import json
 import os
@@ -18,6 +20,7 @@ import threading
 import urllib.request
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
+NOLP = os.environ.get("NOLP", "0") == "1"
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 DUMP = sys.argv[3] if len(sys.argv) > 3 else None
 TOPICS = ["Explain how a paged KV cache shares blocks between sequences.",
@@ -43,10 +46,10 @@ def main():
         base = {"model": model, "temperature": 0.0, "max_tokens": 1500, "enable_thinking": True,
                 "stream": False}
         base.update(json.loads(os.environ.get("EXTRA_JSON", "{}")))
-        r1 = post("/v1/chat/completions", dict(base, messages=msgs, logprobs=True))
+        r1 = post("/v1/chat/completions", dict(base, messages=msgs, logprobs=not NOLP))
         m = r1["choices"][0]["message"]
         content, reasoning = m.get("content") or "", m.get("reasoning_content") or ""
-        lp = r1["choices"][0]["logprobs"]["content"]
+        lp = [] if NOLP else r1["choices"][0]["logprobs"]["content"]
         msgs.append({"role": "assistant", "content": content, "reasoning_content": reasoning})
         msgs.append({"role": "user", "content": "Summarise that in one sentence."})
         r2 = post("/v1/chat/completions", dict(base, messages=msgs, max_tokens=64))
@@ -62,6 +65,12 @@ def main():
     bad = 0
     for i in range(N):
         lp, reasoning, content, fin, p2, c2 = res[i]
+        if NOLP:
+            n_close = 1 + content.count("</think>") if reasoning else content.count("</think>")
+            print(f"session {i}: turn1 content {len(content)} chars finish={fin} </think> x{n_close} "
+                  f"(text count) | turn2 prompt {p2} cached {c2}")
+            bad += n_close > 1
+            continue
         gen = [t["token"] for t in lp]
         rendered = reasoning.strip() + "\n</think>\n\n" + content
         ids = post("/tokenize", {"prompt": rendered})["tokens"]
