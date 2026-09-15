@@ -141,7 +141,10 @@ LABEL org.opencontainers.image.title="imp" \
 ARG IMP_TREE_ID=
 LABEL imp.tree="${IMP_TREE_ID}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# curl and jq come from Ubuntu; the CUDA apt source is dropped first because its index has
+# shipped malformed (2026-09-16: 5 sections without a Package: header broke `apt-get update`).
+RUN rm -f /etc/apt/sources.list.d/cuda*.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
     && rm -rf /var/lib/apt/lists/*
