@@ -1090,6 +1090,8 @@ if(IMP_BUILD_TESTS)
         tests/test_hybrid_restore_chain.cu
         # Engine-level batch invariance of the batched GDN decode: eight rows vs solo, greedy.
         tests/test_hybrid_batched_decode.cu
+        # Row-batched sampler keeps each row's own banned list through the penalty stash (#2019).
+        tests/test_sampler_row_bans.cu
         tests/test_batch_invariance.cu
         # Decode-graph buckets on a GDN hybrid: one captured graph per batch size, two paths to the
         # recurrent slot (captured scalar at n==1, device slot table at n>1). Covers capture+replay of

@@ -343,8 +343,19 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             input.qtype == QType::F16 && output.qtype == QType::F16 && smallm_weight_(h, nv)) {
             const int N = static_cast<int>(nv.N);
             const int K = static_cast<int>(nv.K);
+            // A16 (gemm.nvfp4_smallm_a4=false): FP16 activations into the
+            // dequant+HMMA kernel, no activation quantize (K%128, M<=32).
+            if (!dispatch_policy().gemm.nvfp4_smallm_a4 && (K % 128) == 0) {
+                const size_t need16 = gemm_nvfp4_smallm_workspace_bytes(N);
+                ensure_smallm_ws_(need16, ctx.stream);
+                if (smallm_ws_bytes_ >= need16 &&
+                    gemm_nvfp4_smallm(nv, reinterpret_cast<const half*>(input.data),
+                                      reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_, ctx.stream,
+                                      /*accumulate=*/ctx.beta == 1.0f))
+                    return;
+            }
             // impl 2 = the native mxf4nvf4 pipeline kernel (v2), impl 1 = the
-            // W4A16 dequant+HMMA kernel; unaligned shapes fall back to v1.
+            // dequant+HMMA kernel on packed activations; unaligned shapes fall back to v1.
             const bool v2 = dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
             const size_t need = v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                    : gemm_nvfp4_smallm_workspace_bytes(N);

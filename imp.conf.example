@@ -682,6 +682,9 @@ nvfp4_smallm_impl    = 2
 # Sibling-pair launch for impl 2: gate|up and GDN in|z as one launch, output
 # bit-identical per tensor; 112 launches fewer per 64-layer decode step.
 nvfp4_smallm_pair    = true
+# Small-M activations packed to NVFP4 (A4). false keeps them FP16 (dequant+HMMA
+# kernel, the M=1 GEMV numerics at 2..32 rows); no pair launch, no fused quantize.
+nvfp4_smallm_a4      = true
 # Batched-decode residual accumulation in the small-M GEMM epilogue (beta=1)
 # instead of scratch + elementwise add. Off by measurement: 3/3 pairs negative
 # (-2.7/-0.9/-0.2 %) at 32 streams; the adds already overlap inside the graph.

@@ -79,6 +79,10 @@ struct GEMM {
     // activation (FFN gate|up, GDN in|z) run as ONE launch, same CTA body,
     // bit-identical per tensor. Saves one launch's overhead plus a tail wave per pair.
     bool nvfp4_smallm_pair = true;
+    // Small-M activations packed to NVFP4 (A4) before the GEMM. false keeps them
+    // FP16 (gemm_nvfp4_smallm, dequant+HMMA): the M=1 GEMV numerics at 2..32 rows,
+    // no sibling-pair launch, no producer-fused quantize. Quality instrument (#2019).
+    bool nvfp4_smallm_a4 = true;
     // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier: o/down/
     // GDN-out at 2..32 rows with beta=1 straight into hidden, vs GEMM-to-scratch
     // + elementwise add. Default off: measured negative, since the scratch+add

@@ -104,7 +104,8 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out) {
-    if (!dispatch_policy().gemm.nvfp4_smallm || cur_spec_verify_ || overlap_prefill_active_)
+    if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 || cur_spec_verify_ ||
+        overlap_prefill_active_)
         return nullptr;
     if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
         return nullptr;
@@ -174,8 +175,9 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     // on the combined tile count, fresh outputs only. Every decline is a plain
     // false; the caller issues the single dispatches it would have anyway.
     if (!dispatch_policy().gemm.nvfp4_smallm || dispatch_policy().gemm.nvfp4_smallm_impl != 2 ||
-        !dispatch_policy().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m || overlap_prefill_active_ ||
-        ctx.beta != 0.0f || count < 2 || count > kSmallMV2MaxSiblings)
+        !dispatch_policy().gemm.nvfp4_smallm_pair || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
+        ctx.spec_verify_small_m || overlap_prefill_active_ || ctx.beta != 0.0f || count < 2 ||
+        count > kSmallMV2MaxSiblings)
         return false;
     const int M = static_cast<int>(input.shape[0]);
     // M==1 stays on the fused decode GEMVs; M>32 is prefill.
