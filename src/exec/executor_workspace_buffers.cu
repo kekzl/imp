@@ -974,6 +974,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             gdn_ab_ws_bytes_ = 0;
         }
     }
+    // Prefill alpha/beta launch (gdn.alpha_beta_prefill): 8 MiB of split-K partials, its own
+    // buffer because the narrow kernel's tickets live behind its partials in gdn_ab_ws_. The
+    // split adapts to what fits (split 1 needs none); nullptr keeps the two cuBLAS calls.
+    if (has_gdn_ && dispatch_policy().gdn.alpha_beta_prefill && cfg.ssm_dt_rank > 0) {
+        gdn_ab_prefill_ws_bytes_ = size_t(8) << 20;
+        gdn_ab_prefill_ws_ = vram_alloc(vram_alloc_, gdn_ab_prefill_ws_bytes_, "gdn_ab_prefill_ws");
+        if (gdn_ab_prefill_ws_) {
+            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ab_prefill_ws_, 0, gdn_ab_prefill_ws_bytes_));
+        } else {
+            IMP_LOG_WARN("gdn alpha/beta prefill workspace unavailable (%zu B) - two-call route",
+                         gdn_ab_prefill_ws_bytes_);
+            gdn_ab_prefill_ws_bytes_ = 0;
+        }
+    }
 
     // FP8 activation scratch buffers (for FP8 prefill weight cache)
     if (wcache_.use_fp8) {
@@ -1377,6 +1391,8 @@ void GraphExecutor::free_buffers() {
     gdn_chunkpar_ws_bytes_ = 0;
     vfree(gdn_ab_ws_);
     gdn_ab_ws_bytes_ = 0;
+    vfree(gdn_ab_prefill_ws_);
+    gdn_ab_prefill_ws_bytes_ = 0;
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {

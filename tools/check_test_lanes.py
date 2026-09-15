@@ -272,7 +272,9 @@ def main():
     # SamplerRowBansTest.StashedRowsKeepTheirOwnBanList (test-e2e, primary container), plus the two
     # HybridBatchedDecodeTest instruments BatchedLogitDeltaVsSolo (A4 vs A16 logit delta vs solo)
     # and ThinkCloseRepeatsBatchedVsSolo (server-shaped think-close repro), GDN container.
-    PINNED = 1120
+    # 1120 -> 1126: GemmF16NarrowPrefill.* (test-compute): the prefill alpha/beta GEMM vs a double
+    # reference at M=33..4096, split 1 without workspace, determinism, refusals, bench vs cuBLAS.
+    PINNED = 1126
 
     text = CMAKE.read_text()
     mods = module_sources(text)
