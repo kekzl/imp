@@ -226,7 +226,7 @@ test-e2e: build
 	docker run --rm --gpus all -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
-		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:GdnGraphBucketTest.*:*HybridRestoreChainTest*"
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*"
 	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
 	@# loader + RoPE path the #503 class shipped prompt-blind on).
 	docker run --rm --gpus all -v $(HOME)/models:/models \
