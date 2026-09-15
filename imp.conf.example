@@ -94,6 +94,10 @@ prefill_mixed_decode = true
 # the sync; nsys at 32 streams read 62 us of GPU idle on each side of the
 # append per step. false = sync first, then append.
 penalty_append_early = true
+# GDN/SSM hybrids enter the pipelined batched decode; the #1750 verdict that
+# the chained advance was slower on the hybrid step re-measured on the batched
+# GDN path (Qwen3.8-27B, 32 streams, six alternating pairs: medians +1.4%).
+decode_pipeline_hybrid = true
 # Tokens of max_tokens the think budget keeps for the ANSWER on a reasoning
 # model. The engine injects </think> once reasoning reaches
 # max_tokens - max(think_answer_reserve, max_tokens/4), or the think_budget

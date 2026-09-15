@@ -126,6 +126,11 @@ struct RuntimeConfig {
         // of after the sync. nsys at 32 streams read 62 us of GPU idle on each
         // side of the append per step. False = the sync-then-append order.
         bool penalty_append_early = true;
+        // Recurrent hybrids (GDN/SSM) enter the pipelined batched decode
+        // (runtime.decode_pipeline). The #1750 verdict (chained advance slower
+        // than the per-step hybrid step of that time) re-measured on the
+        // batched GDN path: six alternating pairs at 32 streams, medians +1.4%.
+        bool decode_pipeline_hybrid = true;
         // Tokens of `max_tokens` reserved for the ANSWER on a reasoning
         // model: the engine injects `</think>` once reasoning reaches
         // max_tokens - max(think_answer_reserve, max_tokens/4), or the
