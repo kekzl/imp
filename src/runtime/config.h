@@ -308,7 +308,8 @@ struct RuntimeConfig {
         // prefix-cache snapshot (recurrent slab or SWA window) and no
         // prefill split at the boundary, since the split costs every first
         // turn two eager chunks plus a sync. 0 = snapshot every
-        // block-aligned prompt.
+        // block-aligned prompt. The finish-time transcript save (transcript_snapshot)
+        // splits nothing and ignores this floor.
         int snapshot_min_prompt_tokens = 256;
         // Hybrid models also snapshot the recurrent state at the END of every
         // generation (prompt + reply, an unaligned position; its partial KV
