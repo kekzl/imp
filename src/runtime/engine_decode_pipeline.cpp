@@ -500,6 +500,7 @@ void Engine::pipeline_collect_process_(cudaStream_t stream) {
             // The successor step (if chained) still writes this row's next
             // KV slot — defer the release until no step references it.
             req->status = RequestStatus::FINISHED;
+            req->release_pending = true;
             bd_pipe_.deferred_release.push_back(req);
         }
         kv_manager_->touch(req->id);
@@ -511,8 +512,10 @@ void Engine::pipeline_run_deferred_releases_() {
     // state cover it, so the finish-time hashes and the transcript snapshot
     // must too (finish_request_release_ reads this flag).
     bd_pipe_.draining_release = true;
-    for (auto& req : bd_pipe_.deferred_release)
+    for (auto& req : bd_pipe_.deferred_release) {
         finish_request_release_(req);
+        req->release_pending = false;  // the server delivers the finish from here
+    }
     bd_pipe_.draining_release = false;
     bd_pipe_.deferred_release.clear();
 }

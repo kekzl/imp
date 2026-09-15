@@ -3,6 +3,7 @@
 #include "model/tokenizer.h"
 #include "model/model_arch.h"
 #include "model/jinja.h"
+#include "model/transcript_ids.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -111,6 +112,14 @@ public:
                              bool force_thinking = false,
                              const std::string& reasoning_effort = "") const;
 
+    // Finished transcripts' ids: tokenize_rendered() keeps their split for a resent reply
+    // and tokenizes only the tail, so the KV chain survives a non-canonical BPE split.
+    // Copies of the template share the store (server snapshots per request).
+    void set_transcript_store(std::shared_ptr<TranscriptIdStore> store) {
+        transcript_store_ = std::move(store);
+    }
+    const std::shared_ptr<TranscriptIdStore>& transcript_store() const { return transcript_store_; }
+
     // Special token accessors (for banned token list)
     int32_t im_start_id() const { return im_start_id_; }
     int32_t start_header_id() const { return start_header_id_; }
@@ -202,6 +211,7 @@ private:
     // Build control token lookup table for splitting rendered output
     void build_control_token_map(const Tokenizer& tok);
     std::vector<std::pair<std::string, int32_t>> control_tokens_;  // sorted longest-first
+    std::shared_ptr<TranscriptIdStore> transcript_store_;
 
     // Template-specific apply methods
     std::vector<int32_t> apply_chatml(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,

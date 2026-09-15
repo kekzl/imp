@@ -324,6 +324,12 @@ struct RuntimeConfig {
         // prefills only the new message. Costs one slab copy plus a sync per
         // finished request. Off when the sparse key min/max pool is on.
         bool transcript_snapshot = true;
+        // Every finished transcript keeps its token ids (prompt + reply as forwarded,
+        // 256 entries FIFO); a next turn that renders the reply verbatim tokenizes it
+        // with those ids instead of re-encoding the text, so a non-canonical BPE
+        // split the model produced (` pre`+`pref` vs ` prep`+`ref`) no longer breaks
+        // the prefix-cache hash chain inside the reply. The prompt text is unchanged.
+        bool transcript_token_reuse = true;
         // Green Contexts / prefill-decode overlap streams in the server
         // engine. OFF by default (suspected memSyncDomain race on sm_120
         // fallback streams, gemma-3-12b IMA); opt in via [server] green_contexts = true.

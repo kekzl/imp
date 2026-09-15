@@ -377,6 +377,14 @@ void BatchingEngine::worker_loop() {
         while (it != active_requests_.end()) {
             auto& sr = *it;
             auto& req = sr->request;
+            // A pipelined row marked FINISHED publishes its KV hashes and recurrent
+            // snapshot at the next drain: hold its tail until then, or a client that
+            // resends the transcript at once misses the reply's cache (turn-2 cached 0
+            // with every block cached, 5 of 8 sessions in one probe run).
+            if (req->release_pending) {
+                ++it;
+                continue;
+            }
             size_t current_count = req->output_tokens.size();
             bool is_done = (req->status == imp::RequestStatus::FINISHED ||
                             req->status == imp::RequestStatus::CANCELLED);
@@ -434,6 +442,19 @@ void BatchingEngine::worker_loop() {
                                     break;
                                 }
                             }
+                        }
+                    }
+                    // The reply's ids as generated, BEFORE the client can see the finish: a
+                    // follow-up turn that resends the reply then tokenizes to the same ids
+                    // (server.transcript_token_reuse). The engine's own finish-time release runs
+                    // a step later under the pipeline, after a fast client already sent turn 2.
+                    if (req->status == imp::RequestStatus::FINISHED && !req->ignore_eos &&
+                        req->n_vision_tokens == 0 && !req->image && !req->vision_emb &&
+                        engine->runtime_config().server.transcript_token_reuse) {
+                        if (const auto& store = engine->chat_template().transcript_store()) {
+                            std::vector<int32_t> ids(req->input_tokens);
+                            ids.insert(ids.end(), req->output_tokens.begin(), req->output_tokens.end());
+                            store->remember_forwarded(*tok, stop_ids, ids);
                         }
                     }
                     if (is_stop_token) {

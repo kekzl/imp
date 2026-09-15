@@ -1944,6 +1944,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                 // next KV slot: mark FINISHED (stream delivery proceeds)
                 // but defer the KV/slot release to the pipeline drain.
                 req->status = RequestStatus::FINISHED;
+                req->release_pending = true;
                 bd_pipe_.deferred_release.push_back(req);
             } else {
                 finish_request(req);

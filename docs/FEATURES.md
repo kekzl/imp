@@ -79,7 +79,7 @@ Source: `src/core/qtype.h`.
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |
-| prefix caching, `cache_control` per breakpoint | ✅ | on by default for the server; hybrids (GDN/SSM) snapshot the recurrent state at the prompt boundary and at the end of every reply (`server.transcript_snapshot`), so a resent transcript prefills only the new message |
+| prefix caching, `cache_control` per breakpoint | ✅ | on by default for the server; hybrids (GDN/SSM) snapshot the recurrent state at the prompt boundary and at the end of every reply (`server.transcript_snapshot`), so a resent transcript prefills only the new message; a resent reply tokenizes with the ids the model wrote (`server.transcript_token_reuse`), so a non-canonical BPE split in the reply no longer breaks the chain |
 | tool calling | ✅ | gated by real aider, Claude Code and OpenAI Agents SDK runs |
 | constrained decoding: JSON Schema, regex, GBNF | ✅ | an uncompilable constraint is a 400, not a free-text answer |
 | per-request speculative toggle | ✅ | |

@@ -193,6 +193,8 @@ set(IMP_MODEL_SOURCES
     src/model/tensor_kind_table.cu
     src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
+    src/model/chat_template_tokenize.cpp
+    src/model/transcript_ids.cpp
     src/model/chat_template_families.cpp
     src/model/jinja.cpp
 )
@@ -906,6 +908,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_chat_template.cpp
+        tests/test_transcript_ids.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
         tests/test_jinja.cpp
