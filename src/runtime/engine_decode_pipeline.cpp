@@ -92,9 +92,11 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
     if (offload_mgr_)
         return false;
     // Recurrent hybrids excluded (#975, #1750): the chained advance + event
-    // waits measure slower than the per-step path on the hybrid decode step.
-    // Kept as a measured verdict, not an inherited one.
-    if (ssm_state_)
+    // waits measured slower than the per-step path on the hybrid decode step
+    // of that time. runtime.decode_pipeline_hybrid re-measures on the batched
+    // GDN path (the slot table is per step, the finish release is deferred,
+    // the transcript snapshot keys the drained state with its final token).
+    if (ssm_state_ && !runtime_config_.runtime.decode_pipeline_hybrid)
         return false;
     if (swa_sizing_active_ || config_.streaming_kv_enabled)
         return false;
@@ -492,8 +494,13 @@ void Engine::pipeline_collect_process_(cudaStream_t stream) {
 }
 
 void Engine::pipeline_run_deferred_releases_() {
+    // The chained step forwarded each row's final token: KV row and recurrent
+    // state cover it, so the finish-time hashes and the transcript snapshot
+    // must too (finish_request_release_ reads this flag).
+    bd_pipe_.draining_release = true;
     for (auto& req : bd_pipe_.deferred_release)
         finish_request_release_(req);
+    bd_pipe_.draining_release = false;
     bd_pipe_.deferred_release.clear();
 }
 

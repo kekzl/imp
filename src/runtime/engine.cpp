@@ -338,10 +338,13 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         // same). Hashing the live reply KV turns the next agent turn's resend
         // into a prefix-cache hit instead of a full re-prefill.
         if (req->output_tokens.size() > 1) {
+            // Pipelined rows (drain): the chained step forwarded the final token
+            // too, so its KV row and state are there and the span includes it.
+            const size_t keep = bd_pipe_.draining_release ? 0 : 1;
             std::vector<int32_t> forwarded;
-            forwarded.reserve(req->input_tokens.size() + req->output_tokens.size() - 1);
+            forwarded.reserve(req->input_tokens.size() + req->output_tokens.size() - keep);
             forwarded.insert(forwarded.end(), req->input_tokens.begin(), req->input_tokens.end());
-            forwarded.insert(forwarded.end(), req->output_tokens.begin(), req->output_tokens.end() - 1);
+            forwarded.insert(forwarded.end(), req->output_tokens.begin(), req->output_tokens.end() - keep);
             kv_manager_->register_block_hashes(req->id, forwarded, req->prefix_salt);
             // SWA window snapshot over the SAME span: without it the hashed
             // generated blocks are unusable under SWA sizing (reuse limit stops

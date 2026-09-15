@@ -488,7 +488,7 @@ private:
     // are read back; the host then event-waits on step N's gather only and
     // does its bookkeeping while the GPU runs N+1. See step_decode_pipeline_.
     struct BatchedDecodePipeline {
-        bool in_flight = false;
+        bool in_flight = false, draining_release = false;  // draining: finish spans include the final token
         int parity = 0;    // slot-set parity of the IN-FLIGHT step
         int n = 0;
         int graph_idx = -1;
