@@ -6,21 +6,24 @@
 // one-prompt arm (same prompt, same state) and fails the reversed-order arm on 4 of 8 prompts.
 // Printed only: how many rows differ from their solo run, which the M=1 (GEMV) vs small-M
 // (GEMM) rounding makes a near-tie count, not a defect.
-// Context: Qwen3.8-27B-NVFP4-vllm at 8 thinking sessions re-closes its think block and repeats
-// the answer on 2-5 rows, never solo, never with gdn_batched_decode=false; rows there ARE
-// row-invariant too, so that defect needs a quality oracle (#2019). Needs IMP_TEST_MODEL_GDN;
-// runs from make test-e2e.
+// Context: Qwen3.8-27B-NVFP4-vllm at 8 thinking sessions re-closed its think block and repeated
+// the answer on 2-5 rows (#2019): the sampler's shared banned-list buffer, fixed and gated by
+// SamplerRowBansTest; the instruments below (logit delta vs solo, server-shaped think repro)
+// stay for the next quality question. Needs IMP_TEST_MODEL_GDN; runs from make test-e2e.
 
 #include <gtest/gtest.h>
 
 #include "api/imp_internal.h"
 #include "imp/imp.h"
 #include "model/model.h"
+#include "model/tokenizer.h"
 #include "runtime/config.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"
 #include "test_models.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -207,6 +210,294 @@ TEST_F(HybridBatchedDecodeTest, RowsDecodeIndependentlyOfTheirOrder) {
                                  << " prompts decoded differently in reversed row order";
     std::printf("[batched] identical-prompt rows vs solo: %s\n",
                 same[0]->output_tokens == solo[0] ? "row 0 equals solo" : "row 0 differs from solo");
+}
+
+// Magnitude instrument (diagnostic, asserts nothing): per row, the logprob delta batched vs solo
+// at the prefill step (k=0, same kernels expected) and at the first decode step (k=1, same
+// context, batched kernels vs the GEMV path), plus the solo top-1 margin where greedy flips.
+// Rounding class is |delta| ~ 1e-2; a delta of the margin's size is a defect signal.
+TEST_F(HybridBatchedDecodeTest, BatchedLogitDeltaVsSolo) {
+    if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
+        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT";
+    RuntimeConfig rc;
+    rc.runtime.deterministic = true;
+    rc.server.prefix_cache = false;
+    // IMP_TEST_SET="gdn.ref_kernel=true,gemm.nvfp4_smallm=false": knob ablation with this oracle.
+    if (const char* kv = std::getenv("IMP_TEST_SET"); kv && *kv) {
+        std::vector<std::string> sets;
+        std::string s(kv);
+        for (size_t p = 0; p <= s.size();) {
+            const size_t q = std::min(s.find(',', p), s.size());
+            if (q > p)
+                sets.push_back(s.substr(p, q - p));
+            p = q + 1;
+        }
+        const auto bad = rc.apply_overrides(sets);
+        ASSERT_TRUE(bad.empty()) << "unknown IMP_TEST_SET key: " << bad[0];
+    }
+    // IMP_TEST_DUMP=1: eager, prompt 0 only (solo + eight copies), IMP_TEST_STEPS decode tokens
+    // (default 24), so diagnostics.dump_hidden_dir gets solo step01 vs batched step00 per layer.
+    const bool dump_mode = std::getenv("IMP_TEST_DUMP") != nullptr;
+    const int kSteps = std::getenv("IMP_TEST_STEPS") ? std::atoi(std::getenv("IMP_TEST_STEPS")) : 24;
+    if (dump_mode)
+        rc.runtime.cuda_graphs = "never";
+    set_pending_runtime_config(rc);
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 2048;
+    cfg.max_batch_size = kRows;
+    cfg.enable_cuda_graphs = dump_mode ? 0 : 1;
+    cfg.use_prefix_caching = 0;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    auto make_req = [&](int i) {
+        auto req = std::make_shared<Request>();
+        std::vector<int32_t> toks(4096);
+        int n = 0;
+        EXPECT_EQ(imp_tokenize(model_, kPrompts[i], toks.data(), &n, static_cast<int>(toks.size())),
+                  IMP_SUCCESS);
+        toks.resize(n > 0 ? n : 0);
+        req->input_tokens = toks;
+        req->max_tokens = kSteps;
+        req->temperature = 0.0f;
+        req->top_p = 1.0f;
+        req->top_k = 0;
+        req->ignore_eos = true;
+        req->logprobs = true;
+        req->top_logprobs = 20;
+        req->status = RequestStatus::PENDING;
+        return req;
+    };
+    auto drain = [&](std::vector<std::shared_ptr<Request>>& reqs) {
+        for (int i = 0; i < 65536; ++i) {
+            bool busy = false;
+            for (auto& r : reqs)
+                busy = busy ||
+                       (r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED);
+            if (!busy)
+                break;
+            (void)engine->step();
+        }
+    };
+    // Max |delta| over solo's top-20 that batched also lists, plus the delta of solo's top-1.
+    auto delta = [](const TokenLogprobInfo& a, const TokenLogprobInfo& b, float* top1_delta) {
+        float mx = 0.0f;
+        *top1_delta = 0.0f;
+        for (size_t i = 0; i < a.top.size(); ++i)
+            for (const auto& t : b.top)
+                if (t.token == a.top[i].token) {
+                    const float d = std::fabs(t.logprob - a.top[i].logprob);
+                    mx = std::max(mx, d);
+                    if (i == 0)
+                        *top1_delta = d;
+                }
+        return mx;
+    };
+    auto margin = [](const TokenLogprobInfo& a) {
+        return a.top.size() >= 2 ? a.top[0].logprob - a.top[1].logprob : 99.0f;
+    };
+    std::vector<std::shared_ptr<Request>> solo;
+    for (int i = 0; i < kRows; ++i) {
+        std::vector<std::shared_ptr<Request>> one{make_req(dump_mode ? 0 : i)};
+        engine->add_request(one[0]);
+        drain(one);
+        solo.push_back(one[0]);
+        ASSERT_EQ(static_cast<int>(one[0]->output_logprobs.size()), kSteps);
+    }
+    auto report = [&](const char* label, std::vector<std::shared_ptr<Request>>& rows, int prompt_of_row) {
+        for (int r = 0; r < kRows; ++r) {
+            const int p = prompt_of_row < 0 ? r : prompt_of_row;
+            const auto& s = *solo[static_cast<size_t>(p)];
+            const auto& b = *rows[static_cast<size_t>(r)];
+            ASSERT_EQ(static_cast<int>(b.output_logprobs.size()), kSteps);
+            size_t first = 0;
+            while (first < b.output_tokens.size() && first < s.output_tokens.size() &&
+                   b.output_tokens[first] == s.output_tokens[first])
+                ++first;
+            float t0 = 0, t1 = 0, td = 0;
+            const float d0 = delta(s.output_logprobs[0], b.output_logprobs[0], &t0);
+            const float d1 = first >= 1 ? delta(s.output_logprobs[1], b.output_logprobs[1], &t1) : -1.0f;
+            const bool flipped = first < static_cast<size_t>(kSteps);
+            const float dd = flipped ? delta(s.output_logprobs[first], b.output_logprobs[first], &td) : -1.0f;
+            std::printf(
+                "[%s] row %d prompt %d: k0 max|d| %.4f top1 %.4f | k1 max|d| %.4f top1 %.4f margin %.3f | "
+                "flip at %zu: solo margin %.3f max|d| %.4f top1 %.4f\n",
+                label, r, p, d0, t0, d1, t1, margin(s.output_logprobs[1]), first,
+                flipped ? margin(s.output_logprobs[first]) : -1.0f, dd, td);
+        }
+    };
+    if (!dump_mode) {
+        std::vector<std::shared_ptr<Request>> batch;
+        for (int i = 0; i < kRows; ++i)
+            batch.push_back(make_req(i));
+        for (auto& r : batch)
+            engine->add_request(r);
+        drain(batch);
+        report("mixed", batch, -1);
+    }
+    std::vector<std::shared_ptr<Request>> same;
+    for (int i = 0; i < kRows; ++i)
+        same.push_back(make_req(0));
+    for (auto& r : same)
+        engine->add_request(r);
+    drain(same);
+    report("same", same, 0);
+    // Horizon trace, row 0 vs solo: every 8th step while the tokens still agree, then the flip.
+    {
+        const auto& s = *solo[0];
+        const auto& b = *same[0];
+        for (int k = 0; k < kSteps; ++k) {
+            const bool agree = b.output_tokens[static_cast<size_t>(k)] ==
+                               s.output_tokens[static_cast<size_t>(k)];
+            float t1 = 0;
+            const float d = delta(s.output_logprobs[static_cast<size_t>(k)],
+                                  b.output_logprobs[static_cast<size_t>(k)], &t1);
+            if (k % 8 == 0 || !agree)
+                std::printf("[trace] k %d max|d| %.4f top1 %.4f solo margin %.3f %s\n", k, d, t1,
+                            margin(s.output_logprobs[static_cast<size_t>(k)]), agree ? "" : "FLIP");
+            if (!agree)
+                break;
+        }
+    }
+}
+
+// Server-shaped repro of the #2019 re-close loop at the engine level: the probe's chat
+// transcripts (system + user + assistant "<think>\n"), greedy, repetition_penalty 1.05,
+// logprobs, think_budget 0.5 with the request primed in-think (the server's shape), eight
+// rows in one batch vs their solo runs. Printed, not asserted: per row the </think> count,
+// the token count, the first divergence from solo and the logprob delta there. The pre-fix
+// sampler (one shared device copy of the banned list) shows here as closed rows that cannot
+// stop while row 7 thinks: batched 574-1306 tokens against 319-644 fixed on Qwen3.8-27B,
+// no re-close (the server probe re-closed 5 of 8; which symptom a row picks is a trajectory
+// matter). SamplerRowBansTest is the gate. IMP_TEST_STEPS (default 1500) is max_tokens;
+// IMP_TEST_STAGGER=1 admits one row every second step.
+TEST_F(HybridBatchedDecodeTest, ThinkCloseRepeatsBatchedVsSolo) {
+    if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
+        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT";
+    RuntimeConfig rc;
+    rc.runtime.deterministic = true;
+    rc.server.prefix_cache = false;
+    if (const char* kv = std::getenv("IMP_TEST_SET"); kv && *kv) {
+        std::vector<std::string> sets;
+        std::string s(kv);
+        for (size_t p = 0; p <= s.size();) {
+            const size_t q = std::min(s.find(',', p), s.size());
+            if (q > p)
+                sets.push_back(s.substr(p, q - p));
+            p = q + 1;
+        }
+        const auto bad = rc.apply_overrides(sets);
+        ASSERT_TRUE(bad.empty()) << "unknown IMP_TEST_SET key: " << bad[0];
+    }
+    set_pending_runtime_config(rc);
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 4096;
+    cfg.max_batch_size = kRows;
+    cfg.enable_cuda_graphs = 1;
+    cfg.use_prefix_caching = 0;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    const int kSteps = std::getenv("IMP_TEST_STEPS") ? std::atoi(std::getenv("IMP_TEST_STEPS")) : 1500;
+    const bool stagger = std::getenv("IMP_TEST_STAGGER") != nullptr;
+    Tokenizer* tok = model_->model->tokenizer();
+    ASSERT_NE(tok, nullptr);
+    const auto think_end = tok->encode("</think>", true);
+    ASSERT_EQ(think_end.size(), 1u);
+    auto make_req = [&](int i) {
+        auto req = std::make_shared<Request>();
+        // Prompt 1 thinks longest; on rows 3 and 7 it keeps the LAST enqueued row in-think while the
+        // others answer, the order the aliasing needed (the last upload won for every stashed row).
+        const std::string text = "<|im_start|>system\nSession " + std::to_string(i) +
+                                 ". Answer briefly.<|im_end|>\n<|im_start|>user\n" + kPrompts[(i + 2) % 4] +
+                                 "<|im_end|>\n<|im_start|>assistant\n<think>\n";
+        req->input_tokens = tok->encode(text, true);
+        req->max_tokens = kSteps;
+        req->temperature = 0.0f;
+        req->top_p = 1.0f;
+        req->top_k = 0;
+        req->repetition_penalty = 1.05f;
+        req->logprobs = true;
+        req->top_logprobs = 5;
+        // The server primes a thinking request this way (handlers_chat_core.cpp): the
+        // budget's recount starts in-think and the sampler masks stop ids while thinking.
+        req->think_budget = 0.5f;
+        req->started_in_think = true;
+        req->in_think_block = true;
+        req->status = RequestStatus::PENDING;
+        return req;
+    };
+    auto drain = [&](std::vector<std::shared_ptr<Request>>& reqs) {
+        for (int i = 0; i < 65536; ++i) {
+            bool busy = false;
+            for (auto& r : reqs)
+                busy = busy ||
+                       (r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED);
+            if (!busy)
+                break;
+            (void)engine->step();
+        }
+    };
+    auto closes = [&](const Request& r) {
+        int n = 0;
+        for (int32_t t : r.output_tokens)
+            n += (t == think_end[0]);
+        return n;
+    };
+    std::vector<std::shared_ptr<Request>> solo;
+    for (int i = 0; i < kRows; ++i) {
+        std::vector<std::shared_ptr<Request>> one{make_req(i)};
+        engine->add_request(one[0]);
+        drain(one);
+        solo.push_back(one[0]);
+    }
+    std::vector<std::shared_ptr<Request>> batch;
+    for (int i = 0; i < kRows; ++i)
+        batch.push_back(make_req(i));
+    if (stagger) {
+        for (int i = 0; i < kRows; ++i) {
+            engine->add_request(batch[static_cast<size_t>(i)]);
+            (void)engine->step();
+            (void)engine->step();
+        }
+    } else {
+        for (auto& r : batch)
+            engine->add_request(r);
+    }
+    drain(batch);
+    std::printf("[think] prompt tokens %zu, first id %d, im_start single=%d\n", solo[0]->input_tokens.size(),
+                solo[0]->input_tokens.empty() ? -1 : solo[0]->input_tokens[0],
+                tok->encode("<|im_start|>", true).size() == 1 ? 1 : 0);
+    int looped_batched = 0, looped_solo = 0;
+    for (int r = 0; r < kRows; ++r) {
+        const auto& s = *solo[static_cast<size_t>(r)];
+        const auto& b = *batch[static_cast<size_t>(r)];
+        size_t first = 0;
+        while (first < b.output_tokens.size() && first < s.output_tokens.size() &&
+               b.output_tokens[first] == s.output_tokens[first])
+            ++first;
+        const bool flipped = first < b.output_tokens.size() && first < s.output_tokens.size();
+        float dmax = -1.0f, margin_s = -1.0f;
+        if (flipped && first < s.output_logprobs.size() && first < b.output_logprobs.size()) {
+            const auto& a = s.output_logprobs[first];
+            const auto& c = b.output_logprobs[first];
+            margin_s = a.top.size() >= 2 ? a.top[0].logprob - a.top[1].logprob : 99.0f;
+            dmax = 0.0f;
+            for (const auto& x : a.top)
+                for (const auto& y : c.top)
+                    if (x.token == y.token)
+                        dmax = std::max(dmax, std::fabs(x.logprob - y.logprob));
+        }
+        const int cs = closes(s), cb = closes(b);
+        looped_solo += cs > 1;
+        looped_batched += cb > 1;
+        std::printf(
+            "[think] row %d: solo %zu tokens </think> x%d | batched %zu tokens </think> x%d | "
+            "first diff %zu solo margin %.3f max|d| %.4f\n",
+            r, s.output_tokens.size(), cs, b.output_tokens.size(), cb, first, margin_s, dmax);
+    }
+    std::printf("[think] rows closing more than once: solo %d, batched %d of %d\n", looped_solo,
+                looped_batched, kRows);
 }
 
 }  // namespace imp

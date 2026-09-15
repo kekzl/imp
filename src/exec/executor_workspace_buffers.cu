@@ -1572,13 +1572,12 @@ void GraphExecutor::free_buffers() {
     d_pen_args_ = nullptr;
     n_pending_greedy_rows_ = 0;
     n_pending_pen_rows_ = 0;
-    if (d_banned_cache_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
-        d_banned_cache_ = nullptr;
-        banned_cache_src_ = nullptr;
-        banned_cache_n_ = 0;
-        banned_cache_capacity_ = 0;
+    for (auto& e : banned_cache_entries_) {
+        if (e.d)
+            IMP_CUDA_CHECK_LOG(cudaFree(e.d));
+        e = BannedCacheEntry{};
     }
+    banned_cache_next_ = 0;
     if (d_row_args_) {
         // Arena-owned since A7 step 4b.2 — no free here. The arena is closed by
         // ~Engine, after every executor teardown.

@@ -174,28 +174,31 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
 const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStream_t stream) {
     if (state.banned_tokens == nullptr || state.n_banned_tokens <= 0)
         return nullptr;
-    const bool cache_hit = d_banned_cache_ != nullptr && banned_cache_src_ == state.banned_tokens &&
-                           banned_cache_n_ == state.n_banned_tokens;
-    if (!cache_hit) {
-        size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
-        if (banned_cache_capacity_ < static_cast<size_t>(state.n_banned_tokens)) {
-            if (d_banned_cache_)
-                IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
-            d_banned_cache_ = nullptr;
-            if (cudaMalloc(&d_banned_cache_, ban_bytes) != cudaSuccess) {
-                d_banned_cache_ = nullptr;
-                banned_cache_capacity_ = 0;
-            }
-            banned_cache_capacity_ = d_banned_cache_ ? state.n_banned_tokens : 0;
+    for (const auto& e : banned_cache_entries_)
+        if (e.d != nullptr && e.src == state.banned_tokens && e.n == state.n_banned_tokens)
+            return e.d;
+    // Miss: a fresh entry per list (round-robin past kBannedCacheEntries lists;
+    // the engine has two: the special-token bans and the think stop mask).
+    BannedCacheEntry& e = banned_cache_entries_[banned_cache_next_];
+    banned_cache_next_ = (banned_cache_next_ + 1) % kBannedCacheEntries;
+    const size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
+    if (e.cap < static_cast<size_t>(state.n_banned_tokens)) {
+        if (e.d)
+            IMP_CUDA_CHECK_LOG(cudaFree(e.d));
+        e.d = nullptr;
+        e.cap = 0;
+        if (cudaMalloc(&e.d, ban_bytes) != cudaSuccess) {
+            e.d = nullptr;
+            e.src = nullptr;
+            e.n = 0;
+            return nullptr;
         }
-        if (d_banned_cache_) {
-            cudaMemcpyAsync(d_banned_cache_, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice,
-                            stream);
-            banned_cache_src_ = state.banned_tokens;
-            banned_cache_n_ = state.n_banned_tokens;
-        }
+        e.cap = static_cast<size_t>(state.n_banned_tokens);
     }
-    return d_banned_cache_;
+    cudaMemcpyAsync(e.d, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice, stream);
+    e.src = state.banned_tokens;
+    e.n = state.n_banned_tokens;
+    return e.d;
 }
 
 // Shared per-row logits filter chain (penalties, DRY, token bans, logit

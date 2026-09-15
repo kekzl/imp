@@ -750,12 +750,20 @@ private:
     PenaltyRowArgs* d_pen_args_ = nullptr;    // device mirror
     int n_pending_pen_rows_ = 0;
     int pending_sample_vocab_ = 0;
-    // Static banned-token list cache (see apply_row_filters_): keyed on the
-    // host pointer + count, freed in free_buffers.
-    int32_t* d_banned_cache_ = nullptr;
-    const int32_t* banned_cache_src_ = nullptr;
-    int banned_cache_n_ = 0;
-    size_t banned_cache_capacity_ = 0;
+    // Static banned-token list cache (see apply_row_filters_): one device copy
+    // PER list, keyed on host pointer + count, freed in free_buffers. The
+    // penalty stash keeps a row's pointer until the flush, so two lists in one
+    // step (stop mask on a thinking row, plain bans on a closed one) must not
+    // share a buffer: a closed row then read the mask and never sampled EOS (#2019).
+    struct BannedCacheEntry {
+        const int32_t* src = nullptr;
+        int n = 0;
+        int32_t* d = nullptr;
+        size_t cap = 0;
+    };
+    static constexpr int kBannedCacheEntries = 4;
+    BannedCacheEntry banned_cache_entries_[kBannedCacheEntries];
+    int banned_cache_next_ = 0;
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
                                           // (2 x sample_slots_ x SAMPLE_SCRATCH_BYTES parity
                                           // halves; slot 0 of parity 0 = single-seq)

@@ -268,7 +268,11 @@ def main():
     # TranscriptRestoreStateStaysClose (test-e2e, GDN container of make test-e2e).
     # 1116 -> 1117: HybridBatchedDecodeTest.RowsDecodeIndependentlyOfTheirOrder (test-e2e, GDN container of
     # make test-e2e): engine-level batch invariance of the batched GDN decode.
-    PINNED = 1117
+    # 1117 -> 1120: #2019 (row-batched sampler served one row another row's ban list):
+    # SamplerRowBansTest.StashedRowsKeepTheirOwnBanList (test-e2e, primary container), plus the two
+    # HybridBatchedDecodeTest instruments BatchedLogitDeltaVsSolo (A4 vs A16 logit delta vs solo)
+    # and ThinkCloseRepeatsBatchedVsSolo (server-shaped think-close repro), GDN container.
+    PINNED = 1120
 
     text = CMAKE.read_text()
     mods = module_sources(text)
