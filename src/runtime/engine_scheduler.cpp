@@ -1358,18 +1358,30 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
         }
     }
     if (static_cast<int>(sync_rows.size()) < n) {
-        const int32_t* toks = executor_->collect_sampled_tokens(n, dec_stream);
+        bool any_append = false;
+        for (int i = 0; i < n && !any_append; i++)
+            any_append = pen_append.offs[i] >= 0;
+        // The append reads this step's sample slots, so it must follow the
+        // stash flush on the stream (the parity has not flipped yet). With
+        // the event split it rides behind the flush BEFORE the host waits on
+        // the gather: measured 62 us of GPU idle on each side of the append
+        // when it was launched only after the sync (runtime.penalty_append_early).
+        const int32_t* toks = nullptr;
+        bool appended = false;
+        if (runtime_config_.runtime.penalty_append_early &&
+            executor_->gather_sampled_tokens_async(n, dec_stream)) {
+            if (any_append)
+                appended = executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream);
+            toks = executor_->wait_gathered_tokens(executor_->sample_parity());
+        } else {
+            toks = executor_->collect_sampled_tokens(n, dec_stream);
+            if (toks && any_append)
+                appended = executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream);
+        }
         if (toks) {
             for (int i = 0; i < n; i++)
                 result[i] = toks[i];
-            // Append this step's tokens to the device histories. AFTER
-            // collect on purpose: the row-batched top-k stash only writes
-            // its sample slots inside collect's flush, and the parity has
-            // not flipped yet, so the slots still hold this step.
-            bool any_append = false;
-            for (int i = 0; i < n && !any_append; i++)
-                any_append = pen_append.offs[i] >= 0;
-            if (any_append && executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream)) {
+            if (appended) {
                 for (int i = 0; i < n; i++)
                     if (pen_append.offs[i] >= 0)
                         penalty_hist_state_[pen_append.slots[i]].synced = pen_append.offs[i] + 1;

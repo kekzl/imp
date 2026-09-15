@@ -89,6 +89,11 @@ prefill_batch_decode_cap = 0
 # TTFT p50 -20..-23%, ITL max 141 -> 80 ms; 31 streams + a 4.4k-token ingest:
 # their ITL during the ingest p95 63 -> 51 ms.
 prefill_mixed_decode = true
+# Batched decode: the penalty-history append rides behind the sampler flush
+# before the host waits on the token gather (event split) instead of after
+# the sync; nsys at 32 streams read 62 us of GPU idle on each side of the
+# append per step. false = sync first, then append.
+penalty_append_early = true
 # Tokens of max_tokens the think budget keeps for the ANSWER on a reasoning
 # model. The engine injects </think> once reasoning reaches
 # max_tokens - max(think_answer_reserve, max_tokens/4), or the think_budget

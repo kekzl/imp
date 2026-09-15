@@ -186,6 +186,7 @@ public:
     // replaces the stream sync with an event; wait_gathered_tokens waits only
     // that event. Non-pipelined callers run at parity 0.
     void set_sample_parity(int parity) { sample_parity_ = parity & 1; }
+    int sample_parity() const { return sample_parity_; }
     bool gather_sampled_tokens_async(int n_slots, cudaStream_t stream = nullptr);
     const int32_t* wait_gathered_tokens(int parity);
     // Device pointer of slot 0 of the given parity set (the chain-advance
