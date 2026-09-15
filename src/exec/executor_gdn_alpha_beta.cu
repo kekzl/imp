@@ -1,9 +1,11 @@
-// Batched-decode GDN alpha/beta: one launch for both instead of two
-// cuBLAS GEMMs (nvjet+splitKreduce each, 4 launches/layer, none
-// PDL-registered), via gemm_f16_narrow_smallm's split-K tensor-core
-// launch. Output layout matches the two-call form (alpha at ssm_dt_buf_,
-// beta at the 256-byte-aligned offset), so the scan is untouched.
+// GDN alpha/beta at M >= 2: one launch for both instead of two cuBLAS
+// GEMMs (nvjet+splitKreduce each, 4 launches/layer, none PDL-registered):
+// gemm_f16_narrow_smallm (M<=32, batched decode) or gemm_f16_narrow_prefill
+// (M>32), both split-K tensor-core launches. Output layout matches the
+// two-call form (alpha at ssm_dt_buf_, beta at the 256-byte-aligned
+// offset), so the scan is untouched.
 
+#include "compute/gemm_f16_narrow_prefill.h"
 #include "compute/gemm_f16_narrow_smallm.h"
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
@@ -36,16 +38,18 @@ const half* fp16_weight_ptr(const WeightCaches& wcache, const WeightHandle& h, i
 
 bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input,
                                                Tensor& alpha_out, Tensor& beta_out, cudaStream_t stream) {
-    if (!dispatch_policy().gdn.alpha_beta_smallm || gdn_ab_ws_ == nullptr)
+    const int M = static_cast<int>(input.shape[0]);
+    const bool prefill = M > 32;
+    if (prefill ? (!dispatch_policy().gdn.alpha_beta_prefill || gdn_ab_prefill_ws_ == nullptr)
+                : (!dispatch_policy().gdn.alpha_beta_smallm || gdn_ab_ws_ == nullptr))
         return false;
     if (alpha_id == kInvalidTensorID || beta_id == kInvalidTensorID)
         return false;
     if (cur_spec_verify_ || lora_ != nullptr || calib_)
         return false;
-    const int M = static_cast<int>(input.shape[0]);
     const int64_t K = input.shape[1];
-    if (M < 2 || M > 32 || input.qtype != QType::F16 || alpha_out.qtype != QType::F16 ||
-        beta_out.qtype != QType::F16 || input.stride[0] != K)
+    if (M < 2 || input.qtype != QType::F16 || alpha_out.qtype != QType::F16 || beta_out.qtype != QType::F16 ||
+        input.stride[0] != K)
         return false;
     const int64_t N = alpha_out.shape[1];
     if (beta_out.shape[1] != N)
@@ -63,6 +67,18 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
                 (long long)h.shape[1], (long long)N, (long long)K, wcache_.fp16.count(h.source_data) ? 1 : 0);
         }
         return false;
+    }
+    if (prefill) {
+        const bool ok = gemm_f16_narrow_prefill(static_cast<const half*>(input.data), M, static_cast<int>(K),
+                                                wa, static_cast<half*>(alpha_out.data), static_cast<int>(N),
+                                                wb, static_cast<half*>(beta_out.data), static_cast<int>(N),
+                                                gdn_ab_prefill_ws_, gdn_ab_prefill_ws_bytes_, stream);
+        if (ok && !gdn_ab_prefill_logged_) {
+            gdn_ab_prefill_logged_ = true;
+            IMP_LOG_INFO("gdn alpha/beta prefill GEMM ACTIVE (M=%d, K=%lld, N=%lld x 2)", M, (long long)K,
+                         (long long)N);
+        }
+        return ok;
     }
     const bool ok = gemm_f16_narrow_smallm(static_cast<const half*>(input.data), M, static_cast<int>(K), wa,
                                            static_cast<half*>(alpha_out.data), static_cast<int>(N), wb,

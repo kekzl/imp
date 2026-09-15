@@ -592,6 +592,11 @@ state_bf16           = true
 # Batched decode (2..32 rows): alpha and beta projections in one split-K FP16
 # tensor-core launch instead of two cuBLAS GEMMs (4 launches per GDN layer).
 alpha_beta_smallm    = true
+# Prefill (M > 32): alpha and beta projections in one split-K FP16 tensor-core
+# launch (FP32 accumulate) plus one reduce instead of two cuBLAS GEMMs. Opt-in:
+# Qwen3.8-27B pp512 16.5 vs 23 us per GDN layer, PPL 4.6242 -> 4.6404 (the cuBLAS
+# default accumulates in FP16; cuBLAS at FP32 reads 4.6426).
+alpha_beta_prefill   = false
 # Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj, gate, alpha and
 # beta in one GEMV launch, out-projection with the residual in its epilogue,
 # gated attention q|k|v in one launch (6 launches per GDN layer and 2 per

@@ -629,8 +629,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 gemm_via_handle_(ly.gdn_alpha_beta_packed_id, no, ab_packed_out, ctx);
             } else {
                 // 4-call fallback: ssm_dt_buf_ for alpha, +offset for beta. Batched decode
-                // runs both in one narrow FP16 launch first (gdn.alpha_beta_smallm); the
-                // two calls remain for every shape/tier it declines.
+                // and prefill run both in one narrow FP16 launch first (gdn.alpha_beta_smallm,
+                // gdn.alpha_beta_prefill); the two calls remain for every shape/tier declined.
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
                 char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
                                  ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));

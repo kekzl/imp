@@ -633,7 +633,10 @@ private:
     // nullptr keeps the two cuBLAS calls.
     void* gdn_ab_ws_ = nullptr;
     size_t gdn_ab_ws_bytes_ = 0;
+    void* gdn_ab_prefill_ws_ = nullptr;  // split-K partials of the prefill launch (own tickets)
+    size_t gdn_ab_prefill_ws_bytes_ = 0;
     bool gdn_ab_narrow_logged_ = false;
+    bool gdn_ab_prefill_logged_ = false;
     bool gdn_m1_input_logged_ = false;
     bool gdn_m1_out_logged_ = false;
     bool attn_m1_qkv_logged_ = false;
