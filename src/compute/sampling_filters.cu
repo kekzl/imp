@@ -2,6 +2,7 @@
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cfloat>
@@ -68,12 +69,15 @@ void apply_min_p(float* logits, int vocab_size, float min_p, cudaStream_t stream
 // Single-block kernel: computes entropy, deviation histogram, finds threshold,
 // and filters tokens with deviation > threshold.
 static constexpr int TYPICAL_NBUCKETS = 256;
+static_assert(BLOCK_SIZE == TYPICAL_NBUCKETS, "deterministic path maps one bucket per thread");
 
-__global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p) {
+__global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p,
+                                       bool deterministic) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float s_warp[NUM_WARPS];
     __shared__ float s_max, s_sum, s_entropy, s_max_dev, s_threshold;
     __shared__ float s_buckets[TYPICAL_NBUCKETS];
+    __shared__ float s_warp_buckets[NUM_WARPS * TYPICAL_NBUCKETS];
 
     const int tid = threadIdx.x;
     const int warp_id = tid / WARP_SIZE;
@@ -155,25 +159,52 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
     __syncthreads();
 
     // --- Pass 5: build deviation histogram ---
-    // Initialize buckets
     for (int b = tid; b < TYPICAL_NBUCKETS; b += blockDim.x)
         s_buckets[b] = 0.0f;
     __syncthreads();
 
     float bucket_scale = (s_max_dev > 1e-8f) ? (static_cast<float>(TYPICAL_NBUCKETS) / s_max_dev) : 1.0f;
 
-    for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float surprise = -(logits[i] - log_sum_exp) * inv_log2;
-        float dev = fabsf(surprise - H);
-        int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
-        float p = expf(logits[i] - gmax) / sum_exp;
-        // TODO(determinism): shared-memory FP atomicAdd accumulates bucket mass in
-        // scheduling-dependent order, so the cumulative cutoff can flip near a bucket boundary.
-        // typical_p is a filter (not covered by the deterministic flag); make this an ordered
-        // per-bucket reduction if bit-exact reproducibility is ever needed here.
-        atomicAdd(&s_buckets[bucket], p);
+    if (deterministic) {
+        // Per-thread local accumulators avoid scheduling-dependent atomicAdd order.
+        float local_bkt[TYPICAL_NBUCKETS];
+        for (int b = 0; b < TYPICAL_NBUCKETS; b++)
+            local_bkt[b] = 0.0f;
+
+        for (int i = tid; i < vocab_size; i += blockDim.x) {
+            float surprise = -(logits[i] - log_sum_exp) * inv_log2;
+            float dev = fabsf(surprise - H);
+            int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
+            float p = expf(logits[i] - gmax) / sum_exp;
+            local_bkt[bucket] += p;
+        }
+
+        // Warp-level reduction per bucket, then store into per-warp shared memory.
+        for (int b = 0; b < TYPICAL_NBUCKETS; b++) {
+            float v = warp_reduce_sum(local_bkt[b]);
+            if (lane_id == 0)
+                s_warp_buckets[warp_id * TYPICAL_NBUCKETS + b] = v;
+        }
+        __syncthreads();
+
+        // Cross-warp fixed-order sum (BLOCK_SIZE == TYPICAL_NBUCKETS: one bucket per thread).
+        {
+            float total = 0.0f;
+            for (int w = 0; w < NUM_WARPS; w++)
+                total += s_warp_buckets[w * TYPICAL_NBUCKETS + tid];
+            s_buckets[tid] = total;
+        }
+        __syncthreads();
+    } else {
+        for (int i = tid; i < vocab_size; i += blockDim.x) {
+            float surprise = -(logits[i] - log_sum_exp) * inv_log2;
+            float dev = fabsf(surprise - H);
+            int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
+            float p = expf(logits[i] - gmax) / sum_exp;
+            atomicAdd(&s_buckets[bucket], p);
+        }
+        __syncthreads();
     }
-    __syncthreads();
 
     // --- Pass 6: scan histogram to find threshold (thread 0) ---
     if (tid == 0) {
@@ -204,7 +235,8 @@ void apply_typical_p(float* logits, int vocab_size, float typical_p, cudaStream_
     if (typical_p <= 0.0f || typical_p >= 1.0f)
         return;
 
-    apply_typical_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(logits, vocab_size, typical_p);
+    const bool deterministic = process_diag_deterministic_gemm();
+    apply_typical_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(logits, vocab_size, typical_p, deterministic);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
