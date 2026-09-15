@@ -121,6 +121,11 @@ struct RuntimeConfig {
         // admit (vision, logprobs, constraints, MTP) keeps the whole batch
         // on the separate decode step (docs/roadmap.md, Server and latency).
         bool prefill_mixed_decode = true;
+        // Batched decode: enqueue the penalty-history append behind the sampler
+        // flush BEFORE the host waits on the token gather (event split), instead
+        // of after the sync. nsys at 32 streams read 62 us of GPU idle on each
+        // side of the append per step. False = the sync-then-append order.
+        bool penalty_append_early = true;
         // Tokens of `max_tokens` reserved for the ANSWER on a reasoning
         // model: the engine injects `</think>` once reasoning reaches
         // max_tokens - max(think_answer_reserve, max_tokens/4), or the
