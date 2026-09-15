@@ -100,6 +100,9 @@ bool Engine::init_features() {
                 "Chat template init failed for family %s — requests will use raw "
                 "prompt concatenation (no role markers)",
                 chat_template_family_name(family));
+        // Finished transcripts' ids (server.transcript_token_reuse); server copies of
+        // chat_template_ share the store.
+        chat_template_.set_transcript_store(std::make_shared<TranscriptIdStore>());
     }
 
     build_banned_token_list();

@@ -68,6 +68,9 @@ struct Request {
     float mirostat_eta = 0.1f;        // Learning rate
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;          // Don't stop on EOS (benchmark mode)
+    // FINISHED under the decode pipeline, KV hashes / snapshots published at the drain:
+    // a delivery before that races a fast client's next turn against the publish.
+    bool release_pending = false;
     // n-gram speculation bookkeeping: consecutive draft misses, per-request acceptance economics,
     // and the sticky give-up flag returning the request to the async graph loop once the context
     // proved draft-poor (speculative.give_up_after) or acceptance-poor (e.g. number tables).

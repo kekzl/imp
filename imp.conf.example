@@ -755,6 +755,11 @@ snapshot_min_prompt_tokens = 256
 # prefills only the new message. One slab copy plus a sync per finished
 # request. Off when the sparse key min/max pool is on.
 transcript_snapshot = true
+# Every finished transcript keeps its token ids (256 entries); a next turn
+# that resends the reply verbatim tokenizes it with those ids, so a
+# non-canonical BPE split the model wrote (` pre`+`pref` re-encodes as
+# ` prep`+`ref`) no longer breaks the prefix-cache chain inside the reply.
+transcript_token_reuse = true
 # OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
 # URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every
 # generation request becomes one SERVER span (queue / prefill / decode

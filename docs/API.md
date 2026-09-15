@@ -251,7 +251,10 @@ render it (Qwen3.8 keeps it, `preserve_thinking`). Sending it back is what lets
 a hybrid (GDN) model restore its recurrent state at the end of the previous
 reply instead of at the prompt boundary (`server.transcript_snapshot`): the
 reply then re-tokenizes exactly, a forced think end included (it emits `"\n"`
-before `</think>` like the model's own close). The built-in web UI sends it.
+before `</think>` like the model's own close). Where the model wrote a
+non-canonical BPE split, the server splices the ids it forwarded instead of
+re-encoding the text (`server.transcript_token_reuse`, 256 transcripts). The
+built-in web UI sends it.
 
 **When you do ask for thinking, `content[0]` is not the text.** Select by
 `type` rather than by index:

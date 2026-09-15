@@ -336,6 +336,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
     I("server.snapshot_min_prompt_tokens", cfg.server.snapshot_min_prompt_tokens);
     B("server.transcript_snapshot", cfg.server.transcript_snapshot);
+    B("server.transcript_token_reuse", cfg.server.transcript_token_reuse);
     S("server.otlp_endpoint", cfg.server.otlp_endpoint);
     S("server.otlp_service_name", cfg.server.otlp_service_name);
     B("server.green_contexts", cfg.server.green_contexts);
