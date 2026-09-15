@@ -249,7 +249,7 @@ ADDS (`diagnostics.dump_hidden_dir` + `tools/analysis/layer_ab_diff.py`) are.
 | alpha/beta cuBLAS | 1.2% | packed alpha+beta GEMM would halve the launches for a stride in the scan's reads, 0.6%, priced |
 | penalties | 1.1 -> 0.1% | shipped |
 | memcpy | 1.7% of device time | recurrent-snapshot D2H on its own stream, not idle |
-| idle | 14.9% measured, ~8% real | >1 ms gaps are CUPTI-inflated captures at the wave ramp (5.57 vs 5.51 s with and without); the remainder is Open item 1 |
+| idle | 14.9% measured, ~8% real; RE-MEASURED 2026-09-16: 3.6-4.0% in the steady windows | >1 ms gaps are CUPTI-inflated captures at the wave ramp (5.57 vs 5.51 s with and without); the remainder was Open item 1. Re-measured on 103f0566 (`serving_idle_profile.sh`, 32 x 3 waves x 300 tokens, 1997 tok/s): steady 6 s windows read busy 96.4 / 96.0%, idle 217 / 239 ms, of it 10-100 us gaps 44% (per-step H2D uploads `[memcpy]->[memcpy]` 35 ms, the penalty_hist_append launched only after the collect sync 62 us before and after it, 40 ms), 100 us-1 ms 31% (the per-step host turnaround, ~1.2 per step), >1 ms 8%. The 4-20 s window with the wave boundaries reads 8.6%: the "~8% real" was the benchmark's wave ramp. Host side per step (batch 32, `diagnostics.step_timing`): build 70 us, distribute 212, outside-step 1107 of which the next wave's prefill 641; worker loop 59. Hybrids are refused by the decode pipeline (`ssm_ok=0`), so every host phase is serial. Levers left: enqueue the penalty append before the collect sync (~0.4%), one pinned upload for the per-step tables (~0.6%), the pipeline for GDN rows (~1%). Open item 1 CLOSED as measured |
 
 ```
 [PROV: commit=a65200b3+pdl date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4
