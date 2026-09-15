@@ -29,7 +29,9 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
     // the reverse order made this branch unreachable, since no real stacked checkpoint names the
     // tensor `.weight` (see find_stacked_expert_tensors).
     if (t.shape.size() == 3) {
-        why_not = "3-D stacked tensor — needs the per-expert 2-D layout, not supported yet";
+        why_not =
+            "3-D stacked tensor: an expert stack is split per expert first (expert_destack.h), "
+            "anything else stays as it is";
         return false;
     }
     if (!ends_with(t.name, ".weight")) {

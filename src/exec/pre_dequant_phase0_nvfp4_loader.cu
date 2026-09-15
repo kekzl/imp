@@ -467,6 +467,30 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                          n_gdn_dequant);
     }
 
+    // gpt-oss residual rescale (model.cpp registry, embed_scale 2^-4): the loader shifts the BF16
+    // contributors (Wo, o_bias, expert down bias), an NVFP4 Wo or expert down projection carries
+    // the factor in its tensor_scale, as the MXFP4 convert path's extra_scale does.
+    if (model_->profile().is_gpt_oss && cfg.embed_scale > 0.0f) {
+        int n_rescaled = 0;
+        for (int i = 0; i < cfg.n_layers; ++i) {
+            TransformerLayer& L = mut_model->layer(i);
+            if (L.wo.qtype == QType::NVFP4) {
+                L.wo.tensor_scale *= cfg.embed_scale;
+                n_rescaled++;
+            }
+            for (Tensor& w : L.expert_w_down) {
+                if (w.qtype == QType::NVFP4) {
+                    w.tensor_scale *= cfg.embed_scale;
+                    n_rescaled++;
+                }
+            }
+        }
+        if (n_rescaled > 0)
+            IMP_LOG_INFO(
+                "gpt-oss: residual rescale 2^-4 folded into %d NVFP4 tensor scales (Wo, expert down)",
+                n_rescaled);
+    }
+
     // Drop the scratch — its data pointers (weight_scale, weight_scale_2,
     // input_scale) are now device pointers borrowed by the main tensors,
     // and the host-side metadata isn't needed anymore.

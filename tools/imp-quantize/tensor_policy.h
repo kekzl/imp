@@ -35,12 +35,12 @@ Fp8SourceAction fp8_source_action(const RawTensor& weight, bool gated, bool quan
 // the writing path checks its actual buffers against this and fails loudly on a mismatch.
 size_t nvfp4_output_bytes(int64_t N, int64_t K);
 
-// MoE experts stored as one 3-D [n_experts,N,K] stack rather than a 2-D tensor per expert
-// (gpt-oss mlp.experts.gate_up_proj_blocks, Gemma-4 experts.gate_up_proj): found by inspection
-// since they aren't named `.weight`, so the rank check in should_quantize rejects them first
-// with no counter or message, and they'd be copied through as BF16 while hf_quant_config.json
-// claimed a quantized checkpoint. Returns pointers so the caller can report which tensors and
-// what share of the checkpoint they are.
+// MoE experts stored as one 3-D stack rather than a 2-D tensor per expert (gpt-oss
+// mlp.experts.gate_up_proj, Gemma-4 experts.gate_up_proj): found by inspection since they aren't
+// named `.weight`, so the rank check in should_quantize rejects them first with no counter or
+// message, and they'd be copied through as BF16 while hf_quant_config.json claimed a quantized
+// checkpoint. The caller splits them per expert by the model's layout (expert_destack.h) or
+// refuses the checkpoint when no layout is known; pointers so it can report which and how much.
 std::vector<const RawTensor*> find_stacked_expert_tensors(const std::vector<RawTensor>& tensors);
 
 // Attention q_proj weights carrying a fused output GATE alongside Q (Qwen3.5/Qwen3-Next
