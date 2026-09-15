@@ -472,6 +472,24 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
     engine->mutable_runtime_config().server.transcript_snapshot = true;
     EXPECT_EQ(c_off, imp::snapshot_boundary(prompt_len, kv_bs, min_snap))
         << "with transcript snapshots off, turn 2 must fall back to the prompt-boundary snapshot";
+
+    // Short chat, the common web-UI turn: prompt AND transcript both under
+    // snapshot_min_prompt_tokens. That floor prices the prefill split of a prompt-boundary
+    // snapshot; a finish-time save splits nothing, so it must still restore (a 73-token prompt
+    // + 174-token reply re-prefilled its whole transcript on turn 2 under the floor, 2026-09-15).
+    const int short_len = 4 * kv_bs;
+    ASSERT_LT(short_len + kReply, min_snap) << "the short case must sit under the floor to test it";
+    const std::vector<int32_t> short1(full.begin(), full.begin() + short_len);
+    go_cold();
+    const std::vector<int32_t> short_reply = run(short1, kReply, nullptr);
+    ASSERT_EQ(static_cast<int>(short_reply.size()), kReply);
+    std::vector<int32_t> short2 = short1;
+    short2.insert(short2.end(), short_reply.begin(), short_reply.end());
+    short2.insert(short2.end(), full.begin() + short_len, full.begin() + short_len + 60);
+    int c_short = -1;
+    (void)run(short2, 8, &c_short);
+    EXPECT_EQ(c_short, short_len + kReply - 1)
+        << "a transcript under snapshot_min_prompt_tokens must still restore at the reply end";
 }
 
 }  // namespace

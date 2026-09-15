@@ -444,7 +444,11 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int n = static_cast<int>(forwarded.size());
-    if (n < bs || n < runtime_config_.server.snapshot_min_prompt_tokens)
+    // No snapshot_min_prompt_tokens floor here: that floor prices the prefill SPLIT a
+    // prompt-boundary snapshot costs, and a finish-time save splits nothing (0.1-2 ms).
+    // Short chats are the common case: a 73-token prompt + 174-token reply re-prefilled
+    // its whole 247-token transcript on turn 2 (cached 0) under the 256 floor.
+    if (n < bs)
         return;
     const size_t key = transcript_snapshot_key(forwarded, bs);
     if (key == 0 || recurrent_snapshots_->contains(key))
