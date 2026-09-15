@@ -17,6 +17,7 @@ there instead of retelling it.
 - The web UI offers a `reasoning effort` select when the loaded model's chat template names the values; `GET /v1/models` carries them as `meta.reasoning_effort` `{values, default}`. Qwen3.8-27B: `xhigh`, `medium`, `low` (default `xhigh`); gpt-oss names only a default and gets no select. (#2017)
 
 ### Changed
+- `make test-e2e` (GDN container) runs `HybridBatchedDecodeTest.RowsDecodeIndependentlyOfTheirOrder`: eight prompts under the batched GDN decode must decode the same in forward and reversed row order (greedy, `runtime.deterministic`); a row reading a neighbour's state slot fails it on 4 of 8 prompts. The solo-vs-batched difference is printed only (2 of 8 rows on Qwen3.5-4B-mxfp4, rounding class). `tools/analysis/think_loop_probe.py` reproduces #2019 against a server.
 - `make test-server` starts with `tools/analysis/chat_probe.py`: 12 turns with the web UI request (temperature 0.7, no seed, thinking on) plus 6 unseeded repeats, and stops on FAIL. Qwen3.8-27B-NVFP4-vllm: v0.41.0 fails it (repeats 1/6 distinct, 44 s), v0.41.1 passes (6/6, 43 s). (#2015)
 
 ### Fixed

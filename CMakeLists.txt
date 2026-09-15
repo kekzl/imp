@@ -1088,6 +1088,8 @@ if(IMP_BUILD_TESTS)
         # Chained recurrent restores: 30 growing turns against a cold prefill of
         # the same prompt, compared on the state slab rather than on tokens.
         tests/test_hybrid_restore_chain.cu
+        # Engine-level batch invariance of the batched GDN decode: eight rows vs solo, greedy.
+        tests/test_hybrid_batched_decode.cu
         tests/test_batch_invariance.cu
         # Decode-graph buckets on a GDN hybrid: one captured graph per batch size, two paths to the
         # recurrent slot (captured scalar at n==1, device slot table at n>1). Covers capture+replay of
