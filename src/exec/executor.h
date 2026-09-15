@@ -239,7 +239,11 @@ public:
     size_t smallm_ws_bytes_ = 0;
     void* smallm_xq_ = nullptr;   // A4 activation quantize scratch [32, Kmax]
     size_t smallm_xq_bytes_ = 0;
-    bool smallm_arena_ = false;  // both scratches are T2 arena slabs: never cudaFree them
+    // Per scratch: a T2 arena slab is never cudaFree'd. One flag for both let a
+    // lazy regrowth of the workspace (A16 kernel, larger than the v2 plan) mark the
+    // still-arena activation scratch as owned and cudaFree it at teardown.
+    bool smallm_ws_arena_ = false;
+    bool smallm_xq_arena_ = false;
     // What smallm_xq_ currently holds (source pointer + shape of the last
     // activation quantize). Lets a dispatch with a matching hint skip
     // re-quantizing when two GEMMs share one normed input (gate/up, q/k/v, GDN

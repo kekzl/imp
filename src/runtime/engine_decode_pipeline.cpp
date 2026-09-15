@@ -142,6 +142,16 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
 InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {
     InferenceState per = bd_pipe_.base_state;
     fill_sampling_params(req, per);
+    // fill_sampling_params decided the think-budget force from output_tokens, which
+    // lacks the in-flight step's token. If that token was itself forced, advance the
+    // "\n" then "</think>" sequence by one instead of repeating it (8 of 8 rows closed
+    // twice at 103/104 on Qwen3.8-27B, 2026-09-15).
+    if (think_end_id_ >= 0 && req.pipe_inflight_force == think_end_id_)
+        per.force_token = -1;
+    else if (think_newline_id_ >= 0 && req.pipe_inflight_force == think_newline_id_ &&
+             per.force_token == think_newline_id_)
+        per.force_token = think_end_id_;
+    req.pipe_inflight_force = per.force_token;
     // The chained step samples one output AHEAD of the host-visible count —
     // match the seed the eager path would compute after processing the
     // in-flight step (compute_step_seed = base + output count).
@@ -317,6 +327,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
         auto& req = rows[i];
         InferenceState per = state;
         fill_sampling_params(*req, per);
+        req->pipe_inflight_force = per.force_token;  // the entry step is the first in-flight one
         per.seed = compute_step_seed(*req);
         per.penalty_tokens = nullptr;
         per.n_penalty_tokens = 0;
@@ -464,6 +475,8 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
         if (cont)
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         bd_pipe_.in_flight = false;
+        for (auto& r : bd_pipe_.rows)
+            r->pipe_inflight_force = -1;  // the per-step path sees every token it forced
         pipeline_run_deferred_releases_();
         executor_->set_sample_parity(0);
         bd_pipe_.rows.clear();
@@ -508,6 +521,8 @@ void Engine::drain_decode_pipeline() {
     if (bd_pipe_.in_flight) {
         pipeline_collect_process_(decode_stream());
         bd_pipe_.in_flight = false;
+        for (auto& r : bd_pipe_.rows)
+            r->pipe_inflight_force = -1;
     }
     pipeline_run_deferred_releases_();
     if (executor_)
@@ -519,6 +534,8 @@ void Engine::drain_decode_pipeline() {
 void Engine::abandon_decode_pipeline() {
     // Exception/teardown path: never wait on the device here.
     bd_pipe_.in_flight = false;
+    for (auto& r : bd_pipe_.rows)
+        r->pipe_inflight_force = -1;
     pipeline_run_deferred_releases_();
     if (executor_)
         executor_->set_sample_parity(0);
