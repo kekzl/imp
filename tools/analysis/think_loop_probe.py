@@ -55,7 +55,8 @@ def main():
         r2 = post("/v1/chat/completions", dict(base, messages=msgs, max_tokens=64))
         u2 = r2.get("usage", {})
         res[i] = (lp, reasoning, content, r1["choices"][0].get("finish_reason"), u2.get("prompt_tokens"),
-                  (u2.get("prompt_tokens_details") or {}).get("cached_tokens"))
+                  (u2.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                  (r1.get("usage") or {}).get("completion_tokens"))
 
     threads = [threading.Thread(target=one, args=(i,)) for i in range(N)]
     for t in threads:
@@ -64,10 +65,14 @@ def main():
         t.join()
     bad = 0
     for i in range(N):
-        lp, reasoning, content, fin, p2, c2 = res[i]
+        lp, reasoning, content, fin, p2, c2, ct1 = res[i]
         if NOLP:
             n_close = 1 + content.count("</think>") if reasoning else content.count("</think>")
-            print(f"session {i}: turn1 content {len(content)} chars finish={fin} </think> x{n_close} "
+            # Seam check without token ids: the re-rendered reply must re-tokenize to the
+            # generated count (usage.completion_tokens); a shorter count is a merge seam.
+            rendered = reasoning.strip() + "\n</think>\n\n" + content
+            n_retok = len(post("/tokenize", {"prompt": rendered})["tokens"])
+            print(f"session {i}: turn1 tokens {ct1} retok {n_retok} finish={fin} </think> x{n_close} "
                   f"(text count) | turn2 prompt {p2} cached {c2}")
             bad += n_close > 1
             continue
