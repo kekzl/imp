@@ -150,11 +150,16 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Chain exhausted: fail loudly rather than leave O unwritten (the old silent fallback at hd=256
     // produced garbage logits, #654). Reachable only via a disabled FP16 WMMA tier or unsupported
     // head_dim; both deserve an error, not silent corruption.
-    char msg[160];
+    char msg[320];
     snprintf(msg, sizeof(msg),
              "attention_prefill_dispatch: no prefill kernel accepts head_dim=%d "
-             "(check attention.fmha_sm120/fmha_fa2 config) (#654)",
-             static_cast<int>(Q.shape[3]));
+             "(check attention.fmha_sm120/fmha_fa2 config) (#654): Q [%d, %d, %d] K [%d, %d] q_offset %d "
+             "qtype %d; mxfp4 %d fa2 %d (fmha_fa2=%s hd256=%d) fp8 %d fmha_sm120 %d blackwell %d",
+             static_cast<int>(Q.shape[3]), static_cast<int>(Q.shape[0]), static_cast<int>(Q.shape[1]),
+             static_cast<int>(Q.shape[2]), static_cast<int>(K.shape[1]), static_cast<int>(K.shape[2]),
+             q_offset, static_cast<int>(Q.qtype), (int)sup.mxfp4_accepts, (int)sup.fa2_accepts,
+             rcfg.attention.fmha_fa2.c_str(), (int)imp::process_diag_fa2_hd256(), (int)sup.fp8_accepts,
+             (int)sup.fmha_sm120_accepts, (int)sup.blackwell_accepts);
     throw std::runtime_error(msg);
 }
 

@@ -89,6 +89,10 @@ prefill_batch_decode_cap = 0
 # TTFT p50 -20..-23%, ITL max 141 -> 80 ms; 31 streams + a 4.4k-token ingest:
 # their ITL during the ingest p95 63 -> 51 ms.
 prefill_mixed_decode = true
+# GDN hybrids in the mixed step: a decoding row rides the ragged prefill as a
+# one-token continuation chunk. Measured negative on Qwen3.8-27B (32 x 1k
+# prompts x 300 tokens: 868.6/869.7/874.1 off vs 840.6/822.5/831.5 on).
+prefill_mixed_decode_hybrid = false
 # Batched decode: the penalty-history append rides behind the sampler flush
 # before the host waits on the token gather (event split) instead of after
 # the sync; nsys at 32 streams read 62 us of GPU idle on each side of the
