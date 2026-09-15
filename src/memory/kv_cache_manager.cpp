@@ -299,12 +299,23 @@ void KVCacheManager::free_sequence(int seq_id) {
         return;
 
     SeqBlocks& seq = it->second;
+    int n_cached = 0, n_unhashed = 0, n_shared = 0, n_inmap = 0;
     for (size_t i = 0; i < seq.size(); ++i) {
         const int block_id = seq.id_at(i);
         // A hole marks a slot whose physical block was freed by
         // evict_middle_blocks (StreamingLLM). Nothing to hand over.
         if (block_id < 0)
             continue;
+        if (prefix_caching_enabled_ && pinned_blocks_.find(block_id) == pinned_blocks_.end()) {
+            if (cached_blocks_map_.find(block_id) != cached_blocks_map_.end())
+                n_inmap++;  // already listed by the cache: a stale entry, this block was reused
+            else if (cache_->ref_count(block_id) != 1)
+                n_shared++;
+            else if (block_id_to_hash_.find(block_id) == block_id_to_hash_.end())
+                n_unhashed++;
+            else
+                n_cached++;
+        }
         // Pinned blocks survive free_sequence: keep ref_count=1, add to
         // cached LRU for reuse. They remain in pinned_blocks_ and cannot
         // be evicted until unpin_prefix() is called.
@@ -345,6 +356,10 @@ void KVCacheManager::free_sequence(int seq_id) {
         // Normal case: the reference drops with the table below.
     }
 
+    IMP_LOG_DEBUG(
+        "prefix cache: seq %d freed, %d of %zu blocks cached (%d unhashed, %d shared with a live "
+        "sequence, %d already listed, %zu cached total)",
+        seq_id, n_cached, seq.size(), n_unhashed, n_shared, n_inmap, cached_blocks_lru_.size());
     seq_blocks_.erase(it);
     seq_block_hashes_.erase(seq_id);
 
@@ -465,10 +480,19 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
             parent_hash);
         chain_hashes.push_back(h);
         parent_hash = h;
-        if (chain_intact && block_hash_to_id_.find(h) != block_hash_to_id_.end())
+        if (chain_intact && block_hash_to_id_.find(h) != block_hash_to_id_.end()) {
             cached = b + 1;
-        else
+        } else if (chain_intact) {
             chain_intact = false;
+            char ids[256];
+            int off = 0;
+            for (int t = 0; t < cache_->block_size() && off < 240; ++t)
+                off += snprintf(ids + off, sizeof(ids) - off, "%d ",
+                                tokens[static_cast<size_t>(b) * cache_->block_size() + t]);
+            IMP_LOG_DEBUG("prefix cache: lookup chain breaks at block %d of %d (hash %zx, parent %zx) ids %s",
+                          b, full_blocks, h,
+                          chain_hashes.size() >= 2 ? chain_hashes[chain_hashes.size() - 2] : 0, ids);
+        }
     }
     return cached;
 }
@@ -645,6 +669,10 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
         if (block_hash_to_id_.find(block_hash) == block_hash_to_id_.end()) {
             block_hash_to_id_[block_hash] = block_id;
             block_id_to_hash_[block_id] = block_hash;
+        } else if (block_hash_to_id_[block_hash] != block_id) {
+            IMP_LOG_DEBUG(
+                "prefix cache: seq %d block %d hash %zx already maps to block %d (this one stays unhashed)",
+                seq_id, b, block_hash, block_hash_to_id_[block_hash]);
         }
 
         parent_hash = block_hash;
@@ -743,13 +771,32 @@ int KVCacheManager::reclaim_cached_block() {
     // Dropping the cache's reference is what returns the block to the pool —
     // there is no separate free_block() call any more.
     cached_blocks_map_.erase(block_id);
+    IMP_LOG_DEBUG("prefix cache: reclaimed cached block %d under pressure (%zu cached left, pool %d blocks)",
+                  block_id, cached_blocks_lru_.size(), cache_->total_blocks());
     return block_id;
 }
 
 BlockRef KVCacheManager::allocate_block_ref_with_eviction() {
     BlockRef ref = cache_->acquire_block_ref();
-    if (ref)
+    if (ref) {
+        // A block the prefix cache still lists must never come off the free list: its
+        // hash would then point at KV another sequence is about to overwrite.
+        if (auto stale = cached_blocks_map_.find(ref.id()); stale != cached_blocks_map_.end()) {
+            IMP_LOG_ERROR(
+                "prefix cache: free list handed out block %d that the cache still lists "
+                "(ref_count %d, %zu cached) — dropping the stale entry",
+                ref.id(), cache_->ref_count(ref.id()), cached_blocks_lru_.size());
+            if (auto h = block_id_to_hash_.find(ref.id()); h != block_id_to_hash_.end()) {
+                block_hash_to_id_.erase(h->second);
+                block_id_to_hash_.erase(h);
+            }
+            cached_blocks_lru_.erase(stale->second.lru_it);
+            if (pinned_blocks_.find(ref.id()) == pinned_blocks_.end())
+                reclaimable_cached_count_--;
+            cached_blocks_map_.erase(stale);
+        }
         return ref;
+    }
 
     // A growable pool below its ceiling grows BEFORE the prefix cache is reclaimed:
     // reclaiming first empties the cache while the pool sits at its planned commit (the LRU
