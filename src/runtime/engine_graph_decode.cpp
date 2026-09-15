@@ -239,6 +239,15 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     if (req->constraints || req->json_mode || !req->json_schema.empty() ||
         !req->regex_pattern.empty() || !req->grammar.empty() || !req->tool_constraint_tools.empty())
         return false;
+    // A pending think-budget force belongs to the eager step: it emits "\n" then
+    // "</think>" over two steps. Relaunching the loop between them let the device
+    // sample a free token after the "\n", so the eager step forced "\n" again and the
+    // block never closed (200-token single-stream reply, 663 chars of reasoning, no
+    // answer, Qwen3.8-27B 2026-09-15). Covers every launch site, the burst hooks included.
+    if (think_logic::should_force_think_end(req->think_budget, think_end_id_, req->max_tokens,
+                                            req->output_tokens, think_start_id_, req->started_in_think,
+                                            runtime_config_.runtime.think_answer_reserve))
+        return false;
 
     int remaining = prepare_graph_loop(req, step_limit);
     if (remaining <= 0)

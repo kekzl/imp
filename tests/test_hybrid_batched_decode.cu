@@ -76,6 +76,19 @@ TEST_F(HybridBatchedDecodeTest, RowsDecodeIndependentlyOfTheirOrder) {
     RuntimeConfig rc;
     rc.runtime.deterministic = true;
     rc.server.prefix_cache = false;
+    // IMP_TEST_SET="key=value,..." applies knob arms (same syntax as the instruments below).
+    if (const char* kv = std::getenv("IMP_TEST_SET"); kv && *kv) {
+        std::vector<std::string> sets;
+        std::string s(kv);
+        for (size_t p = 0; p <= s.size();) {
+            const size_t q = std::min(s.find(',', p), s.size());
+            if (q > p)
+                sets.push_back(s.substr(p, q - p));
+            p = q + 1;
+        }
+        const auto bad = rc.apply_overrides(sets);
+        ASSERT_TRUE(bad.empty()) << "unknown IMP_TEST_SET key: " << bad[0];
+    }
     set_pending_runtime_config(rc);
 
     ImpConfig cfg = imp_config_default();
@@ -417,8 +430,10 @@ TEST_F(HybridBatchedDecodeTest, ThinkCloseRepeatsBatchedVsSolo) {
         req->top_p = 1.0f;
         req->top_k = 0;
         req->repetition_penalty = 1.05f;
-        req->logprobs = true;
-        req->top_logprobs = 5;
+        // IMP_TEST_NOLP=1: no logprobs, so the rows qualify as mixed-step riders
+        // (prefill_ragged_req_ok_ refuses logprobs rows); the delta columns then read -1.
+        req->logprobs = std::getenv("IMP_TEST_NOLP") == nullptr;
+        req->top_logprobs = req->logprobs ? 5 : 0;
         // The server primes a thinking request this way (handlers_chat_core.cpp): the
         // budget's recount starts in-think and the sampler masks stop ids while thinking.
         req->think_budget = 0.5f;
@@ -491,6 +506,20 @@ TEST_F(HybridBatchedDecodeTest, ThinkCloseRepeatsBatchedVsSolo) {
         const int cs = closes(s), cb = closes(b);
         looped_solo += cs > 1;
         looped_batched += cb > 1;
+        // Single stream (async graph loop): the budget must close the block exactly once. Pre-fix
+        // the loop relaunched between the forced "\n" and "</think>" and 4 of 8 rows never closed.
+        EXPECT_EQ(cs, 1) << "solo row " << r << " must close its think block once under the budget";
+        if (cb > 1 || cs > 1) {
+            std::printf("[think]   </think> at solo:");
+            for (size_t k = 0; k < s.output_tokens.size(); ++k)
+                if (s.output_tokens[k] == think_end[0])
+                    std::printf(" %zu", k);
+            std::printf(" | batched:");
+            for (size_t k = 0; k < b.output_tokens.size(); ++k)
+                if (b.output_tokens[k] == think_end[0])
+                    std::printf(" %zu", k);
+            std::printf("\n");
+        }
         std::printf(
             "[think] row %d: solo %zu tokens </think> x%d | batched %zu tokens </think> x%d | "
             "first diff %zu solo margin %.3f max|d| %.4f\n",
@@ -498,6 +527,11 @@ TEST_F(HybridBatchedDecodeTest, ThinkCloseRepeatsBatchedVsSolo) {
     }
     std::printf("[think] rows closing more than once: solo %d, batched %d of %d\n", looped_solo,
                 looped_batched, kRows);
+    // Asserted for the pipeline path (IMP_TEST_NOLP=1): the think-budget force must land once
+    // per row. Pre-fix the chained step repeated "\n" and "</think>" (8 of 8 rows closed at
+    // 103 and 104 with a 100-token budget, solo once at 101); the eager path never did.
+    if (looped_solo == 0)
+        EXPECT_EQ(looped_batched, 0) << "batched rows closed their think block more than once";
 }
 
 }  // namespace imp

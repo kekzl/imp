@@ -68,7 +68,9 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
             continue;
         const int N = static_cast<int>(nv.N);
         const int K = static_cast<int>(nv.K);
-        const bool v2 = dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
+        // A16 (gemm.nvfp4_smallm_a4=false) runs the dequant+HMMA kernel at every shape.
+        const bool v2 = dispatch_policy().gemm.nvfp4_smallm_a4 &&
+                        dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
         ws_need = std::max(ws_need, v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                        : gemm_nvfp4_smallm_workspace_bytes(N));
         xq_need = std::max(xq_need, (size_t)32 * (K / 2) + (size_t)32 * (K / 16));
@@ -96,7 +98,8 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
     smallm_xq_bytes_ = xq_need;
     smallm_xq_src_ = nullptr;
     smallm_xq_from_producer_ = false;
-    smallm_arena_ = true;
+    smallm_ws_arena_ = true;
+    smallm_xq_arena_ = true;
     IMP_LOG_INFO(
         "small-M NVFP4 scratch: %d weights, workspace %zu KiB + activation %zu KiB from the T2 arena",
         n_weights, ws_need / 1024, xq_need / 1024);

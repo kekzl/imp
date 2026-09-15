@@ -144,6 +144,10 @@ struct Request {
     // <|end|><|start|>assistant<|channel|>final<|message|> opener is forced instead. Index into
     // Engine::harmony_force_seq_ for the in-flight forced opener (-1 = idle).
     int harmony_force_idx = -1;
+    // Decode pipeline: the token forced into the IN-FLIGHT chained step, which
+    // output_tokens does not hold yet when the next step is prepared (-1 = none).
+    // Without it the think budget forced "\n" twice and "</think>" twice.
+    int32_t pipe_inflight_force = -1;
     int prefill_offset = 0;  // Chunked prefill: tokens processed so far
     int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
     // When the scheduler moved this request into its first prefill batch
