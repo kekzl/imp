@@ -6,6 +6,7 @@
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "batching_engine.h"
+#include "memory/kv_cache.h"
 #include "model/model.h"
 #include "model/tokenizer.h"
 #include "runtime/config.h"
@@ -75,26 +76,28 @@ struct Loaded {
         if (model)
             imp_model_free(model);
     }
-    bool open(int max_batch_size, size_t kv_blocks, bool streaming_kv_auto = false) {
+    bool open(int max_batch_size, size_t kv_blocks, bool streaming_kv_auto = false,
+              const char* kv_dtype = "fp16", int streaming_window = 0) {
         if (imp_model_load(model_path(), IMP_FORMAT_GGUF, &model) != IMP_SUCCESS)
             return false;
         if (streaming_kv_auto) {
-            // The valve only arms on an F16 pool, and the resolver picks FP8
-            // KV for Qwen3 on its own ("auto"): pin F16 the way an operator
-            // would, or the valve never fires and the test says nothing.
+            // The resolver picks FP8 KV for Qwen3 on its own ("auto"). The F16
+            // valve test pins F16 the way an operator would; the quantised valve
+            // test keeps the resolver's choice.
             imp::RuntimeConfig rc;
-            rc.kv_cache.dtype = "fp16";
+            rc.kv_cache.dtype = kv_dtype;
             imp::set_pending_runtime_config(rc);
         }
         ImpConfig config = imp_config_default();
         config.max_seq_len = 1024;
         config.max_batch_size = max_batch_size;
         config.kv_cache_max_blocks = kv_blocks;
-        // The F16-KV eviction valve would answer pressure by dropping context
+        // The eviction valve would answer pressure by dropping context
         // instead of cancelling; the typed cancel is what this file tests.
-        // The one test of the valve itself opts in.
+        // The two tests of the valve itself opt in.
         config.streaming_kv_auto = streaming_kv_auto ? 1 : 0;
         config.streaming_kv_enabled = 0;
+        config.streaming_kv_window = streaming_window;
         return imp_context_create(model, &config, &ctx) == IMP_SUCCESS;
     }
 };
@@ -159,6 +162,32 @@ TEST(ServingSignalsTest, GraphsComeBackWhenThePressureClearsWithoutEvictions) {
     EXPECT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::None)
         << "the demotion outlived the pressure that caused it";
     EXPECT_EQ(engine->executor()->streaming_window(), 0) << "StreamingLLM stayed armed";
+    be.stop();
+}
+
+// Roadmap open 3: the >90 % valve armed on F16 pools only, and the resolver's default for every
+// Qwen3 checkpoint is FP8 KV, so a quantised pool under pressure cancelled the request instead.
+// A 24-block pool (384 tokens) with a 128-token streaming window: the valve arms on the FP8 pool,
+// eviction keeps the sequence inside the pool, and 600 generated tokens finish "length".
+TEST(ServingSignalsTest, QuantizedKvPressureArmsTheValveAndTheRequestFinishes) {
+    if (!model_exists())
+        GTEST_SKIP() << "Model not found: " << model_path();
+    Loaded m;
+    ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/24, /*streaming_kv_auto=*/true, "auto",
+                       /*streaming_window=*/128));
+    auto* engine = m.ctx->engine.get();
+    ASSERT_NE(engine->kv_cache()->qtype(), imp::QType::F16)
+        << "the resolver must pick a quantised pool here, or this is the F16 test again";
+    BatchingEngine be;
+    be.start(m.ctx);
+    Served r{make_request(m.ctx, long_prompt(), 600, 1.0f)};
+    be.submit(r.sr);
+    ASSERT_TRUE(drain(r, 180000)) << "the request never finished";
+    EXPECT_EQ(r.finish, "length") << "the valve did not hold the pool";
+    EXPECT_EQ(r.tokens, 600);
+    EXPECT_EQ(engine->streaming_kv_auto_enables(), 1u) << "the valve did not fire on the quantised pool";
+    EXPECT_GT(engine->streaming_kv_evicted_blocks(), 0u) << "armed, but nothing was evicted";
+    EXPECT_GT(r.sr->request->evicted_kv_tokens, 0);
     be.stop();
 }
 

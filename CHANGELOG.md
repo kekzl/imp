@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+- The >90 % KV-pressure valve (StreamingLLM auto-enable) arms on every KV dtype, not only F16: Qwen3-8B-Q8_0 on its default FP8 pool, 24 blocks (384 tokens), 600 tokens requested, finishes `length` instead of `capacity`; `--streaming-kv` is accepted on every dtype. Kernels without a sink range attend every live block under sinks instead of dropping them; a layer's own narrower window stays. Paired A/B vs main: decode -0.10 %, prefill +0.05 % (#2043)
+
 ## [0.42.0] - 2026-09-16
 
 ### Added

@@ -384,7 +384,10 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                                   const int* context_lens, int block_size, float scale, int max_context_len,
                                   int sliding_window, float softcap, cudaStream_t stream,
                                   int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
-    (void)n_sinks;  // StreamingLLM not yet wired; LEARNED sinks are (#1345)
+    // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
+    // of evict_middle_blocks define sinks + window. LEARNED sinks are wired (#1345).
+    if (n_sinks > 0)
+        sliding_window = 0;
     const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -492,7 +495,10 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                                      float scale, int max_context_len, int sliding_window, float softcap,
                                      cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
                                      const void* attn_sinks) {
-    (void)n_sinks;  // StreamingLLM not yet wired; LEARNED sinks are (#1345)
+    // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
+    // of evict_middle_blocks define sinks + window. LEARNED sinks are wired (#1345).
+    if (n_sinks > 0)
+        sliding_window = 0;
     const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);

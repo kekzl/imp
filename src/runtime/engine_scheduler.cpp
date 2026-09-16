@@ -649,7 +649,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             // member, or a still-active sequence beyond max_batch_size) is a
             // use-after-free once it runs. Cancel THIS sequence and leave the
             // others' KV intact; StreamingLLM auto-enable (above) already
-            // handles the graceful FP16 case before we reach here. Log
+            // handles the graceful case before we reach here. Log
             // loudly: a silent cancel here surfaces as a bare API "internal
             // error" that is expensive to attribute.
             int pool_blocks = kv_cache_raw_ ? kv_cache_raw_->total_blocks() : 0;
@@ -685,8 +685,8 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
     }
 
     // Auto-activate StreamingLLM when KV cache is nearly exhausted.
-    // Only fires once (guards on !streaming_kv_enabled) and only for FP16
-    // KV: quantized variants don't support sentinel-block skipping yet.
+    // Only fires once (guards on !streaming_kv_enabled). Every KV dtype's
+    // decode kernels skip the -1 sentinels (#1704), so every pool has the valve.
     // Never under SWA sizing (streaming_kv_auto is cleared at init there).
     if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
         // Reclaimable prefix-cache blocks are free for this purpose: the
@@ -710,37 +710,22 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             reclaimable = kv_manager_->num_reclaimable_cached_blocks();
             pool_total = kv_cache_raw_->total_blocks();
         }
-        const bool kv_is_f16 = kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16;
-        if (kv_pressure_warns_no_streaming_valve(st.free_blocks, reclaimable, pool_total, kv_is_f16) &&
-            !kv_pressure_no_valve_warned_.test_and_set(std::memory_order_relaxed)) {
-            // Without this warn, a model whose KV dtype has no valve fails
-            // silently here; the next visible event is the hard cancel
-            // further up once the pool runs dry (AUDIT_arch_2026 C-4).
-            IMP_LOG_WARN(
-                "KV cache >90%% full (%d free + %d reclaimable of %d blocks) and StreamingLLM is "
-                "unavailable on kv_cache.dtype=%s (sentinel-block skipping is F16-only): there is "
-                "no valve, and requests will be CANCELLED once the pool runs dry. Lower "
-                "runtime.max_seq_len or runtime.max_batch_size, or raise the pool.",
-                st.free_blocks, reclaimable, pool_total,
-                kv_cache_raw_ ? qtype_name(kv_cache_raw_->qtype()) : "unknown");
-        }
         if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
-            if (kv_is_f16) {
-                config_.streaming_kv_enabled = true;
-                streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
-                int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
-                int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
-                                                            : model_->config().sliding_window;
-                if (win <= 0)
-                    win = 4096;
-                config_.streaming_kv_window = win;
-                executor_->set_streaming_kv(n_sinks, win);
-                IMP_LOG_WARN(
-                    "KV cache >90%% full (%d free + %d reclaimable of %d blocks) - auto-enabling "
-                    "StreamingLLM (sinks=%d, window=%d)",
-                    st.free_blocks, reclaimable, pool_total, n_sinks, win);
-                demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
-            }
+            config_.streaming_kv_enabled = true;
+            streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
+            int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
+            int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
+                                                        : model_->config().sliding_window;
+            if (win <= 0)
+                win = 4096;
+            config_.streaming_kv_window = win;
+            executor_->set_streaming_kv(n_sinks, win);
+            IMP_LOG_WARN(
+                "KV cache >90%% full (%d free + %d reclaimable of %d blocks) - auto-enabling "
+                "StreamingLLM (sinks=%d, window=%d, kv_cache.dtype=%s)",
+                st.free_blocks, reclaimable, pool_total, n_sinks, win,
+                kv_cache_raw_ ? qtype_name(kv_cache_raw_->qtype()) : "unknown");
+            demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
         }
     } else if (config_.streaming_kv_enabled &&
                graph_demotion_ == GraphDemotionReason::StreamingKvKvPressure) {

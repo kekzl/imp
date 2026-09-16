@@ -430,10 +430,6 @@ private:
     std::atomic<uint64_t> kv_pressure_rejections_{0};
     std::atomic<uint64_t> streaming_kv_auto_enables_{0};
     std::atomic<uint64_t> streaming_kv_evicted_blocks_{0};
-    // Once per ENGINE: the >90% pressure trigger fired on a KV dtype with no
-    // StreamingLLM valve (per-step would flood the log). A model swap builds
-    // a new Engine and warns again correctly (new pool, new dtype).
-    std::atomic_flag kv_pressure_no_valve_warned_ = ATOMIC_FLAG_INIT;
     std::atomic<uint64_t> graph_repromotions_{0};
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;

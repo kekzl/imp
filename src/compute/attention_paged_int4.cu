@@ -363,10 +363,11 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window, float softcap, cudaStream_t stream,
                                  int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
-    // StreamingLLM (n_sinks > 0) not yet wired into INT4 decode; falls back
-    // to sliding-window when n_sinks is non-zero. LEARNED sinks (attn_sinks,
+    // StreamingLLM (n_sinks > 0): these kernels have no sink range, so attend every live block and let
+    // the -1 sentinels of evict_middle_blocks define sinks + window. LEARNED sinks (attn_sinks,
     // gpt-oss) are wired (#1345), same five places as the FP8/INT8 paths.
-    (void)n_sinks;
+    if (n_sinks > 0)
+        sliding_window = 0;
     const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);

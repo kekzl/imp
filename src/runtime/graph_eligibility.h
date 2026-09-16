@@ -60,16 +60,6 @@ inline bool kv_pressure_repromotes_graphs(int free_blocks, int reclaimable_block
     return evicted_blocks == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;
 }
 
-// The valve above is F16-only: StreamingLLM's -1 sentinels have no
-// equivalent in quantized KV layouts. On FP8/NVFP4 KV (the default for
-// Qwen3.8-27B and every hybrid) the same 90 % pressure has no valve, so this
-// logs which pool state fired, once per process, instead of the operator
-// only seeing the eventual hard cancel in decode_prepare_kv_.
-inline bool kv_pressure_warns_no_streaming_valve(int free_blocks, int reclaimable_blocks,
-                                                 int pool_total, bool kv_is_f16) {
-    return !kv_is_f16 && kv_pressure_demotes_graphs(free_blocks, reclaimable_blocks, pool_total);
-}
-
 // Caps a bounded async-loop burst's step count against the tokens it has
 // (`prepare_graph_loop`: max_tokens left, capped by reserved KV blocks). A
 // wider cap made the parked runner refuse rearm on a request's last burst

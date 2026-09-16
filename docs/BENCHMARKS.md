@@ -747,7 +747,7 @@ medians; #1882 vs the #1880 tree), Llama-3.2-3B-Instruct-Q8_0:
 gemma-3-12b (HD=256) reads flat at 8k (134.8 vs 134.7): its split-K pipeline
 kernel already ran at 1 419 GB/s in the microbench. A 4500-block pool at 64k
 left 8.8% free and both arms decoded inside the StreamingLLM window
-(206-212 tok/s, above the 32k figure); the >90% valve is F16-only, which is
+(206-212 tok/s, above the 32k figure); the >90% valve was F16-only then, which is
 also why `imp-cli --bench` needed #1883 before it could measure these shapes.
 ## Multi-turn TTFT (hybrid prefix caching, #831 / v0.15.0)
 

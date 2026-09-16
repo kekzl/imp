@@ -274,7 +274,10 @@ def main():
     # and ThinkCloseRepeatsBatchedVsSolo (server-shaped think-close repro), GDN container.
     # 1120 -> 1126: GemmF16NarrowPrefill.* (test-compute): the prefill alpha/beta GEMM vs a double
     # reference at M=33..4096, split 1 without workspace, determinism, refusals, bench vs cuBLAS.
-    PINNED = 1126
+    # 1126 -> 1127 (roadmap open 3): one GPU test in test-e2e driving the
+    # StreamingLLM valve on a quantised (FP8) KV pool through the real
+    # BatchingEngine; needs a card and Qwen3-8B-Q8_0.
+    PINNED = 1127
 
     text = CMAKE.read_text()
     mods = module_sources(text)
