@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-16
+
 ### Added
 - `gemm.nvfp4_gdn_proj_prefill` (default `false`; `all` or a list of in|gate|out): NVFP4 prefill copies of the F16 GDN projections of a native-NVFP4 hybrid, M>32 rows on the CUTLASS W4A4 GEMM instead of cuBLAS FP16 (290-345 TFLOPS on every shape, merged N included). Qwen3.6-35B `in,gate`: pp4096 146.66 / 147.18 / 146.18 -> 127.06 / 127.60 / 128.42 ms (+15.4%, 3 alternating pairs), PPL 6.8543 -> 6.9781 (+1.81%; `all` +4.25%), so it stays opt-in. Decode and M<=32 rows are untouched. Roadmap Open 12 closed.
 - `imp-quantize` splits 3-D expert stacks (gpt-oss `mlp.experts.gate_up_proj` [32, 2880, 5760], Gemma-4 `experts.gate_up_proj` [128, 1408, 2816]) into the per-expert 2-D matrices the loader reads, by a per-model_type layout descriptor (`tools/imp-quantize/expert_destack.cpp`); a model_type without one is refused as before. gpt-oss's 2^-4 residual rescale now lands in the NVFP4 tensor scales of Wo and the expert down projections (Phase 0) instead of refusing a non-BF16 Wo. gpt-oss-20b BF16 -> NVFP4: 12 820 MiB, PPL 179.23 vs 312.50 for the MXFP4 GGUF on `ppl_corpus_45k.txt` (roadmap item 7, `docs/quantization.md`).
