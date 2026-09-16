@@ -26,8 +26,12 @@ FROM nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5
 
 ARG CMAKE_BUILD_TYPE=Release
 
+# The CUDA apt source is dropped before every apt-get update in this file: nothing installed
+# here comes from it, and its index shipped malformed on 2026-09-16 (sections without a
+# Package: header), which failed the build in both stages.
 RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.com|de.archive.ubuntu.com|g' \
           /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true; } \
+    && rm -f /etc/apt/sources.list.d/cuda*.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         g++ git ninja-build ca-certificates python3 wget ccache \
@@ -141,8 +145,7 @@ LABEL org.opencontainers.image.title="imp" \
 ARG IMP_TREE_ID=
 LABEL imp.tree="${IMP_TREE_ID}"
 
-# curl and jq come from Ubuntu; the CUDA apt source is dropped first because its index has
-# shipped malformed (2026-09-16: 5 sections without a Package: header broke `apt-get update`).
+# curl and jq come from Ubuntu; the CUDA apt source is dropped first (see the toolchain stage).
 RUN rm -f /etc/apt/sources.list.d/cuda*.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         curl \
