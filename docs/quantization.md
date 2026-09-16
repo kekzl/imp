@@ -73,7 +73,8 @@ and measured (+16% at 32 streams, +36% at 8, #1766); `gemm.nvfp4_smallm=false` f
 > quantization loss; the result still sits below a published Modelopt export. For evaluation and
 > perf work, not shipping.
 
-Turns a dense BF16/FP16 or block-scaled FP8 SafeTensors checkpoint into NVFP4:
+Turns a dense BF16/FP16 or block-scaled FP8 SafeTensors checkpoint into NVFP4 (MoE: per-expert
+2-D tensors as they are, 3-D expert stacks split per expert, see the MoE section below):
 
 ```bash
 # 1. one calibration pass over a corpus - writes per-channel activation stats
@@ -241,7 +242,8 @@ which is what makes a `[head_dim]` norm shared by 48 heads foldable at all).
   0's dense MLP, the only routerless layer), one line per refusal.
 - `--calib` does not calibrate MoE experts yet: the planner groups the dense FFN by name
   (`mlp.gate_proj` / `mlp.up_proj` / `mlp.down_proj`), not `mlp.experts.<e>.*`. Attention groups
-  still calibrate; experts stay at round-to-nearest, stated per layer in the output.
+  still calibrate; experts stay at round-to-nearest, stated per layer in the output. Split expert
+  stacks (below) are experts too and get the same treatment.
 - Every export (calibrated or not) prints one provenance line at the start, one error line at the
   end, and writes `quant_report.json` beside the weights: per tensor the max relative error against
   the tensor's absmax and the MSE, decoded from the bytes that were written rather than from imp's
@@ -411,6 +413,28 @@ Per-expert 2-D tensors were quantized and silently produced broken checkpoints. 
 | MLP + all 4992 expert tensors, attention left BF16 | coherent |
 
 Expert quantization works. Culprits: MLA latent projections (the runtime slices `kv_a_proj_with_mqa` into latent+RoPE and reshapes `kv_b_proj` into per-head nope/v halves) and MoE router (FP4 across 16 shared-scale values changes the top-k pick). Both refused. With them excluded: 29.26 GiB -> 8.91 GiB (3.28x) in ~70 s; `degen_suite.py` 3 FAIL / 32 vs BF16 source 5 FAIL / 32, a strict subset. Still unsupported: expert weights as `[n_experts, N, K]` stacks (gpt-oss-style); left unquantized.
+
+3-D expert stacks (one tensor per projection per layer: gpt-oss `mlp.experts.gate_up_proj`
+[32, 2880, 5760], Gemma-4 `experts.gate_up_proj` [128, 1408, 2816]) are split into the per-expert
+2-D matrices (`experts.<e>.{gate,up,down}_proj.weight`) before quantizing: the layout every
+published NVFP4 export of these models uses, and the only one `weight_map.cpp` maps to
+`expert_w_gate/up/down`. The stack's orientation and gate/up pairing come from a per-model_type
+descriptor (`tools/imp-quantize/expert_destack.cpp`: gpt-oss stores [ne, K, N] with gate/up rows
+interleaved, Gemma-4 [ne, N, K] concatenated), never from the shape: gpt-oss-20b's down stack is
+[32, 2880, 2880], where a shape test cannot tell the two apart and both quantize into a checkpoint
+that loads. A model_type without a descriptor is refused. Gate and up of one expert share a
+tensor scale (the fused-layer rule); the per-expert biases (`gate_up_proj_bias`,
+`down_proj_bias`) are copied through and de-interleaved by the loader as for the MXFP4 source.
+gpt-oss's 2^-4 residual rescale lands in the NVFP4 tensor scales of Wo and the expert down
+projections at Phase 0 (`pre_dequant_phase0_nvfp4_loader.cu`) instead of the BF16 bytes.
+Measured 2026-09-16 on `unsloth/gpt-oss-20b-BF16` (39 GiB, 48 stacks = 91.4 % of the bytes):
+2400 tensors quantized, 267 copied, 12 820 MiB on disk, worst per-tensor max-rel error 0.1477,
+mean 0.0389; the checkpoint loads (7467 tensors assigned, 0 skipped, 792 NVFP4 tensor scales
+carry the 2^-4), `ppl_corpus_45k.txt` deterministic PPL 179.23 against 312.50 for
+`gpt-oss-20b-mxfp4.gguf` in the same binary (gpt-oss reads 151-308 on this corpus across
+container restarts, cuBLAS algorithm reselection per process, so the pair is a class check, not
+a ranking), greedy Harmony output coherent. Gemma-4 is unrun.
+The split itself is pinned by `test_quantize_expert_destack.cpp` on the real shapes.
 
 Workflow with Modelopt:
 

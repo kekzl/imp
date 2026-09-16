@@ -532,6 +532,7 @@ if(IMP_BUILD_TOOLS)
     add_executable(imp-quantize
         tools/imp-quantize/main.cpp
         tools/imp-quantize/tensor_policy.cpp
+        tools/imp-quantize/expert_destack.cpp
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
@@ -815,6 +816,11 @@ if(IMP_BUILD_TESTS)
         # checkpoint (#1159), so it is compiled into the CPU lane directly.
         tools/imp-quantize/tensor_policy.cpp
         tests/test_quantize_policy.cpp
+        # The 3-D expert stack -> per-expert 2-D split (gpt-oss, Gemma-4). A transposed or
+        # mis-paired matrix quantizes into a checkpoint that loads, so the index arithmetic is
+        # pinned on the CPU lane against the real shapes.
+        tools/imp-quantize/expert_destack.cpp
+        tests/test_quantize_expert_destack.cpp
         # FP8 quantization source read is host-only: bit-level decode is checked by the CPU lane,
         # not by inspecting a converted checkpoint where a wrong exponent bias/stride looks plausible.
         tools/imp-quantize/fp8_source.cpp

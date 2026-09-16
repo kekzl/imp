@@ -5,8 +5,9 @@
 // hf_quant_config.json) or compressed-tensors (--format vllm: weight_packed/weight_scale/
 // weight_global_scale=1/scale + quantization_config in config.json). Both read by imp; only
 // the second by vLLM.
-// Scope: dense models and MoE with per-expert 2-D tensors; 3-D stacked-expert checkpoints
-// (gpt-oss-style) are REFUSED (tensor_policy.h). MLA latent projections and the MoE router are
+// Scope: dense models and MoE with per-expert 2-D tensors; 3-D expert stacks (gpt-oss, Gemma-4)
+// are split into per-expert matrices by a per-model layout descriptor (expert_destack.h) and
+// refused for a model_type without one. MLA latent projections and the MoE router are
 // excluded from quantization even though 2-D/K-aligned (should_quantize).
 // Quality (ppl_corpus_45k.txt, calibrated on separate prose): Qwen3-0.6B BF16 24.08 -> RTN
 // 29.42 -> AWQ 27.60; Qwen3-1.7B BF16 17.22 -> RTN 20.39 -> AWQ 18.71. A short (199-token)
@@ -20,6 +21,7 @@
 #include "common/exit_codes.h"
 #include "awq.h"
 #include "checkpoint_out.h"
+#include "expert_destack.h"
 #include "fp8_source.h"
 #include "quant_report.h"
 #include "tensor_policy.h"
@@ -41,6 +43,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <set>
 #include <map>
 #include <memory>
@@ -120,8 +123,6 @@ void usage() {
 bool ends_with(const std::string& s, const std::string& suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
-
-bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
 
 // Look up a plan vector by tensor name, or an empty one when the plan has
 // nothing to say about it. awq_apply_* treat empty (and wrong-length) vectors
@@ -211,6 +212,134 @@ std::expected<std::vector<uint16_t>, std::string> tensor_as_fp16(
     awq_apply_matrix(out, t.shape[0], t.shape[1], plan_vec(plan.row_div, t.name),
                      plan_vec(plan.col_scale, t.name));
     return out;
+}
+
+// 3-D expert stacks (gpt-oss, Gemma-4) are split into the per-expert 2-D matrices the loader
+// reads, by the model's layout descriptor (expert_destack.h). Without a descriptor the checkpoint
+// is refused before anything is written: the experts are the bulk of the bytes, a guessed layout
+// quantizes a transposed or mis-paired matrix that still loads, and copying them through would
+// label a mostly-BF16 checkpoint NVFP4 (#1188). false = refused, already printed.
+bool resolve_expert_stacks(const std::vector<std::unique_ptr<RawSafeTensors>>& opened,
+                           const std::string& in_dir, std::set<std::string>& stacked_names,
+                           quantize::StackedExpertLayout& stack_layout) {
+    std::vector<const RawTensor*> stacked;
+    size_t stacked_bytes = 0, total_bytes = 0;
+    for (const auto& src : opened) {
+        for (const auto& t : src->tensors())
+            total_bytes += t.nbytes;
+        auto found = quantize::find_stacked_expert_tensors(src->tensors());
+        for (const RawTensor* t : found)
+            stacked_bytes += t->nbytes;
+        stacked.insert(stacked.end(), found.begin(), found.end());
+    }
+    if (stacked.empty())
+        return true;
+    const std::string model_type = quantize::model_type_from_config(
+        (fs::path(in_dir) / "config.json").string());
+    const auto layout = quantize::stacked_expert_layout(model_type);
+    const double share = total_bytes ? 100.0 * double(stacked_bytes) / double(total_bytes) : 0.0;
+    if (!layout) {
+        fprintf(stderr,
+                "refusing: %zu tensor(s) store MoE experts as a 3-D stack (%.1f%% of this\n"
+                "checkpoint) and this tool has no stack layout for model_type '%s'\n"
+                "(known: gpt_oss, gemma4). A guessed layout quantizes a transposed or\n"
+                "mis-paired matrix that loads; add the descriptor to expert_destack.cpp.\n",
+                stacked.size(), share, model_type.c_str());
+        for (size_t i = 0; i < stacked.size() && i < 3; ++i)
+            fprintf(stderr, "  %s\n", stacked[i]->name.c_str());
+        if (stacked.size() > 3)
+            fprintf(stderr, "  ... and %zu more\n", stacked.size() - 3);
+        return false;
+    }
+    stack_layout = *layout;
+    for (const RawTensor* t : stacked)
+        stacked_names.insert(t->name);
+    printf(
+        "  SPLITTING %zu expert stack(s), %.1f%% of the checkpoint, into per-expert matrices "
+        "(model_type %s: %s, gate/up %s)\n",
+        stacked.size(), share, model_type.c_str(), layout->transposed ? "[ne,K,N]" : "[ne,N,K]",
+        layout->gate_up == quantize::GateUpOrder::Interleaved ? "interleaved" : "concatenated");
+    return true;
+}
+
+// Plans every stack in one shard: each becomes ne x (2|1) matrices, and the shard's stores hand
+// out pointers into themselves, so their reserve must count them (`n_destacked`).
+bool plan_shard_stacks(const RawSafeTensors& src, const std::set<std::string>& stacked_names,
+                       const quantize::StackedExpertLayout& layout,
+                       std::map<std::string, std::vector<quantize::DestackedMatrix>>& plans,
+                       size_t& n_destacked) {
+    for (const auto& t : src.tensors()) {
+        if (!stacked_names.count(t.name))
+            continue;
+        auto planned = quantize::destack_plan(t, layout);
+        if (!planned) {
+            fprintf(stderr, "  %s: %s\n", t.name.c_str(), planned.error().c_str());
+            return false;
+        }
+        n_destacked += planned->size();
+        plans[t.name] = std::move(*planned);
+    }
+    return true;
+}
+
+// The per-shard sinks one quantized matrix lands in, bundled so the expert-stack step appends
+// exactly as main()'s own loop does.
+struct ShardSinks {
+    std::vector<Quantized>& quant_store;
+    std::vector<float>& scale_store;
+    std::vector<SafeTensorsOut>& out;
+    std::vector<quantize::TensorError>& tensor_errors;
+    size_t& bytes_out;
+    size_t& n_quantized;
+};
+using EmitFn = std::function<void(std::vector<SafeTensorsOut>&, std::vector<float>&, const std::string&,
+                                  int64_t, int64_t, const Quantized&)>;
+
+// One expert stack: its per-expert matrices quantized and emitted, the stack itself never
+// written. Gate and up of one expert share a tensor scale, the fused-layer rule of
+// checkpoint_out.h (the loader merges them as vLLM merges w13). Dry run: forecast only.
+bool quantize_expert_stack(const RawTensor& t, const std::vector<quantize::DestackedMatrix>& ms,
+                           const quantize::StackedExpertLayout& layout, bool dry_run, ShardSinks& s,
+                           const EmitFn& emit) {
+    if (dry_run) {
+        printf("  QUANT %-58s %zu per-expert matrices [%lld,%lld]\n", t.name.c_str(), ms.size(),
+               (long long)ms[0].N, (long long)ms[0].K);
+        for (const auto& m : ms)
+            s.bytes_out += quantize::nvfp4_output_bytes(m.N, m.K);
+        s.n_quantized += ms.size();
+        return true;
+    }
+    auto one = [&](const quantize::DestackedMatrix& m, const std::vector<uint16_t>& h, float forced) -> bool {
+        auto quantized = quantize_one(h, m.N, m.K, forced);
+        if (!quantized) {
+            fprintf(stderr, "  %s: %s\n", m.name.c_str(), quantized.error().c_str());
+            return false;
+        }
+        s.quant_store.push_back(std::move(*quantized));
+        const Quantized& q = s.quant_store.back();
+        emit(s.out, s.scale_store, m.name, m.N, m.K, q);
+        s.tensor_errors.push_back(quantize::nvfp4_tensor_error(m.name, h.data(), q.packed.data(),
+                                                               q.micro.data(), q.tensor_scale, m.N, m.K));
+        s.bytes_out += q.packed.size() + q.micro.size() + sizeof(float);
+        s.n_quantized++;
+        return true;
+    };
+    for (size_t i = 0; i < ms.size(); ++i) {
+        const std::vector<uint16_t> h = quantize::destack_read(t, layout, ms[i]);
+        if (ms[i].part == quantize::ExpertPart::Down) {
+            if (!one(ms[i], h, 0.0f))
+                return false;
+            continue;
+        }
+        // gate at i, its up at i + 1 (destack_plan orders them so)
+        const std::vector<uint16_t> up = quantize::destack_read(t, layout, ms[i + 1]);
+        const float shared = quantize::export_tensor_scale(
+            std::max(quantize::fp16_absmax(h.data(), h.size()), quantize::fp16_absmax(up.data(), up.size())));
+        if (!one(ms[i], h, shared) || !one(ms[i + 1], up, shared))
+            return false;
+        ++i;
+    }
+    return true;
 }
 
 // What is gone from the card before imp allocates a single weight: kMeasuredLibraryReserveBytes
@@ -375,37 +504,11 @@ int main(int argc, char** argv) {
         opened.push_back(std::move(src));
     }
 
-    // Refuses a stacked-expert checkpoint before writing anything: the experts are the bulk of
-    // the bytes and there is no NVFP4 layout the loader can read them back from, so
-    // "quantizing" one produced a checkpoint mostly still BF16 that claimed NVFP4 in its config.
-    {
-        std::vector<const RawTensor*> stacked;
-        size_t stacked_bytes = 0, total_bytes = 0;
-        for (const auto& src : opened) {
-            for (const auto& t : src->tensors())
-                total_bytes += t.nbytes;
-            auto found = quantize::find_stacked_expert_tensors(src->tensors());
-            for (const RawTensor* t : found)
-                stacked_bytes += t->nbytes;
-            stacked.insert(stacked.end(), found.begin(), found.end());
-        }
-        if (!stacked.empty()) {
-            fprintf(stderr,
-                    "refusing: %zu tensor(s) store MoE experts as a 3-D stack — %.1f%% of this\n"
-                    "checkpoint — and imp has no NVFP4 layout to read stacked experts back from.\n"
-                    "Quantizing would copy them through unchanged and still label the result\n"
-                    "NVFP4, so the output would claim a size and bandwidth win it does not have.\n",
-                    stacked.size(), total_bytes ? 100.0 * double(stacked_bytes) / double(total_bytes) : 0.0);
-            for (size_t i = 0; i < stacked.size() && i < 3; ++i)
-                fprintf(stderr, "  %s\n", stacked[i]->name.c_str());
-            if (stacked.size() > 3)
-                fprintf(stderr, "  ... and %zu more\n", stacked.size() - 3);
-            fprintf(stderr,
-                    "Supported layout: one 2-D tensor per expert\n"
-                    "(`...mlp.experts.<e>.gate_proj.weight`), which is the HF standard.\n");
-            return 1;
-        }
-    }
+    // Expert stacks: split per expert by the model's layout, or refused (resolve_expert_stacks).
+    std::set<std::string> stacked_names;
+    quantize::StackedExpertLayout stack_layout;
+    if (!resolve_expert_stacks(opened, opt.in_dir, stacked_names, stack_layout))
+        return 1;
 
     // Fused Q+gate projections are quantized like anything else; reported because the gate half
     // is where #1273's divergence is created (+0.0169 injected per attention block on a rounded
@@ -492,6 +595,10 @@ int main(int argc, char** argv) {
         printf("\n");
         for (const auto& n : plan.notes)
             printf("  note: %s\n", n.c_str());
+        if (!stacked_names.empty())
+            printf(
+                "  note: expert stacks are quantized round-to-nearest (the planner has no per-expert "
+                "groups, as for every MoE)\n");
         if (plan.groups_scaled == 0) {
             fprintf(stderr,
                     "AWQ found no group worth scaling — refusing to write a checkpoint that\n"
@@ -601,7 +708,7 @@ int main(int argc, char** argv) {
         out.push_back({names.global_scale, "F32", {1}, &scale_store.back(), sizeof(float)});
     };
 
-    size_t n_quantized = 0, n_copied = 0, n_moe_skipped = 0;
+    size_t n_quantized = 0, n_copied = 0, n_stacks_split = 0;
     // What every quantized tensor cost, measured on the bytes that were
     // written. Costs no GPU: the packed nibbles and micro-scales are already
     // on the host at this point.
@@ -627,8 +734,12 @@ int main(int argc, char** argv) {
         // FP8 weights this tool refuses: widened here, so the buffer must outlive
         // the descriptor that points at it.
         std::vector<std::vector<uint16_t>> widened_store;
-        quant_store.reserve(src.tensors().size());
-        scale_store.reserve(src.tensors().size());
+        std::map<std::string, std::vector<quantize::DestackedMatrix>> stack_plans;
+        size_t n_destacked = 0;
+        if (!plan_shard_stacks(src, stacked_names, stack_layout, stack_plans, n_destacked))
+            return 1;
+        quant_store.reserve(src.tensors().size() + n_destacked);
+        scale_store.reserve(src.tensors().size() + n_destacked);
         folded_store.reserve(src.tensors().size());
         widened_store.reserve(src.tensors().size());
         std::vector<SafeTensorsOut> out;
@@ -702,6 +813,14 @@ int main(int argc, char** argv) {
                 n_quantized++;
                 continue;
             }
+            // An expert stack: quantized as its per-expert matrices (quantize_expert_stack).
+            if (const auto sp = stack_plans.find(t.name); sp != stack_plans.end()) {
+                ShardSinks sinks{quant_store, scale_store, out, tensor_errors, bytes_out, n_quantized};
+                if (!quantize_expert_stack(t, sp->second, stack_layout, opt.dry_run, sinks, emit_quantized))
+                    return 1;
+                n_stacks_split++;
+                continue;
+            }
             std::string why;
             // Checked before should_quantize, which sees one tensor and cannot
             // know a q_proj is gated — that needs the layer's o_proj too.
@@ -709,10 +828,6 @@ int main(int argc, char** argv) {
             if (gated)
                 why = "fused Q+gate projection (--keep-attn-gate)";
             if (gated || !quantize::should_quantize(t, opt.quantize_lm_head, why)) {
-                if (contains(why, "3-D stacked")) {
-                    n_moe_skipped++;
-                    printf("  SKIP  %-58s %s\n", t.name.c_str(), why.c_str());
-                }
                 if (ends_with(t.name, ".weight") && t.shape.size() >= 2) {
                     // Record real matrices we left alone so the runtime does not
                     // expect scales for them.
@@ -856,8 +971,8 @@ int main(int argc, char** argv) {
                   "\n      on Qwen3-14B (PPL 9.93 -> 12.3-12.6). The attention groups are the cause:"
                   "\n      on wide-GQA models prefer --calib-groups BD (14B: 9.79, better than RTN)."
                 : "");
-    if (n_moe_skipped)
-        printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
+    if (n_stacks_split)
+        printf(", %zu expert stack(s) split into per-expert matrices", n_stacks_split);
     printf("\nsize: %.2f GiB -> %.2f GiB (%.2fx)%s", bytes_in / 1073741824.0, bytes_out / 1073741824.0,
            bytes_out ? double(bytes_in) / double(bytes_out) : 0.0, opt.dry_run ? " (forecast)" : "");
     // What it cost, per tensor. Until this line existed the only number an

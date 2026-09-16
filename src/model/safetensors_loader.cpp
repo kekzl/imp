@@ -1488,6 +1488,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         auto scale_bf16_pow2 = [&](Tensor& t, int neg_exp) -> bool {
             if (!t.data || t.on_device)
                 return true;
+            // An NVFP4-packed Wo (U8 nibbles, INT8 wire qtype until Phase 0 promotes it) carries
+            // the 2^-4 in its tensor_scale instead: pre_dequant_phase0_nvfp4_loader.cu.
+            if (cfg.is_nvfp4_prequant && t.qtype == QType::INT8)
+                return true;
             if (t.qtype != QType::BF16) {
                 IMP_LOG_ERROR("gpt-oss rescale: expected BF16, got qtype %d", std::to_underlying(t.qtype));
                 return false;
