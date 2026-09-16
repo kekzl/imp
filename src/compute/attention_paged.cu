@@ -284,14 +284,13 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
     for (int i = 0; i < ELEMS; i++)
         o_reg[i] = 0.0f;
 
-    // NOTE: n_sinks is threaded into the kernel signature for API parity but
-    // streaming (sinks+window) is only implemented in the GQA kernel variant.
-    // This path falls back to classical sliding-window by passing n_sinks=0.
-    const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
+    // Sinks + window (n_sinks > 0) is implemented only in the GQA kernel. Here a sink request attends
+    // every live block and the -1 sentinels of evict_middle_blocks define sinks + window.
+    const ContextRange range_ = compute_context_range(ctx_len, block_size, (n_sinks > 0) ? 0 : sliding_window,
+                                                      0);
     const int effective_start = range_.effective_start;
     const int first_block = range_.first_block;
     const int num_ctx_blocks = range_.num_ctx_blocks;
-    (void)n_sinks;
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -441,14 +440,13 @@ __global__ void paged_attention_decode_kernel_generic(
     for (int i = 0; i < v_elems_per_thread; i++)
         o_reg[i] = 0.0f;
 
-    // NOTE: n_sinks is threaded into the kernel signature for API parity but
-    // streaming (sinks+window) is only implemented in the GQA kernel variant.
-    // This path falls back to classical sliding-window by passing n_sinks=0.
-    const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
+    // Sinks + window (n_sinks > 0) is implemented only in the GQA kernel. Here a sink request attends
+    // every live block and the -1 sentinels of evict_middle_blocks define sinks + window.
+    const ContextRange range_ = compute_context_range(ctx_len, block_size, (n_sinks > 0) ? 0 : sliding_window,
+                                                      0);
     const int effective_start = range_.effective_start;
     const int first_block = range_.first_block;
     const int num_ctx_blocks = range_.num_ctx_blocks;
-    (void)n_sinks;
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -596,13 +594,13 @@ __global__ void paged_attention_splitk_kernel(
         }
     }
 
-    // n_sinks is threaded into the signature for API parity; sinks+window streaming is only
-    // implemented in the GQA kernel variant. This path falls back to sliding-window with n_sinks=0.
-    const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
+    // Sinks + window (n_sinks > 0) is implemented only in the GQA kernel. Here a sink request attends
+    // every live block and the -1 sentinels of evict_middle_blocks define sinks + window.
+    const ContextRange range_ = compute_context_range(ctx_len, block_size, (n_sinks > 0) ? 0 : sliding_window,
+                                                      0);
     const int effective_start = range_.effective_start;
     const int first_block = range_.first_block;
     const int num_ctx_blocks = range_.num_ctx_blocks;
-    (void)n_sinks;
     const int total_blocks = num_ctx_blocks - first_block;
 
     // Divide blocks among splits
@@ -797,13 +795,13 @@ __global__ void paged_attention_splitk_pipeline_kernel(
         }
     }
 
-    // n_sinks is threaded into the signature for API parity; sinks+window streaming is only
-    // implemented in the GQA kernel variant. This path falls back to sliding-window with n_sinks=0.
-    const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
+    // Sinks + window (n_sinks > 0) is implemented only in the GQA kernel. Here a sink request attends
+    // every live block and the -1 sentinels of evict_middle_blocks define sinks + window.
+    const ContextRange range_ = compute_context_range(ctx_len, block_size, (n_sinks > 0) ? 0 : sliding_window,
+                                                      0);
     const int effective_start = range_.effective_start;
     const int first_block = range_.first_block;
     const int num_ctx_blocks = range_.num_ctx_blocks;
-    (void)n_sinks;
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;

@@ -239,6 +239,8 @@ struct PathCtx {
     void* d_o;
     int* d_bt;
     int* d_ctx;
+    int sliding_window = 0;  // 0 = full attention
+    int n_sinks = 0;         // StreamingLLM sinks; > 0 needs sliding_window > 0
     void clear_o() const { cudaMemset(d_o, 0, q_elems * sizeof(half)); }
     Tensor O() const { return f16_tensor(d_o, {1, 1, n_heads, head_dim}); }
 };
@@ -260,8 +262,8 @@ struct PathF16 {
         Tensor V = f16_tensor(d_v, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f,
-                               c.stream, c.num_blocks);
+        paged_attention_decode(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window,
+                               0.0f, c.stream, c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "F16 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -307,8 +309,8 @@ struct PathFP8 {
         Tensor V = raw_tensor(d_v, QType::FP8_E4M3, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode_fp8(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, kv_scale, c.kv_len, 0,
-                                   0.0f, c.stream, c.num_blocks);
+        paged_attention_decode_fp8(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, kv_scale, c.kv_len,
+                                   c.sliding_window, 0.0f, c.stream, c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "FP8 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -360,7 +362,8 @@ struct PathINT8 {
         Tensor O = c.O();
         c.clear_o();
         paged_attention_decode_int8(c.Q, K, V, O, (const half*)d_ks, (const half*)d_vs, c.d_bt, c.d_ctx,
-                                    BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream, c.num_blocks);
+                                    BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f, c.stream,
+                                    c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT8 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -418,7 +421,8 @@ struct PathINT4 {
         Tensor O = c.O();
         c.clear_o();
         paged_attention_decode_int4(c.Q, K, V, O, (const half*)d_ks, (const half*)d_vs, c.d_bt, c.d_ctx,
-                                    BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream, c.num_blocks);
+                                    BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f, c.stream,
+                                    c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -488,7 +492,8 @@ struct PathNVFP4 {
         Tensor O = c.O();
         c.clear_o();
         paged_attention_decode_nvfp4(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
-                                     c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream, c.num_blocks);
+                                     c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f, c.stream,
+                                     c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4 scalar paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -517,8 +522,8 @@ struct PathNVFP4TC {
         Tensor O = c.O();
         c.clear_o();
         paged_attention_decode_nvfp4_tc(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
-                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream,
-                                        c.num_blocks);
+                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f,
+                                        c.stream, c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4-TC paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -551,8 +556,8 @@ struct PathMXFP4KV {
         Tensor O = c.O();
         c.clear_o();
         paged_attention_decode_mxfp4_kv(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
-                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream,
-                                        c.num_blocks);
+                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f,
+                                        c.stream, c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "MXFP4-KV paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -623,6 +628,89 @@ protected:
         cudaFree(d_bt);
         cudaFree(d_ctx);
     }
+
+    // StreamingLLM geometry (roadmap open 3): 32 sink tokens (two blocks), a 32-token window, the
+    // three blocks between them evicted to -1 by evict_middle_blocks. The run over the holey table
+    // must match the fp64 reference over the live set (sinks + window); the window-only arm
+    // (n_sinks=0) must match the window reference. The two references must sit further apart than
+    // twice the envelope, or the pair cannot tell sinks from no sinks (16 sinks against a 48
+    // window read 0.165 apart, under the 0.10-0.12 envelopes of the 4-bit caches).
+    void run_holey_window(const char* cfg, int n_heads, int n_kv_heads, int head_dim) {
+        constexpr int kv_len = 112, n_sinks = 32, window = 32;
+        char trace[160];
+        snprintf(trace, sizeof(trace), "%s %s streaming kv_len=%d nh=%d nkv=%d hd=%d", Path::name(), cfg,
+                 kv_len, n_heads, n_kv_heads, head_dim);
+        SCOPED_TRACE(trace);
+
+        const float scale = 1.0f / std::sqrt((float)head_dim);
+        const int num_blocks = kv_len / BLOCK_SIZE;
+        const size_t q_elems = (size_t)n_heads * head_dim;
+        const size_t tok_elems = (size_t)n_kv_heads * head_dim;
+
+        const uint32_t seed = 0x51A7u + (uint32_t)n_kv_heads * 17u + (uint32_t)head_dim;
+        std::vector<half> Qh(q_elems), Kh(kv_len * tok_elems), Vh(kv_len * tok_elems);
+        lcg_fill(Qh, seed + 1, 2.0f);
+        lcg_fill(Kh, seed + 2, 2.0f);
+        lcg_fill(Vh, seed + 3, 1.0f);
+
+        auto slice = [&](const std::vector<half>& src, int from, int to, std::vector<half>& dst) {
+            dst.insert(dst.end(), src.begin() + (ptrdiff_t)((size_t)from * tok_elems),
+                       src.begin() + (ptrdiff_t)((size_t)to * tok_elems));
+        };
+        std::vector<half> Kl, Vl, Kw, Vw;
+        slice(Kh, 0, n_sinks, Kl);
+        slice(Vh, 0, n_sinks, Vl);
+        slice(Kh, kv_len - window, kv_len, Kl);
+        slice(Vh, kv_len - window, kv_len, Vl);
+        slice(Kh, kv_len - window, kv_len, Kw);
+        slice(Vh, kv_len - window, kv_len, Vw);
+        std::vector<double> ref_live, ref_window;
+        ref_decode_f64(Qh, Kl, Vl, ref_live, n_sinks + window, n_heads, n_kv_heads, head_dim, scale);
+        ref_decode_f64(Qh, Kw, Vw, ref_window, window, n_heads, n_kv_heads, head_dim, scale);
+        double sep = 0.0;
+        for (size_t i = 0; i < q_elems; i++)
+            sep = std::max(sep,
+                           std::fabs(ref_live[i] - ref_window[i]) / std::max(1.0, std::fabs(ref_live[i])));
+        ASSERT_GT(sep, 2.0 * Path::envelope()) << "the two references cannot tell sinks from no sinks";
+
+        std::vector<int> bt(num_blocks);
+        for (int i = 0; i < num_blocks; i++)
+            bt[i] = i;
+        bt[2] = -1;  // sink_end_block = 2, window_start_block = 5: blocks 2..4 are evicted
+        bt[3] = -1;
+        bt[4] = -1;
+        int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+        int ctx = kv_len;
+        int* d_ctx = (int*)up(&ctx, sizeof(int));
+        void* d_q = up(Qh.data(), q_elems * sizeof(half));
+        void* d_o = nullptr;
+        cudaMalloc(&d_o, q_elems * sizeof(half));
+
+        PathCtx c{stream_,  kv_len,     n_heads,   n_kv_heads,
+                  head_dim, num_blocks, scale,     q_elems,
+                  &Kh,      &Vh,        &ref_live, f16_tensor(d_q, {1, 1, n_heads, head_dim}),
+                  d_o,      d_bt,       d_ctx};
+        c.sliding_window = window;
+        c.n_sinks = n_sinks;
+        ErrStats a = Path::run(c);
+        EXPECT_EQ(a.nan_count, 0) << Path::name() << " sinks + window: non-finite output";
+        EXPECT_LT(a.max_rel, Path::envelope())
+            << Path::name() << " sinks + window vs fp64 over the live set: " << a.str();
+
+        c.n_sinks = 0;
+        c.ref = &ref_window;
+        ErrStats b = Path::run(c);
+        EXPECT_EQ(b.nan_count, 0) << Path::name() << " window only: non-finite output";
+        EXPECT_LT(b.max_rel, Path::envelope())
+            << Path::name() << " window only vs fp64 over the window: " << b.str();
+        printf("[paged-oracle] %s: sinks+window %s, window-only %s, ref separation %.3g (env %.3g)\n", trace,
+               a.str().c_str(), b.str().c_str(), sep, Path::envelope());
+
+        cudaFree(d_q);
+        cudaFree(d_o);
+        cudaFree(d_bt);
+        cudaFree(d_ctx);
+    }
 };
 
 using KVDtypes =
@@ -654,6 +742,17 @@ TYPED_TEST(PagedOracle, HD256_Sweep) {
         this->run_shape("gqa24x4", kv_len, 24, 4, 256);
         this->run_shape("mha4x4", kv_len, 4, 4, 256);
     }
+}
+
+// StreamingLLM on every KV dtype (roadmap open 3): under KV-pool pressure evict_middle_blocks
+// leaves -1 sentinels between the sinks and the window. The F16 GQA kernel walks the two ranges;
+// every other kernel attends all live blocks once sinks are requested (the sentinels are the
+// eviction). Both must equal the fp64 reference over the live set, and window-only must still
+// equal the window reference.
+TYPED_TEST(PagedOracle, SinksAndWindowAcrossEvictedBlocks) {
+    this->run_holey_window("gqa32x8", 32, 8, 128);
+    this->run_holey_window("mha8x8", 8, 8, 128);
+    this->run_holey_window("gqa24x4", 24, 4, 256);
 }
 
 // F1 robustness: when the split-K Phase-1 launch fails (smem > 48KiB default without opt-in,

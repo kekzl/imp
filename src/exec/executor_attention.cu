@@ -278,10 +278,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             layer_rope_freq_scale = 1.0f;  // no scaling for local layers
         }
     }
-    // Apply caller-provided streaming window override and gate sinks on SWA-only layers.
-    if (streaming_window_ > 0)
+    // StreamingLLM: the eviction window applies to full-attention layers and to layers whose own
+    // window is wider. A layer with a narrower window keeps it (its tokens are inside the kept
+    // tail) and attends no sinks, so a sliding-attention layer stays the model's.
+    if (streaming_window_ > 0 && (layer_sliding_window <= 0 || layer_sliding_window > streaming_window_))
         layer_sliding_window = streaming_window_;
-    if (layer_sliding_window <= 0)
+    else
         layer_n_sinks = 0;
 
     // SWA-aware KV sizing (kv_cache.swa_sizing): windowed layers read/write

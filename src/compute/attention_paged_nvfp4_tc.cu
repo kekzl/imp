@@ -976,7 +976,10 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
                                   int residual_seq_stride_elems, const int* d_residual_seq_slots,
                                   const int* d_residual_counts, const int* d_residual_write_idxes,
                                   const int* d_residual_fc_per_slot, const int* d_residual_widx_per_slot) {
-    (void)n_sinks;  // streaming not yet wired
+    // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
+    // of evict_middle_blocks define sinks + window.
+    if (n_sinks > 0)
+        sliding_window = 0;
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);

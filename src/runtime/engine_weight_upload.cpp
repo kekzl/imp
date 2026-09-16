@@ -86,34 +86,24 @@ bool Engine::init_weights() {
         }
 
         if (config_.streaming_kv_enabled) {
-            // Streaming is only safe for the FP16 GQA decode kernel: quantized
-            // variants don't yet skip -1 sentinels in their block tables. Refuse
-            // non-FP16 KV caches so evict_middle_blocks never runs an unsupported path.
-            if (config_.kv_cache_dtype != QType::F16) {
-                IMP_LOG_WARN(
-                    "StreamingLLM smart KV cache requires FP16 KV cache "
-                    "(requested %d) — disabling streaming.",
-                    std::to_underlying(config_.kv_cache_dtype));
-                config_.streaming_kv_enabled = false;
+            // Every KV dtype's decode kernels skip the -1 sentinels evict_middle_blocks
+            // leaves (#1704); the quantised kernels attend every live block under sinks.
+            int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
+            int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
+                                                        : model_->config().sliding_window;
+            executor_->set_streaming_kv(n_sinks, win);
+            if (n_sinks > 0 && win > 0) {
+                IMP_LOG_INFO("StreamingLLM smart KV cache enabled: %d sinks + %d-token window", n_sinks, win);
+                // Block-table contents change every step once eviction begins;
+                // a captured graph would replay stale pointers, and re-capturing
+                // per step negates the graph's win, so disable graphs entirely.
+                demote_graphs_(GraphDemotionReason::StreamingKvConfigured);
             } else {
-                int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
-                int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
-                                                            : model_->config().sliding_window;
-                executor_->set_streaming_kv(n_sinks, win);
-                if (n_sinks > 0 && win > 0) {
-                    IMP_LOG_INFO("StreamingLLM smart KV cache enabled: %d sinks + %d-token window", n_sinks,
-                                 win);
-                    // Block-table contents change every step once eviction begins;
-                    // a captured graph would replay stale pointers, and re-capturing
-                    // per step negates the graph's win, so disable graphs entirely.
-                    demote_graphs_(GraphDemotionReason::StreamingKvConfigured);
-                } else {
-                    IMP_LOG_WARN(
-                        "StreamingLLM enabled but no sliding window configured "
-                        "(n_sinks=%d, window=%d) — disabling streaming.",
-                        n_sinks, win);
-                    config_.streaming_kv_enabled = false;
-                }
+                IMP_LOG_WARN(
+                    "StreamingLLM enabled but no sliding window configured "
+                    "(n_sinks=%d, window=%d) - disabling streaming.",
+                    n_sinks, win);
+                config_.streaming_kv_enabled = false;
             }
         }
     }
