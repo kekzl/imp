@@ -647,6 +647,11 @@ nvfp4_attn_proj      = false
 # in/out projections on NVFP4 hybrids: halves the dominant FP16-GEMV decode
 # bytes; prefill keeps the FP16 source. Qwen3.6-35B decode +19%, PPL flat.
 fp8_ssm_proj         = true
+# NVFP4 prefill copies of the full-precision GDN projections ("false", "all",
+# or a comma list of in|gate|out): rows M>32 run the CUTLASS W4A4 GEMM instead
+# of cuBLAS FP16 (~320 TFLOPS on sm_120). Decode and M<=32 keep FP16 / the FP8
+# sidecar. Opt-in: Qwen3.6-35B PPL in +0.68%, gate +0.60%, out +1.98%, all +4.25%.
+nvfp4_gdn_proj_prefill = "false"
 # FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
 # per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).
 # "auto" = full q/k/v/o on gpt-oss only (BF16 dense projections have no NVFP4

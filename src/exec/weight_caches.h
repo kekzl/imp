@@ -89,6 +89,13 @@ struct WeightCaches {
     // --- CUTLASS sm_120 block-scaled NVFP4 ---
     std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4;
     size_t cutlass_nvfp4_bytes = 0;
+    // NVFP4 PREFILL copies of full-precision GDN projections (gemm.nvfp4_gdn_proj_prefill),
+    // keyed by the F16 source pointer; the source stays the M=1 / M<=32 path. The packed
+    // data is owned by the quant results here (micro-scales already freed), the SfAtom
+    // buffer by the entry.
+    std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4_prefill;
+    std::vector<NvFP4QuantResult> cutlass_nvfp4_prefill_src;
+    size_t cutlass_nvfp4_prefill_bytes = 0;
 
     // Single bulk allocation backing every cutlass_nvfp4 entry's SfAtom scale factors
     // (mirrors fp16_bulk_data). Each entry's scale_factors is a sub-pointer with

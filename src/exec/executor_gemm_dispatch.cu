@@ -124,6 +124,59 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
+// One CUTLASS NVFP4 prefill GEMM through the kernel registry: quantizes `input` into the
+// shared activation scratch (skipped when ctx says a prior dispatch on the same input
+// already did) and declines on a missing scratch or a nonzero beta (the epilogue bakes
+// beta=0), so the caller falls through to a beta-honouring route.
+static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const Tensor& input, Tensor& output,
+                                           const GemmContext& ctx, int M) {
+    const auto* qs = ctx.qscratch;
+    if (!qs || !qs->cutlass_act_data || !qs->cutlass_act_sf)
+        return false;
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = ctx.stream;
+    args.weight_payload = &cw;
+    args.cutlass_act_data = qs->cutlass_act_data;
+    args.cutlass_act_sf = qs->cutlass_act_sf;
+    args.cutlass_workspace = qs->cutlass_workspace;
+    args.cutlass_workspace_size = qs->cutlass_workspace_size;
+    args.act_prequantized = (ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
+                             ctx.act_quant_hint_m == M &&
+                             ctx.act_quant_hint_k == static_cast<int>(input.shape[1]));
+    args.beta = ctx.beta;
+    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, false};
+    return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
+}
+
+// gemm.nvfp4_gdn_proj_prefill: an FP16-primary handle with an NVFP4 prefill copy (phase 3d,
+// keyed by source pointer; the handle's tiers stay FP16 so every other M keeps its route).
+// True prefill only: M>32 keeps the batched decode rows on FP16, the spec verify chunk
+// stays on the path its acceptance was measured on.
+// The source is F16 with tier FP16 (FP8 decode sidecar demoted it) or Undefined (no cache
+// entry at all, e.g. gdn_gate and ssm_in on Qwen3.6-35B), never a quantized one.
+static bool nvfp4_prefill_copy_routes(const WeightHandle& h, int M, bool spec_verify, const WeightCaches& wc,
+                                      const QuantScratch& qs) {
+    return M > 32 && !spec_verify && h.source_qtype == QType::F16 &&
+           (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
+           wc.cutlass_nvfp4_prefill.count(h.source_data) && qs.cutlass_act_data != nullptr &&
+           qs.cutlass_act_sf != nullptr;
+}
+
+// One ACTIVE / DECLINED line per tensor kind (log only, a benign race between engines).
+static void log_nvfp4_prefill_copy_route(const WeightHandle& h, int M, float beta, bool active) {
+    static bool logged[256] = {};
+    const auto k = static_cast<unsigned>(h.kind) & 255u;
+    if (logged[k])
+        return;
+    logged[k] = true;
+    IMP_LOG_INFO(
+        "GDN NVFP4 prefill route %s: %s [%lld x %lld] M=%d beta=%.1f primary_tier=%d source_qtype=%d",
+        active ? "ACTIVE" : "DECLINED", tensor_kind_name(h.kind), (long long)h.shape[0],
+        (long long)h.shape[1], M, beta, static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype));
+}
+
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
 // the dispatch is guaranteed to reach the CUTLASS NVFP4 prefill block
 // (which quantizes input into the shared activation scratch). Every
@@ -132,6 +185,8 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     if (id == kInvalidTensorID)
         return false;
     const auto& h = registry_.handle(id);
+    if (nvfp4_prefill_copy_routes(h, M, cur_spec_verify_, wcache_, qscratch_))
+        return true;
     if (h.primary_tier != StorageTier::CUTLASS_NVFP4)
         return false;
     // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
@@ -168,6 +223,21 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // whatever a particular tier's kernel happens to materialise.
     if (calib_)
         calib_->accumulate(cur_layer_, h.kind, input, ctx.stream);
+
+    // NVFP4 prefill copy of an F16 GDN projection (gemm.nvfp4_gdn_proj_prefill). Ahead of the
+    // tier split: on Qwen3.6-35B ssm_in and gdn_gate sit in no cache (tier Undefined) and
+    // ssm_out carries the FP8 sidecar (tier FP16). Declines (beta=1, M<=32, spec verify, no
+    // scratch) fall through to the route the handle had before.
+    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_nvfp4_prefill.count(h.source_data)) {
+        const int Mp = static_cast<int>(input.shape[0]);
+        auto it = wcache_.cutlass_nvfp4_prefill.find(h.source_data);
+        const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
+                            nvfp4_prefill_copy_routes(h, Mp, cur_spec_verify_, wcache_, qscratch_) &&
+                            dispatch_cutlass_nvfp4_prefill(it->second, input, output, ctx, Mp);
+        log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
+        if (active)
+            return;
+    }
 
     if (h.primary_tier == StorageTier::Undefined) {
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
@@ -535,8 +605,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 
     // ---- CUTLASS NVFP4 prefill via GemmKernelRegistry (qscratch buffers) ----
     if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
-        const auto* qs = ctx.qscratch;
-        if (qs && qs->cutlass_act_data && qs->cutlass_act_sf) {
+        {
             CutlassNvFP4Weight cw;
             cw.data = h.payload.cutlass_nvfp4.weight;
             cw.scale_factors = h.payload.cutlass_nvfp4.sf;
@@ -545,29 +614,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                   : 1.0f;
             cw.N = h.shape[0];
             cw.K = h.shape[1] * 2;
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.weight_payload = &cw;
-            args.cutlass_act_data = qs->cutlass_act_data;
-            args.cutlass_act_sf = qs->cutlass_act_sf;
-            args.cutlass_workspace = qs->cutlass_workspace;
-            args.cutlass_workspace_size = qs->cutlass_workspace_size;
-            // Act-quant dedupe: a prior dispatch on this exact input already
-            // quantized it into the activation scratch (QKV / gate-up share
-            // one normed input — see with_act_quant_hint call sites).
-            args.act_prequantized = (ctx.act_quant_hint_data != nullptr &&
-                                     ctx.act_quant_hint_data == input.data &&
-                                     ctx.act_quant_hint_m == M &&
-                                     ctx.act_quant_hint_k == static_cast<int>(input.shape[1]));
-            // Threads beta through: the cutlass_nvfp4 handler cannot honour a nonzero
-            // beta (epilogue bakes beta=0) and DECLINES on it. Without this, a beta=1
-            // dispatch reaching here would silently overwrite the residual instead of
-            // falling through to a beta-honouring handler.
-            args.beta = ctx.beta;
-            GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, false};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+            // Act-quant dedupe (QKV / gate-up share one normed input, see the
+            // with_act_quant_hint call sites) and the beta=1 decline live in the helper.
+            if (dispatch_cutlass_nvfp4_prefill(cw, input, output, ctx, M))
                 return;
         }
         // FP8 fallback for CUTLASS_NVFP4 (legacy path)

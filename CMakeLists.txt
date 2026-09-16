@@ -390,6 +390,7 @@ set(IMP_EXEC_SOURCES
     src/exec/decode_pipeline_advance.cu
     src/exec/pre_dequant_phase3_fp8.cu
     src/exec/pre_dequant_phase3_cutlass.cu
+    src/exec/pre_dequant_phase3_gdn_prefill.cu
     src/exec/pre_dequant_phase3_moe.cu
     src/exec/executor_gemm_dispatch.cu
     src/exec/activation_calibrator.cu
