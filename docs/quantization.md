@@ -427,8 +427,14 @@ tensor scale (the fused-layer rule); the per-expert biases (`gate_up_proj_bias`,
 `down_proj_bias`) are copied through and de-interleaved by the loader as for the MXFP4 source.
 gpt-oss's 2^-4 residual rescale lands in the NVFP4 tensor scales of Wo and the expert down
 projections at Phase 0 (`pre_dequant_phase0_nvfp4_loader.cu`) instead of the BF16 bytes.
-UNMEASURED end to end (2026-09-15): no BF16 gpt-oss or Gemma-4 source on the host; the split is
-pinned by `test_quantize_expert_destack.cpp` on the real shapes.
+Measured 2026-09-16 on `unsloth/gpt-oss-20b-BF16` (39 GiB, 48 stacks = 91.4 % of the bytes):
+2400 tensors quantized, 267 copied, 12 820 MiB on disk, worst per-tensor max-rel error 0.1477,
+mean 0.0389; the checkpoint loads (7467 tensors assigned, 0 skipped, 792 NVFP4 tensor scales
+carry the 2^-4), `ppl_corpus_45k.txt` deterministic PPL 179.23 against 312.50 for
+`gpt-oss-20b-mxfp4.gguf` in the same binary (gpt-oss reads 151-308 on this corpus across
+container restarts, cuBLAS algorithm reselection per process, so the pair is a class check, not
+a ranking), greedy Harmony output coherent. Gemma-4 is unrun.
+The split itself is pinned by `test_quantize_expert_destack.cpp` on the real shapes.
 
 Workflow with Modelopt:
 
