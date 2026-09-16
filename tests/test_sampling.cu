@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "compute/sampling.h"
 #include "core/cuda_static_reset.h"
+#include "core/process_diag.h"
 #include "core/tensor.h"
 
 #include <vector>
@@ -912,5 +913,49 @@ TEST(SamplingTest, GreedyScratchRearmsAfterStaticReset) {
     EXPECT_EQ(sample_greedy(d_logits), 2);
     EXPECT_GT(engine_arena().used(), used2) << "greedy result scratch survived the reset";
     free_gpu_tensor(d_logits);
+}
+
+// typical_p under runtime.deterministic: the bucket histogram is an ordered reduction, so the
+// masked set is bit-stable across launches and matches the atomicAdd path on a spread fixture.
+static std::vector<float> run_typical_p(const std::vector<float>& logits, float typical_p) {
+    Tensor d = make_logits(logits.data(), static_cast<int64_t>(logits.size()));
+    apply_typical_p(static_cast<float*>(d.data), static_cast<int>(logits.size()), typical_p);
+    std::vector<float> out(logits.size());
+    cudaMemcpy(out.data(), d.data, out.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    free_gpu_tensor(d);
+    return out;
+}
+
+TEST(SamplingTest, TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath) {
+    constexpr int V = 4096;
+    constexpr float kTypicalP = 0.5f;
+    std::mt19937 rng(20260916);
+    std::normal_distribution<float> dist(0.0f, 2.5f);
+    std::vector<float> logits(V);
+    for (auto& x : logits)
+        x = dist(rng);
+
+    const bool saved = process_diag_deterministic_gemm();
+    process_diag_set_deterministic_gemm(false);
+    const auto atomic_out = run_typical_p(logits, kTypicalP);
+    process_diag_set_deterministic_gemm(true);
+    const auto det_out = run_typical_p(logits, kTypicalP);
+    for (int rep = 0; rep < 20; rep++) {
+        const auto again = run_typical_p(logits, kTypicalP);
+        ASSERT_EQ(std::memcmp(again.data(), det_out.data(), det_out.size() * sizeof(float)), 0)
+            << "deterministic typical_p differs on repeat " << rep;
+    }
+    process_diag_set_deterministic_gemm(saved);
+
+    int masked = 0, agree = 0;
+    for (int i = 0; i < V; i++) {
+        const bool det_masked = det_out[i] < -1e30f;
+        const bool atomic_masked = atomic_out[i] < -1e30f;
+        masked += det_masked;
+        agree += (det_masked == atomic_masked);
+    }
+    EXPECT_GT(masked, 0) << "filter inactive on the fixture";
+    EXPECT_LT(masked, V) << "filter masked every token";
+    EXPECT_EQ(agree, V) << "deterministic and atomic paths mask different tokens";
 }
 }  // namespace imp

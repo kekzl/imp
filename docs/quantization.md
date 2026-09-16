@@ -433,7 +433,11 @@ mean 0.0389; the checkpoint loads (7467 tensors assigned, 0 skipped, 792 NVFP4 t
 carry the 2^-4), `ppl_corpus_45k.txt` deterministic PPL 179.23 against 312.50 for
 `gpt-oss-20b-mxfp4.gguf` in the same binary (gpt-oss reads 151-308 on this corpus across
 container restarts, cuBLAS algorithm reselection per process, so the pair is a class check, not
-a ranking), greedy Harmony output coherent. Gemma-4 is unrun.
+a ranking), greedy Harmony output coherent. Gemma-4 measured 2026-09-16 on
+`google/gemma-4-26B-A4B-it` BF16 (51.6 GB, 60 stacks): 11726 tensors quantized, 747 copied
+(`router.proj.weight` excluded, the reference NVFP4 export keeps it BF16 too), 15 693 MiB, worst
+max-rel 0.1711, mean 0.1054; loads, greedy coherent. No PPL verdict: teacher-forced
+perplexity reads 1e4-1e5 on prose for every Gemma-4 checkpoint on this binary (#2044).
 The split itself is pinned by `test_quantize_expert_destack.cpp` on the real shapes.
 
 Workflow with Modelopt:

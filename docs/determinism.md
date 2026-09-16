@@ -186,16 +186,19 @@ request `determinism::guaranteed`.
 
 ### 3. `typical_p` shared-memory FP atomicAdd
 
-`src/compute/sampling.cu` (bucket histogram): per-bucket probability mass is
+`src/compute/sampling_filters.cu` (bucket histogram): per-bucket probability mass is
 accumulated via shared-memory FP `atomicAdd`, whose ordering is
-scheduling-dependent. Under deterministic mode this remains a documented
-exception — `typical_p` is not part of the temp=0 eval surface.
+scheduling-dependent. CLOSED: under `runtime.deterministic` each warp owns a
+histogram row, lanes hitting one bucket per iteration are summed in lane order
+(`__match_any_sync`), then a fixed-order cross-warp sum (one bucket per thread,
+8 KB extra shared memory, no local frame); the atomic path stays the default.
+Pinned by `SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath`.
 
 ### 5. The CUTLASS NVFP4 GEMM is not gated
 
-`runtime.deterministic` reaches four files and six reads, all through
+`runtime.deterministic` reaches five files and seven reads, all through
 `process_diag_deterministic_gemm()`: `gemm.cu` (cuBLASLt, 2), `sampling_topk_topp.cu`
-(1), `moe_routing.cu` (2) and `moe_routing_permute.cu` (1).
+(1), `sampling_filters.cu` (typical_p, 1), `moe_routing.cu` (2) and `moe_routing_permute.cu` (1).
 `gemm_cutlass_grouped_3x.cu` - the primary GEMM for NVFP4 weights and every GGUF
 quant - reads none of them (#1574).
 

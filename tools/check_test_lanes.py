@@ -277,7 +277,10 @@ def main():
     # 1126 -> 1127 (roadmap open 3): one GPU test in test-e2e driving the
     # StreamingLLM valve on a quantised (FP8) KV pool through the real
     # BatchingEngine; needs a card and Qwen3-8B-Q8_0.
-    PINNED = 1127
+    # 1127 -> 1128: SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath
+    # (test-compute): the ordered typical_p histogram under runtime.deterministic, 20 launches
+    # bit-stable and the same masked set as the atomic path.
+    PINNED = 1128
 
     text = CMAKE.read_text()
     mods = module_sources(text)

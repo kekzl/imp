@@ -47,6 +47,7 @@ READER = "process_diag_deterministic_gemm()"
 EXPECTED = {
     "src/compute/gemm.cu": 2,
     "src/compute/sampling_topk_topp.cu": 1,
+    "src/compute/sampling_filters.cu": 1,
     "src/compute/moe_routing.cu": 2,
     "src/compute/moe_routing_permute.cu": 1,
 }
@@ -147,6 +148,7 @@ def selftest():
     base = {
         "src/compute/gemm.cu": 2,
         "src/compute/sampling_topk_topp.cu": 1,
+        "src/compute/sampling_filters.cu": 1,
         "src/compute/moe_routing.cu": 2,
         "src/compute/moe_routing_permute.cu": 1,
     }
