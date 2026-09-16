@@ -53,6 +53,9 @@ struct GemmKernelArgs {
     // caller did not supply that workspace; the kernel must either degrade
     // (fall back to a non-workspace path) or fail loud via IMP_CHECK.
     void* dequant_scratch = nullptr;
+    // Bytes behind dequant_scratch; 0 = unknown. A whole-weight dequant larger than this is
+    // refused (PreconditionFail) instead of written past the buffer (#2046).
+    size_t dequant_scratch_size = 0;
     void* cutlass_act_data = nullptr;
     void* cutlass_act_sf = nullptr;
     void* cutlass_workspace = nullptr;

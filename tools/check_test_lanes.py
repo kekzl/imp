@@ -280,7 +280,9 @@ def main():
     # 1127 -> 1128: SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath
     # (test-compute): the ordered typical_p histogram under runtime.deterministic, 20 launches
     # bit-stable and the same masked set as the atomic path.
-    PINNED = 1128
+    # 1128 -> 1129 (#2046): GemmKernelRegistryTest.GenericDequantDeclinesWeightLargerThanScratch
+    # (test-compute): the generic dequant catch-all refuses a weight larger than the scratch.
+    PINNED = 1129
 
     text = CMAKE.read_text()
     mods = module_sources(text)

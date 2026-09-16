@@ -848,4 +848,34 @@ TEST(GemmStrategy, EqualityIsByValue) {
     EXPECT_FALSE(a == d);
 }
 
+// The generic dequant catch-all must decline a weight larger than the dequant scratch instead
+// of writing past it: Gemma-4's Q6_K LM head (262144 x 2816, 1408 MiB FP16) against the
+// 44 MiB per-layer-sized scratch crashed `--perplexity` under gemm.no_dp4a_lm (#2046). The
+// weight pointer is never dereferenced before the size check, so no allocation is needed.
+TEST_F(GemmKernelRegistryTest, GenericDequantDeclinesWeightLargerThanScratch) {
+    constexpr int M = 8;
+    constexpr int N = 262144;
+    constexpr int K = 2816;
+    int64_t in_shape[2] = {M, K};
+    int64_t out_shape[2] = {M, N};
+    int64_t w_shape[2] = {N, K};
+    alignas(16) unsigned char dummy_in[16] = {};
+    alignas(16) unsigned char dummy_out[16] = {};
+    alignas(16) unsigned char dummy_w[16] = {};
+    Tensor input(dummy_in, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor output(dummy_out, QType::F32, 2, out_shape, /*on_device=*/true);
+    Tensor weight(dummy_w, QType::Q6_K, 2, w_shape, /*on_device=*/true);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    args.dequant_scratch = dummy_w;
+    args.dequant_scratch_size = 44ull << 20;
+
+    GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+}
+
 }  // namespace

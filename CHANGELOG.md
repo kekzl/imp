@@ -12,6 +12,7 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Fixed
+- Whole-weight dequant into the per-layer-sized dequant scratch is refused when the weight does not fit (Gemma-4 Q6_K LM head 1408 MiB vs 44 MiB scratch crashed `--perplexity` under `gemm.no_dp4a_lm`, #2046); `GemmKernelArgs::dequant_scratch_size`, one WARN per process
 - `typical_p` under `runtime.deterministic`: the deviation histogram is an ordered per-warp reduction instead of shared-memory FP `atomicAdd` (REG 28, STACK 0); 20 launches bit-stable, same masked set as the atomic path (`SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath`)
 - `imp-quantize` keeps Gemma-4's `router.proj.weight` (128 x 2816 per MoE layer) at source precision; the role exclusion matched `.gate.weight` / `.router.weight` only. Gemma-4-26B-A4B-it BF16 -> NVFP4 measured (roadmap 7 second arm): 60 stacks split, 11726 tensors, 15 693 MiB, loads, greedy coherent; no PPL verdict, `--perplexity` reads 1e4-1e5 on every Gemma-4 checkpoint (#2044)
 
