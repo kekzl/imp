@@ -103,6 +103,8 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
 
+    // --- Phase 3d: NVFP4 prefill copies of the F16 GDN projections (gemm.nvfp4_gdn_proj_prefill) ---
+    nvfp4_prefill_cache_gdn_projections_(cfg, stream);
 
     // --- Phase 3c (standalone): Native MXFP4 GGUF when NVFP4 decode is disabled (extracted) ---
     pre_dequant_phase3c_standalone_mxfp4_(cfg, stream);

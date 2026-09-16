@@ -103,6 +103,13 @@ struct GEMM {
     // GGUF hybrids: also covers Q8_0-source ssm_in/gdn_gate/ssm_out. Sub-8-bit
     // sources excluded. Default on.
     bool fp8_ssm_proj = true;
+    // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the CUTLASS
+    // block-scaled GEMM (W4A4) instead of cuBLAS FP16 (~320 TFLOPS on sm_120, 35-40% of peak).
+    // "false"/"off" none, "true"/"all" in+gate+out, or a comma list of in|gate|out.
+    // M<=32 and M=1 keep FP16 / the FP8 sidecar. Opt-in: W4A4 on the state-feeding
+    // projections costs Qwen3.6-35B PPL (45k corpus) in +0.68%, gate +0.60%, out +1.98%,
+    // all +4.25% (roadmap Open 12). Default "false".
+    std::string nvfp4_gdn_proj_prefill = "false";
     // FP8 decode sidecar for full-precision attention projections (wq/wk/wv/wo),
     // same per-row-scale mechanism as fp8_ssm_proj, decode-only (M=1).
     // "auto" = on only for gpt-oss (dense BF16 weights get no NVFP4 decode

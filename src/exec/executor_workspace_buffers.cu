@@ -1461,6 +1461,13 @@ void GraphExecutor::free_buffers() {
         for (auto& [ptr, cw] : wcache_.cutlass_nvfp4)
             free_cutlass_nvfp4_weight(cw);
         wcache_.cutlass_nvfp4.clear();
+        for (auto& [ptr, cw] : wcache_.cutlass_nvfp4_prefill)
+            free_cutlass_nvfp4_weight(cw);
+        wcache_.cutlass_nvfp4_prefill.clear();
+        for (auto& result : wcache_.cutlass_nvfp4_prefill_src)
+            free_nvfp4_result(result);
+        wcache_.cutlass_nvfp4_prefill_src.clear();
+        wcache_.cutlass_nvfp4_prefill_bytes = 0;
         wcache_.cutlass_nvfp4_bytes = 0;
         if (wcache_.cutlass_sf_slab) {
             IMP_CUDA_CHECK_LOG(cudaFree(wcache_.cutlass_sf_slab));
