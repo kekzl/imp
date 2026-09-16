@@ -11,6 +11,10 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- `typical_p` under `runtime.deterministic`: the deviation histogram is an ordered per-warp reduction instead of shared-memory FP `atomicAdd` (REG 28, STACK 0); 20 launches bit-stable, same masked set as the atomic path (`SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath`)
+- `imp-quantize` keeps Gemma-4's `router.proj.weight` (128 x 2816 per MoE layer) at source precision; the role exclusion matched `.gate.weight` / `.router.weight` only
+
 ### Changed
 - The >90 % KV-pressure valve (StreamingLLM auto-enable) arms on every KV dtype, not only F16: Qwen3-8B-Q8_0 on its default FP8 pool, 24 blocks (384 tokens), 600 tokens requested, finishes `length` instead of `capacity`; `--streaming-kv` is accepted on every dtype. Kernels without a sink range attend every live block under sinks instead of dropping them; a layer's own narrower window stays. Paired A/B vs main: decode -0.10 %, prefill +0.05 % (#2043)
 
