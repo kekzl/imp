@@ -166,24 +166,34 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
     float bucket_scale = (s_max_dev > 1e-8f) ? (static_cast<float>(TYPICAL_NBUCKETS) / s_max_dev) : 1.0f;
 
     if (deterministic) {
-        // Per-thread local accumulators avoid scheduling-dependent atomicAdd order.
-        float local_bkt[TYPICAL_NBUCKETS];
-        for (int b = 0; b < TYPICAL_NBUCKETS; b++)
-            local_bkt[b] = 0.0f;
+        // Ordered accumulation, no local frame: each warp owns one histogram row, lanes that hit
+        // the same bucket in one iteration are summed in lane order and added by the lowest lane.
+        float* row = s_warp_buckets + warp_id * TYPICAL_NBUCKETS;
+        for (int b = lane_id; b < TYPICAL_NBUCKETS; b += WARP_SIZE)
+            row[b] = 0.0f;
+        __syncwarp();
 
-        for (int i = tid; i < vocab_size; i += blockDim.x) {
-            float surprise = -(logits[i] - log_sum_exp) * inv_log2;
-            float dev = fabsf(surprise - H);
-            int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
-            float p = expf(logits[i] - gmax) / sum_exp;
-            local_bkt[bucket] += p;
-        }
-
-        // Warp-level reduction per bucket, then store into per-warp shared memory.
-        for (int b = 0; b < TYPICAL_NBUCKETS; b++) {
-            float v = warp_reduce_sum(local_bkt[b]);
-            if (lane_id == 0)
-                s_warp_buckets[warp_id * TYPICAL_NBUCKETS + b] = v;
+        for (int base = 0; base < vocab_size; base += blockDim.x) {
+            const int i = base + tid;
+            const bool active = i < vocab_size;
+            int bucket = -1;
+            float p = 0.0f;
+            if (active) {
+                float surprise = -(logits[i] - log_sum_exp) * inv_log2;
+                float dev = fabsf(surprise - H);
+                bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
+                p = expf(logits[i] - gmax) / sum_exp;
+            }
+            const unsigned peers = __match_any_sync(0xffffffffu, bucket);
+            float sum = 0.0f;
+            for (int l = 0; l < WARP_SIZE; l++) {
+                const float v = __shfl_sync(0xffffffffu, p, l);
+                if (peers & (1u << l))
+                    sum += v;
+            }
+            if (active && lane_id == __ffs(peers) - 1)
+                row[bucket] += sum;
+            __syncwarp();
         }
         __syncthreads();
 
