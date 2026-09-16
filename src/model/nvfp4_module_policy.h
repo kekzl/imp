@@ -196,7 +196,9 @@ inline bool role_excluded(const std::string& name, int64_t K, bool allow_lm_head
         why_not = "MLA latent projection (runtime slices it - must stay full precision)";
         return true;
     }
-    if (ends_with_(name, ".gate.weight") || ends_with_(name, ".router.weight")) {
+    // Gemma-4 spells the gating matrix `router.proj.weight` (weight_map.cpp -> moe_gate).
+    if (ends_with_(name, ".gate.weight") || ends_with_(name, ".router.weight") ||
+        ends_with_(name, ".router.proj.weight")) {
         why_not = "MoE router (FP4 changes expert selection)";
         return true;
     }

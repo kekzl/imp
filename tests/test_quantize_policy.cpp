@@ -45,6 +45,8 @@ TEST(QuantizePolicy, RefusesMlaLatentProjectionsAndTheRouter) {
     EXPECT_FALSE(quantizes(tensor("model.layers.0.self_attn.kv_b_proj.weight", {4096, 512})));
     EXPECT_FALSE(quantizes(tensor("model.layers.0.mlp.gate.weight", {64, 2048})));
     EXPECT_FALSE(quantizes(tensor("model.layers.0.mlp.router.weight", {64, 2048})));
+    // Gemma-4 spelling; the reference NVFP4 export keeps it BF16.
+    EXPECT_FALSE(quantizes(tensor("model.language_model.layers.0.router.proj.weight", {128, 2816})));
 }
 
 // `gate_proj` is an expert projection, `gate` is the router. A substring test

@@ -932,7 +932,8 @@ TEST(SamplingTest, TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath) {
     std::mt19937 rng(20260916);
     std::normal_distribution<float> dist(0.0f, 2.5f);
     std::vector<float> logits(V);
-    for (auto& x : logits) x = dist(rng);
+    for (auto& x : logits)
+        x = dist(rng);
 
     const bool saved = process_diag_deterministic_gemm();
     process_diag_set_deterministic_gemm(false);
