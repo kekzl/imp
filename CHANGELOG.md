@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-09-17
+
 ### Fixed
 - Whole-weight dequant into the per-layer-sized dequant scratch is refused when the weight does not fit (Gemma-4 Q6_K LM head 1408 MiB vs 44 MiB scratch crashed `--perplexity` under `gemm.no_dp4a_lm`, #2046); `GemmKernelArgs::dequant_scratch_size`, one WARN per process
 - `typical_p` under `runtime.deterministic`: the deviation histogram is an ordered per-warp reduction instead of shared-memory FP `atomicAdd` (REG 28, STACK 0); 20 launches bit-stable, same masked set as the atomic path (`SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath`)
