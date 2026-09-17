@@ -18,6 +18,20 @@ namespace imp::quantize {
 // copies the tensor through untouched.
 bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why_not);
 
+// A GDN (Qwen3.5/3.6/3.8 `linear_attn`) in_proj_* / out_proj weight. `--keep-gdn-proj` copies
+// these through at source precision, the recipe Qwen3.6-35B-A3B-NVFP4 ships (30 layers x 5
+// modules in `ignore`), so an export can judge `gemm.nvfp4_gdn_proj_prefill` on a second model.
+bool is_gdn_projection(const std::string& name);
+// Which runtime role such a weight plays, in the vocabulary of gemm.nvfp4_gdn_proj_prefill:
+// "in" (in_proj_qkv / in_proj_qkvz, plus the alpha/beta in_proj_a / in_proj_b / in_proj_ba that
+// feed the scan with it), "gate" (in_proj_z), "out" (out_proj); "" for anything else.
+std::string gdn_projection_role(const std::string& name);
+// `sel` is the --keep-gdn-proj value: "all" / "true" keeps every role, otherwise a comma list of
+// in|gate|out. Empty keeps nothing. Qwen3.8-27B: all three kept is 10.6 GiB BF16 and the
+// checkpoint no longer fits 32 GB next to its KV pool; `in` alone (5 GiB) does.
+bool keep_gdn_projection(const std::string& name, const std::string& sel);
+bool valid_keep_gdn_proj_selection(const std::string& sel);
+
 // What happens to an FP8 weight paired with a block-scale grid: the pair is one unit, the
 // grid is CONSUMED either way (a grid outliving its weight says nothing true, and raw E4M3
 // bytes without their scales are still valid E4M3 meaning something else, undetectably). A

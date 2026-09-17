@@ -532,6 +532,7 @@ if(IMP_BUILD_TOOLS)
     # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
     add_executable(imp-quantize
         tools/imp-quantize/main.cpp
+        tools/imp-quantize/usage.cpp
         tools/imp-quantize/tensor_policy.cpp
         tools/imp-quantize/expert_destack.cpp
         tools/imp-quantize/checkpoint_out.cpp

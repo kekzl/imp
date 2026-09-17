@@ -25,6 +25,7 @@
 #include "fp8_source.h"
 #include "quant_report.h"
 #include "tensor_policy.h"
+#include "usage.h"
 
 #include "core/tensor.h"
 #include "memory/plan.h"
@@ -70,55 +71,13 @@ struct Options {
     // divergence, but excluding it measured ~1.5% WORSE perplexity end to end. Opt-in since the
     // trade may still favor models with a higher gate share than the one checkpoint measured.
     bool keep_attn_gate = false;
+    // Keep GDN linear_attn projections at source precision ("all", or a list of in|gate|out; the
+    // Qwen3.6-35B recipe keeps all three), so the runtime's F16 GDN prefill path and
+    // gemm.nvfp4_gdn_proj_prefill apply to the export. Empty: quantize them like any Linear.
+    std::string keep_gdn_proj;
     bool dry_run = false;
     quantize::OutputFormat format = quantize::OutputFormat::Modelopt;
 };
-
-void usage() {
-    printf(
-        "usage: imp-quantize --model <safetensors-dir> --out <dir> [--calib <file>]\n"
-        "                    [--format modelopt|vllm] [--lm-head] [--dry-run]\n"
-        "\n"
-        "  --model DIR   source checkpoint (BF16/FP16 SafeTensors + config.json)\n"
-        "  --out DIR     destination; created if missing\n"
-        "  --format F    output layout (default modelopt):\n"
-        "                  modelopt            .weight / .weight_scale_2, declared in\n"
-        "                                      hf_quant_config.json. imp reads it.\n"
-        "                  vllm                compressed-tensors nvfp4-pack-quantized:\n"
-        "                  (= compressed-tensors)  .weight_packed / .weight_global_scale,\n"
-        "                                      declared in config.json. imp AND vLLM read\n"
-        "                                      it, and fused layers (q/k/v, gate/up) share\n"
-        "                                      one tensor scale, which vLLM requires.\n"
-        "  --calib FILE  activation calibration (AWQ scaling). Produce it with:\n"
-        "                  imp-cli --model DIR --perplexity <corpus> --calibrate FILE\n"
-        "                Without it the quantization is plain round-to-nearest,\n"
-        "                which costs measurably more quality (see the header).\n"
-        "  --calib-groups ABCDEG\n"
-        "  --calib-weight abs|sq  error weight of the AWQ search (default abs)\n"
-        "                Which AWQ scale groups run (default ABCDEG).\n"
-        "                  A q,k,v  <- input_layernorm        C o_proj   <- v_proj\n"
-        "                  B gate,up<- post_attention_norm    D down_proj<- up_proj\n"
-        "                  G linear_attn.in_proj_* <- input_layernorm   (qwen3_5 GDN)\n"
-        "                  E linear_attn.out_proj  <- linear_attn.norm  (qwen3_5 GDN)\n"
-        "                E and G exist only on the GDN hybrids and are NOT measured\n"
-        "                against an uncalibrated twin yet.\n"
-        "                The ATTENTION groups (A, C) are what breaks on wide GQA:\n"
-        "                on Qwen3-14B (n_rep=5) ABCD costs +2.68 PPL while BD --\n"
-        "                the two FFN groups -- GAINS 0.13 over round-to-nearest.\n"
-        "                Use 'BD' on wide-GQA models, the default on narrow ones,\n"
-        "                or any subset to attribute a bad result. See\n"
-        "                docs/quantization.md.\n"
-        "  --lm-head     also quantize lm_head (default: excluded, imp applies its\n"
-        "                own measured lm_head policy at runtime)\n"
-        "  --keep-attn-gate\n"
-        "                keep a fused Q+gate q_proj (Qwen3.5 / Qwen3-Next\n"
-        "                `attn_output_gate`) out of NVFP4. OFF by default: the gate\n"
-        "                half carries #1273's divergence, but excluding it measured\n"
-        "                ~1.5%% WORSE on perplexity, not better, and costs 1-4%% of\n"
-        "                the checkpoint. Kept for models with a higher gate share.\n"
-        "  --dry-run     report what would be quantized and how large the result\n"
-        "                will be, against what the card has left. Writes nothing.\n");
-}
 
 bool ends_with(const std::string& s, const std::string& suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
@@ -412,7 +371,16 @@ int main(int argc, char** argv) {
             opt.quantize_lm_head = true;
         else if (a == "--keep-attn-gate")
             opt.keep_attn_gate = true;
-        else if (a == "--calib")
+        else if (a == "--keep-gdn-proj") {
+            // Optional value: a bare flag keeps all three roles.
+            const bool has_value = i + 1 < argc && argv[i + 1][0] != '-';
+            opt.keep_gdn_proj = has_value ? next() : "all";
+            if (!quantize::valid_keep_gdn_proj_selection(opt.keep_gdn_proj)) {
+                fprintf(stderr, "imp-quantize: --keep-gdn-proj '%s': expected all or a list of in|gate|out\n",
+                        opt.keep_gdn_proj.c_str());
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
+            }
+        } else if (a == "--calib")
             opt.calib_file = next();
         else if (a == "--format") {
             const std::string f = next();
@@ -657,10 +625,12 @@ int main(int argc, char** argv) {
                 // was
                 // never quantized.
                 std::string why;
-                const bool refused = fp8_scale_of.count(t.name)
-                                         ? quantize::fp8_source_action(t, false, opt.quantize_lm_head, why) !=
-                                               quantize::Fp8SourceAction::Quantize
-                                         : !quantize::should_quantize(t, opt.quantize_lm_head, why);
+                const bool refused = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj) ||
+                                     (fp8_scale_of.count(t.name)
+                                          ? quantize::fp8_source_action(t, false, opt.quantize_lm_head,
+                                                                        why) !=
+                                                quantize::Fp8SourceAction::Quantize
+                                          : !quantize::should_quantize(t, opt.quantize_lm_head, why));
                 if (refused)
                     continue;
                 const std::string key = quantize::fusion_group_key(t.name);
@@ -762,7 +732,11 @@ int main(int argc, char** argv) {
                 // than
                 // duplicating the rule. An FP8 tensor it refuses is copied through as-is.
                 std::string why_fp8;
-                if (quantize::fp8_source_action(t, gated_q_proj.count(t.name) != 0, opt.quantize_lm_head,
+                const bool kept_gdn_fp8 = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj);
+                if (kept_gdn_fp8)
+                    why_fp8 = "GDN projection (--keep-gdn-proj)";
+                if (kept_gdn_fp8 ||
+                    quantize::fp8_source_action(t, gated_q_proj.count(t.name) != 0, opt.quantize_lm_head,
                                                 why_fp8) != quantize::Fp8SourceAction::Quantize) {
                     // Its block grid was dropped above, so the E4M3 bytes cannot
                     // travel as they are. Widen and write full precision.
@@ -825,9 +799,12 @@ int main(int argc, char** argv) {
             // Checked before should_quantize, which sees one tensor and cannot
             // know a q_proj is gated — that needs the layer's o_proj too.
             const bool gated = gated_q_proj.count(t.name) != 0;
+            const bool kept_gdn = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj);
             if (gated)
                 why = "fused Q+gate projection (--keep-attn-gate)";
-            if (gated || !quantize::should_quantize(t, opt.quantize_lm_head, why)) {
+            else if (kept_gdn)
+                why = "GDN projection (--keep-gdn-proj)";
+            if (gated || kept_gdn || !quantize::should_quantize(t, opt.quantize_lm_head, why)) {
                 if (ends_with(t.name, ".weight") && t.shape.size() >= 2) {
                     // Record real matrices we left alone so the runtime does not
                     // expect scales for them.

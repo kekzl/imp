@@ -11,7 +11,11 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+- `imp-quantize --keep-gdn-proj [all|in,gate,out]`: GDN `linear_attn` projections stay at source precision (bare flag = all three, the Qwen3.6-35B-A3B-NVFP4 recipe), so the runtime's F16 GDN path (FP8 decode sidecar, `gemm.nvfp4_gdn_proj_prefill`) applies to an own export. Qwen3.8-27B BF16 -> `--format vllm`, `all`: 256 tensors quantized, 943 copied, 10 605 MiB of GDN projections kept, 27 GB, 4 min 10 s, and the checkpoint no longer fits 32 GB (upload 30 635 MiB, workspace refused); `in` keeps 5 GiB and loads (`GdnProjection.*`, 2 tests).
+
 ### Changed
+- `gemm.nvfp4_gdn_proj_prefill` default `false` -> `in`: the F16 GDN in_proj of a native-NVFP4 hybrid gets an NVFP4 prefill copy (M>32 on the CUTLASS W4A4 GEMM; decode and M<=32 unchanged). Qwen3.6-35B-A3B-NVFP4 pp4096 147.04 / 146.03 / 145.86 -> 135.77 / 135.45 / 136.44 ms (+7.7 %, 3/3 pairs) for PPL +0.68 %; Qwen3.8-27B (`--keep-gdn-proj in` export) 373.51 / 373.66 / 373.40 -> 332.65 / 332.87 / 332.89 ms (+12.3 %, 3/3) for deterministic PPL 4.6143 -> 4.6400 (+0.56 %). `gate`, `out`, `all` stay opt-in (roadmap Open 12).
 - Perf gate re-pinned at 6fe00f81 (`tests/perf_baseline.json`, previous pin 2026-07-26): tg128 287.19 -> 299.61 (+4.32 %), pp512 12406.87 -> 12707.44 (+2.42 %), pp4096 15324.70 -> 15776.32 (+2.95 %), own_peak 20716 -> 20642 MiB; three cold-median runs within 0.8 %, clocks 2872-2932 MHz / 13801 MHz live. Thresholds unchanged (8 % / 8 % / 10 % / paired 2 %)
 
 ### Fixed
