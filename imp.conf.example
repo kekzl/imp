@@ -653,6 +653,13 @@ fp8_ssm_proj         = true
 # sidecar. Default "in": pp4096 +7.7% (Qwen3.6-35B) / +12.3% (Qwen3.8-27B) for
 # PPL +0.68% / +0.56%. gate +0.60%, out +1.98%, all +4.25% PPL stay opt-in.
 nvfp4_gdn_proj_prefill = "in"
+# MXFP8 (E4M3 + UE8M0 per 32) prefill copies of the same projections, same
+# vocabulary; a projection named here takes MXFP8 ahead of its NVFP4 copy.
+# Twice the copy bytes of NVFP4, 3 mantissa bits per element instead of 1.
+# Qwen3.8-27B 45k PPL in +0.08%, gate -0.51%, out -0.18%; Qwen3.6-35B pp4096
+# in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies leave
+# Qwen3.6-35B's KV pool 50 blocks at stock flags (NVFP4 in, 270 MiB: 225).
+mxfp8_gdn_proj_prefill = "false"
 # FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
 # per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).
 # "auto" = full q/k/v/o on gpt-oss only (BF16 dense projections have no NVFP4

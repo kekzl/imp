@@ -106,10 +106,17 @@ struct GEMM {
     // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the CUTLASS
     // block-scaled GEMM (W4A4) instead of cuBLAS FP16 (~320 TFLOPS on sm_120, 35-40% of peak).
     // "false"/"off" none, "true"/"all" in+gate+out, or a comma list of in|gate|out.
-    // M<=32 and M=1 keep FP16 / the FP8 sidecar. Default "in": pp4096 +7.7% (Qwen3.6-35B),
-    // +12.3% (Qwen3.8-27B, BF16 in_proj export) for PPL (45k corpus) +0.68% / +0.56%.
+    // M<=32 and M=1 keep FP16 / the FP8 sidecar. Measured: in pp4096 +7.7% (Qwen3.6-35B),
+    // +12.3% (Qwen3.8-27B, BF16 in_proj export) for PPL (45k corpus) +0.68% / +0.32..0.56%;
     // gate +0.60%, out +1.98%, all +4.25% PPL on Qwen3.6-35B stay opt-in (roadmap Open 12).
     std::string nvfp4_gdn_proj_prefill = "in";
+    // MXFP8 (E4M3, UE8M0 per 32) prefill copies of the same projections on the CUTLASS
+    // block-scaled GEMM: 3 mantissa bits per element against NVFP4's 1, twice the copy bytes.
+    // Same vocabulary; a projection named here takes MXFP8 ahead of its NVFP4 copy. Qwen3.8-27B
+    // 45k PPL: in +0.08%, gate -0.51%, out -0.18% (NVFP4 +0.32 / +0.01 / +0.47%); pp4096
+    // Qwen3.6-35B in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies on
+    // Qwen3.6-35B leave its KV pool 50 blocks at stock flags (NVFP4 in, 270 MiB: 225).
+    std::string mxfp8_gdn_proj_prefill = "false";
     // FP8 decode sidecar for full-precision attention projections (wq/wk/wv/wo),
     // same per-row-scale mechanism as fp8_ssm_proj, decode-only (M=1).
     // "auto" = on only for gpt-oss (dense BF16 weights get no NVFP4 decode
