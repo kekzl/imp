@@ -93,26 +93,31 @@ echo "  pp512 samples: $(paste -sd, "$pp512_samples")  → median $pp512"
 echo "  pp4096 samples: $(paste -sd, "$pp4096_samples")  → median $pp4096"
 echo "  tg128 samples: $(paste -sd, "$tg128_samples")  → median $tg128"
 
-# Get GPU info. Try nvcc first, then fall back to nvidia-smi cuda_version
-# (the runtime image has no nvcc, only the devel image does).
-GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-# `a | b | c || fallback` never reaches the fallback: sed exits 0 on empty input, so the
-# pipeline succeeds with nothing. Test the value, not the exit code (#1684).
-CUDA=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9.]+' | head -1)
-[ -n "$CUDA" ] || CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' | head -1)
+# Host facts. The runtime image has no git, nvcc or nvidia-smi, and under `set -e` a failing
+# `VAR=$(pipeline)` exits the script: `make gen-perf-baseline` passes IMP_BASELINE_* from the
+# host, the probes below are the fallback (every one ends in `|| true`, value tested after).
+GPU="${IMP_BASELINE_GPU:-}"
+[ -n "$GPU" ] || GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
+[ -n "$GPU" ] || GPU="unknown"
+CUDA="${IMP_BASELINE_CUDA:-}"
+[ -n "$CUDA" ] || CUDA=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9.]+' | head -1 || true)
+[ -n "$CUDA" ] || CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA (UMD )?Version:\s*\K[0-9.]+' | head -1 || true)
 [ -n "$CUDA" ] || CUDA="unknown"
-# The commit the numbers were measured at. Absent from every baseline until
-# #1684, which is why the generated PROV block had to invent one.
-COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null)
-[ -n "$COMMIT" ] || COMMIT="unknown"
-if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-    COMMIT="${COMMIT}-dirty"
+COMMIT="${IMP_BASELINE_COMMIT:-}"
+if [ -z "$COMMIT" ]; then
+    COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || true)
+    [ -n "$COMMIT" ] || COMMIT="unknown"
+    if command -v git >/dev/null 2>&1 && { ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; }; then
+        COMMIT="${COMMIT}-dirty"
+    fi
 fi
-VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
+VRAM_TOTAL="${IMP_BASELINE_VRAM_TOTAL:-}"
+[ -n "$VRAM_TOTAL" ] || VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || true)
+[ -n "$VRAM_TOTAL" ] || VRAM_TOTAL=0
 
 # Get model VRAM from benchmark output (independent quick run).
 vram_line=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 1 --temperature 0 2>&1 | grep "GPU memory after weight upload" | tail -1)
-vram_weights=$(echo "$vram_line" | grep -oP 'weights ~\K[0-9]+' || echo "0")
+vram_weights=$(echo "$vram_line" | grep -oP 'upload consumed \K[0-9]+' || echo "0")
 
 # Peak VRAM for the verify.sh gate: same invocation the gate uses, so pinned and measured are
 # comparable. own_peak (this process's allocations since engine init), not device peak_used

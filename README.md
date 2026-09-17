@@ -204,14 +204,14 @@ a different one, on one model:
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
 |---|---|---|
-| decode tg128 | **287.19 tok/s** | 8 % |
-| prefill pp128 | 4885.13 tok/s | 8 % |
-| prefill pp512 | **12406.87 tok/s** | 8 % |
-| prefill pp4096 | 15324.7 tok/s | 8 % |
-| peak VRAM (own) | 20716 MiB | 10 % |
+| decode tg128 | **299.61 tok/s** | 8 % |
+| prefill pp128 | 5031.75 tok/s | 8 % |
+| prefill pp512 | **12707.44 tok/s** | 8 % |
+| prefill pp4096 | 15776.32 tok/s | 8 % |
+| peak VRAM (own) | 20642 MiB | 10 % |
 
-[PROV: commit=unknown date=2026-07-26 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
-       cuda=unknown path=gguf-dp4a cmd=`make verify-fast` n=5x5]
+[PROV: commit=6fe00f81 date=2026-09-17 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+       cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
 Decode on this host moves several percent between sessions with nothing changed,
