@@ -34,6 +34,28 @@
 
 namespace imp {
 
+// The dequant scratch is sized on the largest per-layer weight; the LM head can be far
+// larger (Gemma-4: 262144 x 2816 = 1408 MiB FP16 vs 44 MiB, #2046). Whole-weight dequant
+// into it is only legal when it fits.
+static bool dequant_scratch_fits(const QuantScratch* qs, const Tensor& weight) {
+    if (qs == nullptr || qs->dequant == nullptr)
+        return false;
+    const size_t need = static_cast<size_t>(weight.shape[0]) * static_cast<size_t>(weight.shape[1]) *
+                        sizeof(uint16_t);
+    if (need <= qs->dequant_size)
+        return true;
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        IMP_LOG_WARN(
+            "gemm_dispatch_uncached_fallback: %ld x %ld %s weight needs %.1f MiB, dequant scratch is "
+            "%.1f MiB; whole-weight dequant declined",
+            (long)weight.shape[0], (long)weight.shape[1], qtype_name(weight.qtype), need / (1024.0 * 1024.0),
+            qs->dequant_size / (1024.0 * 1024.0));
+    }
+    return false;
+}
+
 // Uncached fallback: safety net for weights without a WeightHandle
 // (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
 static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
@@ -51,7 +73,7 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
             gemm(input, it->second, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        if (qs->dequant != nullptr && dequant_gpu_supported(qtype) && !weight.dropped_source) {
+        if (dequant_gpu_supported(qtype) && !weight.dropped_source && dequant_scratch_fits(qs, weight)) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             // The one degradation landing on the per-token path was silent
@@ -94,6 +116,7 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
         args.beta = ctx.beta;
         args.weight_payload = &weight;
         args.dequant_scratch = qs->dequant;
+        args.dequant_scratch_size = qs->dequant_size;
         GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
         if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
             return;
@@ -112,7 +135,14 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
     }
 
     // Block-quant types (Q4_K, Q5_K, Q8_0, etc.): dequant to FP16 then cuBLAS.
-    if (dequant_gpu_supported(qtype) && qs->dequant != nullptr) {
+    if (dequant_gpu_supported(qtype)) {
+        if (!dequant_scratch_fits(qs, weight)) {
+            // gemm() has no block-quant arm: it would read the Q6_K/Q8_0 bytes as FP16 and run
+            // past the allocation. Output stays untouched; the WARN above names the weight.
+            IMP_LOG_ERROR("gemm_dispatch_uncached_fallback: no route for a %ld x %ld %s weight at M=%d",
+                          (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype), M);
+            return;
+        }
         int rows = static_cast<int>(weight.shape[0]);
         int cols = static_cast<int>(weight.shape[1]);
         dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
@@ -326,6 +356,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                         args.q8_1_buf = qs->q8_1_buf;
                         args.d8_buf = qs->d8_buf;
                         args.dequant_scratch = qs->dequant;
+                        args.dequant_scratch_size = qs->dequant_size;
                         args.force_mmvq = ctx.force_mmvq;
                         args.no_mmvq = ctx.gemm_no_mmvq;
                         args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;

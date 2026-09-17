@@ -31,6 +31,21 @@ static GemmDispatchResult generic_dequant_kernel(const GemmKernelArgs& args) {
     // bytes into the FP16 scratch, then wrap a Tensor view and call cuBLAS.
     const int rows = static_cast<int>(weight.shape[0]);
     const int cols = static_cast<int>(weight.shape[1]);
+    // The scratch is sized on the largest per-layer weight; a Gemma-4 LM head (262144 x 2816,
+    // 1408 MiB FP16) against a 44 MiB scratch wrote past it (#2046).
+    const size_t need = static_cast<size_t>(rows) * static_cast<size_t>(cols) * sizeof(uint16_t);
+    if (args.dequant_scratch_size > 0 && need > args.dequant_scratch_size) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            IMP_LOG_WARN(
+                "generic_dequant_kernel: %d x %d %s weight needs %.1f MiB, dequant scratch is %.1f MiB; "
+                "declined",
+                rows, cols, qtype_name(weight.qtype), need / (1024.0 * 1024.0),
+                args.dequant_scratch_size / (1024.0 * 1024.0));
+        }
+        return GemmDispatchResult::PreconditionFail;
+    }
     dequant_gpu(weight.data, args.dequant_scratch, weight.qtype, rows, cols, args.stream);
     Tensor w_fp16(args.dequant_scratch, QType::F16, weight.ndim, weight.shape, /*on_device=*/true);
     gemm(*args.input, w_fp16, *args.output, /*alpha=*/1.0f, args.beta, args.stream);

@@ -1,0 +1,21 @@
+<|turn>user
+Write a short story about a small town.<turn|>
+<|turn>model
+<|channel>thought
+<channel|>The small town of Ridgeway sits at the bottom of a long valley, where the river slows down and spreads out into a wide, shallow bend. Most people who live there work at the paper mill, the hospital, or one of the three schools. In the morning the streets are quiet, and by nine o'clock the bakery on Main Street has sold out of its cinnamon rolls.
+
+Maria Delgado had lived in Ridgeway for twelve years. She had come for a teaching job and stayed because she liked the way the hills looked in October, when the maples turned red and the air smelled like wood smoke. Her house was a narrow two-story building with a porch that needed painting and a garden that she never quite managed to keep free of weeds.
+
+On Saturday mornings she walked to the farmers market with a canvas bag over her shoulder. She bought eggs from the Hendersons, bread from the young couple who had opened a stall in the spring, and whatever vegetables looked good that week. She usually stopped to talk with Frank, who sold honey and told long stories about his bees. Frank was eighty-one years old and had opinions about everything, including the weather, the school board, and the correct way to make coffee.
+
+This particular Saturday the market was crowded. A traveling band had set up near the fountain, and children were running between the stalls with paper cups of lemonade. Maria found the Hendersons' table and waited behind a man she did not recognize. He was tall, wore a gray jacket, and carried a notebook under his arm. When it was his turn he asked Mrs. Henderson a series of careful questions about the chickens, the feed, and the size of the farm. Mrs. Henderson answered patiently, glancing now and then at the line forming behind him.
+
+When he finally moved on, Maria stepped forward. "Who was that?" she asked.
+
+"A writer," Mrs. Henderson said. "He's staying at the inn for the month. Says he's working on a book about small towns."
+
+Maria bought her eggs and walked on. She saw the man again near the honey stall, listening to Frank with the expression of someone who has found exactly what he was looking for. Frank was explaining that bees could recognize human faces, which was true, and that his bees in particular preferred people who did not wear perfume, which may or may not have been true.
+
+By noon the crowd had thinned. Maria walked home along the river path, where the water was low and clear enough to see the stones on the bottom. She thought about the writer and his notebook, and about what he would say about Ridgeway. She hoped he would notice the good things: the way people waved from their cars, the library that stayed open late on Thursdays, the fact that nobody locked their bicycles. She suspected he would also notice the empty storefronts on the north end of Main Street and the mill's tall chimney, which had not produced smoke in three years.
+
+At home she put the eggs in the refrigerator, made a sandwich, and sat on the porch to eat it. The afternoon was warm. A neighbor's dog wandered into her yard, sniffed at the garden, and wandered out again. Somewhere down the street a lawn mower started up, ran for a minute, and stopped.

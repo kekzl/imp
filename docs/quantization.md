@@ -436,8 +436,10 @@ container restarts, cuBLAS algorithm reselection per process, so the pair is a c
 a ranking), greedy Harmony output coherent. Gemma-4 measured 2026-09-16 on
 `google/gemma-4-26B-A4B-it` BF16 (51.6 GB, 60 stacks): 11726 tensors quantized, 747 copied
 (`router.proj.weight` excluded, the reference NVFP4 export keeps it BF16 too), 15 693 MiB, worst
-max-rel 0.1711, mean 0.1054; loads, greedy coherent. No PPL verdict: teacher-forced
-perplexity reads 1e4-1e5 on prose for every Gemma-4 checkpoint on this binary (#2044).
+max-rel 0.1711, mean 0.1054; loads, greedy coherent. PPL on `ppl_corpus_gemma4_turn.txt`
+(Gemma-4 scores text only inside its turn framing, #2044): imp-quantize NVFP4 26.99 vs the
+reference NVFP4 export 26.06 vs UD-Q4_K_M 18.16 (704 tokens, deterministic), so the destacked
+quantization lands in the reference export's class and the K-quant GGUF stays the quality pick.
 The split itself is pinned by `test_quantize_expert_destack.cpp` on the real shapes.
 
 Workflow with Modelopt:

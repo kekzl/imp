@@ -731,10 +731,11 @@ All seven were green in `FEATURES.md` without a gate until #1680.
 - **Qwen3.5-27B MXFP4**: blocked on a checkpoint imp can decode, not a bug; no MXFP4 SafeTensors
   decode path exists outside gpt-oss.
 - **Gemma-4 on the FP8-KV quality gate**: baseline perplexity on the gate corpus is broken; stays
-  FP16 KV unless you opt in. Measured 2026-09-16: `--perplexity` reads 1e4-1e5 on prose for every
-  Gemma-4 checkpoint (GGUF and NVFP4, 138 to 6421 tokens) with greedy top-1 15 %, while gemma-3
-  reads 19-34 and Gemma-4 greedy generation stays coherent; not BOS, not an index shift, not the
-  softcap, not the prefill graph (#2044). `--perplexity` is not a judge on Gemma-4 until closed.
+  FP16 KV unless you opt in. Cause (2026-09-17, #2044): Gemma-4-it scores text only inside its own
+  turn framing. Raw prose after BOS reads 19 312 (imp) / 20 066 (llama.cpp, same GGUF, same file);
+  the same prose as `<|turn>user\n...<turn|>\n<|turn>model\n<|channel>thought\n<channel|>` + text
+  reads 18.16 (UD-Q4_K_M), 26.06 (NVFP4 export), 26.99 (imp-quantize NVFP4), 704 tokens. Gate
+  corpus for Gemma-4: `tools/analysis/ppl_corpus_gemma4_turn.txt` (that framing, plain prose).
 - **Qwen3.6-35B / Qwen3.5**: declare no FP8 KV hint; FP16 KV by default.
 - **Quantised KV is a default only for QWEN35, and it is a trade.** `kv_cache.dtype=auto`
   resolves to NVFP4 for that family (Qwen3.8-27B and its Qwen3.5 siblings): +0.29..0.35 %
