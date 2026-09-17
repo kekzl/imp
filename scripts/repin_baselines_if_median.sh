@@ -9,8 +9,9 @@ set -euo pipefail
 
 # Band derived for the spec-OFF gate metric (tight, ~0.5% spread); the spec-ON metric's
 # verify-path volatility (~11% across restarts) does not belong in this band.
-BAND_LO="${BAND_LO:-275}"
-BAND_HI="${BAND_HI:-290}"
+# Pin 2026-09-17: tg128 299.61 (three cold-median runs 297.26-299.66); band = pin -4 % / +1.5 %.
+BAND_LO="${BAND_LO:-288}"
+BAND_HI="${BAND_HI:-304}"
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 IMG="${IMG:-imp:test}"
 

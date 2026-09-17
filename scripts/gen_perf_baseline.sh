@@ -117,7 +117,7 @@ VRAM_TOTAL="${IMP_BASELINE_VRAM_TOTAL:-}"
 
 # Get model VRAM from benchmark output (independent quick run).
 vram_line=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 1 --temperature 0 2>&1 | grep "GPU memory after weight upload" | tail -1)
-vram_weights=$(echo "$vram_line" | grep -oP 'weights ~\K[0-9]+' || echo "0")
+vram_weights=$(echo "$vram_line" | grep -oP 'upload consumed \K[0-9]+' || echo "0")
 
 # Peak VRAM for the verify.sh gate: same invocation the gate uses, so pinned and measured are
 # comparable. own_peak (this process's allocations since engine init), not device peak_used
