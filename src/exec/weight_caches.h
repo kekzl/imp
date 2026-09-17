@@ -4,6 +4,7 @@
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
 #include "compute/gemm_cutlass_sm120.h"      // CutlassNvFP4Weight
 #include "compute/gemm_cutlass_mxfp4_sm120.h"// CutlassMxFP4Weight
+#include "compute/gemm_cutlass_mxfp8_sm120.h"  // CutlassMxFP8Weight
 #include <cuda_fp16.h>
 #include <unordered_map>
 #include <cstddef>
@@ -96,6 +97,10 @@ struct WeightCaches {
     std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4_prefill;
     std::vector<NvFP4QuantResult> cutlass_nvfp4_prefill_src;
     size_t cutlass_nvfp4_prefill_bytes = 0;
+    // MXFP8 prefill copies (gemm.mxfp8_gdn_proj_prefill), same keying; checked ahead of the
+    // NVFP4 map at dispatch. Entries own their data and SfAtom buffers.
+    std::unordered_map<const void*, CutlassMxFP8Weight> cutlass_mxfp8_prefill;
+    size_t cutlass_mxfp8_prefill_bytes = 0;
 
     // Single bulk allocation backing every cutlass_nvfp4 entry's SfAtom scale factors
     // (mirrors fp16_bulk_data). Each entry's scale_factors is a sub-pointer with

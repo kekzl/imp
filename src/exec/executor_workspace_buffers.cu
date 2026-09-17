@@ -1468,6 +1468,12 @@ void GraphExecutor::free_buffers() {
             free_nvfp4_result(result);
         wcache_.cutlass_nvfp4_prefill_src.clear();
         wcache_.cutlass_nvfp4_prefill_bytes = 0;
+        for (auto& [ptr, cw] : wcache_.cutlass_mxfp8_prefill) {
+            vram_free(vram_alloc_, cw.data);
+            vram_free(vram_alloc_, cw.scale_factors);
+        }
+        wcache_.cutlass_mxfp8_prefill.clear();
+        wcache_.cutlass_mxfp8_prefill_bytes = 0;
         wcache_.cutlass_nvfp4_bytes = 0;
         if (wcache_.cutlass_sf_slab) {
             IMP_CUDA_CHECK_LOG(cudaFree(wcache_.cutlass_sf_slab));

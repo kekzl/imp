@@ -12,6 +12,7 @@
 #include "core/tensor_kind.h"
 #include "core/logging.h"
 #include "compute/gemm.h"
+#include "compute/gemm_cutlass_mxfp8_sm120.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
@@ -207,6 +208,18 @@ static void log_nvfp4_prefill_copy_route(const WeightHandle& h, int M, float bet
         (long long)h.shape[1], M, beta, static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype));
 }
 
+static void log_mxfp8_prefill_copy_route(const WeightHandle& h, int M, float beta, bool active) {
+    static bool logged[256] = {};
+    const auto k = static_cast<unsigned>(h.kind) & 255u;
+    if (logged[k])
+        return;
+    logged[k] = true;
+    IMP_LOG_INFO(
+        "GDN MXFP8 prefill route %s: %s [%lld x %lld] M=%d beta=%.1f primary_tier=%d source_qtype=%d",
+        active ? "ACTIVE" : "DECLINED", tensor_kind_name(h.kind), (long long)h.shape[0],
+        (long long)h.shape[1], M, beta, static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype));
+}
+
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
 // the dispatch is guaranteed to reach the CUTLASS NVFP4 prefill block
 // (which quantizes input into the shared activation scratch). Every
@@ -253,6 +266,32 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // whatever a particular tier's kernel happens to materialise.
     if (calib_)
         calib_->accumulate(cur_layer_, h.kind, input, ctx.stream);
+
+    // MXFP8 prefill copy of an F16 GDN projection (gemm.mxfp8_gdn_proj_prefill): the same
+    // gate as the NVFP4 copy below, checked first. Quantizes the activation into the MXFP8
+    // scratch on every call (ssm_in and gdn_gate share one input; the dedupe is a later lever).
+    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_mxfp8_prefill.count(h.source_data)) {
+        const int Mp = static_cast<int>(input.shape[0]);
+        const int Kp = static_cast<int>(input.shape[1]);
+        const auto& cw = wcache_.cutlass_mxfp8_prefill.find(h.source_data)->second;
+        const auto& qs = qscratch_;
+        bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
+                      !cur_spec_verify_ && h.source_qtype == QType::F16 &&
+                      (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
+                      qs.mxfp8_act_data != nullptr && qs.mxfp8_act_sf != nullptr &&
+                      static_cast<size_t>(Mp) * Kp <= qs.mxfp8_act_data_size &&
+                      cutlass_mxfp8_sf_size(Mp, Kp) <= qs.mxfp8_act_sf_size;
+        if (active) {
+            quantize_fp16_to_mxfp8_cutlass(input.data, qs.mxfp8_act_data, qs.mxfp8_act_sf, Mp, Kp,
+                                           ctx.stream);
+            active = gemm_mxfp8_cutlass_sm120(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw, output.data, Mp,
+                                              static_cast<int>(cw.N), Kp, qs.mxfp8_workspace,
+                                              qs.mxfp8_workspace_size, ctx.stream);
+        }
+        log_mxfp8_prefill_copy_route(h, Mp, ctx.beta, active);
+        if (active)
+            return;
+    }
 
     // NVFP4 prefill copy of an F16 GDN projection (gemm.nvfp4_gdn_proj_prefill). Ahead of the
     // tier split: on Qwen3.6-35B ssm_in and gdn_gate sit in no cache (tier Undefined) and

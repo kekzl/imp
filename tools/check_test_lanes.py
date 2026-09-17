@@ -282,7 +282,10 @@ def main():
     # bit-stable and the same masked set as the atomic path.
     # 1128 -> 1129 (#2046): GemmKernelRegistryTest.GenericDequantDeclinesWeightLargerThanScratch
     # (test-compute): the generic dequant catch-all refuses a weight larger than the scratch.
-    PINNED = 1129
+    # 1129 -> 1132: CutlassMxFP8Gemm.{MatchesFp32ReferenceWithinE4M3Budget,
+    # TinyWeightRowsAgainstCoherentActivationStayFinite,PartialSfAtomKTile} (test-quant): the
+    # MXFP8 GDN prefill GEMM against an FP32 reference, finite on 0.01-magnitude rows.
+    PINNED = 1132
 
     text = CMAKE.read_text()
     mods = module_sources(text)

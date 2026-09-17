@@ -39,6 +39,14 @@ struct QuantScratch {
     void* mxfp4_workspace = nullptr;
     size_t mxfp4_workspace_size = 0;
 
+    // --- MXFP8 GDN prefill activation buffers (gemm.mxfp8_gdn_proj_prefill) ---
+    void* mxfp8_act_data = nullptr;  // [max_tokens, max_K] E4M3
+    void* mxfp8_act_sf = nullptr;    // SfAtom UE8M0
+    size_t mxfp8_act_data_size = 0;
+    size_t mxfp8_act_sf_size = 0;
+    void* mxfp8_workspace = nullptr;
+    size_t mxfp8_workspace_size = 0;
+
     // dp4a (MMVQ) scratch for quantized input vector (M=1 decode): sized q8_1_rows x
     // q8_1_max_blocks. Production decode uses row 0 only; the spec-verify batched LM head
     // (#847 lever 2) quantizes up to q8_1_rows chunk rows at stride q8_1_max_blocks.
