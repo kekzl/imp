@@ -42,8 +42,13 @@ sys.exit(0 if ok else 1)
 EOF
 
 run_gen() {
+    # Host facts for the pin: the runtime image has no git or nvidia-smi (see Makefile gen-perf-baseline).
     docker run --rm --gpus all -v "$MODELS_DIR":/models -v "$PWD":/src -w /src \
         -u "$(id -u):$(id -g)" -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+        -e IMP_BASELINE_COMMIT="$(git rev-parse --short=8 HEAD)$(git diff --quiet && git diff --cached --quiet || echo -dirty)" \
+        -e IMP_BASELINE_GPU="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)" \
+        -e IMP_BASELINE_CUDA="$(nvidia-smi | grep -oP 'CUDA (UMD )?Version:\s*\K[0-9.]+' | head -1)" \
+        -e IMP_BASELINE_VRAM_TOTAL="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)" \
         --entrypoint bash "$IMG" scripts/gen_perf_baseline.sh "$1"
 }
 

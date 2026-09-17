@@ -474,12 +474,19 @@ MODELS_DIR ?= $(HOME)/models
 # re-pins what the gate compares against - did not. A baseline measured next to
 # a co-tenant becomes the number every later run is judged by, and nothing
 # downstream can tell.
+# The runtime image has no git, nvcc or nvidia-smi: commit, GPU name, CUDA version and
+# VRAM total come from the host (the script's own probes exited it under `set -e` since
+# #1684, so the medians printed and the file was never written).
 gen-perf-baseline: check-gpu build
 	@docker run --rm --gpus all \
 		-v $(MODELS_DIR):/models \
 		-v $(PWD):/src -w /src \
 		-u $(shell id -u):$(shell id -g) \
 		-e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+		-e IMP_BASELINE_COMMIT="$$(git rev-parse --short=8 HEAD)$$(git diff --quiet && git diff --cached --quiet || echo -dirty)" \
+		-e IMP_BASELINE_GPU="$$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)" \
+		-e IMP_BASELINE_CUDA="$$(nvidia-smi | grep -oP 'CUDA (UMD )?Version:\s*\K[0-9.]+' | head -1)" \
+		-e IMP_BASELINE_VRAM_TOTAL="$$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)" \
 		--entrypoint bash $(DOCKER_IMG) scripts/gen_perf_baseline.sh "$(MODEL)"
 
 # Roofline pipeline (tools/roofline/): GPU measurement is local-only (CI has no
