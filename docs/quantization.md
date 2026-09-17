@@ -177,6 +177,7 @@ each found by measurement:
 | MLA latent projections (`kv_a_proj`, `kv_b_proj`) | the runtime slices and reshapes both | bisection on DeepSeek-V2-Lite: quantized, the checkpoint loaded and emitted cross-script garbage |
 | MoE router (`.gate.weight`) | FP4 across 16 shared-scale values changes the top-k pick | measured separately, MLA pair already excluded |
 | **fused Q+gate `q_proj`** (Qwen3.5 / Qwen3-Next `attn_output_gate`) | reported, **not excluded**: see below | #1273 |
+| GDN `linear_attn` in_proj_* / out_proj | quantized by default; `--keep-gdn-proj [all\|in,gate,out]` keeps them at source precision (all = the Qwen3.6-35B-A3B-NVFP4 recipe), so the runtime's F16 GDN path applies (FP8 decode sidecar, `gemm.nvfp4_gdn_proj_prefill`). Qwen3.8-27B: `all` keeps 10 605 MiB and the 27 GB export no longer fits 32 GB (upload 30 635 MiB, workspace refused); `in` keeps 5 GiB | roadmap Open 12 second arm |
 
 The last row is a correction. The gate half feeds a sigmoid; E2M1 is coarsest near zero, where a
 sigmoid is most sensitive: rounding only that half on a healthy GGUF twin reproduces the #1273

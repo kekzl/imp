@@ -50,6 +50,57 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
     return true;
 }
 
+std::string gdn_projection_role(const std::string& name) {
+    static const std::string kMixer = ".linear_attn.";
+    static const std::string kWeight = ".weight";
+    const size_t p = name.find(kMixer);
+    if (p == std::string::npos || !ends_with(name, kWeight))
+        return "";
+    const size_t start = p + kMixer.size();
+    if (name.size() < start + kWeight.size())
+        return "";
+    const std::string leaf = name.substr(start, name.size() - kWeight.size() - start);
+    // in_proj_qkv / in_proj_z / in_proj_a / in_proj_b (Qwen3.5+), in_proj_qkvz / in_proj_ba
+    // (Qwen3-Next), out_proj. norm / conv1d / A_log / dt_bias are not projections.
+    if (leaf == "out_proj")
+        return "out";
+    if (leaf == "in_proj_z")
+        return "gate";
+    if (leaf.rfind("in_proj", 0) == 0)
+        return "in";
+    return "";
+}
+
+bool is_gdn_projection(const std::string& name) { return !gdn_projection_role(name).empty(); }
+
+bool valid_keep_gdn_proj_selection(const std::string& sel) {
+    if (sel.empty() || sel == "all" || sel == "true")
+        return true;
+    size_t pos = 0;
+    while (pos <= sel.size()) {
+        const size_t comma = sel.find(',', pos);
+        const std::string item = sel.substr(pos,
+                                            comma == std::string::npos ? std::string::npos : comma - pos);
+        if (item != "in" && item != "gate" && item != "out")
+            return false;
+        if (comma == std::string::npos)
+            break;
+        pos = comma + 1;
+    }
+    return true;
+}
+
+bool keep_gdn_projection(const std::string& name, const std::string& sel) {
+    if (sel.empty())
+        return false;
+    const std::string role = gdn_projection_role(name);
+    if (role.empty())
+        return false;
+    if (sel == "all" || sel == "true")
+        return true;
+    return ("," + sel + ",").find("," + role + ",") != std::string::npos;
+}
+
 Fp8SourceAction fp8_source_action(const RawTensor& weight, bool gated, bool quantize_lm_head,
                                   std::string& why_not) {
     if (gated) {

@@ -209,6 +209,53 @@ TEST(Nvfp4OutputBytes, CountsPackedNibblesMicroScalesAndTensorScale) {
 // An FP8 source pairs each E4M3 weight with a block-scale grid consumed regardless of the
 // weight; "leave alone" cannot mean "copy raw bytes" since E4M3 without its scales is still
 // valid E4M3 meaning something else. Every refusal here must be a widen.
+TEST(GdnProjection, NamesTheQwen36RecipeSetAndNothingElse) {
+    // The five modules Qwen3.6-35B-A3B-NVFP4 lists in `ignore` per GDN layer, plus the
+    // Qwen3-Next spellings; norm / conv1d / A_log / dt_bias and attention layers stay out.
+    for (const char* leaf :
+         {"in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "in_proj_qkvz", "in_proj_ba", "out_proj"})
+        EXPECT_TRUE(
+            is_gdn_projection("model.language_model.layers.3.linear_attn." + std::string(leaf) + ".weight"))
+            << leaf;
+    EXPECT_FALSE(is_gdn_projection("model.language_model.layers.3.linear_attn.norm.weight"));
+    EXPECT_FALSE(is_gdn_projection("model.language_model.layers.3.linear_attn.conv1d.weight"));
+    EXPECT_FALSE(is_gdn_projection("model.language_model.layers.3.linear_attn.A_log"));
+    EXPECT_FALSE(is_gdn_projection("model.language_model.layers.3.linear_attn.dt_bias"));
+    EXPECT_FALSE(is_gdn_projection("model.language_model.layers.3.linear_attn.out_proj.bias"));
+    EXPECT_FALSE(is_gdn_projection("model.layers.3.self_attn.o_proj.weight"));
+    EXPECT_FALSE(is_gdn_projection("model.layers.3.mlp.experts.0.up_proj.weight"));
+    EXPECT_TRUE(
+        quantizes(tensor("model.language_model.layers.3.linear_attn.in_proj_qkv.weight", {10240, 5120})))
+        << "without --keep-gdn-proj the policy itself still quantizes a GDN projection";
+}
+
+TEST(GdnProjection, RolesFollowTheRuntimeFlagVocabulary) {
+    const std::string p = "model.language_model.layers.3.linear_attn.";
+    EXPECT_EQ(gdn_projection_role(p + "in_proj_qkv.weight"), "in");
+    EXPECT_EQ(gdn_projection_role(p + "in_proj_qkvz.weight"), "in");
+    EXPECT_EQ(gdn_projection_role(p + "in_proj_a.weight"), "in");
+    EXPECT_EQ(gdn_projection_role(p + "in_proj_b.weight"), "in");
+    EXPECT_EQ(gdn_projection_role(p + "in_proj_z.weight"), "gate");
+    EXPECT_EQ(gdn_projection_role(p + "out_proj.weight"), "out");
+    EXPECT_EQ(gdn_projection_role(p + "norm.weight"), "");
+    EXPECT_EQ(gdn_projection_role("model.layers.3.self_attn.o_proj.weight"), "");
+
+    EXPECT_TRUE(keep_gdn_projection(p + "out_proj.weight", "all"));
+    EXPECT_TRUE(keep_gdn_projection(p + "in_proj_qkv.weight", "in"));
+    EXPECT_TRUE(keep_gdn_projection(p + "in_proj_a.weight", "in"));
+    EXPECT_FALSE(keep_gdn_projection(p + "in_proj_z.weight", "in"));
+    EXPECT_FALSE(keep_gdn_projection(p + "out_proj.weight", "in"));
+    EXPECT_TRUE(keep_gdn_projection(p + "in_proj_z.weight", "in,gate"));
+    EXPECT_FALSE(keep_gdn_projection(p + "in_proj_qkv.weight", ""));
+    EXPECT_FALSE(keep_gdn_projection("model.layers.3.self_attn.o_proj.weight", "all"));
+
+    EXPECT_TRUE(valid_keep_gdn_proj_selection("all"));
+    EXPECT_TRUE(valid_keep_gdn_proj_selection("in,gate,out"));
+    EXPECT_TRUE(valid_keep_gdn_proj_selection(""));
+    EXPECT_FALSE(valid_keep_gdn_proj_selection("in,z"));
+    EXPECT_FALSE(valid_keep_gdn_proj_selection("in,"));
+}
+
 TEST(Fp8SourceAction, RefusedWeightsAreWidenedRatherThanCopiedRaw) {
     std::string why;
     const RawTensor lm_head = tensor("lm_head.weight", {248320, 5120}, "F8_E4M3");
