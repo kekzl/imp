@@ -22,7 +22,7 @@
 # Dockerfile built two different base layers on two different days. Refresh
 # with `docker buildx imagetools inspect nvidia/cuda:<tag>` (the index digest,
 # not a per-platform one) and keep the five ci.yml `image:` lines in step.
-FROM nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466 AS toolchain
+FROM nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378 AS toolchain
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -129,7 +129,7 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
 # Native CUDA 13.3 runtime image already ships the matching cudart + cuBLAS
 # (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
 # entrypoint/healthcheck helpers need adding.
-FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04@sha256:71b55b93449973f2ee6d8024d6dd34853d338a1f007fe07adaaf9a35fd591794
+FROM nvidia/cuda:13.4.1-runtime-ubuntu26.04@sha256:1725dba28b39fd0c3c35665c98284b603bef7b30e8f7990a98d4c3cbb905016a
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here

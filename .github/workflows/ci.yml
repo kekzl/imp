@@ -50,12 +50,12 @@ jobs:
       # out of the box (matches the Dockerfile builder). No apt toolkit install.
       # Ubuntu 26.04 → GCC 15.2, so CI compiles on the same libstdc++ 15 as the
       # release image and catches missing-include regressions (#903) here.
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
+      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
       # sync with the container image tag above (bump both to move CI).
-      CUDA_VERSION: "13.3"
+      CUDA_VERSION: "13.4"
       CCACHE_DIR: /github/home/.ccache
       CCACHE_MAXSIZE: 8G
       CCACHE_COMPILERCHECK: content
@@ -68,7 +68,7 @@ jobs:
       # build tooling installs later, gated on the detection result.)
       #
       # python3 comes with it because the static gates below are python and this
-      # container has neither: `nvidia/cuda:13.3.1-devel-ubuntu26.04` ships no
+      # container has neither: `nvidia/cuda:13.4.1-devel-ubuntu26.04` ships no
       # python3 and no git. Without this the gate step fails "python3: not
       # found" on every PR, which is a false red on the one required check.
       # Every container job points apt at azure.archive.ubuntu.com: the runners
@@ -315,9 +315,9 @@ jobs:
     if: needs.build.outputs.cpp == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
+      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     env:
-      CUDA_VERSION: "13.3"
+      CUDA_VERSION: "13.4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -428,7 +428,7 @@ jobs:
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
+      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -636,12 +636,12 @@ jobs:
     name: PTX fallback
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
+      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     defaults:
       run:
         shell: bash
     env:
-      CUDA_VERSION: "13.3"
+      CUDA_VERSION: "13.4"
       CCACHE_DIR: /github/home/.ccache-ptx
       CCACHE_MAXSIZE: 4G
       CCACHE_COMPILERCHECK: content
@@ -686,9 +686,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache-ptx
-          key: ${{ runner.os }}-cuda13.3-ccache-ptx-${{ github.sha }}
+          key: ${{ runner.os }}-cuda13.4-ccache-ptx-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-cuda13.3-ccache-ptx-
+            ${{ runner.os }}-cuda13.4-ccache-ptx-
 
       # No -DIMP_DISABLE_120F_FALLBACK: the default (OFF) is what ships, and it
       # is the thing under test.
@@ -740,7 +740,7 @@ jobs:
     name: Sanitizers
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:8cf42b8dc4c34d47fb42ffb0923f8a5e363469a7149181c094da336d311bb466
+      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.
@@ -802,9 +802,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache-asan
-          key: ${{ runner.os }}-cuda13.3-ccache-asan-${{ github.sha }}
+          key: ${{ runner.os }}-cuda13.4-ccache-asan-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-cuda13.3-ccache-asan-
+            ${{ runner.os }}-cuda13.4-ccache-asan-
 
       - name: Fetch pinned deps
         if: steps.scope.outputs.run == 'true'

@@ -32,9 +32,11 @@ prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned
 `metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](internals/BENCHMARKING.md));
 refresh it via `scripts/gen_perf_baseline.sh`.
 
-**Toolchain (current: `v0.42.1`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.3
-(13.3.1 since v0.20.1; the rows below were taken on 13.3.0 and carry over —
-re-measured perf-neutral, decode 287.95 vs 288.38 tok/s, median of three).
+**Toolchain (current: `v0.42.1`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4
+(13.4.1 since 2026-09-19, 13.3.1 from v0.20.1; the rows below were taken on
+13.3.x and carry over — the toolkit move re-measured perf-neutral, tg128 299.47
+vs the 299.61 pin, pp512 -0.67 %, pp4096 +0.16 %, median of three independent
+runs at 0.07 % spread).
 The C++20→C++23 move in v0.17.0 is perf-neutral — Qwen3-8B-Q8_0 decode re-measured
 `tg128 = 287` (baseline 269.5, within good-host-day range), so the tabulated
 numbers below carry over unchanged.
