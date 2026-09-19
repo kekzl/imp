@@ -17,6 +17,8 @@ enum class ModelArch {
     QWEN35,
     QWEN35_MOE,
     QWEN36_MOE,
+    QWEN4_EXP,  // Qwen3.8-Flash-Next (model_type qwen4_exp): GDN + QSA hybrid, 512-expert MoE,
+                // gated residual, n-gram PLE. Loader + experts land first; the new blocks follow.
     GPT_OSS,
     GEMMA3,
     GEMMA4,

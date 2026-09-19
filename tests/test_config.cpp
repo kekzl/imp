@@ -118,6 +118,7 @@ TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GEMMA4));
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN35));
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN4_EXP));  // unmeasured
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GENERIC));
 }
 
@@ -131,6 +132,7 @@ TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     // +1.47 % PPL because NVFP4 attention weights compound with a quantised KV,
     // and NVFP4 KV is the more aggressive quantiser. Unmeasured there.
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN4_EXP));  // unmeasured
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN35_MOE));
     // Families the FP8 lists already serve must not be flipped by this gate.
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN3));
@@ -246,6 +248,7 @@ TEST(RuntimeConfigTest, KvFp8NoHintDefaultSafeAllowlist) {
     EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3_MOE));
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::LLAMA));
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::QWEN4_EXP));  // unmeasured
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::NEMOTRON_H_MOE));
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::GEMMA4));
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::GENERIC));

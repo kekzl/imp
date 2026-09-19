@@ -835,7 +835,7 @@ struct UploadCtx {
     std::vector<PinnedBuffer>& host_pinned_allocs;
     // Architecture-specific norm-weight offset: Qwen3.5/3.6 SafeTensors stores block-norm
     // gammas as deltas (gamma=1+W) while GGUF bakes the +1 in at conversion. Applied only on
-    // BF16-source paths in upload_weight(). 1.0f for QWEN35[_MOE]/QWEN36_MOE, 0.0f otherwise.
+    // BF16-source paths in upload_weight(). 1.0f for QWEN35[_MOE]/QWEN36_MOE/QWEN4_EXP, 0.0f otherwise.
     float arch_norm_offset = 0.0f;
     // gpt-oss MXFP4 MoE experts must stay host-resident through weight upload: the
     // MXFP4->NVFP4 conversion runs at pre_dequant (needs the executor's wcache). True for
@@ -2221,7 +2221,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // BF16→FP16 upload conversion; F32-source norms (GGUF) are unaffected.
     const float arch_norm_offset = (config_.arch == ModelArch::QWEN35 ||
                                     config_.arch == ModelArch::QWEN35_MOE ||
-                                    config_.arch == ModelArch::QWEN36_MOE)
+                                    config_.arch == ModelArch::QWEN36_MOE ||
+                                    config_.arch == ModelArch::QWEN4_EXP)
                                        ? 1.0f
                                        : 0.0f;
     const bool is_gpt_oss = (config_.arch == ModelArch::GPT_OSS);

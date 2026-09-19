@@ -422,7 +422,7 @@ bool Engine::supports_chunked_prefill_() const {
         return false;
     const auto& cfg = model_->config();
     // Out-of-scope archs. Hybrid GDN+MoE / Mamba2+MoE archs (QWEN35*,
-    // QWEN36_MOE, NEMOTRON_H_MOE) ARE supported. Gemma-4 (SWA + dual
+    // QWEN36_MOE, QWEN4_EXP, NEMOTRON_H_MOE) ARE supported. Gemma-4 (SWA + dual
     // head_dim 256/512) is supported via cuBLAS softmax sliding_window plus
     // per-layer dispatch (each layer call uses its own nh/nkv/hd). GEMMA3
     // (SWA, uniform head_dim/kv_heads) reuses the same per-layer dispatch and

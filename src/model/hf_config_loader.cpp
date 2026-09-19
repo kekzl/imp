@@ -38,6 +38,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
         {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
         {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
+        {"Qwen4ExpForCausalLM", ModelArch::QWEN4_EXP},
+        {"Qwen4ExpForConditionalGeneration", ModelArch::QWEN4_EXP},
         {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
         {"Gemma2ForCausalLM", ModelArch::GEMMA3},
         {"GemmaForCausalLM", ModelArch::GEMMA3},
@@ -129,6 +131,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                 {"qwen3_5_text", "Qwen3_5ForCausalLM"},
                 {"qwen3_5_moe", "Qwen3_5MoeForCausalLM"},
                 {"qwen3_5_moe_text", "Qwen3_5MoeForCausalLM"},
+                {"qwen4_exp", "Qwen4ExpForConditionalGeneration"},
+                {"qwen4_exp_text", "Qwen4ExpForCausalLM"},
                 {"nemotron_h", "NemotronHForCausalLM"},
                 {"gemma", "GemmaForCausalLM"},
                 {"gemma2", "Gemma2ForCausalLM"},
@@ -433,7 +437,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     //   linear_num_value_heads                         -> ssm_dt_rank (n_heads)
     //   linear_conv_kernel_dim                         -> ssm_conv_kernel
     if (cfg.arch == ModelArch::QWEN36_MOE || cfg.arch == ModelArch::QWEN35_MOE ||
-        cfg.arch == ModelArch::QWEN35) {
+        cfg.arch == ModelArch::QWEN35 || cfg.arch == ModelArch::QWEN4_EXP) {
         // HF SafeTensors stores GDN heads in grouped order (heads 0..n_v_per_k-1 = group 0); the
         // scan kernel's default g=h%n_groups assumes the GGUF tiled layout. Set grouped_layout=1
         // for HF loads. Cross-converted checkpoints may ship tiled; override gdn.layout_override="tiled".

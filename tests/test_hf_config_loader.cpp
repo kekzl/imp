@@ -571,6 +571,11 @@ TEST_F(RopeScalingConfigTest, NewlyMappedArchClassNames) {
               imp::ModelArch::LLAMA);
     EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5MoeForCausalLM"),
               imp::ModelArch::QWEN36_MOE);
+    // Qwen3.8-Flash-Next ships model_type qwen4_exp under a ConditionalGeneration wrapper.
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen4ExpForConditionalGeneration"),
+              imp::ModelArch::QWEN4_EXP);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen4ExpForCausalLM"),
+              imp::ModelArch::QWEN4_EXP);
 
     // Unknown arch still produces GENERIC (and emits a WARN).
     EXPECT_EQ(HFConfigLoader::map_architecture("BogusForCausalLM"),

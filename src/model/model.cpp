@@ -163,6 +163,7 @@ enum {
     kApiQwen36Moe = 13,
     kApiGptOss = 14,
     kApiNomicBert = 15,
+    kApiQwen4Exp = 16,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -182,6 +183,9 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
     {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
+    // Qwen3.8-Flash-Next generation_config: temperature 1.0, top_p 0.95, top_k 20. Router is the
+    // Qwen3.6 one (top-k softmax + norm_topk_prob, shared expert with sigmoid gate).
+    {ModelArch::QWEN4_EXP, "qwen4exp", kApiQwen4Exp, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 20},
     // ewnorm=true: gpt-oss routes softmax-after-topk - selection on biased logits +
     // renormalized top-k softmax equals imp's norm_weights path once router bias is added to
     // logits. embed_scale=2^-4: residual rescale for gpt-oss's BF16 activations overflowing
@@ -309,6 +313,8 @@ ModelArch parse_model_arch(const std::string& s) {
         {"qwen36moe", ModelArch::QWEN36_MOE},
         {"qwen3.6_moe", ModelArch::QWEN36_MOE},
         {"qwen3.6moe", ModelArch::QWEN36_MOE},
+        {"qwen4exp", ModelArch::QWEN4_EXP},
+        {"qwen4_exp", ModelArch::QWEN4_EXP},
         {"gpt_oss", ModelArch::GPT_OSS},
         {"gpt-oss", ModelArch::GPT_OSS},
         {"gemma3", ModelArch::GEMMA3},
@@ -331,6 +337,8 @@ ModelArch parse_model_arch(const std::string& s) {
         {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
         {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
         {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
+        {"Qwen4ExpForCausalLM", ModelArch::QWEN4_EXP},
+        {"Qwen4ExpForConditionalGeneration", ModelArch::QWEN4_EXP},
         {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
         {"Gemma2ForCausalLM", ModelArch::GEMMA3},
         {"GemmaForCausalLM", ModelArch::GEMMA3},
