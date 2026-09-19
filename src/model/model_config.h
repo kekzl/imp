@@ -52,6 +52,9 @@ struct ModelConfig {
     // Qwen4Exp gated residual: hc_count streams of d_model, mixed through an hc_lowrank bottleneck.
     int hc_count = 0;    // 0 = plain residual
     int hc_lowrank = 0;
+    // GDN output gate activation: Qwen3.5/3.6 use SiLU (hidden_act); Qwen4Exp sets
+    // output_gate_type=sigmoid on its gated RMSNorm.
+    bool gdn_gate_sigmoid = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
