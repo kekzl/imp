@@ -93,13 +93,26 @@ prime search in the modeling code is not needed.
 
 ## Reference
 
-HF transformers needs the BF16 checkpoint in RAM (335 GiB). The workable
-oracle on this host is llama.cpp with `unsloth/Qwen3.8-Flash-Next-GGUF`
-`UD-Q4_K_XL` (104 GiB, experts on CPU) and `llama-eval-callback` for per-layer
-dumps against `diagnostics.dump_hidden_dir` + `tools/analysis/layer_diff.py`.
-Quantisation differs between the two, so the comparison bounds drift rather
-than proving equality; token-level agreement on greedy decode is the first
-gate, perplexity on `ppl_corpus_45k.txt` the second.
+The n-gram table never needs to be resident: llama.cpp (PR #27742, merged
+2026-08-27, arch `qwen4exp`) hashes host-side ("the splitmix64-derived
+multipliers reach 2^45, so the products need 64-bit integers and an xor,
+neither of which ggml has") and gathers rows with `ggml_get_rows` from the
+mmap'd `per_layer_token_embd` tensor. `-ot "per_layer_token_embd=CPU"` keeps it
+off the GPU; the page cache serves the hot n-grams. Reported: RTX 3080 Ti
+16 GB + 64 GB RAM with experts 6-46 in RAM and the table on NVMe, pp ~40 and
+tg 8-10 tok/s; M1 Max 64 GB with the table on SSD, tg 17.6 tok/s at 45.8 GB
+resident. 16 rows of 160 bytes per token is ~3 MB/s of random reads at
+36 tok/s, well inside one NVMe's budget.
+
+So the oracle on this host is llama.cpp in the `ghcr.io/ggml-org/llama.cpp`
+CUDA container with `unsloth/Qwen3.8-Flash-Next-GGUF` `UD-Q4_K_XL` (104 GiB,
+4 shards): experts in RAM, table on NVMe, dense part + KV on the card, and
+`llama-eval-callback` for per-layer dumps against `diagnostics.dump_hidden_dir`
++ `tools/analysis/layer_diff.py`. Quantisation differs between the two, so
+the comparison bounds drift rather than proving equality; token-level
+agreement on greedy decode is the first gate, perplexity on
+`ppl_corpus_45k.txt` the second. imp's own PLE path is the same design: host
+hash, host mmap, 16 gathers per token, nothing of the table in VRAM.
 
 ## Findings on the way
 
