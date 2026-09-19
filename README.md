@@ -11,7 +11,7 @@ commit: 412bf8b4
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/kekzl/imp?style=flat&color=blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/CUDA-13.3-76b900?style=flat&logo=nvidia" alt="CUDA 13.3">
+  <img src="https://img.shields.io/badge/CUDA-13.4-76b900?style=flat&logo=nvidia" alt="CUDA 13.4">
   <img src="https://img.shields.io/badge/C++-23-00599C?style=flat&logo=cplusplus" alt="C++23">
 </p>
 

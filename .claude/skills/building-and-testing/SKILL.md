@@ -9,7 +9,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 
 | # | Rule | Detail |
 |---|---|---|
-| 1 | No CUDA toolkit on the host | Everything runs in Docker. Toolchain `nvidia/cuda:13.3.1-devel-ubuntu26.04`, GCC 15.2, C++23 for host AND device (`CMAKE_CUDA23_STANDARD_COMPILE_OPTION` shim at the top of `CMakeLists.txt`). |
+| 1 | No CUDA toolkit on the host | Everything runs in Docker. Toolchain `nvidia/cuda:13.4.1-devel-ubuntu26.04`, GCC 15.2, C++23 for host AND device (`CMAKE_CUDA23_STANDARD_COMPILE_OPTION` shim at the top of `CMakeLists.txt`). |
 | 2 | `build/` and `build-dev/` are root-owned | `make dev-clean`, or `docker run --rm -v $PWD:/src -w /src ubuntu rm -rf build`. Never `sudo`. |
 | 3 | No `--mount=type=cache` on the build dir in the Dockerfile | 03a2cc19: ninja reused stale objects. The `ccache` mount (`id=imp-ccache`) is content-addressed and stays; `docker builder prune` empties it, which only costs one cold build. |
 | 4 | `models/` in the repo is a symlink farm | Custom `docker run` mounts `$HOME/models:/models`; Makefile targets already do. |

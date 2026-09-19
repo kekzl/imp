@@ -4,7 +4,7 @@
 # Honours $CUDA_IMG or --image; falls back to a pinned tag when curl/jq are missing or the
 # registry query fails, so surveys still run offline.
 latest_cuda_devel_img() {
-    local fallback="nvidia/cuda:13.3.1-devel-ubuntu26.04"
+    local fallback="nvidia/cuda:13.4.1-devel-ubuntu26.04"
     command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || { echo "$fallback"; return; }
     local tag
     tag=$(curl -fsS --max-time 8 \
