@@ -35,6 +35,7 @@ struct ModelProfile {
     // post-LN with bias, no KV cache / LM head / sampling. Served by the
     // dedicated encoder forward, never by the decoder loop.
     bool is_encoder = false;
+    bool gated_residual = false;  // Qwen4Exp: hc_attn_norm present, residual is hc_count x d_model wide
 
     // Attention variant, decided from arch+swa_layers+rope_attn_disabled:
     //   STANDARD   - RoPE, no per-arch SWA (Gemma-3's sliding_window_pattern is separate,

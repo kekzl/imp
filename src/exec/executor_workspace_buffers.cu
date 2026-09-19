@@ -1643,6 +1643,7 @@ void GraphExecutor::free_buffers() {
     if (chunk_eager_bytes_ > 0)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));  // retire the frees for the pool
     chunk_eager_bytes_ = 0;
+    hc_free_();          // Qwen4Exp gated-residual streams (executor-owned)
     ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
     vfree(fp32_accum_buf_);
     ssm_layer_map_.clear();

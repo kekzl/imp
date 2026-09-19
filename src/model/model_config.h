@@ -49,6 +49,9 @@ struct ModelConfig {
     //   false (default): tiled order, h % n_groups gives group_id (GGUF Qwen3.5/3.6).
     //   true: grouped order, h / n_v_per_k gives group_id (HF SafeTensors Qwen3.5/3.6).
     bool gdn_grouped_head_layout = false;
+    // Qwen4Exp gated residual: hc_count streams of d_model, mixed through an hc_lowrank bottleneck.
+    int hc_count = 0;    // 0 = plain residual
+    int hc_lowrank = 0;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
@@ -227,6 +230,11 @@ struct TransformerLayer {
     Tensor expert_down_packed_blocks;      // U8 [ne, d_model, d_ff/32, 16]
     Tensor expert_down_packed_scales;      // U8 [ne, d_model, d_ff/32]
     Tensor attn_q_norm, attn_k_norm;       // QK-norm (Qwen3-style per-head RMSNorm)
+    // Qwen4Exp gated residual (hyper-connections): the residual stream is hc_count x d_model wide;
+    // each block reads a d_model mix of the streams and writes back through hc_count scalar gates.
+    // hc_*_norm [hc*d] grouped RMSNorm (1+w), down [lowrank, hc*d], up [hc*d, lowrank], inject [hc, hc*d].
+    Tensor hc_attn_norm, hc_attn_down, hc_attn_up, hc_attn_inject;
+    Tensor hc_mlp_norm, hc_mlp_down, hc_mlp_up, hc_mlp_inject;
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     // Encoder post-LN biases (#836, nomic-bert): true LayerNorm with bias,
     // applied AFTER the residual add (weights live in post_attn/ffn_norm).

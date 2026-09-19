@@ -135,6 +135,13 @@ void GraphExecutor::smallm_producer_tag_(const void* out_data, int M, int K) {
 void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no,
                                         TensorID consumer_id, int n, float eps, cudaStream_t stream,
                                         float weight_offset) {
+    // No pre-norm weight: the block input is already normalised upstream (Qwen4Exp gated
+    // residual hands the block a mixed, hc_norm'ed stream), so the norm is the identity.
+    // Without this a null weight reaches the kernel and the process dies on an illegal access.
+    if (w.data == nullptr) {
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(no.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+        return;
+    }
     const int K = static_cast<int>(h.shape[1]);
     uint8_t* xq_scales = nullptr;
     uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);

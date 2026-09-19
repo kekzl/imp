@@ -796,6 +796,30 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                            : static_cast<const void*>(&alpha);
         const void* p_beta = use_fp16_acc ? static_cast<const void*>(&h_beta)
                                           : static_cast<const void*>(&beta);
+        {
+            // TEMP DEBUG (qwen4-exp bring-up): operand pointer kinds for the first GEMMs of the process.
+            static int dbg_n = 0;
+            if (dbg_n < 8) {
+                ++dbg_n;
+                auto kind = [](const void* p) -> const char* {
+                    cudaPointerAttributes at{};
+                    if (cudaPointerGetAttributes(&at, p) != cudaSuccess) {
+                        (void)cudaGetLastError();
+                        return "INVALID";
+                    }
+                    switch (at.type) {
+                        case cudaMemoryTypeDevice: return "device";
+                        case cudaMemoryTypeHost: return "host";
+                        case cudaMemoryTypeManaged: return "managed";
+                        default: return "unregistered";
+                    }
+                };
+                IMP_LOG_WARN("gemm dbg #%d: M=%ld K=%ld N=%ld A=%p(%s q=%d dev=%d) B=%p(%s q=%d dev=%d) C=%p(%s) ws=%p(%s)",
+                             dbg_n, (long)M, (long)K, (long)N, A.data, kind(A.data), (int)A.qtype, (int)A.on_device,
+                             B.data, kind(B.data), (int)B.qtype, (int)B.on_device, C.data, kind(C.data), s_workspace,
+                             kind(s_workspace));
+            }
+        }
         cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data,
                                            entry->Adesc, p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
                                            entry->has_algo ? &entry->algo : nullptr, s_workspace,

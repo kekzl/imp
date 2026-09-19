@@ -13,7 +13,7 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     // Recurrent / hybrid classification: scan the layers ONCE here (the ≥6 sites
     // that re-derive this — engine_init_resolver, engine_kv_cache_init,
     // vram_budget, engine_weight_upload — read these flags instead).
-    bool any_gdn = false, any_ssm = false, any_attn = false, any_pure_ssm = false;
+    bool any_gdn = false, any_ssm = false, any_attn = false, any_pure_ssm = false, any_hc = false;
     const int n = model.n_layers();
     for (int i = 0; i < n; i++) {
         const auto& L = model.layer(i);
@@ -27,7 +27,10 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
             any_pure_ssm = true;
         if (L.wq.data != nullptr)
             any_attn = true;
+        if (L.hc_attn_norm.data != nullptr)
+            any_hc = true;
     }
+    p.gated_residual = any_hc;
     // NVFP4-prequant checkpoints get the contiguous native NVFP4 expert cache
     // (pre_dequant_phase3_moe.cu keys the cache build on this same flag), so
     // batched multi-token MoE forwards read quantized weights directly.

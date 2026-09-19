@@ -1238,6 +1238,29 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
             return false;
         }
     }
+    // Qwen4Exp gated residual: eight BF16 tensors per layer, uploaded with NO offset. hc_norm is
+    // the (1 + W) delta like the other Qwen norms, but hc_grouped_rmsnorm applies the +1 itself.
+    {
+        struct HcSlot {
+            Tensor* t;
+            const char* name;
+        };
+        const HcSlot hc_slots[] = {
+            {&L.hc_attn_norm, "hc_attn_norm"},     {&L.hc_attn_down, "hc_attn_down"},
+            {&L.hc_attn_up, "hc_attn_up"},         {&L.hc_attn_inject, "hc_attn_inject"},
+            {&L.hc_mlp_norm, "hc_mlp_norm"},       {&L.hc_mlp_down, "hc_mlp_down"},
+            {&L.hc_mlp_up, "hc_mlp_up"},           {&L.hc_mlp_inject, "hc_mlp_inject"},
+        };
+        for (const auto& s : hc_slots) {
+            if (s.t->data && !s.t->on_device) {
+                if (!upload_weight(*s.t, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true, 0.0f,
+                                   s.name, i)) {
+                    IMP_LOG_ERROR("Failed to upload %s for layer %d", s.name, i);
+                    return false;
+                }
+            }
+        }
+    }
 
     // Attention biases (Qwen2-style Q/K/V biases, F32)
     struct NamedTensor {
@@ -2241,6 +2264,17 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype, ctx.stream,
                                            ctx.gpu_allocs)) {
                 IMP_LOG_ERROR("Failed to upload encoder embedding norm/type tensor");
+                return false;
+            }
+        }
+    }
+
+    // --- Qwen4Exp final hyper-connection mixer (BF16, no offset: the kernel applies 1 + W) ---
+    for (auto* t : {&hc_mixer_norm_, &hc_mixer_down_, &hc_mixer_up_}) {
+        if (t->data && !t->on_device) {
+            if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype, ctx.stream,
+                                           ctx.gpu_allocs)) {
+                IMP_LOG_ERROR("Failed to upload hyper_connection_mixer tensor");
                 return false;
             }
         }

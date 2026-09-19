@@ -515,6 +515,20 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             ++assigned;
             continue;
         }
+        // Qwen4Exp: the final hyper-connection mixer (use_combine=False: no inject weight).
+        if (name == "model.hyper_connection_mixer.hc_norm.weight" ||
+            name == "model.hyper_connection_mixer.input_mix_weight_down.weight" ||
+            name == "model.hyper_connection_mixer.input_mix_weight_up.weight") {
+            if (name.find(".hc_norm.") != std::string::npos)
+                model.hc_mixer_norm_ = t;
+            else if (name.find("_down.") != std::string::npos)
+                model.hc_mixer_down_ = t;
+            else
+                model.hc_mixer_up_ = t;
+            IMP_LOG_DEBUG("  assigned: %s -> hc_mixer", name.c_str());
+            ++assigned;
+            continue;
+        }
         // NVFP4 prequant LM head scales (Model Optimizer/llm-compressor): routed into the load-time
         // scratch map under key "out_proj"; Phase 0 promote() in executor_pre_dequant.cu copies the
         // device pointer onto model.out_proj_'s sidecars and clears the entry.
@@ -1110,6 +1124,27 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         //   linear_attn.norm.weight        -> ssm_norm_w
         //   linear_attn.A_log              -> ssm_a
         //   linear_attn.dt_bias            -> ssm_dt_b
+        // Qwen4Exp gated residual: two hyper-connection blocks per layer (attn_ / mlp_), each with
+        // hc_norm [hc*d], input_mix_weight_down [lowrank, hc*d], input_mix_weight_up [hc*d, lowrank],
+        // block_inject_weight [hc, hc*d]. BF16, never quantized (modelopt exclude_modules).
+        if (!matched && parts.size() >= 6 && parts[5] == "weight" &&
+            (parts[3] == "attn_hyper_connection" || parts[3] == "mlp_hyper_connection")) {
+            const bool attn = (parts[3] == "attn_hyper_connection");
+            const std::string& sub = parts[4];
+            Tensor* dst = nullptr;
+            if (sub == "hc_norm")
+                dst = attn ? &layer.hc_attn_norm : &layer.hc_mlp_norm;
+            else if (sub == "input_mix_weight_down")
+                dst = attn ? &layer.hc_attn_down : &layer.hc_mlp_down;
+            else if (sub == "input_mix_weight_up")
+                dst = attn ? &layer.hc_attn_up : &layer.hc_mlp_up;
+            else if (sub == "block_inject_weight")
+                dst = attn ? &layer.hc_attn_inject : &layer.hc_mlp_inject;
+            if (dst) {
+                *dst = t;
+                matched = true;
+            }
+        }
         // The Qwen3.6 GGUF layout splits the same weights across mamba.* + temporal_block.*;
         // SafeTensors routes to the same TransformerLayer slots so the GGUF forward path applies
         // unchanged.

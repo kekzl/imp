@@ -291,6 +291,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing.cu
     src/compute/reduce.cu
     src/compute/ssm.cu
+    src/compute/gated_residual.cu
     src/compute/gdn_factor.cu
     src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
@@ -421,6 +422,7 @@ set(IMP_EXEC_SOURCES
     src/quant/gpt_oss_mxfp4_convert.cu
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
+    src/exec/executor_gated_residual.cu
     src/exec/executor_gdn_alpha_beta.cu
     src/exec/executor_forward_moe.cu
     src/exec/executor_forward_moe_cutlass.cu

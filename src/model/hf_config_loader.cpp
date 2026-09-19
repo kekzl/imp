@@ -464,6 +464,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         jobj_get_int(eff, "linear_num_key_heads", lin_k_heads);
         jobj_get_int(eff, "linear_key_head_dim", lin_k_hdim);
         jobj_get_int(eff, "linear_conv_kernel_dim", lin_conv);
+        // Qwen4Exp gated residual widths (absent on Qwen3.5/3.6: stay 0).
+        jobj_get_int(eff, "hc_count", cfg.hc_count);
+        jobj_get_int(eff, "hc_lowrank", cfg.hc_lowrank);
 
         if (lin_v_heads > 0 && lin_v_hdim > 0) {
             cfg.ssm_inner_size = lin_v_heads * lin_v_hdim;

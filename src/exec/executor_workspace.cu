@@ -388,6 +388,10 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
         IMP_LOG_ERROR("Persistent workspace allocation failed — cannot run inference");
         return false;
     }
+    if (!hc_alloc_(max_tokens_)) {
+        IMP_LOG_ERROR("Gated residual workspace allocation failed — cannot run inference");
+        return false;
+    }
     if (!ws_.allocate_shared_workspace(max_tokens_)) {
         IMP_LOG_ERROR("Shared workspace allocation failed — cannot run inference");
         return false;

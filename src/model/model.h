@@ -49,6 +49,9 @@ public:
     const Tensor& token_embedding() const { return tok_emb_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }
+    const Tensor& hc_mixer_norm() const { return hc_mixer_norm_; }
+    const Tensor& hc_mixer_down() const { return hc_mixer_down_; }
+    const Tensor& hc_mixer_up() const { return hc_mixer_up_; }
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
@@ -104,6 +107,9 @@ public:
     ModelProfile profile_;
     HFConfigLoader::GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
+    // Qwen4Exp: the final hyper-connection mixer folds the hc_count streams back to d_model
+    // before out_norm_ (hc_norm [hc*d], down [lowrank, hc*d], up [hc*d, lowrank]; no inject).
+    Tensor hc_mixer_norm_, hc_mixer_down_, hc_mixer_up_;
     // Encoder embedder extras (#836, nomic-bert): post-embedding LayerNorm
     // (weight+bias) and the token-type embedding table [n_types, d_model]
     // (row 0 is added to every text token's embedding).

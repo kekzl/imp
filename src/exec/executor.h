@@ -561,6 +561,15 @@ private:
     Tensor hidden_;    // [max_tokens, d_model] FP16
     Tensor residual_;  // [max_tokens, d_model] FP16
     Tensor norm_out_;  // [max_tokens, d_model] FP16
+    // Qwen4Exp gated residual (profile().gated_residual): the true residual is hc x d wide and
+    // lives in hc_hidden_; hidden_ carries only the current block's d-wide mixed input / output.
+    Tensor hc_hidden_;  // [max_tokens, hc*d] FP16, the hyper-connection streams
+    Tensor hc_normed_;  // [max_tokens, hc*d] FP16, hc_norm output
+    Tensor hc_mixw_;    // [max_tokens, hc*d] FP16, sigmoid(up(silu(down(normed)/hc))) mix weights
+    Tensor hc_low_;     // [max_tokens, hc_lowrank] FP16
+    Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
+    Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
+    Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
     Tensor logits_;    // [max_logit_tokens, vocab_size]
 
     // FP32 residual accumulator for post-norm architectures (Gemma-3):
@@ -1022,6 +1031,14 @@ private:
                                        QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
+    // Qwen4Exp gated residual (executor_gated_residual.cu). hc_read_ turns the hc streams into the
+    // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the
+    // block output from hidden_ (block convention: h = mixed + out) and injects it into the streams.
+    void hc_read_(const Tensor& norm_w, const Tensor& down, const Tensor& up, const Tensor* inject, int n,
+                  cudaStream_t stream);
+    void hc_write_(int n, cudaStream_t stream);
+    [[nodiscard]] bool hc_alloc_(int max_tokens);  // the seven hc_* buffers, no-op without gated_residual
+    void hc_free_();
 
     // Layer type detection (based on tensor presence)
     bool layer_has_attention(int layer) const;
