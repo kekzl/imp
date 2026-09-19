@@ -25,16 +25,33 @@ void GraphExecutor::hc_read_(const Tensor& norm_w, const Tensor& down, const Ten
     Tensor h = view_tokens(hidden_, n);
     Tensor mixed = view_tokens(hc_mixed_, n);
 
+    // TEMP DEBUG (qwen4-exp bring-up): per-step sync checkpoints for the first three reads.
+    static int dbg_hc = 0;
+    const bool dbg = (dbg_hc < 3);
+    if (dbg)
+        ++dbg_hc;
+    auto ck = [&](const char* what) {
+        if (!dbg)
+            return;
+        const cudaError_t e = cudaDeviceSynchronize();
+        IMP_LOG_WARN("hc dbg #%d n=%d: after %s: %s", dbg_hc, n, what, cudaGetErrorString(e));
+    };
     hc_grouped_rmsnorm(hw, norm_w, normed, hc, d, cfg.rms_norm_eps, stream);
+    ck("grouped_rmsnorm");
     gemm(normed, down, low, 1.0f, 0.0f, stream);  // [n, hc*d] x [lowrank, hc*d]^T
+    ck("down gemm");
     hc_silu_div(low, hc, stream);
     gemm(low, up, mixw, 1.0f, 0.0f, stream);  // [n, lowrank] x [hc*d, lowrank]^T
+    ck("up gemm");
     hc_mix(mixw, normed, h, hc, d, stream);
+    ck("mix");
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(mixed.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     if (inject != nullptr) {
         Tensor inj = view_tokens(hc_inj_, n);
         gemm(normed, *inject, inj, 1.0f, 0.0f, stream);  // [n, hc*d] x [hc, hc*d]^T
+        ck("inject gemm (N=hc)");
         hc_inject_weights(inj, hc, stream);
+        ck("inject weights");
     }
 }
 

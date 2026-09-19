@@ -1145,6 +1145,41 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 matched = true;
             }
         }
+        // Qwen4Exp PLE (layer 1): projections, norms, conv, the n-gram hash buffers and the table's
+        // global scale. The table shards (ple_embedding.ngram_embedding.shard_N.weight) are not
+        // layer weights: NGramTable maps them from the FP8 sidecar shard host-side.
+        if (!matched && parts[3] == "ple" && parts.size() >= 6) {
+            const std::string& sub = parts[4];
+            Tensor* dst = nullptr;
+            if (parts.size() == 6 && parts[5] == "weight") {
+                if (sub == "key_proj")
+                    dst = &layer.ple_key_proj;
+                else if (sub == "value_proj")
+                    dst = &layer.ple_value_proj;
+                else if (sub == "conv1d")
+                    dst = &layer.ple_conv1d;
+                else if (sub == "norm_key")
+                    dst = &layer.ple_norm_key;
+                else if (sub == "norm_query")
+                    dst = &layer.ple_norm_query;
+                else if (sub == "norm_conv")
+                    dst = &layer.ple_norm_conv;
+            } else if (sub == "ple_embedding") {
+                const std::string& b = parts[5];
+                if (b == "layer_multipliers")
+                    dst = &layer.ple_layer_multipliers;
+                else if (b == "ngram_heads_offsets")
+                    dst = &layer.ple_ngram_heads_offsets;
+                else if (b == "ngram_heads_vocab_sizes")
+                    dst = &layer.ple_ngram_heads_vocab_sizes;
+                else if (b == "ngram_embedding" && parts.size() == 7 && parts[6] == "weight_scale")
+                    dst = &layer.ple_ngram_weight_scale;
+            }
+            if (dst) {
+                *dst = t;
+                matched = true;
+            }
+        }
         // The Qwen3.6 GGUF layout splits the same weights across mamba.* + temporal_block.*;
         // SafeTensors routes to the same TransformerLayer slots so the GGUF forward path applies
         // unchanged.
