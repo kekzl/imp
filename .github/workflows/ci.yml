@@ -249,7 +249,10 @@ jobs:
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
-        run: cmake --build build -j$(nproc)
+        # -j from scripts/build_jobs.sh, not $(nproc): the four CUTLASS TUs peak at
+        # 5.2-7.9 GB each and start together, so -j4 OOM-kills a 16 GB runner on a
+        # cold ccache (exit 137, no diagnostic).
+        run: cmake --build build -j"$(bash scripts/build_jobs.sh)"
 
       # Per-kernel registers and local frame against the pin (#1549). Runs HERE
       # because this is the one place both halves exist: the built artifact and
@@ -707,7 +710,7 @@ jobs:
 
       - name: Build the device library
         if: steps.scope.outputs.run == 'true'
-        run: cmake --build build-ptx --target imp -j$(nproc)
+        run: cmake --build build-ptx --target imp -j"$(bash scripts/build_jobs.sh)"
 
       - name: Assemble every PTX image
         if: steps.scope.outputs.run == 'true'
@@ -849,7 +852,7 @@ jobs:
           # sanitized"). The fatbin that ships is assembled and checked by the
           # `PTX fallback` job, which deliberately leaves the option at OFF.
           ccache -z
-          cmake --build build-asan --target test-core test-text -j"$(nproc)"
+          cmake --build build-asan --target test-core test-text -j"$(bash scripts/build_jobs.sh)"
           ccache -s
 
       # A binary that contains none of the tests reports "PASSED 0 tests" and

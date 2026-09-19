@@ -22,6 +22,7 @@ there instead of retelling it.
 - Perf gate re-pinned at 6fe00f81 (`tests/perf_baseline.json`, previous pin 2026-07-26): tg128 287.19 -> 299.61 (+4.32 %), pp512 12406.87 -> 12707.44 (+2.42 %), pp4096 15324.70 -> 15776.32 (+2.95 %), own_peak 20716 -> 20642 MiB; three cold-median runs within 0.8 %, clocks 2872-2932 MHz / 13801 MHz live. Thresholds unchanged (8 % / 8 % / 10 % / paired 2 %)
 
 ### Fixed
+- CI sizes `-j` by available RAM (`scripts/build_jobs.sh`, 6 GB per job) instead of `$(nproc)`: the four CUTLASS TUs peak at 5.2-7.9 GB resident each (`gemm_cutlass_sm120` 7.85 GB) and the build starts all four within 7 s, so `-j4` on a 16 GB runner is an OOM kill (exit 137, no compiler diagnostic) in `Build`, `PTX fallback` and `Sanitizers`. A warm ccache hid it for months; rotating the cache key via `CUDA_VERSION` exposed it
 - `make gen-perf-baseline` writes the file again: the generator's CUDA/git probes exited it under `set -e` in the runtime image (no nvcc, git, nvidia-smi) after printing the medians (since #1684); host facts now come in as `IMP_BASELINE_*`, `model_weights` reads the current "upload consumed N MiB" log line (was 0)
 
 ## [0.42.1] - 2026-09-17
