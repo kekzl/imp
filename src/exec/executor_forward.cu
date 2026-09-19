@@ -325,15 +325,6 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
 
     debug_tensor_stats("after_embedding", h, stream);
     debug_tensor_stats_all("after_embedding_all", view_tokens(h, n), stream);
-    {
-        // TEMP DEBUG (qwen4-exp bring-up): device state checkpoints, first forward only.
-        static int dbg_fwd = 0;
-        if (dbg_fwd < 1) {
-            ++dbg_fwd;
-            const cudaError_t e = cudaDeviceSynchronize();
-            IMP_LOG_WARN("fwd dbg: device state AFTER embedding: %s", cudaGetErrorString(e));
-        }
-    }
     if (model_->profile().gated_residual) {
         // Qwen4Exp: the residual stream is hc copies of the embedding (hidden.repeat(hc)); hidden_
         // is per-block scratch from here on, hc_hidden_ carries the state across layers.
@@ -407,6 +398,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // Qwen4Exp: hidden_[n] becomes this block's mixed input; the block's own pre-norm is
             // the identity (attn_norm is null) and its residual add lands on top of that input.
             const auto& hly = model_->layer(i);
+            if (hly.ple_key_proj.data != nullptr)
+                ple_run_(state, i, n, stream);
             hc_read_(hly.hc_attn_norm, hly.hc_attn_down, hly.hc_attn_up, &hly.hc_attn_inject, n, stream);
         }
 

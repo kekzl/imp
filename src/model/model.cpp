@@ -1,5 +1,6 @@
 #include "model/model.h"
 #include "model/model_arch.h"
+#include "model/ngram_table.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"  // trim_device_mempool
 #include "memory/weight_snapshot.h"

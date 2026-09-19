@@ -52,6 +52,7 @@ struct ModelConfig {
     // Qwen4Exp gated residual: hc_count streams of d_model, mixed through an hc_lowrank bottleneck.
     int hc_count = 0;    // 0 = plain residual
     int hc_lowrank = 0;
+    int ple_eos_token_id = -1;  // Qwen4Exp PLE: config.eos_token_id, the n-gram segment boundary
     // GDN output gate activation: Qwen3.5/3.6 use SiLU (hidden_act); Qwen4Exp sets
     // output_gate_type=sigmoid on its gated RMSNorm.
     bool gdn_gate_sigmoid = false;
@@ -240,10 +241,8 @@ struct TransformerLayer {
     Tensor hc_mlp_norm, hc_mlp_down, hc_mlp_up, hc_mlp_inject;
     // Qwen4Exp PLE (n-gram per-layer embedding, layer 1 only): key_proj [hc*d, ple_d], value_proj
     // [d, ple_d], depthwise conv1d [hc*d, 1, k] (dilation ngram_size), three grouped norms over
-    // hc*d. The 128 F8 table shards stay host-mapped (see NGramTable); only the hash buffers
-    // (I64 [ngram_size], [heads], [heads]) and the table's global scale (BF16 [1]) land here.
+    // hc*d. The F8 table shards, the I64 hash buffers and the table scale live in Model::ngram_table().
     Tensor ple_key_proj, ple_value_proj, ple_conv1d, ple_norm_key, ple_norm_query, ple_norm_conv;
-    Tensor ple_layer_multipliers, ple_ngram_heads_offsets, ple_ngram_heads_vocab_sizes, ple_ngram_weight_scale;
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     // Encoder post-LN biases (#836, nomic-bert): true LayerNorm with bias,
     // applied AFTER the residual add (weights live in post_attn/ffn_norm).

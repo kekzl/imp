@@ -570,6 +570,13 @@ private:
     Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
     Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
     Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
+    // Qwen4Exp PLE (executor_ple.cu): pinned staging for the gathered n-gram rows, the
+    // dilated conv's past rows, the host-side n-gram context and id scratch.
+    PinnedBuffer ple_host_;
+    Tensor ple_conv_state_;  // [(kernel-1)*dilation, hc*d] FP16
+    std::vector<int32_t> ple_ctx_;
+    std::vector<int64_t> ple_ids_;
+    cudaEvent_t ple_h2d_done_ = nullptr;
     Tensor logits_;    // [max_logit_tokens, vocab_size]
 
     // FP32 residual accumulator for post-norm architectures (Gemma-3):
@@ -1039,6 +1046,11 @@ private:
     void hc_write_(int n, cudaStream_t stream);
     [[nodiscard]] bool hc_alloc_(int max_tokens);  // the seven hc_* buffers, no-op without gated_residual
     void hc_free_();
+    // Qwen4Exp PLE (executor_ple.cu): adds the n-gram block's output to the hc streams before
+    // the layer's attention hyper-connection. No-op family without model_->ngram_table().
+    [[nodiscard]] bool ple_alloc_(int max_tokens);
+    void ple_free_();
+    void ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream);
 
     // Layer type detection (based on tensor presence)
     bool layer_has_attention(int layer) const;

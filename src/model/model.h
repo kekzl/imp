@@ -20,6 +20,7 @@ class WeightUploadLog;
 // weights are views into the same mapping and share the model's lifetime. Forward-declared
 // so model/ has no header dependency on vision/.
 struct VisionModel;
+class NGramTable;
 
 class Model {
 public:
@@ -52,6 +53,7 @@ public:
     const Tensor& hc_mixer_norm() const { return hc_mixer_norm_; }
     const Tensor& hc_mixer_down() const { return hc_mixer_down_; }
     const Tensor& hc_mixer_up() const { return hc_mixer_up_; }
+    const NGramTable* ngram_table() const { return ngram_table_.get(); }  // Qwen4Exp PLE, else null
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
@@ -154,6 +156,7 @@ public:
     // parties that own each half: the config loader fills `->config` from
     // config.json, weight_map fills the tensors from the shard map.
     std::unique_ptr<VisionModel> vision_tower;
+    std::unique_ptr<NGramTable> ngram_table_;  // Qwen4Exp PLE table (model/ngram_table.h)
     int last_warm_hits_ = 0;
     // Path the loader was invoked with (GGUF file or SafeTensors directory).
     // Used to derive the on-disk warm-cache location and its fingerprint

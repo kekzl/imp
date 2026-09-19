@@ -59,32 +59,6 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // act_prequantized: scratch already holds quantize(input) from a prior dispatch on the
     // same input (QKV / gate-up dedupe); skip re-quantizing. Except when mxfp4_payload is
     // set: the dual-cache branch above may have clobbered the scratch with MXFP4 scale layout.
-    {
-        // TEMP DEBUG (qwen4-exp bring-up): which GEMM reaches the CUTLASS NVFP4 act-quant, with what.
-        static int dbg_n = 0;
-        if (dbg_n < 8) {
-            ++dbg_n;
-            auto kind = [](const void* p) -> const char* {
-                cudaPointerAttributes at{};
-                if (cudaPointerGetAttributes(&at, p) != cudaSuccess) {
-                    (void)cudaGetLastError();
-                    return "INVALID";
-                }
-                return at.type == cudaMemoryTypeDevice ? "device"
-                       : at.type == cudaMemoryTypeHost ? "host"
-                                                       : "other";
-            };
-            IMP_LOG_WARN("cutlass nvfp4 dbg #%d: M=%d N=%d K=%d prequant=%d input=%p(%s) act=%p(%s) sf=%p(%s) "
-                         "input.shape=[%lld,%lld] input.q=%d",
-                         dbg_n, M, N, K, (int)args.act_prequantized, args.input->data, kind(args.input->data),
-                         args.cutlass_act_data, kind(args.cutlass_act_data), args.cutlass_act_sf,
-                         kind(args.cutlass_act_sf), (long long)args.input->shape[0], (long long)args.input->shape[1],
-                         (int)args.input->qtype);
-            // Is the device already poisoned before this kernel (async copy on another stream)?
-            const cudaError_t pre = cudaDeviceSynchronize();
-            IMP_LOG_WARN("cutlass nvfp4 dbg #%d: device state BEFORE act-quant: %s", dbg_n, cudaGetErrorString(pre));
-        }
-    }
     if (!args.act_prequantized || args.mxfp4_payload != nullptr)
         quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
                                        args.stream);

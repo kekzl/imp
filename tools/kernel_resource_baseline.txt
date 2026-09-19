@@ -56,6 +56,7 @@ imp::topk_partial_rows_kernel	sm_120a	42	1056	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	42	16	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
 imp::(anonymous namespace)::kv_block_copy_kernel	sm_120a	40	128	0
+imp::(anonymous namespace)::ple_conv_state_kernel	sm_120a	40	128	0
 imp::paged_attention_decode_kernel_generic	sm_120a	40	128	0
 imp::rowwise_topm_reduce_kernel	sm_120a	40	64	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
@@ -77,6 +78,7 @@ void imp::gemv_dp4a_moe_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6> >	sm_1
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 imp::topk_partial_kernel	sm_120a	39	1056	0
+imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	39	32	0
 imp::post_decode_step_kernel	sm_120a	39	24	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
 imp::dequant_q3k_kernel	sm_120a	28	16	0

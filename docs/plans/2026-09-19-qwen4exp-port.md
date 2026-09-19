@@ -28,7 +28,7 @@ on `mlp.experts` only, everything else BF16.
 | GDN | `linear_attn.*` | resolves through the Qwen3.5/3.6 names; sigmoid gate added |
 | MoE experts, 512 x 3 x 48 | modelopt layout, same as `Qwen3-30B-A3B-NVFP4-Modelopt` | resolves; 56 GiB stay host-resident (`moe.force_host_experts=48`, LRU 48 x 67 slots x 0.88 MiB) |
 | Gated residual | `attn_/mlp_hyper_connection.{hc_norm, input_mix_weight_down, input_mix_weight_up, block_inject_weight}`, `hyper_connection_mixer.*` | loader, kernels (`compute/gated_residual.cu`), forward wiring (`exec/executor_gated_residual.cu`), BF16 upload: done, not yet run end to end |
-| PLE (layer 1) | `ple.{key_proj, value_proj, conv1d, norm_key, norm_query, norm_conv}`, `ple_embedding.{layer_multipliers [3], ngram_heads_offsets [16], ngram_heads_vocab_sizes [16], ngram_embedding.shard_0..127 F8 [2500012, 160], weight_scale BF16 [1]}` | not started |
+| PLE (layer 1) | `ple.{key_proj, value_proj, conv1d, norm_key, norm_query, norm_conv}`, `ple_embedding.{layer_multipliers [3], ngram_heads_offsets [16], ngram_heads_vocab_sizes [16], ngram_embedding.shard_0..127 F8 [2500012, 160], weight_scale BF16 [1]}` | built, runs (see "PLE, as built"); reference comparison pending; previously: not started |
 | QSA indexer (12 layers) | `self_attn.indexer.{index_qk_proj [640, 2560], q_layernorm [128], k_layernorm [128]}` | not started; attention runs dense without it |
 | MTP | `mtp.*` in the FP8 shard | not started (`speculative.mtp_k=0`) |
 | VL tower | `model.visual.*` | dropped |
@@ -113,6 +113,19 @@ the comparison bounds drift rather than proving equality; token-level
 agreement on greedy decode is the first gate, perplexity on
 `ppl_corpus_45k.txt` the second. imp's own PLE path is the same design: host
 hash, host mmap, 16 gathers per token, nothing of the table in VRAM.
+
+## PLE, as built
+
+| Piece | Where | Fact |
+|---|---|---|
+| Table + hash buffers | `src/model/ngram_table.{h,cpp}`, `Model::ngram_table()` | opened from the index by `.layers.<i>.ple.ple_embedding.*`; FP8 file mmapped `MAP_PRIVATE` without populate + `MADV_RANDOM`, 128 shards x [2500012, 160] = 320001536 rows, 47.7 GiB; `weight_scale` BF16 = 0.00019932; I64 buffers by `pread` (the standard loader drops I64 as unservable, `safetensors_loader.cpp` dtype table) |
+| Loader | `llm_compressor_loader.cpp` `name_is_unused`, `safetensors_loader.cpp` 6a | every `.ple.ple_embedding.` name is unused, so the 50 GiB shard is skipped (3201 tensors) as long as MTP is off; PLE weights without a table refuse the load |
+| Hash | `ngram_hash()` | history = 2 context tokens ++ chunk; shift s is EOS when any of `[pos-s, pos-1]` is EOS; `uint64` products + XOR, Python modulo; `tests/test_ngram_table.cpp` |
+| Gather | `NGramTable::gather` | `MADV_WILLNEED` per row first, then F8 -> float x scale -> FP16 into pinned staging (`max_tokens x 2560 x 2` B, 10 MiB at 2048) |
+| Device | `src/compute/ple.{h,cu}`, `src/exec/executor_ple.cu` | key/value GEMMs + `hc_grouped_rmsnorm` reuse; `ple_gate_value` (one block per (token, stream), in place over q); `ple_conv_add` (thread per channel, 64 rows per block) + `ple_conv_state` (9 rows carried); scratch = the free `hc_*` buffers, own VRAM only the conv state |
+| Sequence state | `ple_ctx_` (2 tokens), `ple_conv_state_` | reset when the chunk's first position is 0, carried otherwise. Not modelled: batched decode (logged once), prefix-cache resume, chunked prefill across a prefix hit |
+| Graphs | none needed today | the D2H of token ids sits outside capture because experts on host already demote graphs (`ExpertsOnHost`); a device-resident model needs the pinned-staging-as-graph-input pattern |
+| MTP | open | `speculative.mtp_k>0` would make the FP8 shard "used" and `MAP_POPULATE` 50 GiB; the MTP milestone needs the shard split or a lazy map |
 
 ## Findings on the way
 

@@ -173,6 +173,7 @@ set(IMP_MEMORY_SOURCES
 set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/model_profile.cpp
+    src/model/ngram_table.cpp
     src/model/gguf_loader.cpp
     src/model/gguf_parse.cpp
     src/model/gguf_tensor_assign.cpp
@@ -292,6 +293,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/reduce.cu
     src/compute/ssm.cu
     src/compute/gated_residual.cu
+    src/compute/ple.cu
     src/compute/gdn_factor.cu
     src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
@@ -423,6 +425,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
     src/exec/executor_gated_residual.cu
+    src/exec/executor_ple.cu
     src/exec/executor_gdn_alpha_beta.cu
     src/exec/executor_forward_moe.cu
     src/exec/executor_forward_moe_cutlass.cu
@@ -700,6 +703,7 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
         tests/test_safetensors_writer.cpp
         tests/test_awq_calibration.cpp

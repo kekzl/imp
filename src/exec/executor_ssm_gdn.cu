@@ -68,26 +68,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // Producer fusion: quantizes into the small-M scratch inside the norm
     // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
     // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
-    {
-        // TEMP DEBUG (qwen4-exp bring-up): device state before the GDN pre-norm, first layer only.
-        static int dbg_gdn_pre = 0;
-        if (dbg_gdn_pre < 1) {
-            ++dbg_gdn_pre;
-            const cudaError_t e = cudaDeviceSynchronize();
-            IMP_LOG_WARN("gdn dbg L%d: attn_norm.data=%p on_device=%d shape0=%lld; device state BEFORE pre-norm: %s",
-                         layer, ly.attn_norm.data, (int)ly.attn_norm.on_device, (long long)ly.attn_norm.shape[0],
-                         cudaGetErrorString(e));
-        }
-    }
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
-    {
-        static int dbg_gdn_post = 0;
-        if (dbg_gdn_post < 1) {
-            ++dbg_gdn_post;
-            const cudaError_t e = cudaDeviceSynchronize();
-            IMP_LOG_WARN("gdn dbg L%d: device state AFTER pre-norm: %s", layer, cudaGetErrorString(e));
-        }
-    }
 
     // cur_spec_verify_ is load-bearing here (missing until 2026-08-18): without
     // it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV branch
