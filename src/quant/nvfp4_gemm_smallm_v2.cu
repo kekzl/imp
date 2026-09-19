@@ -56,8 +56,8 @@ __device__ __forceinline__ void mbar_init(uint64_t* bar, uint32_t count) {
 
 __device__ __forceinline__ void mbar_arrive(uint64_t* bar) {
     const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    uint64_t st;
-    asm volatile("mbarrier.arrive.shared.b64 %0, [%1];" : "=l"(st) : "r"(a) : "memory");
+    // `_` sinks the arrival state PTX-side; no caller reads it.
+    asm volatile("mbarrier.arrive.shared.b64 _, [%0];" ::"r"(a) : "memory");
 }
 
 // Spin until the phase with the given parity completes.

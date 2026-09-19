@@ -103,7 +103,6 @@ struct CompletionCtx {
 void stream_completion_response_(httplib::Response& res, ServerState& state, const CompletionCtx& c,
                                  const std::shared_ptr<ServerRequest>& server_req) {
     const std::string& prompt = c.prompt;
-    const std::vector<int32_t>& tokens = c.tokens;
     const std::vector<std::string>& stop_sequences = c.stop_sequences;
     const std::string& comp_id = c.comp_id;
     const std::string& snap_model_name = c.snap_model_name;
@@ -111,7 +110,6 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
     const auto t_start = c.t_start;
     const int64_t created = c.created;
     const int n_prompt_tokens = c.n_prompt_tokens;
-    const int remaining = c.remaining;
     const size_t max_stop_len = c.max_stop_len;
     const bool echo = c.echo;
     const bool include_usage = c.include_usage;
@@ -435,7 +433,6 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
 void nonstream_completion_response_(httplib::Response& res, ServerState& state, const CompletionCtx& c,
                                     const std::shared_ptr<ServerRequest>& server_req) {
     const std::string& prompt = c.prompt;
-    const std::vector<int32_t>& tokens = c.tokens;
     const std::vector<std::string>& stop_sequences = c.stop_sequences;
     const std::string& comp_id = c.comp_id;
     const std::string& snap_model_name = c.snap_model_name;

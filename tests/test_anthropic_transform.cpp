@@ -903,9 +903,11 @@ TEST(AnthropicToolResult, SuccessfulResultIsUnlabelled) {
                                                                      {"tool_use_id", "toolu_1"},
                                                                      {"content", "ok"}}})}}})}};
     json oai = anthropic_to_openai_body(req);
-    for (const auto& m : oai["messages"])
-        if (m.value("role", "") == "tool")
+    for (const auto& m : oai["messages"]) {
+        if (m.value("role", "") == "tool") {
             EXPECT_EQ(m["content"], "ok");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

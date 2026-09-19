@@ -43,9 +43,15 @@ TEST(JsonOutTest, EscapesOtherControlCharsAsUnicode) {
 TEST(JsonOutTest, PassesUtf8Through) {
     // Multi-byte UTF-8 is valid inside a JSON string and must NOT be escaped
     // byte-by-byte: Ã¤ would be two characters, not "ä".
+    // Split after \x9f: \x is greedy, so "\x9fe" parses as one out-of-range
+    // escape and swallows the 'e' instead of writing ß + 'e'.
     JsonOut j;
-    j.str("text", "gr\xc3\xbc\xc3\x9fe \xe4\xb8\xad");
-    EXPECT_EQ(j.str(), "{\"text\":\"gr\xc3\xbc\xc3\x9fe \xe4\xb8\xad\"}");
+    j.str("text",
+          "gr\xc3\xbc\xc3\x9f"
+          "e \xe4\xb8\xad");
+    EXPECT_EQ(j.str(),
+              "{\"text\":\"gr\xc3\xbc\xc3\x9f"
+              "e \xe4\xb8\xad\"}");
 }
 
 TEST(JsonOutTest, KeysAreEscapedToo) {

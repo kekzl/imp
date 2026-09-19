@@ -26,7 +26,7 @@ namespace {
 struct ResponsesSSE {
     httplib::DataSink& sink;
     uint64_t seq = 0;
-    std::string hot_buf;  // reused by emit_delta, never by emit
+    std::string hot_buf{};  // reused by emit_delta, never by emit
 
     bool emit(const char* type, json payload) {
         payload["type"] = type;

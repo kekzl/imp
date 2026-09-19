@@ -291,7 +291,7 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
 }
 
 // GET /v1/models/{id}: client.models.retrieve(...) 404'd for lack of a path-param route (#1599).
-void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
+void handle_model_retrieve(const httplib::Request&, httplib::Response& res, ServerState& state,
                            const std::string& model_id) {
     bool loaded = false;
     std::string model_name;
