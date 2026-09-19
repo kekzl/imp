@@ -34,7 +34,7 @@ bool model_exists() {
 
 struct Served {
     std::shared_ptr<ServerRequest> sr;
-    std::string finish;
+    std::string finish{};
     int tokens = 0;
 };
 

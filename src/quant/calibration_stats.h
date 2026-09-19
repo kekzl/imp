@@ -21,7 +21,7 @@ struct CalibrationEntry {
     std::string kind;             // tensor_kind_name(), e.g. "WQ" / "W_DOWN"
     uint64_t rows = 0;            // tokens accumulated into this entry
     std::vector<float> mean_abs;  // [K] per input channel
-    std::vector<float> mean_sq;   // [K] per input channel, empty when read from an IMPCAL01 file
+    std::vector<float> mean_sq{};  // [K] per input channel, empty when read from an IMPCAL01 file
 };
 
 struct CalibrationStats {

@@ -27,7 +27,7 @@ namespace {
 // Anthropic SSE event writer. Emits "event: <name>\ndata: <json>\n\n".
 struct AnthropicSSE {
     httplib::DataSink& sink;
-    std::string hot_buf;  // reused by emit_delta, never by emit
+    std::string hot_buf{};  // reused by emit_delta, never by emit
 
     bool emit(const char* event_name, const json& payload) const {
         std::string buf = "event: ";

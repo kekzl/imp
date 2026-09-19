@@ -66,8 +66,9 @@ TEST(SpecGates, IncapableModelOverridesEveryFlag) {
 TEST(SpecGates, NgramSourceImpliesTheVerifyIsEntered) {
     for (int bits = 0; bits < 16; ++bits) {
         const SpecDrafterState s = state(bits & 1, bits & 2, bits & 4, bits & 8);
-        if (spec_ngram_source(s))
+        if (spec_ngram_source(s)) {
             EXPECT_TRUE(spec_any_drafter(s)) << "bits=" << bits;
+        }
     }
 }
 
