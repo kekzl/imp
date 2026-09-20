@@ -188,6 +188,31 @@ Plan (milestone 4), exact at every context length:
 | Gate | `attention.qsa_force=true` runs the selected path below 2048 too: must match dense FA2 (the correctness A/B); above 2048 the reference is llama.cpp's qwen4exp indexer |
 | Not reused | `sparse_attn_select.cu` (Quest page heuristic, KV-page granularity `kv_cache.block_size`, not 4-token blocks) |
 
+## Speed on the 32 GB card (2026-09-20)
+
+56 GiB of experts stay on the host; every decode token streams its misses over PCIe.
+Config for every row: `moe.force_host_experts=48 moe.pin_host_experts=true
+moe.expert_cache_budget_pct=45 speculative.ngram=false speculative.mtp_k=0
+runtime.warmup=false`, greedy, "history of Paris" prompt, tg96; the text is
+byte-identical across all rows.
+
+| Step | tg96 tok/s | What moved |
+|---|---|---|
+| mmap experts, 15 % budget (62 slots/layer) | 5.81 | per miss: 2 `cudaMemcpyAsync` + a 4-byte scale H2D from a stack float (pageable, syncs the stream first) |
+| `pin_host_experts` | 8.10 | DMA-able source |
+| scales + slot indices as kernel params | 14.35 | no pageable copy, no drain per miss |
+| ngram spec off, budget 45 % (186 slots/layer, 71 % hits) | 20.6 (under nsys) | the one n-gram verify step cost 2.9 s for 4 tokens through the legacy prefill |
+| one `cudaMemcpyBatchAsync` per layer | 27.2 | 31-56 us host time per memcpyAsync; the batch call issues 60 copies in 0.05 ms at 54 GB/s (`tools/analysis/h2d_gather_probe.cu`) |
+| device expert cache (`exec/expert_cache_device.{h,cu}`) | 33.2 | resolve kernel (LRU tables on the device) + gather kernel from mapped pinned (51 GB/s); no D2H, no sync per layer |
+| captured decode (per-step graph pool) | 53.0 (tg512: 65.9, 81.9 % hits) | ~2600 launches per token were the host-side floor; PLE host half moved to `prepare_decode_step_host` |
+
+Prefill: `moe.staged_cutlass_prefill=true` needed the >256-expert fixes in
+`compact_alpha_active`, `compute_sfa_offsets`, `build_grouped_3x_staging_kernel`;
+pp62 2.49 -> 1.68 s. The PCIe floor for a full 512-expert layer set is 65 GB per
+chunk at 45 GB/s = 1.4 s, minus cache hits. A 70 % cache budget over-commits VRAM
+(418 MiB free against the 1629 MiB headroom, no tokens); 45 % is the measured
+ceiling at `max_seq_len 4096`.
+
 ## Findings on the way
 
 - cuBLASLt on sm_120 (`tools/analysis/cublaslt_grouped_probe.cu`, CUDA 13.4.1,

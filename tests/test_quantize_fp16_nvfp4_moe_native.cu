@@ -391,6 +391,64 @@ TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceMatchesHost) {
     cudaStreamDestroy(stream);
 }
 
+// 512 experts (Qwen3.8-Flash-Next): the one-expert-per-thread scans capped at 256 and
+// refused the layer. Both single-block scans now chunk experts per thread.
+TEST(QuantizeMoeNative, CompactAlphaAndSfaOffsetsWide512) {
+    const int ne = 512;
+    const int K = 2560;
+    std::vector<float> h_alpha(ne);
+    std::vector<int32_t> h_M(ne);
+    for (int e = 0; e < ne; ++e) {
+        h_alpha[e] = 1.0f + static_cast<float>(e);
+        h_M[e] = (e % 3 == 0) ? 0 : (e * 7) % 300;  // a third inactive, M up to 299
+    }
+    float* d_alpha = nullptr;
+    int32_t* d_M = nullptr;
+    float* d_compact = nullptr;
+    int32_t* d_na = nullptr;
+    int64_t* d_offsets = nullptr;
+    cudaMalloc(&d_alpha, ne * sizeof(float));
+    cudaMalloc(&d_M, ne * sizeof(int32_t));
+    cudaMalloc(&d_compact, ne * sizeof(float));
+    cudaMalloc(&d_na, sizeof(int32_t));
+    cudaMalloc(&d_offsets, (ne + 1) * sizeof(int64_t));
+    cudaMemcpy(d_alpha, h_alpha.data(), ne * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_M, h_M.data(), ne * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compact_alpha_active(d_alpha, d_M, d_compact, d_na, ne, stream);
+    imp::compute_sfa_offsets_device(d_M, d_offsets, ne, K, stream);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    std::vector<float> exp_compact;
+    std::vector<int64_t> exp_off(ne + 1, 0);
+    for (int e = 0; e < ne; ++e) {
+        if (h_M[e] > 0)
+            exp_compact.push_back(h_alpha[e]);
+        exp_off[e + 1] = exp_off[e] + static_cast<int64_t>(imp::cutlass_nvfp4_sf_size(h_M[e], K));
+    }
+    int32_t got_na = -1;
+    cudaMemcpy(&got_na, d_na, sizeof(int32_t), cudaMemcpyDeviceToHost);
+    ASSERT_EQ(got_na, static_cast<int32_t>(exp_compact.size()));
+    std::vector<float> got_compact(exp_compact.size());
+    cudaMemcpy(got_compact.data(), d_compact, got_compact.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    for (size_t i = 0; i < exp_compact.size(); ++i)
+        EXPECT_FLOAT_EQ(got_compact[i], exp_compact[i]) << "compact[" << i << "]";
+    std::vector<int64_t> got_off(ne + 1);
+    cudaMemcpy(got_off.data(), d_offsets, (ne + 1) * sizeof(int64_t), cudaMemcpyDeviceToHost);
+    for (int e = 0; e <= ne; ++e)
+        EXPECT_EQ(got_off[e], exp_off[e]) << "sfa offset[" << e << "]";
+
+    cudaFree(d_alpha);
+    cudaFree(d_M);
+    cudaFree(d_compact);
+    cudaFree(d_na);
+    cudaFree(d_offsets);
+    cudaStreamDestroy(stream);
+}
+
 // build_sfa_bases_device must write base + d_sfa_offsets[e] per expert.
 // Phase 3c-full Step 2a foundation.
 TEST(QuantizeMoeNative, BuildSfaBasesDevice) {

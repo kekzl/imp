@@ -11,7 +11,14 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+- Device-driven expert cache for host-resident NVFP4 MoE experts (`moe.device_expert_cache`, default `true`, needs `moe.pin_host_experts`): routing -> cache slots (per-layer LRU tables on the device) -> zero-copy gather of the misses from the mapped pinned slabs, no D2H and no host LRU per layer; the pool is handed back and forth with the host path through generations. With it the captured decode step replays correctly, so the `experts_on_host` graph demotion is lifted and the per-step graph pool captures (PLE models do their table gather in `prepare_decode_step_host` before each replay). Qwen3.8-Flash-Next-NVFP4 (56 GiB of experts on the host, 45 % cache budget), greedy, same text throughout: tg96 5.81 -> 53.0 tok/s, tg512 65.9 (hit rate 81.9 %) (`docs/plans/2026-09-19-qwen4exp-port.md`).
+
+### Changed
+- Host-expert miss staging: one `cudaMemcpyBatchAsync` per layer, scales and slot indices as kernel parameters, routing and PLE readbacks into pinned buffers. Before, each miss issued two `cudaMemcpyAsync` (31-45 us of host time each on WSL2) plus a 4-byte scale copy from a stack float, i.e. pageable memory, which syncs the stream first: every miss drained the pipeline. Same model, host LRU path: 5.81 -> 27.2 tok/s. Probe: `tools/analysis/h2d_gather_probe.cu`.
+
 ### Fixed
+- The CUTLASS grouped NVFP4 prefill (device-args) refused or aborted above 256 experts: `compact_alpha_active`, `compute_sfa_offsets` (single-block scans, one expert per thread) and `build_grouped_3x_staging_kernel` (one block). Chunked scans and a multi-block launch, limit 4096; `QuantizeMoeNative.CompactAlphaAndSfaOffsetsWide512`. Qwen3.8-Flash-Next `moe.staged_cutlass_prefill=true` pp62 2.49 -> 1.68 s.
 - MoE top-k gating never selected an expert with index >= 256: each of the 256 threads owned one expert. Invisible on every shipped MoE (<= 256 experts); on the 512-expert Qwen3.8-Flash-Next it routed every token whose best experts sat above 255 wrong (PPL on unseen prose 14.25 -> 6.00, llama.cpp 5.54; `docs/plans/2026-09-19-qwen4exp-port.md`). Regression test `MoERoutingWideTest.ExpertsAbove256AreCandidates`.
 
 ## [0.43.0] - 2026-09-19
