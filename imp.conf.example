@@ -486,7 +486,9 @@ attn_scores_mib      = 384
 sparse_topk_tokens   = 0
 # Qwen4Exp QSA indexer: learned block top-k over the context (exact below 2051 tokens).
 # qsa_force runs the selected path on every prefill row (A/B against dense).
-qsa                  = true
+# Off by default: at 4503 tokens it is slower and worse (decode 50.6 vs 54.1 tok/s,
+# PPL 4.7558 vs 4.6978) and flips MoE routing on short prompts (degen_suite 48/50 vs 50/50).
+qsa                  = false
 qsa_force            = false
 qsa_rows             = 16
 qsa_debug            = false
@@ -572,6 +574,11 @@ device_expert_cache  = true
 # instead of per-expert dequant; requires pin_host_experts. Opt-in: pp512
 # +136 % but tg256 -36 % on Qwen3-30B-A3B-NVFP4 (6/6 pairs), not understood.
 staged_cutlass_prefill = false
+# Stage only the experts the routing touched (gather kernel from the mapped pinned slabs)
+# instead of memcpying all n_experts per projection. TTFT on Qwen3.8-Flash-Next-NVFP4:
+# 1267 -> 499 ms at 67 prompt tokens, 1328 -> 1038 ms at 1022. Needs pin_host_experts
+# + device_expert_cache.
+stage_touched_only   = true
 
 [gdn]
 # FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but

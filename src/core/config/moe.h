@@ -33,6 +33,11 @@ struct MoE {
     // unexplained decode regression (expert-cache hit-rate state differs when
     // decode inherits it), so it does not get to impose that cost by default.
     bool staged_cutlass_prefill = false;
+    // Stage only the experts the routing touched, with a gather kernel from the mapped
+    // pinned slabs, instead of memcpying all n_experts per projection. A prompt that
+    // touches every expert moves the same bytes; a short one moves a fraction.
+    // Needs pin_host_experts + device_expert_cache (it reads the cache's device views).
+    bool stage_touched_only = true;
     // Phase 2: assert device-side mirror == host-side LRU state after every
     // cache mutation. D2H readback per update (~120 KiB): never enable in perf
     // runs, only CI/regression diagnosis.

@@ -84,6 +84,15 @@ public:
     // decode step. No-op when nothing moved or no layer is ready.
     void take_over(cudaStream_t stream);
 
+    // Prefill staging on `stream`: copies every expert the routing touched
+    // (expert_offsets[e + 1] > expert_offsets[e]) for all three projections from the mapped
+    // pinned slabs into the layer stage buffer (projection p: packed at
+    // buf + p * proj_bytes + e * pb, micro-scales at buf + p * proj_bytes + n_experts * pb + e * mb).
+    // Untouched experts keep stale bytes no grouped-GEMM group reads. False (nothing copied)
+    // when the layer is not ready or the layout differs from the cache's.
+    bool stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
+                       size_t pb, size_t mb, cudaStream_t stream);
+
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
     size_t ms_off(int layer, int proj) const { return ms_off_[static_cast<size_t>(layer) * 3 + proj]; }
 

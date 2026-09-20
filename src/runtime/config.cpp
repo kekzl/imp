@@ -257,6 +257,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("moe.expert_cache_budget_pct", cfg.moe.expert_cache_budget_pct);
     B("moe.pin_host_experts", cfg.moe.pin_host_experts);
     B("moe.staged_cutlass_prefill", cfg.moe.staged_cutlass_prefill);
+    B("moe.stage_touched_only", cfg.moe.stage_touched_only);
     B("moe.expert_cache_debug_parity", cfg.moe.expert_cache_debug_parity);
     I("moe.prefetch_top_k", cfg.moe.prefetch_top_k);
     B("moe.allow_graphs_under_offload", cfg.moe.allow_graphs_under_offload);

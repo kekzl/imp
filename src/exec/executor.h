@@ -989,7 +989,8 @@ private:
     // Stages every expert of one host-resident NVFP4 layer into
     // moe_.layer_stage_buf, so prefill reads them from device memory instead
     // of two H2D per expert. Fills `out` with one view per projection; true when at least one was staged.
-    bool stage_nvfp4_layer_(int layer, cudaStream_t stream, StagedProj out[kExpertProjCount]);
+    bool stage_nvfp4_layer_(int layer, cudaStream_t stream, const int32_t* expert_offsets,
+                            StagedProj out[kExpertProjCount]);
 
     // Builds a CUTLASS device-args view over a layer staged by
     // stage_nvfp4_layer_, so a host-resident layer dispatches like a
