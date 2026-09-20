@@ -16,7 +16,7 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
     half* __restrict__ y,             // [n_tokens, n_heads * head_dim] in/out
     const half* __restrict__ gate,    // [n_tokens, n_heads * head_dim]
     const half* __restrict__ weight,  // [head_dim] shared norm weight
-    float eps, int n_heads, int head_dim) {
+    float eps, int n_heads, int head_dim, int gate_act) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
@@ -46,7 +46,8 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
 
     // SiLU on gate and multiply
     float g = __half2float(gate[base + d]);
-    float silu_g = g / (1.0f + expf(-g));
+    // gate_act 0: SiLU (Qwen3.5/3.6 hidden_act), 1: sigmoid (Qwen4Exp output_gate_type). Uniform branch.
+    float silu_g = gate_act ? 1.0f / (1.0f + expf(-g)) : g / (1.0f + expf(-g));
     pdl_trigger();
 
     y[base + d] = __float2half(normed * silu_g);
@@ -58,7 +59,8 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
 __global__ void gdn_rmsnorm_gated_silu_fp32in_kernel(
     half* __restrict__ y_fp16_out,        // [n_tokens, n_heads * head_dim]
     const float* __restrict__ y_fp32_in,  // [n_tokens, n_heads * head_dim]
-    const half* __restrict__ gate, const half* __restrict__ weight, float eps, int n_heads, int head_dim) {
+    const half* __restrict__ gate, const half* __restrict__ weight, float eps, int n_heads, int head_dim,
+    int gate_act) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
@@ -83,18 +85,19 @@ __global__ void gdn_rmsnorm_gated_silu_fp32in_kernel(
     float normed = val * inv_rms * __half2float(weight[d]);
 
     float g = __half2float(gate[base + d]);
-    float silu_g = g / (1.0f + expf(-g));
+    // gate_act 0: SiLU (Qwen3.5/3.6 hidden_act), 1: sigmoid (Qwen4Exp output_gate_type). Uniform branch.
+    float silu_g = gate_act ? 1.0f / (1.0f + expf(-g)) : g / (1.0f + expf(-g));
 
     y_fp16_out[base + d] = __float2half(normed * silu_g);
 }
 
 void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in, const half* gate,
                                    const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, bool sigmoid_gate) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32in_kernel<<<grid, head_dim, smem, stream>>>(y_fp16_out, y_fp32_in, gate,
-                                                                           weight, eps, n_heads, head_dim);
+    gdn_rmsnorm_gated_silu_fp32in_kernel<<<grid, head_dim, smem, stream>>>(
+        y_fp16_out, y_fp32_in, gate, weight, eps, n_heads, head_dim, sigmoid_gate ? 1 : 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -104,7 +107,7 @@ __global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp
                                                         const float* __restrict__ y_fp32_in,
                                                         const half* __restrict__ gate,
                                                         const half* __restrict__ weight, float eps,
-                                                        int n_heads, int head_dim) {
+                                                        int n_heads, int head_dim, int gate_act) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
@@ -129,28 +132,30 @@ __global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp
     float normed = val * inv_rms * __half2float(weight[d]);
 
     float g = __half2float(gate[base + d]);
-    float silu_g = g / (1.0f + expf(-g));
+    // gate_act 0: SiLU (Qwen3.5/3.6 hidden_act), 1: sigmoid (Qwen4Exp output_gate_type). Uniform branch.
+    float silu_g = gate_act ? 1.0f / (1.0f + expf(-g)) : g / (1.0f + expf(-g));
 
     y_fp32_out[base + d] = normed * silu_g;
 }
 
 void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in, const half* gate,
                                       const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                      cudaStream_t stream) {
+                                      cudaStream_t stream, bool sigmoid_gate) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(y_fp32_out, y_fp32_in, gate,
-                                                                              weight, eps, n_heads, head_dim);
+    gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(
+        y_fp32_out, y_fp32_in, gate, weight, eps, n_heads, head_dim, sigmoid_gate ? 1 : 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused RMSNormGated + SiLU
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
-                            int n_heads, int head_dim, cudaStream_t stream) {
+                            int n_heads, int head_dim, cudaStream_t stream, bool sigmoid_gate) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
     pdl::enable_kernel(gdn_rmsnorm_gated_silu_kernel);
-    pdl::launch(gdn_rmsnorm_gated_silu_kernel, grid, dim3(head_dim), smem, stream, y, gate, weight, eps, n_heads, head_dim);
+    pdl::launch(gdn_rmsnorm_gated_silu_kernel, grid, dim3(head_dim), smem, stream, y, gate, weight, eps, n_heads,
+                head_dim, sigmoid_gate ? 1 : 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

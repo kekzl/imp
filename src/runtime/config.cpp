@@ -238,6 +238,10 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.fp8_tile_gqa", cfg.attention.fp8_tile_gqa);
     B("attention.gate_concat", cfg.attention.gate_concat);
     I("attention.sparse_topk_tokens", cfg.attention.sparse_topk_tokens);
+    B("attention.qsa", cfg.attention.qsa);
+    B("attention.qsa_force", cfg.attention.qsa_force);
+    I("attention.qsa_rows", cfg.attention.qsa_rows);
+    B("attention.qsa_debug", cfg.attention.qsa_debug);
     I("attention.sparse_min_ctx", cfg.attention.sparse_min_ctx);
     I("attention.sparse_sink_tokens", cfg.attention.sparse_sink_tokens);
     I("attention.sparse_recent_tokens", cfg.attention.sparse_recent_tokens);
@@ -263,6 +267,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("moe.reserve_mib", cfg.moe.reserve_mib);
     B("moe.nvfp4_device_args", cfg.moe.nvfp4_device_args);
     B("moe.nvfp4_smallM", cfg.moe.nvfp4_smallM);
+    B("moe.device_expert_cache", cfg.moe.device_expert_cache);
     I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
     I("moe.mr_nr", cfg.moe.mr_nr);
 

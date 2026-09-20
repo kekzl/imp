@@ -354,7 +354,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // model.language_model.* / model.vision_tower.* (resp. model.visual.*) plus an mtp.* head.
     // Text-only variants ship bare model.* keys, so the strip is prefix-guarded and a no-op there.
     const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
-                                        model.config_.multimodal_wrapper;
+                                        (arch_ == ModelArch::QWEN4_EXP) || model.config_.multimodal_wrapper;
 
     for (auto& [orig_name, tensor] : tensors) {
         std::string name = orig_name;
@@ -512,6 +512,20 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         if (name == "lm_head.weight") {
             model.out_proj_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> out_proj", name.c_str());
+            ++assigned;
+            continue;
+        }
+        // Qwen4Exp: the final hyper-connection mixer (use_combine=False: no inject weight).
+        if (name == "model.hyper_connection_mixer.hc_norm.weight" ||
+            name == "model.hyper_connection_mixer.input_mix_weight_down.weight" ||
+            name == "model.hyper_connection_mixer.input_mix_weight_up.weight") {
+            if (name.find(".hc_norm.") != std::string::npos)
+                model.hc_mixer_norm_ = t;
+            else if (name.find("_down.") != std::string::npos)
+                model.hc_mixer_down_ = t;
+            else
+                model.hc_mixer_up_ = t;
+            IMP_LOG_DEBUG("  assigned: %s -> hc_mixer", name.c_str());
             ++assigned;
             continue;
         }
@@ -1110,6 +1124,66 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         //   linear_attn.norm.weight        -> ssm_norm_w
         //   linear_attn.A_log              -> ssm_a
         //   linear_attn.dt_bias            -> ssm_dt_b
+        // Qwen4Exp gated residual: two hyper-connection blocks per layer (attn_ / mlp_), each with
+        // hc_norm [hc*d], input_mix_weight_down [lowrank, hc*d], input_mix_weight_up [hc*d, lowrank],
+        // block_inject_weight [hc, hc*d]. BF16, never quantized (modelopt exclude_modules).
+        if (!matched && parts.size() >= 6 && parts[5] == "weight" &&
+            (parts[3] == "attn_hyper_connection" || parts[3] == "mlp_hyper_connection")) {
+            const bool attn = (parts[3] == "attn_hyper_connection");
+            const std::string& sub = parts[4];
+            Tensor* dst = nullptr;
+            if (sub == "hc_norm")
+                dst = attn ? &layer.hc_attn_norm : &layer.hc_mlp_norm;
+            else if (sub == "input_mix_weight_down")
+                dst = attn ? &layer.hc_attn_down : &layer.hc_mlp_down;
+            else if (sub == "input_mix_weight_up")
+                dst = attn ? &layer.hc_attn_up : &layer.hc_mlp_up;
+            else if (sub == "block_inject_weight")
+                dst = attn ? &layer.hc_attn_inject : &layer.hc_mlp_inject;
+            if (dst) {
+                *dst = t;
+                matched = true;
+            }
+        }
+        // Qwen4Exp QSA indexer: self_attn.indexer.{index_qk_proj, q_layernorm, k_layernorm}.weight
+        if (!matched && parts.size() == 7 && parts[3] == "self_attn" && parts[4] == "indexer" &&
+            parts[6] == "weight") {
+            Tensor* dst = nullptr;
+            if (parts[5] == "index_qk_proj")
+                dst = &layer.qsa_index_qk;
+            else if (parts[5] == "q_layernorm")
+                dst = &layer.qsa_index_q_norm;
+            else if (parts[5] == "k_layernorm")
+                dst = &layer.qsa_index_k_norm;
+            if (dst) {
+                *dst = t;
+                matched = true;
+            }
+        }
+        // Qwen4Exp PLE (layer 1): projections, norms, conv. Everything under ple.ple_embedding.*
+        // (I64 hash buffers, F8 table shards, table scale) is NGramTable's, read host-side.
+        if (!matched && parts[3] == "ple" && parts.size() == 6 && parts[5] == "weight") {
+            const std::string& sub = parts[4];
+            Tensor* dst = nullptr;
+            {
+                if (sub == "key_proj")
+                    dst = &layer.ple_key_proj;
+                else if (sub == "value_proj")
+                    dst = &layer.ple_value_proj;
+                else if (sub == "conv1d")
+                    dst = &layer.ple_conv1d;
+                else if (sub == "norm_key")
+                    dst = &layer.ple_norm_key;
+                else if (sub == "norm_query")
+                    dst = &layer.ple_norm_query;
+                else if (sub == "norm_conv")
+                    dst = &layer.ple_norm_conv;
+            }
+            if (dst) {
+                *dst = t;
+                matched = true;
+            }
+        }
         // The Qwen3.6 GGUF layout splits the same weights across mamba.* + temporal_block.*;
         // SafeTensors routes to the same TransformerLayer slots so the GGUF forward path applies
         // unchanged.

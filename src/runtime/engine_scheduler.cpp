@@ -422,7 +422,7 @@ bool Engine::supports_chunked_prefill_() const {
         return false;
     const auto& cfg = model_->config();
     // Out-of-scope archs. Hybrid GDN+MoE / Mamba2+MoE archs (QWEN35*,
-    // QWEN36_MOE, NEMOTRON_H_MOE) ARE supported. Gemma-4 (SWA + dual
+    // QWEN36_MOE, QWEN4_EXP, NEMOTRON_H_MOE) ARE supported. Gemma-4 (SWA + dual
     // head_dim 256/512) is supported via cuBLAS softmax sliding_window plus
     // per-layer dispatch (each layer call uses its own nh/nkv/hd). GEMMA3
     // (SWA, uniform head_dim/kv_heads) reuses the same per-layer dispatch and
@@ -1505,6 +1505,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         tp1 = std::chrono::steady_clock::now();
     decode_build_inference_state_(gpu_batch, valid_decode, max_ctx, dec_stream, state, needs_logprobs,
                                   needs_constrained);
+    // Host work the forward must not contain (PLE rows, device expert cache take-over):
+    // done here, so the graph pool can capture and replay the forward.
+    executor_->prepare_decode_step_host(batch.token_ids.data(), batch.positions.data(),
+                                        batch.total_tokens, dec_stream);
 
     // Per-request sampling lambda
 
@@ -2065,7 +2069,11 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         const bool pipeline_compatible =
             dreq->logit_bias.empty() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
             dreq->min_p == 0.0f && dreq->typical_p >= 1.0f && !mtp_spec_decode_enabled() &&
-            dreq->constraints && dreq->constraints->is_active();
+            dreq->constraints && dreq->constraints->is_active() &&
+            // The pipeline enqueues the next forward before the host sees the token: a
+            // PLE model needs the token on the host first, host-resident experts need the
+            // device cache's take-over before each step (both in prepare_decode_step_host).
+            model_->ngram_table() == nullptr && !experts_on_host_;
         if (pipeline_compatible && dreq->status == RequestStatus::DECODING && !dreq->output_tokens.empty()) {
             try_launch_constrained_pipeline(dreq, dec_stream);
         }

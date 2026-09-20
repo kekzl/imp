@@ -38,6 +38,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
         {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
         {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
+        {"Qwen4ExpForCausalLM", ModelArch::QWEN4_EXP},
+        {"Qwen4ExpForConditionalGeneration", ModelArch::QWEN4_EXP},
         {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
         {"Gemma2ForCausalLM", ModelArch::GEMMA3},
         {"GemmaForCausalLM", ModelArch::GEMMA3},
@@ -129,6 +131,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                 {"qwen3_5_text", "Qwen3_5ForCausalLM"},
                 {"qwen3_5_moe", "Qwen3_5MoeForCausalLM"},
                 {"qwen3_5_moe_text", "Qwen3_5MoeForCausalLM"},
+                {"qwen4_exp", "Qwen4ExpForConditionalGeneration"},
+                {"qwen4_exp_text", "Qwen4ExpForCausalLM"},
                 {"nemotron_h", "NemotronHForCausalLM"},
                 {"gemma", "GemmaForCausalLM"},
                 {"gemma2", "Gemma2ForCausalLM"},
@@ -433,7 +437,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     //   linear_num_value_heads                         -> ssm_dt_rank (n_heads)
     //   linear_conv_kernel_dim                         -> ssm_conv_kernel
     if (cfg.arch == ModelArch::QWEN36_MOE || cfg.arch == ModelArch::QWEN35_MOE ||
-        cfg.arch == ModelArch::QWEN35) {
+        cfg.arch == ModelArch::QWEN35 || cfg.arch == ModelArch::QWEN4_EXP) {
         // HF SafeTensors stores GDN heads in grouped order (heads 0..n_v_per_k-1 = group 0); the
         // scan kernel's default g=h%n_groups assumes the GGUF tiled layout. Set grouped_layout=1
         // for HF loads. Cross-converted checkpoints may ship tiled; override gdn.layout_override="tiled".
@@ -460,6 +464,18 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         jobj_get_int(eff, "linear_num_key_heads", lin_k_heads);
         jobj_get_int(eff, "linear_key_head_dim", lin_k_hdim);
         jobj_get_int(eff, "linear_conv_kernel_dim", lin_conv);
+        // Qwen4Exp gated residual widths (absent on Qwen3.5/3.6: stay 0).
+        jobj_get_int(eff, "hc_count", cfg.hc_count);
+        jobj_get_int(eff, "hc_lowrank", cfg.hc_lowrank);
+        jobj_get_int(eff, "indexer_budget", cfg.qsa_budget);
+        jobj_get_int(eff, "indexer_compress_ratio", cfg.qsa_ratio);
+        if (cfg.hc_count > 0)
+            jobj_get_int(eff, "eos_token_id", cfg.ple_eos_token_id);
+        {
+            std::string gate_act;
+            if (jobj_get_string(eff, "output_gate_type", gate_act) && gate_act == "sigmoid")
+                cfg.gdn_gate_sigmoid = true;
+        }
 
         if (lin_v_heads > 0 && lin_v_hdim > 0) {
             cfg.ssm_inner_size = lin_v_heads * lin_v_hdim;

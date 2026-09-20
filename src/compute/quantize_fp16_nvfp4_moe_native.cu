@@ -347,7 +347,9 @@ void compute_M_per_from_offsets_device(
 
 // Order-preserving stream compaction of d_alpha to entries where d_M_per[e] > 0.
 // Single block, Hillis-Steele inclusive prefix sum in shared memory.
-// n_experts <= 256 (typical 64-128); 8 scan steps total.
+// Experts per thread in the single-block scans below: n_experts <= 256 * kScanMaxChunk.
+constexpr int kScanMaxChunk = 16;
+
 __global__ void compact_alpha_active_kernel(
     const float*   __restrict__ d_alpha,
     const int32_t* __restrict__ d_M_per,
@@ -355,31 +357,40 @@ __global__ void compact_alpha_active_kernel(
     int32_t*       __restrict__ d_na_out,
     int n_experts)
 {
-    constexpr int MAX_NE = 256;
-    __shared__ int s_scan[MAX_NE];
+    // Thread t owns experts [t * chunk, (t + 1) * chunk): local count, block scan of the
+    // 256 chunk totals, then the chunk's outputs. n_experts up to 256 * kScanMaxChunk
+    // (Qwen3.8-Flash-Next has 512; the one-expert-per-thread form silently capped at 256).
+    constexpr int NT = 256;
+    __shared__ int s_scan[NT];
 
-    int e = threadIdx.x;
-    int active = (e < n_experts && d_M_per[e] > 0) ? 1 : 0;
-    s_scan[e] = active;
+    const int t = threadIdx.x;
+    const int chunk = (n_experts + NT - 1) / NT;
+    const int e0 = t * chunk;
+    int local = 0;
+    for (int i = 0; i < chunk; ++i) {
+        const int e = e0 + i;
+        if (e < n_experts && d_M_per[e] > 0)
+            ++local;
+    }
+    s_scan[t] = local;
     __syncthreads();
 
-    // Hillis–Steele inclusive prefix sum.
-    for (int off = 1; off < MAX_NE; off <<= 1) {
-        int v = (e >= off) ? s_scan[e - off] : 0;
+    // Hillis–Steele inclusive prefix sum over the chunk totals.
+    for (int off = 1; off < NT; off <<= 1) {
+        int v = (t >= off) ? s_scan[t - off] : 0;
         __syncthreads();
-        s_scan[e] += v;
+        s_scan[t] += v;
         __syncthreads();
     }
 
-    int incl = s_scan[e];
-    if (active) {
-        int excl = incl - 1;          // active=1 → excl = incl - active
-        d_alpha_compact[excl] = d_alpha[e];
+    int excl = s_scan[t] - local;
+    for (int i = 0; i < chunk; ++i) {
+        const int e = e0 + i;
+        if (e < n_experts && d_M_per[e] > 0)
+            d_alpha_compact[excl++] = d_alpha[e];
     }
-    if (e == 0) {
-        // The final inclusive total lives at index n_experts-1 (or 0 if ne==0).
-        *d_na_out = (n_experts > 0) ? s_scan[n_experts - 1] : 0;
-    }
+    if (t == 0)
+        *d_na_out = s_scan[NT - 1];
 }
 
 void compact_alpha_active(
@@ -395,11 +406,9 @@ void compact_alpha_active(
             cudaMemsetAsync(d_na_out, 0, sizeof(int32_t), stream);
         return;
     }
-    // Single-block kernel uses a fixed 256-thread layout — n_experts must fit.
-    // Production MoE models have ≤ 128 experts; the limit is documented in the
-    // header. Caller is responsible for honoring it.
-    IMP_CHECK(n_experts <= 256, "compact_alpha_active: n_experts=%d exceeds 256-thread block limit",
-              n_experts);
+    IMP_CHECK(n_experts <= 256 * kScanMaxChunk,
+              "compact_alpha_active: n_experts=%d exceeds the single-block scan limit %d", n_experts,
+              256 * kScanMaxChunk);
     compact_alpha_active_kernel<<<1, 256, 0, stream>>>(
         d_alpha, d_M_per, d_alpha_compact, d_na_out, n_experts);
     IMP_CUDA_CHECK_LAUNCH();
@@ -422,37 +431,47 @@ __global__ void compute_sfa_offsets_kernel(
     int n_experts,
     int K)
 {
-    constexpr int MAX_NE = 256;
-    __shared__ int64_t s_scan[MAX_NE];
+    // Same chunked layout as compact_alpha_active_kernel: thread t owns experts
+    // [t * chunk, (t + 1) * chunk), block scan over the 256 chunk totals.
+    constexpr int NT = 256;
+    __shared__ int64_t s_scan[NT];
 
-    int e = threadIdx.x;
-    int n_k_tiles = (K + kSfAtomKElems - 1) / kSfAtomKElems;
-
-    int64_t bytes = 0;
-    if (e < n_experts) {
-        int M_e = d_M_per[e];
-        int n_row_tiles = (M_e + kSfAtomRows - 1) / kSfAtomRows;
-        bytes = static_cast<int64_t>(n_row_tiles) * n_k_tiles * kSfAtomSize;
+    const int t = threadIdx.x;
+    const int n_k_tiles = (K + kSfAtomKElems - 1) / kSfAtomKElems;
+    const int chunk = (n_experts + NT - 1) / NT;
+    const int e0 = t * chunk;
+    auto bytes_of = [&](int e) -> int64_t {
+        const int n_row_tiles = (d_M_per[e] + kSfAtomRows - 1) / kSfAtomRows;
+        return static_cast<int64_t>(n_row_tiles) * n_k_tiles * kSfAtomSize;
+    };
+    int64_t local = 0;
+    for (int i = 0; i < chunk; ++i) {
+        const int e = e0 + i;
+        if (e < n_experts)
+            local += bytes_of(e);
     }
-    s_scan[e] = bytes;
+    s_scan[t] = local;
     __syncthreads();
 
-    // Hillis–Steele inclusive prefix sum.
-    for (int off = 1; off < MAX_NE; off <<= 1) {
-        int64_t v = (e >= off) ? s_scan[e - off] : 0;
+    // Hillis–Steele inclusive prefix sum over the chunk totals.
+    for (int off = 1; off < NT; off <<= 1) {
+        int64_t v = (t >= off) ? s_scan[t - off] : 0;
         __syncthreads();
-        s_scan[e] += v;
+        s_scan[t] += v;
         __syncthreads();
     }
 
-    // Output exclusive prefix sum: d_sfa_offsets_out[e] = inclusive - bytes_e
-    if (e < n_experts) {
-        d_sfa_offsets_out[e] = s_scan[e] - bytes;
+    // Exclusive prefix per expert; trailing total at slot n_experts.
+    int64_t excl = s_scan[t] - local;
+    for (int i = 0; i < chunk; ++i) {
+        const int e = e0 + i;
+        if (e < n_experts) {
+            d_sfa_offsets_out[e] = excl;
+            excl += bytes_of(e);
+        }
     }
-    if (e == n_experts) {
-        // Trailing total at slot ne (inclusive sum of ne-1).
-        d_sfa_offsets_out[n_experts] = (n_experts > 0) ? s_scan[n_experts - 1] : 0;
-    }
+    if (t == 0)
+        d_sfa_offsets_out[n_experts] = s_scan[NT - 1];
 }
 
 void compute_sfa_offsets_device(
@@ -467,8 +486,9 @@ void compute_sfa_offsets_device(
             cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream);
         return;
     }
-    IMP_CHECK(n_experts <= 256, "compute_sfa_offsets: n_experts=%d exceeds 256-thread block limit",
-              n_experts);
+    IMP_CHECK(n_experts <= 256 * kScanMaxChunk,
+              "compute_sfa_offsets: n_experts=%d exceeds the single-block scan limit %d", n_experts,
+              256 * kScanMaxChunk);
     compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(
         d_M_per, d_sfa_offsets_out, n_experts, K);
     IMP_CUDA_CHECK_LAUNCH();

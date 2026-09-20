@@ -210,7 +210,11 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                              ctx.h.qtype == QType::F16 && !ctx.nvfp4_covers_layer &&
                              !ctx.gemma4_fp32_norm);
-    if (ctx.moe_fused_norm_q8) {
+    if (norm_w.data == nullptr) {
+        // Qwen4Exp gated residual: the block input is already the mixed, hc_norm'ed stream; the
+        // pre-norm is the identity (the Q8_1 decode producer is not filled on this path).
+        device_copy_async(ctx.no.data, ctx.h.data, ctx.h.nbytes(), stream);
+    } else if (ctx.moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
         rmsnorm_quantize_q8_1(static_cast<const half*>(ctx.h.data),
                               static_cast<const half*>(norm_w.data),

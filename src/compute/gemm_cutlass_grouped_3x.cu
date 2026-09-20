@@ -400,7 +400,8 @@ using DeviceArgsElemD = typename GrpGemm::EpilogueOutputOp::ElementOutput;
 
 }  // namespace imp
 
-// One thread per expert. n_experts <= 256, single block with 256 threads.
+// One thread per expert, ceil(n_experts / 256) blocks (Qwen3.8-Flash-Next has 512).
+constexpr int kGroupedDeviceArgsMaxExperts = 4096;
 __global__ void build_grouped_3x_staging_kernel(
     // Staging-buffer outputs (typed pointers; host wrapper computes offsets).
     GrpUnderlyingShape* __restrict__ shapes,
@@ -439,7 +440,7 @@ __global__ void build_grouped_3x_staging_kernel(
     // Shared shape dims.
     int N, int K, int n_experts)
 {
-    int e = threadIdx.x;
+    const int e = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (e >= n_experts) return;
 
     int     M_e          = d_M_per[e];
@@ -508,9 +509,9 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     cudaStream_t stream) {
     if (n_experts <= 0)
         return true;
-    if (n_experts > 256) {
-        IMP_LOG_ERROR("CUTLASS 3x grouped device-args: n_experts=%d > 256 not supported",
-                      n_experts);
+    if (n_experts > kGroupedDeviceArgsMaxExperts) {
+        IMP_LOG_ERROR("CUTLASS 3x grouped device-args: n_experts=%d > %d not supported",
+                      n_experts, kGroupedDeviceArgsMaxExperts);
         return false;
     }
 
@@ -583,7 +584,7 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     GrpUnderlyingShape* h_shapes = s_host_shapes_max->data();
 
     // Launch the device-side staging-build kernel.
-    build_grouped_3x_staging_kernel<<<1, 256, 0, stream>>>(
+    build_grouped_3x_staging_kernel<<<(n_experts + 255) / 256, 256, 0, stream>>>(
         d_shapes, d_stA, d_stB, d_stC, d_stD, d_lSFA, d_lSFB,
         d_ptrA, d_ptrB, d_ptrSFA, d_ptrSFB, d_ptrC, d_ptrD,
         d_alpha_block, d_aPtrArr,

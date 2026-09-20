@@ -329,6 +329,21 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
 
     if (rows == 0 || d_model == 0)
         return;
+    // No weight: the norm does not exist in this model (Qwen4Exp has no final norm, its
+    // hyper-connection mixer is the last step before lm_head; its block pre-norms live in the
+    // gated residual). Identity, said once. A kernel fed a null weight dies on an illegal access.
+    if (weight.data == nullptr) {
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            IMP_LOG_WARN("rmsnorm: null weight, applying the identity (rows=%d d=%d); expected only on "
+                         "archs that carry no norm at this site",
+                         rows, d_model);
+        }
+        if (out.data != x.data)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(out.data, x.data, x.nbytes(), cudaMemcpyDeviceToDevice, stream));
+        return;
+    }
 
     switch (x.qtype) {
         case QType::F32:

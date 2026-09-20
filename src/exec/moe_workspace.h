@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 #include "compute/moe_routing.h"
 #include "memory/vram_allocator.h"
+#include "memory/host_pinned.h"
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -151,6 +152,9 @@ struct MoEWorkspace {
     // base + idx*stride; idx is the expert's LRU-cache slot, not its id.
     int32_t* d_slot_idx = nullptr;
     int d_slot_idx_count = 0;
+    // Pinned landing zone for the per-layer routing readback (top_k int32). A D2H into a
+    // std::vector is a staged pageable copy: 245 us of copy-engine time per layer on WSL2.
+    PinnedBuffer h_routing_readback;
 
     // CUTLASS 3.x NVFP4 grouped GEMM staging:
     //   packed: [max_expanded, max_K/2] contiguous FP4 activations

@@ -288,6 +288,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                             staged_ptr = expert_cache_.get_or_load_nvfp4(
                                 layer, proj, ck, w.data, layout.packed_bytes, w.scales,
                                 layout.ms_bytes, layout.packed_off(), w.tensor_scale, stream);
+                            expert_cache_.flush_staging(stream);
                         } else if (moe_.raw_staging_buf &&
                                    moe_.raw_staging_size >= layout.slot_bytes()) {
                             // Same slot layout, one buffer: packed at 0, the

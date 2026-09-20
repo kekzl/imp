@@ -113,6 +113,10 @@ bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp) {
         return !keep_vision;
     if (name_is_mtp(in))
         return !keep_mtp;  // skipped by translate_name, but diverted, not dropped
+    // Qwen4Exp n-gram table (F8 shards, I64 hash buffers, scale): NGramTable reads them
+    // host-side; the 51 GiB shard must never be populated by the standard loader.
+    if (in.find(".ple.ple_embedding.") != std::string::npos)
+        return true;
     return false;
 }
 

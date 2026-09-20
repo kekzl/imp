@@ -49,7 +49,15 @@ struct ModelConfig {
     //   false (default): tiled order, h % n_groups gives group_id (GGUF Qwen3.5/3.6).
     //   true: grouped order, h / n_v_per_k gives group_id (HF SafeTensors Qwen3.5/3.6).
     bool gdn_grouped_head_layout = false;
+    // Qwen4Exp gated residual: hc_count streams of d_model, mixed through an hc_lowrank bottleneck.
+    int hc_count = 0;    // 0 = plain residual
+    int hc_lowrank = 0;
+    int ple_eos_token_id = -1;  // Qwen4Exp PLE: config.eos_token_id, the n-gram segment boundary
+    // GDN output gate activation: Qwen3.5/3.6 use SiLU (hidden_act); Qwen4Exp sets
+    // output_gate_type=sigmoid on its gated RMSNorm.
+    bool gdn_gate_sigmoid = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
+    int qsa_budget = 0, qsa_ratio = 0;  // Qwen4Exp indexer_budget / indexer_compress_ratio (0 = no indexer)
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
     // M-RoPE (Qwen-VL): rotary pairs split across 3 position axes (text/time, image height,
@@ -227,6 +235,18 @@ struct TransformerLayer {
     Tensor expert_down_packed_blocks;      // U8 [ne, d_model, d_ff/32, 16]
     Tensor expert_down_packed_scales;      // U8 [ne, d_model, d_ff/32]
     Tensor attn_q_norm, attn_k_norm;       // QK-norm (Qwen3-style per-head RMSNorm)
+    // Qwen4Exp gated residual (hyper-connections): the residual stream is hc_count x d_model wide;
+    // each block reads a d_model mix of the streams and writes back through hc_count scalar gates.
+    // hc_*_norm [hc*d] grouped RMSNorm (1+w), down [lowrank, hc*d], up [hc*d, lowrank], inject [hc, hc*d].
+    Tensor hc_attn_norm, hc_attn_down, hc_attn_up, hc_attn_inject;
+    Tensor hc_mlp_norm, hc_mlp_down, hc_mlp_up, hc_mlp_inject;
+    // Qwen4Exp PLE (n-gram per-layer embedding, layer 1 only): key_proj [hc*d, ple_d], value_proj
+    // [d, ple_d], depthwise conv1d [hc*d, 1, k] (dilation ngram_size), three grouped norms over
+    // hc*d. The F8 table shards, the I64 hash buffers and the table scale live in Model::ngram_table().
+    Tensor ple_key_proj, ple_value_proj, ple_conv1d, ple_norm_key, ple_norm_query, ple_norm_conv;
+    // Qwen4Exp QSA indexer (attention layers): index_qk_proj [(q_heads + kv_heads) * idx_dim, d],
+    // per-head RMSNorm (1+w) weights [idx_dim] for the query and the pooled block key.
+    Tensor qsa_index_qk, qsa_index_q_norm, qsa_index_k_norm;
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     // Encoder post-LN biases (#836, nomic-bert): true LayerNorm with bias,
     // applied AFTER the residual add (weights live in post_attn/ffn_norm).

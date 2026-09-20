@@ -173,6 +173,7 @@ set(IMP_MEMORY_SOURCES
 set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/model_profile.cpp
+    src/model/ngram_table.cpp
     src/model/gguf_loader.cpp
     src/model/gguf_parse.cpp
     src/model/gguf_tensor_assign.cpp
@@ -291,6 +292,8 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing.cu
     src/compute/reduce.cu
     src/compute/ssm.cu
+    src/compute/gated_residual.cu
+    src/compute/ple.cu
     src/compute/gdn_factor.cu
     src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
@@ -421,6 +424,8 @@ set(IMP_EXEC_SOURCES
     src/quant/gpt_oss_mxfp4_convert.cu
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
+    src/exec/executor_gated_residual.cu
+    src/exec/executor_ple.cu
     src/exec/executor_gdn_alpha_beta.cu
     src/exec/executor_forward_moe.cu
     src/exec/executor_forward_moe_cutlass.cu
@@ -428,6 +433,9 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_nvfp4_host.cu
     src/exec/executor_forward_moe_legacy.cu
     src/exec/expert_cache.cu
+    src/exec/expert_cache_device.cu
+    src/exec/executor_qsa.cu
+    src/compute/qsa_indexer.cu
     src/exec/weight_handle.cu
     src/exec/moe_workspace.cu
     src/exec/quant_scratch.cu
@@ -698,6 +706,7 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
         tests/test_safetensors_writer.cpp
         tests/test_awq_calibration.cpp
@@ -968,6 +977,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_fmha_mxfp4.cu
         tests/test_paged_attention.cu
         tests/test_attention_paged_oracle.cu
+        tests/test_qsa_indexer.cu
         tests/test_attention_paged_reduce.cu
         tests/test_attention_paged_nvfp4_tc.cu
         tests/test_attention_paged_nvfp4_tc_residual.cu

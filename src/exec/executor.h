@@ -18,6 +18,8 @@
 #include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)
 #include "exec/activation_calibrator.h"
 #include "exec/expert_cache.h"
+#include "exec/expert_cache_device.h"
+#include "compute/qsa_indexer.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -561,6 +563,44 @@ private:
     Tensor hidden_;    // [max_tokens, d_model] FP16
     Tensor residual_;  // [max_tokens, d_model] FP16
     Tensor norm_out_;  // [max_tokens, d_model] FP16
+    // Qwen4Exp gated residual (profile().gated_residual): the true residual is hc x d wide and
+    // lives in hc_hidden_; hidden_ carries only the current block's d-wide mixed input / output.
+    Tensor hc_hidden_;  // [max_tokens, hc*d] FP16, the hyper-connection streams
+    Tensor hc_normed_;  // [max_tokens, hc*d] FP16, hc_norm output
+    Tensor hc_mixw_;    // [max_tokens, hc*d] FP16, sigmoid(up(silu(down(normed)/hc))) mix weights
+    Tensor hc_low_;     // [max_tokens, hc_lowrank] FP16
+    Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
+    Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
+    Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
+    // Qwen4Exp PLE (executor_ple.cu): pinned staging for the gathered n-gram rows, the
+    // dilated conv's past rows, the host-side n-gram context and id scratch.
+    PinnedBuffer ple_host_;
+    Tensor ple_conv_state_;  // [(kernel-1)*dilation, hc*d] FP16
+    std::vector<int32_t> ple_ctx_;
+    PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
+    Tensor ple_emb_dev_;         // [max_tokens, d] FP16, the gathered rows on the device
+    bool ple_prepared_ = false;  // prepare_decode_step_host() ran for the next forward
+    std::vector<int64_t> ple_ids_;
+    cudaEvent_t ple_h2d_done_ = nullptr;
+    // Qwen4Exp QSA indexer (executor_qsa.cu): per QSA layer the raw index keys [ctx, 128]
+    // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
+    // selection lists and a scratch paged K/V for qsa_rows_ query rows.
+    struct QsaLayerState {
+        void* raw_keys = nullptr;
+        void* block_keys = nullptr;
+    };
+    std::vector<QsaLayerState> qsa_layers_;
+    Tensor qsa_qk_, qsa_q_;  // [max_tokens, (nh+1)*128], [max_tokens, nh*128] FP16
+    float* qsa_scores_ = nullptr;
+    int32_t* qsa_sel_tokens_ = nullptr;
+    int32_t* qsa_sel_count_ = nullptr;
+    int32_t* qsa_scratch_bt_ = nullptr;
+    int32_t* qsa_scratch_ctx_ = nullptr;
+    void* qsa_k_scratch_ = nullptr;
+    void* qsa_v_scratch_ = nullptr;
+    int qsa_max_ctx_ = 0, qsa_nb_max_ = 0, qsa_rows_ = 0, qsa_blocks_per_row_ = 0;
+    int qsa_valid_ = 0;        // raw keys valid for positions [0, qsa_valid_) (prefill bookkeeping)
+    bool qsa_seq_ok_ = true;   // false: this sequence runs dense (resumed prefix, no keys)
     Tensor logits_;    // [max_logit_tokens, vocab_size]
 
     // FP32 residual accumulator for post-norm architectures (Gemma-3):
@@ -646,6 +686,7 @@ private:
     // LRU cache for host-resident expert weights on GPU.
     // Keeps recently-used experts in VRAM to avoid repeated H2D copies.
     ExpertLRUCache expert_cache_;
+    DeviceExpertCache dev_expert_cache_;  // decode: routing -> slots -> gather, all on device
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
     // True when nvfp4_dequant_ws_buf_ came from the engine-persistent arena
@@ -966,6 +1007,12 @@ public:
     // can serve them from there. Call after pre_dequant_weights(): needs
     // Phase 0's promotion and the initialised expert cache.
     void verify_host_expert_placement() const;
+    // Builds the device-driven expert cache over the host-resident NVFP4 layers
+    // (moe.device_expert_cache); no-op when the pool or the mapped pinned slabs are missing.
+    // Returns true when every MoE layer whose experts stay on the host is served by it (a
+    // captured decode step then replays correctly); the engine demotes graphs otherwise.
+    bool init_device_expert_cache();
+    bool device_expert_cache_covers_host_layers() const;
 
 private:
     // Computes MoE routing: gate logits (FP32 router fast-path for Gemma-4
@@ -1022,6 +1069,48 @@ private:
                                        QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
+    // Qwen4Exp gated residual (executor_gated_residual.cu). hc_read_ turns the hc streams into the
+    // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the
+    // block output from hidden_ (block convention: h = mixed + out) and injects it into the streams.
+    void hc_read_(const Tensor& norm_w, const Tensor& down, const Tensor& up, const Tensor* inject, int n,
+                  cudaStream_t stream);
+    void hc_write_(int n, cudaStream_t stream);
+    [[nodiscard]] bool hc_alloc_(int max_tokens);  // the seven hc_* buffers, no-op without gated_residual
+    void hc_free_();
+    // Qwen4Exp PLE (executor_ple.cu): adds the n-gram block's output to the hc streams before
+    // the layer's attention hyper-connection. No-op family without model_->ngram_table().
+    [[nodiscard]] bool ple_alloc_(int max_tokens);
+    void ple_free_();
+    // Qwen4Exp QSA indexer (executor_qsa.cu). qsa_decode_ replaces the dense decode kernel
+    // for one sequence (false: caller runs dense); qsa_prefill_ recomputes the rows whose
+    // selection is no longer all-true after the dense chunk attention.
+    bool qsa_layer_(int layer) const;
+    QsaGeom qsa_geom_(int layer) const;
+    [[nodiscard]] bool qsa_alloc_(int max_tokens);
+    bool qsa_ensure_ctx_(const InferenceState& state, cudaStream_t stream);
+    void qsa_free_();
+    void qsa_attend_rows_(int layer, const InferenceState& state, const void* q_rows, void* o_rows, int rows,
+                          const int* bt, float scale, cudaStream_t stream);
+    bool qsa_decode_(int layer, const InferenceState& state, const Tensor& no, Tensor& qv, Tensor& ao,
+                     const int* bt, float scale, cudaStream_t stream);
+    void qsa_prefill_(int layer, const InferenceState& state, int n, const Tensor& no, Tensor& qv, Tensor& ao,
+                      const int* bt, float scale, cudaStream_t stream);
+    void qsa_debug_rows_(int layer, const InferenceState& state, const void* q_rows, const void* o_dense,
+                         int rows, int p0, const int* bt, float scale, cudaStream_t stream);
+    void ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream);
+    // Host half of the PLE for one chunk: n-gram hash, table gather into pinned staging,
+    // H2D into ple_emb_dev_, context update. Outside any graph capture.
+    void ple_prepare_host_(const int32_t* ids, int n, int pos0, cudaStream_t stream);
+
+public:
+    // Host work a decode step needs BEFORE its forward, so the forward itself is
+    // capture-clean: PLE rows for the step's tokens (ple_prepare_host_) and the device
+    // expert cache's take-over of the pool from the host LRU path. Called by the engine
+    // per decode step with the host copies of the batch's token ids and positions.
+    void prepare_decode_step_host(const int32_t* ids, const int32_t* positions, int n,
+                                  cudaStream_t stream);
+
+private:
 
     // Layer type detection (based on tensor presence)
     bool layer_has_attention(int layer) const;

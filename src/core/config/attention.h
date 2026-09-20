@@ -132,5 +132,12 @@ struct Attention {
     // Offset weight for sparse_score_meanstd. Larger keeps more of the
     // spread, 0 ranks on the mean alone. Ignored by the corner bound.
     float sparse_score_std_coef = 1.0f;
+    // Qwen4Exp QSA indexer (learned block top-k over the attention context, exact below 2051
+    // tokens). qsa=false: dense attention on every row (not the model above 2050 tokens).
+    // qsa_force: run the selected path on every prefill row (correctness A/B vs dense).
+    bool qsa = true;
+    bool qsa_force = false;
+    int qsa_rows = 16;  // query rows per selection pass (scratch K/V = rows x 2051 tokens x KV row)
+    bool qsa_debug = false;  // log FA2 vs paged-on-cache vs selected max diffs (layer 3, prefill)
 };
 }  // namespace imp::cfg

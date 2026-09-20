@@ -484,6 +484,12 @@ attn_scores_mib      = 384
 # metadata pool of ~12.5% (FP8 KV) / ~6.25% (F16 KV) of the K+V pool bytes.
 # Design + gates: docs/plans/2026-08-28-sparse-decode-attention.md.
 sparse_topk_tokens   = 0
+# Qwen4Exp QSA indexer: learned block top-k over the context (exact below 2051 tokens).
+# qsa_force runs the selected path on every prefill row (A/B against dense).
+qsa                  = true
+qsa_force            = false
+qsa_rows             = 16
+qsa_debug            = false
 # Blocks covering the first N positions are always kept (attention sinks).
 sparse_sink_tokens   = 16
 # Blocks covering the last N positions are always kept (local context;
@@ -559,6 +565,9 @@ mr_nr                = 8
 # hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not
 # fewer: the off arm alone spread 34.7-66.1 tok/s decode.
 pin_host_experts     = false
+# Decode on host-resident NVFP4 experts: routing -> cache slots -> zero-copy gather of
+# the misses, all on the device (no per-layer D2H + host LRU). Needs pin_host_experts.
+device_expert_cache  = true
 # Route a STAGED host-resident layer through the CUTLASS grouped NVFP4 prefill
 # instead of per-expert dequant; requires pin_host_experts. Opt-in: pp512
 # +136 % but tg256 -36 % on Qwen3-30B-A3B-NVFP4 (6/6 pairs), not understood.

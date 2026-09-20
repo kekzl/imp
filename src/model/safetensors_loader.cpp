@@ -4,6 +4,7 @@
 #include "model/weight_map.h"
 #include "model/hf_config_loader.h"
 #include "model/llm_compressor_loader.h"
+#include "model/ngram_table.h"
 #include "model/nvfp4_module_policy.h"
 #include "model/sentencepiece_loader.h"
 #include "model/tokenizer.h"
@@ -1156,6 +1157,17 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // 6. Assign tensors via WeightMap
     WeightMap wmap(cfg.arch);
     wmap.apply_weights(*model, tensor_map);
+    // 6a. Qwen4Exp PLE: the layer's projections came through the weight map, its n-gram table
+    // (F8 shards + I64 hash buffers) is opened host-side. Missing table = unservable, refuse.
+    for (size_t i = 0; i < model->layers_.size(); i++) {
+        if (model->layers_[i].ple_key_proj.data == nullptr)
+            continue;
+        model->ngram_table_ = NGramTable::open(model_dir, static_cast<int>(i), cfg.ple_eos_token_id);
+        if (!model->ngram_table_) {
+            IMP_LOG_ERROR("SafeTensors: layer %zu has PLE weights but no n-gram table; refusing to load", i);
+            return nullptr;
+        }
+    }
 
     // 6b. GPTQ config: set bit width and group size on all GPTQ weight structs
     HFConfigLoader::GPTQConfig gptq_cfg;

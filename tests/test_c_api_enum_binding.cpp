@@ -48,6 +48,7 @@ const ArchBinding kBindings[] = {
     {ModelArch::QWEN35, IMP_ARCH_QWEN35, "qwen35"},
     {ModelArch::QWEN35_MOE, IMP_ARCH_QWEN35_MOE, "qwen35moe"},
     {ModelArch::QWEN36_MOE, IMP_ARCH_QWEN36_MOE, "qwen36moe"},
+    {ModelArch::QWEN4_EXP, IMP_ARCH_QWEN4_EXP, "qwen4exp"},
     {ModelArch::GPT_OSS, IMP_ARCH_GPT_OSS, "gpt_oss"},
     {ModelArch::GEMMA3, IMP_ARCH_GEMMA3, "gemma3"},
     {ModelArch::GEMMA4, IMP_ARCH_GEMMA4, "gemma4"},
@@ -82,7 +83,7 @@ TEST(CApiEnumBinding, ArchIdsAreUnique) {
 // model_arch.h without a row here leaves the binding untested.
 TEST(CApiEnumBinding, EveryArchEnumeratorIsCovered) {
     const size_t n = sizeof(kBindings) / sizeof(kBindings[0]);
-    EXPECT_EQ(n, 16u) << "ModelArch gained or lost an enumerator — add/remove the row in "
+    EXPECT_EQ(n, 17u) << "ModelArch gained or lost an enumerator — add/remove the row in "
                          "kBindings so the C-API id stays bound";
     // Every listed arch must round-trip through the registry's name table too,
     // which is what catches a row pointing at the wrong enumerator.

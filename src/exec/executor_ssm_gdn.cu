@@ -712,7 +712,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // a debug flag left y_buf uninitialized in production (ssm_out fed zeros).
             gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32, static_cast<const half*>(gate_out.data),
                                              static_cast<const half*>(ly.ssm_norm_w.data), eps, n, n_heads,
-                                             head_dim_ssm, stream);
+                                             head_dim_ssm, stream, cfg.gdn_gate_sigmoid);
             {
                 int64_t total = static_cast<int64_t>(n) * n_heads * head_dim_ssm;
                 int threads_ = 256;
@@ -923,7 +923,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     if (!use_fp32_scan) {
         gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data), static_cast<const half*>(gate_out.data),
                                static_cast<const half*>(ly.ssm_norm_w.data), norm_eps, n, n_heads,
-                               head_dim_ssm, stream);
+                               head_dim_ssm, stream, cfg.gdn_gate_sigmoid);
     }
 
     // Per-element dump: post-rmsnorm-gated scan output (FP16), pre-ssm_out GEMM.

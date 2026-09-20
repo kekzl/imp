@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include "compute/embedding.h"
+#include "compute/gated_residual.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
 #include "compute/gemm.h"
@@ -324,6 +325,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
 
     debug_tensor_stats("after_embedding", h, stream);
     debug_tensor_stats_all("after_embedding_all", view_tokens(h, n), stream);
+    if (model_->profile().gated_residual) {
+        // Qwen4Exp: the residual stream is hc copies of the embedding (hidden.repeat(hc)); hidden_
+        // is per-block scratch from here on, hc_hidden_ carries the state across layers.
+        Tensor hw = view_tokens(hc_hidden_, n);
+        hc_repeat(h, hw, cfg.hc_count, cfg.d_model, stream);
+    }
 
     // Initialize FP32 residual accumulator from FP16 embedding (post-norm models only).
     if (fp32_accum_buf_) {
@@ -387,6 +394,14 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
 
         // Layer-diff dump: Snapshot A — pre-attention layer input.
         dump_tensor_npy("A_pre_attn", view_tokens(h, n), stream, i, decode_step);
+        if (model_->profile().gated_residual) {
+            // Qwen4Exp: hidden_[n] becomes this block's mixed input; the block's own pre-norm is
+            // the identity (attn_norm is null) and its residual add lands on top of that input.
+            const auto& hly = model_->layer(i);
+            if (hly.ple_key_proj.data != nullptr)
+                ple_run_(state, i, n, stream);
+            hc_read_(hly.hc_attn_norm, hly.hc_attn_down, hly.hc_attn_up, &hly.hc_attn_inject, n, stream);
+        }
 
         // Attention, GDN, or SSM (mutually exclusive per layer).
         // GDN check first: GDN layers have ssm_in (from attn_qkv) but use delta rule.
@@ -419,6 +434,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         if (profile_active)
             cudaEventRecord(ev_attn[i], stream);
 
+        if (model_->profile().gated_residual) {
+            const auto& hly = model_->layer(i);
+            hc_write_(n, stream);
+            hc_read_(hly.hc_mlp_norm, hly.hc_mlp_down, hly.hc_mlp_up, &hly.hc_mlp_inject, n, stream);
+        }
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
         const bool skip_moe = dispatch_policy().moe.skip;
         if (skip_moe) {
@@ -428,6 +448,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
         }
+        if (model_->profile().gated_residual)
+            hc_write_(n, stream);
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
@@ -626,6 +648,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LAUNCH();
     }
 
+    if (model_->profile().gated_residual) {
+        // Qwen4Exp: fold the hc streams back to d_model for the final norm + LM head (mixer has no
+        // inject weight; hidden_[n] is the mixed stream afterwards).
+        hc_read_(model_->hc_mixer_norm(), model_->hc_mixer_down(), model_->hc_mixer_up(), nullptr, n, stream);
+    }
     // Final FP32→FP16 conversion for the tokens that need LM head projection.
     // run_attention/run_ffn already keep hidden_ in sync with fp32_hidden_,
     // but this ensures the final state is clean (no stale data from earlier layers).

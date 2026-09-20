@@ -835,7 +835,7 @@ struct UploadCtx {
     std::vector<PinnedBuffer>& host_pinned_allocs;
     // Architecture-specific norm-weight offset: Qwen3.5/3.6 SafeTensors stores block-norm
     // gammas as deltas (gamma=1+W) while GGUF bakes the +1 in at conversion. Applied only on
-    // BF16-source paths in upload_weight(). 1.0f for QWEN35[_MOE]/QWEN36_MOE, 0.0f otherwise.
+    // BF16-source paths in upload_weight(). 1.0f for QWEN35[_MOE]/QWEN36_MOE/QWEN4_EXP, 0.0f otherwise.
     float arch_norm_offset = 0.0f;
     // gpt-oss MXFP4 MoE experts must stay host-resident through weight upload: the
     // MXFP4->NVFP4 conversion runs at pre_dequant (needs the executor's wcache). True for
@@ -1236,6 +1236,47 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
                            true, 0.0f, "kv_a_layernorm", i)) {
             IMP_LOG_ERROR("Failed to upload kv_a_layernorm for layer %d", i);
             return false;
+        }
+    }
+    // Qwen4Exp gated residual: eight BF16 tensors per layer, uploaded with NO offset. hc_norm is
+    // the (1 + W) delta like the other Qwen norms, but hc_grouped_rmsnorm applies the +1 itself.
+    {
+        struct HcSlot {
+            Tensor* t;
+            const char* name;
+        };
+        const HcSlot hc_slots[] = {
+            {&L.hc_attn_norm, "hc_attn_norm"},     {&L.hc_attn_down, "hc_attn_down"},
+            {&L.hc_attn_up, "hc_attn_up"},         {&L.hc_attn_inject, "hc_attn_inject"},
+            {&L.hc_mlp_norm, "hc_mlp_norm"},       {&L.hc_mlp_down, "hc_mlp_down"},
+            {&L.hc_mlp_up, "hc_mlp_up"},           {&L.hc_mlp_inject, "hc_mlp_inject"},
+        };
+        for (const auto& s : hc_slots) {
+            if (s.t->data && !s.t->on_device) {
+                if (!upload_weight(*s.t, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true, 0.0f,
+                                   s.name, i)) {
+                    IMP_LOG_ERROR("Failed to upload %s for layer %d", s.name, i);
+                    return false;
+                }
+            }
+        }
+        // PLE (one layer) and QSA indexer (attention layers): BF16 tensors go up, no offset (the
+        // norms apply 1 + W in the kernel). The I64 hash buffers and the F8 table scale stay on the host.
+        const HcSlot ple_slots[] = {
+            {&L.ple_key_proj, "ple_key_proj"},   {&L.ple_value_proj, "ple_value_proj"},
+            {&L.ple_conv1d, "ple_conv1d"},       {&L.ple_norm_key, "ple_norm_key"},
+            {&L.ple_norm_query, "ple_norm_query"}, {&L.ple_norm_conv, "ple_norm_conv"},
+            {&L.qsa_index_qk, "qsa_index_qk"},     {&L.qsa_index_q_norm, "qsa_index_q_norm"},
+            {&L.qsa_index_k_norm, "qsa_index_k_norm"},
+        };
+        for (const auto& s : ple_slots) {
+            if (s.t->data && !s.t->on_device) {
+                if (!upload_weight(*s.t, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true, 0.0f,
+                                   s.name, i)) {
+                    IMP_LOG_ERROR("Failed to upload %s for layer %d", s.name, i);
+                    return false;
+                }
+            }
         }
     }
 
@@ -2113,7 +2154,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 }
                 if (total == 0)
                     return;
-                PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total);
+                PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                 if (pin.empty()) {
                     // Correct but slow: the experts stay on the mmap and every
                     // transfer pays the staging cost above.
@@ -2221,7 +2262,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // BF16→FP16 upload conversion; F32-source norms (GGUF) are unaffected.
     const float arch_norm_offset = (config_.arch == ModelArch::QWEN35 ||
                                     config_.arch == ModelArch::QWEN35_MOE ||
-                                    config_.arch == ModelArch::QWEN36_MOE)
+                                    config_.arch == ModelArch::QWEN36_MOE ||
+                                    config_.arch == ModelArch::QWEN4_EXP)
                                        ? 1.0f
                                        : 0.0f;
     const bool is_gpt_oss = (config_.arch == ModelArch::GPT_OSS);
@@ -2240,6 +2282,17 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype, ctx.stream,
                                            ctx.gpu_allocs)) {
                 IMP_LOG_ERROR("Failed to upload encoder embedding norm/type tensor");
+                return false;
+            }
+        }
+    }
+
+    // --- Qwen4Exp final hyper-connection mixer (BF16, no offset: the kernel applies 1 + W) ---
+    for (auto* t : {&hc_mixer_norm_, &hc_mixer_down_, &hc_mixer_up_}) {
+        if (t->data && !t->on_device) {
+            if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype, ctx.stream,
+                                           ctx.gpu_allocs)) {
+                IMP_LOG_ERROR("Failed to upload hyper_connection_mixer tensor");
                 return false;
             }
         }
@@ -2362,7 +2415,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     }
                     if (total == 0)
                         return;
-                    PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total);
+                    PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                     if (pin.empty())
                         return;  // stays on mmap: slower, still correct
                     char* dst = static_cast<char*>(pin.data());

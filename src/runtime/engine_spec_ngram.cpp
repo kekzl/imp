@@ -208,6 +208,11 @@ bool Engine::spec_ngram_model_capable_uncached_() const {
     if (model_->profile().is_moe &&
         !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
         return false;
+    // Host-resident experts: a verify step (n = k + 1 rows) streams every expert the rows
+    // touch over PCIe, 1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next against 15 ms per
+    // captured decode step (tg512 65.9 -> 40.6 tok/s with n-gram on, 2026-09-20).
+    if (experts_on_host_)
+        return false;
     if (!supports_chunked_prefill_())
         return false;
     return true;

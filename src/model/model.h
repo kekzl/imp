@@ -20,6 +20,7 @@ class WeightUploadLog;
 // weights are views into the same mapping and share the model's lifetime. Forward-declared
 // so model/ has no header dependency on vision/.
 struct VisionModel;
+class NGramTable;
 
 class Model {
 public:
@@ -47,8 +48,15 @@ public:
         return self.layers_[i];
     }
     const Tensor& token_embedding() const { return tok_emb_; }
+    // Pinned expert slabs (moe.pin_host_experts); the device expert cache maps expert
+    // pointers to their device views through these.
+    const std::vector<PinnedBuffer>& host_pinned_allocs() const { return host_pinned_allocs_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }
+    const Tensor& hc_mixer_norm() const { return hc_mixer_norm_; }
+    const Tensor& hc_mixer_down() const { return hc_mixer_down_; }
+    const Tensor& hc_mixer_up() const { return hc_mixer_up_; }
+    const NGramTable* ngram_table() const { return ngram_table_.get(); }  // Qwen4Exp PLE, else null
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
@@ -104,6 +112,9 @@ public:
     ModelProfile profile_;
     HFConfigLoader::GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
+    // Qwen4Exp: the final hyper-connection mixer folds the hc_count streams back to d_model
+    // before out_norm_ (hc_norm [hc*d], down [lowrank, hc*d], up [hc*d, lowrank]; no inject).
+    Tensor hc_mixer_norm_, hc_mixer_down_, hc_mixer_up_;
     // Encoder embedder extras (#836, nomic-bert): post-embedding LayerNorm
     // (weight+bias) and the token-type embedding table [n_types, d_model]
     // (row 0 is added to every text token's embedding).
@@ -148,6 +159,7 @@ public:
     // parties that own each half: the config loader fills `->config` from
     // config.json, weight_map fills the tensors from the shard map.
     std::unique_ptr<VisionModel> vision_tower;
+    std::unique_ptr<NGramTable> ngram_table_;  // Qwen4Exp PLE table (model/ngram_table.h)
     int last_warm_hits_ = 0;
     // Path the loader was invoked with (GGUF file or SafeTensors directory).
     // Used to derive the on-disk warm-cache location and its fingerprint

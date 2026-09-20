@@ -564,9 +564,21 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else {
             prefill_attend_seq(n, state.prefill_offset, 0, qv, kk, vv, ao, layer_block_tables,
                                /*bt_flat=*/nullptr, /*bt_swa_flat=*/nullptr, /*seq_positions=*/nullptr);
+            // Qwen4Exp QSA: the rows past 2050 tokens get the learned block selection
+            // (the KV of this chunk is in the paged cache by now).
+            if (qsa_layer_(layer) && state.n_sequences == 1 && state.kv_cache &&
+                state.kv_cache->qtype() == QType::F16)
+                qsa_prefill_(layer, state, n, no, qv, ao, layer_block_tables, scale, stream);
         }
     } else {
-        decode_attend(state, n, /*row_begin=*/0, qv, kk, vv, ao, layer_block_tables);
+        // Qwen4Exp QSA decode: selection + gather + paged kernel on the device, in place of
+        // the dense kernel (identical bytes below 2051 tokens). One sequence only: the
+        // indexer key caches belong to one sequence, like the PLE context.
+        const bool qsa_dec = qsa_layer_(layer) && n == 1 && state.n_sequences == 1 &&
+                             !state.chunk_decode_attn && state.kv_cache &&
+                             state.kv_cache->qtype() == QType::F16;
+        if (!qsa_dec || !qsa_decode_(layer, state, no, qv, ao, layer_block_tables, scale, stream))
+            decode_attend(state, n, /*row_begin=*/0, qv, kk, vv, ao, layer_block_tables);
     }
 
     if (debug_attn_steps) {

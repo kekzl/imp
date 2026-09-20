@@ -34,6 +34,18 @@
 
 namespace imp {
 
+namespace {
+constexpr int kSlotIdxBatch = 64;
+struct SlotIdxBatch {
+    int n;
+    int32_t v[kSlotIdxBatch];
+};
+__global__ void write_slot_idx_kernel(int32_t* dst, SlotIdxBatch b) {
+    if (static_cast<int>(threadIdx.x) < b.n)
+        dst[threadIdx.x] = b.v[threadIdx.x];
+}
+}  // namespace
+
 // Refuses a placement nothing can serve (the #1403 gate), moved to where
 // the answer is known: at weight-upload time whether a host-resident NVFP4
 // layer can be served depends on the expert cache, sized later
@@ -97,6 +109,29 @@ void GraphExecutor::verify_host_expert_placement() const {
 // experts back to back in one pinned slab, and a plain mmap usually does
 // too); contiguity is CHECKED here, not assumed, or an interleaved
 // checkpoint would silently read experts from the wrong addresses.
+bool GraphExecutor::init_device_expert_cache() {
+    if (!dispatch_policy().moe.device_expert_cache || !model_->config().is_nvfp4_prequant)
+        return device_expert_cache_covers_host_layers();
+    const int top_k = std::max(1, model_->config().n_experts_active);
+    if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
+        IMP_LOG_INFO("Device expert cache: not built (no host-resident NVFP4 layer in a mapped "
+                     "pinned slab, or the pool is too small); the host LRU path serves decode");
+    return device_expert_cache_covers_host_layers();
+}
+
+bool GraphExecutor::device_expert_cache_covers_host_layers() const {
+    const auto& cfg = model_->config();
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        const auto& L = model_->layer(i);
+        const bool packed_host = L.expert_up_packed.data && !L.expert_up_packed.on_device;
+        const bool view_host = !L.expert_w_up.empty() && L.expert_w_up[0].data &&
+                               !L.expert_w_up[0].on_device;
+        if ((packed_host || view_host) && !dev_expert_cache_.layer_ready(i))
+            return false;
+    }
+    return true;
+}
+
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                        StagedProj out[kExpertProjCount]) {
     for (int i = 0; i < kExpertProjCount; ++i)
@@ -293,18 +328,33 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [top_k, eff]
     half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
 
+    size_t ms_off[kExpertProjCount] = {0, 0, 0};
+    const bool use_dev = dev_expert_cache_.layer_ready(layer);
+    if (use_dev) {
+        // Routing -> slots -> gather on the device; nothing of this layer's staging touches
+        // the host (expert_cache_device.h).
+        for (int p = 0; p < kExpertProjCount; ++p)
+            ms_off[p] = dev_expert_cache_.ms_off(layer, p);
+        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, moe_.d_slot_idx, stream);
+    } else {
     // Establishing residency needs the routing on the host, so this path pays
     // one D2H + sync per layer - the same one the GGUF slot path pays, and the
     // reason CUDA graphs stay disabled under host-resident experts.
     moe_host_args_capture_guard(stream);
-    std::vector<int32_t> h_experts(top_k);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts.data(), expert_indices,
-                                       static_cast<size_t>(top_k) * sizeof(int32_t),
+    const size_t readback_bytes = static_cast<size_t>(top_k) * sizeof(int32_t);
+    if (moe_.h_routing_readback.bytes() < readback_bytes)
+        moe_.h_routing_readback = PinnedBuffer::acquire(cuda_host_pinned_allocator(), readback_bytes);
+    std::vector<int32_t> h_experts_fallback;
+    int32_t* h_experts = moe_.h_routing_readback.as<int32_t>();
+    if (!h_experts) {
+        h_experts_fallback.resize(top_k);
+        h_experts = h_experts_fallback.data();
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts, expert_indices, readback_bytes,
                                        cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
-    size_t ms_off[kExpertProjCount] = {0, 0, 0};
 
     auto stage = [&](const std::vector<Tensor>& experts, ExpertProj proj) -> bool {
         const int proj_idx = std::to_underlying(proj);
@@ -346,9 +396,17 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
                   layer, top_k, expert_cache_.slots_per_layer_);
     }
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
-                                       h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                       stream));
+    // Scales and slot indices reach the device as kernel parameters: an H2D from a host
+    // vector is a pageable copy and syncs the stream before it runs (48 drains per token).
+    expert_cache_.flush_staging(stream);
+    for (size_t off = 0; off < h_slots.size(); off += kSlotIdxBatch) {
+        SlotIdxBatch b{};
+        b.n = static_cast<int>(std::min<size_t>(kSlotIdxBatch, h_slots.size() - off));
+        std::copy_n(h_slots.begin() + static_cast<std::ptrdiff_t>(off), b.n, b.v);
+        write_slot_idx_kernel<<<1, kSlotIdxBatch, 0, stream>>>(moe_.d_slot_idx + off, b);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    }  // host staging
 
     char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
                        static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
