@@ -217,6 +217,14 @@ unseen prose yesterday, so the reference cannot separate indexer from quant here
 build proves: the kernels match the reference math, the selection reads the right bytes, and
 retrieval past the budget works.
 
+Default flipped to `attention.qsa=false` on 2026-09-21. On short prompts the decode path runs
+selection + gather + the paged kernel where dense would do, and the paged-vs-FA2 re-rounding
+flips MoE routing: `degen_suite.py` 48/50 with the indexer (a counting prompt derails,
+"What is the capital of France" answers `7391`), 50/50 without, reproduced on three server
+starts. At 4503 tokens it is also slower on both axes and 1.2 % above dense on PPL, so nothing
+measured here pays for it. It earns its place above ~8k context, where the dense KV read
+dominates; the kernels and the gate stay.
+
 ## Speed on the 32 GB card (2026-09-20)
 
 56 GiB of experts stay on the host; every decode token streams its misses over PCIe.
@@ -234,6 +242,20 @@ byte-identical across all rows.
 | one `cudaMemcpyBatchAsync` per layer | 27.2 | 31-56 us host time per memcpyAsync; the batch call issues 60 copies in 0.05 ms at 54 GB/s (`tools/analysis/h2d_gather_probe.cu`) |
 | device expert cache (`exec/expert_cache_device.{h,cu}`) | 33.2 | resolve kernel (LRU tables on the device) + gather kernel from mapped pinned (51 GB/s); no D2H, no sync per layer |
 | captured decode (per-step graph pool) | 53.0 (tg512: 65.9, 81.9 % hits) | ~2600 launches per token were the host-side floor; PLE host half moved to `prepare_decode_step_host` |
+
+TTFT (2026-09-21, `moe.stage_touched_only`): prefill staged all 512 experts of every layer
+regardless of routing, 63 GB per prefill, so TTFT was flat at ~1.27 s whatever the prompt
+length. A gather kernel reading `expert_offsets` stages only the touched experts:
+
+| prompt tokens | all experts | touched only |
+|---|---|---|
+| 67 | 1267 ms | 499 ms |
+| 328 | 1287 ms | 811 ms |
+| 1022 | 1328 ms | 1038 ms |
+
+Decode unchanged (~54 tok/s), PPL on `ppl_corpus_45k.txt` 4.6326 vs 4.6306 (+0.04 %). The
+ratio at 67 tokens says the routing is skewed: a uniform top-10 over 512 experts would touch
+73 % of them, the measured cost falls to 39 %.
 
 Prefill: `moe.staged_cutlass_prefill=true` needed the >256-expert fixes in
 `compact_alpha_active`, `compute_sfa_offsets`, `build_grouped_3x_staging_kernel`;
