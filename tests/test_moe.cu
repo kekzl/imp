@@ -236,6 +236,47 @@ TEST_F(MoERoutingTest, TopKSelection) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b: routers wider than one block of threads. The selection once gave every thread one
+// expert (tid < n_experts), so experts >= 256 were never candidates: a 512-expert router
+// (Qwen3.8-Flash-Next) routed every token whose best experts sat above 255 wrong.
+// ---------------------------------------------------------------------------
+TEST(MoERoutingWideTest, ExpertsAbove256AreCandidates) {
+    constexpr int n_tokens = 3, n_experts = 512, top_k = 10;
+    std::vector<float> logits(static_cast<size_t>(n_tokens) * n_experts, -9.0f);
+    // token 0: best experts all above 255; token 1: mixed; token 2: the very last expert wins
+    const int winners[n_tokens][top_k] = {
+        {338, 369, 293, 492, 289, 352, 300, 401, 257, 511},
+        {71, 338, 215, 369, 32, 293, 160, 492, 46, 289},
+        {511, 510, 509, 508, 507, 506, 505, 504, 503, 502},
+    };
+    for (int t = 0; t < n_tokens; t++)
+        for (int k = 0; k < top_k; k++)
+            logits[static_cast<size_t>(t) * n_experts + winners[t][k]] = 2.0f - 0.1f * k;
+    int64_t shape[2] = {n_tokens, n_experts};
+    Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
+    MoeRoutingResult routing{};
+    moe_topk_gating(d_gate, top_k, routing, /*stream=*/nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto h_indices = to_host<int32_t>(routing.expert_indices);
+    auto h_weights = to_host<float>(routing.expert_weights);
+    std::vector<int> ref_indices(n_tokens * top_k);
+    std::vector<float> ref_weights(n_tokens * top_k);
+    cpu_topk_gating(logits.data(), n_tokens, n_experts, top_k, ref_indices.data(), ref_weights.data());
+    for (int t = 0; t < n_tokens; t++) {
+        std::set<int> got(h_indices.begin() + t * top_k, h_indices.begin() + (t + 1) * top_k);
+        std::set<int> want(winners[t], winners[t] + top_k);
+        EXPECT_EQ(got, want) << "token " << t;
+        std::map<int, float> ref;
+        for (int k = 0; k < top_k; k++)
+            ref[ref_indices[t * top_k + k]] = ref_weights[t * top_k + k];
+        for (int k = 0; k < top_k; k++)
+            EXPECT_NEAR(h_weights[t * top_k + k], ref[h_indices[t * top_k + k]], 1e-4f) << "token " << t;
+    }
+    free_tensor(d_gate);
+    free_routing(routing);
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: WeightNormalization
 // ---------------------------------------------------------------------------
 TEST_F(MoERoutingTest, WeightNormalization) {

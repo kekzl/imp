@@ -104,14 +104,15 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
 
         const float* sel = score_bias ? s_sel_probs : s_probs;
 
-        // Each thread owns one element (tid < n_experts), or -FLT_MAX if out of range
-        float my_val = (tid < n_experts) ? sel[tid] : -FLT_MAX;
-        int my_idx = tid;
+        // Strided ownership tid + j*BLOCK_SIZE (moe_routing_internal.cuh): one expert per thread
+        // capped the search at 255 on the 512-expert Qwen3.8-Flash-Next router.
+        float my_vals[kTopkSlotsPerThread];
+        topk_load_slots(sel, n_experts, tid, my_vals);
 
         for (int k = 0; k < top_k; k++) {
-            // Warp-level argmax
-            float wmax = my_val;
-            int widx = my_idx;
+            float wmax;
+            int widx;
+            topk_owned_argmax(my_vals, tid, wmax, widx);
 #pragma unroll
             for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
                 float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
@@ -151,8 +152,8 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
             __syncthreads();
 
             // Mask out the selected expert so it won't be picked again
-            if (tid == s_topk_idx[k])
-                my_val = -FLT_MAX;
+            if ((s_topk_idx[k] & (BLOCK_SIZE - 1)) == tid)
+                my_vals[s_topk_idx[k] / BLOCK_SIZE] = -FLT_MAX;
         }
 
         // Thread 0: normalize weights and write output
@@ -286,12 +287,13 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
     // ---- Phase 3: Top-k selection (same algorithm as topk_gating_kernel) ----
     {
         const float* sel = score_bias ? s_sel_probs : s_logits;
-        float my_val = (tid < n_experts) ? sel[tid] : -FLT_MAX;
-        int my_idx = tid;
+        float my_vals[kTopkSlotsPerThread];
+        topk_load_slots(sel, n_experts, tid, my_vals);
 
         for (int k = 0; k < top_k; k++) {
-            float wmax = my_val;
-            int widx = my_idx;
+            float wmax;
+            int widx;
+            topk_owned_argmax(my_vals, tid, wmax, widx);
 #pragma unroll
             for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
                 float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
@@ -327,8 +329,8 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
             }
             __syncthreads();
 
-            if (tid == s_topk_idx[k])
-                my_val = -FLT_MAX;
+            if ((s_topk_idx[k] & (BLOCK_SIZE - 1)) == tid)
+                my_vals[s_topk_idx[k] / BLOCK_SIZE] = -FLT_MAX;
         }
 
         // Thread 0: normalize weights and write output
