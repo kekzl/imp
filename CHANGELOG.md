@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- MoE top-k gating never selected an expert with index >= 256: each of the 256 threads owned one expert. Invisible on every shipped MoE (<= 256 experts); on the 512-expert Qwen3.8-Flash-Next it routed every token whose best experts sat above 255 wrong (PPL on unseen prose 14.25 -> 6.00, llama.cpp 5.54; `docs/plans/2026-09-19-qwen4exp-port.md`). Regression test `MoERoutingWideTest.ExpertsAbove256AreCandidates`.
+
 ## [0.43.0] - 2026-09-19
 
 ### Added

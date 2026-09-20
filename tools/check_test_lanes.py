@@ -285,7 +285,9 @@ def main():
     # 1129 -> 1132: CutlassMxFP8Gemm.{MatchesFp32ReferenceWithinE4M3Budget,
     # TinyWeightRowsAgainstCoherentActivationStayFinite,PartialSfAtomKTile} (test-quant): the
     # MXFP8 GDN prefill GEMM against an FP32 reference, finite on 0.01-magnitude rows.
-    PINNED = 1132
+    # 1132 -> 1133: MoERoutingWideTest.ExpertsAbove256AreCandidates (test-moe-gdn): a 512-expert
+    # router selects experts above index 255 (the one-expert-per-thread selection never did).
+    PINNED = 1133
 
     text = CMAKE.read_text()
     mods = module_sources(text)
