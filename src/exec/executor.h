@@ -19,6 +19,7 @@
 #include "exec/activation_calibrator.h"
 #include "exec/expert_cache.h"
 #include "exec/expert_cache_device.h"
+#include "compute/qsa_indexer.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -581,6 +582,25 @@ private:
     bool ple_prepared_ = false;  // prepare_decode_step_host() ran for the next forward
     std::vector<int64_t> ple_ids_;
     cudaEvent_t ple_h2d_done_ = nullptr;
+    // Qwen4Exp QSA indexer (executor_qsa.cu): per QSA layer the raw index keys [ctx, 128]
+    // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
+    // selection lists and a scratch paged K/V for qsa_rows_ query rows.
+    struct QsaLayerState {
+        void* raw_keys = nullptr;
+        void* block_keys = nullptr;
+    };
+    std::vector<QsaLayerState> qsa_layers_;
+    Tensor qsa_qk_, qsa_q_;  // [max_tokens, (nh+1)*128], [max_tokens, nh*128] FP16
+    float* qsa_scores_ = nullptr;
+    int32_t* qsa_sel_tokens_ = nullptr;
+    int32_t* qsa_sel_count_ = nullptr;
+    int32_t* qsa_scratch_bt_ = nullptr;
+    int32_t* qsa_scratch_ctx_ = nullptr;
+    void* qsa_k_scratch_ = nullptr;
+    void* qsa_v_scratch_ = nullptr;
+    int qsa_max_ctx_ = 0, qsa_nb_max_ = 0, qsa_rows_ = 0, qsa_blocks_per_row_ = 0;
+    int qsa_valid_ = 0;        // raw keys valid for positions [0, qsa_valid_) (prefill bookkeeping)
+    bool qsa_seq_ok_ = true;   // false: this sequence runs dense (resumed prefix, no keys)
     Tensor logits_;    // [max_logit_tokens, vocab_size]
 
     // FP32 residual accumulator for post-norm architectures (Gemma-3):
@@ -1061,6 +1081,22 @@ private:
     // the layer's attention hyper-connection. No-op family without model_->ngram_table().
     [[nodiscard]] bool ple_alloc_(int max_tokens);
     void ple_free_();
+    // Qwen4Exp QSA indexer (executor_qsa.cu). qsa_decode_ replaces the dense decode kernel
+    // for one sequence (false: caller runs dense); qsa_prefill_ recomputes the rows whose
+    // selection is no longer all-true after the dense chunk attention.
+    bool qsa_layer_(int layer) const;
+    QsaGeom qsa_geom_(int layer) const;
+    [[nodiscard]] bool qsa_alloc_(int max_tokens);
+    bool qsa_ensure_ctx_(const InferenceState& state, cudaStream_t stream);
+    void qsa_free_();
+    void qsa_attend_rows_(int layer, const InferenceState& state, const void* q_rows, void* o_rows, int rows,
+                          const int* bt, float scale, cudaStream_t stream);
+    bool qsa_decode_(int layer, const InferenceState& state, const Tensor& no, Tensor& qv, Tensor& ao,
+                     const int* bt, float scale, cudaStream_t stream);
+    void qsa_prefill_(int layer, const InferenceState& state, int n, const Tensor& no, Tensor& qv, Tensor& ao,
+                      const int* bt, float scale, cudaStream_t stream);
+    void qsa_debug_rows_(int layer, const InferenceState& state, const void* q_rows, const void* o_dense,
+                         int rows, int p0, const int* bt, float scale, cudaStream_t stream);
     void ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream);
     // Host half of the PLE for one chunk: n-gram hash, table gather into pinned staging,
     // H2D into ple_emb_dev_, context update. Outside any graph capture.

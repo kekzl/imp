@@ -434,6 +434,8 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_legacy.cu
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
+    src/exec/executor_qsa.cu
+    src/compute/qsa_indexer.cu
     src/exec/weight_handle.cu
     src/exec/moe_workspace.cu
     src/exec/quant_scratch.cu
@@ -975,6 +977,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_fmha_mxfp4.cu
         tests/test_paged_attention.cu
         tests/test_attention_paged_oracle.cu
+        tests/test_qsa_indexer.cu
         tests/test_attention_paged_reduce.cu
         tests/test_attention_paged_nvfp4_tc.cu
         tests/test_attention_paged_nvfp4_tc_residual.cu

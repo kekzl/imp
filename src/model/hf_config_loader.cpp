@@ -467,6 +467,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         // Qwen4Exp gated residual widths (absent on Qwen3.5/3.6: stay 0).
         jobj_get_int(eff, "hc_count", cfg.hc_count);
         jobj_get_int(eff, "hc_lowrank", cfg.hc_lowrank);
+        jobj_get_int(eff, "indexer_budget", cfg.qsa_budget);
+        jobj_get_int(eff, "indexer_compress_ratio", cfg.qsa_ratio);
         if (cfg.hc_count > 0)
             jobj_get_int(eff, "eos_token_id", cfg.ple_eos_token_id);
         {

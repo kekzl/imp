@@ -396,6 +396,10 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
         IMP_LOG_ERROR("PLE workspace allocation failed, cannot run inference");
         return false;
     }
+    if (!qsa_alloc_(max_tokens_)) {
+        IMP_LOG_ERROR("QSA indexer workspace allocation failed, cannot run inference");
+        return false;
+    }
     if (!ws_.allocate_shared_workspace(max_tokens_)) {
         IMP_LOG_ERROR("Shared workspace allocation failed — cannot run inference");
         return false;

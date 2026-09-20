@@ -1646,6 +1646,7 @@ void GraphExecutor::free_buffers() {
     chunk_eager_bytes_ = 0;
     hc_free_();          // Qwen4Exp gated-residual streams (executor-owned)
     ple_free_();         // Qwen4Exp PLE staging + conv state
+    qsa_free_();         // Qwen4Exp QSA indexer key caches + scratch
     ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
     vfree(fp32_accum_buf_);
     ssm_layer_map_.clear();

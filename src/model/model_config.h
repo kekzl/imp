@@ -57,6 +57,7 @@ struct ModelConfig {
     // output_gate_type=sigmoid on its gated RMSNorm.
     bool gdn_gate_sigmoid = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
+    int qsa_budget = 0, qsa_ratio = 0;  // Qwen4Exp indexer_budget / indexer_compress_ratio (0 = no indexer)
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
     // M-RoPE (Qwen-VL): rotary pairs split across 3 position axes (text/time, image height,

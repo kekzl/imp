@@ -29,7 +29,7 @@ on `mlp.experts` only, everything else BF16.
 | MoE experts, 512 x 3 x 48 | modelopt layout, same as `Qwen3-30B-A3B-NVFP4-Modelopt` | resolves; routing needed the >= 256-expert fix (see "Reference comparison"); 56 GiB stay host-resident (`moe.force_host_experts=48`, LRU 48 x 67 slots x 0.88 MiB) |
 | Gated residual | `attn_/mlp_hyper_connection.{hc_norm, input_mix_weight_down, input_mix_weight_up, block_inject_weight}`, `hyper_connection_mixer.*` | loader, kernels (`compute/gated_residual.cu`), forward wiring (`exec/executor_gated_residual.cu`), BF16 upload: done, not yet run end to end |
 | PLE (layer 1) | `ple.{key_proj, value_proj, conv1d, norm_key, norm_query, norm_conv}`, `ple_embedding.{layer_multipliers [3], ngram_heads_offsets [16], ngram_heads_vocab_sizes [16], ngram_embedding.shard_0..127 F8 [2500012, 160], weight_scale BF16 [1]}` | built, runs (see "PLE, as built"); reference comparison pending; previously: not started |
-| QSA indexer (12 layers) | `self_attn.indexer.{index_qk_proj [640, 2560], q_layernorm [128], k_layernorm [128]}` | not started; attention runs dense without it |
+| QSA indexer (12 layers) | `self_attn.indexer.{index_qk_proj [640, 2560], q_layernorm [128], k_layernorm [128]}` | built (see "QSA indexer, as built"); `attention.qsa=false` runs dense |
 | MTP | `mtp.*` in the FP8 shard | not started (`speculative.mtp_k=0`) |
 | VL tower | `model.visual.*` | dropped |
 
@@ -187,6 +187,35 @@ Plan (milestone 4), exact at every context length:
 | Attention consumer | one "selected-token" attention kernel over the paged KV (F16 first) taking the index list: decode (`n_q = 1`) and prefill rows alike; rows with `pos < 2048` get `[0..pos]`, so the kernel is exact everywhere and FA2 stays the fast path for chunks entirely below 2048 |
 | Gate | `attention.qsa_force=true` runs the selected path below 2048 too: must match dense FA2 (the correctness A/B); above 2048 the reference is llama.cpp's qwen4exp indexer |
 | Not reused | `sparse_attn_select.cu` (Quest page heuristic, KV-page granularity `kv_cache.block_size`, not 4-token blocks) |
+
+## QSA indexer, as built (2026-09-20)
+
+| Piece | Where | Fact |
+|---|---|---|
+| Kernels | `compute/qsa_indexer.{h,cu}` | `qsa_prep_queries` (q: (1+w) norm, NeoX RoPE on 64 of 128 dims at the row's position; raw key written at the position), `qsa_pool_blocks` (mean of 4 raw keys -> fp16 -> (1+w) norm -> RoPE at 4b; decode derives the block from `positions[0]` on the device), `qsa_select` (one CTA per row: scores, radix select of the k-th largest float key, compaction ascending, ties by lowest index, tail appended), `qsa_gather_kv` (selected rows from the paged cache into a scratch paged cache, row r owns 129 blocks) |
+| Orchestration | `exec/executor_qsa.cu` | decode (one sequence): index GEMM -> prep -> pool -> select -> gather -> `paged_attention_decode` on the scratch, in place of the dense kernel, all device-driven so the captured step replays; prefill: dense FA2 for the chunk, then rows with position >= 2051 recomputed in passes of `attention.qsa_rows` (16); `attention.qsa_force` recomputes every row |
+| State | lazily sized from the KV cache on the first forward | per QSA layer raw keys `[ctx, 128]` + block keys `[ctx/4, 128]` FP16 (16k context: 60 MiB for 12 layers), scratch K/V 16 rows x 129 blocks (64.5 MiB), scores `[16, ctx/4]` |
+| Exactness | `tests/test_qsa_indexer.cu` (test-attention, 3 GPU tests) | select + gather + paged on the scratch is byte-identical to paged on the original cache (stale bytes in the scratch); select vs CPU top-k incl. ties; prep vs CPU norm+RoPE |
+| In situ | `attention.qsa_debug` | layer 3, every 16-row pass: max abs diff FA2 vs paged-on-cache 0.007-0.023 (values ~3.3), paged-on-cache vs selected 0 |
+
+Measurements (config of the speed table below, `max_seq_len` 8192):
+
+| Probe | dense (`attention.qsa=false`) | indexer |
+|---|---|---|
+| PPL window 2048..4095 of `ppl_corpus_45k.txt` (imp dump indices; llama.cpp `-c 4096 --chunks 1` on the same text with its own QSA top-k, UD-Q4_K_XL: 4.5021) | 4.6978 | 4.7558 |
+| PPL 0..2047 of the same run | 5.3653 | 5.3653 (identical, the selection is all-true there) |
+| `attention.qsa_force` on `prose_5500.txt` (1301 tokens, all-true selection through the paged kernel) | 1.6930 | 1.7004 (+0.44 %, FA2-vs-paged numerics amplified by the MoE routing; skill band +-0.5 %) |
+| Needle at 4503 tokens context (`ZEBRA-9134`, greedy) | found | found |
+| Decode at 4.5k context | 54.1 tok/s | 50.6 tok/s (31.7 before the split-K scratch was handed to the selected path) |
+| pp4503 | 912 tok/s | 650 tok/s (the row passes; batching more rows per pass is the lever) |
+
+Not modelled: prefix-cache resume (a chunk starting past the valid keys makes the sequence
+dense with one warning), batched decode (one sequence's key caches; the PLE context has the
+same limit), non-F16 KV caches (dense). The indexer arm sits 1.2 % above dense on the 2k
+window while both sit above llama.cpp; the quant gap (NVFP4 experts vs Q4_K_XL) was +8 % on
+unseen prose yesterday, so the reference cannot separate indexer from quant here. What the
+build proves: the kernels match the reference math, the selection reads the right bytes, and
+retrieval past the budget works.
 
 ## Speed on the 32 GB card (2026-09-20)
 

@@ -287,7 +287,7 @@ def main():
     # MXFP8 GDN prefill GEMM against an FP32 reference, finite on 0.01-magnitude rows.
     # 1132 -> 1133: MoERoutingWideTest.ExpertsAbove256AreCandidates (test-moe-gdn): a 512-expert
     # router selects experts above index 255 (the one-expert-per-thread selection never did).
-    PINNED = 1134
+    PINNED = 1137
 
     text = CMAKE.read_text()
     mods = module_sources(text)
