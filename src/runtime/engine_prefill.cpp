@@ -657,7 +657,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
                                  kv_append_capturable && offset == 0 && !ends_at_snapshot &&
                                  !executor_->nvfp4_dequant_uncapturable() &&
-                                 !executor_->moe_prefill_uncapturable();
+                                 !executor_->moe_prefill_uncapturable() &&
+                                 // PLE gathers its n-gram rows on the host per chunk (D2H + sync).
+                                 model_->ngram_table() == nullptr;
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
             if (chunk_len != last_prefill_chunk_len_ || block_count != last_prefill_block_count_) {
@@ -682,10 +684,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 IMP_LOG_INFO(
                     "prefill graph: not capturing (runtime.prefill_graph=true) — "
                     "pf_pool=%d cuda_graphs=%d kv_append_f16=%d offset0=%d "
-                    "not_snapshot_end=%d nvfp4_dequant_capturable=%d moe_capturable=%d",
+                    "not_snapshot_end=%d nvfp4_dequant_capturable=%d moe_capturable=%d no_ple=%d",
                     (int)pf_pool_used, (int)config_.use_cuda_graphs, (int)kv_append_capturable,
                     (int)(offset == 0), (int)!ends_at_snapshot, (int)!executor_->nvfp4_dequant_uncapturable(),
-                    (int)!executor_->moe_prefill_uncapturable());
+                    (int)!executor_->moe_prefill_uncapturable(), (int)(model_->ngram_table() == nullptr));
             }
             executor_->forward_logits(state, logits_out, pf_stream);
         }
