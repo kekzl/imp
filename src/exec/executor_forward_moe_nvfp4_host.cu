@@ -34,6 +34,18 @@
 
 namespace imp {
 
+namespace {
+constexpr int kSlotIdxBatch = 64;
+struct SlotIdxBatch {
+    int n;
+    int32_t v[kSlotIdxBatch];
+};
+__global__ void write_slot_idx_kernel(int32_t* dst, SlotIdxBatch b) {
+    if (static_cast<int>(threadIdx.x) < b.n)
+        dst[threadIdx.x] = b.v[threadIdx.x];
+}
+}  // namespace
+
 // Refuses a placement nothing can serve (the #1403 gate), moved to where
 // the answer is known: at weight-upload time whether a host-resident NVFP4
 // layer can be served depends on the expert cache, sized later
@@ -297,9 +309,16 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     // one D2H + sync per layer - the same one the GGUF slot path pays, and the
     // reason CUDA graphs stay disabled under host-resident experts.
     moe_host_args_capture_guard(stream);
-    std::vector<int32_t> h_experts(top_k);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts.data(), expert_indices,
-                                       static_cast<size_t>(top_k) * sizeof(int32_t),
+    const size_t readback_bytes = static_cast<size_t>(top_k) * sizeof(int32_t);
+    if (moe_.h_routing_readback.bytes() < readback_bytes)
+        moe_.h_routing_readback = PinnedBuffer::acquire(cuda_host_pinned_allocator(), readback_bytes);
+    std::vector<int32_t> h_experts_fallback;
+    int32_t* h_experts = moe_.h_routing_readback.as<int32_t>();
+    if (!h_experts) {
+        h_experts_fallback.resize(top_k);
+        h_experts = h_experts_fallback.data();
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts, expert_indices, readback_bytes,
                                        cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
@@ -346,9 +365,16 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
                   layer, top_k, expert_cache_.slots_per_layer_);
     }
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
-                                       h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                       stream));
+    // Scales and slot indices reach the device as kernel parameters: an H2D from a host
+    // vector is a pageable copy and syncs the stream before it runs (48 drains per token).
+    expert_cache_.flush_staging(stream);
+    for (size_t off = 0; off < h_slots.size(); off += kSlotIdxBatch) {
+        SlotIdxBatch b{};
+        b.n = static_cast<int>(std::min<size_t>(kSlotIdxBatch, h_slots.size() - off));
+        std::copy_n(h_slots.begin() + static_cast<std::ptrdiff_t>(off), b.n, b.v);
+        write_slot_idx_kernel<<<1, kSlotIdxBatch, 0, stream>>>(moe_.d_slot_idx + off, b);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
 
     char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
                        static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *

@@ -575,6 +575,7 @@ private:
     PinnedBuffer ple_host_;
     Tensor ple_conv_state_;  // [(kernel-1)*dilation, hc*d] FP16
     std::vector<int32_t> ple_ctx_;
+    PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
     std::vector<int64_t> ple_ids_;
     cudaEvent_t ple_h2d_done_ = nullptr;
     Tensor logits_;    // [max_logit_tokens, vocab_size]

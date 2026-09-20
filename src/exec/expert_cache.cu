@@ -395,21 +395,84 @@ void* ExpertLRUCache::get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheK
     }
 
     char* dst = static_cast<char*>(slot->gpu_ptr);
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(dst, src_packed, packed_bytes, cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(dst + ms_off, src_ms, ms_bytes, cudaMemcpyHostToDevice, stream));
+    pending_copies_.push_back({dst, src_packed, packed_bytes});
+    pending_copies_.push_back({dst + ms_off, src_ms, ms_bytes});
     slot->ms_off = ms_off;
 
     // The scale mirror is indexed by the layer-relative slot index - the same
     // number the dispatch hands the kernels as `expert_indices`.
-    const int slot_in_layer = static_cast<int>(
-        (static_cast<char*>(slot->gpu_ptr) - static_cast<char*>(pool_)) / slot_size_) -
-        layer * slots_per_layer_;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_slot_scales_ + static_cast<size_t>(layer) * slots_per_layer_ +
-                                           slot_in_layer,
-                                       &tensor_scale, sizeof(float), cudaMemcpyHostToDevice, stream));
+    const int flat_slot = static_cast<int>(
+        (static_cast<char*>(slot->gpu_ptr) - static_cast<char*>(pool_)) / slot_size_);
+    pending_scales_.emplace_back(flat_slot, tensor_scale);
     return slot->gpu_ptr;
+}
+
+namespace {
+constexpr int kSlotScaleBatch = 32;
+struct SlotScaleBatch {
+    int n;
+    int slot[kSlotScaleBatch];
+    float scale[kSlotScaleBatch];
+};
+// One thread, in queue order: a slot refilled twice since the last flush ends with its
+// latest scale.
+__global__ void write_slot_scales_kernel(float* scales, SlotScaleBatch b) {
+    for (int i = 0; i < b.n; ++i)
+        scales[b.slot[i]] = b.scale[i];
+}
+}  // namespace
+
+void ExpertLRUCache::flush_staging(cudaStream_t stream) {
+    if (!pending_copies_.empty()) {
+        // One API call per flush. 2026-09-20 on WSL2: cudaMemcpyAsync cost 31 us of host
+        // time per call under load, 2 per miss, ~25 ms of a 48 ms decode step; the batch
+        // call issues 60 copies in 0.05 ms and DMAs at 53 GB/s (tools/analysis/h2d_gather_probe.cu).
+        bool done = false;
+        if (batch_copy_ok_) {
+            std::vector<void*> dsts;
+            std::vector<const void*> srcs;
+            std::vector<size_t> sizes;
+            dsts.reserve(pending_copies_.size());
+            srcs.reserve(pending_copies_.size());
+            sizes.reserve(pending_copies_.size());
+            for (const PendingCopy& c : pending_copies_) {
+                dsts.push_back(c.dst);
+                srcs.push_back(c.src);
+                sizes.push_back(c.bytes);
+            }
+            cudaMemcpyAttributes attr{};
+            attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+            size_t attr_idx = 0;
+            cudaError_t e = cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(),
+                                                 dsts.size(), &attr, &attr_idx, 1, stream);
+            if (e == cudaSuccess) {
+                done = true;
+            } else {
+                (void)cudaGetLastError();
+                batch_copy_ok_ = false;
+                IMP_LOG_WARN("Expert LRU cache: cudaMemcpyBatchAsync refused (%s); falling back to "
+                             "one cudaMemcpyAsync per copy for the rest of the process",
+                             cudaGetErrorString(e));
+            }
+        }
+        if (!done) {
+            for (const PendingCopy& c : pending_copies_)
+                IMP_CUDA_CHECK_LOG(
+                    cudaMemcpyAsync(c.dst, c.src, c.bytes, cudaMemcpyHostToDevice, stream));
+        }
+        pending_copies_.clear();
+    }
+    size_t i = 0;
+    while (i < pending_scales_.size()) {
+        SlotScaleBatch b{};
+        for (; b.n < kSlotScaleBatch && i < pending_scales_.size(); ++i, ++b.n) {
+            b.slot[b.n] = pending_scales_[i].first;
+            b.scale[b.n] = pending_scales_[i].second;
+        }
+        write_slot_scales_kernel<<<1, 1, 0, stream>>>(d_slot_scales_, b);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    pending_scales_.clear();
 }
 
 int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback) {
@@ -621,6 +684,8 @@ void ExpertLRUCache::destroy() {
     }
     // d_slot_scales_ points into pool_, freed above - nothing of its own.
     d_slot_scales_ = nullptr;
+    pending_scales_.clear();
+    pending_copies_.clear();
     nvfp4_slots_ = false;
     if (!prefetch_done_.empty()) {
         if (prefetch_h2ds_ > 0 || prefetch_skipped_cached_ > 0) {

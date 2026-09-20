@@ -82,10 +82,23 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
     const int ctx_len = tab->context_len();
 
     // Host side: token ids and the chunk's first position (sequence start = reset).
-    std::vector<int32_t> ids(static_cast<size_t>(n));
-    int pos0 = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost));
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(&pos0, state.positions, sizeof(int), cudaMemcpyDeviceToHost));
+    // Pinned landing zone: a D2H into pageable memory is a staged copy (245 us on WSL2).
+    const size_t rb_bytes = static_cast<size_t>(n + 1) * sizeof(int32_t);
+    if (ple_readback_.bytes() < rb_bytes)
+        ple_readback_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), rb_bytes);
+    std::vector<int32_t> rb_fallback;
+    int32_t* rb = ple_readback_.as<int32_t>();
+    if (!rb) {
+        rb_fallback.resize(static_cast<size_t>(n) + 1);
+        rb = rb_fallback.data();
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(rb, state.token_ids, n * sizeof(int32_t),
+                                       cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(rb + n, state.positions, sizeof(int), cudaMemcpyDeviceToHost,
+                                       stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    const int32_t* ids = rb;
+    const int pos0 = rb[n];
     static bool warned_batch = false;
     if (state.ssm_n_seq > 1 && !warned_batch) {
         warned_batch = true;
@@ -96,7 +109,7 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
         std::fill(ple_ctx_.begin(), ple_ctx_.end(), cfg.ple_eos_token_id);
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(ple_conv_state_.data, 0, ple_conv_state_.nbytes(), stream));
     }
-    tab->hash(ple_ctx_.data(), ids.data(), n, ple_ids_.data());
+    tab->hash(ple_ctx_.data(), ids, n, ple_ids_.data());
     // The previous chunk's H2D must have drained before the staging rows are rewritten.
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(ple_h2d_done_));
     tab->gather(ple_ids_.data(), n, ple_host_.as<uint16_t>());

@@ -170,6 +170,18 @@ struct ExpertLRUCache {
     // plain get_or_load() is a programming error (it would fill a slot with
     // weights and no scales, which decodes to garbage) and says so loudly.
     float* d_slot_scales_ = nullptr;  // [n_slots_], device
+    // get_or_load_nvfp4 queues a miss's two H2D copies and its scale-mirror write;
+    // flush_staging() issues them as one cudaMemcpyBatchAsync plus one kernel launch.
+    // Before: 2 cudaMemcpyAsync per miss (31 us host time each on WSL2 under load) and a
+    // 4-byte H2D from a stack float, i.e. pageable, which syncs the stream before it runs.
+    struct PendingCopy {
+        void* dst;
+        const void* src;
+        size_t bytes;
+    };
+    std::vector<PendingCopy> pending_copies_;
+    std::vector<std::pair<int, float>> pending_scales_;
+    bool batch_copy_ok_ = true;  // false after cudaMemcpyBatchAsync refused once
     bool nvfp4_slots_ = false;
     bool debug_parity_ = false;
     mutable int64_t parity_checks_ok_ = 0;  // exposed for tests; bumped by const check_parity()
@@ -203,6 +215,10 @@ struct ExpertLRUCache {
     void* get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheKey key, const void* src_packed,
                             size_t packed_bytes, const void* src_ms, size_t ms_bytes, size_t ms_off,
                             float tensor_scale, cudaStream_t stream);
+
+    // Issues every copy and scale write queued by get_or_load_nvfp4 on `stream`.
+    // Call before the first kernel that reads the slots staged since the last flush.
+    void flush_staging(cudaStream_t stream);
 
     // Device pointer to layer L's per-slot tensor-scale block, or nullptr
     // outside NVFP4 mode. Indexed by the same layer-relative slot index the
