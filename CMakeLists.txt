@@ -433,6 +433,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_nvfp4_host.cu
     src/exec/executor_forward_moe_legacy.cu
     src/exec/expert_cache.cu
+    src/exec/expert_cache_device.cu
     src/exec/weight_handle.cu
     src/exec/moe_workspace.cu
     src/exec/quant_scratch.cu

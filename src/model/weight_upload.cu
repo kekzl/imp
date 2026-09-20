@@ -2154,7 +2154,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 }
                 if (total == 0)
                     return;
-                PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total);
+                PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                 if (pin.empty()) {
                     // Correct but slow: the experts stay on the mmap and every
                     // transfer pays the staging cost above.
@@ -2415,7 +2415,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     }
                     if (total == 0)
                         return;
-                    PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total);
+                    PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                     if (pin.empty())
                         return;  // stays on mmap: slower, still correct
                     char* dst = static_cast<char*>(pin.data());

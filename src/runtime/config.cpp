@@ -263,6 +263,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("moe.reserve_mib", cfg.moe.reserve_mib);
     B("moe.nvfp4_device_args", cfg.moe.nvfp4_device_args);
     B("moe.nvfp4_smallM", cfg.moe.nvfp4_smallM);
+    B("moe.device_expert_cache", cfg.moe.device_expert_cache);
     I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
     I("moe.mr_nr", cfg.moe.mr_nr);
 

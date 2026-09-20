@@ -18,6 +18,7 @@
 #include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)
 #include "exec/activation_calibrator.h"
 #include "exec/expert_cache.h"
+#include "exec/expert_cache_device.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -663,6 +664,7 @@ private:
     // LRU cache for host-resident expert weights on GPU.
     // Keeps recently-used experts in VRAM to avoid repeated H2D copies.
     ExpertLRUCache expert_cache_;
+    DeviceExpertCache dev_expert_cache_;  // decode: routing -> slots -> gather, all on device
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
     // True when nvfp4_dequant_ws_buf_ came from the engine-persistent arena
@@ -983,6 +985,9 @@ public:
     // can serve them from there. Call after pre_dequant_weights(): needs
     // Phase 0's promotion and the initialised expert cache.
     void verify_host_expert_placement() const;
+    // Builds the device-driven expert cache over the host-resident NVFP4 layers
+    // (moe.device_expert_cache); no-op when the pool or the mapped pinned slabs are missing.
+    void init_device_expert_cache();
 
 private:
     // Computes MoE routing: gate logits (FP32 router fast-path for Gemma-4

@@ -109,6 +109,15 @@ void GraphExecutor::verify_host_expert_placement() const {
 // experts back to back in one pinned slab, and a plain mmap usually does
 // too); contiguity is CHECKED here, not assumed, or an interleaved
 // checkpoint would silently read experts from the wrong addresses.
+void GraphExecutor::init_device_expert_cache() {
+    if (!dispatch_policy().moe.device_expert_cache || !model_->config().is_nvfp4_prequant)
+        return;
+    const int top_k = std::max(1, model_->config().n_experts_active);
+    if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
+        IMP_LOG_INFO("Device expert cache: not built (no host-resident NVFP4 layer in a mapped "
+                     "pinned slab, or the pool is too small); the host LRU path serves decode");
+}
+
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                        StagedProj out[kExpertProjCount]) {
     for (int i = 0; i < kExpertProjCount; ++i)
@@ -305,6 +314,15 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [top_k, eff]
     half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
 
+    size_t ms_off[kExpertProjCount] = {0, 0, 0};
+    const bool use_dev = dev_expert_cache_.layer_ready(layer);
+    if (use_dev) {
+        // Routing -> slots -> gather on the device; nothing of this layer's staging touches
+        // the host (expert_cache_device.h).
+        for (int p = 0; p < kExpertProjCount; ++p)
+            ms_off[p] = dev_expert_cache_.ms_off(layer, p);
+        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, moe_.d_slot_idx, stream);
+    } else {
     // Establishing residency needs the routing on the host, so this path pays
     // one D2H + sync per layer - the same one the GGUF slot path pays, and the
     // reason CUDA graphs stay disabled under host-resident experts.
@@ -323,7 +341,6 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     cudaStreamSynchronize(stream);
 
     std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
-    size_t ms_off[kExpertProjCount] = {0, 0, 0};
 
     auto stage = [&](const std::vector<Tensor>& experts, ExpertProj proj) -> bool {
         const int proj_idx = std::to_underlying(proj);
@@ -375,6 +392,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         write_slot_idx_kernel<<<1, kSlotIdxBatch, 0, stream>>>(moe_.d_slot_idx + off, b);
         IMP_CUDA_CHECK_LAUNCH();
     }
+    }  // host staging
 
     char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
                        static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *

@@ -48,6 +48,9 @@ public:
         return self.layers_[i];
     }
     const Tensor& token_embedding() const { return tok_emb_; }
+    // Pinned expert slabs (moe.pin_host_experts); the device expert cache maps expert
+    // pointers to their device views through these.
+    const std::vector<PinnedBuffer>& host_pinned_allocs() const { return host_pinned_allocs_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }
     const Tensor& hc_mixer_norm() const { return hc_mixer_norm_; }

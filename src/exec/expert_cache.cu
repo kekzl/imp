@@ -226,6 +226,10 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
                       n_layers_);
         return nullptr;
     }
+    if (device_dirty_) {
+        invalidate_host_state();
+        device_dirty_ = false;
+    }
     auto& plru = per_layer_lru_[layer];
 
     // Stamp the host source pointer for capture-safe memcpy (Phase 5).
@@ -314,6 +318,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
     slot.layer = layer;
     slot.proj = proj_idx;
     slot.expert = key.expert_idx;
+    ++host_generation_;
     plru.lru_order.push_front(slot_in_layer);
     plru.lookup[key] = {slot_in_layer, plru.lru_order.begin()};
     if (debug_parity_)
@@ -663,6 +668,23 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
     }
     parity_checks_ok_++;
     return true;
+}
+
+void ExpertLRUCache::invalidate_host_state() {
+    for (auto& plru : per_layer_lru_) {
+        plru.lookup.clear();
+        plru.lru_order.clear();
+    }
+    for (Slot& s : slots_) {
+        s.occupied = false;
+        s.key = {};
+        s.layer = s.proj = s.expert = -1;
+    }
+    if (d_lookup_ && n_experts_ > 0) {
+        const size_t cells = static_cast<size_t>(n_layers_) * kExpertProjCount * n_experts_;
+        IMP_CUDA_CHECK_LOG(cudaMemset(d_lookup_, 0xFF, cells * sizeof(int)));
+    }
+    ++host_generation_;
 }
 
 void ExpertLRUCache::destroy() {

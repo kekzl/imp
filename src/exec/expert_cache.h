@@ -182,6 +182,13 @@ struct ExpertLRUCache {
     std::vector<PendingCopy> pending_copies_;
     std::vector<std::pair<int, float>> pending_scales_;
     bool batch_copy_ok_ = true;  // false after cudaMemcpyBatchAsync refused once
+
+    // Pool hand-over with the device-driven cache (expert_cache_device.h). host_generation_
+    // moves on every host-side slot fill; device_dirty_ is set by the device path and makes
+    // the next host-side acquire forget every slot first (the device moved occupants).
+    uint64_t host_generation_ = 0;
+    bool device_dirty_ = false;
+    void invalidate_host_state();
     bool nvfp4_slots_ = false;
     bool debug_parity_ = false;
     mutable int64_t parity_checks_ok_ = 0;  // exposed for tests; bumped by const check_parity()

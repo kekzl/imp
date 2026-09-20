@@ -389,6 +389,7 @@ bool Engine::init_kv_cache() {
     // labelled host-resident NVFP4 experts, and the expert cache was sized in
     // init_weights(). Refusing here, not at weight-upload time, is the point.
     executor_->verify_host_expert_placement();
+    executor_->init_device_expert_cache();
 
     // KV takes the MEASURED residual, not a predicted one: this can only shrink
     // the pool relative to the budget's projection, never grow it, so it cannot

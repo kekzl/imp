@@ -559,6 +559,9 @@ mr_nr                = 8
 # hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not
 # fewer: the off arm alone spread 34.7-66.1 tok/s decode.
 pin_host_experts     = false
+# Decode on host-resident NVFP4 experts: routing -> cache slots -> zero-copy gather of
+# the misses, all on the device (no per-layer D2H + host LRU). Needs pin_host_experts.
+device_expert_cache  = true
 # Route a STAGED host-resident layer through the CUTLASS grouped NVFP4 prefill
 # instead of per-expert dequant; requires pin_host_experts. Opt-in: pp512
 # +136 % but tg256 -36 % on Qwen3-30B-A3B-NVFP4 (6/6 pairs), not understood.

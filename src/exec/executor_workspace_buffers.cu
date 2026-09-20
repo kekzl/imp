@@ -1563,6 +1563,7 @@ void GraphExecutor::free_buffers() {
     qscratch_.free(vram_alloc_);
 
     moe_.free(vram_alloc_);
+    dev_expert_cache_.destroy();
     expert_cache_.destroy();
 
     // Free gemm_nvfp4 dequant workspace and unregister from the free function.

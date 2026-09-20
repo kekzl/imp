@@ -58,6 +58,11 @@ struct MoE {
     bool nvfp4_device_args = true;
     // Opt-in smallM kernel branch for NVFP4 MoE prefill.
     bool nvfp4_smallM = false;
+    // Decode on host-resident NVFP4 experts: resolve routing to cache slots and gather the
+    // misses on the device (no per-layer D2H + host LRU). Needs pin_host_experts (the
+    // slabs are mapped); otherwise the host LRU path serves. 2026-09-20: see
+    // src/exec/expert_cache_device.h.
+    bool device_expert_cache = true;
     // Threshold M for smallM kernel (clamped to [0,128]).
     int nvfp4_smallM_threshold = 64;
     // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels: one warp
