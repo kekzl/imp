@@ -1260,12 +1260,14 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
                 }
             }
         }
-        // PLE (one layer): the six BF16 tensors go up, no offset (grouped norms apply 1 + W in
-        // the kernel). The I64 hash buffers and the F8 table scale stay on the host.
+        // PLE (one layer) and QSA indexer (attention layers): BF16 tensors go up, no offset (the
+        // norms apply 1 + W in the kernel). The I64 hash buffers and the F8 table scale stay on the host.
         const HcSlot ple_slots[] = {
             {&L.ple_key_proj, "ple_key_proj"},   {&L.ple_value_proj, "ple_value_proj"},
             {&L.ple_conv1d, "ple_conv1d"},       {&L.ple_norm_key, "ple_norm_key"},
             {&L.ple_norm_query, "ple_norm_query"}, {&L.ple_norm_conv, "ple_norm_conv"},
+            {&L.qsa_index_qk, "qsa_index_qk"},     {&L.qsa_index_q_norm, "qsa_index_q_norm"},
+            {&L.qsa_index_k_norm, "qsa_index_k_norm"},
         };
         for (const auto& s : ple_slots) {
             if (s.t->data && !s.t->on_device) {

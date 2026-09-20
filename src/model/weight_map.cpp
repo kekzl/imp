@@ -1145,6 +1145,21 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 matched = true;
             }
         }
+        // Qwen4Exp QSA indexer: self_attn.indexer.{index_qk_proj, q_layernorm, k_layernorm}.weight
+        if (!matched && parts.size() == 7 && parts[3] == "self_attn" && parts[4] == "indexer" &&
+            parts[6] == "weight") {
+            Tensor* dst = nullptr;
+            if (parts[5] == "index_qk_proj")
+                dst = &layer.qsa_index_qk;
+            else if (parts[5] == "q_layernorm")
+                dst = &layer.qsa_index_q_norm;
+            else if (parts[5] == "k_layernorm")
+                dst = &layer.qsa_index_k_norm;
+            if (dst) {
+                *dst = t;
+                matched = true;
+            }
+        }
         // Qwen4Exp PLE (layer 1): projections, norms, conv. Everything under ple.ple_embedding.*
         // (I64 hash buffers, F8 table shards, table scale) is NGramTable's, read host-side.
         if (!matched && parts[3] == "ple" && parts.size() == 6 && parts[5] == "weight") {

@@ -243,6 +243,9 @@ struct TransformerLayer {
     // [d, ple_d], depthwise conv1d [hc*d, 1, k] (dilation ngram_size), three grouped norms over
     // hc*d. The F8 table shards, the I64 hash buffers and the table scale live in Model::ngram_table().
     Tensor ple_key_proj, ple_value_proj, ple_conv1d, ple_norm_key, ple_norm_query, ple_norm_conv;
+    // Qwen4Exp QSA indexer (attention layers): index_qk_proj [(q_heads + kv_heads) * idx_dim, d],
+    // per-head RMSNorm (1+w) weights [idx_dim] for the query and the pooled block key.
+    Tensor qsa_index_qk, qsa_index_q_norm, qsa_index_k_norm;
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     // Encoder post-LN biases (#836, nomic-bert): true LayerNorm with bias,
     // applied AFTER the residual add (weights live in post_attn/ffn_norm).

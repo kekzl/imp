@@ -26,7 +26,7 @@ on `mlp.experts` only, everything else BF16.
 |---|---|---|
 | Registry, detection, template family, GDN head layout, `(1 + W)` norm offset, KV allowlists | | done, `165e45f2` |
 | GDN | `linear_attn.*` | resolves through the Qwen3.5/3.6 names; sigmoid gate added |
-| MoE experts, 512 x 3 x 48 | modelopt layout, same as `Qwen3-30B-A3B-NVFP4-Modelopt` | resolves; 56 GiB stay host-resident (`moe.force_host_experts=48`, LRU 48 x 67 slots x 0.88 MiB) |
+| MoE experts, 512 x 3 x 48 | modelopt layout, same as `Qwen3-30B-A3B-NVFP4-Modelopt` | resolves; routing needed the >= 256-expert fix (see "Reference comparison"); 56 GiB stay host-resident (`moe.force_host_experts=48`, LRU 48 x 67 slots x 0.88 MiB) |
 | Gated residual | `attn_/mlp_hyper_connection.{hc_norm, input_mix_weight_down, input_mix_weight_up, block_inject_weight}`, `hyper_connection_mixer.*` | loader, kernels (`compute/gated_residual.cu`), forward wiring (`exec/executor_gated_residual.cu`), BF16 upload: done, not yet run end to end |
 | PLE (layer 1) | `ple.{key_proj, value_proj, conv1d, norm_key, norm_query, norm_conv}`, `ple_embedding.{layer_multipliers [3], ngram_heads_offsets [16], ngram_heads_vocab_sizes [16], ngram_embedding.shard_0..127 F8 [2500012, 160], weight_scale BF16 [1]}` | built, runs (see "PLE, as built"); reference comparison pending; previously: not started |
 | QSA indexer (12 layers) | `self_attn.indexer.{index_qk_proj [640, 2560], q_layernorm [128], k_layernorm [128]}` | not started; attention runs dense without it |
@@ -126,6 +126,67 @@ hash, host mmap, 16 gathers per token, nothing of the table in VRAM.
 | Sequence state | `ple_ctx_` (2 tokens), `ple_conv_state_` | reset when the chunk's first position is 0, carried otherwise. Not modelled: batched decode (logged once), prefix-cache resume, chunked prefill across a prefix hit |
 | Graphs | none needed today | the D2H of token ids sits outside capture because experts on host already demote graphs (`ExpertsOnHost`); a device-resident model needs the pinned-staging-as-graph-input pattern |
 | MTP | open | `speculative.mtp_k>0` would make the FP8 shard "used" and `MAP_POPULATE` 50 GiB; the MTP milestone needs the shard split or a lazy map |
+
+## Reference comparison (2026-09-19, llama.cpp UD-Q4_K_XL vs imp NVFP4)
+
+Method: teacher-forced NLL on the same text, `llama-perplexity -c 256 --chunks 1`
+scores positions 128..255 of the first chunk; imp `--perplexity` with
+`diagnostics.ppl_dump=full` gives every position, averaged over the same window.
+Both tokenize identically (748 / 1301 tokens). Control on Qwen3-30B-A3B: llama
+Q4_K_M 11.48, imp on the same GGUF 11.29, imp NVFP4-Modelopt 12.78.
+
+| Text | Window | llama.cpp | imp before | imp after |
+|---|---|---|---|---|
+| `novel_prose_2026.txt` (unseen prose, 748 tok) | 128..255 | 5.54 | 14.25 | 6.00 |
+| `prose_5500.txt` (Gutenberg, 1301 tok) | 256..511 | 1.4238 | 4.03 | 1.422 |
+
+The gap was NOT the port. `llama-eval-callback` per-block fingerprints (token 0
+matched through layer 23, later tokens diverged from the layer-0 FFN on) led to
+the router: logits matched llama.cpp, the selected experts did not. Token 1's
+best expert is 338; imp picked 68. `topk_gating_kernel` gave each of its 256
+threads exactly one expert (`tid < n_experts`), so experts >= 256 were never
+candidates. Every previous MoE checkpoint had <= 256 experts; Qwen3.8-Flash-Next
+has 512. Fix: strided slots per thread (`kTopkSlotsPerThread = 4096 / 256`),
+same for the fused decode gating kernel; regression test
+`MoERoutingWideTest.ExpertsAbove256AreCandidates` (fails on the old kernel).
+PLE-off ablation on the unseen text: 24.8 (before the fix), so the PLE block
+carries roughly half of the model's quality on plain prose.
+
+## QSA indexer, what it does and when it matters
+
+`Qwen4ExpTextQSAIndexer` (modeling_qwen4_exp.py:672-816): per query, the visible
+tokens are cut into complete blocks of `indexer_compress_ratio=4`; each block key
+is the mean of the 4 raw keys (`index_qk_proj` K half, 1 head x 128), then
+`k_layernorm`, then RoPE at the block's first position; the query (4 heads x 128,
+`q_layernorm`, RoPE) scores every block with `relu(q . k)` summed over heads /
+sqrt(128); the top `indexer_budget / 4 = 512` blocks plus the incomplete tail
+block stay visible, everything else is masked out of the ordinary attention.
+
+`topk(min(512, num_complete_blocks))`: with at most 512 complete blocks, i.e.
+`visible <= 2048 + 3` tokens, every block is selected and the mask is all-true.
+Dense attention is therefore EXACT up to 2048 tokens of context and only diverges
+beyond. imp's existing `sparse_attn_select.cu` is a Quest-class page heuristic on
+the paged decode kernels, not this learned block selection; the indexer needs its
+own key cache ([ctx, 128] per QSA layer), a block-pooling + scoring kernel and a
+token-mask consumer in both the prefill FMHA and the paged decode path.
+
+Indexer tensors (`self_attn.indexer.{index_qk_proj [640, 2560], q_layernorm [128],
+k_layernorm [128]}`) now map to `qsa_index_qk / qsa_index_q_norm / qsa_index_k_norm`
+and are uploaded raw (norms are `1 + w`). RoPE on the indexer is the attention's
+`apply_rotary_pos_emb`: NeoX `rotate_half` over the first `rotary_dim = 0.25 x 256 = 64`
+dims of each 128-dim indexer head, the other 64 untouched; the block key takes the
+position of the block's first token.
+
+Plan (milestone 4), exact at every context length:
+
+| Step | Design |
+|---|---|
+| State per QSA layer | raw index keys `[max_ctx, 128]` FP16 (pre-norm, pre-RoPE) and block keys `[max_ctx/4, 128]` (mean of 4 raw keys -> `k_layernorm` -> RoPE at block start); block keys are query-independent, so they are built once per completed block |
+| Per forward | `index_qk_proj` GEMM `[n, 640]`; q: `q_layernorm` + RoPE (4 heads); k: write raw keys; pool the newly completed blocks |
+| Scoring | per query row: `relu(q_h . blk)` summed over the 4 heads / sqrt(128) for every complete block `< (pos+1)/4`; top-512 blocks (vocab top-k machinery in `compute/sampling_topk_topp.cu` as template) + the incomplete tail = a token index list `[n_q, 2051]`, -1 padded, ascending |
+| Attention consumer | one "selected-token" attention kernel over the paged KV (F16 first) taking the index list: decode (`n_q = 1`) and prefill rows alike; rows with `pos < 2048` get `[0..pos]`, so the kernel is exact everywhere and FA2 stays the fast path for chunks entirely below 2048 |
+| Gate | `attention.qsa_force=true` runs the selected path below 2048 too: must match dense FA2 (the correctness A/B); above 2048 the reference is llama.cpp's qwen4exp indexer |
+| Not reused | `sparse_attn_select.cu` (Quest page heuristic, KV-page granularity `kv_cache.block_size`, not 4-token blocks) |
 
 ## Findings on the way
 

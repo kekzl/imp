@@ -356,6 +356,15 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
             return nullptr;
         }
     }
+    {
+        std::string s;
+        for (int p = 0; p < t->ngram_size_; p++)
+            s += " m" + std::to_string(p) + "=" + std::to_string(t->multipliers_[p]);
+        for (int h = 0; h < t->n_heads_; h++)
+            s += " h" + std::to_string(h) + "=" + std::to_string(t->offsets_[h]) + "+" +
+                 std::to_string(t->vocab_sizes_[h]);
+        IMP_LOG_INFO("ngram table: hash constants%s", s.c_str());
+    }
     IMP_LOG_INFO(
         "ngram table: layer %d, %d shards, %lld rows x %d, %d heads x ngram %d, scale %.5g, eos %d, "
         "%.1f GiB host-mapped (page cache, not resident)",
