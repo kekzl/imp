@@ -31,4 +31,16 @@ __device__ __forceinline__ void topk_owned_argmax(const float* vals, int tid, fl
     }
 }
 
+// Clear the owned slot of expert `expert` (no-op unless this thread owns it). Unrolled compare
+// instead of a dynamic index: a dynamic index spills the 16-slot array to a 64 B local frame.
+__device__ __forceinline__ void topk_clear_slot(float* vals, int expert, int tid) {
+    if ((expert & (BLOCK_SIZE - 1)) != tid)
+        return;
+    const int slot = expert / BLOCK_SIZE;
+#pragma unroll
+    for (int j = 0; j < kTopkSlotsPerThread; j++)
+        if (j == slot)
+            vals[j] = -FLT_MAX;
+}
+
 }  // namespace imp

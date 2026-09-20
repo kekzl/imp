@@ -152,8 +152,7 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
             __syncthreads();
 
             // Mask out the selected expert so it won't be picked again
-            if ((s_topk_idx[k] & (BLOCK_SIZE - 1)) == tid)
-                my_vals[s_topk_idx[k] / BLOCK_SIZE] = -FLT_MAX;
+            topk_clear_slot(my_vals, s_topk_idx[k], tid);
         }
 
         // Thread 0: normalize weights and write output
@@ -329,8 +328,7 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
             }
             __syncthreads();
 
-            if ((s_topk_idx[k] & (BLOCK_SIZE - 1)) == tid)
-                my_vals[s_topk_idx[k] / BLOCK_SIZE] = -FLT_MAX;
+            topk_clear_slot(my_vals, s_topk_idx[k], tid);
         }
 
         // Thread 0: normalize weights and write output
