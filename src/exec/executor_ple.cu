@@ -52,6 +52,12 @@ bool GraphExecutor::ple_alloc_(int max_tokens) {
     const int64_t shape[2] = {state_len, channels};
     ple_conv_state_ = Tensor(p, QType::F16, 2, shape, true);
     IMP_CUDA_CHECK_LOG(cudaMemset(p, 0, st_bytes));
+    const size_t emb_bytes = align256(static_cast<size_t>(max_tokens) * d * 2);
+    void* pe = vram_alloc(vram_alloc_, emb_bytes, "ple_emb");
+    if (pe == nullptr)
+        return false;
+    const int64_t emb_shape[2] = {max_tokens, d};
+    ple_emb_dev_ = Tensor(pe, QType::F16, 2, emb_shape, true);
     IMP_CUDA_CHECK_LOG(cudaEventCreateWithFlags(&ple_h2d_done_, cudaEventDisableTiming));
     ple_ctx_.assign(static_cast<size_t>(tab->context_len()), cfg.ple_eos_token_id);
     ple_ids_.resize(static_cast<size_t>(max_tokens) * tab->n_heads());
@@ -66,6 +72,10 @@ void GraphExecutor::ple_free_() {
     if (ple_conv_state_.data != nullptr) {
         vram_free(vram_alloc_, ple_conv_state_.data);
         ple_conv_state_.data = nullptr;
+    }
+    if (ple_emb_dev_.data != nullptr) {
+        vram_free(vram_alloc_, ple_emb_dev_.data);
+        ple_emb_dev_.data = nullptr;
     }
     if (ple_h2d_done_ != nullptr) {
         cudaEventDestroy(ple_h2d_done_);
@@ -82,29 +92,56 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
     const int ctx_len = tab->context_len();
 
     // Host side: token ids and the chunk's first position (sequence start = reset).
-    // Pinned landing zone: a D2H into pageable memory is a staged copy (245 us on WSL2).
-    const size_t rb_bytes = static_cast<size_t>(n + 1) * sizeof(int32_t);
-    if (ple_readback_.bytes() < rb_bytes)
-        ple_readback_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), rb_bytes);
-    std::vector<int32_t> rb_fallback;
-    int32_t* rb = ple_readback_.as<int32_t>();
-    if (!rb) {
-        rb_fallback.resize(static_cast<size_t>(n) + 1);
-        rb = rb_fallback.data();
-    }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(rb, state.token_ids, n * sizeof(int32_t),
-                                       cudaMemcpyDeviceToHost, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(rb + n, state.positions, sizeof(int), cudaMemcpyDeviceToHost,
-                                       stream));
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    const int32_t* ids = rb;
-    const int pos0 = rb[n];
     static bool warned_batch = false;
     if (state.ssm_n_seq > 1 && !warned_batch) {
         warned_batch = true;
         IMP_LOG_ERROR("PLE: batched decode (%d sequences) shares one n-gram context; output is wrong",
                       state.ssm_n_seq);
     }
+    if (!ple_prepared_) {
+        // Eager path (prefill, or a decode step the engine did not prepare): read the ids
+        // back and do the host half here. Pinned landing zone: a D2H into pageable memory
+        // is a staged copy (245 us on WSL2).
+        const size_t rb_bytes = static_cast<size_t>(n + 1) * sizeof(int32_t);
+        if (ple_readback_.bytes() < rb_bytes)
+            ple_readback_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), rb_bytes);
+        std::vector<int32_t> rb_fallback;
+        int32_t* rb = ple_readback_.as<int32_t>();
+        if (!rb) {
+            rb_fallback.resize(static_cast<size_t>(n) + 1);
+            rb = rb_fallback.data();
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(rb, state.token_ids, n * sizeof(int32_t),
+                                           cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(rb + n, state.positions, sizeof(int),
+                                           cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        ple_prepare_host_(rb, n, rb[n], stream);
+    }
+    ple_prepared_ = false;
+    (void)ctx_len;
+
+    Tensor emb = view_tokens(ple_emb_dev_, n);  // [n, d] the gathered n-gram embedding
+    Tensor key = view_tokens(hc_mixw_, n);     // [n, hc*d]: key_proj, then q, then gv (in place)
+    Tensor keyn = view_tokens(hc_normed_, n);  // [n, hc*d]: normed key, then normed gv
+    Tensor value = view_tokens(hc_mixed_, n);  // [n, d]
+    Tensor hw = view_tokens(hc_hidden_, n);
+    gemm(emb, L.ple_key_proj, key, 1.0f, 0.0f, stream);  // [n, d] x [hc*d, d]^T
+    hc_grouped_rmsnorm(key, L.ple_norm_key, keyn, hc, d, cfg.rms_norm_eps, stream);
+    gemm(emb, L.ple_value_proj, value, 1.0f, 0.0f, stream);  // [n, d] x [d, d]^T
+    hc_grouped_rmsnorm(hw, L.ple_norm_query, key, hc, d, cfg.rms_norm_eps, stream);
+    ple_gate_value(keyn, key, value, hc, d, stream);
+    hc_grouped_rmsnorm(key, L.ple_norm_conv, keyn, hc, d, cfg.rms_norm_eps, stream);
+    const int channels = hc * d;
+    const int kernel = static_cast<int>(L.ple_conv1d.numel() / channels);
+    ple_conv_add(key, keyn, L.ple_conv1d, ple_conv_state_, hw, channels, kernel, tab->ngram_size(), stream);
+}
+
+void GraphExecutor::ple_prepare_host_(const int32_t* ids, int n, int pos0, cudaStream_t stream) {
+    const NGramTable* tab = model_->ngram_table();
+    const auto& cfg = model_->config();
+    const int d = cfg.d_model;
+    const int ctx_len = tab->context_len();
     if (pos0 == 0) {
         std::fill(ple_ctx_.begin(), ple_ctx_.end(), cfg.ple_eos_token_id);
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(ple_conv_state_.data, 0, ple_conv_state_.nbytes(), stream));
@@ -117,24 +154,17 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
         const int src = n - ctx_len + i;
         ple_ctx_[i] = (src >= 0) ? ids[src] : ple_ctx_[src + ctx_len];
     }
-
-    Tensor emb = view_tokens(hc_out_, n);      // [n, d] the gathered n-gram embedding
-    Tensor key = view_tokens(hc_mixw_, n);     // [n, hc*d]: key_proj, then q, then gv (in place)
-    Tensor keyn = view_tokens(hc_normed_, n);  // [n, hc*d]: normed key, then normed gv
-    Tensor value = view_tokens(hc_mixed_, n);  // [n, d]
-    Tensor hw = view_tokens(hc_hidden_, n);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(emb.data, ple_host_.data(), static_cast<size_t>(n) * d * 2,
-                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ple_emb_dev_.data, ple_host_.data(),
+                                       static_cast<size_t>(n) * d * 2, cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaEventRecord(ple_h2d_done_, stream));
-    gemm(emb, L.ple_key_proj, key, 1.0f, 0.0f, stream);  // [n, d] x [hc*d, d]^T
-    hc_grouped_rmsnorm(key, L.ple_norm_key, keyn, hc, d, cfg.rms_norm_eps, stream);
-    gemm(emb, L.ple_value_proj, value, 1.0f, 0.0f, stream);  // [n, d] x [d, d]^T
-    hc_grouped_rmsnorm(hw, L.ple_norm_query, key, hc, d, cfg.rms_norm_eps, stream);
-    ple_gate_value(keyn, key, value, hc, d, stream);
-    hc_grouped_rmsnorm(key, L.ple_norm_conv, keyn, hc, d, cfg.rms_norm_eps, stream);
-    const int channels = hc * d;
-    const int kernel = static_cast<int>(L.ple_conv1d.numel() / channels);
-    ple_conv_add(key, keyn, L.ple_conv1d, ple_conv_state_, hw, channels, kernel, tab->ngram_size(), stream);
+    ple_prepared_ = true;
+}
+
+void GraphExecutor::prepare_decode_step_host(const int32_t* ids, const int32_t* positions, int n,
+                                             cudaStream_t stream) {
+    dev_expert_cache_.take_over(stream);
+    if (model_->ngram_table() != nullptr && n > 0)
+        ple_prepare_host_(ids, n, positions[0], stream);
 }
 
 }  // namespace imp

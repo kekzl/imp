@@ -577,6 +577,8 @@ private:
     Tensor ple_conv_state_;  // [(kernel-1)*dilation, hc*d] FP16
     std::vector<int32_t> ple_ctx_;
     PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
+    Tensor ple_emb_dev_;         // [max_tokens, d] FP16, the gathered rows on the device
+    bool ple_prepared_ = false;  // prepare_decode_step_host() ran for the next forward
     std::vector<int64_t> ple_ids_;
     cudaEvent_t ple_h2d_done_ = nullptr;
     Tensor logits_;    // [max_logit_tokens, vocab_size]
@@ -987,7 +989,10 @@ public:
     void verify_host_expert_placement() const;
     // Builds the device-driven expert cache over the host-resident NVFP4 layers
     // (moe.device_expert_cache); no-op when the pool or the mapped pinned slabs are missing.
-    void init_device_expert_cache();
+    // Returns true when every MoE layer whose experts stay on the host is served by it (a
+    // captured decode step then replays correctly); the engine demotes graphs otherwise.
+    bool init_device_expert_cache();
+    bool device_expert_cache_covers_host_layers() const;
 
 private:
     // Computes MoE routing: gate logits (FP32 router fast-path for Gemma-4
@@ -1057,6 +1062,19 @@ private:
     [[nodiscard]] bool ple_alloc_(int max_tokens);
     void ple_free_();
     void ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream);
+    // Host half of the PLE for one chunk: n-gram hash, table gather into pinned staging,
+    // H2D into ple_emb_dev_, context update. Outside any graph capture.
+    void ple_prepare_host_(const int32_t* ids, int n, int pos0, cudaStream_t stream);
+
+public:
+    // Host work a decode step needs BEFORE its forward, so the forward itself is
+    // capture-clean: PLE rows for the step's tokens (ple_prepare_host_) and the device
+    // expert cache's take-over of the pool from the host LRU path. Called by the engine
+    // per decode step with the host copies of the batch's token ids and positions.
+    void prepare_decode_step_host(const int32_t* ids, const int32_t* positions, int n,
+                                  cudaStream_t stream);
+
+private:
 
     // Layer type detection (based on tensor presence)
     bool layer_has_attention(int layer) const;

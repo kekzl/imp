@@ -290,8 +290,9 @@ void DeviceExpertCache::invalidate_(cudaStream_t stream) {
     }
 }
 
-void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indices, int top_k,
-                                          int32_t* slot_idx_out, cudaStream_t stream) {
+void DeviceExpertCache::take_over(cudaStream_t stream) {
+    if (!cache_ || layers_ready_ == 0)
+        return;
     if (cache_->host_generation_ != seen_host_generation_) {
         // The host path filled slots since we last looked: our tables name occupants that
         // are gone. Forget everything; the pool is ours again from here.
@@ -299,6 +300,11 @@ void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indic
         seen_host_generation_ = cache_->host_generation_;
     }
     cache_->device_dirty_ = true;
+}
+
+void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indices, int top_k,
+                                          int32_t* slot_idx_out, cudaStream_t stream) {
+    take_over(stream);
     const DevExpertLayer& L = layers_[layer];
     expert_cache_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(L, expert_indices, top_k,
                                                                     slot_idx_out, d_misses_, d_n_miss_);

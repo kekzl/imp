@@ -233,6 +233,10 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
 
 bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
                                          cudaStream_t stream, int step_limit) {
+    // Models with per-step host work (PLE n-gram rows from a host table, device expert
+    // cache take-over from the host LRU) decode on the per-step graph pool instead.
+    if (model_->ngram_table() != nullptr || experts_on_host_)
+        return false;
     // Constrained requests (json_mode / json_schema / enforced tool call) can
     // NEVER run here: the loop samples device-side with no FSM mask. Guards the
     // spec-ngram burst hooks, which call this directly, bypassing step_decode (#1002).

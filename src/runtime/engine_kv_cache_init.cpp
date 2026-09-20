@@ -389,7 +389,8 @@ bool Engine::init_kv_cache() {
     // labelled host-resident NVFP4 experts, and the expert cache was sized in
     // init_weights(). Refusing here, not at weight-upload time, is the point.
     executor_->verify_host_expert_placement();
-    executor_->init_device_expert_cache();
+    if (!executor_->init_device_expert_cache() && experts_on_host_)
+        demote_graphs_(GraphDemotionReason::ExpertsOnHost);
 
     // KV takes the MEASURED residual, not a predicted one: this can only shrink
     // the pool relative to the budget's projection, never grow it, so it cannot
@@ -888,12 +889,10 @@ bool Engine::init_kv_cache() {
                          "capture eligible",
                          covered, moe_layers);
         } else if (moe_layers > 0) {
-            IMP_LOG_WARN(
-                "NVFP4 decode caches: PARTIAL (%d/%d MoE layers covered) — decode "
-                "CUDA-graph capture will abort and decode runs per-step (~10x slower). "
-                "Remedies: lower runtime.max_seq_len or max_batch_size (both shrink the "
-                "workspaces/KV competing for cache VRAM), or check the [vram] knobs.",
-                covered, moe_layers);
+            IMP_LOG_WARN("NVFP4 decode caches: PARTIAL (%d/%d MoE layers covered): decode graph "
+                         "capture aborts unless the device expert cache serves the host-resident "
+                         "layers. Remedies: lower runtime.max_seq_len / max_batch_size, [vram] knobs.",
+                         covered, moe_layers);
         }
     }
 

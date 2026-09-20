@@ -109,13 +109,27 @@ void GraphExecutor::verify_host_expert_placement() const {
 // experts back to back in one pinned slab, and a plain mmap usually does
 // too); contiguity is CHECKED here, not assumed, or an interleaved
 // checkpoint would silently read experts from the wrong addresses.
-void GraphExecutor::init_device_expert_cache() {
+bool GraphExecutor::init_device_expert_cache() {
     if (!dispatch_policy().moe.device_expert_cache || !model_->config().is_nvfp4_prequant)
-        return;
+        return device_expert_cache_covers_host_layers();
     const int top_k = std::max(1, model_->config().n_experts_active);
     if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
         IMP_LOG_INFO("Device expert cache: not built (no host-resident NVFP4 layer in a mapped "
                      "pinned slab, or the pool is too small); the host LRU path serves decode");
+    return device_expert_cache_covers_host_layers();
+}
+
+bool GraphExecutor::device_expert_cache_covers_host_layers() const {
+    const auto& cfg = model_->config();
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        const auto& L = model_->layer(i);
+        const bool packed_host = L.expert_up_packed.data && !L.expert_up_packed.on_device;
+        const bool view_host = !L.expert_w_up.empty() && L.expert_w_up[0].data &&
+                               !L.expert_w_up[0].on_device;
+        if ((packed_host || view_host) && !dev_expert_cache_.layer_ready(i))
+            return false;
+    }
+    return true;
 }
 
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,

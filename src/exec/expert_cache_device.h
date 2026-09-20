@@ -78,11 +78,14 @@ public:
     // host path if that one moved since the last call.
     void resolve_and_stage(int layer, const int32_t* expert_indices, int top_k,
                            int32_t* slot_idx_out, cudaStream_t stream);
+    // Takes the pool over from the host LRU path if that one filled slots since the last
+    // call (forgets every slot, on `stream`). resolve_and_stage does this itself when it
+    // runs on the host; a graph replay does not, so the engine calls it before each replayed
+    // decode step. No-op when nothing moved or no layer is ready.
+    void take_over(cudaStream_t stream);
 
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
     size_t ms_off(int layer, int proj) const { return ms_off_[static_cast<size_t>(layer) * 3 + proj]; }
-
-    int layers_ready() const { return layers_ready_; }
 
 private:
     void invalidate_(cudaStream_t stream);
