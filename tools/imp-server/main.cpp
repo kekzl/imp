@@ -253,15 +253,21 @@ int main(int argc, char** argv) {
         // minutes: a blocking acquire here parked every arriving worker inside the load-shedding guard
         // until the thread pool was gone (AUDIT_arch_2026 F2-3). A lock timeout means "engine busy", 503.
         if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
+            // A swap or suspend holds `mtx` for its whole duration and says so in an atomic, so
+            // the one case worth shedding for is readable without touching the lock.
+            if (state.swapping.load() || state.suspended.load()) {
+                send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
+                                   "Server busy (model swap or suspend in progress), retry shortly");
+                return httplib::Server::HandlerResponse::Handled;
+            }
             int queue = 0;
             {
                 std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
-                if (!lock.owns_lock()) {
-                    send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
-                                       "Server busy (model swap or suspend in progress), retry shortly");
-                    return httplib::Server::HandlerResponse::Handled;
-                }
-                if (state.batching)
+                // Timing out here is ordinary contention between request threads, which answering
+                // 503 turned into a failure: a concurrent burst on Qwen3.8-Flash-Next lost 5 of 8
+                // requests to it, all blaming a model swap that was not happening. The depth read
+                // is a pre-check anyway; inflight.try_enter below is the gate that decides.
+                if (lock.owns_lock() && state.batching)
                     queue = state.batching->queue_depth();
             }
             if (queue >= state.max_concurrent) {

@@ -25,6 +25,9 @@ there instead of retelling it.
 - n-gram speculation is off while MoE experts are host-resident: a verify step streams every expert its rows touch over PCIe (1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next, tg512 65.9 -> 40.6 tok/s with it on). With `moe.staged_cutlass_prefill` the warmup runs on this model too, so `runtime.warmup=false` is no longer needed there.
 
 ### Fixed
+- Concurrent requests are no longer shed with "model swap or suspend in progress" when no swap is
+  happening: the load-shedding guard timed out on a 250 ms lock acquire and blamed a transition.
+  It now reads `swapping`/`suspended` lock-free; 5 of 8 burst requests were lost before, 0 after.
 - PLE models (Qwen3.8-Flash-Next) no longer die on concurrent requests: batched decode shares one
   host n-gram context, which `executor_ple.cu` logged as wrong output before running past the
   single-sequence buffers into an illegal access. `max_batch_size` is clamped to 1 there.
