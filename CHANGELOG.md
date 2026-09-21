@@ -25,6 +25,9 @@ there instead of retelling it.
 - n-gram speculation is off while MoE experts are host-resident: a verify step streams every expert its rows touch over PCIe (1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next, tg512 65.9 -> 40.6 tok/s with it on). With `moe.staged_cutlass_prefill` the warmup runs on this model too, so `runtime.warmup=false` is no longer needed there.
 
 ### Fixed
+- The auto context window no longer collapses to its 4096 floor on a host-offloaded MoE: the
+  weight-footprint estimate counted experts that `moe.force_host_experts` keeps in host RAM, so
+  Qwen3.8-Flash-Next estimated 78.5 GB against 9.4 GB resident. `max_seq_len` auto 4096 -> 131072.
 - Concurrent requests are no longer shed with "model swap or suspend in progress" when no swap is
   happening: the load-shedding guard timed out on a 250 ms lock acquire and blamed a transition.
   It now reads `swapping`/`suspended` lock-free; 5 of 8 burst requests were lost before, 0 after.

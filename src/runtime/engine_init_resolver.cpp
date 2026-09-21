@@ -33,11 +33,18 @@ namespace {
 // Crude pre-upload weight-footprint estimate (weights are still host/mmap at
 // resolver time, so cudaMemGetInfo reports the near-empty card). Shared by
 // the auto max_batch_size and auto max_seq_len resolvers.
-size_t approx_weight_footprint_bytes(const ModelConfig& mcfg) {
+// `host_expert_layers`: moe.force_host_experts, the last N layers whose experts stay in host
+// RAM and never take VRAM. Counting them anyway made a host-offloaded MoE look far bigger than
+// the card: Qwen3.8-Flash-Next estimated 78.5 GB against 9.4 GB of resident weights, which put
+// the tier floor at 1 and the headroom at 0, so the auto batch never left one sequence. The
+// expert cache that serves those layers is charged where it is sized, not here.
+size_t approx_weight_footprint_bytes(const ModelConfig& mcfg, int host_expert_layers) {
     size_t bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers * 12;
     if (mcfg.n_experts > 0) {
+        const int resident_layers =
+            std::max(0, mcfg.n_layers - std::max(0, std::min(host_expert_layers, mcfg.n_layers)));
         bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff * mcfg.d_model *
-                 mcfg.n_layers * 2;
+                 resident_layers * 2;
     }
     return bytes;
 }
@@ -369,7 +376,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 
     if (config_.max_batch_size <= 0) {
-        size_t approx_weight_bytes = approx_weight_footprint_bytes(mcfg);
+        size_t approx_weight_bytes = approx_weight_footprint_bytes(mcfg, runtime_config_.moe.force_host_experts);
         // Weight-footprint tier: kept as a FLOOR so this never regresses
         // below the previous default for any model.
         int tier;
@@ -900,7 +907,7 @@ void Engine::init_compute_max_seq_len_() {
         // raw-free overshoot (absorbed by the downstream KV clamp).
         size_t free_for_kv = free_vram;
         if (mcfg.is_nvfp4_prequant) {
-            size_t reserved = approx_weight_footprint_bytes(mcfg) +
+            size_t reserved = approx_weight_footprint_bytes(mcfg, runtime_config_.moe.force_host_experts) +
                               native_cache_demand().total();
             free_for_kv = (free_vram > reserved) ? (free_vram - reserved) : 0;
         }
