@@ -277,8 +277,23 @@ Pinning by frequency loses to plain recency at every budget the card can hold. T
 too flat for it: layer 0 touches 384 of 512 experts in 300 tokens, and its 64 most frequent
 experts carry only 41 % of the activations. Only more slots raise the hit rate, and more slots
 spill. What is left for decode is hiding the transfer behind compute, or not transferring at
-all: 62.7 % hits leave ~470 MiB of misses per token over PCIe against ~5.5 ms of GPU work,
-while the same bytes already sit in host RAM at a higher bandwidth than the link.
+all: 62.7 % hits leave ~470 MiB of misses per token over PCIe against ~5.5 ms of GPU work.
+
+Computing those misses on the CPU instead, where the bytes already are, has far less headroom
+than it sounds. `tools/analysis/cpu_expert_gemv_probe.cpp` reads random 0.88 MiB experts out
+of a 4 GiB slab on a 9800X3D, 16 threads:
+
+| | ms per token (537 misses) | GB/s |
+|---|---|---|
+| read only, memory-bound ceiling | 8.25 | 60.0 |
+| dequant + GEMV, scalar | 28.61 | 17.3 |
+| the same bytes over PCIe | 9.52 | 52.0 |
+
+Host RAM for this access pattern is 58-60 GB/s, 13 % above the link, not the 2x the DDR5
+figure suggests. So a perfect AVX-512 NVFP4 GEMV sitting exactly on the memory roofline saves
+1.2 ms of 9.5 on that component; the scalar version is 3.5x off that roofline. The case for a
+CPU path is overlap (the CPU's misses running while the GPU does its hits), not bandwidth, and
+it has to be written against a 8.3 ms floor.
 
 TTFT (2026-09-21, `moe.stage_touched_only`): prefill staged all 512 experts of every layer
 regardless of routing, 63 GB per prefill, so TTFT was flat at ~1.27 s whatever the prompt
