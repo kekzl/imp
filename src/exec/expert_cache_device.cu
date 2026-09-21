@@ -71,15 +71,25 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
         s_best[tid] = best;
         s_bestv[tid] = bestv;
         __syncthreads();
-        if (tid == 0) {
-            int victim = -1;
-            uint32_t vv = UINT_MAX;
-            for (int t = 0; t < kResolveThreads; ++t) {
-                if (s_best[t] >= 0 && s_bestv[t] < vv) {
-                    vv = s_bestv[t];
-                    victim = s_best[t];
+        // Tree-reduce the per-thread argmins. This was a serial scan of all kResolveThreads
+        // entries on thread 0, once per miss: 30 x 256 single-threaded iterations per layer,
+        // 1.10 ms per token over 48 layers. Ties go to the lower slot index; any slot holding
+        // the minimum stamp is an LRU victim, so the pick stays correct either way.
+        for (int off = kResolveThreads / 2; off > 0; off >>= 1) {
+            if (tid < off) {
+                const int o = tid + off;
+                const bool take = s_best[o] >= 0 &&
+                                  (s_best[tid] < 0 || s_bestv[o] < s_bestv[tid] ||
+                                   (s_bestv[o] == s_bestv[tid] && s_best[o] < s_best[tid]));
+                if (take) {
+                    s_bestv[tid] = s_bestv[o];
+                    s_best[tid] = s_best[o];
                 }
             }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            const int victim = s_best[0];
             const int key = s_key[i];
             if (victim >= 0) {
                 const int old = L.key_of_slot[victim];
