@@ -133,6 +133,7 @@ bool GraphExecutor::device_expert_cache_covers_host_layers() const {
 }
 
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
+                                       const int32_t* expert_offsets,
                                        StagedProj out[kExpertProjCount]) {
     for (int i = 0; i < kExpertProjCount; ++i)
         out[i] = StagedProj{};
@@ -142,6 +143,19 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
     const auto& ly = model_->layer(layer);
     const std::vector<Tensor>* projs[kExpertProjCount] = {&ly.expert_w_gate, &ly.expert_w_up,
                                                           &ly.expert_w_down};
+    // Touched-only staging: the routing is known (expert_offsets on the device), so a
+    // gather kernel copies just the experts with tokens, all three projections in one
+    // launch, from the mapped pinned slabs. Whole-layer memcpys stay the fallback.
+    bool touched_staged = false;
+    if (dispatch_policy().moe.stage_touched_only && expert_offsets &&
+        nvfp4_host_experts_servable(ly.expert_w_up) &&
+        static_cast<int>(ly.expert_w_up.size()) <= moe_.layer_stage_experts) {
+        const auto& up0 = ly.expert_w_up[0];
+        const auto layout = nvfp4_slot_layout(up0.shape[0], up0.shape[1] * 2);
+        touched_staged = dev_expert_cache_.stage_touched(
+            layer, expert_offsets, static_cast<char*>(moe_.layer_stage_buf),
+            moe_.layer_stage_proj_bytes, layout.packed_bytes, layout.ms_bytes, stream);
+    }
     bool any = false;
     for (int p = 0; p < kExpertProjCount; ++p) {
         const std::vector<Tensor>& experts = *projs[p];
@@ -164,7 +178,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         // Are the host experts laid out back to back? If so this is two
         // memcpys for the whole projection instead of 2*ne.
         bool packed_contig = true, ms_contig = true;
-        for (int e = 1; e < ne; ++e) {
+        for (int e = 1; e < ne && !touched_staged; ++e) {
             const char* w0 = static_cast<const char*>(experts[0].data);
             const char* s0 = static_cast<const char*>(experts[0].scales);
             if (static_cast<const char*>(experts[e].data) != w0 + static_cast<size_t>(e) * pb)
@@ -175,7 +189,9 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                 break;
         }
 
-        if (packed_contig) {
+        if (touched_staged) {
+            // already in the stage buffer (gather kernel above)
+        } else if (packed_contig) {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(packed_dst, experts[0].data,
                                                static_cast<size_t>(ne) * pb,
                                                cudaMemcpyHostToDevice, stream));
@@ -185,7 +201,8 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                                    experts[e].data, pb, cudaMemcpyHostToDevice,
                                                    stream));
         }
-        if (ms_contig) {
+        if (touched_staged) {
+        } else if (ms_contig) {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ms_dst, experts[0].scales,
                                                static_cast<size_t>(ne) * mb,
                                                cudaMemcpyHostToDevice, stream));
@@ -250,7 +267,9 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
 // entry predicate (covers_ids) cannot see them.
 bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf)
-        ctx.staged_done = stage_nvfp4_layer_(layer, stream, ctx.staged);
+        ctx.staged_done = stage_nvfp4_layer_(
+            layer, stream, static_cast<const int32_t*>(ctx.routing.expert_offsets.data),
+            ctx.staged);
     if (!dispatch_policy().moe.staged_cutlass_prefill || !ctx.staged_done)
         return false;
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };

@@ -135,7 +135,11 @@ struct Attention {
     // Qwen4Exp QSA indexer (learned block top-k over the attention context, exact below 2051
     // tokens). qsa=false: dense attention on every row (not the model above 2050 tokens).
     // qsa_force: run the selected path on every prefill row (correctness A/B vs dense).
-    bool qsa = true;
+    // Default off: at 4503 tokens it loses on every axis measured (decode 50.6 vs 54.1 tok/s,
+    // pp 650 vs 912 tok/s, PPL 4.7558 vs 4.6978) and the paged-vs-FA2 re-rounding flips MoE
+    // routing on short prompts (degen_suite 48/50 on, 50/50 off). Turn on above ~8k context,
+    // where the dense KV read is the larger cost.
+    bool qsa = false;
     bool qsa_force = false;
     int qsa_rows = 16;  // query rows per selection pass (scratch K/V = rows x 2051 tokens x KV row)
     bool qsa_debug = false;  // log FA2 vs paged-on-cache vs selected max diffs (layer 3, prefill)

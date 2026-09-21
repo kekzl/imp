@@ -105,6 +105,36 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
     }
 }
 
+// grid (blocks_per_expert, n_experts, 3): block (x, e, p) copies its share of expert e's
+// projection p into the stage buffer when the routing touched e (prefill staging).
+__global__ void expert_stage_touched_kernel(const DevExpertSrc* __restrict__ src,
+                                            const int32_t* __restrict__ expert_offsets,
+                                            char* __restrict__ stage_buf, size_t proj_bytes,
+                                            size_t pb, size_t mb, int n_experts) {
+    const int e = blockIdx.y, p = blockIdx.z;
+    if (expert_offsets[e + 1] == expert_offsets[e])
+        return;
+    const DevExpertSrc s = src[p * n_experts + e];
+    if (!s.packed || !s.ms)
+        return;
+    char* base = stage_buf + static_cast<size_t>(p) * proj_bytes;
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    const size_t t0 = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    {
+        const int4* sp = reinterpret_cast<const int4*>(s.packed);
+        int4* dp = reinterpret_cast<int4*>(base + static_cast<size_t>(e) * pb);
+        for (size_t j = t0; j < pb / 16; j += stride)
+            dp[j] = sp[j];
+    }
+    {
+        const int4* sm = reinterpret_cast<const int4*>(s.ms);
+        int4* dm = reinterpret_cast<int4*>(base + static_cast<size_t>(n_experts) * pb +
+                                          static_cast<size_t>(e) * mb);
+        for (size_t j = t0; j < mb / 16; j += stride)
+            dm[j] = sm[j];
+    }
+}
+
 // grid (blocks_per_copy, kMaxEntries): block y copies miss y, packed block then micro-scales.
 __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ misses,
                                            const int* __restrict__ n_miss, size_t packed_bytes,
@@ -300,6 +330,26 @@ void DeviceExpertCache::take_over(cudaStream_t stream) {
         seen_host_generation_ = cache_->host_generation_;
     }
     cache_->device_dirty_ = true;
+}
+
+bool DeviceExpertCache::stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf,
+                                      size_t proj_bytes, size_t pb, size_t mb,
+                                      cudaStream_t stream) {
+    if (!layer_ready(layer) || !expert_offsets || !stage_buf || pb % 16 != 0 || mb % 16 != 0)
+        return false;
+    const DevExpertLayer& L = layers_[layer];
+    for (int p = 0; p < 3; ++p) {
+        const size_t i = static_cast<size_t>(layer) * 3 + p;
+        if (packed_bytes_[i] != pb || ms_bytes_[i] != mb)
+            return false;
+    }
+    if (static_cast<size_t>(L.n_experts) * (pb + mb) > proj_bytes)
+        return false;
+    const dim3 grid(16, L.n_experts, 3);
+    expert_stage_touched_kernel<<<grid, 256, 0, stream>>>(L.src, expert_offsets, stage_buf,
+                                                          proj_bytes, pb, mb, L.n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
 }
 
 void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indices, int top_k,
