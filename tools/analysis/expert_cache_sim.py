@@ -53,7 +53,7 @@ def sim(recs, slots, policy, hot=None):
                 key = (proj, e)
                 if key in pin or key in c:
                     hits += 1
-                    if key in c:
+                    if key in c and policy != "fifo":
                         c.move_to_end(key)
                     continue
                 misses += 1
@@ -94,13 +94,13 @@ def main():
             marks.append(f"top{i} {100.0 * run / tot:.0f}%")
     print(f"layer {l0}: {len(c0)} distinct experts, skew: " + "  ".join(marks))
 
-    print(f"{'slots':>6}  {'LRU':>8}  {'pin_hot':>8}")
+    print(f"{'slots':>6}  {'LRU':>8}  {'pin_hot':>8}  {'FIFO':>8}")
     for s in budgets:
         out = []
-        for pol in ("lru", "pin_hot"):
+        for pol in ("lru", "pin_hot", "fifo"):
             h, m = sim(recs, s, pol, hot)
             out.append(100.0 * h / (h + m))
-        print(f"{s:>6}  {out[0]:>7.1f}%  {out[1]:>7.1f}%")
+        print(f"{s:>6}  {out[0]:>7.1f}%  {out[1]:>7.1f}%  {out[2]:>7.1f}%")
 
 
 if __name__ == "__main__":
