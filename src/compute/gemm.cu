@@ -261,6 +261,12 @@ struct GemmCacheEntry {
     // benchmarked pin looked identical to re-picking a heuristic one (#1545).
     bool benchmarked = false;
     int64_t desc_M;  // M dimension baked into layout descriptors
+    // The ACTUAL M this algo was chosen at, which is not desc_M: the layouts are rebuilt for
+    // every M that lands in the bucket, so desc_M always equals the current call's M and says
+    // nothing about where the algo came from. A cuBLASLt algo is dimension-sensitive, so a pin
+    // taken at one M can fail at another M in the same bucket; keeping the two apart is what
+    // lets the failure path leave a pin that is still correct for its own M (2026-09-21).
+    int64_t algo_M = 0;
 };
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
@@ -335,6 +341,7 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K,
                 (long)M, (long)K, (long)N, (long)entry.desc_M);
         }
         entry.algo = results[0].algo;
+        entry.algo_M = M;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
         entry.benchmarked = false;
@@ -343,6 +350,30 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K,
         entry.workspace_size = 0;
     }
     return true;
+}
+
+// A cached pin is dimension-sensitive, and bucket_m puts several M behind one key. When the
+// pin was chosen at a DIFFERENT M, replacing it here would change every later call at that
+// other M too: two identical greedy requests answered differently once a third request had
+// failed once (degen_suite kv-growth, 2026-09-21). Returns true when the pin was left alone,
+// and the caller then runs this one call on the default heuristic.
+static bool keep_pin_chosen_at_other_m(GemmCacheEntry& entry, int64_t M, int64_t K, int64_t N) {
+    bool other_m = false;
+    {
+        std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
+        other_m = entry.has_algo && entry.algo_M != M;
+        if (!other_m)
+            reselect_algo_for_entry(entry, M, K, N);
+    }
+    if (other_m) {
+        static int kept_count = 0;
+        if (++kept_count <= 5)
+            IMP_LOG_WARN("[gemm-algo] matmul failed at M=%ld K=%ld N=%ld with the pin chosen at "
+                         "M=%ld (same bucket) — this call takes the heuristic, the pin stays so "
+                         "calls at its own M keep answering identically",
+                         (long)M, (long)K, (long)N, (long)entry.algo_M);
+    }
+    return other_m;
 }
 
 // Set per-call FP8 scale pointers on a matmul descriptor.
@@ -462,6 +493,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
             }
         }
         entry.algo = results[pick].algo;
+        entry.algo_M = M;
         entry.workspace_size =
             (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize : 0;
         entry.has_algo = true;
@@ -475,6 +507,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // Use pre-allocated scratch buffer to avoid fragmenting GPU memory
     if (!s_bench_scratch || C_bytes > s_bench_scratch_size) {
         entry.algo = results[0].algo;
+        entry.algo_M = M;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
         entry.benchmarked = false;
@@ -602,6 +635,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         return;
     }
     entry.algo = results[best_idx].algo;
+    entry.algo_M = M;
     entry.workspace_size = results[best_idx].workspaceSize;
     entry.has_algo = true;
     entry.benchmarked = true;
@@ -801,17 +835,12 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                            entry->has_algo ? &entry->algo : nullptr, s_workspace,
                                            entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            // Stale algo from a different M within the same bucket: re-select via heuristic and
-            // retry, unless deterministic mode is on, where the heuristic pick is exactly what the
-            // warmup probe exists to reject (#1574).
-            {
-                std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
-                reselect_algo_for_entry(*entry, M, K, N);
-            }
+            const bool pin_belongs_to_other_m = keep_pin_chosen_at_other_m(*entry, M, K, N);
+            const cublasLtMatmulAlgo_t* retry_algo =
+                (pin_belongs_to_other_m || !entry->has_algo) ? nullptr : &entry->algo;
             st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-                                p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
-                                entry->has_algo ? &entry->algo : nullptr, s_workspace, entry->workspace_size,
-                                stream);
+                                p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc, retry_algo, s_workspace,
+                                pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
             if (st != CUBLAS_STATUS_SUCCESS) {
                 static int fallback_count = 0;
                 if (++fallback_count <= 10) {
@@ -950,17 +979,13 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                                        entry->workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        // The cached algo (benchmarked for a different M within the same bucket)
-        // may be invalid for the current M. Re-select via heuristic and retry.
-        {
-            std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
-            reselect_algo_for_entry(*entry, M, K, N);
-        }
+        const bool pin_belongs_to_other_m = keep_pin_chosen_at_other_m(*entry, M, K, N);
         set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
+        const cublasLtMatmulAlgo_t* retry_algo =
+            (pin_belongs_to_other_m || !entry->has_algo) ? nullptr : &entry->algo;
         st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
-                            C.data, entry->Cdesc, C.data, entry->Cdesc,
-                            entry->has_algo ? &entry->algo : nullptr, s_workspace, entry->workspace_size,
-                            stream);
+                            C.data, entry->Cdesc, C.data, entry->Cdesc, retry_algo, s_workspace,
+                            pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
 
         if (st != CUBLAS_STATUS_SUCCESS) {
             static int fallback_count = 0;
