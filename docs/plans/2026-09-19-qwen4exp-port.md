@@ -243,6 +243,23 @@ byte-identical across all rows.
 | device expert cache (`exec/expert_cache_device.{h,cu}`) | 33.2 | resolve kernel (LRU tables on the device) + gather kernel from mapped pinned (51 GB/s); no D2H, no sync per layer |
 | captured decode (per-step graph pool) | 53.0 (tg512: 65.9, 81.9 % hits) | ~2600 launches per token were the host-side floor; PLE host half moved to `prepare_decode_step_host` |
 
+End to end, `imp-cli --bench --bench-pp 512 --bench-reps 2`, host experts at 45 % budget,
+`imp:ab-dc05d8b8` (main before) vs `imp:test` (after), alternating A B B A:
+
+| | before | after |
+|---|---|---|
+| pp512 | 395.98 / 395.05 tok/s | 859.64 / 852.90 tok/s |
+| tg8192 | 67.85 / 67.85 tok/s | 102.03 / 101.37 tok/s |
+
+Prefill from touched-only staging, decode from `attention.qsa=false`: at 8704 tokens of
+context, where the indexer is fully active, it costs a third of decode throughput.
+
+Expert cache budget is at its ceiling: 60 % raises the hit rate (98.8 -> 99.2 %) and drops
+tg8192 to 78.26 tok/s. The allocation succeeds and the bytes spill (WSL2/WDDM, #1103).
+Warm vs cold matters more than either: a 120-token server request decodes at ~54 tok/s
+against 102 tok/s at tg8192, because prefill stages experts into its own buffer and leaves
+the decode cache empty.
+
 TTFT (2026-09-21, `moe.stage_touched_only`): prefill staged all 512 experts of every layer
 regardless of routing, 63 GB per prefill, so TTFT was flat at ~1.27 s whatever the prompt
 length. A gather kernel reading `expert_offsets` stages only the touched experts:
