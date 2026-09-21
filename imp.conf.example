@@ -42,8 +42,10 @@ max_batch_size       = 0
 # Burst size for the autonomous decode graph loop on a NON-streaming request
 # with speculation off. The loop runs in bursts of this many tokens and returns
 # to the host to re-poll cancellation/timeout (so a disconnected client doesn't
-# burn a full generation). Output is identical to the old unbounded loop; larger
-# = less relaunch overhead but higher cancel latency. Streaming + speculation
+# burn a full generation). Larger = less relaunch overhead but higher cancel
+# latency. NOT output-identical to the unbounded loop: with a growable KV pool a
+# relaunch after the pool grew can flip a greedy token (degen_suite kv-growth,
+# 2026-09-21). Set 0 for order-independent greedy output. Streaming + speculation
 # paths are unaffected. 0 = legacy unbounded behavior. Ignored when
 # deterministic = true (the unbounded loop stays for bit-reproducible evals).
 decode_burst         = 128

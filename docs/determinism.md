@@ -98,8 +98,28 @@ between `.` and `<|eot_id|>`. A numerical difference between two ways of
 computing the same thing, not the cache serving different content, and not
 known limit 1 either (that one is about *exactly tied*, bit-identical logits).
 
-**For order-independent greedy output today: `server.prefix_cache = false`.**
-The only switch measured to remove it. An earlier revision recommended
+**For order-independent greedy output today: `server.prefix_cache = false`
+AND `runtime.decode_burst = 0`.** Prefix caching is one source; burst-chunked
+decode is a second, found 2026-09-21 on Qwen3.8-Flash-Next-NVFP4 and measured
+with `degen_suite.py --only kv-growth`, which asks the same greedy question
+before and after the KV pool grows:
+
+| setting | kv-growth |
+|---|---|
+| defaults | FAIL (`2,3,5,7,...` becomes `2, 3, 5, 7, ...`) |
+| `server.prefix_cache=false` | FAIL |
+| `runtime.deterministic_gemm=true` | FAIL |
+| `CUBLAS_WORKSPACE_CONFIG=:4096:8` | FAIL |
+| `runtime.decode_burst=0` | PASS |
+| `runtime.cuda_graphs=never` | PASS |
+| `runtime.deterministic=true` | PASS (it sets decode_burst unbounded) |
+
+Three repeats of the same greedy prompt on a pool that does not grow are
+byte-identical, so the trigger is the growth, not run-to-run noise. Both
+switches that fix it leave the burst-chunked graph-replay decode path, which
+is where the divergence lives; the per-relaunch mechanism is not yet isolated.
+`imp.conf.example` claimed `decode_burst` was output-identical to the unbounded
+loop, which this measurement retracts. An earlier revision recommended
 `runtime.deterministic_gemm` on the strength of the short probe alone; that
 recommendation was wrong and is retracted.
 
