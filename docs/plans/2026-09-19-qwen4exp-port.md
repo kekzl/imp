@@ -256,9 +256,29 @@ context, where the indexer is fully active, it costs a third of decode throughpu
 
 Expert cache budget is at its ceiling: 60 % raises the hit rate (98.8 -> 99.2 %) and drops
 tg8192 to 78.26 tok/s. The allocation succeeds and the bytes spill (WSL2/WDDM, #1103).
-Warm vs cold matters more than either: a 120-token server request decodes at ~54 tok/s
-against 102 tok/s at tg8192, because prefill stages experts into its own buffer and leaves
-the decode cache empty.
+
+The 54 vs 102 tok/s gap between a 120-token server request and tg8192 is not a cold cache,
+it is the routing: `--bench` generates on a repetitive synthetic prompt and hits 98.8 %,
+real text hits 62.7 % (300 tokens, `diagnostics.moe_expert_trace`).
+
+A better eviction policy is not the lever. `tools/analysis/expert_cache_sim.py` replays the
+trace; it reproduces the engine's own 62.7 % at the shipped 186 slots/layer, which is what
+makes its other rows worth reading:
+
+| slots/layer | LRU | pin hottest half, LRU rest |
+|---|---|---|
+| 93 | 43.5 % | 40.4 % |
+| 186 (shipped) | 62.0 % | 59.4 % |
+| 279 | 72.0 % | 70.7 % |
+| 372 | 78.9 % | 77.9 % |
+| 512 | 85.0 % | 85.3 % |
+
+Pinning by frequency loses to plain recency at every budget the card can hold. The routing is
+too flat for it: layer 0 touches 384 of 512 experts in 300 tokens, and its 64 most frequent
+experts carry only 41 % of the activations. Only more slots raise the hit rate, and more slots
+spill. What is left for decode is hiding the transfer behind compute, or not transferring at
+all: 62.7 % hits leave ~470 MiB of misses per token over PCIe against ~5.5 ms of GPU work,
+while the same bytes already sit in host RAM at a higher bandwidth than the link.
 
 TTFT (2026-09-21, `moe.stage_touched_only`): prefill staged all 512 experts of every layer
 regardless of routing, 63 GB per prefill, so TTFT was flat at ~1.27 s whatever the prompt
