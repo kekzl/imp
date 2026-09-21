@@ -502,6 +502,23 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
 
+    // A PLE model (Qwen4Exp) keeps ONE n-gram context on the host, so a decode step with
+    // several sequences feeds every one of them the same context. executor_ple.cu logged
+    // that the output was wrong and carried on; the step then ran past the single-sequence
+    // buffers and took the process down with an illegal access. Serve one sequence instead.
+    if (model_ && model_->ngram_table() != nullptr && config_.max_batch_size > 1) {
+        IMP_LOG_WARN(
+            "max_batch_size %d -> 1: this model's PLE block holds one n-gram context, so "
+            "batched decode would answer every sequence from the first one's context. "
+            "Concurrent requests are served one decode step at a time.",
+            config_.max_batch_size);
+        config_.max_batch_size = 1;
+        if (runtime_config_.runtime.max_batch_size > 1)
+            runtime_config_.runtime.max_batch_size = 1;
+        if (scheduler_)
+            scheduler_->clamp_max_batch_size(1);
+    }
+
     // Every decode-graph path is gated on n_sequences <= kMaxGraphPoolSize, so
     // a batch above it runs the forward EAGERLY with no clamp or warning
     // (#1646). Not clamped here: the value also bounds admission and KV
