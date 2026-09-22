@@ -139,13 +139,80 @@ size_t parse_meminfo_available(std::string_view meminfo_text) {
     return any ? kb * 1024 : 0;
 }
 
-size_t host_mem_available_bytes() {
-    std::ifstream f("/proc/meminfo");
-    if (!f)
+size_t parse_cgroup_headroom(std::string_view limit_text, std::string_view current_text,
+                             std::string_view stat_text) {
+    auto number = [](std::string_view s) -> size_t {
+        size_t v = 0;
+        bool any = false;
+        for (char c : s) {
+            if (c >= '0' && c <= '9') {
+                v = v * 10 + static_cast<size_t>(c - '0');
+                any = true;
+            } else if (any) {
+                break;
+            }
+        }
+        return any ? v : 0;
+    };
+    // memory.current counts page cache, and a model load fills it with the mmap'd
+    // checkpoint: a 70 GiB container reads 0.45 GiB headroom while 68.9 of its 70 GiB are
+    // file pages the kernel drops on demand. Count them as free, the way MemAvailable does
+    // on the host. The cost of being wrong here is re-reading the checkpoint, not an OOM,
+    // because anonymous and pinned pages are what the limit actually binds.
+    auto field = [&](std::string_view key) -> size_t {
+        size_t pos = stat_text.find(key);
+        while (pos != std::string_view::npos && pos != 0 && stat_text[pos - 1] != '\n')
+            pos = stat_text.find(key, pos + 1);
+        if (pos == std::string_view::npos)
+            return 0;
+        return number(stat_text.substr(pos + key.size()));
+    };
+    // cgroup v2 writes the literal "max" for "no limit"; v1 writes a number so large it
+    // means the same. Either way there is no cgroup ceiling to report.
+    if (limit_text.find("max") != std::string_view::npos)
         return 0;
+    const size_t limit = number(limit_text);
+    if (limit == 0 || limit >= (1ULL << 50))
+        return 0;
+    const size_t current = number(current_text);
+    const size_t reclaimable = field("file ");  // cgroup v2; absent on v1, which then reads 0
+    const size_t used = current > reclaimable ? current - reclaimable : 0;
+    return limit > used ? limit - used : 1;  // 1, not 0: 0 means "no ceiling"
+}
+
+namespace {
+std::string read_small_file(const char* path) {
+    std::ifstream f(path);
+    if (!f)
+        return {};
     std::stringstream ss;
     ss << f.rdbuf();
-    return parse_meminfo_available(ss.str());
+    return ss.str();
+}
+}  // namespace
+
+// MemAvailable is the HOST's figure even inside a memory-capped container: a container
+// limited to 8 GiB on a 78 GiB host reads 76 GiB free and pins until the OOM killer
+// stops it. The cgroup ceiling is the real one, so report the smaller of the two.
+size_t host_mem_available_bytes() {
+    const std::string meminfo = read_small_file("/proc/meminfo");
+    if (meminfo.empty())
+        return 0;
+    const size_t from_meminfo = parse_meminfo_available(meminfo);
+    const size_t from_cgroup =
+        parse_cgroup_headroom(read_small_file("/sys/fs/cgroup/memory.max"),
+                              read_small_file("/sys/fs/cgroup/memory.current"),
+                              read_small_file("/sys/fs/cgroup/memory.stat"));
+    const size_t from_cgroup_v1 =
+        from_cgroup ? 0
+                    : parse_cgroup_headroom(
+                          read_small_file("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+                          read_small_file("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+                          read_small_file("/sys/fs/cgroup/memory/memory.stat"));
+    const size_t capped = from_cgroup ? from_cgroup : from_cgroup_v1;
+    if (capped == 0)
+        return from_meminfo;
+    return (from_meminfo && from_meminfo < capped) ? from_meminfo : capped;
 }
 
 // ---------------------------------------------------------------------------

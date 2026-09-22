@@ -12,6 +12,7 @@
 namespace {
 
 using imp::make_weight_key;
+using imp::parse_cgroup_headroom;
 using imp::parse_meminfo_available;
 using imp::Tensor;
 using imp::QType;
@@ -35,6 +36,30 @@ TEST(MeminfoParseTest, ParsesMemAvailable) {
     // Malformed digits → 0.
     EXPECT_EQ(parse_meminfo_available("MemAvailable:   garbage kB\n"), 0u);
     EXPECT_EQ(parse_meminfo_available(""), 0u);
+}
+
+TEST(CgroupHeadroomTest, LimitMinusNonReclaimable) {
+    // docker run --memory=8g, 1 GiB charged, no page cache: 7 GiB left, not the host's
+    // MemAvailable.
+    EXPECT_EQ(parse_cgroup_headroom("8589934592\n", "1073741824\n", ""), 7ull << 30);
+    // The measured case: a 70 GiB container after a model load is at its limit, but 68.9
+    // GiB of that is mmap'd checkpoint the kernel can drop. Headroom is what anon holds.
+    EXPECT_EQ(parse_cgroup_headroom("75161927680\n", "75160621056\n",
+                                    "anon 751619276\nfile 73970352128\ninactive_file 1\n"),
+              75161927680ull - (75160621056ull - 73970352128ull));
+    // "file" must not match "inactive_file" on the line above it.
+    EXPECT_EQ(parse_cgroup_headroom("8589934592\n", "4294967296\n",
+                                    "inactive_file 4294967296\nfile 2147483648\n"),
+              8589934592ull - (4294967296ull - 2147483648ull));
+    // 0 means "no ceiling to report", so a cgroup with nothing left reports 1, not 0.
+    EXPECT_EQ(parse_cgroup_headroom("8589934592\n", "8589934592\n", "file 0\n"), 1u);
+    EXPECT_EQ(parse_cgroup_headroom("8589934592\n", "9000000000\n", ""), 1u);
+    // cgroup v2 unlimited, v1's near-int64 sentinel, and missing files: no ceiling.
+    EXPECT_EQ(parse_cgroup_headroom("max\n", "1073741824\n", ""), 0u);
+    EXPECT_EQ(parse_cgroup_headroom("9223372036854771712\n", "1073741824\n", ""), 0u);
+    EXPECT_EQ(parse_cgroup_headroom("", "", ""), 0u);
+    // An unreadable current file charges nothing: the limit itself still caps the answer.
+    EXPECT_EQ(parse_cgroup_headroom("8589934592\n", "", ""), 8ull << 30);
 }
 
 // Fake "device" allocations — the log never dereferences them.

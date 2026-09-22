@@ -52,6 +52,12 @@ static bool host_pin_ram_available(size_t bytes) {
     return avail == 0 || avail > bytes + kHeadroom;
 }
 
+// Whether the WHOLE set of host-resident NVFP4 experts fits in pinned memory. Decided once
+// per upload (upload_expert_weights) and read by both the weight and the micro-scale slab
+// builders: pinning some of them costs that RAM and buys nothing, because the device expert
+// cache needs a device view on every host-resident layer or it serves none of them.
+static bool g_pin_host_experts_fits = true;
+
 static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t stream = nullptr) {
     size_t reserve = g_vram_reserve;
     // Use cached free memory (updated at start of each upload pass)
@@ -1812,6 +1818,24 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     // cannot be decided here - it's sized in init_weights()' workspace pass, which runs after.
     // This only reports; the refusal lives in GraphExecutor::verify_host_expert_placement(),
     // once both the promotion and the real cache exist.
+    // One decision for the whole model, before the first projection is pinned.
+    g_pin_host_experts_fits = true;
+    if (ctx.is_nvfp4_prequant) {
+        size_t host_expert_bytes = 0;
+        for (int i = 0; i < n_layers; ++i)
+            if (!experts_upload_layer[i])
+                host_expert_bytes += layer_expert_bytes[i];
+        if (host_expert_bytes > 0 && !host_pin_ram_available(host_expert_bytes)) {
+            g_pin_host_experts_fits = false;
+            IMP_LOG_WARN(
+                "Host NVFP4 experts: not pinning %.2f GiB, host RAM available is %.2f GiB (6 GiB "
+                "headroom kept) — decode serves from the host LRU path, measured 2.5x slower. "
+                "Free host RAM or raise the container memory limit.",
+                host_expert_bytes / (1024.0 * 1024.0 * 1024.0),
+                host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+
     if (expert_placement_needs_host_path(ctx.is_nvfp4_prequant, layer_expert_bytes,
                                          experts_upload_layer)) {
         const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);
@@ -2181,19 +2205,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 // graphs stay off - measured 2026-09-22 on Qwen3.8-Flash-Next, real prose:
                 // 30.3 tok/s on the host path against 74.5-79.6 with the device cache.
                 // Pinning is skipped only when the host cannot spare the pages.
-                if (!process_diag_moe_pin_host_experts() && !host_pin_ram_available(total)) {
-                    static bool warned = false;
-                    if (!warned) {
-                        warned = true;
-                        IMP_LOG_WARN(
-                            "Host NVFP4 experts: not pinning (%.2f MiB projection, %.2f GiB host "
-                            "RAM available) — decode falls back to the host LRU path. Free host "
-                            "RAM or use a smaller quantisation.",
-                            total / (1024.0 * 1024.0),
-                            host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0));
-                    }
+                if (!process_diag_moe_pin_host_experts() && !g_pin_host_experts_fits)
                     return;
-                }
                 PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                 if (pin.empty()) {
                     // Correct but slow: the experts stay on the mmap and every
@@ -2456,7 +2469,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     // Same rule as the weights above: the device expert cache reads these
                     // through a device view, so an unpinned scale keeps the whole layer on
                     // the host LRU path. Skipped only when the host has no RAM to spare.
-                    if (!process_diag_moe_pin_host_experts() && !host_pin_ram_available(total))
+                    if (!process_diag_moe_pin_host_experts() && !g_pin_host_experts_fits)
                         return;  // stays on host, unpinned
                     PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                     if (pin.empty())

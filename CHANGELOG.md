@@ -25,6 +25,9 @@ there instead of retelling it.
 - n-gram speculation is off while MoE experts are host-resident: a verify step streams every expert its rows touch over PCIe (1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next, tg512 65.9 -> 40.6 tok/s with it on). With `moe.staged_cutlass_prefill` the warmup runs on this model too, so `runtime.warmup=false` is no longer needed there.
 
 ### Fixed
+- Host RAM is read from the cgroup, not only `/proc/meminfo`, which reports the host's figure
+  inside a memory-capped container. A `--memory=70g` container served 11.4 tok/s instead of 74.7
+  on Qwen3.8-Flash-Next-NVFP4; pinning the experts is now all-or-nothing.
 - A native-NVFP4 MoE checkpoint whose experts do not fit the card serves on its defaults: every
   expert layer goes to the host, its slabs and micro-scales are pinned for the device expert
   cache, and `moe.expert_cache_budget_pct = 0` sizes the cache from free VRAM (227 slots/layer).

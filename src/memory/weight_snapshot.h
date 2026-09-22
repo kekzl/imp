@@ -225,9 +225,13 @@ WeightSnapshot* weight_snapshot_take_armed();
 // Clear the armed slot iff it points at snap (called before destroying one).
 void weight_snapshot_disarm(const WeightSnapshot* snap);
 
-// /proc/meminfo MemAvailable in bytes (0 if unavailable). The parser is
-// separated for unit testing.
+// Host RAM this process may still take, in bytes (0 if it cannot be determined): the
+// smaller of /proc/meminfo MemAvailable and the cgroup ceiling, since MemAvailable
+// reports the host's figure inside a memory-capped container. Parsers separated for
+// unit testing; parse_cgroup_headroom returns 0 for "no limit".
 size_t host_mem_available_bytes();
 size_t parse_meminfo_available(std::string_view meminfo_text);
+size_t parse_cgroup_headroom(std::string_view limit_text, std::string_view current_text,
+                             std::string_view stat_text);
 
 }  // namespace imp
