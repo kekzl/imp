@@ -80,6 +80,12 @@ inline size_t vram_allocator_headroom(size_t total_bytes) {
     return total_bytes * static_cast<size_t>(kAllocatorHeadroomPct) / 100;
 }
 
+// Share of free VRAM the expert LRU cache takes when it sizes itself automatically
+// (moe.expert_cache_budget_pct = 0). The remainder carries the KV pool, the workspaces and
+// the lazily committed GDN/SSM slots, all of which allocate after the cache. Measured, not
+// derived: see executor_workspace_buffers.cu for the sweep this number comes from.
+constexpr int kExpertCacheAutoPctHostResident = 55;
+
 inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
     const size_t floor_bytes = 256ULL * 1024 * 1024;
     pct = pct < 0 ? 0 : (pct > 50 ? 50 : pct);

@@ -25,6 +25,11 @@ there instead of retelling it.
 - n-gram speculation is off while MoE experts are host-resident: a verify step streams every expert its rows touch over PCIe (1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next, tg512 65.9 -> 40.6 tok/s with it on). With `moe.staged_cutlass_prefill` the warmup runs on this model too, so `runtime.warmup=false` is no longer needed there.
 
 ### Fixed
+- A native-NVFP4 MoE checkpoint whose experts do not fit the card serves on its defaults: every
+  expert layer goes to the host, its slabs and micro-scales are pinned for the device expert
+  cache, and `moe.expert_cache_budget_pct = 0` sizes the cache from free VRAM (227 slots/layer).
+- Qwen3.8-Flash-Next-NVFP4 on a 32 GiB card: refused at start before, 74.5-79.6 tok/s on real
+  prose now, against 30.3 on the host LRU path.
 - Two identical greedy requests no longer answer differently after a third request failed a matmul:
   a cuBLASLt pin chosen at one M was replaced process-wide when it failed at another M in the
   same `bucket_m`. The pin now stays and only the failing call takes the heuristic.

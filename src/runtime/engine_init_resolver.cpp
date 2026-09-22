@@ -49,6 +49,18 @@ size_t approx_weight_footprint_bytes(const ModelConfig& mcfg, int host_expert_la
     return bytes;
 }
 
+// How many MoE layers the loader will leave on the host. It uploads experts only while
+// they fit (weight_upload.cu decide_expert_layer_placement_), so a model whose full
+// footprint exceeds the card ends up serving every MoE layer from the expert cache.
+// Without this the auto resolvers plan as if the experts were free and hand the KV pool
+// VRAM the expert cache needs: on Qwen3.8-Flash-Next that produced max_seq_len 131072
+// and a start that refused with "the slot path needs at least 30 slots per layer and has 0".
+int estimated_host_expert_layers(const ModelConfig& mcfg, int forced, size_t free_vram) {
+    if (forced > 0 || mcfg.n_experts <= 0)
+        return std::max(0, std::min(forced, mcfg.n_layers));
+    return approx_weight_footprint_bytes(mcfg, 0) > free_vram ? mcfg.n_layers : 0;
+}
+
 }  // namespace
 
 // IMP_DEBUG_RAW meta-flag: forces the engine into a "naked" FP16 forward pass
@@ -376,7 +388,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 
     if (config_.max_batch_size <= 0) {
-        size_t approx_weight_bytes = approx_weight_footprint_bytes(mcfg, runtime_config_.moe.force_host_experts);
+        size_t free_vram_now = 0, total_vram_now = 0;
+        vram_budget_mem_get_info(&free_vram_now, &total_vram_now);
+        size_t approx_weight_bytes = approx_weight_footprint_bytes(
+            mcfg, estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now));
         // Weight-footprint tier: kept as a FLOOR so this never regresses
         // below the previous default for any model.
         int tier;
@@ -907,9 +922,19 @@ void Engine::init_compute_max_seq_len_() {
         // raw-free overshoot (absorbed by the downstream KV clamp).
         size_t free_for_kv = free_vram;
         if (mcfg.is_nvfp4_prequant) {
-            size_t reserved = approx_weight_footprint_bytes(mcfg, runtime_config_.moe.force_host_experts) +
-                              native_cache_demand().total();
+            const int host_layers =
+                estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram);
+            size_t reserved =
+                approx_weight_footprint_bytes(mcfg, host_layers) + native_cache_demand().total();
             free_for_kv = (free_vram > reserved) ? (free_vram - reserved) : 0;
+            // The expert LRU cache is sized from free VRAM at its own init, which runs
+            // before the KV plan, and takes moe.expert_cache_budget_pct of it. KV only
+            // ever sees the remainder.
+            if (host_layers > 0) {
+                const int pct = runtime_config_.moe.expert_cache_budget_pct;
+                const int taken = (pct > 0) ? std::clamp(pct, 1, 90) : kExpertCacheAutoPctHostResident;
+                free_for_kv = free_for_kv / 100 * (100 - taken);
+            }
         }
         int max_by_vram = (kv_bytes_per_token > 0)
                               ? static_cast<int>(free_for_kv * (0.75 * kv_fraction) / kv_bytes_per_token)

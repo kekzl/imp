@@ -294,8 +294,10 @@ bool Engine::init_weights() {
         // routing, residency and the miss copies resolve on the device, so the captured
         // decode replays correctly. init_device_expert_cache() demotes later if a
         // host-resident layer stays on the host path.
-        const bool device_cache_planned = runtime_config_.moe.device_expert_cache &&
-                                          runtime_config_.moe.pin_host_experts && mcfg.is_nvfp4_prequant;
+        // pin_host_experts is no longer part of the condition: host-resident NVFP4 experts
+        // are pinned unless the host is out of RAM (weight_upload.cu), and a failed pin
+        // demotes through init_device_expert_cache() below.
+        const bool device_cache_planned = runtime_config_.moe.device_expert_cache && mcfg.is_nvfp4_prequant;
         if (experts_on_host_ && config_.use_cuda_graphs && device_cache_planned) {
             IMP_LOG_INFO("Experts on host: CUDA graphs stay on, the device expert cache serves decode "
                          "(demoted after init if it cannot cover every host-resident layer)");
