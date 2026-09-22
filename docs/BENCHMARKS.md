@@ -32,7 +32,7 @@ prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned
 `metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](internals/BENCHMARKING.md));
 refresh it via `scripts/gen_perf_baseline.sh`.
 
-**Toolchain (current: `v0.43.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4
+**Toolchain (current: `v0.44.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4
 (13.4.1 since 2026-09-19, 13.3.1 from v0.20.1; the rows below were taken on
 13.3.x and carry over — the toolkit move re-measured perf-neutral, tg128 299.47
 vs the 299.61 pin, pp512 -0.67 %, pp4096 +0.16 %, median of three independent
