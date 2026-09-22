@@ -61,53 +61,6 @@ void clamp_auto_max_seq_len_to_pool(int& max_seq_len, int pool_blocks, int kv_bs
 
 }  // namespace
 
-// Stable model identity hash: FNV-1a over config scalars + weight bytes
-// (LM head, embeddings, layer-0/mid Q proj) - distinguishes same-shape fine-tunes.
-// Gates the persisted prefix cache only (cold path, twice per process).
-uint64_t Engine::model_fingerprint_() const {
-    auto fnv = [](uint64_t h, const void* p, size_t n) {
-        const auto* b = static_cast<const uint8_t*>(p);
-        for (size_t i = 0; i < n; ++i) {
-            h ^= b[i];
-            h *= 0x100000001b3ULL;
-        }
-        return h;
-    };
-    uint64_t h = 0xcbf29ce484222325ULL;
-    const auto& c = model_->config();
-    const uint32_t ids[] = {
-        static_cast<uint32_t>(std::to_underlying(c.arch)), static_cast<uint32_t>(c.n_layers),
-        static_cast<uint32_t>(c.n_heads), static_cast<uint32_t>(c.n_kv_heads),
-        static_cast<uint32_t>(c.d_model), static_cast<uint32_t>(c.d_ff),
-        static_cast<uint32_t>(c.vocab_size), static_cast<uint32_t>(c.head_dim),
-        static_cast<uint32_t>(c.n_experts), static_cast<uint32_t>(c.n_experts_active),
-        static_cast<uint32_t>(c.is_nvfp4_prequant), static_cast<uint32_t>(c.is_mxfp4_prequant)};
-    h = fnv(h, ids, sizeof(ids));
-    h = fnv(h, &c.rope_theta, sizeof(c.rope_theta));
-
-    auto sample = [&](const Tensor& t) {
-        if (!t.data)
-            return;
-        size_t n = std::min<size_t>(t.nbytes(), 512);
-        if (n == 0)
-            return;
-        std::vector<uint8_t> buf(n);
-        if (t.on_device) {
-            if (cudaMemcpy(buf.data(), t.data, n, cudaMemcpyDeviceToHost) != cudaSuccess)
-                return;
-        } else {
-            std::memcpy(buf.data(), t.data, n);
-        }
-        h = fnv(h, buf.data(), n);
-    };
-    sample(model_->output_proj());
-    sample(model_->token_embedding());
-    sample(model_->layer(0).wq);
-    if (c.n_layers > 1)
-        sample(model_->layer(c.n_layers / 2).wq);
-    return h;
-}
-
 bool Engine::init_kv_cache() {
     const auto& mcfg = model_->config();
     int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
