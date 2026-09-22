@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # Performance
@@ -23,18 +23,18 @@ quoting anything below; two of the figures here are routinely misread.
 
 **Decode on this host moves several percent between sessions, with nothing
 changed.** The same tree measured 287.63 tok/s on one day and 276.92 the next at
-healthy clocks; six quiet runs spanned 278.59-289.77. Three processes *within*
+healthy clocks; six quiet runs spanned 278.59-289.77; three processes *within*
 one session agree to 0.16 %. That is why the regression gate sits at 8 % and not
 at 3 %: below 8 % it was reporting the host, not the change.
 
 **Prefill varies more than decode, and it is the MoE path that varies, not
 cuBLAS.** Measured across fresh processes on one quiet host: the cuBLAS-FP16
 prefill model spreads **0.6-1.2 %**, a fully resident NVFP4 MoE model
-**37.6 %** in the same session. Under host-resident MoE experts the same arm
+**37.6 %** in the same session; under host-resident MoE experts the same arm
 varies about 15 % between two runs. cuBLAS algo selection, long blamed,
 contributes **3.50 %** over nine process starts
 (`docs/audit/AUDIT_ARCH_2026_07_29.md`, answer 5), inside the gate's own
-threshold. A single prefill number is not a measurement; a paired,
+threshold; a single prefill number is not a measurement, a paired,
 alternating A/B is.
 
 [PROV: commit=43e8b663 date=2026-08-14 hw=RTX5090 model=Qwen3-8B-Q8_0+Qwen3-Coder-30B-A3B-NVFP4
@@ -62,7 +62,7 @@ because CI has no GPU runner.
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
-Pinned 2026-07-26, thresholds widened 2026-08-13 (#1400). Median of 5 trials x 5
+Pinned 2026-07-26, thresholds widened 2026-08-13 (#1400); median of 5 trials x 5
 reps with a 15 s cooldown; `tg128` comes from the `pp512` run so the gate matches
 what it measures; speculation off since #1011. Since #1214 the gate takes the
 median across **three independent processes** and prints the spread.
@@ -77,7 +77,7 @@ it is byte-identical across repeat runs, which is why its threshold can stay at
 `pp512` was 14515 before 2026-07-26, 12406.87 now. **Nothing regressed.**
 Until #1061 `imp-cli --bench` left prefix caching on, so repeated bench reps
 partly measured cache hits on top of prefill; one-shot runs now disable it (a
-single-generation process never re-sees its own prefix). Confirmed by bisect
+single-generation process never re-sees its own prefix); confirmed by bisect
 (first differing commit `d8bc45a8`) and by forcing the old behaviour back on,
 which reproduces the old band.
 
@@ -149,8 +149,8 @@ v0.36.0 image vs #1897:
 What a request pays for being served next to 31 others, on the native NVFP4
 decode path. Teacher-forced: the same 64 corpus tokens are fed to the same
 engine at M=1 and at M=32, so the row under test has an identical history in
-both arms and no sampling divergence can enter. Row 0 is the measured
-sequence; rows 1..31 carry different content at different lengths.
+both arms and no sampling divergence can enter; row 0 is the measured
+sequence, rows 1..31 carry different content at different lengths.
 
 [PROV: commit=23262f83 date=2026-09-06 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.3.1
  path=gemv_nvfp4_kpar+smallm_v2_a4 kv=fp8 cmd="make test-e2e (BatchInvarianceTest)" n=1
@@ -177,7 +177,7 @@ Three things the table settles:
   2-layer FP16 synthetic harness that runs no quantized kernel.
 - **The activation format is not the cause.** `gemm.nvfp4_smallm=false` serves
   2..32 rows as W4A16 instead of W4A4 and leaves the gap the same size (0.261
-  vs 0.242, 7 flips either way). The batch SHAPE is the term. That switch costs
+  vs 0.242, 7 flips either way); the batch SHAPE is the term. That switch costs
   about 11 % aggregate throughput at 32 streams and buys no numerical closeness.
 - **Two identical inits agree bit for bit**, so the numbers above are the batch
   effect and not run-to-run noise. Flipping an unrelated config knob does not:
@@ -205,7 +205,7 @@ can hold it without appearing there. Check `docker ps` as well.
 from `imp-cli --prompt` or a server request. Healthy-host check during a run:
 about 2850 MHz SM, 13801 MHz memory, ~500 W; a depressed host reads 8-15 % low
 (#526), and held VRAM (`nvidia-smi --query-gpu=memory.used` against the
-~1.3-1.6 GiB WSLg baseline) is ruled out before that explanation. The 2026-05
+~1.3-1.6 GiB WSLg baseline) is ruled out before that explanation; the 2026-05
 prefill and KV-dtype comparison tables live in
 [`archive/performance_2026_05.md`](archive/performance_2026_05.md) as a record.
 
@@ -216,12 +216,12 @@ over.
 
 ## MoE host offload
 
-Only relevant when a MoE model's experts do not fit in VRAM. Both GGUF and
+Only relevant when a MoE model's experts do not fit in VRAM; both GGUF and
 NVFP4 experts have a working host path. NVFP4 was refused at load in #1403;
 the refusal was replaced by an implementation
 (`src/exec/executor_forward_moe_nvfp4_host.cu`, doc corrected in #1670;
-`LIMITATIONS.md:108-110` carries the measurement, 23.3 tok/s against 384.0
-resident). A placement the expert cache cannot hold at all is still refused;
+`LIMITATIONS.md:64` carries the measurement, 23.3 tok/s against 384.0
+resident); a placement the expert cache cannot hold at all is still refused,
 that part of #1403 stands.
 
 <!-- markdownlint-disable -->
@@ -237,10 +237,14 @@ that part of #1403 stands.
        note=warm; a cold run of the same build reads 20.99 rather than 49.60]
 
 #1669: the withdrawn row read four different figures across this file and
-`roadmap.md:655` for one measurement; the checkpoint is not on this host to
+`roadmap.md` for one measurement; the checkpoint is not on this host to
 re-run.
 
 **Warm and cold differ by 2.4x on this path**: a figure from it must say
 which it is. Cache capacity is the lever: `moe.expert_cache_budget_pct` moves
-the same model 10.51 to 51.86 tok/s across 5 % to 50 %. Default stays 15: on
-a model that genuinely does not fit, the same VRAM is what the KV pool wants.
+the same model 10.51 to 51.86 tok/s across 5 % to 50 %. Default is `0`
+(automatic: free VRAM minus the allocator headroom and a state/KV floor) since
+#2069; a flat 15 % default starved a 56 GiB host-resident model, a hand-set
+45 % was needed to make it usable, and the automatic split now lands above
+that. On a model that genuinely does not fit, the same VRAM is what the KV
+pool wants.
