@@ -33,7 +33,10 @@ enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 // Why a CANCELLED request was cancelled. Most cancellations are indistinguishable to a
 // caller and stay `None`; the one actionable case (prompt needs more KV blocks than the
 // pool can ever hold) gets its own reason so the API returns a typed error. Invariant I6.
-enum class CancelReason { None, KvCapacity };
+// KvCapacity: the KV pool can never hold this prompt. RecurrentCapacity: the GDN/SSM
+// state slab cannot be committed and nothing is running that would hand one back. Both
+// are non-transient and surface as IMP_ERROR_CAPACITY / HTTP 503; retrying fixes neither.
+enum class CancelReason { None, KvCapacity, RecurrentCapacity };
 
 const char* request_status_name(RequestStatus status);
 

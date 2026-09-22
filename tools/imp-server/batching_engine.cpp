@@ -413,8 +413,10 @@ void BatchingEngine::worker_loop() {
                         // can act on that (shorter prompt, more VRAM), and the handler maps it to 503 instead
                         // of a
                         // silent empty completion (I6).
-                        reason = req->cancel_reason == imp::CancelReason::KvCapacity ? "capacity"
-                                                                                     : "cancelled";
+                        const bool capacity =
+                            req->cancel_reason == imp::CancelReason::KvCapacity ||
+                            req->cancel_reason == imp::CancelReason::RecurrentCapacity;
+                        reason = capacity ? "capacity" : "cancelled";
                     } else if (req->ignore_eos) {
                         // ignore_eos: the engine ran to max_tokens; a final
                         // EOS / stop token is an output token like any other
@@ -473,10 +475,12 @@ void BatchingEngine::worker_loop() {
                 // If we didn't push a finish event via the token loop
                 // (request ended with no new tokens this step), push one now.
                 if (!had_new_tokens) {
-                    const char* reason =
-                        (req->status != imp::RequestStatus::CANCELLED) ? "length"
-                        : (req->cancel_reason == imp::CancelReason::KvCapacity) ? "capacity"
-                                                                                : "cancelled";
+                    const bool capacity =
+                        req->cancel_reason == imp::CancelReason::KvCapacity ||
+                        req->cancel_reason == imp::CancelReason::RecurrentCapacity;
+                    const char* reason = (req->status != imp::RequestStatus::CANCELLED) ? "length"
+                                         : capacity                                     ? "capacity"
+                                                                                        : "cancelled";
                     if (!req->output_tokens.empty() && !req->ignore_eos) {
                         int32_t last = req->output_tokens.back();
                         if (last == tok->eos_id())
