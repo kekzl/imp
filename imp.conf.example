@@ -573,9 +573,9 @@ pin_host_experts     = false
 # the misses, all on the device (no per-layer D2H + host LRU). Needs pin_host_experts.
 device_expert_cache  = true
 # Route a STAGED host-resident layer through the CUTLASS grouped NVFP4 prefill
-# instead of per-expert dequant; requires pin_host_experts. Opt-in: pp512
-# +136 % but tg256 -36 % on Qwen3-30B-A3B-NVFP4 (6/6 pairs), not understood.
-staged_cutlass_prefill = false
+# instead of per-expert dequant; needs pinned slabs. Qwen3-30B-A3B-NVFP4, 48 host
+# layers: pp4096 2631-2748 -> 7067-7093 tok/s, tg256 unchanged (device expert cache).
+staged_cutlass_prefill = true
 # Stage only the experts the routing touched (gather kernel from the mapped pinned slabs)
 # instead of memcpying all n_experts per projection. TTFT on Qwen3.8-Flash-Next-NVFP4:
 # 1267 -> 499 ms at 67 prompt tokens, 1328 -> 1038 ms at 1022. Needs pin_host_experts

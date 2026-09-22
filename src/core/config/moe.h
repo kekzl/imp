@@ -28,15 +28,14 @@ struct MoE {
     // per-expert H2D becomes real DMA (on WSL2 an mmap can't be page-locked in
     // place, so this copies rather than registers). A TRADE not a win: big
     // prefill gain, much slower load, VRAM cost of the pinned copies. Off by
-    // default. Also gates whole-layer staging (needed for one memcpy per
-    // projection instead of many driver-staged pageable copies).
+    // default; weight_upload pins NVFP4 prequant experts anyway when host RAM allows,
+    // and whole-layer staging follows the pinned slabs, not this flag.
     bool pin_host_experts = false;
     // Dispatch a staged host-resident MoE layer through the CUTLASS grouped
-    // NVFP4 prefill instead of the per-expert dequant fallback. Requires
-    // pin_host_experts. Opt-in: the measured prefill win comes with an
-    // unexplained decode regression (expert-cache hit-rate state differs when
-    // decode inherits it), so it does not get to impose that cost by default.
-    bool staged_cutlass_prefill = false;
+    // NVFP4 prefill instead of the per-expert dequant fallback. Needs pinned slabs.
+    // Qwen3-30B-A3B-NVFP4, 48 host layers: pp4096 2631-2748 -> 7067-7093 tok/s, tg256
+    // unchanged (the old -36 % was the host LRU path, gone with the device expert cache).
+    bool staged_cutlass_prefill = true;
     // Stage only the experts the routing touched, with a gather kernel from the mapped
     // pinned slabs, instead of memcpying all n_experts per projection. A prompt that
     // touches every expert moves the same bytes; a short one moves a fraction.

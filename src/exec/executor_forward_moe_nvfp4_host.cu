@@ -279,8 +279,8 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
 
 // Presents a staged layer to the CUTLASS grouped prefill as if
 // device-resident: the staging pass already wrote per-expert pointer and
-// alpha arrays, this just slices them per projection. Opt-in
-// (moe.staged_cutlass_prefill): the decode effect that comes with the prefill win is real but unexplained.
+// alpha arrays, this just slices them per projection.
+// moe.staged_cutlass_prefill (default on).
 bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
