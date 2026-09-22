@@ -37,6 +37,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 | Full / chunked / north-star gates | `make verify`, `make verify-chunked`, `make verify-north-star` | ~5 min full |
 | Kernel register/spill ratchet (CI `kernels` gate) | `make kernel-resources`, re-pin `make kernel-resources-update` | needs `libimp.a` |
 | clang-format | `make format-check`; never bare `make format` | repo is not format-clean |
+| clang-format, changed lines only (what CI checks) | per file: ranges from `git diff -U0 main -- f`, then `docker run --rm --user $(id -u):$(id -g) -v $PWD:/work -w /work $CLANG_FORMAT_IMG clang-format --style=file -i --lines=a:b ... f` (`--dry-run` to check) | image name: `CLANG_FORMAT_IMG` in `Makefile` |
 | Host ASan/UBSan over test-core/test-text | `make asan` | works on WSL2 |
 | compute-sanitizer | `make sanitize` | does NOT work on WSL2 (WDDM) |
 | Alloc-interpose census | `make check-alloc-interpose` (`build-interpose/`) | never benchmark it (reads ~3% low) |
@@ -95,6 +96,8 @@ Advisory jobs: `Lint`, `clang-tidy`, `Mock API contract`, `Real API contract (mo
 | Gate result contradicts the tree | `make build` COPYs the tree at start (#1531); `verify-fast` never builds (`SKIP build` line) | rebuild after every edit or amend, then gate |
 | Bench numbers move while a chain runs | `make dev` rebuilds `build-dev/` under the running binary | bench from copies (`-v dir:/bin_arm`) |
 | `NvFP4SmallMTest.BandwidthAboveStarvationFloor` red in the full suite | contention in the run (401 vs 537.6 GB/s threshold; isolated 590-622) | rerun isolated |
+| `NvFP4SmallMV2Test.BandwidthAboveStarvationFloor` red in the pre-commit suite | same class: 39.68 % vs the 40 % floor, isolated 73-78 % (3/3, 2026-09-22) | rerun isolated (`docker run --rm --gpus all imp:test test-quant --gtest_filter=...`), then `--no-verify` |
+| `ci_static_gates.sh` in `imp:toolchain`: `FAIL registers + local frame vs the pin`, `docker: command not found` | the `kernels` group shells out to docker | run `make kernel-resources` on the host (reads `build-dev/libimp.a`: `make dev` first) |
 | `test-core` fails to link in `Sanitizers` / `make asan` | sources inside the `IMP_BUILD_SERVER` block (#1821) | keep test-core's deps outside that block |
 | `--perplexity` OOMs or pool floors on a head checkpoint | `mtp_k=auto` loads the MTP head (+0.79 GiB) | `--set speculative.mtp_k=0` in PPL harnesses |
 | PPL differs 0.35% between runs of the SAME binary | non-deterministic forward | `--set runtime.deterministic=true` on both arms (implies `deterministic_gemm`) |

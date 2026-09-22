@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-13
-commit: 81d22eff
+verified: 2026-09-22
+commit: 2c436aba
 -->
 
 # src/compute - CUDA kernels
@@ -44,6 +44,7 @@ docker run --rm --gpus all -v $PWD:/src -w /src imp:test \
 - `build-dev/` holds the branch last compiled there; `git checkout` does not rebuild.
 - `__launch_bounds__` moves perf in both directions: never add or remove one without `make verify-ab`.
 - `compute-sanitizer` does not work on this WSL2 host; `make asan` covers host code only.
+- `paged_attention_decode` split-K: `total_blocks_nosplit` must count the kernel that runs without splits; GQA ratio > 8 without multitok = `paged_attention_gqa_kernel`, batch x n_kv CTAs (#2074).
 
 ## Do not touch
 

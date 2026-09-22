@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-13
-commit: 81d22eff
+verified: 2026-09-22
+commit: 2c436aba
 -->
 
 # tests - lanes, and which one gates
@@ -36,6 +36,8 @@ make test-gpu        # the GPU suite; started wrong it silently skips most
 - A surviving mutant is a test hole only if it is not equivalent.
 - A timed-out mutation run leaves the mutation in the tree: back the file up to the scratchpad first, never `git checkout` to undo it.
 - Test-model env vars pointing at a wrong path skip whole batteries silently.
+- `paged_attention_set_splitk_scratch` is process-global: a test that sets it resets it to `(nullptr, 0)`, or the next tests in the binary inherit a foreign buffer (2 reds, #2072).
+- A dispatch test proves the path ran, not only the output: `QsaIndexer.SixteenRowGqaSplitKMatchesGqaKernel` also asserts the two kernels are NOT bit-identical.
 - Chat-template tests compare the whole rendered prompt (goldens), not a grepped marker (#1572).
 - The template family comes from `ChatTemplate::detect_family()`, not the model name: Nemotron-3-Nano and Phi-4-reasoning both ship ChatML.
 
