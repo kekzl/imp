@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # Benchmarking methodology
@@ -41,41 +41,16 @@ The script refuses to run on a busy GPU, alternates the arms so host drift hits 
 
 ### Long-context arms: four ways to measure something else
 
-Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four
-confident numbers before it produced a true one (2026-08-29, full ledger in
-[`plans/2026-08-29-qwen38-long-context-posture.md`](../plans/2026-08-29-qwen38-long-context-posture.md)):
+Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four confident numbers before it produced a true one (2026-08-29). Full ledger: [`plans/2026-08-29-qwen38-long-context-posture.md`](../plans/2026-08-29-qwen38-long-context-posture.md).
 
-- **State the KV dtype, do not inherit it.** `kv_cache.dtype=auto` resolves
-  NVFP4 on QWEN35 and FP8 or FP16 elsewhere, so the same `--kv-fp8` halves KV
-  bytes on most families and doubles them there. An inherited pin read as a
-  batch-size effect for a whole sweep.
-- **Long-context claims need long-context arms.** A tok/s table taken at a few
-  hundred prompt tokens cannot show a KV-dtype difference at all; per-step KV
-  traffic is negligible there. It reported "costs nothing" and the real cost was
-  16% (measured on real prose; a synthetic filler with a fixed sentence skeleton
-  understated it as 11%).
-- **KV block counts compare only within one library-reserve state.** A `--rm`
-  container plans with the 3900 MiB constant, a deployment with a mounted
-  `/home/imp/.cache/imp` plans with its measurement: 716 blocks apart on this
-  model, +4389 MiB of reserve difference on Qwen3-8B-Q8_0.
-- **Speculation makes the arms diverge, then compares texts.** Different KV
-  precision gives different logits; the n-gram matcher drafts from the request's
-  own emitted tokens, so which arm it fires on follows the generated text. The
-  same reproducer on the same box gave "NVFP4 +20%" in one session and "FP8
-  +13%" in another, with `drafted=0` on the other arm each time.
-- **Force equal emitted-token counts, do not observe them.** Spec off is not
-  enough: the forward is not bit-deterministic, so the same arm can stop at
-  different lengths across runs. Set `max_tokens` BELOW what the task needs, so
-  both arms are cut off at the same number. Three pairs on 2026-08-30 were
-  compared on counts that merely happened to match; the pair that did not match
-  read the opposite sign, and the forced-length repeat settled it (FP8 13.5%
-  ahead on that day's kernel, 0.3% spread per arm; #1817 then removed the gap
-  itself, which is why the protocol is the durable part and the number is not).
-- **Record which config file was loaded, not just the flags.** A dev build with
-  the repo as its working directory reads `./imp.conf`; a release image does not.
-  A stray gitignored `imp.conf` made both arms of two profiling runs the same
-  arm - identical kernel lists to within 3 ms per row. imp logs `imp.conf loaded
-  from <path>`; keep that line in the measurement record.
+| Pitfall | Rule | What it cost |
+|---|---|---|
+| KV dtype inherited, not stated | state `kv_cache.dtype` explicitly; `kv_cache.dtype=auto` resolves NVFP4 on Qwen3.5, FP8/FP16 elsewhere - the same `--kv-fp8` halves KV bytes on most families and doubles them there | an inherited pin read as a batch-size effect for a whole sweep |
+| Short context can't show a KV-dtype difference | use long-context arms; per-step KV traffic is negligible at a few hundred prompt tokens | reported "costs nothing"; real cost 16 % on real prose (11 % on synthetic filler with a fixed sentence skeleton) |
+| KV block counts depend on library-reserve state | compare only within one library-reserve state | `--rm` (3900 MiB constant) vs a mounted `/home/imp/.cache/imp` (measured): 716 blocks apart, +4389 MiB reserve difference on Qwen3-8B-Q8_0 |
+| Speculation makes arms diverge, then compares texts | different KV precision gives different logits; the n-gram matcher drafts from the request's own emitted tokens | same reproducer: "NVFP4 +20 %" one session, "FP8 +13 %" another, `drafted=0` on the other arm each time |
+| Non-bit-deterministic forward; spec off is not enough | force equal emitted-token counts: set `max_tokens` BELOW what the task needs so both arms cut off at the same number | 3 pairs on 2026-08-30 compared counts that merely happened to match; the mismatched pair read the opposite sign; forced-length repeat: FP8 13.5 % ahead, 0.3 % spread per arm (#1817 later removed the gap itself) |
+| Wrong config file loaded silently (a dev build with the repo as its working directory reads `./imp.conf`; a release image does not) | record which config file was loaded, not just the flags; imp logs `imp.conf loaded from <path>` - keep that line in the record | a stray gitignored `imp.conf` made both arms of two profiling runs the same arm: identical kernel lists to within 3 ms/row |
 
 ## The gate
 
@@ -88,13 +63,15 @@ confident numbers before it produced a true one (2026-08-29, full ledger in
 | VRAM gate | yes | no |
 | speculation | off | off since #1625; **was on**, so it measured a quantity the pin does not describe |
 
-  Both pass `--set speculative.ngram=false` now, which `tests/perf_baseline.json` states in its own `methodology` field. Until #1625 only `verify.sh` did, while the two were documented as one gate.
-- A decode delta worse than −8 % **fails**; a prefill delta worse than −8 % warns (cuBLAS variance).
-- **When it runs.** The pre-push hook runs the perf gate only when the diff can move it: `src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build definition, or a baseline file. A push outside those paths keeps the correctness half (tests, peak VRAM, graphs ON/OFF, degeneration smoke) and skips the three benched processes, half the wall clock (36 s → 18 s). `scripts/check-release.sh` always runs everything, so a release is gated on the full set. Of the 40 commits between v0.24.0 and v0.25.0, 13 touch a measured path and 27 do not.
-- **Why 8 % and not 3 %.** The threshold has to sit above this host's own movement, or it reports the box instead of the diff. Within one session the gate is tight (three independent processes agree to 0.16 %), but *between* sessions the same tree moves about 3.6 % with nothing changed (the two-day pair and the six-run spread are in [`../PERF.md`](../PERF.md), with PROV). Ordinary desktop use (a stream, a browser) costs a few percent more; a depressed-host day costs 8-15 %. The old 3 % sat below all of that and failed on docs-only changes. What the gate still catches: the split-K mutation M29 measured **−36 %**, a 4.5x margin. A red gate has never been a regression on its own; the proof is a paired A/B against `main`, alternating the arms.
-- **The paired arm: `make verify-ab`** (`scripts/verify_ab.sh`, AUDIT_arch_2026 H-3). The single-arm gate above compares one tree against a pin measured weeks earlier, and this host moves 4-6 % on one tree between sessions: the only regression it has ever caught was -36 %, and -7.3 % shipped at +0.33 %. `verify-ab` builds `origin/main` into `imp:ab-<sha>` once per sha (`scripts/ab_base_image.sh`) and runs the gate bench in alternating pairs (A B, B A, A B) against `imp:test`, so drift hits both arms equally; the verdict is the mean paired decode delta against `thresholds.paired_decode_regression_pct` in `tests/perf_baseline.json`, with every pair printed so a non-unanimous sign is visible. The pre-push hook runs it after `verify-fast` on the same diffs (`IMP_SKIP_AB=1` skips). It is not a substitute for the context-dependent A/B above: it measures the pin's shape (Qwen3-8B Q8_0, pp512 / tg128, chunk 0) and nothing else.
-- **Peak VRAM is gated too** (`scripts/verify.sh`, both `verify` and `verify-fast`): a `--mem-report` run vs the pinned `metrics.memory_mb.own_peak_mb` against `thresholds.vram_increase_pct`. It gates `own_peak` (this process's allocations since engine init), **not** device `peak_used`, which also carries the CUDA primary context and any neighbour process. `own_peak` measures byte-identical across repeat runs, a stricter signal than any throughput number. (Skip with `IMP_VERIFY_SKIP_VRAM=1`.)
-- **Intentional perf moves:** refresh the baseline with `scripts/gen_perf_baseline.sh` (cold-median: 5 trials, median per metric; re-pins `own_peak_mb` in the same run) and **say so in the PR**. A change that intentionally moves VRAM needs the same refresh.
+  Both pass `--set speculative.ngram=false` now, which `tests/perf_baseline.json` states in its own `methodology` field. Until #1625 only `verify.sh` did, while the two were documented as one gate. A decode delta worse than -8 % **fails**; a prefill delta worse than -8 % warns (cuBLAS variance).
+
+| Rule | Detail |
+|---|---|
+| When it runs | the pre-push hook runs the perf gate only when the diff can move it: `src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build definition, or a baseline file - else it keeps the correctness half (tests, peak VRAM, graphs ON/OFF, degeneration smoke) and skips the three benched processes, half the wall clock (36 s -> 18 s). `scripts/check-release.sh` always runs everything. Of the 40 commits between v0.24.0 and v0.25.0, 13 touch a measured path and 27 do not |
+| Why 8 % and not 3 % | the threshold must sit above this host's own movement or it reports the box instead of the diff: within one session three independent processes agree to 0.16 %, but between sessions the same tree moves ~3.6 % with nothing changed ([`../PERF.md`](../PERF.md), with PROV); ordinary desktop use costs a few percent more, a depressed-host day 8-15 %. The old 3 % sat below all of that and failed on docs-only changes. Still catches the split-K mutation M29 (-36 %, a 4.5x margin). A red gate alone is never proof; the proof is a paired A/B against `main` |
+| Paired arm: `make verify-ab` | `scripts/verify_ab.sh`, `AUDIT_arch_2026` H-3. The single-arm gate compares one tree against a pin measured weeks earlier, and this host moves 4-6 % between sessions (its only catches: -36 % and a miss at -7.3 % shipped/+0.33 %). Builds `origin/main` into `imp:ab-<sha>` once per sha (`scripts/ab_base_image.sh`), runs the gate bench in alternating pairs (A B, B A, A B) against `imp:test` so drift hits both arms equally; verdict is the mean paired decode delta against `thresholds.paired_decode_regression_pct`, every pair printed. Runs after `verify-fast` in the pre-push hook (`IMP_SKIP_AB=1` skips). Not a substitute for the context-dependent A/B above: measures only the pin's shape (Qwen3-8B Q8_0, pp512/tg128, chunk 0) |
+| Peak VRAM gate | `scripts/verify.sh`, both `verify` and `verify-fast`: a `--mem-report` run vs the pinned `metrics.memory_mb.own_peak_mb` against `thresholds.vram_increase_pct`. Gates `own_peak` (this process's allocations since engine init), not device `peak_used` (also carries the CUDA primary context and any neighbour process); `own_peak` is byte-identical across repeat runs. Skip with `IMP_VERIFY_SKIP_VRAM=1` |
+| Intentional perf moves | refresh with `scripts/gen_perf_baseline.sh` (cold-median: 5 trials, median per metric, re-pins `own_peak_mb` in the same run) and say so in the PR; a VRAM-moving change needs the same refresh |
 
 ## Serving KPIs
 
