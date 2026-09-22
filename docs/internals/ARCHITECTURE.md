@@ -1,154 +1,106 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # imp - Architecture
 
-Canonical narrative companion to [`architecture.svg`](../architecture.svg). The SVG shows the structural overview; this file explains each phase and points at the source files that implement it. If the code and this document disagree, the code wins, and the disagreement is a bug in this document.
+If the code and this document disagree, the code wins.
 
 ## Target architecture
 
-**This is the one place in the repository that states what consumer Blackwell has and lacks.** Every other document links here rather than restating it; the `docs_lint.py` forbidden-token check keeps it that way, because the same delimitation used to appear in eight files and a reader could not tell which one was maintained.
+**This is the one place in the repository that states what consumer Blackwell has and lacks.** Every other document links here; `docs_lint.py`'s forbidden-token check keeps it that way.
 
-imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode, with a `compute_120f` PTX fallback for the other consumer Blackwell SKUs. No portability layer, no second target.
+imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode, with a `compute_120f` PTX fallback for other consumer Blackwell SKUs. No portability layer, no second target.
 
-**Consumer Blackwell is not a smaller datacenter Blackwell.** `sm_120a` does *not* have:
-
-| absent on `sm_120a` | where it does exist | consequence for imp |
+| Absent on `sm_120a` | Where it exists | Consequence for imp |
 |---|---|---|
-| `tcgen05` async MMA | datacenter Blackwell (`sm_100`, B200) | the MMA always blocks the issuing warp, so a producer/consumer pipeline cannot be built around it |
+| `tcgen05` async MMA | datacenter Blackwell (`sm_100`, B200) | the MMA always blocks the issuing warp; no producer/consumer pipeline around it |
 | TMEM | `sm_100` | no tensor-memory accumulator ring; accumulators live in registers |
-| `wgmma` | Hopper and `sm_100` | the tensor-core path is register-based `mma.sync`, and the FA4-style warpgroup split is not expressible |
+| `wgmma` | Hopper, `sm_100` | tensor-core path is register-based `mma.sync`; the FA4-style warpgroup split is not expressible |
 
-What `sm_120a` *does* have, and imp uses:
+| Present on `sm_120a`, and used | Detail |
+|---|---|
+| NVFP4 block-scaled `mma.sync`, `kind::mxf4nvf4` | FlashAttention-2-style block scaling, not a B200 kernel design |
+| FP8 MMA `kind::f8f6f4` | `f` family-feature suffix; used for attention scores |
+| TMA bulk-tensor loads, including a CUTLASS warp-specialized grouped-GEMM mainloop | `src/compute/gemm_grouped_nvfp4_smallM.cu:65` wraps `cp.async.bulk.tensor.2d...`, emits `UTMALDG`; the shipped grouped-NVFP4 cubin was verified (`cuobjdump`, #1543) to contain a TMA-WS mainloop on native `sm_120a` SASS - the `compute_120f` PTX fallback loses it |
 
-- **NVFP4 block-scaled `mma.sync` with `kind::mxf4nvf4`**, the FP4 path. FlashAttention-2-style block scaling rather than a B200 kernel design.
-- **FP8 MMA `kind::f8f6f4`**, enabled by the `f` family-feature suffix, used for attention scores.
-- **TMA bulk-tensor loads.** `src/compute/gemm_grouped_nvfp4_smallM.cu:65` wraps `cp.async.bulk.tensor.2d...` and emits `UTMALDG`. Whether the CUTLASS *warp-specialized grouped GEMM tactic* is selectable on this arch is **unresolved** and deliberately not claimed either way; see [`OPEN_QUESTIONS.md`](../audit/docs-rewrite/OPEN_QUESTIONS.md) Q1.
+Kernel designs published for B200 or Hopper do not port as-is; check which architecture a reported FP4 win was measured on. Deeper hardware notes, MMA shapes, measured ceilings: [`SM120.md`](SM120.md).
 
-**The practical consequence, stated once so nobody re-derives it:** kernel designs published for B200 or Hopper do not port. When a paper or a competing engine reports a large FP4 win, check which architecture it was measured on before treating it as a lever here.
+## Pipeline
 
-Deeper hardware notes, MMA shapes and the measured ceilings: [`SM120.md`](SM120.md).
+```mermaid
+flowchart LR
+    subgraph L["1. Load - src/model/"]
+        A["GGUF / SafeTensors loader"] --> B["WeightMap + Tokenizer + ModelConfig"]
+    end
+    subgraph I["2. Engine init - src/runtime/engine.cpp"]
+        C["RuntimeConfig"] --> D["Upload weights + pre-dequant caches"]
+        D --> E["Open T2 arena + graph-slot pool"]
+        E --> F["Init KV cache (caches first, pool takes the residual)"]
+        F --> G["Allocate workspaces"]
+        G --> H["Warmup: capture decode CUDA graph"]
+    end
+    subgraph P["3. Prefill - Engine::step_prefill"]
+        J["Per-chunk forward: RMSNorm to LM head"] --> K["Attention dispatcher"]
+    end
+    subgraph De["4. Decode - Engine::step_decode_forward"]
+        M["Replay CUDA graph"] --> N["Paged attention decode"]
+        N --> O["FFN + LM head GEMV"]
+        O --> Q["Penalties + sampler"]
+        Q --> R["Stop check"]
+        R -->|continue| M
+    end
+    B --> C
+    H --> J
+    K --> M
+```
 
-## At a glance
+Entry points, all in `include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`:
 
-imp runs LLM inference end-to-end in four phases:
+| Phase | Signature |
+|---|---|
+| Load | `imp_model_load(path) → ImpModel` |
+| Engine init | `imp_context_create(model, ImpConfig) → ImpContext` |
+| Prefill | `imp_prefill_with_params(tokens, n) → status` |
+| Decode | `imp_decode_step(params) → next_token` (or streaming: `imp_generate_streaming`) |
 
-1. **Load** - read a GGUF file or a Hugging-Face SafeTensors directory into a `Model` object with a `WeightMap`, a `Tokenizer`, and a `ModelConfig`.
-2. **Engine init** - resolve runtime config, upload weights to VRAM, build the paged KV cache, allocate workspaces, capture CUDA graphs for decode.
-3. **Prefill** - run the prompt through the per-layer forward pass (chunked if the architecture supports it), producing the first-token logits.
-4. **Decode** - replay the captured CUDA graph per token: attention → FFN → LM head → penalties → sampler → stop check, looping until EOS or limit.
+## Components
 
-See [`architecture.svg`](../architecture.svg) for the full graph including the attention dispatcher, memory subsystem, and kernel subsystem.
-
-## Phase 1 - Load (one-time, `src/model/`)
-
-Entry: `imp_model_load(path) → ImpModel` (`include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`).
-
-Format detection inspects the path: a `.gguf` file routes to `src/model/gguf_loader.cpp`; a directory containing `config.json` and `*.safetensors` routes to `src/model/safetensors_loader.cpp`, with optional LLM-Compressor recipe handling in `src/model/llm_compressor_loader.cpp`.
-
-Both loaders produce:
-
-- A **WeightMap** (`src/model/weight_map.cpp`) - tensor name → role.
-- A **Tokenizer** (`src/model/tokenizer.cpp` + `chat_template.cpp` + `jinja.cpp` + optional `sentencepiece_loader.cpp`).
-- A **ModelConfig** + **Model** object (`src/model/model.cpp`, `src/model/model_arch.h`).
-
-## Phase 2 - Engine init (one-time, `src/runtime/engine.cpp`)
-
-Entry: `imp_context_create(model, ImpConfig) → ImpContext`.
-
-`Engine::init()` orchestrates the init pipeline; the major steps are distinct private methods on `Engine`:
-
-| Step | Method | Notes |
+| Component | File | Responsibility |
 |---|---|---|
-| Load runtime config | `RuntimeConfig::load()` | `imp.conf` + `--config` CLI + legacy env-var seeds (`src/runtime/config.cpp`) |
-| Resolve quant/KV/SSM dtypes | `init_resolve_*` group | `init_resolve_kv_dtype_policy_`, `init_resolve_ssm_dtype_`, `init_resolve_fp8_prefill_`, `init_resolve_quant_flags_` |
-| Compute max sequence length | `init_compute_max_seq_len_` | VRAM budget → max context (`src/runtime/vram_budget.cpp`) |
-| Upload weights | `init_weights` | `upload_weight` + `upload_expert_weights` in `src/model/weight_upload.cu`; pre-dequant orchestrated by `src/exec/executor_pre_dequant.cu` (calls per-phase TUs `pre_dequant_phase*.cu`: `pre_dequant_phase0_nvfp4_loader.cu`, `pre_dequant_phase1_fp16_cache.cu`, `pre_dequant_phase2_fp8_cache.cu`, `pre_dequant_phase3_nvfp4_decode.cu`, `pre_dequant_phase3c_mxfp4.cu`, `pre_dequant_phase4_tensor_registry.cu`, `phase4b` drop-source + VRAM reclamation, `phase4c` second-pass FP8 using reclaimed VRAM) |
-| Open the T2 arena + graph slot pool | `engine_arena_open`, `graph_slot_pool_open_for` | Engine-persistent tier, sized from `exec_t2_demand()`. Opened BEFORE the first tenant: the arena acquires its region here, which is what reserves those bytes against everything allocated later |
-| Init KV cache | `init_kv_cache` | **Weight caches are built first, then the pool takes the measured residual.** The reverse order sized the pool from an *estimate* of cache demand and starved the caches when the estimate was low - that is #1103, and it cost ~7x decode on gpt-oss-20b. Paged blocks (`kv_block_size` 16 for every model since 2026-09-07, `kv_cache.block_size` overrides; the "32 when `n_kv_heads <= 4`" rule was measured a 1.5-4.3 % decode loss on the class it targeted, `docs/audit/PERF_LOG.md`; `src/runtime/engine_init_resolver.cpp`, the #1819 class of bug is sizing anything off a constant 16 instead of the resolved value); dtype is FP16 / FP8 / INT8 / INT4 / NVFP4 / MXFP4 |
-| Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~384 MiB default `attention.attn_scores_mib` - see Known limitations), FP8 activation scratch, split-K attn scratch |
-| Warm up | `warmup()` | Captures CUDA graph for decode (`src/runtime/cuda_graph.cu`) |
-| Pre-size speculative scratch | `prewarm_spec_scratch_` | Last step before the allocation-phase guard arms. The verify path's one-shot capacity resolutions happen here rather than at first use, so serving allocates nothing |
-
-The Engine façade (`engine.cpp`, ~570 LOC) delegates to 6 per-subsystem TUs by concern (resolver, weight upload, KV cache, workspaces, scheduler, sampling/stop).
-
-## Phase 3 - Prefill (per request, `Engine::step_prefill`)
-
-Entry: `imp_prefill_with_params(tokens, n) → status`.
-
-Per-chunk loop in `src/exec/executor_forward.cu` (or `executor_forward_moe.cu` for MoE architectures). Each layer runs:
-
-```
-RMSNorm → QKV GEMM + RoPE + KV-cache write → Attention → O proj →
-RMSNorm + residual → FFN (dense SwiGLU or MoE top-k grouped GEMM)
-```
-
-After the last layer of the last chunk: final RMSNorm + LM head → logits.
-
-With an image in the request, the encoder has already run and its merged embeddings replace the expanded `<|image_pad|>` positions before the first layer; on Qwen3-VL the first few layers additionally get DeepStack taps added at those same positions (see **Vision** under Subsystems).
-
-### Attention dispatcher (the central choice)
-
-`executor_attention_prefill.cu` decides which attention kernel to call. Since #687 the prefill gate is **FA2-first**:
-
-```
-const bool force_cublas_attn = per_layer_shapes || attn_sinks != nullptr;
-const bool s_matrix_fits      = attn_scores_buf_ != nullptr && n <= attn_scores_.shape[1];
-const bool prefer_fmha        = !force_cublas_attn && n >= fmha_prefill_threshold;
-
-if (!force_cublas_attn && try_fa2_fp16qk_prefill(...))      // hd==128: O(n) memory, no S-matrix
-    /* handled by FA2 f16-QK */;
-else if (s_matrix_fits && !prefer_fmha)
-    attention_cublas_prefill(...);                          // legacy materialized fallback
-else
-    attention_prefill_dispatch(...);                        // per-dtype FMHA family
-```
-
-The FP16-QK FA2 kernel is the primary path for hd=128 and - since #930/#932 (`attention.fa2_hd256`, default on; `attention.fa2_hd256_bkv=32` is the opt-in two-CTAs-per-SM tile: FA2 kernel -11% at pp4096 on Qwen3.8-27B for +0.53% PPL, see `roadmap.md`) - hd=256 at every length (at-or-above the materialized cuBLAS path: ~parity pp512, +24% pp1024, +52% pp2048), and needs no S-matrix. `attention_cublas_prefill` (cuBLAS QK^T → ~384 MiB S-matrix → causal softmax → cuBLAS PV) stays the fallback for the configs FA2 declines: `hd ∉ {128, 256}`, hd=256 with `fa2_hd256=false`, and `force_cublas_attn` (learned sinks / truly heterogeneous per-layer shapes; uniform GDN/Mamba2-hybrid shapes are FA2-servable since #932). Everything else falls through to `attention_prefill_dispatch`, which selects among the per-dtype FMHA kernels. Full coverage matrix: [`attention-dispatch.md`](ATTENTION_DISPATCH.md).
-
-`force_cublas_attn` is set per-layer for Gemma-4 hd=512 global layers, where FMHA OOMs the 100 KiB smem cap.
-
-Decode attention uses a separate switch on `cache_dtype` further down in the same file, dispatching to one of the paged kernels (INT4 / NVFP4 ± TC / MXFP4-KV / INT8 / FP8 / FP16-paged).
-
-## Phase 4 - Decode loop (per token, `Engine::step_decode_forward`)
-
-Entry: `imp_decode_step(params) → next_token` (or the streaming wrapper `imp_generate_streaming`).
-
-Per token:
-
-1. **Replay** the captured CUDA graph (`src/runtime/cuda_graph.cu`). Graph capture is on unless a `GraphDemotionReason` fires (`src/runtime/graph_eligibility.h`: config `never`, `debug_raw`, calibration, streaming KV, host-resident experts, no pinned sample buffer, KV pressure); an on-device MoE (Qwen3.6-35B-A3B, Qwen3-Coder-30B) captures decode graphs like a dense model.
-2. **Paged attention decode** - kernel chosen by KV dtype.
-3. **FFN GEMV** - dp4a / mma.sync / NVFP4 variants in `executor_ffn.cu`.
-4. **LM head GEMV** → logits.
-5. **Apply penalties** (repeat / freq / presence / DRY) - `src/compute/sampling.cu` (kernels) called from `src/exec/executor.cu`. Parameters are declared in `src/runtime/request.h`.
-6. **Sampler** (temp / top-p / top-k / min-p / typical / mirostat) - `src/compute/sampling.{h,cu}` (`sample_greedy`, `sample_topk_topp`, `sample_mirostat_v2`, `apply_typical_p`).
-7. **Stop check** - EOS, max_tokens, stop strings.
-8. **(Optional) speculative decoding** - batch-1 greedy requests verify drafts as teacher-forced continuation chunks (`src/runtime/engine_spec_ngram.cpp`). Draft sources: the suffix index / n-gram matcher (`src/runtime/suffix_draft.{h,cpp}`, `src/runtime/ngram_draft.h`) and - opt-in - the trained MTP head (`src/runtime/engine_spec_mtp.cpp`, forward in `src/compute/mtp_forward.cu`). Hybrid (SSM/GDN) models participate via a recurrent-state slab snapshot around the verify chunk (a partial acceptance restores the slab and re-forwards the accepted prefix); `speculative.hybrid` in `imp.conf` gates it, imp-cli `--bench` pins it off.
-
-## Subsystems referenced across phases
-
-- **Memory** - has its own design document: [`docs/internals/MEMORY.md`](MEMORY.md) is canonical for anything about ownership, lifetime or capacity, and [`AUDIT.md`](../../AUDIT.md) records what was measured on the way (including the negative results). The short version: five lifetime tiers (T1 model-resident, T2 engine-persistent, T3 pooled fixed-block, T4 forward-scratch, T5 host staging - split into T5a transient and T5b engine-persistent pinned, because a buffer pinned once and reused every decode step cannot obey "load only") over a three-layer stack. `src/memory/backend.{h,cpp}` is the only code that talks to the driver about *device* memory and `memory/host_pinned.{h,cpp}` is its host-side counterpart; `arena` / `block_pool` / `scratch_stack` / `graph_slots` are the tier allocators; `StableSpan` vs `DeviceSpan` encodes in the type system which memory a captured CUDA graph may bake an address into. `src/memory/plan.cpp` plans capacity without querying the device; `src/runtime/vram_budget.cpp` is still the live pass it shadows. Older, still-live pieces: `src/memory/vram_allocator.cu`, `src/memory/kv_cache.cu`, `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cu`, `src/exec/storage_planner.cpp`. Prefix caching (content-addressed KV block reuse) works on hybrid SSM/GDN models via `src/memory/recurrent_snapshot_store.cpp`: one recurrent-state slab per prefill is snapshotted at the largest block-aligned prompt position and restored on a prefix hit - KV blocks alone cannot skip prefill for a recurrent model.
-- **Kernels** - `src/compute/` (attention, GEMM, RMSNorm, RoPE, SwiGLU, softmax, sampling) and `src/quant/` (dequant, FP8 quant, NVFP4 quant).
-- **Constrained decoding** - four grammars, one contract. Each owns a host-side FSM and exposes the same `apply_mask(logits, vocab, stream)`: `JsonConstrainer` (any valid JSON), `SchemaConstrainer` (a JSON Schema, plus the tool-call envelopes), `RegexConstrainer` (`RegexNfa`, shared with JSON-Schema `pattern`), and `GrammarConstrainer` (GBNF - a nondeterministic pushdown simulator in `src/compute/gbnf_grammar.cpp`, so recursive and bracket-balanced formats are expressible where a regex is not). `ConstraintManager` (`src/runtime/constraint_manager.h`) picks at most one per request and is pooled across requests. The mask is applied in `src/exec/executor.cu` through a single `apply_constraint_mask` helper, because the sampling paths that must not bypass it are easy to miss. The scheduler routes any constrained request through the pipelined constrained decode (`Engine::step_constrained_pipeline`), gated on one `needs_constrained` flag - a second flag for the same question is how regex requests ended up taking a different path than the JSON ones for no reason.
-- **Vision** (`src/vision/`) - two shapes, one seam. The Gemma path (SigLIP / gemma4v) loads its encoder from a separate `mmproj.gguf` and produces a fixed token count from a fixed `image_size`. The Qwen3-VL path loads its tower from the checkpoint itself and is *dynamic*: `smart_resize` + `patchify` derive a per-image grid, so the token count varies with the picture, and every workspace is sized from a patch budget (`runtime.vision_max_patches`) rather than an image size - which makes the budget a ceiling, so a larger image is scaled down rather than refused. Both hand the LM a merged embedding, but Qwen3-VL touches the text forward in two more places: `deepstack_inject.cu` adds encoder taps after each of the first few LM layers at the image-token positions (`executor_forward.cu`), and positions are three-axis M-RoPE (`model/mrope_positions.cpp` builds per-token (t,h,w); `compute/rope.cu` applies the section split). One image per request today. The seam is the `<|image_pad|>` placeholder: `model/image_placeholders.cpp` expands it to the encoder's real token count and salts the prefix-cache hash with the image content, since every image token otherwise carries the same id and two different pictures would share a prefix.
-- **Public C API** - `include/imp/{imp,types,error,config}.h`, implemented in `src/api/imp_api.cpp`. ABI-stable per CONTRIBUTING.md.
+| GGUF loader | `src/model/gguf_loader.cpp` | `.gguf` format detection and parse |
+| SafeTensors loader | `src/model/safetensors_loader.cpp` | HF directory (`config.json` + `*.safetensors`) parse |
+| LLM-Compressor recipe loader | `src/model/llm_compressor_loader.cpp` | quantization recipe metadata for compressed-tensors checkpoints |
+| WeightMap | `src/model/weight_map.cpp` | tensor name -> role |
+| Tokenizer + chat template | `src/model/tokenizer.cpp`, `chat_template.cpp`, `jinja.cpp`, `sentencepiece_loader.cpp` | tokenization, Jinja chat templating |
+| Model / ModelConfig | `src/model/model.cpp`, `src/model/model_arch.h` | parsed model object and per-arch config |
+| Engine init orchestrator | `src/runtime/engine.cpp` | `Engine::init()`, delegates to 6 per-subsystem TUs (resolver, weight upload, KV cache, workspaces, scheduler, sampling/stop) |
+| Runtime config | `src/runtime/config.cpp` | `imp.conf` + `--config` + `--set` |
+| VRAM budget (live pass) | `src/runtime/vram_budget.cpp` | current sizing pass; shadowed by `src/memory/plan.cpp` (see `MEMORY.md`) |
+| Weight upload | `src/model/weight_upload.cu` | H2D upload, expert weights |
+| Pre-dequant cache pipeline | `src/exec/executor_pre_dequant.cu` + `pre_dequant_phase0_nvfp4_loader.cu`, `pre_dequant_phase1_fp16_cache.cu`, `pre_dequant_phase2_fp8_cache.cu`, `pre_dequant_phase3_nvfp4_decode.cu`, `pre_dequant_phase3c_mxfp4.cu`, `pre_dequant_phase4_tensor_registry.cu` | FP16/FP8/NVFP4/MXFP4 weight caches; `pre_dequant_phase4_tensor_registry.cu` also does drop-source reclaim (`phase4b`) and reclaimed-VRAM second-pass FP8 (`phase4c`) |
+| KV cache | `src/memory/kv_cache.cu`, `src/runtime/engine_init_resolver.cpp` | paged block pool; `kv_block_size` 16 for every model since 2026-09-07 (`kv_cache.block_size` overrides; the retired "32 when `n_kv_heads <= 4`" rule measured a 1.5-4.3 % decode loss; #1819 is the bug class of sizing off the constant instead of the resolved value) |
+| CUDA graph capture/replay | `src/runtime/cuda_graph.cu`, `src/runtime/graph_eligibility.h` | decode graph capture; demotion reasons (`GraphDemotionReason`: config `never`, `debug_raw`, calibration, streaming KV, host-resident experts, no pinned sample buffer, KV pressure) |
+| Prefill forward (dense) | `src/exec/executor_forward.cu` | per-layer RMSNorm -> attention -> FFN loop |
+| Prefill forward (MoE) | `src/exec/executor_forward_moe.cu` | MoE top-k grouped-GEMM variant of the same loop |
+| Attention dispatcher | `src/exec/executor_attention_prefill.cu`, `src/exec/executor_attention.cu` | per-layer prefill/decode kernel choice; full table: [`ATTENTION_DISPATCH.md`](ATTENTION_DISPATCH.md) |
+| Decode FFN | `src/exec/executor_ffn.cu` | dp4a / mma.sync / NVFP4 GEMV variants |
+| Sampling / penalties | `src/compute/sampling.cu`, `src/compute/sampling.h`, `src/exec/executor.cu` | repeat/freq/presence/DRY penalties (params in `src/runtime/request.h`); temp/top-p/top-k/min-p/typical/mirostat via `sample_greedy`, `sample_topk_topp`, `sample_mirostat_v2`, `apply_typical_p` |
+| Speculative decoding | `src/runtime/engine_spec_ngram.cpp`, `src/runtime/suffix_draft.{h,cpp}`, `src/runtime/ngram_draft.h`, `src/runtime/engine_spec_mtp.cpp`, `src/compute/mtp_forward.cu` | n-gram/suffix draft and opt-in MTP head (`speculative.hybrid` gates hybrid SSM/GDN participation), batch-1 greedy only |
+| Memory subsystem | `src/memory/backend.{h,cpp}` (device), `memory/host_pinned.{h,cpp}` (host); tier allocators `arena`/`block_pool`/`scratch_stack`/`graph_slots`; older still-live pieces `src/memory/vram_allocator.cu`, `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cu`, `src/memory/recurrent_snapshot_store.cpp`, `src/exec/storage_planner.cpp` | tiers, allocators, planner; canonical doc [`MEMORY.md`](MEMORY.md) |
+| Kernels | `src/compute/`, `src/quant/` | attention, GEMM, RMSNorm, RoPE, SwiGLU, softmax, sampling, dequant/quant |
+| Constrained decoding | `src/runtime/constraint_manager.h` (`ConstraintManager`), `src/compute/gbnf_grammar.cpp` | `JsonConstrainer`, `SchemaConstrainer`, `RegexConstrainer` (shares `RegexNfa` with JSON-Schema `pattern`), `GrammarConstrainer` (GBNF); one `apply_mask(logits, vocab, stream)` contract applied via `apply_constraint_mask` in `src/exec/executor.cu`; routed through `Engine::step_constrained_pipeline` on the `needs_constrained` flag |
+| Vision | `src/vision/` | SigLIP/gemma4v (fixed token count) and Qwen3-VL (dynamic, patch-budget-sized, DeepStack taps, M-RoPE) |
+| Public C API | `src/api/imp_api.cpp`, `include/imp/{imp,types,error,config}.h` | ABI-stable entry points (`CONTRIBUTING.md`) |
 
 ## Known limitations
 
-- **The cuBLAS attention path allocates ~384 MiB of S-matrix workspace** (default `attention.attn_scores_mib`), which caps maximum context length for that legacy path. FA2 is the primary prefill kernel for hd=128 (#687) and hd=256 (#932), and on FA2-served configs the S-matrix is skipped entirely at init - so this only applies to the remaining cuBLAS fallback configs (heterogeneous shapes, learned sinks, opted-out hd=256).
-- **`process_diag` is a process-wide config snapshot.** `RuntimeConfig` itself is per-Engine since Phase 5 Track D, but the leaf-utility diagnostics cache (`src/core/process_diag.h`) is seeded once per process - two Engines with *different* diagnostics/attention-variant settings in one process would fight over it.
+| Limitation | Affected | Detail |
+|---|---|---|
+| cuBLAS attention path allocates ~384 MiB S-matrix workspace (`attention.attn_scores_mib`) | legacy cuBLAS fallback configs only (heterogeneous per-layer shapes, learned sinks, opted-out hd=256) | FA2 is primary for hd=128 (#687) and hd=256 (#932); S-matrix is skipped at init on FA2-served configs |
+| `process_diag` is a process-wide config snapshot (`src/core/process_diag.h`) | multi-`Engine` process with different diagnostics/attention-variant settings per Engine | `RuntimeConfig` itself is per-Engine; the leaf-utility diagnostics cache is seeded once per process |
 
-## Re-rendering the diagram
-
-```bash
-docker run --rm -v "$(pwd)/docs:/d" nshine/dot \
-  dot -Tsvg /d/architecture.dot -o /d/architecture.svg
-docker run --rm -v "$(pwd)/docs:/d" nshine/dot \
-  dot -Tpng /d/architecture.dot -o /d/architecture.png
-```
-
-Edit `architecture.dot` first, then regenerate both raster forms.
+Also owned by [`docs/LIMITATIONS.md`](../LIMITATIONS.md).
