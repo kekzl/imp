@@ -3,6 +3,7 @@
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cstdint>
 
 namespace imp {
@@ -10,7 +11,8 @@ namespace imp {
 namespace {
 
 constexpr int D = kQsaDim;
-constexpr int kSelThreads = 256;
+constexpr int kSelThreads = 1024;  // block_rank assumes 32 warps
+constexpr int kScoreWarps = 8;
 
 __device__ __forceinline__ float block_sum_128(float v, float* red) {
     // 128 threads = 4 warps.
@@ -90,59 +92,94 @@ __global__ void qsa_pool_blocks_kernel(const half* __restrict__ raw_keys, const 
     block_keys[static_cast<size_t>(b) * D + d] = __float2half(out);
 }
 
-// Inclusive scan of one int per thread over the block (kSelThreads), result in `buf[tid]`.
-__device__ __forceinline__ int block_scan_incl(int v, int* buf) {
-    const int t = threadIdx.x;
-    buf[t] = v;
-    __syncthreads();
-    for (int o = 1; o < kSelThreads; o <<= 1) {
-        const int u = (t >= o) ? buf[t - o] : 0;
-        __syncthreads();
-        buf[t] += u;
-        __syncthreads();
+// grid (x, rows), block kScoreWarps * 32: one warp per block key (256 B, coalesced),
+// grid-stride over the row's complete blocks. score = sum_h relu(q_h . blk) / sqrt(D).
+__global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half* __restrict__ q,
+                                                                     const int* __restrict__ positions,
+                                                                     const half* __restrict__ block_keys,
+                                                                     float* __restrict__ scores,
+                                                                     int max_blocks, QsaGeom g) {
+    const int r = blockIdx.y, lane = threadIdx.x & 31;
+    const int nb = (positions[r] + 1) / g.ratio;
+    float qr[4][4];
+#pragma unroll
+    for (int h = 0; h < 4; ++h) {
+        const uint2 u = h < g.n_heads ? *reinterpret_cast<const uint2*>(
+                                            q + (static_cast<size_t>(r) * g.n_heads + h) * D + lane * 4)
+                                      : make_uint2(0u, 0u);
+        const float2 a = __half22float2(*reinterpret_cast<const half2*>(&u.x));
+        const float2 b = __half22float2(*reinterpret_cast<const half2*>(&u.y));
+        qr[h][0] = a.x, qr[h][1] = a.y, qr[h][2] = b.x, qr[h][3] = b.y;
     }
-    return buf[t];
+    const float inv_sqrt = rsqrtf(static_cast<float>(D));
+    float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
+    const int stride = gridDim.x * kScoreWarps;
+    for (int b = blockIdx.x * kScoreWarps + (threadIdx.x >> 5); b < nb; b += stride) {
+        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D + lane * 4);
+        const float2 k0 = __half22float2(*reinterpret_cast<const half2*>(&u.x));
+        const float2 k1 = __half22float2(*reinterpret_cast<const half2*>(&u.y));
+        float dot[4];
+#pragma unroll
+        for (int h = 0; h < 4; ++h)
+            dot[h] = qr[h][0] * k0.x + qr[h][1] * k0.y + qr[h][2] * k1.x + qr[h][3] * k1.y;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1)
+#pragma unroll
+            for (int h = 0; h < 4; ++h)
+                dot[h] += __shfl_xor_sync(0xffffffffu, dot[h], o);
+        if (lane == 0) {
+            float s = 0.0f;
+            for (int h = 0; h < g.n_heads; ++h)
+                s += fmaxf(dot[h], 0.0f);
+            my_scores[b] = s * inv_sqrt;
+        }
+    }
 }
 
-// One CTA per query row. Scores, radix-selects the k-th largest score (exact float key),
-// then compacts the selected blocks in ascending order, ties by lowest index.
-__global__ void __launch_bounds__(kSelThreads)
-qsa_select_kernel(const half* __restrict__ q, const int* __restrict__ positions,
-                  const half* __restrict__ block_keys, float* __restrict__ scores, int max_blocks,
-                  int32_t* __restrict__ sel_tokens, int32_t* __restrict__ sel_count, QsaGeom g) {
-    __shared__ float sq[4 * D];
+// Exclusive rank of `pred` over the CTA (kSelThreads = 32 warps) and the CTA total, via
+// warp ballots. `wsum` holds 33 ints; a caller reuses it only after a barrier.
+__device__ __forceinline__ int block_rank(bool pred, int* wsum, int& total) {
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+    const unsigned m = __ballot_sync(0xffffffffu, pred);
+    if (lane == 0)
+        wsum[w] = __popc(m);
+    __syncthreads();
+    if (w == 0) {
+        const int v = wsum[lane];
+        int incl = v;
+        for (int o = 1; o < 32; o <<= 1) {
+            const int n = __shfl_up_sync(0xffffffffu, incl, o);
+            if (lane >= o)
+                incl += n;
+        }
+        wsum[lane] = incl - v;
+        if (lane == 31)
+            wsum[32] = incl;
+    }
+    __syncthreads();
+    total = wsum[32];
+    return wsum[w] + __popc(m & ((1u << lane) - 1u));
+}
+
+// One CTA per query row over the scores of qsa_score_kernel. Radix-selects the k-th largest
+// score (exact float key), then compacts the selected blocks in ascending order, ties by
+// lowest index.
+__global__ void __launch_bounds__(kSelThreads) qsa_select_kernel(const int* __restrict__ positions,
+                                                                 const float* __restrict__ scores,
+                                                                 int max_blocks,
+                                                                 int32_t* __restrict__ sel_tokens,
+                                                                 int32_t* __restrict__ sel_count, QsaGeom g) {
     __shared__ int hist[256];
-    __shared__ int scan_buf[kSelThreads];
-    __shared__ int s_bcast[4];
-    const int r = blockIdx.x, t = threadIdx.x;
+    __shared__ int rank_eq[33], rank_take[33];
+    __shared__ int s_bcast[2];
+    const int r = blockIdx.x, t = threadIdx.x, lane = t & 31;
     const int p = positions[r];
     const int nb = (p + 1) / g.ratio;
     const int topk = g.budget / g.ratio;
     const int k = nb < topk ? nb : topk;
     const int cap = g.budget + g.ratio - 1;
-    float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
+    const float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
     int32_t* out = sel_tokens + static_cast<size_t>(r) * cap;
-
-    for (int i = t; i < g.n_heads * D; i += kSelThreads)
-        sq[i] = __half2float(q[static_cast<size_t>(r) * g.n_heads * D + i]);
-    __syncthreads();
-
-    const float inv_sqrt = rsqrtf(static_cast<float>(D));
-    for (int b = t; b < nb; b += kSelThreads) {
-        const half2* bk = reinterpret_cast<const half2*>(block_keys + static_cast<size_t>(b) * D);
-        float s = 0.0f;
-        for (int h = 0; h < g.n_heads; ++h) {
-            float dot = 0.0f;
-            const float* qh = sq + h * D;
-            for (int i = 0; i < D / 2; ++i) {
-                const float2 kv = __half22float2(bk[i]);
-                dot += qh[2 * i] * kv.x + qh[2 * i + 1] * kv.y;
-            }
-            s += fmaxf(dot, 0.0f);
-        }
-        my_scores[b] = s * inv_sqrt;
-    }
-    __syncthreads();
 
     // Threshold key T (k-th largest) and how many ties at T to take, ascending.
     uint32_t T = 0;
@@ -151,8 +188,8 @@ qsa_select_kernel(const half* __restrict__ q, const int* __restrict__ positions,
         uint32_t prefix = 0, mask_hi = 0;
         int remaining = k;
         for (int shift = 24; shift >= 0; shift -= 8) {
-            for (int i = t; i < 256; i += kSelThreads)
-                hist[i] = 0;
+            if (t < 256)
+                hist[t] = 0;
             __syncthreads();
             for (int b = t; b < nb; b += kSelThreads) {
                 const uint32_t key = __float_as_uint(my_scores[b]);
@@ -160,17 +197,34 @@ qsa_select_kernel(const half* __restrict__ q, const int* __restrict__ positions,
                     atomicAdd(&hist[(key >> shift) & 255], 1);
             }
             __syncthreads();
-            if (t == 0) {
-                int cum = 0, digit = 0;
-                for (int dgt = 255; dgt >= 0; --dgt) {
-                    if (cum + hist[dgt] >= remaining) {
-                        digit = dgt;
-                        break;
-                    }
-                    cum += hist[dgt];
+            // Warp 0: lane l owns digits 255 - 8l .. 248 - 8l; the lane whose running count
+            // (from the top) first reaches `remaining` walks its 8 digits.
+            if (t < 32) {
+                int c[8], sum = 0;
+#pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    c[j] = hist[255 - 8 * lane - j];
+                    sum += c[j];
                 }
-                s_bcast[0] = digit;
-                s_bcast[1] = cum;
+                int incl = sum;
+                for (int o = 1; o < 32; o <<= 1) {
+                    const int n = __shfl_up_sync(0xffffffffu, incl, o);
+                    if (lane >= o)
+                        incl += n;
+                }
+                const unsigned hit = __ballot_sync(0xffffffffu, incl >= remaining);
+                if (lane == __ffs(hit) - 1) {
+                    int cum = incl - sum, digit = 0;
+                    for (int j = 0; j < 8; ++j) {
+                        if (cum + c[j] >= remaining) {
+                            digit = 255 - 8 * lane - j;
+                            break;
+                        }
+                        cum += c[j];
+                    }
+                    s_bcast[0] = digit;
+                    s_bcast[1] = cum;
+                }
             }
             __syncthreads();
             const int digit = s_bcast[0];
@@ -193,14 +247,12 @@ qsa_select_kernel(const half* __restrict__ q, const int* __restrict__ positions,
             is_gt = (nb <= k) || (key > T);
             is_eq = (nb > k) && (key == T);
         }
-        const int eq_incl = block_scan_incl(is_eq, scan_buf);
-        const int eq_total = scan_buf[kSelThreads - 1];
-        const int take = is_gt || (is_eq && (eq_seen + eq_incl - 1) < need_eq);
-        __syncthreads();
-        const int take_incl = block_scan_incl(take, scan_buf);
-        const int take_total = scan_buf[kSelThreads - 1];
+        int eq_total, take_total;
+        const int eq_excl = block_rank(is_eq, rank_eq, eq_total);
+        const int take = is_gt || (is_eq && (eq_seen + eq_excl) < need_eq);
+        const int take_excl = block_rank(take, rank_take, take_total);
         if (take) {
-            const int slot = out_blocks + take_incl - 1;
+            const int slot = out_blocks + take_excl;
             for (int j = 0; j < g.ratio; ++j)
                 out[slot * g.ratio + j] = b * g.ratio + j;
         }
@@ -272,8 +324,19 @@ void qsa_select(const half* q, const int* positions, const half* block_keys, flo
     if (rows <= 0)
         return;
     IMP_CHECK(g.n_heads <= 4, "qsa_select: %d indexer heads, kernel holds 4", g.n_heads);
-    qsa_select_kernel<<<rows, kSelThreads, 0, stream>>>(q, positions, block_keys, scores, max_blocks,
-                                                        sel_tokens, sel_count, g);
+    static const int n_sms = [] {
+        int dev = 0, n = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev);
+        return n > 0 ? n : 1;
+    }();
+    // Two waves of score CTAs over all rows, never more CTAs per row than blocks to score.
+    const int gx = std::max(1, std::min((max_blocks + kScoreWarps - 1) / kScoreWarps, 2 * n_sms / rows));
+    qsa_score_kernel<<<dim3(gx, rows), kScoreWarps * 32, 0, stream>>>(q, positions, block_keys, scores,
+                                                                      max_blocks, g);
+    IMP_CUDA_CHECK_LAUNCH();
+    qsa_select_kernel<<<rows, kSelThreads, 0, stream>>>(positions, scores, max_blocks, sel_tokens, sel_count,
+                                                        g);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

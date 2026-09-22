@@ -5,6 +5,8 @@
 //   SelectMatchesCpuTopk: > 512 blocks, scores and the top-k set (ties: lowest index) and
 //     the tail against a CPU reference.
 //   PrepQueriesMatchesCpu: (1+w) norm + NeoX RoPE on the first rope_dim dims of a head.
+//   SixteenRowGqaSplitKMatchesGqaKernel: the 16-row prefill pass engages split-K (24/2 heads)
+//     and matches the GQA kernel within 2e-3.
 #include <gtest/gtest.h>
 #include "compute/attention_paged.h"
 #include "compute/qsa_indexer.h"
@@ -132,15 +134,17 @@ TEST(QsaIndexer, AllTrueSelectionMatchesDensePaged) {
 
 TEST(QsaIndexer, SelectMatchesCpuTopk) {
     const QsaGeom g = geom();
-    const int rows = 2;
-    const int positions_h[rows] = {2051, 3001};  // 512 and 750 complete blocks
-    const int nb_max = 3001 / g.ratio + 2, cap = g.budget + g.ratio - 1;
+    const int rows = 4;
+    // 512 and 750 complete blocks; 5000 (row 2: zero query, every score ties at 0) and 5000.
+    const int positions_h[rows] = {2051, 3001, 20001, 20003};
+    const int nb_max = 20003 / g.ratio + 2, cap = g.budget + g.ratio - 1;
     std::mt19937 rng(11);
     auto Qi = rand_half(static_cast<size_t>(rows) * g.n_heads * D, rng);
     auto BK = rand_half(static_cast<size_t>(nb_max) * D, rng);
     // Force ties: blocks 100..109 of row 1 identical keys.
     for (int b = 101; b < 110; ++b)
         std::copy(BK.begin() + 100 * D, BK.begin() + 101 * D, BK.begin() + static_cast<size_t>(b) * D);
+    std::fill(Qi.begin() + 2 * g.n_heads * D, Qi.begin() + 3 * g.n_heads * D, __float2half(0.0f));
     std::vector<int> pos(positions_h, positions_h + rows);
     half *dQi = up(Qi), *dBK = up(BK);
     int* dpos = up(pos);
@@ -179,6 +183,8 @@ TEST(QsaIndexer, SelectMatchesCpuTopk) {
         const int k = std::min(topk, nb);
         std::vector<int> want(order.begin(), order.begin() + k);
         std::sort(want.begin(), want.end());
+        if (r == 2)
+            ASSERT_EQ(want.back(), k - 1) << "all-tie row must take the lowest block indices";
         ASSERT_EQ(cnt[r], k * g.ratio + (p + 1 - nb * g.ratio)) << "row " << r;
         for (int i = 0; i < k; ++i)
             for (int j = 0; j < g.ratio; ++j)
@@ -311,4 +317,45 @@ TEST(QsaIndexer, SplitKBelowBudgetMatchesDensePaged) {
         mism += (__half_as_ushort(od[i]) != __half_as_ushort(os[i]));
     EXPECT_EQ(mism, 0u) << "split-K selected path differs from dense paged in " << mism << " of " << od.size()
                         << " halfs";
+}
+
+// 16 rows x 24/2 heads (the QSA prefill pass): batch * n_heads = 384 >= 2 * SMs, but the no-split
+// kernel would launch batch * n_kv = 32 CTAs, so split-K engages. Split-K vs the GQA kernel.
+TEST(QsaIndexer, SixteenRowGqaSplitKMatchesGqaKernel) {
+    const int nh = 24, nkv = 2, hd = 256, bs = 16, rows = 16, ctx = 2051;
+    const int nblk = (ctx + bs - 1) / bs;
+    std::mt19937 rng(23);
+    auto K = rand_half(static_cast<size_t>(rows) * nblk * bs * nkv * hd, rng);
+    auto V = rand_half(K.size(), rng);
+    auto Q = rand_half(static_cast<size_t>(rows) * nh * hd, rng);
+    std::vector<int> bt(static_cast<size_t>(rows) * nblk), cl(rows, ctx);
+    std::iota(bt.begin(), bt.end(), 0);
+    half *dK = up(K), *dV = up(V), *dQ = up(Q), *dOg = nullptr, *dOs = nullptr;
+    int *dbt = up(bt), *dcl = up(cl);
+    cudaMalloc(&dOg, Q.size() * sizeof(half));
+    cudaMalloc(&dOs, Q.size() * sizeof(half));
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    Tensor tQ = f16(dQ, {rows, 1, nh, hd}), tK = f16(dK, {rows * nblk, bs, nkv, hd}),
+           tV = f16(dV, {rows * nblk, bs, nkv, hd}), tOg = f16(dOg, {rows, 1, nh, hd}),
+           tOs = f16(dOs, {rows, 1, nh, hd});
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    paged_attention_decode(tQ, tK, tV, tOg, dbt, dcl, bs, scale, ctx, 0, 0.0f, nullptr, nblk, 0, nullptr, hd);
+    const size_t splitk_sz = static_cast<size_t>(rows) * nh * 64 * (2 + hd) * sizeof(float);
+    void* splitk = nullptr;
+    cudaMalloc(&splitk, splitk_sz);
+    paged_attention_set_splitk_scratch(splitk, splitk_sz);
+    paged_attention_decode(tQ, tK, tV, tOs, dbt, dcl, bs, scale, ctx, 0, 0.0f, nullptr, nblk, 0, nullptr, hd);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(splitk);
+    auto og = down(dOg, Q.size());
+    auto os = down(dOs, Q.size());
+    float max_diff = 0.0f;
+    size_t mism = 0;
+    for (size_t i = 0; i < og.size(); ++i) {
+        max_diff = std::max(max_diff, std::fabs(__half2float(og[i]) - __half2float(os[i])));
+        mism += (__half_as_ushort(og[i]) != __half_as_ushort(os[i]));
+    }
+    EXPECT_LT(max_diff, 2e-3f) << "split-K vs GQA kernel at 16 rows";
+    EXPECT_GT(mism, 0u) << "bit-identical: the second call ran the GQA kernel again, split-K never engaged";
 }

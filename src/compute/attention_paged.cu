@@ -1151,6 +1151,9 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                            : 0;
     int total_blocks_nosplit = (mt_hpc > 0) ? batch_size * n_kv_heads * (n_q_per_kv_mt / mt_hpc)
                                             : batch_size * n_heads;
+    // Without multitok the no-split kernel is paged_attention_gqa_kernel: batch * n_kv_heads CTAs,
+    // not batch * n_heads. Qwen3.8-Flash-Next (24/2 heads) at 16 rows: 32 CTAs, 1.04 ms per call.
+    const bool gqa_fallback = mt_hpc == 0 && n_q_per_kv_mt > 1 && n_q_per_kv_mt <= MAX_Q_PER_KV;
     int num_splits = 1;
     const bool is_mla_asymmetric = (vhd != head_dim);
 
@@ -1164,6 +1167,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // each split gets enough KV blocks to amortize the merge overhead.
         // The Phase 2 merge kernel costs ~5µs — need ≥4 KV blocks/split to break even.
         int target_blocks = 2 * num_sms;
+        if (total_blocks_nosplit >= target_blocks && gqa_fallback)
+            total_blocks_nosplit = batch_size * n_kv_heads;
         if (total_blocks_nosplit >= target_blocks) {
             num_splits = 1;  // already enough parallelism from batch*heads
         } else {

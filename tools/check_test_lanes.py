@@ -290,7 +290,9 @@ def main():
     # 1137 -> 1138: QsaIndexer.SplitKBelowBudgetMatchesDensePaged (test-attention): the QSA
     # selected path below the budget against dense paged WITH the split-K scratch the executor
     # hands it, which is the configuration where passing the constant cap changed the order.
-    PINNED = 1138
+    # 1138 -> 1139: QsaIndexer.SixteenRowGqaSplitKMatchesGqaKernel (test-attention): 16 rows x
+    # 24/2 heads engage split-K instead of the 32-CTA GQA kernel, output within 2e-3.
+    PINNED = 1139
 
     text = CMAKE.read_text()
     mods = module_sources(text)
