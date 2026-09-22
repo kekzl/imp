@@ -1,15 +1,14 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-31
-commit: a81792d8
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # Deployment
 
-Running imp as a service. Read [`LIMITATIONS.md`](LIMITATIONS.md) first:
-several entries there are deployment decisions, in particular that one GPU
-holds one model and that nothing is covered by an SLO.
+Running imp as a service. [`LIMITATIONS.md`](LIMITATIONS.md) first: several
+entries there are deployment decisions - one GPU holds one model, nothing is covered by an SLO.
 
 ## Compose
 
@@ -31,9 +30,13 @@ volumes:
 ```
 
 The cache volume is not optional in a service context: without it every
-restart re-transforms the weights. Must be writable by the container user; a
-fresh volume owned by root silently disables the warm weight cache and the
-library-reserve measurement.
+restart re-transforms the weights into `<model-name>-<hash>.impwcache` under
+`~/.cache/imp/warm` (`[warm_cache] dir` to override) again. Must be writable
+by the container user; a fresh volume owned by root silently disables the
+warm weight cache (on by default, `[warm_cache] enabled = false` to opt out)
+and the library-reserve measurement. Raw quant payloads are never duplicated:
+near-zero size for raw-served GGUF/NVFP4-prequant, ~model-size for BF16-dense.
+A stale cache (changed model file) is detected and ignored.
 
 ## Configuration
 
@@ -48,8 +51,7 @@ a typo used to measure the default silently. An unknown key in `imp.conf`
 stays a warning, because a config file may outlive the build that understood
 every key in it.
 
-Every key, with defaults: `src/runtime/config.h` is the source of truth;
-[`usage.md`](usage.md#configuration--impconf) is the readable version.
+Every key, with defaults: `src/runtime/config.h` is the source of truth; [`CONFIG.md`](CONFIG.md#impconf) is the readable version.
 
 ### From a container
 
@@ -79,13 +81,11 @@ The rest - `IMP_MODEL`, `IMP_HOST`, `IMP_PORT`, `IMP_API_KEY`,
 since arrives through `IMP_SET`.
 
 **A pin can invert without being edited.** `IMP_KV_FP8=1` saves KV memory on
-most families and costs it on one, because `auto` resolves NVFP4 where that has
-been measured safe and FP8 is the wider type there. The engine now says so at
-startup instead of leaving it to be discovered
-([`plans/2026-08-29-qwen38-long-context-posture.md`](plans/2026-08-29-qwen38-long-context-posture.md)).
+most families and costs it on one, because `auto` resolves NVFP4 where that
+has been measured safe and FP8 is the wider type there - the engine says so at
+startup ([`plans/2026-08-29-qwen38-long-context-posture.md`](plans/2026-08-29-qwen38-long-context-posture.md)).
 The legacy KV names also outrank a `kv_cache.dtype` from `IMP_SET` in either
-order - `--kv-fp8` sets the dtype directly, ahead of the config file - so the
-entrypoint warns when both are set.
+order - `--kv-fp8` sets the dtype directly - so the entrypoint warns when both are set.
 
 The settings that most often need changing in a deployment:
 
@@ -115,8 +115,7 @@ a supervisor can tell a bad argument from a full GPU without parsing prose.
 | 8 | cancelled | n/a |
 | 9 | capacity: the KV pool cannot fit this prompt | yes, shorter prompt or more VRAM |
 
-Codes above 9 are unused. `imp-quantize` returned 2 for usage errors before
-this; it returns 1 now, with every other invalid argument.
+Codes above 9 are unused; `imp-quantize` returns 1 for usage errors (was 2), same as every other invalid argument.
 
 ## Auth and exposure
 
@@ -128,14 +127,12 @@ this; it returns 1 now, with every other invalid argument.
 
 **No default credential, no default refusal.** Without `--api-key` every
 endpoint is open to whoever can reach the port: the shipped compose file
-publishes on `127.0.0.1`, and widening it is a two-part change, `IMP_BIND`
-plus `IMP_API_KEY` together (#1619).
+publishes on `127.0.0.1`; widening it is a two-part change, `IMP_BIND` plus `IMP_API_KEY` together (#1619).
 
 **`--trusted-proxy` makes rate limiting work behind a proxy.** Without it
 `X-Forwarded-For` is ignored and every request from the proxy shares one
-bucket; with it the header is believed from those peers only. Believing it
-from anyone else would let a client vary the header per request and bypass
-the limit (#1614).
+bucket; with it the header is believed from those peers only - believing it
+from anyone else would let a client vary the header and bypass the limit (#1614).
 
 Per-request work is capped independently of the rate limit (one request can
 ask for many units of it):
@@ -150,10 +147,8 @@ ask for many units of it):
 | `--http-write-timeout` | 600 s | socket write, must outlast a stream |
 | `--http-keep-alive-max` | 100 | requests per connection |
 
-**CORS is wide open by design** (`Access-Control-Allow-Origin: *` plus an
-`OPTIONS` catch-all): the built-in web UI and browser clients call the API
-directly. imp does not do TLS; if reachable beyond your own network,
-terminate TLS and enforce origin policy at a reverse proxy.
+**CORS is wide open by design** (`Access-Control-Allow-Origin: *` plus an `OPTIONS` catch-all): the built-in web UI and browser clients call the API
+directly. imp does not do TLS; terminate TLS and enforce origin policy at a reverse proxy if reachable beyond your own network.
 
 A minimal nginx front:
 
@@ -172,13 +167,11 @@ location / {
 
 `proxy_buffering off` is the line people forget: with buffering on, streaming
 responses arrive in one lump at the end and every client reports TTFT equal
-to total latency.
-
-`limit_conn` is the connection-level backpressure imp itself does not have:
-`--max-concurrent` and `--rate-limit` run after a request body is fully read,
-and the worker pool is `--max-concurrent + 8` threads with a 60 s read
-timeout, so a peer holding open connections that never finish a body ties up
-workers no imp-side guard can see. Cap connections per peer at the proxy.
+to total latency. `limit_conn` is the connection-level backpressure imp
+itself does not have: `--max-concurrent`/`--rate-limit` run only after a
+request body is fully read, and the worker pool (`--max-concurrent + 8`
+threads, 60 s read timeout) can be tied up by a peer holding open connections
+that never finish a body - cap connections per peer at the proxy.
 
 ## Health, metrics, lifecycle
 
@@ -187,22 +180,28 @@ workers no imp-side guard can see. Cap connections per peer at the proxy.
 | `GET /health` | liveness. Answers before a model is loaded, and 200 while suspended or mid-swap |
 | `GET /ready` | readiness. 200 only when an inference request would be taken now; 503 with `code` `no_model`, `suspended`, `swapping` or `draining` otherwise. Point an orchestrator's readiness probe here, its liveness probe at `/health` |
 | `GET /metrics` | Prometheus. Latency histograms (request, TTFT, inter-token, queue), decode batch size, refusal and cancellation counters, and a memory breakdown that separates capacity from occupancy |
-| `GET /v1/models` | what is loaded, and what else is in the models directory |
-| `POST /admin/suspend` | park the weights in host RAM and free the GPU completely. Inference answers 503 while suspended |
-| `POST /admin/resume` | restore warm, in seconds, without re-reading weights |
+| `GET /v1/models` | what is loaded, and what else is in the models directory. Requests must name the served model; any other value gets `404 model_not_found` - inference never triggers a load/swap on its own |
+| `POST /admin/suspend` | park the weights in host RAM (`[suspend] device_reset`, default on: also `cudaDeviceReset()` so `nvidia-smi` reads ~0 MiB) and free the GPU. Inference answers 503, `/health` reports `"suspended": true` at 200. Fails cleanly (507) when host `MemAvailable` is below snapshot size + `[suspend] host_ram_headroom_mb`. Models whose device buffers are transformed in place after upload (native MXFP4 GGUF, gpt-oss, Gemma-4 fused-expert split) are refused with 501 |
+| `POST /admin/resume` | restore from RAM (no mmap re-read, no requantization), serving again in seconds. Sessions/KV do not survive; only weights stay warm |
 
-Suspend/resume frees the GPU temporarily without paying a cold load
-afterwards. Sessions and KV do not survive it; weights do.
+**Shutdown** (SIGTERM/SIGINT): the listener stops, requests already accepted
+answer 503, `/ready` reports `draining`, and in-flight generations get
+`server.model_swap_drain_ms` (60 s default) to finish before teardown.
+`docker-compose.yml` sets `stop_grace_period: 75s` to cover that; a bare
+`docker stop` (10 s default) kills a draining server. While a swap or
+`/admin/suspend` holds the engine lock, inference answers 503
+(`overloaded_error`) within 250 ms rather than parking a worker thread.
 
-**Shutdown** (SIGTERM / SIGINT): the listener stops, requests already
-accepted answer 503, `/ready` reports `draining`, and in-flight generations
-get `server.model_swap_drain_ms` (60 s default) to finish before the engine
-is torn down. `docker-compose.yml` sets `stop_grace_period: 75s` to cover
-that; a bare `docker stop` with its 10 s default kills a draining server.
-
-While a model swap or `/admin/suspend` holds the engine lock, inference
-requests answer 503 (`overloaded_error`) within 250 ms instead of parking a
-worker thread until the swap completes.
+**Context-window reporting.** `/v1/models` carries vLLM's `max_model_len` and
+llama.cpp's `meta.n_ctx_train`; `GET /props` returns llama.cpp's `n_ctx`
+(top-level and under `default_generation_settings`); `GET /info` TGI's
+`max_total_tokens`/`max_input_tokens` - all three report the smaller of the
+resolver's plan and the pool's clamp since #1542 (97204 vs 52256 measured
+on a tight Qwen3.8-27B-NVFP4 card). A growable pool (`kv_cache.growable`,
+default on) counts by its ceiling: starts at `kv_cache.growable_initial_pct`
+(25%) of the plan, grows at admission (measured: 875 of 13264 blocks
+committed, 131072 advertised). `/health` reports both: `kv_capacity_tokens`
+for the commit, `kv_ceiling_blocks` for the ceiling.
 
 ### Which series answer which question
 
@@ -236,19 +235,16 @@ Size the deployment from the model plus the KV pool you intend to serve; pin
 model and invariants: [`internals/MEMORY.md`](internals/MEMORY.md).
 
 **Host RAM: read `RssAnon`, not `VmRSS`.** The loader maps the checkpoint and
-faults it in, and imp drops those pages again once the weights are on the GPU
-(#1934). Before that it held the whole file resident for the process lifetime:
-Qwen3.8-27B-NVFP4-vllm read 21.53 GiB of `VmRSS`, of which 18.48 GiB was the
-mapping and 1.01 GiB was actually anonymous. `docker stats` showed 3.2 GiB
-throughout, because the cgroup does not account a shared file mapping the way
-`ps` does, so the two disagree by design. Weights left on host by an offload
-placement refault on demand and are counted again while they are being read.
+faults it in, dropping those pages again once weights are on the GPU (#1934).
+Before that it held the whole file resident: Qwen3.8-27B-NVFP4-vllm read
+21.53 GiB of `VmRSS` (18.48 GiB mapping, 1.01 GiB anonymous) while `docker
+stats` showed 3.2 GiB, because the cgroup does not account a shared file
+mapping the way `ps` does. Weights left on host by an offload placement
+refault on demand and are counted again while being read.
 
 ## Serving more than one model
 
-One GPU holds one model. `server.model_swap` (default on): a request naming a
-different model from the models directory swaps to it. In-flight generations
-drain first, never cancelled; a failed load restores the previous model. The
-requesting call pays the load, cheap on repeats via the warm weight cache.
-
-Strict single-model semantics: `server.model_swap=false`.
+One GPU holds one model; `server.model_swap` (default on, table above) drains
+in-flight generations first, never cancels them, and a failed load restores
+the previous model. The requesting call pays the load, cheap on repeats via
+the warm weight cache. Strict single-model semantics: `server.model_swap=false`.
