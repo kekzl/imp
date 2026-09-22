@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-22
-commit: 2c436aba
+verified: 2026-09-23
+commit: 19dda319
 -->
 
 # src/compute - CUDA kernels
@@ -33,8 +33,7 @@ Decode-attention variant selection lives one level up: `src/exec/executor_attent
 After `make build`: `test-compute`, `test-attention` cover this directory (`test-quant`, `test-kv`, `test-moe-gdn` cover theirs); all need a GPU.
 
 ```
-docker run --rm --gpus all -v $PWD:/src -w /src imp:test \
-    ./build/test-attention --gtest_filter='*Paged*'
+docker run --rm --gpus all --entrypoint test-attention imp:test --gtest_filter='*Paged*'
 ```
 
 `ctest` registers only the `unit`/`gpu`/`perf` aggregates: filter inside the binary, not with `ctest -R`. Filter and lane pitfalls: `tests/CLAUDE.md`.

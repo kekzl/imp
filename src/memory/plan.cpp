@@ -186,10 +186,16 @@ PlanResult plan_memory(const PlanInput& in) {
     }
     f.over_by = f.requested > in.budget_bytes ? f.requested - in.budget_bytes : 0;
 
-    // Levers, largest first. Each is a knob the operator actually has.
+    // Levers, largest first. Each is a knob the operator actually has, and frees at most what
+    // the itemisation above charges for it (a lever larger than its line is not a lever).
+    size_t kv_charged = 0;
+    for (const auto& l : f.lines)
+        if (l.tag == RegionTag::KvBlockPool)
+            kv_charged += l.bytes;
     if (seq > 256 && per_block > 0) {
-        const size_t frees =
-            static_cast<size_t>(p.kv.blocks_per_seq - ((seq / 2) + bs - 1) / bs) * per_block * batch;
+        const size_t frees = std::min(
+            kv_charged,
+            static_cast<size_t>(p.kv.blocks_per_seq - ((seq / 2) + bs - 1) / bs) * per_block * batch);
         f.levers.push_back(PlanLever{fmt_lever("runtime.max_seq_len", seq, seq / 2), frees});
     }
     if (batch > 1) {
@@ -207,10 +213,13 @@ PlanResult plan_memory(const PlanInput& in) {
         // docs/vram_audit.md 2026-06-12 Lever C), so it is offered, not applied.
         f.levers.push_back(PlanLever{std::string("kv_cache.dtype f16 -> fp8"), p.kv.bytes / 2});
     }
-    if (in.model.weight_cache_bytes > in.model.mandatory_cache_bytes) {
-        f.levers.push_back(PlanLever{std::string("drop the optional weight caches"),
-                                     in.model.weight_cache_bytes - in.model.mandatory_cache_bytes});
-    }
+    if (p.optional_caches > 0)
+        f.levers.push_back(PlanLever{std::string("drop the optional weight caches"), p.optional_caches});
+    std::erase_if(f.levers, [](const PlanLever& lv) { return lv.frees == 0; });
+    // Nothing negotiable is charged: the fixed lines alone overrun, and only more budget helps.
+    if (f.levers.empty() && f.over_by > 0)
+        f.levers.push_back(PlanLever{std::format("more VRAM (--vram-budget, other tenants) +{} MiB", (f.over_by + (1 << 20) - 1) >> 20),
+                                     f.over_by});
     std::stable_sort(f.levers.begin(), f.levers.end(),
                      [](const PlanLever& a, const PlanLever& b) { return a.frees > b.frees; });
     if (f.levers.size() > 3)

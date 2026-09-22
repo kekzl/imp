@@ -197,6 +197,22 @@ TEST(MemoryPlan, FailsWithAnItemisedReportAndActionableLevers) {
         EXPECT_GE(res.failure.levers[i - 1].frees, res.failure.levers[i].frees);
 }
 
+// Fixed charges alone overrun: KV and optional caches are charged 0, so shrinking them frees 0.
+// Was "runtime.max_seq_len 76800 -> 38400 frees 43200 MiB" against a 3807 MiB budget (2026-09-23).
+TEST(MemoryPlan, LeversNeverFreeMoreThanTheItemisationCharges) {
+    auto in = dense_input();
+    in.model.weight_bytes = 28 * kGiB;
+    in.limits.max_seq_len = 76800;
+    in.limits.max_batch_size = 16;
+    auto res = plan_memory(in);
+    ASSERT_FALSE(res.ok);
+    ASSERT_EQ(res.failure.levers.size(), 1u);
+    EXPECT_NE(res.failure.levers[0].change.find("more VRAM"), std::string::npos);
+    EXPECT_EQ(res.failure.levers[0].frees, res.failure.over_by);
+    for (const auto& lv : res.failure.levers)
+        EXPECT_LE(lv.frees, res.failure.requested);
+}
+
 namespace {
 
 // Shadow probe, Qwen3.8-27B-NVFP4 at max_batch_size=64: distributable 9683 MiB, SSM/GDN
