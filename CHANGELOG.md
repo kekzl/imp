@@ -11,6 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- Release image: the Dockerfile compiled at `-j$(nproc)` and OOM-killed the 16 GB runner, so v0.43.0 and v0.44.0 published no image (`ghcr.io/kekzl/imp:latest` stayed 0.42.1). It now takes `scripts/build_jobs.sh` (2 jobs at 16 GB); `workflow_dispatch` with `tag=vX.Y.Z` rebuilds a release.
+
 ### Changed
 - QSA indexer (`attention.qsa`, still default `false`) wins decode above budget: Qwen3.8-Flash-Next, 13863-token prompt, tg512 55.99-57.10 dense vs 62.28-63.84 tok/s indexer (was 57.59-58.31), pp 197.65-203.65 vs 185.21-185.64 before. Select scores across the card (128.4 -> 9.1 us per layer-step); `paged_attention_decode` split-K counts the GQA kernel's `batch * n_kv_heads` CTAs, so the 16-row prefill pass leaves the 32-CTA path (9233 -> 1588 ms per prompt). The 0.44.0 "0.3 % of the step" note was wrong: dense decode attention is 81.6 us per layer (`docs/plans/2026-09-19-qwen4exp-port.md`).
 
