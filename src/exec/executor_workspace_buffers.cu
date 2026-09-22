@@ -651,8 +651,27 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 int pct = dispatch_policy().moe.expert_cache_budget_pct;
-                pct = std::clamp(pct, 1, 90);
-                budget = static_cast<size_t>(budget * (pct / 100.0));
+                if (pct > 0) {
+                    pct = std::clamp(pct, 1, 90);
+                    budget = static_cast<size_t>(budget * (pct / 100.0));
+                } else {
+                    // Automatic (pct = 0). Native-NVFP4 experts on the host are served by the
+                    // device expert cache, where every slot is decode throughput, and the
+                    // whole model is on the host - so the cache gets the measured share. The
+                    // cache still allocates BEFORE the KV pool, the workspaces and the lazily
+                    // committed GDN/SSM slots, which is why it cannot simply take the rest.
+                    // Measured 2026-09-22, Qwen3.8-Flash-Next (48 host layers, 56 GiB of
+                    // experts, 32 GiB card), share of free VRAM -> slots/layer -> real prose:
+                    //   45% -> 186 -> 74.1/76.5 tok/s      55% -> 227 -> 77.5/77.2 tok/s
+                    //   62% -> 256 -> SSM slot never commits, server stops answering
+                    //   82% -> 338 -> same, plus the device cache's own tables fail
+                    // 15% (the old flat default) starved it: 0 usable slots, refused load.
+                    // Partial GGUF offload keeps 15 %: there the resident layers still need
+                    // VRAM and the sweep above does not cover that split (#1374).
+                    const int auto_pct =
+                        nvfp4_host_experts ? kExpertCacheAutoPctHostResident : 15;
+                    budget = budget / 100 * auto_pct;
+                }
                 const auto& mcfg = model_->config();
                 bool debug_parity = dispatch_policy().moe.expert_cache_debug_parity;
                 if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,

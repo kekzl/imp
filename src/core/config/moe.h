@@ -19,7 +19,11 @@ struct MoE {
     // Share of free VRAM the expert LRU cache may claim, percent. Sets how many
     // tokens of routing history the cache holds (a 30B-A3B's 73 slots/layer is
     // ~3 tokens). Exposed so the trade is measurable, not hardcoded.
-    int expert_cache_budget_pct = 15;
+    // Share of free VRAM the expert LRU cache may take. 0 = automatic: free VRAM minus
+    // the allocator headroom and a state/KV floor (executor_workspace_buffers.cu). A flat
+    // 15 % starved a 56 GiB host-resident model - 45 % of free was the hand-set value that
+    // made it usable, and the automatic split lands above it.
+    int expert_cache_budget_pct = 0;
     // Copy host-resident NVFP4 experts into pinned host memory at load, so
     // per-expert H2D becomes real DMA (on WSL2 an mmap can't be page-locked in
     // place, so this copies rather than registers). A TRADE not a win: big

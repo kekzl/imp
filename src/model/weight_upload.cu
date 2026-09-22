@@ -20,6 +20,7 @@
 
 #ifdef __linux__
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -40,6 +41,16 @@ static size_t g_vram_reserve = 0;  // set from Engine's computed reserve
 // StagingGuard alongside g_stager; nullptr everywhere else.
 static WeightUploadLog* g_upload_log = nullptr;
 static WeightSnapshot* g_warm = nullptr;
+
+// Pinned pages are not reclaimable, so pinning past what /proc/meminfo reports does not
+// slow the host down, it kills the process. 6 GiB headroom: the PLE n-gram table is
+// mmap'd and only needs page cache it can lose, but the allocator, the CUDA driver and
+// the request path still need room. host_mem_available_bytes() is weight_snapshot.h's.
+static bool host_pin_ram_available(size_t bytes) {
+    constexpr size_t kHeadroom = 6ull << 30;
+    const size_t avail = host_mem_available_bytes();
+    return avail == 0 || avail > bytes + kHeadroom;
+}
 
 static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t stream = nullptr) {
     size_t reserve = g_vram_reserve;
@@ -1702,16 +1713,28 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
     size_t total_reserve = expert_reserve_bytes + overhead;
     size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
-    if (is_nvfp4_prequant && budget < total_expert_bytes) {
-        IMP_LOG_WARN(
-            "NVFP4-prequant experts (%.2f GiB) exceed the on-device budget (%.2f GiB free). "
-            "There is no host path for this weight format, so the load is about to be refused.",
-            total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
-    }
-
     int force_host_n = process_diag_moe_force_host_experts();
     if (force_host_n < 0)
         force_host_n = 0;
+
+    // NVFP4 experts that do not all fit: every layer goes to the host and the VRAM the
+    // partial upload would have taken becomes expert-cache slots. A resident layer buys a
+    // 100% hit rate on 1/n_layers of the work for ~1.17 GiB; the same VRAM in the cache
+    // buys ~27 slots/layer on EVERY layer. Measured 2026-09-22, Qwen3.8-Flash-Next: the
+    // greedy partial upload put 13 layers on the card, left the cache 0 slots and the load
+    // was refused outright; all-on-host with the freed VRAM serves 77 tok/s.
+    if (is_nvfp4_prequant && budget < total_expert_bytes && force_host_n == 0) {
+        int moe_layers = 0;
+        for (int i = 0; i < n_layers; ++i)
+            if (layer_expert_bytes[i] > 0)
+                moe_layers++;
+        IMP_LOG_INFO(
+            "NVFP4 experts (%.2f GiB) do not fit the %.2f GiB budget: all %d MoE layer(s) stay "
+            "host-resident so the expert cache gets the VRAM (a partial upload starves it).",
+            total_expert_bytes / (1024.0 * 1024.0 * 1024.0), budget / (1024.0 * 1024.0 * 1024.0),
+            moe_layers);
+        return;  // experts_upload_layer stays all-false
+    }
 
     if (budget >= total_expert_bytes && force_host_n == 0) {
         for (int i = 0; i < n_layers; ++i) {
@@ -2144,8 +2167,6 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             auto pin_host_nvfp4_experts = [&](std::vector<Tensor>& expert_vec) {
                 if (!ctx.is_nvfp4_prequant || expert_vec.empty())
                     return;
-                if (!process_diag_moe_pin_host_experts())
-                    return;  // off by default — see moe.pin_host_experts
                 size_t total = 0;
                 for (const Tensor& w : expert_vec) {
                     if (!w.data || w.on_device || w.qtype == QType::BF16)
@@ -2154,6 +2175,25 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 }
                 if (total == 0)
                     return;
+                // Host-resident NVFP4 experts reach this line, and for them the pinned slab is
+                // not the opt-in trade moe.pin_host_experts describes: it is what the device
+                // expert cache maps. Without it decode falls to the host LRU path and CUDA
+                // graphs stay off - measured 2026-09-22 on Qwen3.8-Flash-Next, real prose:
+                // 30.3 tok/s on the host path against 74.5-79.6 with the device cache.
+                // Pinning is skipped only when the host cannot spare the pages.
+                if (!process_diag_moe_pin_host_experts() && !host_pin_ram_available(total)) {
+                    static bool warned = false;
+                    if (!warned) {
+                        warned = true;
+                        IMP_LOG_WARN(
+                            "Host NVFP4 experts: not pinning (%.2f MiB projection, %.2f GiB host "
+                            "RAM available) — decode falls back to the host LRU path. Free host "
+                            "RAM or use a smaller quantisation.",
+                            total / (1024.0 * 1024.0),
+                            host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0));
+                    }
+                    return;
+                }
                 PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                 if (pin.empty()) {
                     // Correct but slow: the experts stay on the mmap and every
@@ -2396,8 +2436,6 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 // still pinned, in ONE slab per projection, for the same per-allocation discipline as the
                 // weights.
                 if (!experts[0].on_device) {
-                    if (!process_diag_moe_pin_host_experts())
-                        return;  // stays on host, unpinned
                     size_t total = 0;
                     std::vector<Tensor*> host_scales;
                     host_scales.reserve(N);
@@ -2415,6 +2453,11 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     }
                     if (total == 0)
                         return;
+                    // Same rule as the weights above: the device expert cache reads these
+                    // through a device view, so an unpinned scale keeps the whole layer on
+                    // the host LRU path. Skipped only when the host has no RAM to spare.
+                    if (!process_diag_moe_pin_host_experts() && !host_pin_ram_available(total))
+                        return;  // stays on host, unpinned
                     PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
                     if (pin.empty())
                         return;  // stays on mmap: slower, still correct
