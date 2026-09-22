@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # C++23 in imp
@@ -42,16 +42,18 @@ The two absences are libstdc++ 15.2 gaps, not language ones. No `std::mdspan` â†
 
 ## The rules
 
-- **Errors a caller must handle: `std::expected<T, E>`.** Replaces `bool f(..., T& out, std::string& err)`, whose contract lived in a comment ("returns false, leaving `out` UNTOUCHED") and depended on every caller reading the bool. With `expected` a half-filled result is not a value that exists. Where the refusal carries more than a sentence, the error type is a struct: `Qwen3VLVisionLoadError` carries the counts the caller logs.
-- **Absence that is not an error: `std::optional<T>`.** `log_level_from_string` returns `nullopt` for an unknown word: a value the caller does not have, not a failure it reports.
-- **Host buffers: `std::span<T>`.** Any host-side (pointer, length) pair in a C++ signature is a span. Removes a callable state: `ngram_draft(nullptr, 6, ...)` and `SuffixDraftIndex::append(nullptr, 5)` were real call shapes needing a defensive null check; both tests exercising them are gone because the state is unrepresentable.
-- **Device pointers are NOT spans.** A `std::span` says "you may index and iterate this"; on a device pointer that is a silent host segfault at the first `s[0]`. Kernel launch wrappers keep raw `const half*` + extent, extent as a separate parameter. The one place the C++17 shape is correct, and why the audit's "span is not used for the raw pointer + length pairs that dominate every kernel launch wrapper" is not a defect to fix wholesale.
-- **Strings a function only reads: `std::string_view`.** Except where the callee needs a null-terminated `c_str()` for a C API, in which case `const std::string&` stays and says so. Rule for new and touched code: the 591 existing `const std::string&` parameters have NOT been swept; that is a separate change that has to look at each callee.
-- **Building a string: `std::format`**, not `snprintf` into a fixed buffer. The memory-plan failure report was seven `snprintf` calls into one `char buf[256]` whose truncation only a user with a refused engine would see.
-- **Logging stays printf-style.** `IMP_LOG_*` is a variadic macro over `log_message(..., const char* fmt, ...)` with `__attribute__((format(printf)))`, across 1431 call sites. Format-string checking is already compile-time; `std::format` would buy type safety over a hazard the attribute already covers, at the cost of touching every site. Deliberately not converted.
-- **Bit patterns: `std::bit_cast`.** Constexpr, so a conversion can be checked by `static_assert` instead of a test run (`src/core/fp_bits.h` does exactly that).
-- **Exceptions.** Unchanged, out of scope here: internal code throws, `src/api/imp_api.cpp` translates to `ImpError` at the C ABI boundary. `expected` is for the layers below that boundary that returned a bool.
-- **`std::unreachable()` is deliberately absent.** Exactly two branches are commented "statically unreachable" (both in `engine_decode_pipeline.cpp`, split out of `engine_scheduler.cpp` 2026-08-26), and both carry a safe fallback: log and abandon the half-enqueued step, or re-run the row through the legacy collect path. Replacing a fallback with undefined behaviour is a bet that the comment is right. `[[assume]]` is absent for the same reason.
+| Use | For | Detail |
+|---|---|---|
+| `std::expected<T, E>` | errors a caller must handle | replaces `bool f(..., T& out, std::string& err)`, whose contract lived in a comment and depended on every caller reading the bool - a half-filled result is not a value that exists with `expected`. Where the refusal carries more than a sentence, the error type is a struct (`Qwen3VLVisionLoadError` carries the counts the caller logs) |
+| `std::optional<T>` | absence that is not an error | `log_level_from_string` returns `nullopt` for an unknown word: a value the caller does not have, not a failure it reports |
+| `std::span<T>` | host buffers | any host-side (pointer, length) pair in a C++ signature is a span; removes a callable state - `ngram_draft(nullptr, 6, ...)` and `SuffixDraftIndex::append(nullptr, 5)` were real call shapes needing a defensive null check, both tests exercising them are gone because the state is now unrepresentable |
+| raw `const half*` + extent, NOT `std::span` | device pointers | a `std::span` says "you may index and iterate this"; on a device pointer that is a silent host segfault at the first `s[0]`. The one place the C++17 shape is correct - not a defect to fix wholesale |
+| `std::string_view` | strings a function only reads | except where the callee needs a null-terminated `c_str()` for a C API, where `const std::string&` stays and says so. Rule for new/touched code only: the 591 existing `const std::string&` parameters have NOT been swept |
+| `std::format`, not `snprintf` into a fixed buffer | building a string | the memory-plan failure report was seven `snprintf` calls into one `char buf[256]` whose truncation only a user with a refused engine would see |
+| printf-style, NOT `std::format` | logging | `IMP_LOG_*` is a variadic macro over `log_message(..., const char* fmt, ...)` with `__attribute__((format(printf)))`, across 1431 call sites; format-string checking is already compile-time, `std::format` would buy type safety at the cost of touching every site. Deliberately not converted |
+| `std::bit_cast` | bit patterns | constexpr, so a conversion can be checked by `static_assert` instead of a test run (`src/core/fp_bits.h` does exactly that) |
+| exceptions, unchanged | internal error propagation | out of scope here: internal code throws, `src/api/imp_api.cpp` translates to `ImpError` at the C ABI boundary; `expected` is for the layers below that boundary that returned a bool |
+| NOT `std::unreachable()` / `[[assume]]` | the two branches commented "statically unreachable" (`engine_decode_pipeline.cpp`, split out of `engine_scheduler.cpp` 2026-08-26) | both carry a safe fallback (log and abandon the half-enqueued step, or re-run the row through the legacy collect path); replacing a fallback with undefined behaviour is a bet that the comment is right |
 
 ## What stays C ABI
 
@@ -59,7 +61,7 @@ The two absences are libstdc++ 15.2 gaps, not language ones. No `std::mdspan` â†
 
 ## Where this is done, and where it is not
 
-**`bool f(..., std::string& err)` no longer exists anywhere in `src/`, `tools/` or `include/`.** Was 36 sites, 15 of them header declarations, across the Qwen3-VL loader chain, image placeholder expansion, M-RoPE position building and the whole `imp-quantize` surface; `grep -rIn "std::string& err" src tools include` returns nothing.
+**`bool f(..., std::string& err)` no longer exists anywhere in `src/`, `tools/` or `include/`.** Was 36 sites, 15 of them header declarations, across the Qwen3-VL loader chain, image placeholder expansion, M-RoPE position building and the whole `imp-quantize` surface; `grep -rIn "std::string& err[,)]" src tools include` returns nothing (plain `"std::string& err"` also matches `error()`/`error_reason()` accessors - false positives, not the out-param pattern).
 
 Spans replaced the host (pointer, length) pairs in the drafters (`ngram_draft`, `SuffixDraftIndex`, `TokenRecycleTable`), the image byte path from the C ABI down to `stbi_load_from_memory`, `BatchBuilder`'s token and block tables, the perplexity and encoder-embed entry points, `BinaryReader`, `make_weight_key` and (as `string_view`) `JsonParser` and `log_level_from_string`.
 
