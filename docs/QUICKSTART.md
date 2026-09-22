@@ -116,7 +116,11 @@ Expected: an explanation of Rayleigh scattering, written at about 102 tok/s (the
 
 ## 4. Or use the other surfaces
 
-**Browser.** <http://localhost:8080>: single-page chat UI, streams the answer, draws one bar per token (inter-token latency visible while the reply is written) and shows the usage chunk of every run: prompt tokens, prefix-cache hits, reasoning tokens, context used against the model's window. With a models directory the header is a picker; an unloaded entry is swapped in by the request. One file, no build step; served from the binary at `GET /`.
+**Browser.** <http://localhost:8080>: single-page chat UI, streams the answer, draws one bar per token (inter-token latency visible while the reply is written).
+
+- Shows the usage chunk of every run: prompt tokens, prefix-cache hits, reasoning tokens, context used against the model's window.
+- With a models directory the header is a picker; an unloaded entry is swapped in by the request.
+- One file, no build step; served from the binary at `GET /`.
 
 <img src="webui.png" width="800" alt="the built-in web UI after one answer">
 

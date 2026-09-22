@@ -18,14 +18,13 @@ documented limits (tracked in issue #554).
 | default (`deterministic = false`), since the request-order-independence fix | greedy **request-order independence within a process**: identical greedy requests produce identical output no matter how many requests preceded them | `runtime.warmup` defaults **true** (pre-arms the decode graph pool so the first real request starts on the same graph state as every later one); `CudaGraphRunner::mark_process_warm()` (warmup teardown no longer resets the per-runner eager pre-capture step, which used to execute only on the first real request, an eager-vs-captured kernel mix that flipped greedy output on near-tie logits); scheduler gates use `graph_path_available()` instead of `is_ready()` (gating loop/pipeline entry on `is_captured()` deferred those paths by one step on the first request only) | measured after the fix: 3 fresh server processes x 12 greedy requests, Qwen3-30B-A3B-NVFP4, 36/36 byte-identical; `runtime.warmup=false` restores the old first-request asymmetry, acceptable for dev/CI, not for evals |
 | batch composition (any mode) | **a batch neighbour's content cannot reach another row, bit-exactly**: two batches of identical shape and row lengths, differing only in what neighbouring sequences contain, produce bit-identical logits for the row under test | `ForwardPassTest.DecodeLogitsInvariantToBatchComposition`; a mask fault, a padding leak or a block-table mixup (the #1044/#1045 class) breaks it | hard guarantee; NOT the same as batch invariance, which is out of scope (known limits) |
 
-`deterministic_gemm`'s decode cost sits below this host's noise floor: `bench_gate.sh` method
-(discarded warm-up run, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, `--prefill-chunk-size 0`), 4 alternating
-pairs on Qwen3-4B-IQ4_NL, `tg128` tok/s off/on: 295.99/285.80, 268.77/280.03, 278.02/281.24,
-266.91/271.08 [PROV: hw=RTX5090 model=Qwen3-4B-IQ4_NL]. Medians 273.4 off / 280.6 on, separated by
-less than the off arm's own spread (10.9 %). Prefill is deliberately not quoted:
-[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) rules it out as an A/B signal, and
-split-k reduction is where a cost would be most plausible, so "no measurable cost" is a statement
-about decode on one model only.
+`deterministic_gemm`'s decode cost sits below this host's noise floor.
+
+- `bench_gate.sh` method: discarded warm-up run, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, `--prefill-chunk-size 0`.
+- 4 alternating pairs on Qwen3-4B-IQ4_NL, `tg128` tok/s off/on: 295.99/285.80, 268.77/280.03, 278.02/281.24, 266.91/271.08 [PROV: hw=RTX5090 model=Qwen3-4B-IQ4_NL].
+- Medians 273.4 off / 280.6 on, separated by less than the off arm's own spread (10.9 %).
+- Prefill is deliberately not quoted: [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) rules it out as an A/B signal, and split-k reduction is where a cost would be most plausible.
+- "No measurable cost" is a statement about decode on one model only.
 
 ## Known limits
 
@@ -54,11 +53,10 @@ is the three `DetEvalE2ETest` prompts at 96 tokens, three fresh servers per arm.
 | `runtime.deterministic = true` | 0/5 | **1 of 3 prompts, 3/3 reps** | - |
 | `server.prefix_cache = false` | 0/5 | **0 of 3, 3/3 reps** | - |
 
-The GEMM knobs move the particular near-tie the short probe lands on; over 96 tokens the
-divergence returns with `deterministic = true` still set. `PrefixCacheE2ETest.FreshVsPrefixHitTokenEqual`
-asserts the strong version of the guarantee and passes: its long multi-block prompt has no margin
-this narrow. The gate is right about what it measures; the promise above is wider than what the
-gate can see.
+The GEMM knobs move the particular near-tie the short probe lands on; over 96 tokens the divergence returns with `deterministic = true` still set.
+
+- `PrefixCacheE2ETest.FreshVsPrefixHitTokenEqual` asserts the strong version of the guarantee and passes: its long multi-block prompt has no margin this narrow.
+- The gate is right about what it measures; the promise above is wider than what the gate can see.
 
 ## Recipe: reproducible evals
 

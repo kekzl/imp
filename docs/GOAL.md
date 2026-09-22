@@ -11,11 +11,16 @@ commit: 9cbb8004
 
 imp is the best single-GPU **agentic** AI inference engine on NVIDIA RTX 5090 (`sm_120`): fastest, most capable backend for coding agents, tool-using assistants and reasoning loops on one workstation card. Single GPU, latency-first, not a datacenter throughput competitor to vLLM/SGLang.
 
-Foundation, non-negotiable: **the fastest single-stream (batch=1) decode of any engine on this chip**, across every supported architecture. Nothing agentic may erode it. On top of raw speed (release-bar gated, see "Agentic surface"): unbreakable tool-call/JSON contracts, long-context multi-turn loops, reasoning as a separable channel, moderate concurrency (tens of requests on one GPU), reliability under sustained load.
+Foundation, non-negotiable: **the fastest single-stream (batch=1) decode of any engine on this chip**, across every supported architecture.
+
+- Nothing agentic may erode it.
+- On top of raw speed (release-bar gated, see "Agentic surface"): unbreakable tool-call/JSON contracts, long-context multi-turn loops, reasoning as a separable channel, moderate concurrency (tens of requests on one GPU), reliability under sustained load.
 
 ## Definition of "best"
 
-Ranked, non-negotiable. Anything below this bar is a bug. Concurrent throughput for agent fan-out is secondary: never bought by regressing single-stream decode.
+Ranked, non-negotiable: anything below this bar is a bug.
+
+- Concurrent throughput for agent fan-out is secondary: never bought by regressing single-stream decode.
 
 | # | Metric | Bar |
 |---|---|---|
@@ -27,11 +32,17 @@ Ranked, non-negotiable. Anything below this bar is a bug. Concurrent throughput 
 
 ## Target hardware
 
-RTX 5090 (`sm_120`, GB202, 32 GB GDDR7) is the hero target, every decision made for it first. RTX PRO 6000 Blackwell (96 GB) and the 5080/5070 Ti siblings share `sm_120`/`compute_120f` and inherit wins, lower tuning priority. Everything else unsupported by design; what `sm_120a` has/lacks: [`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md).
+RTX 5090 (`sm_120`, GB202, 32 GB GDDR7) is the hero target, every decision made for it first.
+
+- RTX PRO 6000 Blackwell (96 GB) and the 5080/5070 Ti siblings share `sm_120`/`compute_120f` and inherit wins, lower tuning priority.
+- Everything else unsupported by design; what `sm_120a` has/lacks: [`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md).
 
 ## Target models (hero set)
 
-Best-in-class on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-20b closed the last gap, #547/#572-#574). Requires staged local weights, a green degeneration battery, decode numbers in `BENCHMARKS.md`. A hero regressing against any competitor is a release blocker.
+Leading on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-20b closed the last gap, #547/#572-#574).
+
+- Requires staged local weights, a green degeneration battery, decode numbers in `BENCHMARKS.md`.
+- A hero regressing against any competitor is a release blocker.
 
 | Model | Quant | Why |
 |---|---|---|
@@ -43,7 +54,10 @@ Best-in-class on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-2
 | Nemotron-H | NVFP4 | hybrid Mamba2+Attn+MoE flagship |
 | gpt-oss-20b | MXFP4 | experts converted to NVFP4 at load, Harmony channels, tg ~315-345, pp512 ~16-19k |
 
-`check-release.sh` stage 9 runs `make bench-competitive` `RELEASE_BAR=1`, failing any hero leading llama.cpp by < 5 %. Enforced over **5 of 7**: Coder-30B-A3B and Nemotron-H are NVFP4-only, llama.cpp has no NVFP4 path on `sm_120`, no shared-quant comparison exists; gate prints `N/7 contested`. Before 2026-08-21 enforced over 2 only (`perf_baseline.json`, `perf_baseline_north_star.json`); `docs/audit/DEBT_LEDGER_2026_08_21.md` (h).
+`check-release.sh` stage 9 runs `make bench-competitive` `RELEASE_BAR=1`, failing any hero leading llama.cpp by < 5 %.
+
+- Enforced over **5 of 7**: Coder-30B-A3B and Nemotron-H are NVFP4-only, llama.cpp has no NVFP4 path on `sm_120`, no shared-quant comparison exists; gate prints `N/7 contested`.
+- Before 2026-08-21 enforced over 2 only (`perf_baseline.json`, `perf_baseline_north_star.json`); `docs/audit/DEBT_LEDGER_2026_08_21.md` (h).
 
 **Extended** - validated opportunistically, not release-blocking (2026-06-06): DeepSeek-R1-Distill-7B/14B (never benched, Qwen2/LLaMA arch); DeepSeek-V2-Lite MLA (supported, #802/#803, bf16 28 GB experts host-offloaded, PPL ~3 % of HF: imp 6.43 vs 6.25, 534-tok, post 2026-07-07 YaRN fix); Gemma-3 27B (12B Q4_K_M + 4B-VL staged, 27B not); Phi-4 14B (NVFP4 staged, GGUF Q6_K not); Mixtral 8x7B (chat-template test only, never staged).
 
@@ -106,7 +120,10 @@ llama-bench methodology: pp512 + tg128 at minimum, plus pp8192/tg512 @ 16k ctx; 
 
 ## North-star single number
 
-**Qwen3-14B Q6_K decode tok/s at batch=1, ctx=2048.** Goes up over time, never down. Methodology: 5x `imp-cli --bench` x 5 reps x 15 s cooldown, cold-median, resists cuBLAS-algo-state drift over long sessions (`memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md`). `--bench-pp 2048` required (`--bench-pp 16` reads 169.00, `--bench-pp 512` reads 164.83 on the same build - shorter contexts, not gains).
+**Qwen3-14B Q6_K decode tok/s at batch=1, ctx=2048.** Goes up over time, never down.
+
+- Methodology: 5x `imp-cli --bench` x 5 reps x 15 s cooldown, cold-median, resists cuBLAS-algo-state drift over long sessions (`memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md`).
+- `--bench-pp 2048` required (`--bench-pp 16` reads 169.00, `--bench-pp 512` reads 164.83 on the same build, shorter contexts, not gains).
 
 | When | tok/s | Note |
 |---|---:|---|
@@ -115,6 +132,10 @@ llama-bench methodology: pp512 + tg128 at minimum, plus pp8192/tg512 @ 16k ctx; 
 
 Gate re-pinned spec-OFF 2026-07-15: dense bench drafts ~99.9 % accept, so spec-ON tg measured the restart-volatile spec-verify GEMMs (11 % swing); pure decode stable <1 %. Default (spec ON) reads above spec-OFF since the verify-chunk NVFP4 overlay (#998/#1001), not pinnable at 3 %.
 
-Next: **175 tok/s**, multi-week kernel fusion. Roofline (2026-05-30): decode 87 % NVFP4 GEMVs at 66-70 % HBM, 4-bit-dequant co-limit (L1TEX 91 %); occupancy/KPAR/MR rerouting are dead ends, and the LM-head quantization unlock already shipped (#479/#483). "FP8 prefill" does not exist on this hardware: `NOT_SUPPORTED` on `sm_120` (#550).
+Next: **175 tok/s**, multi-week kernel fusion.
+
+- Roofline (2026-05-30): decode 87 % NVFP4 GEMVs at 66-70 % HBM, 4-bit-dequant co-limit (L1TEX 91 %).
+- Occupancy/KPAR/MR rerouting are dead ends; the LM-head quantization unlock already shipped (#479/#483).
+- "FP8 prefill" does not exist on this hardware: `NOT_SUPPORTED` on `sm_120` (#550).
 
 Stretch: 200 tok/s needs speculative decoding, parked - Qwen3.6 MTP accepts 85 %+ (#804 sigmoid fix) but generation dead-ends on GDN-hybrid irreversible recurrent state through verify; needs a non-recurrent MTP model. No MTP head for Qwen3-14B; draft-model integration multi-week, uncommitted.

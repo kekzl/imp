@@ -7,7 +7,10 @@ commit: 9cbb8004
 
 # Configuration reference
 
-`imp.conf`, CLI flags (`imp-cli` and `imp-server`), `--json`, LoRA and the C API. Endpoints and request fields: [`API.md`](API.md). Deployment/env vars: [`DEPLOYMENT.md`](DEPLOYMENT.md).
+`imp.conf`, CLI flags (`imp-cli` and `imp-server`), `--json`, LoRA and the C API.
+
+- Endpoints and request fields: [`API.md`](API.md).
+- Deployment/env vars: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## `imp.conf`
 
@@ -107,7 +110,12 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 
 KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 -> FP16 KV via the `engine.cpp:500` carve-out). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
 
-`--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card. The cap binds but is not exact: the CUDA primary context (~1.7 GiB on the reference host) and ~1.8 GiB of dequant scratch/CUTLASS scale buffers/pinned staging sit outside the sizing gates. Measured on Qwen3-8B-Q8_0: `--vram-budget 16000` peaks at 19468 MiB - leave ~3.5 GiB of headroom between the sum of budgets and the card. `--mem-report` prints the peak against the cap and marks `[OVER BUDGET]`. A budget too small for one `max_seq_len` sequence is refused at init, naming the blocks available, needed and the MiB to add.
+`--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card.
+
+- The cap binds but is not exact: the CUDA primary context (~1.7 GiB on the reference host) and ~1.8 GiB of dequant scratch/CUTLASS scale buffers/pinned staging sit outside the sizing gates.
+- Measured on Qwen3-8B-Q8_0: `--vram-budget 16000` peaks at 19468 MiB, leave ~3.5 GiB of headroom between the sum of budgets and the card.
+- `--mem-report` prints the peak against the cap and marks `[OVER BUDGET]`.
+- A budget too small for one `max_seq_len` sequence is refused at init, naming the blocks available, needed and the MiB to add.
 
 ## `--json` - machine-readable output
 
@@ -190,7 +198,12 @@ imp-server --model base.gguf --lora style=/adapters/style --lora med=/adapters/m
 // "lora" absent or "" = base model; unknown names -> 400.
 ```
 
-One adapter is active at a time: a request naming a different one waits for in-flight requests, then the worker switches (decode graphs re-capture, ~100 ms); it is never batched with them. The prefix cache is keyed by adapter. v1 scope: per-layer `q/k/v/o/gate/up/down_proj` adapters on standard pre-norm archs; sandwich-norm o/down (Gemma) and MoE-expert targets are declined with a log. C API: `imp_lora_load()` / `imp_lora_set()`.
+One adapter is active at a time: a request naming a different one waits for in-flight requests, then the worker switches (decode graphs re-capture, ~100 ms); it is never batched with them.
+
+- The prefix cache is keyed by adapter.
+- v1 scope: per-layer `q/k/v/o/gate/up/down_proj` adapters on standard pre-norm archs.
+- Sandwich-norm o/down (Gemma) and MoE-expert targets are declined with a log.
+- C API: `imp_lora_load()` / `imp_lora_set()`.
 
 ## C API
 

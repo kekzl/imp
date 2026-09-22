@@ -21,20 +21,16 @@ post-validation.
 | `response_format: {"type": "regex"}` / `guided_regex` | ✅ |
 | `response_format: {"type": "grammar"}` / `grammar` / `guided_grammar` | ✅ GBNF, a pushdown simulator, so recursive and bracket-balanced formats work |
 
-**A constraint imp cannot compile is a `400`, not an unconstrained answer.** That
-changed in v0.23.0 and it is a breaking difference from servers that log the
-rejection and answer anyway. Left recursion, undefined rules and a missing
-`root` are rejected at compile time, and since #1567 so are the JSON-Schema
-assertion keywords imp does not enforce. Which ones, and the three shapes that
-are accepted with a weaker guarantee than asked for, are listed in
-[`LIMITATIONS.md`](LIMITATIONS.md#known-bad-and-known-limited-behaviour).
+**A constraint imp cannot compile is a `400`, not an unconstrained answer.** That changed in v0.23.0 and it is a breaking difference from servers that log the rejection and answer anyway.
 
-All four forms are carried by `/v1/responses` as `text.format` too. Until #1930
-that transform mapped only `json_object` and `json_schema` and wrote nothing for
-the rest, so the same `regex` or `grammar` request was constrained on
-`/v1/chat/completions` and free text on `/v1/responses`, at 200. A `text.format`
-or a `tool_choice` shape the transform cannot map is now a `400` naming it,
-rather than a field deleted before the parser's own check could see it.
+- Left recursion, undefined rules and a missing `root` are rejected at compile time.
+- Since #1567, the JSON-Schema assertion keywords imp does not enforce are rejected too.
+- Which ones, and the three shapes accepted with a weaker guarantee than asked for: [`LIMITATIONS.md`](LIMITATIONS.md#known-bad-and-known-limited-behaviour).
+
+All four forms are carried by `/v1/responses` as `text.format` too.
+
+- Until #1930 that transform mapped only `json_object` and `json_schema` and wrote nothing for the rest, so the same `regex` or `grammar` request was constrained on `/v1/chat/completions` and free text on `/v1/responses`, at 200.
+- A `text.format` or a `tool_choice` shape the transform cannot map is now a `400` naming it, rather than a field deleted before the parser's own check could see it.
 
 Schema, regex and grammar inputs are bounded: nesting past 64 levels, a `{n,m}`
 repeat above 1024, or a pattern needing more than 100k NFA states is a `400`
@@ -90,16 +86,17 @@ Measurement on `gpt-oss-20b-mxfp4`, `tool_choice: "auto"` (10 requests each):
 `tool_choice: "required"` on `harmony` is still a 400: the FSM has no grammar
 for this envelope, so the call is the model's choice rather than a guarantee.
 
-Reasoning models separate their chain of thought into `reasoning_content`
-(Anthropic: `thinking`) rather than emitting it as the answer. On streaming: with
-thinking off, stream scans first tokens for `<think>` the model may open anyway.
-Without tools: releases on first word (client-side TTFT on Qwen3.8-27B-NVFP4,
-27-token prompt, 97-105 -> 32-62 ms). With tools: holds up to 256 tokens so
-chain of thought does not stream as answer.
+Reasoning models separate their chain of thought into `reasoning_content` (Anthropic: `thinking`) rather than emitting it as the answer.
 
-**On `/v1/messages`, thinking is opt-in** (#1541). Without `thinking` field:
-no thinking block, `content[0]` is text. With it: thinking block first.
-Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
+- On streaming, with thinking off: stream scans first tokens for `<think>` the model may open anyway.
+- Without tools: releases on first word (client-side TTFT on Qwen3.8-27B-NVFP4, 27-token prompt, 97-105 -> 32-62 ms).
+- With tools: holds up to 256 tokens so chain of thought does not stream as answer.
+
+**On `/v1/messages`, thinking is opt-in** (#1541).
+
+- Without `thinking` field: no thinking block, `content[0]` is text.
+- With it: thinking block first.
+- Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
 
 | request `thinking` | `content` blocks | `content[0].text` |
 |---|---|---|
@@ -112,16 +109,12 @@ Only this dialect changed. On `/v1/chat/completions` the reasoning is a separate
 `reasoning_content` field, so nothing shifts an index and the server's
 `think_budget` default still applies.
 
-A prior assistant message may carry its `reasoning_content` back (the Anthropic
-dialect folds `thinking` blocks into it); the Jinja template decides whether to
-render it (Qwen3.8 keeps it, `preserve_thinking`). Sending it back is what lets
-a hybrid (GDN) model restore its recurrent state at the end of the previous
-reply instead of at the prompt boundary (`server.transcript_snapshot`): the
-reply then re-tokenizes exactly, a forced think end included (it emits `"\n"`
-before `</think>` like the model's own close). Where the model wrote a
-non-canonical BPE split, the server splices the ids it forwarded instead of
-re-encoding the text (`server.transcript_token_reuse`, 256 transcripts). The
-built-in web UI sends it.
+A prior assistant message may carry its `reasoning_content` back (the Anthropic dialect folds `thinking` blocks into it); the Jinja template decides whether to render it (Qwen3.8 keeps it, `preserve_thinking`).
+
+- Sending it back is what lets a hybrid (GDN) model restore its recurrent state at the end of the previous reply instead of at the prompt boundary (`server.transcript_snapshot`).
+- The reply then re-tokenizes exactly, a forced think end included (it emits `"\n"` before `</think>` like the model's own close).
+- Where the model wrote a non-canonical BPE split, the server splices the ids it forwarded instead of re-encoding the text (`server.transcript_token_reuse`, 256 transcripts).
+- The built-in web UI sends it.
 
 **When you do ask for thinking, `content[0]` is not the text.** Select by
 `type` rather than by index:
@@ -158,10 +151,10 @@ Three knobs, and only one of them caps tokens:
 | `thinking.budget_tokens` | Anthropic | a token count, converted to that same fraction (`N / max_tokens`, clamped to 1.0); `0` disables thinking |
 | `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8). The loaded model's values: `/v1/models` `meta.reasoning_effort` |
 
-Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches
-`max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction,
-whichever is later. `runtime.think_answer_reserve` default 256.
-Example: `max_tokens: 260` + 0.5 default = `max(130, 4) = 130` reasoning tokens max.
+Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches `max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction, whichever is later.
+
+- `runtime.think_answer_reserve` default 256.
+- Example: `max_tokens: 260` + 0.5 default = `max(130, 4) = 130` reasoning tokens max.
 
 When answer never starts, response signals it:
 
@@ -181,26 +174,33 @@ to scan for reasoning model (`<think>`). Without tools: holds 8 tokens, releases
 
 On `/v1/chat/completions` at `max_tokens: 400` with JSON prompt, `think_budget: 0` and `enable_thinking: false` both fully disable reasoning.
 
-Structured output disables thinking on its own: `json_mode`, `json_schema`,
-`tools`, `regex` and `grammar` all suppress it without either field.
-Answer and thinking share the token budget: a small `max_tokens` on a thinking model can be spent before the reply starts (empty `content`, `finish_reason: stop`). For short structured calls, disable thinking instead of raising every budget; see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+Structured output disables thinking on its own: `json_mode`, `json_schema`, `tools`, `regex` and `grammar` all suppress it without either field.
+
+- Answer and thinking share the token budget: a small `max_tokens` on a thinking model can be spent before the reply starts (empty `content`, `finish_reason: stop`).
+- For short structured calls, disable thinking instead of raising every budget; see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 ## Images
 
-✅ on `/v1/chat/completions`, as `image_url` content parts. Multiple images
-encoded in prompt order, max `--max-images-per-request` (default 8).
-Picture wider or taller than 16384 px: `400`.
+✅ on `/v1/chat/completions`, as `image_url` content parts.
 
-`http(s)` URLs require `--allow-remote-images` (#1610); destination refused
-if loopback, link-local, RFC1918, CGNAT or ULA. No redirects. Body cap 32 MiB,
-10 s read timeout. Data URIs work by default.
+- Multiple images encoded in prompt order, max `--max-images-per-request` (default 8).
+- Picture wider or taller than 16384 px: `400`.
+
+`http(s)` URLs require `--allow-remote-images` (#1610); destination refused if loopback, link-local, RFC1918, CGNAT or ULA.
+
+- No redirects.
+- Body cap 32 MiB, 10 s read timeout.
+- Data URIs work by default.
 
 Refusal rules:
 
 - Unreadable content part or block: `400` naming it, all three dialects.
-  `/v1/chat/completions`, `/v1/responses`: read `text` and `image_url`.
-  `/v1/messages`: read `text`, `image` (base64 or url), `tool_use`, `tool_result`, `thinking`.
-  On `/v1/messages` the `system` field takes string or array of `text` blocks.
+| Endpoint | Reads |
+|---|---|
+| `/v1/chat/completions`, `/v1/responses` | `text`, `image_url` |
+| `/v1/messages` | `text`, `image` (base64 or url), `tool_use`, `tool_result`, `thinking` |
+
+- On `/v1/messages` the `system` field takes string or array of `text` blocks.
 - Unreadable `image_url`: `400`, not skipped (would misalign later images).
   Message same regardless of error, does not echo URL.
 - Model with unreadable vision tower: loads text-only, image request gets `400 vision_unavailable`.

@@ -75,7 +75,10 @@ make kernel-resources-update  # re-pin, deliberately
 | `STACK` | per-thread local frame in bytes; nonzero means state in local memory |
 | `LOCAL` | separately declared local memory |
 
-`tools/kernel_resource_baseline.txt` pins every kernel at or above REG 240 or with a nonzero local frame as a two-way ratchet: a kernel that starts spilling fails the gate, and so does a pinned kernel that improved (the list cannot go stale in either direction). This is the gate the throughput gates (`verify-fast`, 8 % threshold) cannot be: one kernel crossing the register cliff inside a 48-layer forward is far below that threshold. It also makes hand-set `__launch_bounds__` auditable (`src/compute/CLAUDE.md`).
+`tools/kernel_resource_baseline.txt` pins every kernel at or above REG 240 or with a nonzero local frame as a two-way ratchet: a kernel that starts spilling fails the gate, and so does a pinned kernel that improved (the list cannot go stale in either direction).
+
+- This is the gate the throughput gates (`verify-fast`, 8 % threshold) cannot be: one kernel crossing the register cliff inside a 48-layer forward is far below that threshold.
+- It also makes hand-set `__launch_bounds__` auditable (`src/compute/CLAUDE.md`).
 
 ## Common findings to check for
 
@@ -91,4 +94,8 @@ make kernel-resources-update  # re-pin, deliberately
 
 ## Allocations while serving
 
-Any `cudaMalloc`/`cudaFree` after warmup is a bug; nsys is the wrong instrument. Build with `-DIMP_ALLOC_INTERPOSE=ON` and read `[alloc-interpose] steady state`, which attributes every call site. Shipped state is zero. Rebuild with the default OFF before measuring throughput: the shim costs ~3 % decode.
+Any `cudaMalloc`/`cudaFree` after warmup is a bug; nsys is the wrong instrument.
+
+- Build with `-DIMP_ALLOC_INTERPOSE=ON` and read `[alloc-interpose] steady state`, which attributes every call site.
+- Shipped state is zero.
+- Rebuild with the default OFF before measuring throughput: the shim costs ~3 % decode.

@@ -7,7 +7,10 @@ commit: 9cbb8004
 
 # C++23 in imp
 
-The build targets C++23 since 2026-07-08 (`CMakeLists.txt:4-16`, migration record in [`../archive/cpp23_migration_2026_07_08.md`](../archive/cpp23_migration_2026_07_08.md)). This file says which of the language the tree actually uses and where the line runs between host and device code. The 2026-07-29 architecture audit called it "C++17 with C++23 spelling ... nvcc constrains what is usable in `.cu`"; the first half was accurate, the second half was never measured and is false.
+The build targets C++23 since 2026-07-08 (`CMakeLists.txt:4-16`, migration record in [`../archive/cpp23_migration_2026_07_08.md`](../archive/cpp23_migration_2026_07_08.md)).
+
+- This file says which of the language the tree actually uses and where the line runs between host and device code.
+- The 2026-07-29 architecture audit called it "C++17 with C++23 spelling ... nvcc constrains what is usable in `.cu`"; the first half was accurate, the second half was never measured and is false.
 
 ## What nvcc 13.3 actually accepts
 
@@ -38,7 +41,10 @@ Compiled and run on the host, both as `.cpp` and as the host side of a `.cu` (id
 
 Not probed in device code, and not used there: the ranges views, `std::format`, the allocating or OS-backed containers. Host facilities with no reason to appear in a kernel, so the first table is "measured to work on the card", not "everything that could".
 
-The two absences are libstdc++ 15.2 gaps, not language ones. No `std::mdspan` → tensor views stay hand-rolled. No `std::start_lifetime_as` → reading a POD out of a mapped byte buffer stays `std::memcpy` rather than `std::bit_cast` (bit_cast needs an object on both sides; a `const uint8_t*` into an mmap is not one).
+The two absences are libstdc++ 15.2 gaps, not language ones.
+
+- No `std::mdspan` → tensor views stay hand-rolled.
+- No `std::start_lifetime_as` → reading a POD out of a mapped byte buffer stays `std::memcpy` rather than `std::bit_cast` (bit_cast needs an object on both sides; a `const uint8_t*` into an mmap is not one).
 
 ## The rules
 
@@ -57,7 +63,10 @@ The two absences are libstdc++ 15.2 gaps, not language ones. No `std::mdspan` �
 
 ## What stays C ABI
 
-`include/imp/imp.h` is a C header: raw pointers, lengths, `ImpError` returns, no templates. Nothing in this document applies to it. The span is constructed one level in, in `src/api/imp_api_vision.cpp`.
+`include/imp/imp.h` is a C header: raw pointers, lengths, `ImpError` returns, no templates.
+
+- Nothing in this document applies to it.
+- The span is constructed one level in, in `src/api/imp_api_vision.cpp`.
 
 ## Where this is done, and where it is not
 

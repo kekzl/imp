@@ -7,7 +7,10 @@ commit: 9cbb8004
 
 # Attention dispatch
 
-Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel runs for each (phase × dtype × layer) combination. If this doc and the code disagree, the code wins. Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
+Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel runs for each (phase × dtype × layer) combination.
+
+- If this doc and the code disagree, the code wins.
+- Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
 
 > **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](../archive/roofline_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range. Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
 >
@@ -47,7 +50,10 @@ The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_
 
 ### Chunked prefill carve-out (default for most archs)
 
-Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads - NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result hits the dispatch gate above with `q_offset`-aware causal masking. See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/roadmap.md`.
+Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads, NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4.
+
+- Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result hits the dispatch gate above with `q_offset`-aware causal masking.
+- See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/roadmap.md`.
 
 ## Decode - switch on cache_dtype
 
@@ -62,15 +68,29 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 | NVFP4 | `paged_attention_decode_nvfp4` / `_nvfp4_tc` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu` (`attention.paged_nvfp4_multitok`); scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel`; TC: `_decode_nvfp4_tc_kernel`, `_splitk_nvfp4_tc_kernel`, `_residual_reduce_kernel` |
 | MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:492`) | shares the NVFP4 kernels with UE8M0 scales |
 
-**Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674). `paged_attention_serves_head_dim()` in `attention_paged.h` is the table, and the resolver falls back to FP16 KV before init when a model's head_dim is not in it. FP16 and FP8 serve 64/96/128/256/512, INT8 and INT4 serve 64/96/128/256, NVFP4 serves 64/128/256/512 - **no 96**.
+**Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674).
+
+| KV dtype | head_dim served |
+|---|---|
+| FP16, FP8 | 64/96/128/256/512 |
+| INT8, INT4 | 64/96/128/256 |
+| NVFP4 | 64/128/256/512 (**no 96**) |
+
+- `paged_attention_serves_head_dim()` in `attention_paged.h` is the table; the resolver falls back to FP16 KV before init when a model's head_dim is not in it.
 
 ### BitDecoding residual cache
 
-When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest `kv_cache.bitdecoding_residual_tokens` tokens are kept in a residual FP16 buffer and combined with the quantized older blocks at attention time. Used by NVFP4-decode for higher fidelity on the recent context. See `src/compute/attention_paged_nvfp4_tc.cu`.
+When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest `kv_cache.bitdecoding_residual_tokens` tokens are kept in a residual FP16 buffer and combined with the quantized older blocks at attention time.
+
+- Used by NVFP4-decode for higher fidelity on the recent context.
+- See `src/compute/attention_paged_nvfp4_tc.cu`.
 
 ## MLA (Multi-head Latent Attention)
 
-DeepSeek-V2/V3 checkpoints take a different route (missing from this doc until the 2026-08-02 audit). `ModelProfile::AttnVariant::MLA` marks them; the compressed KV latent is expanded by `src/compute/mla_kv_assemble.cu` before the assembled K/V reach the gate above, so an MLA layer looks to the dispatch like a normal attention layer with the assembled shapes. No standard RoPE on the latent path; the YaRN `mscale` ratio bug fixed 2026-07-07 lived here.
+DeepSeek-V2/V3 checkpoints take a different route (missing from this doc until the 2026-08-02 audit).
+
+- `ModelProfile::AttnVariant::MLA` marks them; the compressed KV latent is expanded by `src/compute/mla_kv_assemble.cu` before the assembled K/V reach the gate above, so an MLA layer looks to the dispatch like a normal attention layer with the assembled shapes.
+- No standard RoPE on the latent path; the YaRN `mscale` ratio bug fixed 2026-07-07 lived here.
 
 ## Sliding-window mask and soft-cap
 

@@ -93,7 +93,10 @@ One deliberate exception: `Serving` is temporarily re-entered as `Planning` duri
 | `BlockPool` | T3 | free-list over one slab; stride is a runtime constructor argument |
 | `ScratchStack` | T4 | LIFO; RAII `Mark` rewinds on scope exit |
 
-A forward pass opens one `ScratchStack::Mark` at entry; every intermediate takes from the stack; the mark's destructor rewinds. Cannot fragment (LIFO), cannot leak (unwinds on exception too). Its high-water mark sizes the planner's T4 charge from a measured warmup, not the `max(attn, ffn, moe, ssm)` heuristic recomputed in three places.
+A forward pass opens one `ScratchStack::Mark` at entry; every intermediate takes from the stack; the mark's destructor rewinds.
+
+- Cannot fragment (LIFO), cannot leak (unwinds on exception too).
+- Its high-water mark sizes the planner's T4 charge from a measured warmup, not the `max(attn, ffn, moe, ssm)` heuristic recomputed in three places.
 
 ### A3.4 L3 Handles (I3, I5)
 
@@ -108,7 +111,11 @@ Every graph-capturable kernel launch wrapper takes `StableSpan`, so a relocatabl
 
 "A block cannot outlive its request" is not compile-time enforceable in C++: `BlockRef` makes an accidental copy a compile error, and each request's `SequenceSlot` destructor asserts (debug) / counts (release) that its net refcount contribution is zero.
 
-**Platform fact behind I4's other half:** within a process, free VRAM only ever decreases. After a load -> generate -> free cycle every CUDA-level release succeeds (async pool trims to 0, graph memory zero) but `cudaMemGetInfo` never recovers for the process's life - WSL2/WDDM does not hand a process's peak commitment back. "Live blocks return to baseline" is what criterion 4 checks; "device-used returns to baseline" is not achievable here by any allocator design. Bandwidth, not a `cudaMalloc` probe, tells resident from spilled (~1530 GB/s resident vs ~237 GB/s spilled).
+**Platform fact behind I4's other half:** within a process, free VRAM only ever decreases.
+
+- After a load -> generate -> free cycle every CUDA-level release succeeds (async pool trims to 0, graph memory zero) but `cudaMemGetInfo` never recovers for the process's life, WSL2/WDDM does not hand a process's peak commitment back.
+- "Live blocks return to baseline" is what criterion 4 checks; "device-used returns to baseline" is not achievable here by any allocator design.
+- Bandwidth, not a `cudaMalloc` probe, tells resident from spilled (~1530 GB/s resident vs ~237 GB/s spilled).
 
 ---
 
@@ -172,7 +179,10 @@ PlanResult plan_memory(const PlanInput& in);   // pure, deterministic, never tou
 
 A KV block has **two** refcount holders, not three (COW-fork does not exist, archive A1.6): `seq_blocks_[seq_id]` (an active sequence's positional block table) and the cached LRU (`cached_blocks_lru_`, the content-addressed prefix cache; holds a `BlockRef` per entry). `pinned_blocks_`/`pin_refcount_` is an **eviction-policy overlay**, not a holder: a pinned block stays alive because the cached LRU already holds it at count 1, pinning only stops `reclaim_cached_block()` rotating past it.
 
-**Rule: the `BlockPool` owns the memory; nobody else does.** A block returns to the free list when and only when its last `BlockRef` is destroyed. `free_sequence()` moves its reference into the cache or lets it drop - no "skip the free" branches. StreamingLLM eviction (`evict_middle_blocks()`) must keep the block-table *length* for kernel positional alignment, so `seq_blocks_` is `std::vector<std::optional<BlockRef>>`, `nullopt` the hole.
+**Rule: the `BlockPool` owns the memory; nobody else does.** A block returns to the free list when and only when its last `BlockRef` is destroyed.
+
+- `free_sequence()` moves its reference into the cache or lets it drop, no "skip the free" branches.
+- StreamingLLM eviction (`evict_middle_blocks()`) must keep the block-table *length* for kernel positional alignment, so `seq_blocks_` is `std::vector<std::optional<BlockRef>>`, `nullopt` the hole.
 
 **The KV-pressure valve counts reclaimable blocks (#1879).** Until 2026-09-03 the "pool over 90% full" check compared the free list against the blocks live sequences hold, so a pool one third full of reclaimable prefix-cache blocks read as full and every wave after the first ran eager (measured: 2387 -> 1443-1485 tok/s). Fixed by adding `num_reclaimable_cached_blocks()` to the comparison.
 
@@ -189,11 +199,20 @@ A KV block has **two** refcount holders, not three (COW-fork does not exist, arc
 
 ### A5.3 cuBLAS / CUTLASS workspaces
 
-Shared from the T2 arena, sized by the plan, per-process (not per-handle, not per-stream: one compute stream plus one prefill stream). `gemm.cu`'s two statics (64 MiB workspace, 32 MiB bench scratch) moved to T2; the grouped-GEMM reserve was guesswork at 512 MiB against a measured 152 320 B (170 SMs x 896 B persistent-scheduler state) - now 1 MiB, freeing 488 MiB on every MoE model. The lazy CUTLASS growth path (`cudaFree`+`cudaMalloc` at GEMM time, unsafe under graph capture) is deleted: `gemm_nvfp4_cutlass_sm120_workspace(M, N, K)` pre-sizes, the planner takes the max over the model's shape set; the FP32 LM head caller needs 0 bytes at every shape measured, pinned by the `CutlassWorkspaceContract` test suite.
+Shared from the T2 arena, sized by the plan, per-process (not per-handle, not per-stream: one compute stream plus one prefill stream).
+
+- `gemm.cu`'s two statics (64 MiB workspace, 32 MiB bench scratch) moved to T2.
+- The grouped-GEMM reserve was guesswork at 512 MiB against a measured 152 320 B (170 SMs x 896 B persistent-scheduler state), now 1 MiB, freeing 488 MiB on every MoE model.
+- The lazy CUTLASS growth path (`cudaFree`+`cudaMalloc` at GEMM time, unsafe under graph capture) is deleted: `gemm_nvfp4_cutlass_sm120_workspace(M, N, K)` pre-sizes, the planner takes the max over the model's shape set.
+- The FP32 LM head caller needs 0 bytes at every shape measured, pinned by the `CutlassWorkspaceContract` test suite.
 
 ### A5.4 Vision tower
 
-Resident: loaded during `init_features()`/warmup whenever `--mmproj` is given, or always when the checkpoint carries its own tower (Qwen3-VL). Measured cost: +1610 MiB at `04_features` on the gemma-3-4b pair (archive A1.4). `runtime.vision_max_patches` (default 4096, ~1024x1024) bounds the image-token budget every encoder workspace is sized from - a hard ceiling, an oversized image is scaled down rather than refused. **Kept resident by design:** lazy loading would allocate ~1.6 GiB *while serving* on the first image (an I2 violation) and would need admission control for a memory event unrelated to request size.
+Resident: loaded during `init_features()`/warmup whenever `--mmproj` is given, or always when the checkpoint carries its own tower (Qwen3-VL).
+
+- Measured cost: +1610 MiB at `04_features` on the gemma-3-4b pair (archive A1.4).
+- `runtime.vision_max_patches` (default 4096, ~1024x1024) bounds the image-token budget every encoder workspace is sized from, a hard ceiling: an oversized image is scaled down rather than refused.
+- **Kept resident by design:** lazy loading would allocate ~1.6 GiB *while serving* on the first image (an I2 violation) and would need admission control for a memory event unrelated to request size.
 
 ### A5.5 Speculative decoding
 
@@ -241,7 +260,11 @@ V8 is the migration safety net: record a journal from a real GPU run once per mo
 | I6 | OOM is typed and recoverable | done - plan-time refusal at load with the block arithmetic; admission-time `IMP_ERROR_CAPACITY` -> HTTP 503 `capacity_error`, distinct from a client cancel | plan-time failure at load; admission-time 429/503 |
 | I7 | Capacity != occupancy | partial - per-tier reserved and live served on `/metrics`, plus KV blocks and budget-vs-own; accounting improves once the library reserve is charged at its measured value rather than a fixed constant | per-tier reserved and live, library reserve named, >=95 % accounted |
 
-Nothing in the set was dropped. I3 is type-enforced for stability with the graph-invalidation `generation()` check kept as a runtime assert rather than a compile-time one; I5's "a request-scoped block cannot outlive its request" is type-enforced against aliasing (`BlockRef` move-only) and assert-plus-soak-enforced against outliving (A3.4), not compile-time enforced end to end. Dated measurements behind every "partial" and the full divergence log (D1-D16, B1-B8): [`docs/archive/memory_census_2026.md`](../archive/memory_census_2026.md).
+Nothing in the set was dropped.
+
+- I3 is type-enforced for stability with the graph-invalidation `generation()` check kept as a runtime assert rather than a compile-time one.
+- I5's "a request-scoped block cannot outlive its request" is type-enforced against aliasing (`BlockRef` move-only) and assert-plus-soak-enforced against outliving (A3.4), not compile-time enforced end to end.
+- Dated measurements behind every "partial" and the full divergence log (D1-D16, B1-B8): [`docs/archive/memory_census_2026.md`](../archive/memory_census_2026.md).
 
 ---
 
@@ -257,4 +280,7 @@ Nothing in the set was dropped. I3 is type-enforced for stability with the graph
 
 ## Provenance
 
-The site census this design was measured against (archive A1) was taken 2026-07-28 on `imp:test` (`main` + the two `#1104` constrain commits + the staged `#1103` budget fix), GPU otherwise idle, healthy under load (2857-2932 MHz SM, 13801 MHz mem, 310-444 W). Harness: `MemAccount` via `diagnostics.vram_audit`; driver `tools/analysis/vram_audit_load.py`. Findings including refuted ones: `AUDIT.md`.
+The site census this design was measured against (archive A1) was taken 2026-07-28 on `imp:test` (`main` + the two `#1104` constrain commits + the staged `#1103` budget fix), GPU otherwise idle, healthy under load (2857-2932 MHz SM, 13801 MHz mem, 310-444 W).
+
+- Harness: `MemAccount` via `diagnostics.vram_audit`; driver `tools/analysis/vram_audit_load.py`.
+- Findings including refuted ones: `AUDIT.md`.

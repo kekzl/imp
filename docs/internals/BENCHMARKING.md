@@ -26,7 +26,10 @@ The one-page contract for how imp performance is measured and gated. Numbers tha
 
 ## Context-dependent changes need their own A/B
 
-The gate measures `tg128` at **`pp512`**; a change whose effect depends on context length is invisible there **by construction**. #1270 shipped a split-count heuristic that gained +10.0% at 32k on Qwen3-8B-Q8_0, cost **−7.30% at 32k on Qwen3-30B-A3B-NVFP4**, and passed `verify-fast` at +0.33% because the boost is inactive at pp512. Reverted in #1271.
+The gate measures `tg128` at **`pp512`**; a change whose effect depends on context length is invisible there **by construction**.
+
+- #1270 shipped a split-count heuristic that gained +10.0% at 32k on Qwen3-8B-Q8_0, cost **−7.30% at 32k on Qwen3-30B-A3B-NVFP4**, and passed `verify-fast` at +0.33% because the boost is inactive at pp512.
+- Reverted in #1271.
 
 ```bash
 scripts/bench_longctx_ab.sh <A> <B> [ctx-list] [model-list]
@@ -63,7 +66,10 @@ Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four confiden
 | VRAM gate | yes | no |
 | speculation | off | off since #1625; **was on**, so it measured a quantity the pin does not describe |
 
-  Both pass `--set speculative.ngram=false` now, which `tests/perf_baseline.json` states in its own `methodology` field. Until #1625 only `verify.sh` did, while the two were documented as one gate. A decode delta worse than -8 % **fails**; a prefill delta worse than -8 % warns (cuBLAS variance).
+Both pass `--set speculative.ngram=false` now, which `tests/perf_baseline.json` states in its own `methodology` field.
+
+- Until #1625 only `verify.sh` did, while the two were documented as one gate.
+- A decode delta worse than -8 % **fails**; a prefill delta worse than -8 % warns (cuBLAS variance).
 
 | Rule | Detail |
 |---|---|
@@ -100,12 +106,12 @@ arms.
 | preemption | deltas of `imp_kv_pressure_rejections_total`, `imp_streaming_kv_auto_enables_total`, `imp_prefix_cache_evictions_total` | `/metrics` |
 | energy | `nvidia-smi power.draw` integrated over the level: mean W and J per 1k output tokens; the mean SM clock beside it is the host-health check of rule 6 | host |
 
-Percentiles are p50 / p95 / p99 with linear interpolation; no latency is
-reported as a mean. The rules above (free GPU, one server per arm, clocks
-sampled) apply unchanged. The level's wall includes the closed loop's tail,
-so keep `--requests-per-level` at least twice the concurrency (the default).
-Not reported: tok/s per GPU and cost per token, imp targets one card. The
-published table is in [`../PERF.md`](../PERF.md) ("Serving KPIs").
+Percentiles are p50 / p95 / p99 with linear interpolation; no latency is reported as a mean.
+
+- The rules above (free GPU, one server per arm, clocks sampled) apply unchanged.
+- The level's wall includes the closed loop's tail, so keep `--requests-per-level` at least twice the concurrency (the default).
+- Not reported: tok/s per GPU and cost per token, imp targets one card.
+- The published table is in [`../PERF.md`](../PERF.md) ("Serving KPIs").
 
 ```
 python3 tools/analysis/serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,32 \

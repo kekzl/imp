@@ -29,14 +29,11 @@ volumes:
   imp-cache:
 ```
 
-The cache volume is not optional in a service context: without it every
-restart re-transforms the weights into `<model-name>-<hash>.impwcache` under
-`~/.cache/imp/warm` (`[warm_cache] dir` to override) again. Must be writable
-by the container user; a fresh volume owned by root silently disables the
-warm weight cache (on by default, `[warm_cache] enabled = false` to opt out)
-and the library-reserve measurement. Raw quant payloads are never duplicated:
-near-zero size for raw-served GGUF/NVFP4-prequant, ~model-size for BF16-dense.
-A stale cache (changed model file) is detected and ignored.
+The cache volume is not optional in a service context: without it every restart re-transforms the weights into `<model-name>-<hash>.impwcache` under `~/.cache/imp/warm` (`[warm_cache] dir` to override) again.
+
+- Must be writable by the container user; a fresh volume owned by root silently disables the warm weight cache (on by default, `[warm_cache] enabled = false` to opt out) and the library-reserve measurement.
+- Raw quant payloads are never duplicated: near-zero size for raw-served GGUF/NVFP4-prequant, ~model-size for BF16-dense.
+- A stale cache (changed model file) is detected and ignored.
 
 ## Configuration
 
@@ -184,24 +181,16 @@ that never finish a body - cap connections per peer at the proxy.
 | `POST /admin/suspend` | park the weights in host RAM (`[suspend] device_reset`, default on: also `cudaDeviceReset()` so `nvidia-smi` reads ~0 MiB) and free the GPU. Inference answers 503, `/health` reports `"suspended": true` at 200. Fails cleanly (507) when host `MemAvailable` is below snapshot size + `[suspend] host_ram_headroom_mb`. Models whose device buffers are transformed in place after upload (native MXFP4 GGUF, gpt-oss, Gemma-4 fused-expert split) are refused with 501 |
 | `POST /admin/resume` | restore from RAM (no mmap re-read, no requantization), serving again in seconds. Sessions/KV do not survive; only weights stay warm |
 
-**Shutdown** (SIGTERM/SIGINT): the listener stops, requests already accepted
-answer 503, `/ready` reports `draining`, and in-flight generations get
-`server.model_swap_drain_ms` (60 s default) to finish before teardown.
-`docker-compose.yml` sets `stop_grace_period: 75s` to cover that; a bare
-`docker stop` (10 s default) kills a draining server. While a swap or
-`/admin/suspend` holds the engine lock, inference answers 503
-(`overloaded_error`) within 250 ms rather than parking a worker thread.
+**Shutdown** (SIGTERM/SIGINT): the listener stops, requests already accepted answer 503, `/ready` reports `draining`, and in-flight generations get `server.model_swap_drain_ms` (60 s default) to finish before teardown.
 
-**Context-window reporting.** `/v1/models` carries vLLM's `max_model_len` and
-llama.cpp's `meta.n_ctx_train`; `GET /props` returns llama.cpp's `n_ctx`
-(top-level and under `default_generation_settings`); `GET /info` TGI's
-`max_total_tokens`/`max_input_tokens` - all three report the smaller of the
-resolver's plan and the pool's clamp since #1542 (97204 vs 52256 measured
-on a tight Qwen3.8-27B-NVFP4 card). A growable pool (`kv_cache.growable`,
-default on) counts by its ceiling: starts at `kv_cache.growable_initial_pct`
-(25%) of the plan, grows at admission (measured: 875 of 13264 blocks
-committed, 131072 advertised). `/health` reports both: `kv_capacity_tokens`
-for the commit, `kv_ceiling_blocks` for the ceiling.
+- `docker-compose.yml` sets `stop_grace_period: 75s` to cover that; a bare `docker stop` (10 s default) kills a draining server.
+- While a swap or `/admin/suspend` holds the engine lock, inference answers 503 (`overloaded_error`) within 250 ms rather than parking a worker thread.
+
+**Context-window reporting.** `/v1/models` carries vLLM's `max_model_len` and llama.cpp's `meta.n_ctx_train`; `GET /props` returns llama.cpp's `n_ctx` (top-level and under `default_generation_settings`); `GET /info` TGI's `max_total_tokens`/`max_input_tokens`.
+
+- All three report the smaller of the resolver's plan and the pool's clamp since #1542 (97204 vs 52256 measured on a tight Qwen3.8-27B-NVFP4 card).
+- A growable pool (`kv_cache.growable`, default on) counts by its ceiling: starts at `kv_cache.growable_initial_pct` (25%) of the plan, grows at admission (measured: 875 of 13264 blocks committed, 131072 advertised).
+- `/health` reports both: `kv_capacity_tokens` for the commit, `kv_ceiling_blocks` for the ceiling.
 
 ### Which series answer which question
 
@@ -234,17 +223,14 @@ Size the deployment from the model plus the KV pool you intend to serve; pin
 `runtime.max_seq_len` rather than auto-fitting against a moving number. Tier
 model and invariants: [`internals/MEMORY.md`](internals/MEMORY.md).
 
-**Host RAM: read `RssAnon`, not `VmRSS`.** The loader maps the checkpoint and
-faults it in, dropping those pages again once weights are on the GPU (#1934).
-Before that it held the whole file resident: Qwen3.8-27B-NVFP4-vllm read
-21.53 GiB of `VmRSS` (18.48 GiB mapping, 1.01 GiB anonymous) while `docker
-stats` showed 3.2 GiB, because the cgroup does not account a shared file
-mapping the way `ps` does. Weights left on host by an offload placement
-refault on demand and are counted again while being read.
+**Host RAM: read `RssAnon`, not `VmRSS`.** The loader maps the checkpoint and faults it in, dropping those pages again once weights are on the GPU (#1934).
+
+- Before that it held the whole file resident: Qwen3.8-27B-NVFP4-vllm read 21.53 GiB of `VmRSS` (18.48 GiB mapping, 1.01 GiB anonymous) while `docker stats` showed 3.2 GiB, because the cgroup does not account a shared file mapping the way `ps` does.
+- Weights left on host by an offload placement refault on demand and are counted again while being read.
 
 ## Serving more than one model
 
-One GPU holds one model; `server.model_swap` (default on, table above) drains
-in-flight generations first, never cancels them, and a failed load restores
-the previous model. The requesting call pays the load, cheap on repeats via
-the warm weight cache. Strict single-model semantics: `server.model_swap=false`.
+One GPU holds one model; `server.model_swap` (default on, table above) drains in-flight generations first, never cancels them, and a failed load restores the previous model.
+
+- The requesting call pays the load, cheap on repeats via the warm weight cache.
+- Strict single-model semantics: `server.model_swap=false`.

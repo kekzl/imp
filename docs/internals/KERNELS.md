@@ -7,7 +7,11 @@ commit: 9cbb8004
 
 # The optimal sm_120a attention kernel
 
-Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB202, **sm_120a**, consumer Blackwell). Grounded in profiling ground-truth and empirical refutations through 2026-06; not datacenter (B200/FA4) assumptions. Companion docs: [`SM120.md`](SM120.md) (kernel notes), [`../PERF.md`](../PERF.md) (baselines/methodology). Refuted design moves and the full occupancy-tax investigation: [`docs/archive/kernels_refuted_2026.md`](../archive/kernels_refuted_2026.md).
+Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB202, **sm_120a**, consumer Blackwell).
+
+- Grounded in profiling ground-truth and empirical refutations through 2026-06, not datacenter (B200/FA4) assumptions.
+- Companion docs: [`SM120.md`](SM120.md) (kernel notes), [`../PERF.md`](../PERF.md) (baselines/methodology).
+- Refuted design moves and the full occupancy-tax investigation: [`docs/archive/kernels_refuted_2026.md`](../archive/kernels_refuted_2026.md).
 
 ## Kernel table
 
@@ -65,9 +69,15 @@ O_acc       -> REGISTERS, not smem (0 KB)
 
 **Async pipeline:** synchronous `float4` copies replaced by a 3-stage `cp.async.cg.shared.global` 16-byte ring; producer lanes prefetch K tile j+1 and V tile j while consumers run QK/PV on tile j (`commit_group`/`wait_group(N-1)` + `__syncthreads()` before any smem read). At 1 block/SM (0.75 waves) more occupancy cannot hide GDDR7 latency, so deeper software pipelining is the only correct response.
 
-**Softmax off the critical chain:** `exp` via `ex2.approx.f32` on the MUFU/SFU pipe, parallel to the tensor pipe - warp A runs PV-MMA for tile j while warp B computes softmax for tile j+1. No forced producer/consumer specialization: both cross-tile pipeline variants regressed (+9 % / +15 %, archive); warps deliver phase diversity on their own. Running max/sum stay in register lanes; `O *= α` is a register op on the accumulator fragments.
+**Softmax off the critical chain:** `exp` via `ex2.approx.f32` on the MUFU/SFU pipe, parallel to the tensor pipe, warp A runs PV-MMA for tile j while warp B computes softmax for tile j+1.
 
-**NVFP4 precision boundary:** QK and PV stay f16. `mxf4nvf4.block_scale` (k=64, 2.6x raw) needs Q/K in NVFP4, which hits a format-intrinsic quality cliff (e4m3-QK PPL 5722 vs 6.12, #511 - 3 mantissa bits x 36-layer compounding). FP4 MMA is the lever for the projection GEMMs (q/k/v/o_proj, FFN), not for QK^T/PV inside attention.
+- No forced producer/consumer specialization: both cross-tile pipeline variants regressed (+9 % / +15 %, archive); warps deliver phase diversity on their own.
+- Running max/sum stay in register lanes; `O *= α` is a register op on the accumulator fragments.
+
+**NVFP4 precision boundary:** QK and PV stay f16.
+
+- `mxf4nvf4.block_scale` (k=64, 2.6x raw) needs Q/K in NVFP4, which hits a format-intrinsic quality cliff (e4m3-QK PPL 5722 vs 6.12, #511, 3 mantissa bits x 36-layer compounding).
+- FP4 MMA is the lever for the projection GEMMs (q/k/v/o_proj, FFN), not for QK^T/PV inside attention.
 
 ## 3. Steady-state pipeline (per KV tile)
 

@@ -43,7 +43,10 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 
 ## Hybrid (Gated DeltaNet + attention)
 
-GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but eliminates multi-turn state collapse). Linear-time scan vs O(n²) attention. Qwen3.5/Qwen3.6/Qwen3.8 GDN checkpoints below all run the same `qwen3_5` architecture code path.
+GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but eliminates multi-turn state collapse).
+
+- Linear-time scan vs O(n²) attention.
+- Qwen3.5/Qwen3.6/Qwen3.8 GDN checkpoints below all run the same `qwen3_5` architecture code path.
 
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---:|---:|---:|---|

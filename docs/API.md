@@ -7,10 +7,10 @@ commit: 9cbb8004
 
 # API
 
-What the HTTP surface actually accepts. Status legend from
-[`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no
-test. Constrained decoding, tool calling, thinking/reasoning and images:
-[`API_FEATURES.md`](API_FEATURES.md).
+What the HTTP surface actually accepts.
+
+- Status legend from [`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no test.
+- Constrained decoding, tool calling, thinking/reasoning and images: [`API_FEATURES.md`](API_FEATURES.md).
 
 **Two dialects, both native.** `/v1/messages` is implemented against the
 Anthropic wire format directly, no shim in either direction. All three
@@ -71,11 +71,11 @@ identical request returns different output than against the OpenAI API.
 Two of these do not switch off the way the field name suggests:
 
 - **`top_k: 0` is not "off", it is 50.** Every sampling site spells
-  `top_k > 0 ? top_k : 50` (`src/exec/executor.cu:191`, `:290`,
-  `src/runtime/engine_decode_pipeline.cpp:74`): zero and "unset" both land on
-  50, a *tighter* truncation than the 40 default. Disabling top-k needs a
-  value at or above the vocabulary size, which the dispatcher clamps to the
-  full vocabulary (`engine_decode_pipeline.cpp:75`).
+`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:191`, `:290`, `src/runtime/engine_decode_pipeline.cpp:74`).
+
+- Zero and "unset" both land on 50, a *tighter* truncation than the 40 default.
+- Disabling top-k needs a value at or above the vocabulary size.
+- The dispatcher clamps to the full vocabulary (`engine_decode_pipeline.cpp:75`).
 - **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant
   client cannot switch it off. Sending the non-OpenAI field with value `1.0`
   disables it: the engine skips the penalty pass when all three penalties are
@@ -95,47 +95,36 @@ Two of these do not switch off the way the field name suggests:
 
 `imp_requests_cancelled_total` remains client-disconnect only.
 
-Speculative decoding is counted twice: once in aggregate
-(`imp_spec_drafted_total`, `_accepted_total`, `_verify_steps_total`,
-`_miss_steps_total`) and once per draft source, `imp_spec_mtp_*` against
-`imp_spec_ngram_*`, each with `drafted_total`, `accepted_total`,
-`emitted_total`, `verify_steps_total` and `verify_wall_ms_total`. The aggregate
-cannot price the MTP head on its own: the n-gram/suffix matcher, the prompt
-prediction and token recycling fill the same verify chunk and land in the same
-totals, so a server running the documented MTP pair reports the same four
-numbers as one the matcher carried. `imp_spec_mtp_accepted_total /
-imp_spec_mtp_drafted_total` is the head's acceptance rate,
-`imp_spec_mtp_emitted_total / imp_spec_mtp_verify_steps_total` is what its
-verify bought, and `imp_spec_mtp_verify_wall_ms_total` is what it cost.
-`imp_spec_ngram_*` is every non-MTP drafter together. All ten hang off a live
-engine, so a model-less server emits none of them.
+Speculative decoding is counted twice: once in aggregate, once per draft source.
 
-Per endpoint, the same counter and ladders carry an `endpoint` label
-(`chat_completions`, `completions`, `messages`, `responses`, `embeddings`,
-`rerank`): `imp_endpoint_requests_total`, `imp_endpoint_request_duration_seconds`,
-`imp_endpoint_ttft_seconds`, `imp_endpoint_inter_token_seconds`,
-`imp_endpoint_queue_time_seconds`, every endpoint emitted at zero so a panel
-can be built before traffic arrives. The unlabelled series stay the totals.
-`imp_model_loaded` carries `model="<name>"`, so a swapped model's numbers are
-not its predecessor's.
+- Aggregate: `imp_spec_drafted_total`, `_accepted_total`, `_verify_steps_total`, `_miss_steps_total`.
+- Per source: `imp_spec_mtp_*` against `imp_spec_ngram_*`, each with `drafted_total`, `accepted_total`, `emitted_total`, `verify_steps_total`, `verify_wall_ms_total`.
+- Aggregate cannot price the MTP head on its own: the n-gram/suffix matcher, the prompt prediction and token recycling fill the same verify chunk and land in the same totals, so a server running the documented MTP pair reports the same four numbers as one the matcher carried.
+- `imp_spec_mtp_accepted_total / imp_spec_mtp_drafted_total`: the head's acceptance rate.
+- `imp_spec_mtp_emitted_total / imp_spec_mtp_verify_steps_total`: what its verify bought.
+- `imp_spec_mtp_verify_wall_ms_total`: what it cost.
+- `imp_spec_ngram_*`: every non-MTP drafter together.
+- All ten hang off a live engine; a model-less server emits none of them.
+
+Per endpoint, the same counter and ladders carry an `endpoint` label (`chat_completions`, `completions`, `messages`, `responses`, `embeddings`, `rerank`).
+
+- Labels apply to `imp_endpoint_requests_total`, `imp_endpoint_request_duration_seconds`, `imp_endpoint_ttft_seconds`, `imp_endpoint_inter_token_seconds`, `imp_endpoint_queue_time_seconds`.
+- Every endpoint emitted at zero, so a panel can be built before traffic arrives.
+- The unlabelled series stay the totals.
+- `imp_model_loaded` carries `model="<name>"`, so a swapped model's numbers are not its predecessor's.
 
 `imp_decode_batch_last_rows` (gauge) is the number of sequences in the most
 recent decode step, 0 while the worker idles: the live batch, where
 `imp_decode_batch_rows_total / imp_decode_batch_steps_total` is a windowed
 mean and `imp_decode_batch_max` never resets.
 
-The four latency histograms (`imp_request_duration_seconds`,
-`imp_ttft_seconds`, `imp_queue_time_seconds`, `imp_inter_token_seconds`) are
-fed by every generation path: chat stream and non-stream, `/v1/completions`
-stream and non-stream. A request cancelled or timed out before the worker
-admitted it contributes its wait to `imp_queue_time_seconds` as well.
-`imp_queue_time_seconds` ends when the scheduler puts the request into its
-first batch: the wait behind `max_batch_size` and KV admission.
-`imp_queue_waiting` / `imp_queue_running` split `imp_queue_depth` on the same boundary. Gate:
-`tests/test_server_metrics.py` in `make test-server`. The serving KPI harness
-reads the histograms and counters back per concurrency level
-(`tools/analysis/serving_kpi.py`, definitions in
-[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md)).
+The four latency histograms (`imp_request_duration_seconds`, `imp_ttft_seconds`, `imp_queue_time_seconds`, `imp_inter_token_seconds`) are fed by every generation path: chat stream and non-stream, `/v1/completions` stream and non-stream.
+
+- A request cancelled or timed out before the worker admitted it contributes its wait to `imp_queue_time_seconds` as well.
+- `imp_queue_time_seconds` ends when the scheduler puts the request into its first batch: the wait behind `max_batch_size` and KV admission.
+- `imp_queue_waiting` / `imp_queue_running` split `imp_queue_depth` on the same boundary.
+- Gate: `tests/test_server_metrics.py` in `make test-server`.
+- The serving KPI harness reads the histograms and counters back per concurrency level (`tools/analysis/serving_kpi.py`, definitions in [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md)).
 
 `imp_kv_blocks_reserved` (gauge) is what admission has promised to running
 requests for the rest of their generation and not yet written (#1635). Free
@@ -157,38 +146,22 @@ never replayed.
 
 ## Request tracing
 
-Send an `X-Request-Id` header and every response echoes it back - refusals
-and unmatched routes included - sanitized to printable ASCII and capped at
-128 chars. The generation endpoints answer with the server's own completion
-id when no client id was sent, so every generation response carries some id
-a caller can quote. With `--log-requests`, the JSONL record carries the
-client id as `client_request_id` next to the server `req_id`, which is the
-join an agent framework needs to attribute its own latency to this hop.
-With `server.otlp_endpoint` set (the full traces URL of an OTLP/HTTP
-collector, JSON encoding, `http://` only), every generation request is also
-exported as an OpenTelemetry span: a SERVER span named after the endpoint
-(`/v1/chat/completions`, `/v1/messages`, ...) with `imp.request_id`,
-`imp.client_request_id`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`
-/ `output_tokens`, `imp.cached_tokens`, `gen_ai.response.finish_reasons`,
-`imp.stream`, `imp.queue_ms` and `imp.ttft_ms` as attributes, plus `queue`,
-`prefill` and `decode` child spans on the request's timeline (the last two
-for streaming requests, where the first token is observed). A W3C
-`traceparent` request header puts the hop inside the caller's trace (its
-trace id, the caller's span as parent); without one a trace id is minted.
-A header with the sampled flag clear (`...-00`) is honoured the way a
-parent-based sampler would: ids are minted, nothing is exported. The JSONL
-record carries the same `trace_id` / `span_id` either way. Only requests
-that reach generation are traced; a request refused before it (4xx, 429,
-503) emits no span. Export runs on a background thread in one-second
-batches; an unreachable collector costs one warning and dropped batches,
-never request latency (measured 2026-09-02 on Qwen3.8-27B: median request
-latency 113.6 ms with the collector up, 111.5 ms with it stopped). `/metrics`
-counts `imp_otlp_spans_exported_total`, `imp_otlp_export_failures_total`
-and `imp_otlp_unsampled_requests_total`. Service name:
-`server.otlp_service_name` (default `imp-server`). Verified against Jaeger
-v2.20 (OTLP/HTTP receiver, GenAI view) with an OpenTelemetry-SDK client:
-the hop lands under the client's span with `queue` / `prefill` / `decode`
-children on its timeline.
+Every response echoes back the `X-Request-Id` header, refusals and unmatched routes included, sanitized to printable ASCII and capped at 128 chars.
+
+- Generation endpoints answer with the server's own completion id when no client id was sent, so every generation response carries some id a caller can quote.
+- With `--log-requests`, the JSONL record carries the client id as `client_request_id` next to the server `req_id`, the join an agent framework needs to attribute its own latency to this hop.
+- With `server.otlp_endpoint` set (the full traces URL of an OTLP/HTTP collector, JSON encoding, `http://` only), every generation request is exported as an OpenTelemetry span: a SERVER span named after the endpoint (`/v1/chat/completions`, `/v1/messages`, ...).
+- Span attributes: `imp.request_id`, `imp.client_request_id`, `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens`, `imp.cached_tokens`, `gen_ai.response.finish_reasons`, `imp.stream`, `imp.queue_ms`, `imp.ttft_ms`.
+- Child spans on the request's timeline: `queue`, `prefill`, `decode` (the last two for streaming requests, where the first token is observed).
+- A W3C `traceparent` request header puts the hop inside the caller's trace (its trace id, the caller's span as parent); without one a trace id is minted.
+- A header with the sampled flag clear (`...-00`) is honoured the way a parent-based sampler would: ids are minted, nothing is exported.
+- The JSONL record carries the same `trace_id` / `span_id` either way.
+- Only requests that reach generation are traced; a request refused before it (4xx, 429, 503) emits no span.
+- Export runs on a background thread in one-second batches; an unreachable collector costs one warning and dropped batches, never request latency.
+- Measured 2026-09-02 on Qwen3.8-27B: median request latency 113.6 ms with the collector up, 111.5 ms with it stopped.
+- `/metrics` counts `imp_otlp_spans_exported_total`, `imp_otlp_export_failures_total`, `imp_otlp_unsampled_requests_total`.
+- Service name: `server.otlp_service_name` (default `imp-server`).
+- Verified against Jaeger v2.20 (OTLP/HTTP receiver, GenAI view) with an OpenTelemetry-SDK client: the hop lands under the client's span with `queue` / `prefill` / `decode` children on its timeline.
 
 ## Errors
 
@@ -258,19 +231,16 @@ not, so a caller can check a prompt against server capacity without scraping
  "kv_ceiling_blocks": 16, "kv_pool_growable": false, "kv_pool_bandwidth_gbps": 1554.0}
 ```
 
-`kv_pool_bandwidth_gbps` is a device-to-device copy timed inside the pool at
-init, GB/s counting read plus write (also `imp_kv_pool_bandwidth_gbps` on
-`/metrics`). On WSL2/WDDM a successful allocation proves nothing: a pool the
-driver spilled into host memory serves at a sixth of the bandwidth with every
-other signal reading ok. Resident memory on the reference card reads ~1500,
-a spilled pool ~240; below 500 the server logs a WARN at load and keeps
-serving (the threshold is one driver on one card, so it is a gauge, not a
-refusal). 0 = not measured (a pool too small to time).
+`kv_pool_bandwidth_gbps` is a device-to-device copy timed inside the pool at init, GB/s counting read plus write (also `imp_kv_pool_bandwidth_gbps` on `/metrics`).
 
-`kv_ceiling_blocks` is what the pool may still grow to: equal to
-`kv_blocks_total` = fixed pool at final size; greater = growable, not there
-yet (`kv_cache.growable`). `kv_pool_growable` disambiguates the case both
-report ceiling == total (fixed pool vs growable at its ceiling), which want
-opposite reactions: wait for the card to free, or stop waiting. A pool that is
-small **and** can still grow is not reported unhealthy: it heals as the card
-frees; wait for the total to climb rather than restart.
+- On WSL2/WDDM a successful allocation proves nothing: a pool the driver spilled into host memory serves at a sixth of the bandwidth with every other signal reading ok.
+- Resident memory on the reference card reads ~1500, a spilled pool ~240.
+- Below 500 the server logs a WARN at load and keeps serving (the threshold is one driver on one card, so it is a gauge, not a refusal).
+- 0 = not measured (a pool too small to time).
+
+`kv_ceiling_blocks` is what the pool may still grow to.
+
+- Equal to `kv_blocks_total`: fixed pool at final size.
+- Greater than `kv_blocks_total`: growable, not there yet (`kv_cache.growable`).
+- `kv_pool_growable` disambiguates the case both report ceiling == total (fixed pool vs growable at its ceiling), which want opposite reactions: wait for the card to free, or stop waiting.
+- A pool that is small **and** can still grow is not reported unhealthy: it heals as the card frees; wait for the total to climb rather than restart.
