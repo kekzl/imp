@@ -19,8 +19,11 @@ actually shipped before, not that it enforces a style:
   3. frontmatter       - every in-scope doc declares exactly one layer, so a
                          reader knows whether it may assume CUDA knowledge.
   4. generated drift   - a PERF block hand-edited away from its source.
-  5. dead links        - an internal link to a file that does not exist.
-  6. size budgets      - README and the CLAUDE.md hierarchy.
+  5. dead links        - an internal link to a file or `#anchor` that does not exist.
+  6. size budgets      - README and the CLAUDE.md hierarchy; docs/ pages, limits in
+                         tools/filesize_thresholds.toml [thresholds.docs].
+  8. prose             - marketing/filler words (tools/docs_lint.toml) anywhere in scope;
+                         a docs/ paragraph over [paragraph] max_sentences.
   7. staleness         - `verified:` older than 180 days is a warning, listed
                          in docs/audit/docs-rewrite/STALE.md.
 
@@ -36,6 +39,7 @@ import json
 import pathlib
 import re
 import subprocess
+import tomllib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -105,8 +109,20 @@ FRONTMATTER_RE = re.compile(r"\A(?:<!--\n(.*?)\n-->|---\n(.*?)\n---)\n", re.S)
 VALID_LAYERS = {"L0", "L1", "L2", "L3"}
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
+ANCHOR_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)#\s]*)#([^)\s]+)\)")
 
-README_MAX_LINES = 400
+with open(ROOT / "tools" / "docs_lint.toml", "rb") as _f:
+    _PROSE = tomllib.load(_f)
+with open(ROOT / "tools" / "filesize_thresholds.toml", "rb") as _f:
+    _DOCS_LIMITS = tomllib.load(_f)["thresholds"]["docs"]
+PROSE_WORDS_RE = re.compile(
+    r"\b(?:" + "|".join(w for ws in _PROSE["words"].values() for w in ws) + r")\b", re.I)
+MAX_SENTENCES = _PROSE["paragraph"]["max_sentences"]
+SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+ABBREV_RE = re.compile(r"\b(?:e\.g|i\.e|vs|etc|cf|approx|incl|resp|no|Fig|Sec)\.", re.I)
+DOCS_MAX_LINES = _DOCS_LIMITS["docs"]
+
+README_MAX_LINES = _DOCS_LIMITS["readme"]
 CLAUDE_ROOT_MAX_TOKENS = 2000
 CLAUDE_DIR_MAX_TOKENS = 800
 STALE_DAYS = 180
@@ -320,6 +336,93 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
             resolved = (path.parent / target).resolve()
             if not resolved.exists():
                 errors.append(f"{rel}:{i}: dead link -> {target}")
+
+    # 5b. dead anchors: `[x](file.md#a)` and `[x](#a)` must name a heading or an explicit id.
+    for i, line in enumerate(lines, 1):
+        for target, anchor in ANCHOR_LINK_RE.findall(line):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            dest = path if not target else (path.parent / target).resolve()
+            if dest.suffix != ".md" or not dest.exists():
+                continue
+            if anchor.lower() not in _anchors(dest):
+                errors.append(f"{rel}:{i}: dead anchor -> {target}#{anchor}")
+
+    check_prose(rel, lines, errors)
+
+
+def _slug(heading: str) -> str:
+    """GitHub heading slug: lowercase, drop punctuation except - and _, spaces to -."""
+    h = re.sub(r"`|\*\*|\*|\[([^\]]*)\]\([^)]*\)", r"\1", heading.strip()).lower()
+    h = re.sub(r"[^\w\- ]", "", h)
+    return h.replace(" ", "-")
+
+
+_ANCHOR_CACHE: dict = {}
+
+
+def _anchors(p: pathlib.Path) -> set:
+    if p not in _ANCHOR_CACHE:
+        seen: dict = {}
+        out = set()
+        fence = False
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            if ln.lstrip().startswith("```"):
+                fence = not fence
+            if fence:
+                continue
+            m = re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", ln)
+            if m:
+                s = _slug(m.group(1))
+                n = seen.get(s, 0)
+                out.add(s if n == 0 else f"{s}-{n}")
+                seen[s] = n + 1
+            out.update(a.lower() for a in re.findall(r"""(?:id|name)=["']([^"']+)["']""", ln))
+        _ANCHOR_CACHE[p] = out
+    return _ANCHOR_CACHE[p]
+
+
+def _is_docs_page(rel: str) -> bool:
+    return (rel.startswith("docs/internals/") or
+            (rel.startswith("docs/") and "/" not in rel[len("docs/"):]))
+
+
+def check_prose(rel: str, lines: list, errors: list) -> None:
+    """8. prose rules from tools/docs_lint.toml; 9. docs line limit."""
+    if _is_docs_page(rel) and len(lines) > DOCS_MAX_LINES:
+        errors.append(f"{rel}: {len(lines)} lines > {DOCS_MAX_LINES}")
+    fence = comment = False
+    par: list = []
+    start = 0
+
+    def flush():
+        text = ABBREV_RE.sub("", " ".join(par))
+        n = len(SENTENCE_END_RE.findall(text + " "))
+        if _is_docs_page(rel) and n > MAX_SENTENCES:
+            errors.append(f"{rel}:{start}: paragraph of {n} sentences > {MAX_SENTENCES}; use a table or list")
+        par.clear()
+
+    for i, ln in enumerate(lines, 1):
+        s = ln.strip()
+        if s.startswith("```"):
+            fence = not fence
+            flush()
+            continue
+        if fence:
+            continue
+        if comment or s.startswith("<!--"):
+            comment = "-->" not in s
+            continue
+        m = PROSE_WORDS_RE.search(re.sub(r"`[^`]*`", "", s))
+        if m:
+            errors.append(f"{rel}:{i}: '{m.group(0)}' (tools/docs_lint.toml)")
+        if not s or re.match(r"(\||#|[-*+] |\d+\. |>|<|!\[|\[[^\]]*\]:)", s):
+            flush()
+            continue
+        if not par:
+            start = i
+        par.append(s)
+    flush()
 
 
 def check_generated_blocks(errors: list) -> None:
