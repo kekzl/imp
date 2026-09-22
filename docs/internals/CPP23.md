@@ -65,7 +65,7 @@ The two absences are libstdc++ 15.2 gaps, not language ones.
 
 `include/imp/imp.h` is a C header: raw pointers, lengths, `ImpError` returns, no templates.
 
-- Nothing in this document applies to it.
+- None of these rules apply to it.
 - The span is constructed one level in, in `src/api/imp_api_vision.cpp`.
 
 ## Where this is done, and where it is not

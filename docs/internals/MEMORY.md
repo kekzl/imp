@@ -216,7 +216,7 @@ Resident: loaded during `init_features()`/warmup whenever `--mmproj` is given, o
 
 ### A5.5 Speculative decoding
 
-Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculative.k`/`suffix_k_max`/MTP depth, invalidated together. Per-request spec toggling must not resize anything: buffers are planned for the config's maximum `k` and simply unused when a request does not qualify.
+Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculative.k`/`suffix_k_max`/MTP depth, invalidated together. Per-request spec toggling must not resize anything: buffers are planned for the config's maximum `k` and stay unused when a request does not qualify.
 
 ---
 
