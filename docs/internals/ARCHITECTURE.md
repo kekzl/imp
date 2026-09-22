@@ -93,7 +93,7 @@ Entry points, all in `include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`:
 | Memory subsystem | `src/memory/backend.{h,cpp}` (device), `memory/host_pinned.{h,cpp}` (host); tier allocators `arena`/`block_pool`/`scratch_stack`/`graph_slots`; older still-live pieces `src/memory/vram_allocator.cu`, `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cu`, `src/memory/recurrent_snapshot_store.cpp`, `src/exec/storage_planner.cpp` | tiers, allocators, planner; canonical doc [`MEMORY.md`](MEMORY.md) |
 | Kernels | `src/compute/`, `src/quant/` | attention, GEMM, RMSNorm, RoPE, SwiGLU, softmax, sampling, dequant/quant |
 | Constrained decoding | `src/runtime/constraint_manager.h` (`ConstraintManager`), `src/compute/gbnf_grammar.cpp` | `JsonConstrainer`, `SchemaConstrainer`, `RegexConstrainer` (shares `RegexNfa` with JSON-Schema `pattern`), `GrammarConstrainer` (GBNF); one `apply_mask(logits, vocab, stream)` contract applied via `apply_constraint_mask` in `src/exec/executor.cu`; routed through `Engine::step_constrained_pipeline` on the `needs_constrained` flag |
-| Vision | `src/vision/` | SigLIP/gemma4v (fixed token count) and Qwen3-VL (dynamic, patch-budget-sized, DeepStack taps, M-RoPE) |
+| Vision | `src/vision/` | SigLIP/gemma4v (fixed token count) and Qwen3-VL (dynamic, patch-budget-sized, DeepStack taps, M-RoPE); merged embeddings replace the expanded `<\|image_pad\|>` positions before layer 0 |
 | Public C API | `src/api/imp_api.cpp`, `include/imp/{imp,types,error,config}.h` | ABI-stable entry points (`CONTRIBUTING.md`) |
 
 ## Known limitations

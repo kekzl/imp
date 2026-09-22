@@ -490,3 +490,478 @@ A client comparing total against ceiling reads "at capacity, healthy" in both, a
        ceiling read from GET /health, upload delta from the server log]
 ```
 
+
+## Design draft A2-A6, invariant compliance, open questions (verbatim, `9cbb8004`)
+
+Superseded by `docs/internals/MEMORY.md`; kept so no design detail is lost. Corrections to it: `docs/audit/docs-rewrite/DISPATCH_docs_v3.md` (agent E).
+
+### A2. Lifetime taxonomy
+
+Five tiers. **Each tier gets exactly one allocator whose discipline makes that tier's failure mode structurally impossible.**
+
+| Tier | Lifetime | Allocator | Failure mode made impossible | Address stability |
+|---|---|---|---|---|
+| **T1 Model-resident** | model load → unload | bump arena, freed wholesale | per-object leak (nothing is individually freed) | stable |
+| **T2 Engine-persistent** | process | bump arena | per-object leak | stable |
+| **T3 Pooled fixed-block** | request-scoped, refcounted | free-list over one slab | external fragmentation (all blocks identical) | stable |
+| **T4 Forward-scratch** | one forward pass | LIFO stack | fragmentation (LIFO cannot fragment) + leak (stack unwinds) | stable per slot |
+| **T5a Transient host-staging** | load only | ordinary host alloc | surviving load (asserted at phase transition) | n/a |
+| **T5b Engine-persistent pinned host** | process | `PinnedBuffer` over `HostPinnedAllocator`; `HostRegistration` for memory imp does not own | per-object leak (move-only owner, no free to forget); asymmetric unregister | n/a |
+
+Confirmed against A1.7. Three corrections the inventory forced:
+
+- **T5 splits.** 26 pinned-host acquisition sites are engine-persistent by construction (e.g. the per-step D2H gather staging buffer is pinned once and reused every decode step), so they must survive into `AllocPhase::Serving`. T5a keeps the "load only, asserted at phase transition" discipline; T5b is the tier those 26 sites move to, owned by `PinnedBuffer` (move-only, frees exactly once, empty-on-failure so degradation paths still work). `Backend` covers device memory only.
+- **T1 and T2 need separate arenas.** `server.model_swap` (shipped 2026-07-26) unloads a model and loads another without a process restart. T1 must be releasable wholesale at swap; T2 (KV pool geometry, cuBLAS workspace, graph buffers) must survive it or be torn down explicitly.
+- **T3 is a group of pools, not one.** The KV cache runs two block groups (global + SWA); the residual FP16 ring, SSM state and recurrent snapshots are all fixed-stride slabs with per-sequence slots. One `BlockPool<Stride>` template, four instantiations.
+
+No tier for the library reservation (F4): it is not imp's memory, it is a **charge** the planner subtracts before distributing anything (A4).
+
+One entry used to straddle tiers: the per-request `cudaMallocAsync` traffic in `engine_graph_decode.cpp` / `engine_scheduler.cpp` was logically T4 but implemented as driver calls on the hot path. Since 2026-09-07 that family (serial and ragged prefill metadata, the sync and async graph-loop block tables, the constrained pipeline's table/token/pos/ctx) is one T2 allocation at init, `Engine::init_serving_metadata_pool_()` carved by `runtime/serving_metadata_layout.h`; the driver calls remain only as the fallback for a pool that failed to allocate.
+
+---
+
+### A3. Layer design
+
+Three layers. Each states what it is *not* responsible for.
+
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │ L3  Handles          typed RAII ownership, stability in the  │
+   │                      type system                             │
+   │     NOT: sizing, policy, physical acquisition                │
+   ├──────────────────────────────────────────────────────────────┤
+   │ L2  Allocators       one per lifetime tier (A2)              │
+   │     NOT: talking to the driver, deciding how much            │
+   ├──────────────────────────────────────────────────────────────┤
+   │ L1  Backend          physical acquisition, phase guard,      │
+   │                      accounting                              │
+   │     NOT: lifetime, tiering, policy                           │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+All of it lives in `src/memory/`. Nothing above L1 calls the driver.
+
+#### A3.1 L1 - Backend: VMM or `cudaMalloc`?
+
+**Recommendation: `cudaMalloc` backend for every tier now; a VMM backend for the KV block pool only, in migration step 7, gated on a WSL2 spike. No VMM anywhere else.**
+
+*Against VMM everywhere:* peak - steady state is +190 / +178 / +200 MiB (A1.3); imp allocates once at init and holds until teardown, so there is no churn to fragment. VMM's costs (2 MiB minimum granularity, explicit `cuMemAddressReserve`/`cuMemCreate`/`cuMemMap`/`cuMemSetAccess` lifecycle, handle bookkeeping, different behaviour under WDDM) are a bad trade against a 190 MiB problem.
+
+**Superseded 2026-07-31 (B84): the defect this section describes no longer exists.** 6.4 reordered the build so the caches come first and KV takes the measured residual; 6.9 replaced the wrong free-VRAM reading with a measured library charge (attribution ~100 %). The pool grants the full requested context at 4k, 32k and 128k; holding a 128k pool at 81 MiB free costs 1 % of decode. The reasoning below stands as the record of why VMM looked necessary.
+
+*For VMM on the KV pool:* the pool must be sized **before** the weight caches are built, from a free-VRAM reading wrong by ~3.9 GiB (F3, F4). With VMM the guess disappears:
+
+- `cuMemAddressReserve` the VA range for the **maximum** KV the config could want (`max_batch × max_seq_len`); reserving address space costs no physical memory.
+- Commit physical pages in coarse chunks (64-256 MiB, multiples of the 2 MiB granularity) as the free-list runs dry.
+- Decommit chunks when a chunk's blocks are all free and the pool has been under-subscribed for N steps.
+
+The pool cannot be mis-sized because it is no longer sized: bounded by the reservation, backed on demand. The planner's job shrinks from "predict the residual exactly" to "prove the maximum commitment fits". The `kv_max_blocks` clamp ladder (`vram_budget.cpp:379-437`) collapses to one check. Addresses stay stable under VMM, so I3 holds and graph-captured KV pointers remain valid across growth; plain `cudaMalloc` growth cannot offer that.
+
+*Why step 7 and not step 1:*
+
+1. **`cuMemCreate`/`cuMemMap` under WSL2/WDDM: measured 2026-07-29, gate OPEN.** `tools/analysis/vmm_wsl2_probe.cu`, 24/24 checks, two reproducible runs on the RTX 5090 (driver 13030, `VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED=1`):
+
+   | property | result |
+   |---|---|
+   | 24 GiB `cuMemAddressReserve` | succeeds in 0.4-1.0 ms, **+0.000 MiB** physical |
+   | commit in 256 MiB granules | exactly `+256.00 MiB` each, no overhead |
+   | base address across grow/shrink (8→2→6→4→10 chunks) | **invariant**, `0x2000000000` at every step |
+   | data in another region across decommit/recommit | intact, 0 / 67 108 864 words wrong |
+   | **graph-captured kernel over a fixed VA, across +1.5 GiB growth** | **same checksum three times, no re-instantiate** |
+   | full decommit | free VRAM returns to baseline, **+0.00 MiB** residual |
+
+   Two numbers change the design:
+   - **Granularity is 2 MiB** (minimum and recommended identical on sm_120a), not 64 KiB. A commit chunk must be a multiple of 2 MiB; 256 MiB = 128 granules.
+   - **Decommit costs ~2x commit**: commit 256 MiB ~1.2 ms mean, decommit ~2.4-2.6 ms. The decommit policy must be generous and hysteretic or flapping costs more than the memory it returns. A growth event is ~1.2 ms, a third of a decode step at ~280 tok/s, only every few hundred steps.
+
+   No WDDM tax of the 165 µs `memcpyAsync` kind appeared.
+
+2. **The tiers above must exist first**, or there is nothing to grow into.
+
+*Not considered:* `cudaMallocAsync` pools as the backend. imp pins the default pool's release threshold to `UINT64_MAX` (a de-facto arena without an arena's guarantees), and its reserved-vs-used split is a recurring accounting-confusion source (A1.4 residuals). Kept only for the weight-upload path during migration, then retired.
+
+**Backend interface:**
+
+```cpp
+// src/memory/backend.h - the ONLY place in imp that calls the driver.
+class Backend {
+public:
+    virtual ~Backend() = default;
+    // Physical acquisition. Fails cleanly; never throws, never aborts.
+    virtual std::expected<Region, MemError> acquire(size_t bytes,
+                                                    Alignment a,
+                                                    RegionTag tag) = 0;
+    virtual void release(Region&&) = 0;
+    // Growable regions (VMM backend only; CudaMallocBackend returns
+    // MemError::NotGrowable).
+    virtual std::expected<void, MemError> commit(Region&, size_t new_bytes) = 0;
+    virtual void decommit(Region&, size_t new_bytes) = 0;
+    virtual BackendStats stats() const = 0;
+};
+```
+
+`Region` is `{void* base; size_t committed; size_t reserved; RegionTag tag;}`: move-only, and the *only* type in imp that holds a raw device pointer obtained from the driver.
+
+#### A3.2 L1 - the phase guard (I2)
+
+```cpp
+enum class AllocPhase { Loading, Planning, Serving };
+```
+
+Process-global, monotonic, set by the engine. Every entry point that acquires physical memory consults it: `acquire()`, `acquire_growable()`, and since #1649 `commit()` and `commit_range()` as well.
+
+- `Loading` / `Planning`: allowed.
+- `Serving`: **debug:** `IMP_ASSERT_FAIL` with the tag and a backtrace. **release:** increment `steady_state_allocations_total{tag}`, log once per tag at WARN, proceed (never crash a production server over an accounting bug).
+
+The counter is the I2 test surface: acceptance criterion 3 is `steady_state_allocations_total == 0` after a soak. Also the migration progress bar: starts at ~190 MiB worth of allocations per config, must reach zero.
+
+One deliberate exception: `Serving` is temporarily re-entered as `Planning` during `server.model_swap`, bracketed and logged.
+
+**Growth is an acquisition** (#1649). `commit()` and `commit_range()` are non-virtual wrappers around `do_commit()` / `do_commit_range()`, same reason `acquire()` wraps `do_acquire()`: a backend cannot forget the guard. Before #1649 a growable KV pool committing pages under load was counted by none of the three instruments: not the phase counter, not the `--wrap` interposer (wraps `cudaMalloc*`, the VMM backend calls `cuMemCreate`/`cuMemMap`), not `check_alloc_sites.py` (scans for driver APIs, and the call is inside `src/memory/`).
+
+The guard runs **after** the call, on the delta the backend actually committed: a range may be partly mapped already, and `commit(new_total)` is a target, not an amount. Shrinking is not counted; it hands memory back.
+
+#### A3.3 L2 - Allocators, one per tier
+
+```cpp
+class ArenaAllocator;   // T1, T2 - bump; reset() frees wholesale
+template <size_t Stride> class BlockPool;  // T3 - free-list over one slab
+class ScratchStack;     // T4 - LIFO; scope guard restores the mark
+```
+
+`ArenaAllocator` and `BlockPool` exist in `src/core/allocator.h` (A1.6, dead). They move to `src/memory/`, get the Backend as acquisition source and the handle types below.
+
+`ScratchStack` is new:
+
+```cpp
+class ScratchStack {
+public:
+    class Mark {                       // RAII; dtor rewinds
+        ~Mark() { stack_->rewind(off_); }
+    };
+    [[nodiscard]] Mark mark();
+    StableSpan<std::byte> take(size_t bytes, Alignment);  // nullptr if exhausted
+};
+```
+
+A forward pass opens one `Mark` at entry; every intermediate takes from the stack; the `Mark` destructor rewinds. Cannot fragment (LIFO), cannot leak (unwinds on exception too). Its high-water mark is the number the planner needs, so the planner sizes it from a **measured** warmup high-water mark rather than from `max(attn, ffn, moe, ssm)` heuristics recomputed in three places.
+
+#### A3.4 L3 - Handles: making the illegal states unrepresentable
+
+The load-bearing type distinction is I3.
+
+```cpp
+// Non-owning view. May point at anything. Cheap, copyable.
+template <class T> class DeviceSpan {
+    T* p_; size_t n_;
+public:
+    T* data() const; size_t size() const;
+};
+
+// Non-owning view whose address is guaranteed stable for the lifetime of the
+// region it came from. Constructible ONLY by the tier allocators that can make
+// that promise (T1-T4). Friend-restricted ctor; no public ctor from T*.
+template <class T> class StableSpan {
+    T* p_; size_t n_;
+    StableSpan(T*, size_t);                       // private
+    friend class ArenaAllocator;
+    template <size_t S> friend class BlockPool;
+    friend class ScratchStack;
+public:
+    operator DeviceSpan<T>() const;               // widening: always OK
+    // NOTE: there is deliberately no DeviceSpan -> StableSpan conversion,
+    // no StableSpan(T*) ctor, and no as_stable() escape hatch.
+};
+```
+
+Every graph-capturable kernel launch wrapper takes `StableSpan`:
+
+```cpp
+// exec/: signature enforces I3 at the call site.
+void launch_paged_attention_decode(StableSpan<const half> q,
+                                   StableSpan<const int>  block_table,
+                                   StableSpan<half>       out,
+                                   cudaStream_t);
+```
+
+A relocatable buffer is a `DeviceSpan`; passing it where a `StableSpan` is expected does not compile. The tier allocators are the only producers of `StableSpan` because the promise is theirs to make.
+
+Ownership:
+
+```cpp
+template <class T, Tier Ti> class Owned {   // move-only RAII
+    ~Owned();                               // returns to its allocator
+    StableSpan<T> span() const;             // T1..T4 only
+};
+```
+
+`Owned<T, Tier::ModelResident>` is not convertible to `Owned<T, Tier::EnginePersistent>`: a subsystem cannot smuggle a model-lifetime buffer into engine-lifetime storage, so `server.model_swap` cannot leave a dangling pointer behind.
+
+Request-scoped blocks:
+
+```cpp
+class BlockRef {                     // move-only; NOT copyable
+    KVBlockId id_; BlockPool<kKVBlockBytes>* pool_;
+public:
+    ~BlockRef();                     // dec_ref, exactly once
+    BlockRef share() const;          // explicit inc_ref - the ONLY way to alias
+};
+```
+
+"A request-scoped block cannot outlive its request" is not compile-time enforceable in C++ without lifetime annotations. What the design does enforce:
+
+- `BlockRef` is move-only: an accidental copy is a compile error, every additional referent is a visible, greppable `share()` call.
+- Every `BlockRef` a request owns lives in that request's `SequenceSlot`; the slot destructor asserts (debug) / counts (release) that its refcount contribution nets to zero.
+- Acceptance criterion 4 (post-drain live blocks return to post-load baseline ±1 %) is the soak-time test for "no block outlived its request".
+
+**Criterion 4 is pool-level, not device-level, and that is a platform fact** (AUDIT B36). Measured: after one load → generate → free cycle, every CUDA-level release succeeds (async pool trims to `reserved 0 / used 0`, graph memory zero) and `cudaMemGetInfo` still drops by the model's full footprint and never recovers for the life of the process. Release threshold zero + re-trim returns nothing. WSL2/WDDM does not hand a process's peak VRAM commitment back. So "live blocks return to baseline" is what the soak checks; "device-used returns to baseline" is not achievable here by any allocator design, and a `cudaMalloc` probe cannot prove otherwise because the driver oversubscribes into host memory and returns success (G18; time it instead: ~1530 GB/s resident vs ~237 GB/s spilled).
+
+This is also the sharpest argument for **I4**: within a process, free VRAM only ever decreases; any capacity decision read from `cudaMemGetInfo` measures a moving floor.
+
+---
+
+### A4. The planner
+
+#### A4.1 What is wrong today
+
+`compute_vram_budget()` (`src/runtime/vram_budget.cpp`, 480 LOC) is "pure computation" per its header, but its dominant input is `free_vram`, a live `cudaMemGetInfo` reading, and it is called **after** the weights are uploaded and **before** the weight caches are built. So:
+
+1. It sizes the KV pool from a free-VRAM number that still contains ~3.9 GiB of library reservation claimed later (F4).
+2. The pre-dequant phases then re-derive **their own** reserves from live free VRAM again. That is #1100: "the KV pool is allocated before the cache build, so its bytes are already gone from free_vram, and every one of them then came out of the decode cache a second time."
+3. The engine works around the ordering with a **balloon**: a physical `cudaMalloc` held across `init_weights` purely to hide bytes from the KV planner, released just before phase 3 (`engine_weight_upload.cpp:278`, `engine_kv_cache_init.cpp:370`).
+4. Six incident-driven clamps stack on the result: `target_blocks`, the post-weight `max_fit_blocks` backstop, `min_kv_blocks`, the `kv_fraction` affordability cap, the SWA batch-shaped charge, and the `#1103` allocator-headroom floor.
+
+#### A4.2 The replacement
+
+```cpp
+struct PlanInput {
+    ModelShape        model;        // layers, dims, per-tensor byte demand
+    FeatureSet        features;     // spec decode, vision, SWA, residual ring, LoRA
+    ConcurrencyLimits limits;       // max_batch, max_seq_len, kv dtype/block size
+    size_t            budget_bytes; // --vram-budget, or device total
+    LibraryReserve    library;      // A1.5 - measured constant, not a guess
+};
+
+struct MemoryPlan {
+    size_t model_resident;       // T1 arena
+    size_t engine_persistent;    // T2 arena
+    ScratchSizes scratch;        // T4 high-water, per phase
+    KvPlan kv;                   // block count / VA reservation / commit chunk
+    std::vector<PoolPlan> pools; // SWA group, residual ring, SSM state, snapshots
+    size_t library_reserve;
+    size_t total() const;
+};
+
+std::expected<MemoryPlan, PlanFailure> plan_memory(const PlanInput&);
+```
+
+Three properties the current code does not have:
+
+- **`plan_memory` never calls `cudaMemGetInfo`.** Only capacity input is `budget_bytes`. Fully testable on the host with no GPU; same config yields the same plan on every boot, ending the "free VRAM before weight upload swings by 1.6 GB between identical invocations → different auto-batch → different KV clamp" trap recorded against #1103.
+- **Allocation follows the plan in tier order**, KV allocated from a **computed** residual: `library reserve → T2 engine-persistent → T1 model-resident + weight caches → T3 pools → KV`. The balloon is deleted, not fixed.
+- **It fails at load time with a report**, never mid-generation.
+
+#### A4.3 `--vram-budget` and the failure report
+
+`--vram-budget` today is a *sizing view* (`src/memory/vram_query.{h,cpp}`): it rewrites what `cudaMemGetInfo` returns so the heuristics size smaller; its own header calls it "best-effort hard cap, not an OS limit ... leave ~1 GiB of real headroom." Under the new planner, `budget_bytes` is the plan's total, the plan fits it or fails, and `Backend` refuses any acquisition that would exceed it. The rewriting view is retired with the heuristics that needed it.
+
+`PlanFailure` carries the full arithmetic; the operator-facing message says what to change:
+
+```
+Cannot fit this configuration in the 32607 MiB budget.
+
+  requested                             MiB
+    model weights                    15467
+    NVFP4 decode cache + SF slab      1800
+    KV pool (batch 8 x 4096 tok)     12288
+    executor scratch (high-water)      507
+    engine-persistent                  310
+    CUDA context + driver             1680
+    library reserve (measured)        3900
+                                     -----
+    total                            35952   over by 3345 MiB
+
+  the three largest levers
+    runtime.max_seq_len 4096 -> 2048        frees 6144 MiB
+    kv_cache.dtype f16 -> fp8               frees 6144 MiB
+    runtime.max_batch_size 8 -> 6           frees 3072 MiB
+```
+
+Not "VRAM budget: KV clamped 25600 -> 512 blocks", which is what the log says today after the fact.
+
+---
+
+### A5. Subsystem boundaries
+
+| subsystem | may hold | must request | must never touch |
+|---|---|---|---|
+| `compute/` | nothing | all buffers as `StableSpan`/`DeviceSpan` parameters | any allocation API; any static workspace |
+| `exec/` | `Owned<_, EnginePersistent>` workspace handles; a `ScratchStack::Mark` per forward | scratch from the stack | driver calls; `cudaMallocAsync` |
+| `model/` | `Owned<_, ModelResident>` weight handles | the T1 arena | KV, workspaces, driver calls |
+| `quant/` | `Owned<_, ModelResident>` cache handles | the T1 arena, budgeted by the plan | live free-VRAM queries |
+| `graph` (`runtime/cuda_graph.*`, `engine_graph_decode.cpp`) | graph + exec objects | `StableSpan` for everything captured | any allocation inside a capture region |
+| `runtime/` | the plan, the allocators, the phase | - | per-request driver allocation |
+| `vision/` | `Owned<_, ModelResident>` tower + `Owned<_, EnginePersistent>` staging | T1 + T2 | KV, executor workspaces |
+| `api/` | nothing device-side | - | everything |
+
+#### A5.1 Paged KV + prefix cache + pinning - who owns a block
+
+> **Corrected 2026-07-29 during step 3 (B3).** This section originally said a block has three refcount holders (sequence, prefix cache, pin set). Wrong: there are **two** holders; the pin set is an eviction *policy* overlay, not an owner. Verified: `kv_cache_manager.cpp` contains exactly **one** `cache_->inc_ref` call site (line 536, prefix reuse) and no pin path touches the KV refcount.
+
+A KV block has **two refcount holders** (COW-fork does not exist, A1.6):
+
+1. **`seq_blocks_[seq_id]`**: an active sequence's positional block table. Takes a reference on allocation, drops it in `free_sequence()`.
+2. **The cached LRU** (`cached_blocks_lru_` + `block_hash_to_id_`): the content-addressed prefix cache. Holds no reference of its own; it survives because `free_sequence()` *deliberately skips* the free, leaving the count at 1. That is the defect: liveness by omission rather than by ownership.
+
+Not a holder, though it behaves like a referent:
+
+3. **`pinned_blocks_` / `pin_refcount_`**: agentic prefix pinning. Its counts are *pin-owner* counts, not KV refcounts. A pinned block stays alive because it sits in the cached LRU at count 1; pinning only makes `reclaim_cached_block()` rotate past it. The pin set migrates as **policy**, not ownership.
+
+Plus one out-of-process referent: `save_prefix_cache()` / `load_prefix_cache()` serialise blocks to disk and re-register hashes on load.
+
+**Ownership rule: the `BlockPool` owns the memory; nobody else does. Both holders hold `BlockRef`s.** A block returns to the free list when and only when its last `BlockRef` is destroyed. No path frees a block by id.
+
+Concretely:
+
+- `seq_blocks_` becomes `std::vector<BlockRef>`; `free_sequence()` clears the vector, the refs drop.
+- The prefix cache holds its own `BlockRef` per entry. `evict_cached_block()` drops that ref; a block still used by a sequence is untouched. Today this is a manual refcount plus `free_block_dropping_stale_hash`, whose comment documents the double-ownership bug it prevents: "a stale hash->id entry on a free-listed block lets a later prefix match inc_ref a block the allocator still hands out".
+- The pin set holds `BlockRef`s keyed by owner. `unpin_prefix()` drops them; budget eviction drops the front owner's refs. Pins surviving `free_sequence()` is just another live reference, not a special case.
+
+**Cancellation, disconnect, error paths** leak refcounts today because each path frees by hand. Under `BlockRef` they are one path: the `SequenceSlot` is destroyed and its refs unwind, including on exception. The slot destructor asserts its net contribution is zero (A3.4); criterion 4's cancellation-heavy soak is the system-level proof.
+
+**Nuance the design must not lose:** `evict_middle_blocks()` (StreamingLLM) replaces freed slots with sentinel `-1` while keeping the table *length*; the attention kernels depend on positional alignment. So `seq_blocks_` is `std::vector<std::optional<BlockRef>>` and the sentinel is `nullopt`. Same for the SWA positional table (documented `-1` holes by design).
+
+**The KV-pressure valve counts reclaimable blocks (#1879).** `Engine` auto-enables StreamingLLM and demotes CUDA graphs one-way when the pool is "over 90% full"; until 2026-09-03 the check compared the free list with the blocks live sequences hold, so a pool one third full of reclaimable prefix-cache blocks read as full ("0/2016 free" with 984 reclaimable), and every wave after the first ran eager (Llama-3.2-3B-Q8_0, 32 x 1000-token streams: 2387 -> 1443-1485 tok/s). The check now adds `num_reclaimable_cached_blocks()` and compares against `total_blocks()`; the I7 distinction (occupied vs reclaimable) that `/metrics` already exported is what the scheduler had ignored.
+
+#### A5.2 CUDA graph pool
+
+Current state, verified:
+
+| pool | keyed by | bound |
+|---|---|---|
+| `decode_graph_pool_[64]` | `n_sequences − 1` | `kMaxGraphPoolSize = 64`, fixed array |
+| `prefill_graph_runner_` | - | 1 |
+| `async_graph_runner_` | - | 1 (conditional-node loop) |
+| `spec_graphs_` | `std::tuple<n_tokens, ctx_capacity, rec_slot>` | **no explicit cap**, all three axes bucketed; cleared wholesale by `free_spec_graphs_()` |
+
+`spec_graphs_` bucketing: `n_tokens` to 3-5 draft buckets (`spec_capture_bucket_`), `ctx_capacity` to power-of-two tiers from 4096 up to `speculative.capture_ctx_cap` (`spec_capture_ctx_tier_`, ~6 tiers), `rec_slot` to `max_batch + 1`. Worst case ~5 × 6 × (max_batch+1) graph execs, ~1950 at `--max-batch 64`. Bounded but **uncounted**: nothing in the plan charges the graph memory those execs hold. The design gives it a plan-derived LRU capacity and counts it.
+
+Interaction with I3: everything a graph captures is a `StableSpan`, so it comes from T1-T4, all arena- or pool-backed and never moving. The `workspace_generation` invalidation hook stays as a belt-and-braces assert; it should never fire.
+
+Interaction with `cudaDeviceGraphMemTrim`: **measured 2026-07-29, already zero.** `cudaDeviceGetGraphMemAttribute` reports `used=0.0 / reserved=0.0 / high_since_serving=0.0 MiB` after 12 serving requests on the dense config, so no captured region allocates today. Consequences, settled: the trim calls at `cuda_graph.cu:339,1291` are dead code (pure deletion, not a step-5 deliverable), and graph memory is **not** part of the 20-39 % residual (AUDIT B26/B27).
+
+#### A5.3 cuBLAS / CUTLASS workspaces
+
+Current: three file-scope statics. `gemm.cu:s_workspace` (64 MiB via a 64/32/8/2 try-down ladder), `gemm.cu:s_bench_scratch` (32 MiB), `gemm_cutlass_sm120.cu:s_cutlass_workspace` (0, grown lazily inside `gemm_nvfp4_cutlass_sm120_impl` at GEMM time: a `cudaFree` + `cudaMalloc` pair on a path that can run under graph capture).
+
+**Design: shared from the T2 arena, sized by the plan, per-process; not per-handle and not per-stream.** cuBLASLt takes a workspace pointer + size as an argument, so one arena slice sized at the plan's maximum serves every call; per-handle multiplies by handle count for no benefit; per-stream is meaningless with one compute stream plus a prefill stream.
+
+The lazy CUTLASS growth path is deleted. `gemm_nvfp4_cutlass_sm120_workspace(M, N, K)` already pre-sizes `qscratch_.cutlass_workspace`; the planner calls it over the model's shape set and takes the max. A shape exceeding the plan fails cleanly and falls back; it does not allocate.
+
+**Implemented 2026-07-31 (B73); the growth path was unreachable, not merely undesirable.** Every in-tree caller sizes with the same `..._workspace()` it passes; the one caller passing `nullptr, 0` (FP32 LM head at `executor_forward.cu` / `executor_perplexity.cu`) needs zero: these kernel configurations ask for **0 bytes at every shape measured**, pinned by `CutlassWorkspaceContract`. Same commit moved `gemm.cu`'s two statics to T2 and re-sized the **grouped** path: the 512 MiB reservation was guesswork against a measured 152 320 B (170 SMs x 896 B persistent-scheduler state, invariant across expert count, N, K and prefill length); it now takes 1 MiB, freeing 488 MiB of resident VRAM on every MoE model. The grouped path keeps a growth path, safe because **a bump-arena take is pointer arithmetic, not a CUDA call, so it is legal under stream capture.**
+
+**Prefill variance:** not explained by persistent autotuning state; there is none (A1.6, zero file I/O in `gemm.cu`). Question closed, not a design input. (The dispatch quoted 2.6x; retracted, see `docs/PERF.md`.)
+
+**The measurement window, not the charge, is what varies (B79).** *Superseded in part by #1899: on Q8_0 configs the charge varied too, because most of it was the unplanned IMMA plane cache (A1.5). The window argument below still holds for the remainder.* The reserve reads 0 / 2 / 4182 / 7460 MiB across configs because `report_library_reserve()` anchors immediately before the warmup forward, and which library claims before that point depends on the model's execution path: the NVFP4 cache build runs CUTLASS two phases earlier. On 30B-A3B-NVFP4 the unmeasured remainder is the 2239 MiB residual, confirmed by the invariance A1.5 defines the charge by (identical at batch 1 and 8, +27.7 MiB across a 4x context). Fix: an earlier anchor; it changes what the plan charges on every model, so it is its own pass.
+
+**Not covered here: the ~3.9 GiB library reservation (F4).** Claimed by the libraries themselves on first dispatch. The plan charges it (A4.2), `--mem-report` names it, reducing it is out of scope.
+
+#### A5.4 Vision tower
+
+Currently **resident**: `VisionPipeline::init()` runs during `init_features()`/warmup whenever `--mmproj` is given, loading the tower and pre-allocating pixel + embedding buffers through `VRAMAllocator`. Measured cost on the gemma-3-4b pair: **+1610 MiB** at `04_features` (A1.4), for a server that may never receive an image.
+
+Qwen3-VL (2026-07-31): tower ships *inside* the checkpoint, so presence is the signal, no `--mmproj` to withhold. Operator knob: `runtime.vision_max_patches` (default 4096 ≈ 1024x1024) sets the image-token budget every encoder workspace is sized from; a hard ceiling, so a larger image is scaled down rather than refused. DeepStack adds one embedding buffer per tap (`engine_qwen3vl.cpp`) on top of the merged one. The tower is not measured here yet; that number belongs in this table when it is.
+
+**Design: keep it resident, as a planned, declared T1 cost.** Lazy loading rejected: the tower is model-resident weights, so a first-image request would allocate ~1.6 GiB *while serving*, violating I2, and would need admission control for a memory event unrelated to request size. On the mmproj path, not passing `--mmproj` is the switch; Qwen3-VL has no such switch.
+
+One hot-path hole to fix: `vision_pipeline.cpp:97` falls back to a raw `cudaMalloc` per image if the pre-allocated pixel buffer was too small. Becomes a `ScratchStack` take that fails cleanly.
+
+#### A5.5 Speculative decoding
+
+Draft/verify staging buffers and `spec_graphs_` are T2, sized by the plan from `speculative.k` / `suffix_k_max` / MTP depth. Already invalidated together (`free_spec_buffers_` → `free_spec_graphs_`), which is the right coupling.
+
+**Per-request toggling** (`spec-ngram: gates failed ...`: spec disabled per request by sampling params) must not resize anything: buffers are planned for the maximum `k` the config allows and simply unused when a request does not qualify. Already the behaviour; the design states it as an invariant so nobody "optimises" it into a per-request allocation later.
+
+---
+
+### A6. Testability
+
+`Backend` is the substitution seam. `FakeBackend` allocates host memory (`std::aligned_alloc`) and hands out the same `Region` type, so every allocator, the planner, and the refcount logic run on CPU-only CI (no GPU runner; the CI lane is `ctest -L unit`).
+
+`FakeBackend` provides:
+
+- Configurable capacity: budget-exhaustion paths testable without a 32 GiB card.
+- Full allocation journal: `(seq, phase, tag, bytes, op)` for every acquire / release / commit / decommit.
+- Poison-on-release (`0xDE`): use-after-free becomes a deterministic data comparison, not a GPU fault.
+- Injectable failure (fail the *n*-th acquisition), exercising the rollback paths that today are hand-written per call site (`rollback_partial_allocation`, the `moe_3x_packed`/`sf` unwind in `executor_workspace_buffers.cu:572`, the KV `allocate_blocks` rollback).
+- Growth simulation for the VMM path: `commit`/`decommit` succeed or fail on command; the fake asserts the base address never changes (host-side proof of I3 under growth).
+
+Invariants asserted against it:
+
+| # | Invariant | Test shape |
+|---|---|---|
+| V1 | Conservation | journal replay: Σ acquired − Σ released == live bytes, after every op |
+| V2 | No allocation in `Serving` | drive a synthetic decode loop; assert the journal has no acquire with `phase == Serving` |
+| V3 | Arena resets free wholesale | after `reset()`, live bytes attributable to that arena == 0 |
+| V4 | Block pool conservation | randomised alloc/free/share/evict/pin sequence; free_count + live refs == num_blocks, always |
+| V5 | Refcount balance under faults | inject an exception at every point in a request's lifecycle; assert net block refcount delta == 0 for each |
+| V6 | LIFO discipline | `ScratchStack` marks are asserted to rewind in reverse order; out-of-order rewind is a hard failure |
+| V7 | Plan determinism | `plan_memory` is a pure function: same input → byte-identical plan, 1000 randomised configs |
+| V8 | Plan sufficiency | replay a recorded real allocation journal against the plan; assert no tier is exceeded |
+| V9 | Stability under growth | VMM fake: commit/decommit across a 10× growth; assert `Region::base` is invariant |
+
+V8 makes the migration safe: record the journal from a real GPU run once per model config, check it in, assert the planner covers it. An under-provisioned plan is then a CI failure, not a production OOM.
+
+Acceptance criterion 8 (peak VRAM per model config vs checked-in thresholds): **built 2026-07-29, with one design change.** The gate lives in `scripts/verify.sh` next to the perf gate (CI has no GPU runner) and the threshold in the existing `tests/perf_baseline.json` (`metrics.memory_mb.own_peak_mb` vs `thresholds.vram_increase_pct`) rather than a new file; that file carried both fields since it was written and nothing read either, so criterion 8 was structurally unmeetable while looking provided-for (B39). It gates **`own_peak`, not the `--mem-report` device total**: device-used carries the CUDA primary context and any neighbour process, while `own_peak` is this process's allocations since engine init, a delta immune to the 1.6 GB run-to-run free-VRAM swing #1103 documented. Measured byte-identical across repeat runs.
+
+---
+
+### A7. Migration plan
+
+Strangler fig. The I1 allowlist starts at **365 sites / 74 files** and shrinks monotonically; `tools/check_alloc_sites.py` fails the build if a file not on the list allocates or the list grows. Every step leaves the tree green, keeps decode and prefill within 1 %, and records both in `docs/audit/PERF_LOG.md`.
+
+| # | Step | Removes from allowlist | Why here |
+|---|---|---:|---|
+| 0 | `Backend` + `FakeBackend` + phase guard + `check_alloc_sites.py` (allowlist = everything, gate green from day one). No behaviour change. | 0 | The gate must exist before anything moves, or the list can silently grow. |
+| 1 | Move `ArenaAllocator`/`BlockPool` to `src/memory/`, wire to `Backend`, add `StableSpan`/`Owned`/`BlockRef`. Still unused. | 0 | Pure addition; A1.6 says the code already exists and is dead. |
+| 2 | **`plan_memory()` alongside `compute_vram_budget()`** - computed alongside, and since 2026-07-30 (B69) the KV block count is APPLIED from it. Log both; assert agreement within a tolerance in CI via V8. | 0 | Establishes the plan is right *before* anything depends on it. Highest-information, lowest-risk step. |
+| 3 | **KV pool + `KVCacheManager`** → `BlockPool` + `BlockRef`. Deletes the manual refcount, `free_block_dropping_stale_hash`, and the free-by-id paths. | ~15 | The hardest ownership question (A5.1), with the best existing test coverage. Doing it early proves the refcount machinery before four more subsystems depend on it. |
+| 4 | **Executor workspaces** (`exec/executor_workspace*.cu`, 47+ sites in one file) → T2 arena + `ScratchStack`. | ~70 | Biggest single-file win; sizes already computed centrally in `compute_shared_sizes`. |
+| 5 | **Per-request allocations** (`engine_graph_decode.cpp`, `engine_scheduler.cpp`, `executor_attention_prefill.cu`, `executor_attention.cu`, MoE per-call arrays) → `ScratchStack`. **The step that satisfies I2**; the step-0 counter must reach zero. **Plan it per BUFFER FAMILY, not per file** (B59): the KV block tables alone are 8 acquisitions against **23 releases in 5 files**, one allocation freed at 8 sites depending on which path unwinds; a file-at-a-time pass cannot close them. | ~40 | Depends on the stack existing (4) and the plan sizing it (2). |
+| 6 | **Weight upload + pre-dequant caches** (`model/`, `quant/`, `exec/pre_dequant_*`) → T1 arena. **Deletes the balloon** and the phase-local free-VRAM re-derivation. Switch allocation order to the plan's tier order. **Re-scoped 2026-07-30 (B61): both original justifications are spent.** B6's acceptance test (`03_kv_cache` at 0.0 MiB free on gpt-oss) was closed by 6.4's reordering (now ends at 10613 MiB free). The balloon binds on exactly ONE of five measured configurations (35B-MoE-NVFP4 @32k: 120 vs 108 covered MoE caches, KV 16 vs 87 blocks), where the capture-abort it exists to prevent does **not** reproduce and the uncovered path is correct. What remains open here is I4's other half: the live `cudaMemGetInfo` sizing, not the balloon's rescue. | ~90 | Largest blast radius; after the plan is trusted (2) and the KV pool no longer competes for a residual (3). |
+| 7 | **VMM backend for the KV pool**, gated on the WSL2 spike (A3.1). If the spike fails, stop here. **The spike passed, B84 measured the premises spent, and B85 built it anyway once the condition B84 named for reopening actually happened in production.** | ~450 | Optional by construction; `kv_cache.growable`, off by default. |
+| 8 | **`compute/` statics**: cuBLAS/cuBLASLt/CUTLASS workspaces from the T2 arena; delete the lazy CUTLASS growth path. | ~115 | Mechanical once the arena exists; `compute/` sites are small per-kernel scratch. |
+| 9 | **Guardrails**: `--vram-budget` as a real cap, admission control per I6, `/metrics` tagged breakdown per I7, `--mem-report`, the peak-VRAM CI gate. | remainder | Needs everything above to have real numbers to report. |
+
+Ordering rationale, one line each: gate before moves (0); tools before users (1); the plan before it is trusted (2); the hardest ownership problem while isolated (3); the biggest single file (4); I2 once scratch has somewhere to go (5); the balloon last among big consumers because its removal changes init ordering (6); the optional backend behind a gate (7); the mechanical sweep (8); the operator surface once it has something true to say (9).
+
+Steps 3, 4 and 6 each need a coherence check (`check-degeneration`): KV cache, forward pass and weight caches respectively.
+
+---
+
+### Invariant compliance
+
+"Design-time" is the state Phase A was written against, kept as the record. "Measured" is where Phase B stands; three of the seven are still open.
+
+| | Invariant | Design-time | **Measured (rows carry their own date; latest 2026-07-30)** | Target |
+|---|---|---|---|---|
+| I1 | Single acquisition point | ✗ - 365 sites / 74 files outside `src/memory/` | **✗ - 499 calls / 74 files (2026-07-31), of which 224 are acquisitions and 275 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) - every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52-B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ - `Backend`, allowlist empty, CI gate |
+| I2 | No allocation on the hot path | ✗ - measured +190 MiB/config of steady-state allocation | **~ - `make check-alloc-interpose`, two phases (2026-09-07): A (batch 4, NVFP4 residual KV, MTP chain) 19 -> 1 -> 0 calls (#1939, then the MTP feed scratch sized at enable time, #1940); B (ragged prefill + constrained pipeline, `mtp_k=0`) 3 calls (`JsonConstrainer::init`, once per process, 0.71 MiB), 0 `cudaMallocAsync`, 0 pinned-host.** The 2026-07-30 `0 / 0 / 0` (15 requests, dense) predates ragged prefill (2026-08-26) and the gate (2026-08-21); the upload family (block tables, token ids, positions, M-RoPE, pipeline landing) is one T2 pool since 2026-09-07 | ✓ - `ScratchStack`, phase guard, counter == 0 |
+| I3 | Stable addresses for graph memory | ~ - true in practice, enforced by comments + a `workspace_generation` hook | **~ - `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ - `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
+| I4 | Capacity planned, not discovered | ✗ - live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ - `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). **The balloon is GONE (2026-07-30, B62)** - the mandatory-cache guarantee is a planned floor instead of a physical hold, which also freed 72x more KV on the config where the hold bound. **The KV block count is now the PLAN's** (B69) - `plan_memory()` decides it, the live pass is the fallback when the plan rejects, and the measured-residual clamp can still only shrink it. What still enters through `cudaMemGetInfo` is the *distributable* figure the plan is handed - **measured 2026-07-31 (B82) and it does not move**: five identical starts produce a byte-identical plan, and a co-tenant holding 31 949 MiB changes neither the plan nor decode throughput (293.4 vs 292.7 tok/s, i.e. no WDDM spill). Replacing it is the invariant's letter, not a fix for anything that fails. **B82 holds only while the config cap binds before VRAM does** - with a VRAM-bound plan the same co-tenant takes 25 % of the KV pool (B8) | ✓ - `plan_memory()` never queries the device; fails at load with a report |
+| I5 | Unidirectional ownership | ✗ - `VRAMAllocator` is a tracker; raw `void*` cross module boundaries | **~ - KV blocks and the T2/T3 tiers own through move-only RAII** (`Region`, `BlockRef`, `GraphSlotLease`); raw `void*` still crosses boundaries in `exec/` and `compute/` | ✓ - `Owned<T, Tier>`, no cross-tier conversion, no raw device pointers above L1 |
+| I6 | OOM is typed and recoverable | ~ - `RequestStatus::CANCELLED`, plus a warning that fires *after* prefill | **✓ - both halves.** Plan-time: an unservable `--vram-budget` refuses at load with the block arithmetic. Admission-time: `IMP_ERROR_CAPACITY` → HTTP 503 `capacity_error`, distinct from a client cancel (B40) | ✓ - plan-time failure at load; admission-time 429/503 at runtime |
+| I7 | Capacity ≠ occupancy | ✗ - 20-39 % of device memory unattributed | **~ - per-tier reserved *and* live is served** on `/metrics`, plus KV blocks and budget-vs-own. Accounting reaches **98.3 %** once the library reserve is charged at its measured value rather than the 3900 MiB constant (B41/B42); with the constant it is 82.5 % on Qwen3-8B. MoE's **102.0 %** - a negative residual - proves the note double-booking (B32), so that config's gap is the counters, not the attribution | ✓ - per-tier reserved *and* live, library reserve named, ≥95 % accounted |
+
+Nothing in the invariant set was dropped. Two are weakened in a stated way: I3 is type-enforced for *stability* with the graph-invalidation hook kept as a runtime assert; I5's "request-scoped block cannot outlive its request" is type-enforced against aliasing and assert-plus-soak-enforced against outliving (A3.4).
+
+---
+
+### Open questions for Phase B
+
+1. **WSL2 VMM spike** (A3.1): gates step 7 only.
+2. **`LibraryReserve` calibration**: the ~3.9 GiB constant is measured on this driver/CUDA/card. Needs a boot-time self-check (assumed vs actual after the first forward, metric on >10 % divergence) rather than a hardcoded number, plus a documented re-measure procedure after a driver or CUDA bump.
+3. **`ScratchStack` under concurrency**: one compute stream plus a prefill stream. Two stacks or one with a mutex? Lean toward two (one per stream): keeps LIFO per-stream, no lock on the forward path. Decide with the step-5 measurement.
+
+---
+
