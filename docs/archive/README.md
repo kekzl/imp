@@ -24,6 +24,11 @@ full text of each is in git history; the recipe for reading one is below.
 | `vram_audit_2026_07_07.md` | VRAM accounting snapshot | docs |
 | `cpp23_migration_2026_07_08.md` | the C++23 move | docs |
 | `housekeeping_2026_06_13.md` | the consolidation pass described below | docs |
+| `benchmarks_pre_v0.44.md` | `docs/BENCHMARKS.md` before the 2026-09-23 prose cleanup, all superseded sweeps | `docs/BENCHMARKS.md` |
+| `memory_census_2026.md` | `MEMORY.md` census, design draft A2-A6, migration plan, implementation log | `docs/internals/MEMORY.md` |
+| `limitations_detail_2026.md` | MTP speculative-decoding investigation series | `docs/LIMITATIONS.md` |
+| `quantization_awq_findings.md` | AWQ findings, refuted quantization experiments | `docs/quantization.md` |
+| `kernels_refuted_2026.md` | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
 
 Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
 you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in
