@@ -193,9 +193,9 @@ PlanResult plan_memory(const PlanInput& in) {
         if (l.tag == RegionTag::KvBlockPool)
             kv_charged += l.bytes;
     if (seq > 256 && per_block > 0) {
-        const size_t frees = std::min(
-            kv_charged,
-            static_cast<size_t>(p.kv.blocks_per_seq - ((seq / 2) + bs - 1) / bs) * per_block * batch);
+        const size_t frees = std::min(kv_charged,
+                                      static_cast<size_t>(p.kv.blocks_per_seq - ((seq / 2) + bs - 1) / bs) *
+                                          per_block * batch);
         f.levers.push_back(PlanLever{fmt_lever("runtime.max_seq_len", seq, seq / 2), frees});
     }
     if (batch > 1) {
@@ -218,7 +218,8 @@ PlanResult plan_memory(const PlanInput& in) {
     std::erase_if(f.levers, [](const PlanLever& lv) { return lv.frees == 0; });
     // Nothing negotiable is charged: the fixed lines alone overrun, and only more budget helps.
     if (f.levers.empty() && f.over_by > 0)
-        f.levers.push_back(PlanLever{std::format("more VRAM (--vram-budget, other tenants) +{} MiB", (f.over_by + (1 << 20) - 1) >> 20),
+        f.levers.push_back(PlanLever{std::format("more VRAM (--vram-budget, other tenants) +{} MiB",
+                                                 (f.over_by + (1 << 20) - 1) >> 20),
                                      f.over_by});
     std::stable_sort(f.levers.begin(), f.levers.end(),
                      [](const PlanLever& a, const PlanLever& b) { return a.frees > b.frees; });

@@ -26,6 +26,41 @@
 
 namespace imp {
 
+namespace {
+
+// The planes are optional (weights past the cap prefill via dequant), one max_seq_len sequence is
+// not: the plan capped them against its projection, the measured residual is lower by the allocator
+// headroom and cache estimates (856 of 1333 blocks, Qwen3-4B Q8_0 at --vram-budget 9000).
+// Returns the plane bytes still outstanding after giving back what `need` requires.
+size_t yield_imma_planes_to_one_sequence(VRAMBudget& budget, size_t used, size_t free_now, size_t need,
+                                         int max_seq_len) {
+    size_t outstanding = budget.imma_plane_bytes > used ? budget.imma_plane_bytes - used : 0;
+    const size_t have = free_now > outstanding ? free_now - outstanding : 0;
+    if (outstanding == 0 || have >= need)
+        return outstanding;
+    const size_t give = std::min(outstanding, need - have);
+    budget.imma_plane_bytes -= give;
+    mmq_q8_imma_set_plane_budget(budget.imma_plane_bytes);
+    IMP_LOG_INFO(
+        "KV cache: IMMA prefill planes cut by %.0f MiB to %.0f MiB so one max_seq_len=%d "
+        "sequence fits the measured residual",
+        give / (1024.0 * 1024.0), budget.imma_plane_bytes / (1024.0 * 1024.0), max_seq_len);
+    return outstanding - give;
+}
+
+// AUTO max_seq_len = min(resolver bound, what the built pool holds; a growable pool its ceiling).
+// The resolver runs before weights and caches exist, so its value is only an upper bound.
+void clamp_auto_max_seq_len_to_pool(int& max_seq_len, int pool_blocks, int kv_bs) {
+    const int pool_tokens = pool_blocks * kv_bs;
+    if (pool_tokens <= 0 || pool_tokens >= max_seq_len)
+        return;
+    IMP_LOG_INFO("max_seq_len: auto %d -> %d (KV pool %d blocks x %d)", max_seq_len, pool_tokens, pool_blocks,
+                 kv_bs);
+    max_seq_len = pool_tokens;
+}
+
+}  // namespace
+
 // Stable model identity hash: FNV-1a over config scalars + weight bytes
 // (LM head, embeddings, layer-0/mid Q proj) - distinguishes same-shape fine-tunes.
 // Gates the persisted prefix cache only (cold path, twice per process).
@@ -414,29 +449,11 @@ bool Engine::init_kv_cache() {
         // weight's first prefill, during warmup). Charging them here keeps the
         // residual pass from handing the pool bytes the next forward claims (#1899).
         const size_t imma_used = mmq_q8_imma_plane_bytes_used();
-        size_t imma_outstanding = vram_budget.imma_plane_bytes > imma_used
-                                      ? vram_budget.imma_plane_bytes - imma_used
-                                      : 0;
-        // The planes are optional (weights past the cap prefill via dequant), one max_seq_len
-        // sequence is not: the plan capped them against its projection, the measured residual is
-        // lower by the allocator headroom and cache estimates (21328 tokens planned, 856 of 1333
-        // blocks measured on Qwen3-4B at --vram-budget 9000). Give the planes back first.
-        if (imma_outstanding > 0) {
-            const size_t one_seq =
-                static_cast<size_t>(kv_blocks_per_sequence(config_.max_seq_len, kv_bs)) * per_block_total_bytes;
-            const size_t need = one_seq + vram_allocator_headroom(total_now);
-            const size_t have = free_now > imma_outstanding ? free_now - imma_outstanding : 0;
-            if (have < need) {
-                const size_t give = std::min(imma_outstanding, need - have);
-                imma_outstanding -= give;
-                vram_budget.imma_plane_bytes -= give;
-                mmq_q8_imma_set_plane_budget(vram_budget.imma_plane_bytes);
-                IMP_LOG_INFO("KV cache: IMMA prefill planes cut by %.0f MiB to %.0f MiB so one "
-                             "max_seq_len=%d sequence fits the measured residual",
-                             give / (1024.0 * 1024.0), vram_budget.imma_plane_bytes / (1024.0 * 1024.0),
-                             config_.max_seq_len);
-            }
-        }
+        const size_t imma_outstanding = yield_imma_planes_to_one_sequence(
+            vram_budget, imma_used, free_now,
+            static_cast<size_t>(kv_blocks_per_sequence(config_.max_seq_len, kv_bs)) * per_block_total_bytes +
+                vram_allocator_headroom(total_now),
+            config_.max_seq_len);
         if (imma_outstanding > 0) {
             IMP_LOG_INFO(
                 "KV cache: holding %.0f MiB of the post-cache residual for the IMMA "
@@ -651,16 +668,9 @@ bool Engine::init_kv_cache() {
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
-    // AUTO max_seq_len = min(resolver bound, what the built pool holds; a growable pool its ceiling).
-    // The resolver runs before weights and caches exist, so its value is only an upper bound.
-    if (!max_seq_len_explicit_) {
-        const int pool_tokens = std::max(max_blocks, kv_ceiling_effective) * kv_bs;
-        if (pool_tokens > 0 && pool_tokens < config_.max_seq_len) {
-            IMP_LOG_INFO("max_seq_len: auto %d -> %d (KV pool %d blocks x %d)", config_.max_seq_len,
-                         pool_tokens, std::max(max_blocks, kv_ceiling_effective), kv_bs);
-            config_.max_seq_len = pool_tokens;
-        }
-    }
+    if (!max_seq_len_explicit_)
+        clamp_auto_max_seq_len_to_pool(config_.max_seq_len, std::max(max_blocks, kv_ceiling_effective),
+                                       kv_bs);
     // A successful allocation proves nothing on WSL2/WDDM: the pool can sit in
     // host memory at a sixth of the bandwidth with /health ok and nothing logged
     // (#1103, AUDIT_arch_2026 B-6). One cheap copy inside the fresh pool, then a
