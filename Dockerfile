@@ -109,7 +109,7 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
         -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
         -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
         -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
-    && cmake --build build -j$(nproc) \
+    && cmake --build build -j"$(bash scripts/build_jobs.sh)" \
     && ccache -s \
     && cp build/imp-server build/imp-cli /tmp/ \
     && ([ -f build/imp-quantize ] && cp build/imp-quantize /tmp/ || true) \
