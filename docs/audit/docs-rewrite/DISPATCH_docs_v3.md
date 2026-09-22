@@ -444,4 +444,20 @@ None. Every fact removed from these 8 files in this pass was either condensed-fo
 | sections deleted or moved | 84 agent rows + 7 orchestrator |
 | tokens absent from new set, logged | 61 |
 | commands: CPU run | `make build`, `make test-unit` (64 passed), `make dev-test` (13 passed), `make kernel-resources`, 7 tool `--help`/usage checks, fuzz build + run (2289899 runs in 601 s, exit 0) |
-| commands: GPU, not run | 52 (card busy 86 %, 18.2 GB, `gpu-busy-check.sh` exit 1) |
+| commands: GPU | run 2026-09-23 on `19dda319`, see "GPU commands" below |
+
+## GPU commands (2026-09-23, `19dda319`)
+
+| doc | command | result |
+|---|---|---|
+| README, QUICKSTART | `ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm` + both curls | up, answer on topic |
+| README | `docker compose build imp-server` + `imp:latest` run | built, up |
+| CONFIG | `--set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never`, `--bench --json`, `imp-bench gemm --json`, rope yarn server | rc 0 |
+| CONFIG | two servers `--vram-budget 9000` / `8000` | **refused to start**; fixed in this PR (auto `max_seq_len` clamp), then up at 21328 / 16384 tokens |
+| MODELS | Qwen3-8B Q8_0, Qwen3-Coder-30B FP4, Qwen3-VL-4B + image, Gemma-3 + mmproj + image | rc 0; both vision runs describe the cat (Gemma-3 12B mmproj absent: 4B used) |
+| quantization | `--perplexity --calibrate`, `imp-quantize --calib`, run the NVFP4 output | rc 0, PPL 24.2687 on `calib_corpus.txt` |
+| CONTRIBUTING | `imp-cli --bench --bench-pp 512 --bench-reps 5` | rc 0 |
+| src/compute/CLAUDE.md | `./build/test-attention` | **no such file**; fixed to the image binary, 63 passed |
+| tests/README | `test-quant --gtest_filter='GgufDequant/*:GgufRef.*'` | 24 passed |
+| make | `verify-fast`, `test-gpu`, `test-vision`, `test-server`, `verify`, `test-agents-external` | all rc 0 (`test-gpu` 695 s, `verify` 452 s) |
+| not run | `nvidia-smi -lgc/-lmc` (clock lock), `kernel-resources-update`, `gen_perf_baseline.sh` (mutate pins), LoRA (no adapters), `nsys`/`ncu` against a host `./build` (no host toolchain) | by design |
