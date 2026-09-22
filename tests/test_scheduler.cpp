@@ -84,6 +84,34 @@ TEST(SchedulerTest, AdmissionGateHoldsTheWholeRound) {
     EXPECT_EQ(asked, 3);
 }
 
+// A gate that never opens with nothing running is not contention, it is capacity: the
+// request used to sit in pending_ forever while the engine logged "SSM state: slot N not
+// committed" once per attempt and the caller waited on a reply that never came.
+TEST(SchedulerTest, AdmissionGateCancelsAnAgedRequestWhenNothingIsRunning) {
+    Scheduler sched(4);
+    sched.set_admission_gate([] { return false; });
+    auto req = std::make_shared<Request>();
+    req->input_tokens = {1, 2, 3};
+    sched.add_request(req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(req->status, RequestStatus::PENDING) << "first refusal is contention, not capacity";
+
+    int rounds = 1;
+    while (req->status == RequestStatus::PENDING && rounds <= Scheduler::kAgingRounds + 2) {
+        sched.schedule(prefill, decode);
+        ++rounds;
+    }
+    EXPECT_GE(rounds, Scheduler::kAgingRounds)
+        << "cancelled before the request aged: transient contention would be killed too";
+    EXPECT_EQ(req->status, RequestStatus::CANCELLED);
+    EXPECT_EQ(req->cancel_reason, CancelReason::RecurrentCapacity)
+        << "the caller gets IMP_ERROR_CAPACITY / HTTP 503, not a hang";
+    EXPECT_EQ(sched.pending_count(), 0);
+    EXPECT_EQ(prefill.size(), 0u);
+}
+
 // 8. Scheduler respects max_batch_size
 TEST(SchedulerTest, MaxBatchSizeLimit) {
     Scheduler sched(2);  // max batch = 2

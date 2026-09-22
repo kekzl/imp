@@ -776,7 +776,8 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         // the scheduler refused admission ("needs N KV blocks, cache has M"), a
         // non-transient condition that retrying never fixes.
         if (req->status == imp::RequestStatus::CANCELLED) {
-            const bool capacity = req->cancel_reason == imp::CancelReason::KvCapacity;
+            const bool capacity = req->cancel_reason == imp::CancelReason::KvCapacity ||
+                                  req->cancel_reason == imp::CancelReason::RecurrentCapacity;
             ctx->active_request = nullptr;
             return capacity ? IMP_ERROR_CAPACITY : IMP_ERROR_OUT_OF_MEMORY;
         }
@@ -909,8 +910,9 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
             // A capacity refusal is the one cancellation the caller can act on,
             // so it gets its own code rather than being folded into the generic
             // cancel (I6). The server maps it to 503.
-            const bool capacity =
-                cancelled && req->cancel_reason == imp::CancelReason::KvCapacity;
+            const bool capacity = cancelled &&
+                                  (req->cancel_reason == imp::CancelReason::KvCapacity ||
+                                   req->cancel_reason == imp::CancelReason::RecurrentCapacity);
             ctx->active_request = nullptr;
             if (capacity)
                 return IMP_ERROR_CAPACITY;

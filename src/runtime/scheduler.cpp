@@ -70,8 +70,27 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
             // Before any KV is taken: a seat the engine cannot back right now
             // (lazy recurrent slot) ends the round for everyone behind too.
-            if (admission_gate_ && !admission_gate_())
+            if (admission_gate_ && !admission_gate_()) {
+                // Held, not cancelled, while anything could still hand a slab back: a
+                // finishing request, the post-warmup trim, a shrinking KV pool. But an
+                // AGED request with nothing running has watched all of that happen and
+                // still gets no slab, so the next round asks the same question forever
+                // while the engine logs "SSM state: slot N not committed" per attempt.
+                // Same verdict as the KV-capacity path below: cancel, do not hold.
+                if (aged && active_.empty()) {
+                    IMP_LOG_ERROR(
+                        "Scheduler: request %d cannot be admitted - the recurrent state slab "
+                        "cannot be committed above the allocator headroom and no other request "
+                        "holds one. Give the process more VRAM (lower moe.expert_cache_budget_pct "
+                        "or runtime.max_seq_len) or set vram.lazy_commit=false.",
+                        req->id);
+                    req->status = RequestStatus::CANCELLED;
+                    req->cancel_reason = CancelReason::RecurrentCapacity;
+                    it = pending_.erase(it);
+                    continue;
+                }
                 break;
+            }
 
             // Memory-aware check: estimate KV blocks needed for this request
             if (kv_manager_) {
