@@ -1,52 +1,29 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # Feature matrix
 
-**Single source of truth.** The README shows a generated extract; nothing else
-states what imp supports.
+**Single source of truth.** The README shows a generated extract; nothing else states what imp supports.
 
 Legend:
 
-- ✅ **verified** — code path plus a test that runs in a gate
-- 🟡 **implemented** — code path, no test coverage. Every 🟡 also appears in [`LIMITATIONS.md`](LIMITATIONS.md)
-- ⚪ **not implemented** — deliberately absent, with the reasoning in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)
+- ✅ **verified** - code path plus a test that runs in a gate
+- 🟡 **implemented** - code path, no test coverage. Every 🟡 also appears in [`LIMITATIONS.md`](LIMITATIONS.md)
+- ⚪ **not implemented** - deliberately absent, with the reasoning in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)
 
-**What "verified" means here.** CI has no GPU runner: the `test` job is gated
-behind `vars.HAS_GPU_RUNNER`, and the lane that runs executes in under a
-second without launching a CUDA kernel. Current case count:
-`python3 tools/check_test_lanes.py --report` (a literal here was 248 low
-within nine days, #1673). For anything GPU-shaped the gate is
-`make verify-fast`, locally, before push. No document in this repo should
-claim CI tests the kernels.
+**What "verified" means here:**
+
+- CI has no GPU runner: the `test` job is gated behind `vars.HAS_GPU_RUNNER`, and the lane that runs executes in under a second without launching a CUDA kernel.
+- Current case count: `python3 tools/check_test_lanes.py --report` (a literal here was 248 low within nine days, #1673).
+- For anything GPU-shaped the gate is `make verify-fast`, locally, before push. No document in this repo should claim CI tests the kernels.
 
 ## Model architectures
 
-Source: `src/model/model_arch.h`, `src/model/model.cpp`.
-
-| architecture | status | note |
-|---|---|---|
-| LLaMA, Mistral, Mixtral | ✅ | Mixtral: the gate is the synthetic 8-expert case in `tests/test_moe_executor.cu` plus the template-family test; no Mixtral checkpoint has a `MODELS.md` row |
-| Phi-4 | 🟡 | **an alias onto the LLaMA path** (`src/model/model.cpp:299`), not a separate loader. No checkpoint of its own in any gate (#1680) |
-| DeepSeek, incl. V2 multi-head latent attention | ✅ | validated on DeepSeek-V2-Lite; latent-KV decode is opt-in |
-| Qwen3, Qwen3-MoE | ✅ | the pinned gate model is Qwen3-8B-Q8_0 |
-| Qwen3.5, Qwen3.5-MoE (Qwen3.6-27B and Qwen3.8-27B run on the same `qwen3_5` architecture path) | ✅ | Gated DeltaNet family; Qwen3.8-27B is the README worked example |
-| Qwen3.6-MoE | ✅ | |
-| gpt-oss | ✅ | MXFP4 experts, learned attention sinks |
-| Gemma-3 (text + SigLIP vision) | ✅ | |
-| Gemma-4 | ✅ | |
-| Nemotron-H MoE | ✅ | |
-| nomic-bert (encoder / embeddings) | ✅ | bidirectional, no KV, mean-pooled |
-| Qwen3-VL | ✅ | `make test-vision` (gemma-3-4b-vl, Qwen3-VL-4B-Instruct) |
-| Qwen3.6-35B-A3B on the same tower | 🟡 | shares the tower; `make test-vision` runs neither checkpoint against it (#1680) |
-| Llama-4 | 🟡 | arch exists, no dedicated gate |
-
-Per-checkpoint detail, including what each one needs at load, is in
-[`MODELS.md`](MODELS.md).
+Which architecture maps to which code path, per-checkpoint status, VRAM and decode numbers: [`MODELS.md`](MODELS.md). Source: `src/model/model_arch.h`, `src/model/model.cpp`.
 
 ## Quantisation
 
@@ -55,9 +32,9 @@ Source: `src/core/qtype.h`.
 | format | status |
 |---|---|
 | Q4_0, Q8_0 | ✅ |
-| Q4_1, Q5_0, Q5_1 | 🟡 | dequant path, no gate reads a checkpoint in these (#1680) |
+| Q4_1, Q5_0, Q5_1 | 🟡 dequant path, no gate reads a checkpoint in these (#1680) |
 | Q4_K, Q5_K, Q6_K | ✅ |
-| Q2_K, Q3_K, Q8_K | 🟡 | dequant path, no gate reads a checkpoint in these (#1680) |
+| Q2_K, Q3_K, Q8_K | 🟡 dequant path, no gate reads a checkpoint in these (#1680) |
 | IQ4_NL, IQ4_XS | ✅ |
 | F32, F16, BF16 | ✅ |
 | NVFP4 (two-level block scaling) | ✅ the primary weight path |
@@ -75,7 +52,7 @@ Source: `src/core/qtype.h`.
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:335`), so the default gate does not run it (#1680) |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:365`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |
