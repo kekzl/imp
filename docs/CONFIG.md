@@ -75,7 +75,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--config <path>`, `--set sec.key=val` | - | see `imp.conf` above |
 | `--json` | off | one JSON document on stdout, human lines on stderr - see `--json` below |
 | `--prompt <text>` / `--prompt-file <path>` | - | mutually exclusive; `--prompt-file` reads the whole file verbatim (argv is capped at ~128 KiB, ~32k tokens) |
-| `--max-tokens <n>` | `8192` | max tokens to generate (shared default with `imp-server`; the old CLI default of 256 predates reasoning models) |
+| `--max-tokens <n>` | `8192` (`16384` with `--interactive`) | max tokens to generate; same default as `imp-server` |
 | `--max-seq-len <n>` / `--min-kv-tokens <n>` | auto | KV context ceiling / floor in tokens |
 | `--vram-budget <mb>` | `0` (uncapped) | hard per-process VRAM cap, see below |
 | `--mem-report` | off | full VRAM attribution table at init |
