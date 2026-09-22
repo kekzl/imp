@@ -32,12 +32,12 @@ reliable A/B signal; prefill (pp) varies up to 2.6× across container restarts
 > **Correction, 2026-08-14**: cuBLAS algo re-timing measures 3.50 % over nine
 > process starts. Spread is a property of the *model*, not of cuBLAS: 0.6-1.2 %
 > on Qwen3-8B Q8_0 against 37.6 % on a fully resident NVFP4 MoE model.
-> Current figures and provenance: [`PERF.md`](PERF.md).
+> Current figures and provenance: [`PERF.md`](../PERF.md).
 
 The CI-gated canonical baseline lives in
-[`tests/perf_baseline.json`](../tests/perf_baseline.json) (8% decode / 8%
+[`tests/perf_baseline.json`](../../tests/perf_baseline.json) (8% decode / 8%
 prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned
-`metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](internals/BENCHMARKING.md));
+`metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](../internals/BENCHMARKING.md));
 refresh it via `scripts/gen_perf_baseline.sh`.
 
 **Toolchain (current: `v0.44.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4
@@ -102,7 +102,7 @@ against llama.cpp defaults, full offload, flash attention on.
 ### Competitive re-sweep 2026-08-21 (llama.cpp build 10524 `9ee9fc04c`)
 
 Reproduce with `make bench-competitive`. The competitor image is pinned **by
-digest** in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh),
+digest** in [`scripts/bench_competitive.sh`](../../scripts/bench_competitive.sh),
 not by tag: `:full-cuda` moves, and the two sweeps below were each compared
 against a build that nothing in the repo recorded.
 
@@ -205,7 +205,7 @@ Same-day, same host state, both engines pp512/tg128: imp
 --temperature 0` (commit `7811658a`, defaults) vs llama.cpp
 `llama-bench -m <m> -p 512 -n 128 -r 5 -ngl 99` (image
 `ghcr.io/ggml-org/llama.cpp:full-cuda`, pulled 2026-07-12). Full imp hero
-matrix appended to [`scoreboard.tsv`](scoreboard.tsv).
+matrix appended to [`scoreboard.tsv`](../scoreboard.tsv).
 
 | Model (shared quant) | imp tg128 | llama.cpp tg128 | imp lead |
 |---|---:|---:|---:|
@@ -313,7 +313,7 @@ cuBLAS path (attention sinks). Decode 310-345 depending on host state.
 
 On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
 NVFP4 path on an opcode family consumer Blackwell does not have (see
-[`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md)) and falls back to
+[`internals/ARCHITECTURE.md`](../internals/ARCHITECTURE.md)) and falls back to
 Marlin on the 5090; llama.cpp has no
 native NVFP4 path).
 
@@ -343,7 +343,7 @@ Nemotron-3-Nano is arch-limited — was disproved on 2026-08-12; see note ¹ᶜ.
 
 ## Qwen3.8-27B, the quickstart model (2026-08-16)
 
-The model the [README](../README.md) and [`QUICKSTART.md`](QUICKSTART.md)
+The model the [README](../../README.md) and [`QUICKSTART.md`](../QUICKSTART.md)
 walk a first-time reader through.
 
 2026-08-16, commit `52efa361`, CUDA 13.3, `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
@@ -365,7 +365,7 @@ processes agreed to 0.06 %, which is the quiet-host case the gate cannot assume.
 A dense-GDN 27B at 87 tok/s is bounded by weight bandwidth, not by the LM head:
 that head is 2.4 GiB of the 17.9 and is served from the NVFP4 decode cache, a
 trade measured at +10.4 % decode for +0.99 % perplexity
-([`quantization.md`](quantization.md)).
+([`quantization.md`](../quantization.md)).
 
 ## imp vs vLLM on one checkpoint (2026-08-16)
 

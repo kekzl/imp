@@ -380,7 +380,7 @@ static void snapshot_ctx(ServerState& state, bool& loaded, std::string& model_na
     }
     max_seq_len = state.max_seq_len;  // plain int, set once at load
     // All three probes must answer the same question with the same number
-    // (docs/usage.md says so), so the pool clamp applies here too (#1542).
+    // (docs/DEPLOYMENT.md says so), so the pool clamp applies here too (#1542).
     max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 }
 

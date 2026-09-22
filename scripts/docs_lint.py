@@ -337,7 +337,7 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
             if not resolved.exists():
                 errors.append(f"{rel}:{i}: dead link -> {target}")
 
-    # 5b. dead anchors: `[x](file.md#a)` and `[x](#a)` must name a heading or an explicit id.
+    # 5b. dead anchors: `[x](<doc>#a)` and `[x](#a)` must name a heading or an explicit id.
     for i, line in enumerate(lines, 1):
         for target, anchor in ANCHOR_LINK_RE.findall(line):
             if target.startswith(("http://", "https://", "mailto:")):
