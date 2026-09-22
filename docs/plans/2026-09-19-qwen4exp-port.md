@@ -225,6 +225,47 @@ starts. At 4503 tokens it is also slower on both axes and 1.2 % above dense on P
 measured here pays for it. It earns its place above ~8k context, where the dense KV read
 dominates; the kernels and the gate stay.
 
+### The above-8k expectation, measured and refuted (2026-09-22)
+
+The 2026-09-21 note left the default off but expected the indexer to pay above ~8k. It does
+not, on this model. One server per arm, `imp:test` at 9ae7ad2a + the fixes below, greedy,
+seed 42, needle recall plus one 1024-token generation from an ~11k-token prompt:
+
+| Probe (prompt tokens) | `qsa=false` | `qsa=true` |
+|---|---|---|
+| needle @ 4883 | found, 3.01 tok/s | found, 2.35 |
+| needle @ 11283 | found, 1.63 | found, 0.96 |
+| needle @ 23084 | found, 0.79 | found, 0.50 |
+| 1024 generated @ 11283 | 18.14 tok/s | 15.88 (-12.5 %) |
+| `degen_suite.py` | 50/50 | 47-48/50 |
+
+Retrieval is intact at every length; the cost is throughput. The reason is the layer budget,
+not the kernels: 12 of 48 layers carry attention and each holds 2 KiB of KV per token, so the
+whole dense KV read is 24 KiB/token. At 12k context that is 288 MB, ~0.19 ms at 1.5 TB/s,
+against a 63 ms decode step (15.88 tok/s) whose time belongs to the host-resident experts.
+The indexer replaces 0.3 % of the step and adds an index GEMM, a selection CTA per row, a
+gather and a second paged launch on each of those 12 layers. `qsa_select_kernel` runs one CTA
+per query row and walks `ctx/4` block keys serially on a single SM, so its cost grows with
+context while the dense read it saves does not.
+
+It also holds VRAM whether or not it engages: `qsa_ensure_ctx_` sizes the key caches from
+`ceiling_blocks()`, so a 131072-token ceiling reserves 480 MiB of key caches plus 64.5 MiB of
+scratch on first forward, while the KV pool itself starts at 1675 blocks and grows. On this
+card that is ~13 expert-cache slots per layer.
+
+The 2026-09-21 cause ("the paged-vs-FA2 re-rounding flips MoE routing") is not established.
+Two facts against it: `attention.qsa_debug` over 88 passes reads max |paged-on-cache -
+selected| of 0 or one half ULP (0.0009766 against values ~3.5), and no `degen_suite.py` prompt
+reaches 2051 tokens (the long-context check tops out near 1700), so the selection there is
+every token in order and never sparse. One real defect did sit under that budget and is fixed
+below, but fixing it moved the suite from 48/50 to 47/50 — the residual is unexplained and
+tracks the known order-dependence classes (`kv-growth`, `stream`, cf. 10f2f18b), not the
+selection.
+
+Reopen trigger: a QSA model whose attention layers carry the decode (a dense-attention
+architecture, or KV per token an order up), or a selection kernel that scales across SMs.
+Measured to 23k tokens only; the 131k end is untested.
+
 ## Speed on the 32 GB card (2026-09-20)
 
 56 GiB of experts stay on the host; every decode token streams its misses over PCIe.

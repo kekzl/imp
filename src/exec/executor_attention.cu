@@ -565,10 +565,16 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             prefill_attend_seq(n, state.prefill_offset, 0, qv, kk, vv, ao, layer_block_tables,
                                /*bt_flat=*/nullptr, /*bt_swa_flat=*/nullptr, /*seq_positions=*/nullptr);
             // Qwen4Exp QSA: the rows past 2050 tokens get the learned block selection
-            // (the KV of this chunk is in the paged cache by now).
-            if (qsa_layer_(layer) && state.n_sequences == 1 && state.kv_cache &&
-                state.kv_cache->qtype() == QType::F16)
-                qsa_prefill_(layer, state, n, no, qv, ao, layer_block_tables, scale, stream);
+            // (the KV of this chunk is in the paged cache by now). A prefill this path
+            // does NOT serve leaves no indexer keys behind, so the decode must stay dense
+            // until the next pos0 == 0 prefill rebuilds them: qsa_seq_ok_ defaults to true
+            // and nothing else clears it.
+            if (qsa_layer_(layer)) {
+                if (state.n_sequences == 1 && state.kv_cache && state.kv_cache->qtype() == QType::F16)
+                    qsa_prefill_(layer, state, n, no, qv, ao, layer_block_tables, scale, stream);
+                else
+                    qsa_seq_ok_ = false;
+            }
         }
     } else {
         // Qwen4Exp QSA decode: selection + gather + paged kernel on the device, in place of

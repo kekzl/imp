@@ -1090,8 +1090,12 @@ private:
     [[nodiscard]] bool qsa_alloc_(int max_tokens);
     bool qsa_ensure_ctx_(const InferenceState& state, cudaStream_t stream);
     void qsa_free_();
+    // ctx_hint: highest context length any of these rows can reach (decode:
+    // state.max_context_len, prefill: last position + 1). It only sizes the split-K
+    // decision, and passing the constant cap there made the below-budget path reduce in a
+    // different order than dense attention on the same bytes.
     void qsa_attend_rows_(int layer, const InferenceState& state, const void* q_rows, void* o_rows, int rows,
-                          const int* bt, float scale, cudaStream_t stream);
+                          const int* bt, float scale, int ctx_hint, cudaStream_t stream);
     bool qsa_decode_(int layer, const InferenceState& state, const Tensor& no, Tensor& qv, Tensor& ao,
                      const int* bt, float scale, cudaStream_t stream);
     void qsa_prefill_(int layer, const InferenceState& state, int n, const Tensor& no, Tensor& qv, Tensor& ao,
