@@ -1,234 +1,48 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # Troubleshooting
 
 Symptom, cause, fix. Ordered by frequency.
 
-## The model loads and answers nonsense
-
-**Repeated tokens, or a fluent answer that contradicts itself.**
-
-Check `stderr` for `packed NVFP4 weight reached the generic cuBLAS path`:
-weights reached a kernel that cannot read them, the multiply was skipped, the
-layer contributed nothing. Since #1403 an NVFP4 MoE checkpoint whose experts
-do not fit is refused at load; on a current build this line is a new defect,
-worth an issue.
-
-**Fluent but wrong is the harder case.** Partial corruption stays grammatical.
-Do not judge output quality from one short prompt; run the degeneration
-battery (`tools/analysis/degen_suite.py`).
-
-## Decode is far slower than the numbers in the docs
-
-In order of likelihood:
-
-1. **Something else is on the GPU.** On WSL2 `nvidia-smi` does **not** show a
-   container holding the card. Check `docker ps` as well.
-2. **CUDA graphs did not capture.** The log prints `Resolved dispatch: ...
-   graphs=1` when they did. `graphs=0` typically costs 2-3x on decode.
-3. **The NVFP4 decode cache is partial.** Look for
-   `NVFP4 decode caches: FULL (n/n MoE layers)`. Anything less means some
-   tensors decode from their slower source, and a partial cache also aborts
-   graph capture.
-4. **VRAM spilled to host.** A successful allocation proves nothing on
-   WSL2/WDDM: the driver oversubscribes into host memory and returns success.
-   The tell is bandwidth, roughly 1530 GB/s resident against 237 GB/s spilled,
-   so the symptom is a ~6.5x cliff rather than an error. Since 2026-09-07 the
-   server measures it once at load: `KV cache: pool copy bandwidth N GB/s` in
-   the log (a WARN below 500), `kv_pool_bandwidth_gbps` on `/health`,
-   `imp_kv_pool_bandwidth_gbps` on `/metrics`. Reduce `runtime.max_seq_len`,
-   the KV dtype, or pin a smaller pool with `kv_cache.max_blocks`.
-5. **You are comparing against a number that was measured differently.** The
-   prefill pin changed meaning on 2026-07-26 when one-shot runs stopped hitting
-   the prefix cache. See [`PERF.md`](PERF.md).
-6. **It is the host, not the change.** Decode on this box moves several percent
-   between sessions. A single slow reading is not a regression until it
-   reproduces in a paired A/B.
-
-## The perf gate is red
-
-A red gate is **not** a regression until it reproduces. Before investigating:
-
-- re-run it; the host's own between-session movement is several percent
-- check `docker ps` and `nvidia-smi` for a co-tenant
-- if it still fails, A/B against `main` with alternating rounds, not two runs
-  twenty minutes apart
-
-If the change genuinely and intentionally moves performance, refresh the
-baseline with `scripts/gen_perf_baseline.sh` **and say so in the PR**. A refresh
-without that sentence is indistinguishable from a regression papered over.
-
-## A request hangs, or streams nothing until the end
-
-Almost always a reverse proxy buffering the response: set
-`proxy_buffering off` (nginx) or equivalent, see
-[`DEPLOYMENT.md`](DEPLOYMENT.md).
-
-No proxy: a very large grammar can take long to build its first token mask.
-Grammars are compiled and memoised; the first mask inside a deeply nested
-state is the expensive one.
-
-## Requests fail after the first one
-
-`finish_reason: "cancelled"`, or the second identical request returns nothing.
-
-Usually the KV pool is too small to hold one full-length sequence: the load
-succeeds, every full-length request is cancelled at admission. Since v0.23.0
-the condition is reported at load time for an operator-set `max_seq_len`.
-Reduce `runtime.max_seq_len`, or pick a smaller KV dtype.
-
-Also check `kv_cache.swa_snapshot_mb`: a value **below one snapshot size**
-silently disables prefix caching, which is worse than setting it to zero. It
-warns since #1092.
-
-## Requests queue while `/metrics` shows free KV blocks
-
-`imp_kv_blocks_reserved` is the answer (gauge since v0.29.0).
-
-Admission reserves prompt **plus `max_tokens`** (#1635): a request admitted on
-its prompt alone can run the pool dry mid-answer, truncating whichever
-request needs the next block. Queueing is the better failure, so the promise
-holds from admission until the blocks are written.
-
-Cost: concurrency against a client that does not set `max_tokens`. The server
-default is 8192, so each such request reserves `ceil(8192/block_size) + 1`
-blocks whatever it emits. Set `max_tokens` to what the answer needs.
-
-On a pool too small to ever hold prompt + `max_tokens` the reserve is clamped
-to the pool (pre-#1635 behaviour): the mid-stream cancel stays possible, no
-admission rule can promise memory that does not exist.
-
-## After a restart, every prompt is cancelled
-
-Restarting while the previous process still holds the card sizes the KV pool
-against unreleased VRAM: the server comes up in seconds, loads the model,
-then cancels every prompt past a few hundred tokens with "KV cache too small
-for prompt", which reads as a statement about the prompt.
-
-`GET /health` says so since v0.28.0: **503 with `code: "kv_pool_floored"`**,
-plus `kv_capacity_tokens` in the body always. On an older build the tell is
-`imp_kv_blocks_total` in `/metrics`: tens where a clean start reads
-thousands, while `/v1/models` kept advertising the full context.
-
-Fix: restart on a free card, not a retry. The pool is sized once, at startup;
-wait for the old process to release the GPU.
-
-## The server came up fine, but its numbers are wrong
-
-Quieter half of the same fault: a false finding instead of a cancelled
-request. A server started beside another process does not fail; it gets a
-smaller KV pool, and `/health` reports that pool at its own ceiling because
-the ceiling was computed against the same occupied card. No `/health` field
-separates it from a healthy start, both read `ok`.
-
-The load log says so since v0.29.0:
-
-```
-WARN  Weight upload consumed 8446 MiB of device free VRAM for a 3263 MiB
-      checkpoint. The excess is not weights: another process is holding the card
-      (on WSL2 it is invisible until this upload), or the upload spilled to host
-      memory.
-```
-
-The weight upload is the first moment a neighbour is visible at all: under
-WSL2/WDDM the driver reports the whole card as free until a process allocates
-against it. Everything sized after that point (KV pool, decode caches) reads
-the same shrunken residual and the load still reports success. Treat the
-warning as a refusal to measure: free the card and restart before recording
-any number from that process.
-
-## The server answers 503
-
-Either the model is suspended (`POST /admin/resume`), or the server was started
-without `--model` and the request resolved to no model. `GET /v1/models` shows
-what is available.
-
-## An image is ignored, or refused
-
-- `400 vision_unavailable` means the checkpoint loaded **text-only**: imp does
-  not recognise its vision tower. This is a refusal on purpose, so you do not get
-  a confident description of a picture the model never saw.
-- `400` on an `image_url` means it could not be fetched or decoded. Dropping it
-  silently would shift every later image onto the wrong placeholder.
-- Check `MODELS.md` for which checkpoints can actually see.
-
-## Constrained output comes back unconstrained
-
-Since v0.23.0 this should be impossible: a pattern imp cannot compile is a `400`.
-If you get free text at HTTP 200 with a `response_format` set, that is a bug
-worth reporting, and it was the exact defect fixed in #1256.
-
-## `content` is empty and the answer sits in `reasoning_content`
-
-The response now says which of the two situations it is, on every dialect and
-both transports: `imp_finish_detail: "reasoning_budget_exhausted"` beside
-`finish_reason`, `usage.completion_tokens_details.reasoning_tokens` (OpenAI) /
-`usage.output_tokens_details.reasoning_tokens` (Anthropic, Responses), and
-`imp_requests_reasoning_exhausted_total` on `/metrics`. `finish_reason` itself
-stays `stop` / `length`. Before that the only report was a server-side WARN.
-
-The answer-headroom budget does engage on imp-server: measured on the current
-build, `max_tokens` 64 returns 126 characters of reasoning and then 186
-characters of content, `max_tokens` 16 returns 32 characters of reasoning and
-then content. So the forced `</think>` fires. The limit is
-`max(max_tokens x think_budget, max_tokens - max(runtime.think_answer_reserve,
-max_tokens/4))`, i.e. 130 reasoning tokens at `max_tokens` 260 and the 0.5
-default.
-
-**Still open:** the empty replies below still reproduce on a long session at
-`max_tokens` 120-150 (turn 5 of the 74-turn replay: `finish_reason: length`,
-586 characters of reasoning, `content` empty), and the think seed does not
-explain them. Under investigation, tracked in the dispatch audit; the leading
-hypothesis is that the model re-opens `<think>` after the forced close and the
-last-close-wins splitter then leaves `content` empty. Raising `max_tokens`
-remains the fix.
-
-Measured on Qwen3.8-27B, one session grown to ~8k tokens over 74 turns:
-
-| `max_tokens` | result |
-|---|---|
-| 260 | several turns with empty `content`, one reply that was a single non-Latin token |
-| 600 | **74 of 74 turns clean**, every recall correct |
-
-Not one model's quirk: Qwen3.6-35B-A3B runs the same 54-turn probe with 53
-turns clean at `max_tokens` 600; its one failure is the same shape, a
-`wrapup` turn cut off mid-sentence at `finish_reason: length` with 2 395
-characters of thinking behind it.
-
-The model, not the engine: the same conversation on vLLM with the same
-checkpoint degenerates the same way, only visibly (vLLM has no reasoning
-parser, thinking streams into `content`). A fixed conversation replayed at
-identical depth (up to 5 005 prompt tokens) is answered correctly by both
-engines, so context length alone is not the trigger.
-
-The server logs `empty content: the answer never started because the token
-budget went to reasoning`, with the amount of thinking and the finish reason.
-Reproduce, or gate, with the budget sweep:
-
-```
-python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 \
-    --model <id> --max-tokens 200,260,400,600 --assert-answered
-```
-
-`--assert-answered` fails any turn whose `content` is empty and whose response
-carries no `imp_finish_detail`. It runs in `scripts/test_server.sh`.
+| symptom | cause | fix | issue |
+|---|---|---|---|
+| Repeated tokens, or a fluent answer that contradicts itself | `stderr` shows `packed NVFP4 weight reached the generic cuBLAS path`: weights reached a kernel that cannot read them, the layer contributed nothing | since #1403 an NVFP4 MoE checkpoint whose experts do not fit is refused at load; on a current build this line is a new defect, worth an issue | #1403 |
+| Fluent but wrong; partial corruption stays grammatical | do not judge output quality from one short prompt | run the degeneration battery, `tools/analysis/degen_suite.py` | - |
+| Decode far slower than the docs: something else is on the GPU | on WSL2 `nvidia-smi` does **not** show a container holding the card | check `docker ps` as well | - |
+| Decode far slower than the docs: CUDA graphs did not capture | log prints `Resolved dispatch: ... graphs=1` when they did | `graphs=0` typically costs 2-3x on decode | - |
+| Decode far slower than the docs: NVFP4 decode cache is partial | look for `NVFP4 decode caches: FULL (n/n MoE layers)` | anything less means some tensors decode from their slower source, and a partial cache also aborts graph capture | - |
+| Decode far slower than the docs: VRAM spilled to host | a successful allocation proves nothing on WSL2/WDDM, driver oversubscribes into host memory and returns success; tell is bandwidth, ~1530 GB/s resident vs ~237 GB/s spilled (~6.5x cliff) | since 2026-09-07 the server measures it once at load: `KV cache: pool copy bandwidth N GB/s` in the log (WARN below 500), `kv_pool_bandwidth_gbps` on `/health`, `imp_kv_pool_bandwidth_gbps` on `/metrics`; reduce `runtime.max_seq_len`, the KV dtype, or pin a smaller pool with `kv_cache.max_blocks` | - |
+| Decode far slower than the docs: comparing against a number measured differently | the prefill pin changed meaning on 2026-07-26 when one-shot runs stopped hitting the prefix cache | see [`PERF.md`](PERF.md) | - |
+| Decode far slower than the docs: it is the host, not the change | decode on this box moves several percent between sessions | a single slow reading is not a regression until it reproduces in a paired A/B | - |
+| Perf gate is red | not a regression until it reproduces; host's own between-session movement is several percent | re-run it; check `docker ps` and `nvidia-smi` for a co-tenant; if it still fails, A/B against `main` with alternating rounds, not two runs 20 minutes apart | - |
+| Perf gate genuinely moves, on purpose | an intentional change | refresh with `scripts/gen_perf_baseline.sh` **and say so in the PR**; a refresh without that sentence is indistinguishable from a regression papered over | - |
+| Request hangs, or streams nothing until the end | almost always a reverse proxy buffering the response | set `proxy_buffering off` (nginx) or equivalent, see [`DEPLOYMENT.md`](DEPLOYMENT.md); no proxy: a very large grammar can take long to build its first token mask (compiled and memoised, the first mask inside a deeply nested state is the expensive one) | - |
+| Requests fail after the first one: `finish_reason: "cancelled"`, or the second identical request returns nothing | KV pool too small to hold one full-length sequence; the load succeeds, every full-length request is cancelled at admission | since v0.23.0 reported at load time for an operator-set `max_seq_len`; reduce `runtime.max_seq_len`, or pick a smaller KV dtype | - |
+| Requests fail after the first one, and prefix caching seems off | `kv_cache.swa_snapshot_mb` **below one snapshot size** silently disables prefix caching, worse than setting it to zero | set it to at least one snapshot size, or to zero | warns since #1092 |
+| Requests queue while `/metrics` shows free KV blocks | admission reserves prompt **plus `max_tokens`** (#1635): a request admitted on its prompt alone can run the pool dry mid-answer; `imp_kv_blocks_reserved` is the gauge since v0.29.0 | queueing is the better failure, the promise holds from admission until the blocks are written; cost is concurrency against a client that does not set `max_tokens` (server default 8192, so each such request reserves `ceil(8192/block_size) + 1` blocks); set `max_tokens` to what the answer needs | #1635, #1636, #1662 |
+| Requests queue, pool too small to ever hold prompt + `max_tokens` | reserve is clamped to the pool (pre-#1635 behaviour) | mid-stream cancel stays possible; no admission rule can promise memory that does not exist | - |
+| After a restart, every prompt is cancelled | restarting while the previous process still holds the card sizes the KV pool against unreleased VRAM; comes up in seconds, loads the model, then cancels every prompt past a few hundred tokens with "KV cache too small for prompt" | `GET /health` since v0.28.0: **503 with `code: "kv_pool_floored"`**, plus `kv_capacity_tokens` in the body always; older build tell: `imp_kv_blocks_total` in `/metrics` reads tens where a clean start reads thousands; restart on a free card, not a retry, the pool is sized once at startup | - |
+| Server came up fine, but its numbers are wrong | quieter half of the same fault: a server started beside another process does not fail, it gets a smaller KV pool and `/health` reports that pool at its own ceiling; no `/health` field separates it from a healthy start, both read `ok` | load log since v0.29.0: `WARN Weight upload consumed 8446 MiB of device free VRAM for a 3263 MiB checkpoint`; the weight upload is the first moment a neighbour is visible under WSL2/WDDM; treat the warning as a refusal to measure, free the card and restart before recording any number | - |
+| Server answers 503 | model is suspended, or the server started without `--model` and the request resolved to no model | `POST /admin/resume`; `GET /v1/models` shows what is available | - |
+| Image ignored, `400 vision_unavailable` | checkpoint loaded **text-only**, imp does not recognise its vision tower | refusal on purpose, so you do not get a confident description of a picture the model never saw; check [`MODELS.md`](MODELS.md) for which checkpoints can see | - |
+| Image ignored, plain `400` on `image_url` | could not be fetched or decoded | dropping it silently would shift every later image onto the wrong placeholder | - |
+| Constrained output comes back unconstrained | since v0.23.0 this should be impossible, a pattern imp cannot compile is a `400` | free text at HTTP 200 with `response_format` set is a bug worth reporting; the exact defect fixed in #1256 | #1256 |
+| `content` empty, answer sits in `reasoning_content` | forced `</think>` fired: `max(max_tokens x think_budget, max_tokens - max(runtime.think_answer_reserve, max_tokens/4))` limited reasoning, i.e. 130 reasoning tokens at `max_tokens` 260 and the 0.5 default; default `think_budget=0.5`, `think_answer_reserve=256`; measured on the current build, `max_tokens` 64 returns 126 characters of reasoning then 186 characters of content, `max_tokens` 16 returns 32 characters of reasoning then content, so the forced `</think>` fires | `imp_finish_detail: "reasoning_budget_exhausted"` beside `finish_reason`, `usage.completion_tokens_details.reasoning_tokens` (OpenAI) / `usage.output_tokens_details.reasoning_tokens` (Anthropic, Responses), `imp_requests_reasoning_exhausted_total` on `/metrics`; `finish_reason` stays `stop`/`length`; raise `max_tokens` | - |
+| `content` empty, still reproduces at `max_tokens` 120-150 on a long session | leading hypothesis: the model re-opens `<think>` after the forced close and the last-close-wins splitter leaves `content` empty; not model-specific (Qwen3.8-27B and Qwen3.6-35B-A3B both affected; a fixed conversation replayed at identical depth, up to 5 005 prompt tokens, is answered correctly by both, so context length alone is not the trigger; the same conversation on vLLM with the same checkpoint degenerates the same way, only visibly, since vLLM has no reasoning parser and thinking streams into `content`) | raising `max_tokens` remains the fix: Qwen3.8-27B one 74-turn session, `max_tokens` 260 gave several turns with empty `content` (one reply a single non-Latin token; turn 5 `finish_reason: length`, 586 characters of reasoning, `content` empty), `max_tokens` 600 gave **74/74 turns clean**, every recall correct; Qwen3.6-35B-A3B 54-turn probe: 53/54 clean at `max_tokens` 600, the one failure a `wrapup` turn cut off mid-sentence at `finish_reason: length` with 2 395 characters of thinking behind it; reproduce or gate with `python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 --model <id> --max-tokens 200,260,400,600 --assert-answered` (fails any turn with empty `content` and no `imp_finish_detail`; runs in `scripts/test_server.sh`) | under investigation |
 
 ## Build or test problems
 
-- `build/` and `build-dev/` are root-owned by the container. Remove them with
-  `make dev-clean` or a throwaway container, never `sudo`.
-- `make test-unit` runs a **different binary** from the CI lane. Green there is
-  not green in CI. The CI lane is `ctest -L unit`, which is `make dev-test`.
-- `build-dev/` carries whichever branch was last compiled in it; `git checkout`
-  does not rebuild.
-- A `--gtest_filter` naming a value-parameterised suite without wildcards matches
-  zero tests and reports `PASSED`. `DetEvalE2ETest.*` matches nothing;
-  `*DetEvalE2ETest*` is correct.
+See [`CONTRIBUTING.md`](../CONTRIBUTING.md#build) and [`CONTRIBUTING.md`](../CONTRIBUTING.md#test).
+Fast pointers:
 
-More: [`CONTRIBUTING.md`](../CONTRIBUTING.md) and
-[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md).
+- `build/` and `build-dev/` are root-owned by the container; remove with `make dev-clean` or a throwaway container, never `sudo`.
+- `make test-unit` runs a **different binary** from the CI lane (`ctest -L unit`, i.e. `make dev-test`); green in one is not green in the other.
+- `build-dev/` carries whichever branch was last compiled in it; `git checkout` does not rebuild.
+- A `--gtest_filter` naming a value-parameterised suite without wildcards matches zero tests and reports `PASSED`: `DetEvalE2ETest.*` matches nothing, `*DetEvalE2ETest*` is correct.
+
+More: [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md).

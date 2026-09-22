@@ -1,13 +1,16 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-03
-commit: b3cc2079
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 # Attention dispatch
 
-Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel runs for each (phase × dtype × layer) combination. If this doc and the code disagree, the code wins. Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
+Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel runs for each (phase × dtype × layer) combination.
+
+- If this doc and the code disagree, the code wins.
+- Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
 
 > **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](../archive/roofline_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range. Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
 >
@@ -26,7 +29,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
 | `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1036) - cuBLAS in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
 | otherwise | `attention_prefill_dispatch` → the FMHA chain below |
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cu:34`: they route straight to the FP16 WMMA FMHA (the only sink-capable tier) and **throw** on decline rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cu:65`: they route straight to the FP16 WMMA FMHA (the only sink-capable tier) and **throw** on decline rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 
@@ -34,18 +37,23 @@ Since #1205 the resolved path is **observable at runtime**: the engine logs one 
 
 Tried in order, first hit wins:
 
-1. **`fmha_sm120_mxfp4_prefill`** - opt-in (`attention_mxfp4_available()`), hd%32==0, compared against an FP16 reference at hd 64/96/128 **and 256** (`tests/test_attention_fmha_mxfp4.cu`; the hd=256 case needs the FA2 reference because tier 5 cannot serve hd=256 on sm_120, see below)
-2. **`fmha_sm120_fa2_prefill`** - register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd 128 and 256** (hd=256 via `attention.fa2_hd256`, default on since #932; Bq=64/TWOSLOT instance). f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`).
-3. **`fmha_sm120_fp8_prefill`** - strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0. Raw e4m3 Q/K conversion compounds per-layer score error on real activations (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill. Off by default.
-4. **`fmha_sm120_prefill`** - FP16 WMMA, hd%16==0. Fallback for the configs FA2 declines: hd=256 with `fa2_hd256=false`, FA2-declined chunk continuations (`q_offset > 0`), other head dims (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window).
-5. **`flash_attention_blackwell`** - WMMA 128×64 tiles, last tier. Declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in).
-6. **Chain exhausted → `std::runtime_error`** (#654). The old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10); tc also lacks `q_offset`, so chunked continuations would mask wrongly even when it launches. Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim; both error loudly now.
+| # | Kernel | Condition | Note |
+|---|---|---|---|
+| 1 | `fmha_sm120_mxfp4_prefill` | opt-in (`attention_mxfp4_available()`), hd%32==0 | compared against an FP16 reference at hd 64/96/128 **and 256** (`tests/test_attention_fmha_mxfp4.cu`; hd=256 needs the FA2 reference since tier 5 cannot serve hd=256 on sm_120) |
+| 2 | `fmha_sm120_fa2_prefill` | register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), hd 128 and 256 (hd=256 via `attention.fa2_hd256`, default on since #932; Bq=64/TWOSLOT instance) | f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`) |
+| 3 | `fmha_sm120_fp8_prefill` | strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0 | raw e4m3 Q/K conversion compounds per-layer score error (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill; off by default |
+| 4 | `fmha_sm120_prefill` | FP16 WMMA, hd%16==0 | fallback for configs FA2 declines: hd=256 with `fa2_hd256=false`, FA2-declined chunk continuations (`q_offset > 0`), other head dims (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window) |
+| 5 | `flash_attention_blackwell` | WMMA 128×64 tiles, last tier | declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in) |
+| 6 | chain exhausted | - | `std::runtime_error` (#654); the old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10), and lacked `q_offset` (chunked continuations would mask wrongly even when it launched). Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim; both error loudly now |
 
 The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) are summarized in [`archive/README.md`](../archive/README.md); full source in git history.
 
 ### Chunked prefill carve-out (default for most archs)
 
-Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads - NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result hits the dispatch gate above with `q_offset`-aware causal masking. See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/roadmap.md`.
+Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads, NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4.
+
+- Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result hits the dispatch gate above with `q_offset`-aware causal masking.
+- See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/roadmap.md`.
 
 ## Decode - switch on cache_dtype
 
@@ -53,30 +61,45 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode` (`attention_paged.cu:1115`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (`attention.paged_f16_multitok`, up to four Q heads per CTA) |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:1121`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (`attention.paged_f16_multitok`, up to four Q heads per CTA) |
 | FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 without split-K: `_decode_fp8_multitok_kernel<128,4>` in `attention_paged_fp8_multitok.cu` (`attention.paged_fp8_multitok`); tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
 | NVFP4 | `paged_attention_decode_nvfp4` / `_nvfp4_tc` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu` (`attention.paged_nvfp4_multitok`); scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel`; TC: `_decode_nvfp4_tc_kernel`, `_splitk_nvfp4_tc_kernel`, `_residual_reduce_kernel` |
-| MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:424`) | shares the NVFP4 kernels with UE8M0 scales |
+| MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:492`) | shares the NVFP4 kernels with UE8M0 scales |
 
-**Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674). `paged_attention_serves_head_dim()` in `attention_paged.h` is the table, and the resolver falls back to FP16 KV before init when a model's head_dim is not in it. FP16 and FP8 serve 64/96/128/256/512, INT8 and INT4 serve 64/96/128/256, NVFP4 serves 64/128/256/512 - **no 96**.
+**Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674).
+
+| KV dtype | head_dim served |
+|---|---|
+| FP16, FP8 | 64/96/128/256/512 |
+| INT8, INT4 | 64/96/128/256 |
+| NVFP4 | 64/128/256/512 (**no 96**) |
+
+- `paged_attention_serves_head_dim()` in `attention_paged.h` is the table; the resolver falls back to FP16 KV before init when a model's head_dim is not in it.
 
 ### BitDecoding residual cache
 
-When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest `kv_cache.bitdecoding_residual_tokens` tokens are kept in a residual FP16 buffer and combined with the quantized older blocks at attention time. Used by NVFP4-decode for higher fidelity on the recent context. See `src/compute/attention_paged_nvfp4_tc.cu`.
+When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest `kv_cache.bitdecoding_residual_tokens` tokens are kept in a residual FP16 buffer and combined with the quantized older blocks at attention time.
+
+- Used by NVFP4-decode for higher fidelity on the recent context.
+- See `src/compute/attention_paged_nvfp4_tc.cu`.
 
 ## MLA (Multi-head Latent Attention)
 
-DeepSeek-V2/V3 checkpoints take a different route (missing from this doc until the 2026-08-02 audit). `ModelProfile::AttnVariant::MLA` marks them; the compressed KV latent is expanded by `src/compute/mla_kv_assemble.cu` before the assembled K/V reach the gate above, so an MLA layer looks to the dispatch like a normal attention layer with the assembled shapes. No standard RoPE on the latent path; the YaRN `mscale` ratio bug fixed 2026-07-07 lived here.
+DeepSeek-V2/V3 checkpoints take a different route (missing from this doc until the 2026-08-02 audit).
 
-## Sliding-window mask
+- `ModelProfile::AttnVariant::MLA` marks them; the compressed KV latent is expanded by `src/compute/mla_kv_assemble.cu` before the assembled K/V reach the gate above, so an MLA layer looks to the dispatch like a normal attention layer with the assembled shapes.
+- No standard RoPE on the latent path; the YaRN `mscale` ratio bug fixed 2026-07-07 lived here.
 
-cuBLAS path: `attention_cublas_prefill`'s `sliding_window` parameter (Gemma-4 SWA layers). FMHA path: `fmha_sm120_prefill`'s `sliding_window` argument (every FMHA variant accepts it). Naive FP32 SWA path is archived ([`archive/README.md`](../archive/README.md); source in git history).
+## Sliding-window mask and soft-cap
 
-## Soft-cap (logit cap)
+| Feature | cuBLAS path | FMHA path |
+|---|---|---|
+| Sliding-window mask (Gemma-4 SWA layers) | `attention_cublas_prefill`'s `sliding_window` parameter | `fmha_sm120_prefill`'s `sliding_window` argument (every FMHA variant accepts it) |
+| Soft-cap / logit cap (Gemma-3/Gemma-4 feature, 0/off elsewhere) | `cfg.attn_logit_softcap` through `attention_cublas_prefill` | `softcap` threaded through every kernel |
 
-cuBLAS path passes `cfg.attn_logit_softcap` through `attention_cublas_prefill`. FMHA path threads `softcap` through every kernel. Soft-cap is a Gemma-3/Gemma-4 feature; other archs default to 0 (off).
+Naive FP32 SWA path is archived ([`archive/README.md`](../archive/README.md); source in git history).
 
 ## Known wounds
 

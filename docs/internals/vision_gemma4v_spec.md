@@ -7,9 +7,10 @@ commit: 81ffa573
 
 # Gemma-4 vision (gemma4v) encoder — implementation spec
 
-Reverse-engineered from llama.cpp master (`tools/mtmd/models/gemma4v.cpp`, `clip.cpp`,
-`mtmd-image.cpp`). imp implements the gemma3 SigLIP path; gemma4v is a structurally
-different encoder. This doc is the reference for porting it.
+Reverse-engineered from llama.cpp master (`tools/mtmd/models/gemma4v.cpp`, `clip.cpp`, `mtmd-image.cpp`).
+
+- imp implements the gemma3 SigLIP path; gemma4v is a structurally different encoder.
+- This doc is the reference for porting it.
 
 ## GGUF facts (ggml-org/gemma-4-26B-A4B-it-GGUF mmproj)
 - `clip.vision.projector_type = gemma4v`, projection_dim=2816, hidden=1152,

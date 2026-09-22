@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-09-06
-commit: 412bf8b4
+verified: 2026-09-22
+commit: 9cbb8004
 -->
 
 <p align="center">
@@ -19,187 +19,67 @@ commit: 412bf8b4
 
 **imp is an LLM inference engine that targets exactly one chip: the NVIDIA RTX 5090.**
 
-**What it is**
-
-- A from-scratch C++23/CUDA engine for consumer Blackwell (`sm_120a`), with its own GGUF and SafeTensors loaders, tokenizer, paged KV cache and kernels.
-- A server that speaks **both** the OpenAI and the Anthropic APIs natively, so an agent stack written against either runs without a shim.
+- From-scratch C++23/CUDA engine for consumer Blackwell (`sm_120a`): own GGUF and SafeTensors loaders, tokenizer, paged KV cache, kernels.
+- A server that speaks **both** the OpenAI and the Anthropic APIs natively - no shim for either.
 - Also a C library and a CLI, not only a server.
+- Not portable (no CPU path, no other GPU), not multi-GPU, not a supported product (one author, no SLO, no support rotation).
 
-**What it is not**
+Who this fits, who should use [llama.cpp](https://github.com/ggerganov/llama.cpp) (breadth) or [vLLM](https://github.com/vllm-project/vllm) (scale-out) instead, and the numbers behind that call: [`docs/PERF.md`](docs/PERF.md#competitive-standing).
 
-- Portable. There is no CPU path, no other GPU, no fallback.
-- A multi-GPU or datacenter-batching engine.
-- A supported product. One author, no SLO, no support rotation.
+## Requirements
 
-## Is imp for you?
+- `sm_120a` GPU only: RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, or RTX PRO 6000. Nothing else works.
+- Docker with the NVIDIA Container Toolkit (`--gpus all`); the host needs no CUDA toolkit.
 
-| Yes, if | No, if |
-|---|---|
-| you run an RTX 5090 / 5080 / 5070 Ti / PRO 6000 | you have anything else, including datacenter Blackwell ([why](docs/internals/ARCHITECTURE.md)) |
-| you have one GPU: one user, an agent loop, or a few dozen concurrent streams | you need more than one GPU, or a fleet of them |
-| you want NVFP4 weights served natively, without dequant | you need a portable engine across a fleet |
-| you want an Anthropic-compatible endpoint without a proxy | you need SLOs, a support contract or a security response process |
+Full checklist, including the WSL2 `docker ps` caveat: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#requirements).
 
-If more than one cell on the right applies to you, use
-[llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth or
-[vLLM](https://github.com/vllm-project/vllm) for scale-out across GPUs and
-machines. Both are better at those jobs than imp is, and imp does not try to
-be. On one 5090 the picture depends on the model: on the Qwen3.8-27B hybrid
-imp leads vLLM by 25 % at 32 concurrent streams and by 16 % at 8 on the same
-checkpoint and client; on a dense NVFP4 checkpoint (Qwen3-14B) imp leads by
-8 % at 8 streams and by 3 % at 32, and reads parity at 32 with ~1000-token
-prompts (table with provenance in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
-"re-measured on one client").
+## 3-command quickstart
 
-## 60-second quickstart
+Worked example: **Qwen3.8-27B**, a 27B multimodal model quantized to NVFP4 so it fits one 5090 with room for a real context.
 
-Everything runs in Docker; the host needs no CUDA toolkit. The worked example
-is **Qwen3.8-27B**, a 27B multimodal model quantized to NVFP4 so it fits one
-5090 with room for a real context. The 60 seconds start once the weights are on
-disk; the two steps before that are a build and a download.
-
-**1. Build the image** (~6 min the first time, seconds after: ccache). `scripts/stage-model.sh` runs the downloader
-inside the `imp:test` image this produces and exits 1 without it (#1682).
-`docker compose build imp-server` makes `imp:latest`, a different tag.
+**1. Build the image** (~6 min the first time, seconds after via ccache):
 
 ```bash
 make build
 ```
 
-**2. Get the weights** (19.2 GiB, download only, nothing to convert). The
-checkpoint is [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm),
-an `imp-quantize --format vllm` export; the same directory also loads in vLLM
-(verified on 0.27.1 and 0.28.0).
+**2. Get the weights** (19.2 GiB, download only): [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm), an `imp-quantize --format vllm` export that also loads in vLLM.
 
 ```bash
 scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm
 ```
 
-**3. Serve.** The cache volume is optional and pays for itself on the second
-start: it holds the transformed weights (Qwen3-14B-NVFP4 init 7.9 s → 2.1 s).
+**3. Serve:**
 
 ```bash
 docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
   -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm
 ```
 
-**4. Ask.** Open <http://localhost:8080>. The built-in UI streams the answer,
-draws one bar per token as it arrives, and shows the server's own counts for
-the run: prompt tokens, prefix-cache hits, reasoning tokens, context used. If
-the models directory holds more than one model, the header becomes a picker and
-choosing an unloaded entry swaps it in.
-
-<p align="center">
-  <img src="docs/webui.png" width="900"
-       alt="the built-in web UI after one answer: transcript on the left, one bar per token under it, run and usage readouts on the right">
-</p>
-
-<sub>Captured against the UI's dev mock (`tools/imp-server/webui/dev/`): the numbers in the picture are the mock's, not a measurement.</sub>
-
-Or from the shell:
-
-```bash
-curl -s http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen3.8-27B-NVFP4-vllm","messages":[{"role":"user","content":"Why is the sky blue?"}],"max_tokens":64}'
-```
-
-Expected: a JSON completion object whose `choices[0].message.content` explains
-Rayleigh scattering. The model id is the file or directory basename,
-`GET /v1/models` lists it, and the field is required. A GGUF file works the same
-way: swap the path.
-
-The weights take 18.3 GiB on the card and answer at **~102 tok/s**, leaving
-~7 GiB for the KV cache on a 32 GB 5090.
+Open <http://localhost:8080> for the built-in chat UI, or `curl` `/v1/chat/completions` (model id is the file/directory basename, `GET /v1/models` lists it). The weights take 18.3 GiB on the card and answer at **~102 tok/s**, leaving ~7 GiB for the KV cache on a 32 GB 5090.
 
 [PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
        cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
        cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
 
-### Bringing your own model
+Full walkthrough (screenshot, other model formats, bringing your own BF16/FP8 checkpoint, the MTP head): [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Quantizing it yourself, quality numbers: [`docs/quantization.md`](docs/quantization.md).
 
-That checkpoint was made with the in-tree quantizer, and the same command builds
-one from any BF16 or FP8 release. Qwen3.8-27B needs it: no published NVFP4 export
-of it runs here, because they keep attention in FP8 and this card has no kernel
-for that.
+## What works today
 
-```bash
-scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
-```
+Full matrix with per-item status: [`docs/FEATURES.md`](docs/FEATURES.md). ✅ = code path plus a gated test, 🟡 = code path, no test.
 
-28.8 GiB down, ~25 minutes of conversion, 18.8 GiB out. The FP8 release is a
-third of the BF16 download and costs 0.24 % perplexity against converting the
-BF16 one. The script forecasts the output size and whether it fits the card
-*before* writing anything, so a model that would not fit costs seconds rather
-than half an hour. Details and the quality numbers:
-[`docs/quantization.md`](docs/quantization.md).
+| area | |
+|---|---|
+| **Models** | ✅ Qwen3 / 3.5 / 3.6 / 3.8 (dense, MoE, Gated-DeltaNet hybrids), LLaMA, Mistral, Mixtral, DeepSeek incl. V2 latent attention, Gemma-3 and Gemma-4, gpt-oss, Nemotron-H, nomic-bert embeddings. 🟡 Llama-4 |
+| **Vision** | ✅ Qwen3-VL and Qwen3.6-35B-A3B (tower in the checkpoint), Gemma-3/4 via `--mmproj`. No video |
+| **Quantisation** | ✅ NVFP4 (native, the primary path), MXFP4, GGUF Q2_K-Q8_0, IQ4_NL/XS, FP8 E4M3 weights and KV, INT8/INT4 KV |
+| **APIs** | ✅ OpenAI chat/completions/responses/embeddings, Anthropic `/v1/messages`, `/v1/rerank`, per-token SSE on all three dialects, tool calling, JSON-Schema / regex / GBNF constrained decoding, prefix caching with `cache_control` |
+| **Serving** | ✅ continuous batching, paged KV, model swap on request, suspend/resume to free the GPU, Prometheus `/metrics`, API-key auth |
+| **Engine** | ✅ NVFP4 block-scaled `mma.sync` GEMM/GEMV, FP8 `f8f6f4` attention scores, FlashAttention-2 prefill (hd 128 and 256), CUDA graphs on prefill and decode, Gated DeltaNet and Mamba2, speculative decoding |
 
-## How fast is it, really
+## What CI defends
 
-Same card, same GGUF, same flags, decode tok/s. imp v0.33.0 against llama.cpp
-(image pinned by digest, `ghcr.io/ggml-org/llama.cpp@sha256:c49f4d48…`),
-measured 2026-08-30 on one RTX 5090:
-
-| model | imp | llama.cpp | |
-|---|---:|---:|---:|
-| Qwen3-8B Q8_0 | **385.4** | 160.1 | **+141 %** |
-| Qwen3-14B Q6_K | **162.5** | 114.8 | **+42 %** |
-| Qwen3.6-35B-A3B UD-Q4_K_M | **287.9** | 235.8 | **+22 %** |
-| gpt-oss-20b MXFP4 | **382.7** | 335.9 | **+14 %** |
-| Qwen3-30B-A3B Q4_K_M | 305.5 | 295.7 | +3 % |
-
-[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep
-       quant=per-row cuda=13.3 path=gguf cmd=`make bench-competitive` n=6x2
-       note2=sixth row Gemma-4-26B-A4B UD-Q4_K_M 245.0 vs 214.4, +14 %, omitted here for length
-       note=imp defaults vs llama.cpp defaults, full offload, flash attention on]
-
-The last row is the honest bottom of the range, not an outlier we forgot to
-delete: on a MoE that is already bandwidth-bound at batch 1 there is little left
-to win. imp's default enables n-gram speculation, which is most of the Qwen3-8B
-figure; with it off that row reads 284.6, still +78 %.
-
-**The 32 GB is the other half of the story.** NVFP4 KV means a 27B model holds
-**126 432 tokens of context** on this card, where 8-bit KV stops at 86 848. At a
-77k prompt it decodes 74.3 tok/s, or 100.2 with sparse decode switched on.
-
-[PROV: commit=3921547d date=2026-08-30 hw=RTX5090 model=Qwen3.8-27B-NVFP4
-       quant=NVFP4 cuda=13.3 path=nvfp4-kv cmd=`imp-server --max-batch 8` + a
-       client that caps max_tokens so both arms emit the same count n=3x3
-       note=sparse arm adds `--set attention.sparse_topk_tokens=8192`; it trades
-       retrieval accuracy for the speed, see docs/MODELS.md]
-
-**Serving on one card.** The same checkpoint served by imp and by vLLM
-(0.27.1, Marlin NVFP4) to one client, fresh server per arm, three alternating
-trials, aggregate tok/s as the median of three waves. Qwen3.8-27B (a
-Gated-DeltaNet hybrid) unless noted; the dense rows are Qwen3-14B-NVFP4:
-
-| streams | prompt | imp | vLLM 0.27.1 | |
-|---|---|---:|---:|---|
-| 32 | 38 tokens | **1807.9** | 1447.8 | +25 % |
-| 8 | 36 tokens | **573.0** | 495.8 | +16 % |
-| 32 | 1082 tokens | **873.4** | 497.8 | +75 % |
-| 8, dense Qwen3-14B-NVFP4 | 36 tokens | **1085.4** | 1005.8 | +8 % |
-| 32, dense Qwen3-14B-NVFP4 | 38 tokens | **3948.9** | 3817.6 | +3 % |
-| 32, dense Qwen3-14B-NVFP4 | 982 tokens | **2491.2** | 2490.9 | +0 % |
-
-[PROV: commit=a44298cb date=2026-09-02 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm
-       quant=NVFP4 cuda=13.3 path=server-api cmd=`tools/analysis/vllm_conc_ab.sh`
-       n=3 trials x 3 waves per arm, alternating; vLLM v0.27.1 with
-       --gpu-memory-utilization 0.90 --max-model-len 16384 --max-num-seqs N;
-       imp --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096
-       --set kv_cache.max_blocks=2387; vLLM 0.28.0 reads 1410.7 at 32 streams;
-       dense rows 2026-09-03 imp 6281802f (attention.paged_fp8_multitok=4), model=Qwen3-14B-NVFP4,
-       the 982-token row 2026-09-08 with the grouped FP8 decode attention (#1953, BENCHMARKS run 10),
-       quant=NVFP4-Modelopt, --set kv_cache.max_blocks=8192]
-
-Per-model history with dates, commits and exact commands:
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Methodology and what counts as a
-number at all: [`docs/PERF.md`](docs/PERF.md).
-
-### What CI defends
-
-The table above is a sweep. The number the regression gate pins on every push is
-a different one, on one model:
+Every push measures this on one pinned model (Qwen3-8B Q8_0); the regression gate is 8 % either way. Full sweep across models, competitive numbers vs llama.cpp/vLLM (imp led llama.cpp +141 % down to +3 % across six models on 2026-08-30, imp led vLLM +25 % at 32 streams / -7.6 % on a dense checkpoint at the same width on 2026-09-02), and why the threshold is 8 % and not 3 %: [`docs/PERF.md`](docs/PERF.md). Per-model history with exact commands: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
@@ -214,76 +94,9 @@ a different one, on one model:
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
-Decode on this host moves several percent between sessions with nothing changed,
-and prefill moves more (the MoE path, not cuBLAS); the measurements behind that
-are in [`docs/PERF.md`](docs/PERF.md). That is why the thresholds are 8 % and
-not 3 %.
+Decode on this host moves several percent between sessions with nothing changed, and prefill moves more (the MoE path, not cuBLAS); that is why the thresholds are 8 % and not 3 %. Detail: [`docs/PERF.md`](docs/PERF.md).
 
-## What works today
-
-Full matrix with per-item status: [`docs/FEATURES.md`](docs/FEATURES.md).
-✅ = code path plus a gated test, 🟡 = code path, no test.
-
-| area | |
-|---|---|
-| **Models** | ✅ Qwen3 / 3.5 / 3.6 / 3.8 (dense, MoE and the Gated-DeltaNet hybrids), LLaMA, Mistral, Mixtral, DeepSeek incl. V2 latent attention, Gemma-3 and Gemma-4, gpt-oss, Nemotron-H, nomic-bert embeddings. 🟡 Llama-4 |
-| **Vision** | ✅ Qwen3-VL and Qwen3.6-35B-A3B (tower in the checkpoint), Gemma-3/4 via `--mmproj`. No video |
-| **Quantisation** | ✅ NVFP4 (native, the primary path), MXFP4, GGUF Q2_K–Q8_0, IQ4_NL/XS, FP8 E4M3 weights and KV, INT8/INT4 KV |
-| **APIs** | ✅ OpenAI chat/completions/responses/embeddings, Anthropic `/v1/messages`, `/v1/rerank`, per-token SSE on all three dialects, tool calling, JSON-Schema / regex / GBNF constrained decoding, prefix caching with `cache_control` |
-| **Serving** | ✅ continuous batching, paged KV, model swap on request, suspend/resume to free the GPU, Prometheus `/metrics`, API-key auth |
-| **Engine** | ✅ NVFP4 block-scaled `mma.sync` GEMM/GEMV, FP8 `f8f6f4` attention scores, FlashAttention-2 prefill (hd 128 and 256), CUDA graphs on prefill and decode, Gated DeltaNet and Mamba2, speculative decoding |
-
-## Where imp loses
-
-The five that should decide against imp, in plain terms. The rest are in
-[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
-
-1. **One GPU, one chip.** No multi-GPU, no tensor parallelism, and no plan for
-   either: consumer Blackwell has no NVLink, so TP is net-negative on the
-   workload imp targets ([why](docs/DESIGN_DECISIONS.md)).
-2. **No GPU in continuous integration.** Every kernel correctness and performance
-   check runs on one person's desktop before a push. If that fails your risk
-   model, it should.
-3. **One model resident at a time.** 32 GB fits one. Serving a second is a swap,
-   and the requesting call pays the load.
-4. **Measurements move.** Decode varies several percent between sessions on this
-   host; prefill varies more. Any single number, including ours, is one sample.
-5. **Single-author project.** No support rotation, no SLO, no security response
-   process.
-
-## How it works in five minutes
-
-A request arrives at the HTTP layer and becomes a `Request` on the **scheduler**,
-which runs continuous batching: it admits as many requests as the KV budget
-allows and steps them together rather than serving them one at a time.
-
-Before a new request generates anything, its prompt has to be read. That is
-**prefill**, and it is compute-bound: thousands of tokens go through the model at
-once, so the GEMMs are large and the GPU is busy. If an earlier request shares a
-prefix with this one, the **prefix cache** hands over the already-computed
-key/value pairs and prefill only runs on the tail, which is why a multi-turn
-agent loop gets cheaper as it grows.
-
-Those key/value pairs live in the **paged KV cache**: fixed-size blocks with an
-index, so a sequence does not need one contiguous allocation and blocks can be
-shared between requests that share a prefix. Same idea as virtual memory.
-
-Then **decode** starts, one token at a time, and the picture inverts. There is
-only one token to process, so the arithmetic is trivial and the cost is entirely
-reading the weights out of memory. Decode is bandwidth-bound, which is the single
-most important fact about this engine: **making decode faster means moving fewer
-bytes**, not doing less maths. That is why the weights are stored in 4 bits
-(NVFP4) and read by kernels that multiply them without unpacking them to 16 bits
-first. It is also why CUDA graphs matter, replaying a recorded sequence of kernel
-launches instead of re-issuing hundreds of them per token.
-
-The generated token is streamed back as it appears, not after the reply is done.
-
-That is the whole loop: **request → scheduler → prefill (compute-bound) → paged
-KV → decode (bandwidth-bound) → stream**.
-
-*Everything above this line is the five-minute version. The real thing is in*
-[`docs/internals/`](docs/internals/).
+Provenance for the headline numbers above: llama.cpp pinned by digest `ghcr.io/ggml-org/llama.cpp@sha256:c49f4d48…` (imp v0.33.0, 2026-08-30, `make bench-competitive`); vLLM run with `--gpu-memory-utilization 0.90 --max-model-len 16384 --max-num-seqs N` (`tools/analysis/vllm_conc_ab.sh`) - dense Qwen3-14B-NVFP4, 32 streams, after `attention.paged_fp8_multitok=4`: imp **3948.9** vs vLLM 3817.6 tok/s (+3.4 %).
 
 ## Go deeper
 
@@ -293,10 +106,12 @@ KV → decode (bandwidth-bound) → stream**.
 | put it behind a proxy, with auth and metrics | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
 | know which API fields actually work | [`docs/API.md`](docs/API.md) |
 | know which models and quants load | [`docs/MODELS.md`](docs/MODELS.md) |
+| know how it works | [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md) |
 | know why it is this fast, or this slow | [`docs/PERF.md`](docs/PERF.md), [`docs/internals/BENCHMARKING.md`](docs/internals/BENCHMARKING.md) |
 | fix something that went wrong | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 | understand or replace a kernel | [`docs/internals/KERNELS.md`](docs/internals/KERNELS.md) |
-| know why there is no multi-GPU | [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) |
+| know why there is no multi-GPU, and the rest of where imp loses | [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md), [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
+| build from source, or contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | work on it as an AI agent | [`CLAUDE.md`](CLAUDE.md) |
 
 ## Build from source
@@ -307,23 +122,15 @@ Tracks `main` rather than the latest release.
 git clone https://github.com/kekzl/imp.git && cd imp
 docker compose build imp-server
 docker run --gpus all -v ./models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 127.0.0.1:8080:8080 \
-  imp:latest --model /models/your-model.gguf
+  -p 127.0.0.1:8080:8080 imp:latest --model /models/your-model.gguf
 ```
 
-Contributor workflow, build targets and the test lanes:
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+Contributor workflow, build targets, test lanes: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## How this was built
 
-Every line of imp was written by an AI coding agent (Claude Code), across ~138k
-lines of engine C++/CUDA plus tooling and tests. The repository keeps its own
-audit trail of that: what was measured, what was refuted, and what was shelved,
-in [`docs/audit/`](docs/audit/) and [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md).
+Every line of imp was written by an AI coding agent (Claude Code), across ~138k lines of engine C++/CUDA plus tooling and tests. The repository keeps its own audit trail of that: [`docs/audit/`](docs/audit/), [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md).
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE). One kernel file is adapted from Apache-2.0 code
-(SageAttention); its licence text and notice are in
-[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md), shipped in the image at
-`/usr/share/doc/imp/`.
+MIT. See [`LICENSE`](LICENSE). One kernel file is adapted from Apache-2.0 code (SageAttention); its licence text and notice are in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md), shipped in the image at `/usr/share/doc/imp/`.

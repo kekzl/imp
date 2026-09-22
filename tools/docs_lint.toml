@@ -1,0 +1,28 @@
+# Prose rules for scripts/docs_lint.py. Line limits: tools/filesize_thresholds.toml [thresholds.docs].
+
+# Case-insensitive regexes; any hit in an in-scope doc outside code blocks is an error.
+[words]
+marketing = [
+  "blazing",
+  "state[- ]of[- ]the[- ]art",
+  "world[- ]class",
+  "cutting[- ]edge",
+  "lightning[- ]fast",
+  "best[- ]in[- ]class",
+]
+filler = [
+  "basically",
+  "simply",
+  "note that",
+  "it'?s worth (?:mentioning|noting)",
+  "in this document",
+  "as mentioned (?:above|before)",
+]
+history = [
+  "coming soon",
+]
+
+[paragraph]
+# A prose paragraph (not table, list, heading, code, quote, comment) in docs/ with more
+# sentences than this is an error.
+max_sentences = 2

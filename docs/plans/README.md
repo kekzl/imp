@@ -13,6 +13,7 @@ is the other direction: text moved OUT of the roadmap.
 | plan | state | standing record |
 |---|---|---|
 | [2026-05-28-q4k-mmq-kernel-design](2026-05-28-q4k-mmq-kernel-design.md) | CLOSED 2026-05-28, REFUTED before implementation | roadmap "Closed competitive records" |
+| [2026-06-profiling-campaign](2026-06-profiling-campaign.md) | record, moved out of `docs/internals/PROFILING.md` 2026-09-23 | `docs/internals/PROFILING.md` |
 | [2026-07-22-token-recycling-spec-tree](2026-07-22-token-recycling-spec-tree.md) | CLOSED 2026-08-19, neutral to -7%, default off | roadmap Closed, "speculation tree" |
 | [2026-07-31-qwen3-vl-vision](2026-07-31-qwen3-vl-vision.md) | CLOSED 2026-08-11, shipped #1163-#1180 | roadmap Closed, "vision beyond Gemma" |
 | [2026-08-15-imp-quantize-roadmap](2026-08-15-imp-quantize-roadmap.md) | **OPEN**: items 2 (embedding opt-in), 3 (blocked on a model), 4 (stacked experts) | roadmap Open 6, Open 7 |
