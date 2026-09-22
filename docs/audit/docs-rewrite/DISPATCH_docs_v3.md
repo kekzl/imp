@@ -398,3 +398,50 @@ fc.sh baseline: 9cbb8004. Final missing-token counts (full DST set): MEMORY.md 9
 
 None. Every fact removed from these 8 files in this pass was either condensed-for-budget (table 1, with its replacement or archive location stated) or checked and corrected (table 2); nothing was dropped for being unverifiable.
 
+
+## Report (phase 4)
+
+| file | lines at `9cbb8004` | lines now |
+|---|---|---|
+| `README.md` | 329 | 136 |
+| `CONTRIBUTING.md` | 143 | 136 |
+| `docs/API.md` | 473 | 246 |
+| `docs/BENCHMARKS.md` | 882 | 299 |
+| `docs/DEPLOYMENT.md` | 254 | 236 |
+| `docs/DESIGN_DECISIONS.md` | 232 | 24 |
+| `docs/FEATURES.md` | 111 | 88 |
+| `docs/GOAL.md` | 207 | 141 |
+| `docs/LIMITATIONS.md` | 792 | 107 |
+| `docs/MODELS.md` | 183 | 153 |
+| `docs/PERF.md` | 246 | 250 |
+| `docs/QUICKSTART.md` | 189 | 144 |
+| `docs/README.md` | 76 | 70 |
+| `docs/TROUBLESHOOTING.md` | 234 | 48 |
+| `docs/determinism.md` | 295 | 73 |
+| `docs/quantization.md` | 552 | 200 |
+| `docs/usage.md` | 487 | 0 |
+| `docs/CONFIG.md` | 0 | 258 |
+| `docs/API_FEATURES.md` | 0 | 208 |
+| `docs/internals/ARCHITECTURE.md` | 154 | 106 |
+| `docs/internals/ATTENTION_DISPATCH.md` | 83 | 106 |
+| `docs/internals/BENCHMARKING.md` | 141 | 124 |
+| `docs/internals/CPP23.md` | 72 | 83 |
+| `docs/internals/KERNELS.md` | 139 | 128 |
+| `docs/internals/MEMORY.md` | 949 | 286 |
+| `docs/internals/PROFILING.md` | 193 | 101 |
+| `docs/internals/QUANT_PIPELINE.md` | 67 | 147 |
+| `docs/internals/SM120.md` | 105 | 109 |
+| `docs/internals/vision_gemma4v_spec.md` | 66 | 67 |
+| **total** | **7654** | **4074** |
+
+| item | count |
+|---|---|
+| files deleted | 4: `docs/usage.md`, `docs/architecture.dot`, `.svg`, `.png` |
+| files new (L1) | 2: `docs/CONFIG.md`, `docs/API_FEATURES.md` |
+| records new | 6: 5 in `docs/archive/`, `docs/plans/2026-06-profiling-campaign.md` |
+| facts corrected | 39 (36 agent rows + 3 orchestrator) |
+| unverifiable claims removed | 3 |
+| sections deleted or moved | 84 agent rows + 7 orchestrator |
+| tokens absent from new set, logged | 61 |
+| commands: CPU run | `make build`, `make test-unit` (64 passed), `make dev-test` (13 passed), `make kernel-resources`, 7 tool `--help`/usage checks, fuzz build + run (2289899 runs in 601 s, exit 0) |
+| commands: GPU, not run | 52 (card busy 86 %, 18.2 GB, `gpu-busy-check.sh` exit 1) |
