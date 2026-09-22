@@ -109,6 +109,8 @@ FP8 prefill stays DISABLED on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `
 | Isolated bench without an L2-defeating ring | reads L2; rotate >= 4 x 100 MB slabs, warm per shape |
 | "perf-neutral" without a SASS diff | `cuobjdump -sass`; byte-identical = proof |
 | tf32 on a recurrent state path checked only by MoE PPL | unit-test state diff + Qwen3.8 deterministic PPL |
+| One CTA per row walking a context-length loop (`qsa_select` before #2074: 128.4 us/layer at 13.9k) | score across the grid (one warp per 256 B key, two waves), then a 1024-thread select with ballot ranks: 9.1 us |
+| Split decision counted on the split kernel's CTAs, not the no-split kernel's | `paged_attention_decode`: GQA ratio > 8 without multitok falls back to `paged_attention_gqa_kernel` = batch x n_kv CTAs (16 rows x 24/2 heads: 32 CTAs, 1041 us vs split-K 133 us, #2074); counting n_kv at batch 1 too moved splits 15 -> 64 and cost +9 % (81.6 -> 89.0 us) |
 
 ## Where to look
 

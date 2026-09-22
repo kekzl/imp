@@ -22,7 +22,7 @@ Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (mea
 | 9 | No-graphs profiles overstate tiny-kernel classes ~1.8x at batch=1 on MoE; on Qwen3.8 M=1 the decode graph is strictly serial (union == sum, #1797) | A batch=1 lever must hold bytes or critical-path math. At 32 streams the class pays (RMSNorm +6.8% #1769, act-quantize +4.6% #1771, producer fusion +2.6% #1773) but residual-accumulate lost -0.9% (#1793). Measure the regime you claim |
 | 10 | Isolated kernel benches measure L2: every single Qwen3.8 weight fits the 96 MB L2 (>1792 GB/s = self-disqualified; the GQA-tile decode kernel built on that misread measured -9% e2e, #1785); balanced per-expert inputs flip the sign vs real routing (grouped GEMM mt32 -8.7% isolated, +4% in situ) | Rotate >=4-8 x 100 MB slabs; sub-wave shapes are bistable 1.6x between runs; verdicts from in-process nsys kernel sums; when the in-situ sweep ranks like the isolated one, record that too (#1768) |
 | 11 | Capture costs under nsys are CUPTI-inflated (27.8 ms gaps; >1 ms gaps at the wave ramp = graph captures) | Never price graph capture from a profile |
-| 12 | "Neutral" on a gate-based feature is usually a dead path | Prove activity by kernel launch counts (stream-K workspace refused every launch: 1960 -> 1400 CUTLASS launches, 22k -> 4.2k tok/s; sparse needs the `sparse decode attention ACTIVE` line in one arm only) |
+| 12 | "Neutral" on a gate-based feature is usually a dead path | Prove activity by kernel launch counts (stream-K workspace refused every launch: 1960 -> 1400 CUTLASS launches, 22k -> 4.2k tok/s; sparse needs the `sparse decode attention ACTIVE` line in one arm only). A control MODEL can be dead too: a 32-stream A/B of an F16 paged-attention change on Nemotron-3-Nano ran FP8 KV (`attention_paged_fp8*`), a different kernel (#2074); read `KV cache dtype:` first |
 | 13 | Batch=1 roofline: 1628 GB/s resident (8 GiB sweep, #1797), spilled ~237 GB/s; Qwen3.8 spec-off ceiling ~112 tok/s, measured 87.4 | Re-measure the sweep before quoting bandwidth; the old 1530 pin is stale |
 
 ## Methodology (every A/B)
@@ -128,6 +128,9 @@ nsys stats timeline.nsys-rep
 ```
 
 - WSL2 needs sampling off or nsys hangs.
+- nsys in `imp:test` (no toolchain image needed): `-v /opt/nvidia/nsight-systems/2026.1.3:/nsys --entrypoint /nsys/target-linux-x64/nsys`; `export --type sqlite` the same way; read the sqlite in `python:3.13-slim` (`imp:test` has no python/sqlite3). Scratchpad files mounted into the container need `chmod 755` dir / `644` file (`--prompt-file: cannot open`).
+- Phase split: kernels with `start` in `[end - tg_ms - pp_ms, end - tg_ms)` = prefill; `end - tg_ms` onward = decode (`pp`/`tg` walls from the same run's log).
+- e2e delta larger than kernel-sum delta = host-bound phase: sum `CUPTI_ACTIVITY_KIND_RUNTIME` per API name and `CUPTI_ACTIVITY_KIND_MEMCPY` by `bytes`/`srcKind` (1 = pageable) in that window. Qwen3.8-Flash-Next pp13863: kernels 8.9 s of a 63.8 s wall, 837k pageable `cudaMemcpyAsync` = 28 s of API time (legacy host-expert prefill, `moe_prefill=legacy_fallback` in `Resolved dispatch`).
 - Graphs hide captured kernels: `--no-cuda-graphs` for the mix, `--cuda-graph-trace=node` when graphs must stay on.
 - In `imp:toolchain` the qdstrm -> nsys-rep conversion fails silently (`libcap.so.2`, `libdw.so.1` missing): `apt-get install libcap2 libdw1t64`, then `/opt/nvidia/nsight-compute/*/host/*/QdstrmImporter -i x.qdstrm -o x.nsys-rep`.
 - nsys prints template args as `<(int)64, (int)256, ...>`; grep accordingly.
@@ -168,6 +171,7 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 | "`token_recycling` net-negative, -7%" | -0.27%, neutral (#1483) | same commit |
 | "+21.3% at k=1" (LIMITATIONS) and "+15% k=2" (/health) | measured without template/think; on think traffic MTP was dead (#1796) | spec verdicts need a think arm |
 | "GDN scan: `must be FP32`" | layout bug; BF16 +12.5% (#1776) | - |
+| "QSA: attention is 0.3 % of the decode step, structural" (#2072) | computed, not measured: dense decode attention 81.6 us/layer, the select kernel was 128.4 us on one SM; fixed, QSA tg +11 % at 13.9k (#2074) | same day; a breakdown without a profile is a hypothesis |
 
 1. `git log --oneline <PROV commit>..HEAD -- <files of the measured path>` (all provenance blocks have perf-path commits behind them; only THIS path matters). Renamed TUs: `engine_scheduler.cpp` split into `engine_prefill.cpp`, `engine_prefill_ragged.cpp`, `engine_decode_pipeline.cpp` (#1782).
 2. Re-run the harness instead of reasoning about the delta.
