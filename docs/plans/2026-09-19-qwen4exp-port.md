@@ -192,10 +192,10 @@ Plan (milestone 4), exact at every context length:
 
 | Piece | Where | Fact |
 |---|---|---|
-| Kernels | `compute/qsa_indexer.{h,cu}` | `qsa_prep_queries` (q: (1+w) norm, NeoX RoPE on 64 of 128 dims at the row's position; raw key written at the position), `qsa_pool_blocks` (mean of 4 raw keys -> fp16 -> (1+w) norm -> RoPE at 4b; decode derives the block from `positions[0]` on the device), `qsa_select` (one CTA per row: scores, radix select of the k-th largest float key, compaction ascending, ties by lowest index, tail appended), `qsa_gather_kv` (selected rows from the paged cache into a scratch paged cache, row r owns 129 blocks) |
+| Kernels | `compute/qsa_indexer.{h,cu}` | `qsa_prep_queries` (q: (1+w) norm, NeoX RoPE on 64 of 128 dims at the row's position; raw key written at the position), `qsa_pool_blocks` (mean of 4 raw keys -> fp16 -> (1+w) norm -> RoPE at 4b; decode derives the block from `positions[0]` on the device), `qsa_select` (scores: one warp per block key over two waves of CTAs; then one 1024-thread CTA per row: radix select of the k-th largest float key, compaction ascending, ties by lowest index, tail appended), `qsa_gather_kv` (selected rows from the paged cache into a scratch paged cache, row r owns 129 blocks) |
 | Orchestration | `exec/executor_qsa.cu` | decode (one sequence): index GEMM -> prep -> pool -> select -> gather -> `paged_attention_decode` on the scratch, in place of the dense kernel, all device-driven so the captured step replays; prefill: dense FA2 for the chunk, then rows with position >= 2051 recomputed in passes of `attention.qsa_rows` (16); `attention.qsa_force` recomputes every row |
 | State | lazily sized from the KV cache on the first forward | per QSA layer raw keys `[ctx, 128]` + block keys `[ctx/4, 128]` FP16 (16k context: 60 MiB for 12 layers), scratch K/V 16 rows x 129 blocks (64.5 MiB), scores `[16, ctx/4]` |
-| Exactness | `tests/test_qsa_indexer.cu` (test-attention, 3 GPU tests) | select + gather + paged on the scratch is byte-identical to paged on the original cache (stale bytes in the scratch); select vs CPU top-k incl. ties; prep vs CPU norm+RoPE |
+| Exactness | `tests/test_qsa_indexer.cu` (test-attention, 5 GPU tests) | select + gather + paged on the scratch is byte-identical to paged on the original cache (stale bytes in the scratch); select vs CPU top-k incl. ties; prep vs CPU norm+RoPE |
 | In situ | `attention.qsa_debug` | layer 3, every 16-row pass: max abs diff FA2 vs paged-on-cache 0.007-0.023 (values ~3.3), paged-on-cache vs selected 0 |
 
 Measurements (config of the speed table below, `max_seq_len` 8192):
@@ -265,6 +265,40 @@ selection.
 Reopen trigger: a QSA model whose attention layers carry the decode (a dense-attention
 architecture, or KV per token an order up), or a selection kernel that scales across SMs.
 Measured to 23k tokens only; the 131k end is untested.
+
+### Reopened: nsys says the kernels, not the model (2026-09-22, second pass)
+
+The "0.19 ms of a 63 ms step" above is wrong twice: the 63 ms included prefill, and the dense
+decode attention measures 81.6 us per layer, not 16. `nsys --cuda-graph-trace=node`, imp-cli,
+13863-token prompt (`ppl_corpus_45k.txt`), tg256, per-kernel sums:
+
+| Kernel (13863 context) | before | after |
+|---|---|---|
+| dense decode attention, per layer-step | 81.6 us | unchanged (same dispatch) |
+| QSA decode select, per layer-step | 128.4 us (1 CTA) | 9.1 us (score 2.6 + select 6.5) |
+| QSA decode attention on 2051 tokens, per layer-step | 16.3 us | 15.1 us |
+| QSA prefill attend, 16-row passes | 9233 ms, `paged_attention_gqa_kernel` 1041 us x 8868 | 1588 ms split-K, 133 us; gqa 24 calls |
+| QSA prefill select | 1130 ms | 128 ms (select 67 + score 61) |
+
+Two fixes: `qsa_select` scores with one warp per block key across the card, then selects in a
+1024-thread CTA (ballot ranks, one warp finds the radix digit). `paged_attention_decode` split
+on `batch * n_heads` = 384 CTAs at 16 rows and skipped split-K, but its no-split kernel for
+GQA ratios above 8 (no multitok) launches `batch * n_kv_heads` = 32; it now splits on that
+count when the first says "enough". Reaches F16 KV with ratio 9..16 only: Flash-Next
+(24/2), Nemotron with `kv_cache.dtype=fp16` (defaults to FP8 KV, a different kernel).
+
+e2e, imp-cli, one process per run, 13863-token prompt, tg512, two trials (tok/s):
+
+| Arm | pp | tg |
+|---|---|---|
+| main ece705a4, `qsa=false` | 213.38 / 209.71 | 55.41 / 53.22 |
+| main ece705a4, `qsa=true` | 185.64 / 185.21 | 57.59 / 58.31 |
+| this change, `qsa=false` | 215.12 / 220.15 | 57.10 / 55.99 |
+| this change, `qsa=true` | 203.65 / 197.65 | 63.84 / 62.28 |
+
+At 13.9k the indexer now gains 11-12 % decode and costs 5-10 % prefill. Default stays
+`false`: `degen_suite.py` 47-48/50 unexplained, 480 MiB of key caches reserved at a 131k
+ceiling. Open: prefill passes, 16 rows each, 741 per layer on a 13.9k prompt ((11952 - 3060) / 12 select launches).
 
 ## Speed on the 32 GB card (2026-09-20)
 
