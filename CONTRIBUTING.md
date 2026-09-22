@@ -120,7 +120,7 @@ Body explains *why*, not *what* - the diff already says what changed.
 
 ## Filing bugs
 
-Useful bug reports include: `./build/imp-cli --version` (or the commit SHA), driver version (`nvidia-smi`) and CUDA toolkit version (`nvcc --version`), model identity (file path or HF repo + quantization), the exact command that reproduces, and whether you ran in Docker or on the host.
+Useful bug reports include: commit SHA (`git rev-parse --short HEAD`), driver version (`nvidia-smi`) and CUDA toolkit version (`nvcc --version`), model identity (file path or HF repo + quantization), the exact command that reproduces, and whether you ran in Docker or on the host.
 
 For decode quality regressions (degenerate output, repetition loops), the `check-degeneration` workflow in `scripts/` is a useful first triage.
 

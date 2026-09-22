@@ -134,7 +134,7 @@ $ imp-bench gemm --json 2>/dev/null
 | mode | keys |
 |---|---|
 | `bench` | `prefill_tps`, `decode_tps`, `pp_tokens`, `pp_ms`, `tg_tokens`, `tg_ms`, `reps`, `peak_vram_mib` |
-| `perplexity` | `perplexity`, `tokens`, `corpus`, `calibration` (when `--calibrate-out`) |
+| `perplexity` | `perplexity`, `tokens`, `corpus`, `calibration` (when `--calibrate <out>`) |
 | `generate` | `text`, `prompt_tokens`, `completion_tokens`, `prefill_tps`, `decode_tps`, `prefill_ms`, `decode_ms`, `total_ms` |
 | `bench-suite` | `requested`, `run`, `wall_s`, `benchmarks[].{name,measured,seconds}` |
 

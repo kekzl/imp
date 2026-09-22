@@ -24,6 +24,10 @@ Every section removed, moved or corrected in the prose cleanup. Base `9cbb8004`.
 | file | claim | was | now | source |
 |---|---|---|---|---|
 | `tools/imp-cli/args.cpp` `--help` | `--max-tokens` default | 256 | 8192 (16384 with `--interactive`) | `tools/common/args_common.h:28`, `tools/imp-cli/mode_interactive.cpp:22` |
+| `docs/CONFIG.md` | calibration flag | `--calibrate-out` | `--calibrate <out>` | `imp-cli --help`, `tools/imp-cli/args.cpp:123` |
+| `CONTRIBUTING.md` | bug report version command | `./build/imp-cli --version` | `git rev-parse --short HEAD` | `imp-cli --version` exits "Unknown argument: --version" |
+
+Phase 3 checks on the rewritten set: 34 `make` targets exist (`make -n`), 39 `scripts/`/`tools/` paths exist, 100 config keys resolve in `src/runtime/config.cpp`, 150 `--flags` checked against `imp-cli`/`imp-server`/`imp-quantize --help` (remaining unmatched ones belong to nsys, ncu, docker, vLLM, HF CLI, scripts), 46 `IMP_*` names found in code.
 
 ## Agent A log - README.md, docs/QUICKSTART.md, docs/FEATURES.md, docs/MODELS.md, docs/GOAL.md
 
