@@ -236,3 +236,79 @@ TEST(QsaIndexer, PrepQueriesMatchesCpu) {
         }
     }
 }
+
+// The selected path runs with split-K enabled (executor_qsa.cu), and
+// compute_splitk_splits() takes max_context_len as an input: passing the constant cap
+// there instead of the real context makes the SAME bytes reduce in a different order.
+// Below the budget the selection is every token in order, so the two must agree with
+// the dense paged kernel bit for bit once both are told the same context.
+TEST(QsaIndexer, SplitKBelowBudgetMatchesDensePaged) {
+    const int nh = 24, nkv = 2, hd = 256, bs = 16, rows = 1;
+    // 100 tokens = 7 context blocks: the dense path splits 7 ways, cap (2051 = 129
+    // blocks) splits 29. Above ~464 tokens both saturate at 29 and the bug is invisible.
+    const int pos = 100;
+    const int max_ctx = pos + 1, num_blocks = (max_ctx + bs - 1) / bs;
+    const QsaGeom g = geom();
+    const int cap = g.budget + g.ratio - 1, bpr = (cap + bs - 1) / bs;
+    std::mt19937 rng(11);
+    auto K = rand_half(static_cast<size_t>(num_blocks) * bs * nkv * hd, rng);
+    auto V = rand_half(K.size(), rng);
+    auto Q = rand_half(static_cast<size_t>(rows) * nh * hd, rng);
+    auto Qi = rand_half(static_cast<size_t>(rows) * g.n_heads * D, rng);
+    auto BK = rand_half(static_cast<size_t>(max_ctx / g.ratio + 1) * D, rng);
+    std::vector<int> bt(num_blocks), ctx(rows, max_ctx), p(rows, pos);
+    std::iota(bt.begin(), bt.end(), 0);
+    half *dK = up(K), *dV = up(V), *dQ = up(Q), *dQi = up(Qi), *dBK = up(BK);
+    int *dbt = up(bt), *dctx = up(ctx), *dpos = up(p);
+    half *dO_dense = nullptr, *dO_sel = nullptr;
+    cudaMalloc(&dO_dense, Q.size() * sizeof(half));
+    cudaMalloc(&dO_sel, Q.size() * sizeof(half));
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+
+    // Split-K scratch sized as the executor's: rows x heads x splits x (2 + hd) floats.
+    void* splitk = nullptr;
+    const size_t splitk_sz = static_cast<size_t>(rows) * nh * 32 * (2 + hd) * sizeof(float);
+    cudaMalloc(&splitk, splitk_sz);
+
+    Tensor tQ = f16(dQ, {rows, 1, nh, hd}), tK = f16(dK, {num_blocks, bs, nkv, hd}),
+           tV = f16(dV, {num_blocks, bs, nkv, hd}), tOd = f16(dO_dense, {rows, 1, nh, hd});
+    paged_attention_set_splitk_scratch(splitk, splitk_sz);
+    paged_attention_decode(tQ, tK, tV, tOd, dbt, dctx, bs, scale, max_ctx, 0, 0.0f, nullptr, num_blocks, 0,
+                           nullptr, hd);
+
+    const int nb_max = max_ctx / g.ratio + 1;
+    float* d_scores = nullptr;
+    int32_t *d_sel = nullptr, *d_cnt = nullptr, *d_sbt = nullptr, *d_sctx = nullptr;
+    half *dKs = nullptr, *dVs = nullptr;
+    cudaMalloc(&d_scores, static_cast<size_t>(rows) * nb_max * sizeof(float));
+    cudaMalloc(&d_sel, static_cast<size_t>(rows) * cap * sizeof(int32_t));
+    cudaMalloc(&d_cnt, rows * sizeof(int32_t));
+    cudaMalloc(&d_sbt, static_cast<size_t>(rows) * bpr * sizeof(int32_t));
+    cudaMalloc(&d_sctx, rows * sizeof(int32_t));
+    const size_t scr = static_cast<size_t>(rows) * bpr * bs * nkv * hd;
+    cudaMalloc(&dKs, scr * sizeof(half));
+    cudaMalloc(&dVs, scr * sizeof(half));
+    qsa_init_scratch_bt(d_sbt, rows, bpr, nullptr);
+    qsa_select(dQi, dpos, dBK, d_scores, nb_max, d_sel, d_cnt, rows, g, nullptr);
+    qsa_gather_kv(dK, dV, dbt, bs, nkv, hd, d_sel, d_cnt, cap, dKs, dVs, bpr, d_sctx, rows, nullptr);
+    Tensor tKs = f16(dKs, {rows * bpr, bs, nkv, hd}), tVs = f16(dVs, {rows * bpr, bs, nkv, hd}),
+           tOs = f16(dO_sel, {rows, 1, nh, hd});
+    paged_attention_set_splitk_scratch(splitk, splitk_sz);
+    paged_attention_decode(tQ, tKs, tVs, tOs, d_sbt, d_sctx, bs, scale, std::min(cap, max_ctx), 0, 0.0f,
+                           nullptr, bpr, 0, nullptr, hd);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    // The scratch pointer is global state: leaving it set hands a foreign buffer to
+    // whatever test runs next in this binary.
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(splitk);
+
+    ASSERT_EQ(down(d_cnt, rows)[0], pos + 1);
+    auto od = down(dO_dense, Q.size());
+    auto os = down(dO_sel, Q.size());
+    size_t mism = 0;
+    for (size_t i = 0; i < od.size(); ++i)
+        mism += (__half_as_ushort(od[i]) != __half_as_ushort(os[i]));
+    EXPECT_EQ(mism, 0u) << "split-K selected path differs from dense paged in " << mism << " of " << od.size()
+                        << " halfs";
+}

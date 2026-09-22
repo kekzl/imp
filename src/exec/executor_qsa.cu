@@ -152,8 +152,8 @@ void GraphExecutor::qsa_free_() {
 
 // Selected-token attention for `rows` query rows (q_rows/o_rows: [rows, nh*hd] FP16) whose
 // token lists sit in qsa_sel_tokens_[0..rows).
-void GraphExecutor::qsa_attend_rows_(int layer, const InferenceState& state, const void* q_rows,
-                                     void* o_rows, int rows, const int* bt, float scale,
+void GraphExecutor::qsa_attend_rows_(int layer, const InferenceState& state, const void* q_rows, void* o_rows,
+                                     int rows, const int* bt, float scale, int ctx_hint,
                                      cudaStream_t stream) {
     const auto& cfg = model_->config();
     KVCache* cache = state.kv_cache;
@@ -175,7 +175,11 @@ void GraphExecutor::qsa_attend_rows_(int layer, const InferenceState& state, con
     // rows x heads x splits and drops to fewer splits or none): without it one CTA per head
     // walks the 2051 tokens serially, 31.7 vs 54.1 tok/s at 4.5k context (2026-09-20).
     paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-    paged_attention_decode(Q, Ks, Vs, O, qsa_scratch_bt_, qsa_scratch_ctx_, bs, scale, cap, 0,
+    // The selection holds at most cap tokens, and below cap it is every token in order:
+    // the dense path splits on the real context, so this must too or the same bytes
+    // reduce in a different order.
+    const int max_ctx = std::max(1, std::min(cap, ctx_hint > 0 ? ctx_hint : cap));
+    paged_attention_decode(Q, Ks, Vs, O, qsa_scratch_bt_, qsa_scratch_ctx_, bs, scale, max_ctx, 0,
                            cfg.attn_logit_softcap, stream, qsa_blocks_per_row_, 0, nullptr, hd);
 }
 
@@ -183,6 +187,14 @@ bool GraphExecutor::qsa_decode_(int layer, const InferenceState& state, const Te
                                 Tensor& ao, const int* bt, float scale, cudaStream_t stream) {
     if (!qsa_seq_ok_ || !qsa_ensure_ctx_(state, stream))
         return false;
+    // Proof-of-activity for A/B arms: below budget + ratio - 1 the selection is every
+    // token in order, so an arm that never logs this ran bit-identically to dense.
+    static bool logged_qsa_active = false;
+    if (!logged_qsa_active && state.max_context_len > model_->config().qsa_budget) {
+        logged_qsa_active = true;
+        IMP_LOG_INFO("QSA indexer ACTIVE: ctx %d > budget %d tokens", state.max_context_len,
+                     model_->config().qsa_budget);
+    }
     const auto& ly = model_->layer(layer);
     const QsaGeom g = qsa_geom_(layer);
     const QsaLayerState& L = qsa_layers_[layer];
@@ -195,7 +207,7 @@ bool GraphExecutor::qsa_decode_(int layer, const InferenceState& state, const Te
                     static_cast<half*>(L.block_keys), 0, 1, state.positions, g, stream);
     qsa_select(static_cast<const half*>(qsa_q_.data), state.positions, static_cast<const half*>(L.block_keys),
                qsa_scores_, qsa_nb_max_, qsa_sel_tokens_, qsa_sel_count_, 1, g, stream);
-    qsa_attend_rows_(layer, state, qv.data, ao.data, 1, bt, scale, stream);
+    qsa_attend_rows_(layer, state, qv.data, ao.data, 1, bt, scale, state.max_context_len, stream);
     return true;
 }
 
@@ -252,7 +264,7 @@ void GraphExecutor::qsa_prefill_(int layer, const InferenceState& state, int n, 
             qsa_debug_rows_(layer, state, static_cast<const char*>(qv.data) + r * q_row,
                             static_cast<const char*>(ao.data) + r * q_row, rows, pos0 + r, bt, scale, stream);
         qsa_attend_rows_(layer, state, static_cast<const char*>(qv.data) + r * q_row,
-                         static_cast<char*>(ao.data) + r * q_row, rows, bt, scale, stream);
+                         static_cast<char*>(ao.data) + r * q_row, rows, bt, scale, pos0 + r + rows, stream);
     }
 }
 
@@ -297,7 +309,7 @@ void GraphExecutor::qsa_debug_rows_(int layer, const InferenceState& state, cons
     paged_attention_decode(Q, Kc, Vc, O, d_bt, d_ctx, bs, scale, p0 + rows, 0, cfg.attn_logit_softcap, stream,
                            mb, 0, nullptr, hd);
     // Selected path into a private output so ao stays FA2's for the comparison.
-    qsa_attend_rows_(layer, state, q_rows, d_o2, rows, bt, scale, stream);
+    qsa_attend_rows_(layer, state, q_rows, d_o2, rows, bt, scale, p0 + rows, stream);
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     std::vector<half> h_fa2(o_elems), h_paged(o_elems), h_sel(o_elems);
     IMP_CUDA_CHECK_LOG(cudaMemcpy(h_fa2.data(), o_dense, o_elems * sizeof(half), cudaMemcpyDeviceToHost));
