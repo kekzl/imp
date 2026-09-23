@@ -10,6 +10,34 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · FA2 for gpt-oss: head_dim 64 + learned sinks
+
+[PROV: commit=2889d8b2+branch perf/fa2-hd64-sinks date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
+kernel=nsys kernel means (inventory.sh) ncu=ncu_cell.sh full e2e=inventory/ab_bench.sh imp:ab-b3625fd0 vs imp:test, 5 pairs]
+
+| | Before | After |
+|---|---|---|
+| gpt-oss-20b pp4096 attention | `fmha_sm120_kernel` (tiled WMMA, only sink-capable tier) 1571 us/call, 46.6 % | `fmha_sm120_fa2_kernel<128,64>` 288 us/call, 13.8 % |
+| gpt-oss-20b pp512 attention | cuBLAS + `causal_softmax_inplace_kernel` (78 us/call, 7.7 %) | FA2 31 us/call, 4.1 % |
+| e2e pp4096 / pp512 (medians) | 19766.31 / 16070.52 tok/s | 36412.67 (+84.2 %) / 20849.72 (+29.7 %) |
+| e2e tg128 at 512 / 4096 context | 388.11 / 333.55 tok/s | 386.47 / 331.37 (4 of 5 pairs -0.2..-1.0 % at 4096) |
+| FA2 kernel (ncu, pp4096) | - | 48.6 % of the measured FP16 f32-acc tensor peak (119.5 of 246 TFLOPS), math_pipe_throttle 3.82 cycles/issue, occupancy 16.3 % (151 regs, 1 CTA/SM) |
+
+| Accuracy vs fp64 (max rel err, RMS-normalised, sinks on) | cuBLAS | WMMA FMHA | FA2 f16-acc | FA2 f32-acc (shipped) |
+|---|---:|---:|---:|---:|
+| 48 x 48, 16/4 heads | 5.30e-03 | 5.59e-03 | 5.16e-03 | 3.49e-03 |
+| 777 x 777, 64/8 heads | - | 2.00e-02 | 1.81e-02 | 1.49e-02 |
+| chunk 2: 300 queries at q_offset 1024, full | - | 6.18e-03 | 3.64e-02 | 5.96e-03 |
+| chunk 2, SWA 128 | - | 4.21e-03 | 1.50e-02 | 3.87e-03 |
+| 300 x 300, input amplitude 8 (no QK norm) | 3.41e-02 | 2.87e-03 | - | 1.76e-03 |
+
+| Check | Result |
+|---|---|
+| f16 QK/PV accumulators (the hd=128 defaults) | refuted for hd=64: chunk-2 error 3.6e-2 vs 6e-3; hd=64 uses f32 accumulators |
+| gpt-oss PPL, 45k corpus, deterministic, chunk 1024 | cuBLAS 308.48, WMMA FMHA 297.61, FA2 267.28 (f16-acc) / 267.29 (f32-acc); default chunking FA2 256.22 vs main 312.50. No verdict: layer dump diff WMMA vs FA2 grows 0.0003 -> 0.25 relative by layer 15 while each attention block adds at most +0.0033 (MoE routing amplifies); chunk size alone moves PPL 1.3-4 % |
+| `degen_suite.py` gpt-oss | 41 PASS, 6 FAIL, identical on main (constrained JSON empty content x4, anthropic default thinking block x2: pre-existing) |
+| Mutation: sink seed without `/ s_eff` | `GptOssSinkRef.Fa2Hd64SinkMatchesReference` red |
+
 ## 2026-09-23 · RoPE prefill: angle once per (token, pair), bit-identical
 
 [PROV: commit=b3625fd0+branch perf/prefill-bitexact-rewrites date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz

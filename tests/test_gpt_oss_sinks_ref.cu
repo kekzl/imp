@@ -67,8 +67,8 @@ std::vector<double> ref_attention_sink(const std::vector<half>& Qh, const std::v
             std::vector<double> s(kv_len);
             double mx = sink_logit[h];  // sink joins the max
             for (int j = 0; j < kv_len; j++) {
-                bool masked = (causal && j > i) ||
-                              (sliding_window > 0 && (i - j) >= sliding_window);
+                const int gi = i + (kv_len - q_len);  // chunked continuation: q_offset = kv_len - q_len
+                bool masked = (causal && j > gi) || (sliding_window > 0 && (gi - j) >= sliding_window);
                 if (masked) {
                     s[j] = -INFINITY;
                     continue;
@@ -171,7 +171,7 @@ std::vector<double> run_kernel(const std::vector<half>& Qh, const std::vector<ha
 std::vector<double> run_kernel_fmha(const std::vector<half>& Qh, const std::vector<half>& Kh,
                                     const std::vector<half>& Vh, const std::vector<double>& sink_logit,
                                     int q_len, int kv_len, int n_heads, int n_kv_heads, int head_dim,
-                                    bool causal, int sliding_window) {
+                                    bool causal, int sliding_window, bool fa2 = false) {
     AttnDevBufs b;
     const size_t qn = static_cast<size_t>(q_len) * n_heads * head_dim;
     const size_t kn = static_cast<size_t>(kv_len) * n_kv_heads * head_dim;
@@ -201,9 +201,13 @@ std::vector<double> run_kernel_fmha(const std::vector<half>& Qh, const std::vect
     Tensor O(b.O, QType::F16, 4, qshape, true);
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    bool ok = fmha_sm120_prefill(Q, K, V, O, scale, causal, /*sliding_window=*/sliding_window,
-                                 /*softcap=*/0.0f, /*stream=*/nullptr, /*q_offset=*/0, sinks_ptr);
-    EXPECT_TRUE(ok) << "fmha_sm120_prefill declined the config";
+    bool ok = fa2 ? fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, /*softcap=*/0.0f,
+                                           /*stream=*/nullptr, /*q_offset=*/kv_len - q_len, /*fp16_qk=*/true,
+                                           /*d_kv_len=*/nullptr, sinks_ptr)
+                  : fmha_sm120_prefill(Q, K, V, O, scale, causal, /*sliding_window=*/sliding_window,
+                                       /*softcap=*/0.0f, /*stream=*/nullptr, /*q_offset=*/kv_len - q_len,
+                                       sinks_ptr);
+    EXPECT_TRUE(ok) << (fa2 ? "fmha_sm120_fa2_prefill" : "fmha_sm120_prefill") << " declined the config";
     cudaDeviceSynchronize();
 
     std::vector<half> Oh(qn);
@@ -327,6 +331,47 @@ TEST(GptOssSinkRef, FmhaNoSinkUnchanged) {
         double e = max_rel_err(got, ref);
         EXPECT_LT(e, kRelTol) << c.name << " FMHA no-sink rel err " << e;
         printf("[sink] %-18s FMHA no-sink rel=%.2e\n", c.name, e);
+    }
+}
+
+// FA2 at head_dim 64 (gpt-oss prefill): sinks seed the register softmax state (m = sink / scale,
+// l = 1). Adds the real gpt-oss head counts and lengths that are not tile multiples, so all three
+// Bq bands (2-CTA Bq=128, TWOSLOT Bq=64, plain Bq=64) run.
+TEST(GptOssSinkRef, Fa2Hd64SinkMatchesReference) {
+    const SinkCfg cfgs[] = {
+        kCfgs[0],
+        kCfgs[1],
+        {"gptoss_heads_full", 777, 777, 64, 8, 64, 0, true},
+        {"gptoss_heads_swa", 777, 777, 64, 8, 64, 128, true},
+        {"gptoss_band_bq64", 200, 200, 64, 8, 64, 128, true},
+        {"chunk2_full", 300, 1324, 64, 8, 64, 0, true},  // second prefill chunk: q_offset 1024
+        {"chunk2_swa", 300, 1324, 64, 8, 64, 128, true},
+    };
+    for (const auto& c : cfgs) {
+        auto Q = lcg_fill_f16(0x4001u, static_cast<size_t>(c.q_len) * c.n_heads * c.head_dim, 2.0f);
+        auto K = lcg_fill_f16(0x5002u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        auto V = lcg_fill_f16(0x6003u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        std::vector<double> sink(c.n_heads);
+        for (int h = 0; h < c.n_heads; h++)
+            sink[h] = -1.5 + 0.5 * (h % 7);
+        std::vector<double> no_sink(c.n_heads, -INFINITY);
+        for (bool with_sink : {true, false}) {
+            const auto& s = with_sink ? sink : no_sink;
+            auto ref = ref_attention_sink(Q, K, V, s, c.q_len, c.kv_len, c.n_heads, c.n_kv_heads, c.head_dim,
+                                          c.causal, c.sliding_window);
+            auto got = run_kernel_fmha(Q, K, V, with_sink ? sink : std::vector<double>{}, c.q_len, c.kv_len,
+                                       c.n_heads, c.n_kv_heads, c.head_dim, c.causal, c.sliding_window,
+                                       /*fa2=*/true);
+            auto wmma = run_kernel_fmha(Q, K, V, with_sink ? sink : std::vector<double>{}, c.q_len, c.kv_len,
+                                        c.n_heads, c.n_kv_heads, c.head_dim, c.causal, c.sliding_window);
+            double e = max_rel_err(got, ref);
+            double e_wmma = max_rel_err(wmma, ref);
+            // Long rows (777 x 64 heads): the WMMA FMHA it replaces measures 1.55e-2..2.0e-2 itself.
+            const double tol = c.kv_len <= 160 ? kRelTol : 3e-2;
+            EXPECT_LT(e, tol) << c.name << " FA2 sink=" << with_sink << " rel err " << e;
+            printf("[sink] %-18s FA2 %s rel=%.2e  (WMMA FMHA %.2e)\n", c.name,
+                   with_sink ? "with-sink" : "no-sink  ", e, e_wmma);
+        }
     }
 }
 

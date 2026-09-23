@@ -295,7 +295,9 @@ def main():
     # 1121 -> 1122: SchemaConstrainTest.XmlToolCallEnumValueConstrained (needs CUDA for apply_mask).
     # 1122 -> 1125: SSMScanTest.{RegisterScanBitIdenticalToLegacy,RegisterScanRefusesUnsupportedShape,
     # RegisterScanMatchesDoubleReference} (test-moe-gdn): register Mamba2 scan vs the legacy kernel.
-    PINNED = 1125
+    # 1125 -> 1126: GptOssSinkRef.Fa2Hd64SinkMatchesReference (test-attention): FA2 hd=64 with learned
+    # sinks vs the fp64 reference incl. chunk continuation (q_offset 1024) and SWA.
+    PINNED = 1126
 
     text = CMAKE.read_text()
     mods = module_sources(text)

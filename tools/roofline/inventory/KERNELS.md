@@ -64,6 +64,7 @@ matrix=matrix.tsv (13 models x pp512/pp4096/tg128/tg128_ctx8k), Nemotron cells r
 
 | Kernel | Cell | Before | After | Bound by (ncu) | Status |
 |---|---|---:|---:|---|---|
+| `fmha_sm120_kernel<64,64>` -> `fmha_sm120_fa2_kernel<128,64>` | gpt-oss-20b pp4096 | 1571 us/call, 46.6 % | 288 us/call, 13.8 % | tensor pipe: 48.6 % of FP16 f32-acc peak, math_pipe_throttle 3.82, occupancy 16.3 % (151 regs) | FA2 now serves hd=64 + learned sinks; not at target (85 %), [`../PERF_LOG.md`](../PERF_LOG.md) |
 | `rope_forward_kernel<half>` | gpt-oss-20b pp4096 | 669.1 us/call, 16.6 % | 21.0 us/call, 0.6 % | eliminated: FP64 angle math repeated per head (64x); 0.6 % (gpt-oss) and 0.7 % (Qwen3-14B-NVFP4) in the two cells re-measured | bit-identical, [`../PERF_LOG.md`](../PERF_LOG.md) |
 | `ssm_scan_kernel` -> `ssm_scan_reg_kernel<1,1,16,8>` | nemotron pp4096 | 4991 us/call, 77.9 % | 495.7 us/call, 25.8 % | issue + latency: 47.7 % issue slots, 3 warps/scheduler (2048 warps total), stalls wait 0.88 / long_scoreboard 0.81 / short_scoreboard 0.64 | bit-identical to legacy, [`../PERF_LOG.md`](../PERF_LOG.md); next step needs the chunked SSD form (tensor cores), which gives up bit-identity |
 

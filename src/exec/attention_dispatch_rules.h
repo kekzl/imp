@@ -15,11 +15,11 @@ inline bool fmha_serves_head_dim(int head_dim) {
     return head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256 || head_dim == 512;
 }
 
-// FP16-QK FlashAttention-2. hd=256 rides the stage-1 port and is gated by
-// `attention.fa2_hd256`; `attention.fa2_fp16qk == "never"` is the caller's
-// opt-out and is checked there, not here.
+// FP16-QK FlashAttention-2 (hd=64 with f32 accumulators, gpt-oss). hd=256 rides the stage-1 port and is gated
+// by `attention.fa2_hd256`; `attention.fa2_fp16qk == "never"` is the caller's opt-out and is checked there,
+// not here.
 inline bool fa2_serves_head_dim(int head_dim, bool fa2_hd256_enabled) {
-    return head_dim == 128 || (head_dim == 256 && fa2_hd256_enabled);
+    return head_dim == 64 || head_dim == 128 || (head_dim == 256 && fa2_hd256_enabled);
 }
 
 // True when some O(n) family takes this head_dim, i.e. when no S-matrix is

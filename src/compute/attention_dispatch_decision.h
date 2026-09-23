@@ -29,12 +29,14 @@ struct AttnKernelSupport {
 };
 
 // Reproduces attention_prefill_dispatch()'s path selection (config gates + kernel-decline
-// fall-through). has_sinks mirrors the #992 pre-gate: learned sinks route straight to the FP16
-// WMMA FMHA (only sink-capable tier); dispatch throws on decline instead of falling through.
+// fall-through). has_sinks mirrors the #992 pre-gate: learned sinks route to the sink-capable tiers
+// only (fp16-qk FA2, then the FP16 WMMA FMHA); dispatch throws on decline instead of falling through.
 inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, const AttnKernelSupport& sup,
                                                 bool has_sinks = false) {
-    // 0. Learned sinks (#992): FP16 WMMA FMHA or nothing.
+    // 0. Learned sinks (#992): fp16-qk FA2, FP16 WMMA FMHA, or nothing.
     if (has_sinks) {
+        if (rcfg.attention.fmha_fa2 == "on" && rcfg.attention.fa2_fp16qk != "never" && sup.fa2_accepts)
+            return AttnPrefillPath::FA2;
         if (rcfg.attention.fmha_sm120 != "never" && sup.fmha_sm120_accepts)
             return AttnPrefillPath::FMHA_SM120;
         return AttnPrefillPath::NONE;  // dispatcher throws (silent-wrong guard)

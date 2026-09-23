@@ -34,6 +34,7 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 // correctly as context grows (#847). fp16_qk path only.
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                            int q_offset = 0, bool fp16_qk = false, const int* d_kv_len = nullptr);
+                            int q_offset = 0, bool fp16_qk = false, const int* d_kv_len = nullptr,
+                            const half* sinks = nullptr);
 
 }  // namespace imp
