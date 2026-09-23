@@ -10,6 +10,34 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · Dense Q8_0 IMMA: scale loads and small grids
+
+[PROV: commit=fd51feb7+branch perf/q8-imma-lds date=2026-09-23 hw=RTX5090
+ncu=ncu_cell.sh q8-8b pp512 full kernel=inventory.sh BIN_DIR/BIN per binary copy e2e=binary-copy A/B, 5 pairs]
+
+| `mmq_imma_kernel<128,0,0,0>`, q8-8b pp512 (ncu, before) | |
+|---|---|
+| k/v projections (grid 8x4 = 32 CTAs on 170 SMs) | 68.0 us, tensor pipe 6.4 % |
+| q / o-down / gate-up | 87.4 / 93.9 / 247.4 us, tensor pipe 25.1 / 23.3 / 25.7 % |
+| occupancy, top stall | 16.7 % (199 regs, 1 CTA/SM), `mio_throttle` 1.15 |
+
+| Step | Change | Qwen3-8B Q8_0 pp512, 5 pairs | Verdict |
+|---|---|---|---|
+| 1 | nf-outer inner loop (199 -> 162 regs; LDS count unchanged, ptxas had CSE'd B) | 12625 -> 12982 | kept |
+| 2 | weight scales kb-major, one LDS.64 per fragment (LDS 191 -> 153) | 12933 -> 13288 | kept |
+| - | exact int->float via magic constant instead of I2FP | 13247 -> 12710 | refuted, -4.1 % |
+| - | `ldmatrix.x4` for A/B fragments (240 regs) | 13283 -> 12400 | refuted, -6.7 % |
+| 3 | dense grid whose BM=32 version fits one wave runs BM=32 (k/v: 32 -> 128 CTAs) | 13275 -> 14034 | kept |
+| - | same rule at grid < SMs (q/o too) | 14013 -> 13039 | refuted, -7 % |
+| - | rule at grid < SMs/2 | gemma4-26b Q8 kernel sum +3 % (64-68 CTA grids, 1.5-wave tail) | replaced by 4x grid <= SMs |
+
+| Result (all steps) | Before | After |
+|---|---|---|
+| Qwen3-8B Q8_0 pp512 / pp4096 (medians, all pairs same sign) | 12611.10 / 14547.22 tok/s | 14044.55 (+11.4 %) / 15211.47 (+4.6 %) |
+| tg | 295.79 / 267.55 | 296.40 / 268.30 |
+| Q8 IMMA kernel sum per `bench:pp` rep (nsys): q8-8b / gemma4-26b Q4_K / gpt-oss-20b | 34.81 / 10.33 / 5.06 ms | 31.05 / 9.66 / 3.80 ms |
+| PPL, Qwen3-8B Q8_0, 45k, deterministic | 11.1108 | 11.1108 (bit-identical: every output keeps its k order) |
+
 ## 2026-09-23 · Q6_K MoE experts read GGUF blocks in place
 
 [PROV: commit=1275b7e7+branch perf/q6k-imma-raw date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
