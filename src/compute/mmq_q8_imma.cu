@@ -158,61 +158,64 @@ __global__ void __launch_bounds__(kThreads)
         }
         __syncthreads();
 
+        // nf outer, mf inner: each B fragment and its (alpha, beta) pair is read from smem once
+        // per nf instead of once per (mf, nf); per-element accumulation order is unchanged.
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
             const int kc = kb * 32;
+            uint32_t a[kMF][4];
+            float da_lo[kMF], da_hi[kMF], rs_lo[kMF], rs_hi[kMF];
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
                 const int arow_lo = warp_m * kTileM + mf * 16 + rl;
                 const int arow_hi = arow_lo + 8;
                 const int acol = kc + cl * 4;
-                uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
-                uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
-                uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
-                uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol + 16]);
-                // activation scale + rowsum for the fragment's two rows,
-                // hoisted over all n-frags
-                const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
-                const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
-                const float rs_lo = WB ? sArs[stage][arow_lo][kb] : 0.0f;
-                const float rs_hi = WB ? sArs[stage][arow_hi][kb] : 0.0f;
+                a[mf][0] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
+                a[mf][1] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
+                a[mf][2] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
+                a[mf][3] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol + 16]);
+                da_lo[mf] = __half2float(sAsc[stage][arow_lo][kb]);
+                da_hi[mf] = __half2float(sAsc[stage][arow_hi][kb]);
+                rs_lo[mf] = WB ? sArs[stage][arow_lo][kb] : 0.0f;
+                rs_hi[mf] = WB ? sArs[stage][arow_hi][kb] : 0.0f;
+            }
 
 #pragma unroll
-                for (int nf = 0; nf < kNF; ++nf) {
-                    const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const int bk = kc + cl * 4;
-                    uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk]);
-                    uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk + 16]);
-
+            for (int nf = 0; nf < kNF; ++nf) {
+                const int bcol = warp_n * kTileN + nf * 8 + rl;
+                const int bk = kc + cl * 4;
+                const uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk]);
+                const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk + 16]);
+                // c0,c1 = rows (rl) cols (cl*2, cl*2+1); c2,c3 = rows (rl+8)
+                const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                const __half2 ab_lo = *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo][kb][0]);
+                const __half2 ab_hi = *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo + 1][kb][0]);
+                const float al = __half2float(__low2half(ab_lo));
+                const float bl = __half2float(__high2half(ab_lo));
+                const float ah = __half2float(__low2half(ab_hi));
+                const float bh = __half2float(__high2half(ab_hi));
+#pragma unroll
+                for (int mf = 0; mf < kMF; ++mf) {
                     int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
 #if __CUDA_ARCH__ >= 800
                     asm volatile(
                         "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
                         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
                         : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0), "r"(0),
-                          "r"(0), "r"(0));
+                        : "r"(a[mf][0]), "r"(a[mf][1]), "r"(a[mf][2]), "r"(a[mf][3]), "r"(b0), "r"(b1),
+                          "r"(0), "r"(0), "r"(0), "r"(0));
 #endif
-                    // c0,c1 = rows (rl) cols (cl*2, cl*2+1); c2,c3 = rows (rl+8)
-                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
-                    const __half2 ab_lo = *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo][kb][0]);
-                    const __half2 ab_hi =
-                        *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo + 1][kb][0]);
-                    const float al = __half2float(__low2half(ab_lo));
-                    const float bl = __half2float(__high2half(ab_lo));
-                    const float ah = __half2float(__low2half(ab_hi));
-                    const float bh = __half2float(__high2half(ab_hi));
                     if (WB) {
-                        acc[mf][nf][0] += da_lo * fmaf(al, static_cast<float>(c0), bl * rs_lo);
-                        acc[mf][nf][1] += da_lo * fmaf(ah, static_cast<float>(c1), bh * rs_lo);
-                        acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
-                        acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
+                        acc[mf][nf][0] += da_lo[mf] * fmaf(al, static_cast<float>(c0), bl * rs_lo[mf]);
+                        acc[mf][nf][1] += da_lo[mf] * fmaf(ah, static_cast<float>(c1), bh * rs_lo[mf]);
+                        acc[mf][nf][2] += da_hi[mf] * fmaf(al, static_cast<float>(c2), bl * rs_hi[mf]);
+                        acc[mf][nf][3] += da_hi[mf] * fmaf(ah, static_cast<float>(c3), bh * rs_hi[mf]);
                     } else {
                         // pure-alpha fast path: the unified beta form costs Q8_0 throughput
-                        acc[mf][nf][0] += (da_lo * al) * static_cast<float>(c0);
-                        acc[mf][nf][1] += (da_lo * ah) * static_cast<float>(c1);
-                        acc[mf][nf][2] += (da_hi * al) * static_cast<float>(c2);
-                        acc[mf][nf][3] += (da_hi * ah) * static_cast<float>(c3);
+                        acc[mf][nf][0] += (da_lo[mf] * al) * static_cast<float>(c0);
+                        acc[mf][nf][1] += (da_lo[mf] * ah) * static_cast<float>(c1);
+                        acc[mf][nf][2] += (da_hi[mf] * al) * static_cast<float>(c2);
+                        acc[mf][nf][3] += (da_hi[mf] * ah) * static_cast<float>(c3);
                     }
                 }
             }
