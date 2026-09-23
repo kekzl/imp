@@ -10,6 +10,30 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · Q5_K MoE experts on the grouped IMMA kernel
+
+[PROV: commit=55f0ee39+branch perf/moe-q5k-imma date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
+kernel=nsys kernel means (inventory.sh) e2e=inventory/ab_bench.sh imp:ab-c2b8f047 vs imp:test, 5 pairs]
+
+| Qwen3.6-35B-A3B UD-Q4_K_M | Before | After |
+|---|---|---|
+| Q5_K expert tensor per layer, pp512 | `dequant_q5k_kernel` of all 256 experts (791 us, 36.6 %) + FP16 grouped GEMM `Kernel2` (226 us, 11.3 %) | `mmq_imma_q5k_raw_kernel` 239 us, 17.6 % |
+| `bench:pp` wall per rep, pp512 / pp4096 | 88 / 297 ms | 60 / 239 ms |
+| e2e pp512 / pp4096 (medians) | 5957.09 / 13982.07 tok/s | 8660.70 (+45.4 %) / 17235.98 (+23.3 %) |
+| e2e tg128 at 512 / 4096 context | 304.27 / 297.21 | 304.57 / 296.58 |
+| PPL, 45k corpus, deterministic, 2 runs per arm | 6.5617, 6.5505 | 6.5437, 6.5502 |
+| `degen_suite.py --skip-deterministic` (`runtime.max_batch_size=4`) | - | 50 checks, 0 FAIL |
+
+| Check | Result |
+|---|---|
+| `MmqQ8Imma.MoeGroupedQ5K`, BM 32 and 128, N=192 partial tile, K=512 | NRMSE < 2e-2 vs the ggml Q5_K dequant formula |
+| Mutation: fifth bit taken from bit `kb` instead of `2g + kb` | red |
+| Raw-kernel dispatch | Q4_K / Q5_1 / Q5_K launch through one function-pointer path (the Q4_K and Q5_1 copies removed) |
+
+Also measured, from #2091 (cuBLASLt inside the prefill capture): gemma-3-12b Q4_K_M pp4096 ran its captured offset-0 chunk on the WMMA fallback `gemm_fp16_kernel` (47.3 % of kernel time, 709 us/call); pp4096 7343.74 -> 8057.04 tok/s (3 pairs).
+
+Found on the way, pre-existing on main: `imp-server` with Qwen3.6-35B-A3B UD-Q4_K_M fails to start at defaults (`recurrent state slot 8 could not be committed: the card cannot spare it above the allocator headroom`), card free (1774 MiB used); starts with `runtime.max_batch_size=4`.
+
 ## 2026-09-23 · Prefill graph: last chunk, FP8 KV, kept across context resets
 
 [PROV: commit=c2b8f047+branch perf/prefill-graph-buckets date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz

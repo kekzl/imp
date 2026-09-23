@@ -299,7 +299,9 @@ def main():
     # sinks vs the fp64 reference incl. chunk continuation (q_offset 1024) and SWA.
     # 1126 -> 1127: DegenerationTest.PrefillGraphReplayMatchesEager (test-e2e gpu): eager, captured
     # and replayed prefill graph give the same greedy tokens.
-    PINNED = 1127
+    # 1127 -> 1128: MmqQ8Imma.MoeGroupedQ5K (test-quant): Q5_K MoE IMMA (BM 32 and 128) vs the ggml
+    # dequant formula.
+    PINNED = 1128
 
     text = CMAKE.read_text()
     mods = module_sources(text)

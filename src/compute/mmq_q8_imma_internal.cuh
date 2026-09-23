@@ -80,6 +80,21 @@ __global__ void mmq_imma_q51_raw_kernel(const int8_t* __restrict__ X_s8,
                                         const int32_t* __restrict__ expert_offsets,
                                         size_t w_stride_blocks);
 
+template <int BM, bool BETA1>
+__global__ void mmq_imma_q5k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                                        const float* __restrict__ x_rowsum, const uint8_t* __restrict__ Wq5k,
+                                        __half* __restrict__ out, int M, int N, int K,
+                                        const int32_t* __restrict__ expert_offsets, size_t w_stride_blocks);
+
+// Q5_K raw kernel dynamic smem: A tile, qs + qh rows (32 B + 16 pad), 16-B headers, per-row A scale
+// and rowsum, (alpha, beta) pairs; kStages each.
+constexpr size_t q5k_smem_bytes(int BM) {
+    return static_cast<size_t>(kStages) *
+           (static_cast<size_t>(BM) * kRow + 2 * static_cast<size_t>(kBN) * (32 + 16) +
+            static_cast<size_t>(kBN) * 16 + static_cast<size_t>(BM) * 2 * sizeof(__half) +
+            static_cast<size_t>(BM) * 2 * sizeof(float) + static_cast<size_t>(kBN) * 2 * sizeof(__half2));
+}
+
 constexpr size_t q6k_smem_bytes(int BM) {
     return static_cast<size_t>(kStages) *
            (static_cast<size_t>(BM) * kRow + static_cast<size_t>(kBN) * kQlRow +

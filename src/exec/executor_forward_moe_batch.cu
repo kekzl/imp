@@ -491,10 +491,10 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
     char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
-    // MoE IMMA prefill (gemm.moe_imma_prefill): Q8_0/Q4_K expert tensors run
+    // MoE IMMA prefill (gemm.moe_imma_prefill): Q8_0/Q4_K/Q5_K/Q6_K/Q5_1 expert tensors run
     // the grouped INT8 IMMA kernel (fused dequant, one launch over all
     // experts) instead of materializing every expert to FP16. Other qtypes
-    // (Q6_K down_proj) and FP32-out fall through to the legacy path.
+    // and FP32-out fall through to the legacy path.
     int max_rows_per_expert = 0;
     for (int e = 0; e < ne; ++e)
         max_rows_per_expert = std::max(max_rows_per_expert, h_offsets[e + 1] - h_offsets[e]);
@@ -506,12 +506,14 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         int64_t rows = packed.shape[1];
         int64_t cols = packed.shape[2];
         if (moe_imma && out_dtype == QType::F16 &&
-            (qtype == QType::Q8_0 || qtype == QType::Q4_K || qtype == QType::Q6_K ||
-             qtype == QType::Q5_1) &&
+            (qtype == QType::Q8_0 || qtype == QType::Q4_K || qtype == QType::Q6_K || qtype == QType::Q5_1 ||
+             qtype == QType::Q5_K) &&
             max_rows_per_expert > 0) {
-            const int qkind = (qtype == QType::Q4_K)
-                                  ? 1
-                                  : (qtype == QType::Q6_K ? 2 : (qtype == QType::Q5_1 ? 3 : 0));
+            const int qkind = qtype == QType::Q4_K   ? 1
+                              : qtype == QType::Q6_K ? 2
+                              : qtype == QType::Q5_1 ? 3
+                              : qtype == QType::Q5_K ? 4
+                                                     : 0;
             if (mmq_imma_moe_gemm(packed.data, qkind,
                                   reinterpret_cast<const __half*>(a_base),
                                   reinterpret_cast<__half*>(c_base),

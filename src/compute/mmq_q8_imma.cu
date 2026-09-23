@@ -289,7 +289,10 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 // Pair shares ql bytes [g*64..+63] (quad&1 selects the 32-byte half, quad>=2 the nibble) and qh bytes
 // [g*32..+31] (shift quad*2).
 
-bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __half* x_f16,
+using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
+                               int, const int32_t*, size_t);
+
+bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
@@ -309,47 +312,40 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
     const int bm = small_m ? 32 : 128;
     dim3 grid((N + kBN - 1) / kBN, (grid_m_rows + bm - 1) / bm, ne);
 
-    if (qkind == 1) {
-        // raw-read kernel: zero extra weight VRAM
-        const uint8_t* w4 = static_cast<const uint8_t*>(w_blocks);
-        const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
-        if (small_m) {
-            mmq_imma_q4k_raw_kernel<32, false>
-                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4,
-                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else if (beta == 1.0f) {
-            mmq_imma_q4k_raw_kernel<128, true>
-                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4,
-                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            mmq_imma_q4k_raw_kernel<128, false>
-                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4,
-                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
+    if (qkind == 1 || qkind == 3 || qkind == 4) {
+        // Raw-read kernels (Q4_K, Q5_1, Q5_K): zero extra weight VRAM, one argument list.
+        const size_t w_stride_blocks = static_cast<size_t>(N) * (K / (qkind == 3 ? 32 : 256));
+        RawImmaKernel k32 = mmq_imma_q4k_raw_kernel<32, false>, k128b = mmq_imma_q4k_raw_kernel<128, true>,
+                      k128 = mmq_imma_q4k_raw_kernel<128, false>;
+        size_t smem32 = 0, smem128 = 0;
+        if (qkind == 3) {
+            k32 = mmq_imma_q51_raw_kernel<32, false>;
+            k128b = mmq_imma_q51_raw_kernel<128, true>;
+            k128 = mmq_imma_q51_raw_kernel<128, false>;
+        } else if (qkind == 4) {
+            k32 = mmq_imma_q5k_raw_kernel<32, false>;
+            k128b = mmq_imma_q5k_raw_kernel<128, true>;
+            k128 = mmq_imma_q5k_raw_kernel<128, false>;
+            smem32 = q5k_smem_bytes(32);
+            smem128 = q5k_smem_bytes(128);
+            static bool smem_set5 = false;
+            if (!smem_set5) {
+                smem_set5 = true;
+                cudaFuncSetAttribute(k32, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     static_cast<int>(smem32));
+                cudaFuncSetAttribute(k128b, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     static_cast<int>(smem128));
+                cudaFuncSetAttribute(k128, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     static_cast<int>(smem128));
+            }
         }
-        return true;
-    }
-    if (qkind == 3) {
-        const uint8_t* w5 = static_cast<const uint8_t*>(w_blocks);
-        const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 32);
-        if (small_m) {
-            mmq_imma_q51_raw_kernel<32, false>
-                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w5,
-                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else if (beta == 1.0f) {
-            mmq_imma_q51_raw_kernel<128, true>
-                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w5,
-                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            mmq_imma_q51_raw_kernel<128, false>
-                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w5,
-                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
+        RawImmaKernel k = small_m ? k32 : (beta == 1.0f ? k128b : k128);
+        k<<<grid, kThreads, small_m ? smem32 : smem128, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                                  g_imma_act.xrowsum,
+                                                                  static_cast<const uint8_t*>(w_blocks),
+                                                                  out_f16, M, N, K, d_offsets,
+                                                                  w_stride_blocks);
+        IMP_CUDA_CHECK_LAUNCH();
         return true;
     }
     if (qkind == 2) {
@@ -474,7 +470,8 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
                        int K, cudaStream_t stream) {
     if (N % 2 != 0) return false;
-    if (K % ((qkind == 1 || qkind == 2) ? 256 : kBK) != 0) return false;
+    if (K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : kBK) != 0)
+        return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
                                 d_offsets, h_max_rows, expanded, ne);
@@ -482,8 +479,11 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
     if (ok && !logged) {
         logged = true;
         IMP_LOG_INFO("MoE IMMA prefill ACTIVE (%s, ne=%d N=%d K=%d max_rows=%d)",
-                     qkind == 1 ? "Q4_K"
-                                : (qkind == 2 ? "Q6_K" : (qkind == 3 ? "Q5_1" : "Q8_0")),
+                     qkind == 1   ? "Q4_K"
+                     : qkind == 2 ? "Q6_K"
+                     : qkind == 3 ? "Q5_1"
+                     : qkind == 4 ? "Q5_K"
+                                  : "Q8_0",
                      ne, N, K, h_max_rows);
     }
     return ok;
