@@ -26,52 +26,40 @@
 
 namespace imp {
 
-// Stable model identity hash: FNV-1a over config scalars + weight bytes
-// (LM head, embeddings, layer-0/mid Q proj) - distinguishes same-shape fine-tunes.
-// Gates the persisted prefix cache only (cold path, twice per process).
-uint64_t Engine::model_fingerprint_() const {
-    auto fnv = [](uint64_t h, const void* p, size_t n) {
-        const auto* b = static_cast<const uint8_t*>(p);
-        for (size_t i = 0; i < n; ++i) {
-            h ^= b[i];
-            h *= 0x100000001b3ULL;
-        }
-        return h;
-    };
-    uint64_t h = 0xcbf29ce484222325ULL;
-    const auto& c = model_->config();
-    const uint32_t ids[] = {
-        static_cast<uint32_t>(std::to_underlying(c.arch)), static_cast<uint32_t>(c.n_layers),
-        static_cast<uint32_t>(c.n_heads), static_cast<uint32_t>(c.n_kv_heads),
-        static_cast<uint32_t>(c.d_model), static_cast<uint32_t>(c.d_ff),
-        static_cast<uint32_t>(c.vocab_size), static_cast<uint32_t>(c.head_dim),
-        static_cast<uint32_t>(c.n_experts), static_cast<uint32_t>(c.n_experts_active),
-        static_cast<uint32_t>(c.is_nvfp4_prequant), static_cast<uint32_t>(c.is_mxfp4_prequant)};
-    h = fnv(h, ids, sizeof(ids));
-    h = fnv(h, &c.rope_theta, sizeof(c.rope_theta));
+namespace {
 
-    auto sample = [&](const Tensor& t) {
-        if (!t.data)
-            return;
-        size_t n = std::min<size_t>(t.nbytes(), 512);
-        if (n == 0)
-            return;
-        std::vector<uint8_t> buf(n);
-        if (t.on_device) {
-            if (cudaMemcpy(buf.data(), t.data, n, cudaMemcpyDeviceToHost) != cudaSuccess)
-                return;
-        } else {
-            std::memcpy(buf.data(), t.data, n);
-        }
-        h = fnv(h, buf.data(), n);
-    };
-    sample(model_->output_proj());
-    sample(model_->token_embedding());
-    sample(model_->layer(0).wq);
-    if (c.n_layers > 1)
-        sample(model_->layer(c.n_layers / 2).wq);
-    return h;
+// The planes are optional (weights past the cap prefill via dequant), one max_seq_len sequence is
+// not: the plan capped them against its projection, the measured residual is lower by the allocator
+// headroom and cache estimates (856 of 1333 blocks, Qwen3-4B Q8_0 at --vram-budget 9000).
+// Returns the plane bytes still outstanding after giving back what `need` requires.
+size_t yield_imma_planes_to_one_sequence(VRAMBudget& budget, size_t used, size_t free_now, size_t need,
+                                         int max_seq_len) {
+    size_t outstanding = budget.imma_plane_bytes > used ? budget.imma_plane_bytes - used : 0;
+    const size_t have = free_now > outstanding ? free_now - outstanding : 0;
+    if (outstanding == 0 || have >= need)
+        return outstanding;
+    const size_t give = std::min(outstanding, need - have);
+    budget.imma_plane_bytes -= give;
+    mmq_q8_imma_set_plane_budget(budget.imma_plane_bytes);
+    IMP_LOG_INFO(
+        "KV cache: IMMA prefill planes cut by %.0f MiB to %.0f MiB so one max_seq_len=%d "
+        "sequence fits the measured residual",
+        give / (1024.0 * 1024.0), budget.imma_plane_bytes / (1024.0 * 1024.0), max_seq_len);
+    return outstanding - give;
 }
+
+// AUTO max_seq_len = min(resolver bound, what the built pool holds; a growable pool its ceiling).
+// The resolver runs before weights and caches exist, so its value is only an upper bound.
+void clamp_auto_max_seq_len_to_pool(int& max_seq_len, int pool_blocks, int kv_bs) {
+    const int pool_tokens = pool_blocks * kv_bs;
+    if (pool_tokens <= 0 || pool_tokens >= max_seq_len)
+        return;
+    IMP_LOG_INFO("max_seq_len: auto %d -> %d (KV pool %d blocks x %d)", max_seq_len, pool_tokens, pool_blocks,
+                 kv_bs);
+    max_seq_len = pool_tokens;
+}
+
+}  // namespace
 
 bool Engine::init_kv_cache() {
     const auto& mcfg = model_->config();
@@ -414,9 +402,11 @@ bool Engine::init_kv_cache() {
         // weight's first prefill, during warmup). Charging them here keeps the
         // residual pass from handing the pool bytes the next forward claims (#1899).
         const size_t imma_used = mmq_q8_imma_plane_bytes_used();
-        const size_t imma_outstanding = vram_budget.imma_plane_bytes > imma_used
-                                            ? vram_budget.imma_plane_bytes - imma_used
-                                            : 0;
+        const size_t imma_outstanding = yield_imma_planes_to_one_sequence(
+            vram_budget, imma_used, free_now,
+            static_cast<size_t>(kv_blocks_per_sequence(config_.max_seq_len, kv_bs)) * per_block_total_bytes +
+                vram_allocator_headroom(total_now),
+            config_.max_seq_len);
         if (imma_outstanding > 0) {
             IMP_LOG_INFO(
                 "KV cache: holding %.0f MiB of the post-cache residual for the IMMA "
@@ -457,7 +447,7 @@ bool Engine::init_kv_cache() {
         // every full-length request is cancelled at admission (#1251).
         // Only warn for an operator-set max_seq_len: an AUTO value is expected to
         // be undercut by this clamp (init_compute_max_seq_len_ sizes from raw
-        // free VRAM on purpose), so warning there would bury real faults.
+        // free VRAM on purpose, then clamped to the built pool), so warning there would bury real faults.
         if (vram_budget_bytes() == 0 && max_seq_len_explicit_ &&
             kv_pool_verdict(sizing, config_.max_seq_len, kv_bs) ==
                 KvPoolVerdict::ShortOfOneSequence) {
@@ -485,7 +475,8 @@ bool Engine::init_kv_cache() {
     // Only when a budget is installed - without one this stays the pre-existing best-effort path.
     if (vram_budget_bytes() > 0 && per_block_total_bytes > 0) {
         const int blocks_per_seq = kv_blocks_per_sequence(config_.max_seq_len, kv_bs);
-        if (max_blocks < blocks_per_seq) {
+        // Operator-set max_seq_len only: an AUTO one is clamped to the built pool below.
+        if (max_seq_len_explicit_ && max_blocks < blocks_per_seq) {
             const double need_mib =
                 double(blocks_per_seq) * double(per_block_total_bytes) / (1024.0 * 1024.0);
             const double have_mib =
@@ -630,6 +621,9 @@ bool Engine::init_kv_cache() {
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
+    if (!max_seq_len_explicit_)
+        clamp_auto_max_seq_len_to_pool(config_.max_seq_len, std::max(max_blocks, kv_ceiling_effective),
+                                       kv_bs);
     // A successful allocation proves nothing on WSL2/WDDM: the pool can sit in
     // host memory at a sixth of the bandwidth with /health ok and nothing logged
     // (#1103, AUDIT_arch_2026 B-6). One cheap copy inside the fresh pool, then a

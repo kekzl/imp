@@ -919,7 +919,7 @@ void Engine::init_compute_max_seq_len_() {
         // (CUTLASS SfAtom slab + nvfp4_moe, reserved right after upload) will
         // consume most of the card; subtract them so the auto context
         // reflects the KV room that actually remains. GGUF models keep the
-        // raw-free overshoot (absorbed by the downstream KV clamp).
+        // raw-free overshoot: init_kv_cache clamps an auto value to the built pool.
         size_t free_for_kv = free_vram;
         if (mcfg.is_nvfp4_prequant) {
             const int host_layers =

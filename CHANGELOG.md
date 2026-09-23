@@ -12,6 +12,9 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Fixed
+- `--vram-budget` with an auto `max_seq_len` refused to start: the resolver sized GGUF context from raw budget VRAM (Qwen3-4B Q8_0 at 9000 MiB: 76800 tokens against a 1333-block pool). An auto value is now clamped to the built pool (21328), and an operator-set value that fits the plan no longer loses to outstanding IMMA prefill planes (856 -> 1333 blocks, planes cut 536 MiB).
+- Memory-plan failure levers were larger than their line items ("max_seq_len 76800 -> 38400 frees 43200 MiB" against a 3807 MiB budget); each lever now frees at most what the report charges, zero levers are dropped.
+- `src/compute/CLAUDE.md` test command pointed at a non-existent `./build/test-attention`.
 - Release image: the Dockerfile compiled at `-j$(nproc)` and OOM-killed the 16 GB runner, so v0.43.0 and v0.44.0 published no image (`ghcr.io/kekzl/imp:latest` stayed 0.42.1). It now takes `scripts/build_jobs.sh` (2 jobs at 16 GB); `workflow_dispatch` with `tag=vX.Y.Z` rebuilds a release.
 - `imp-cli --help` named `--max-tokens` default 256; the default is 8192 (16384 with `--interactive`).
 
