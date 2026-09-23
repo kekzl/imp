@@ -396,8 +396,21 @@ void run_mmvq_gemv(const char* name, QType qt, int N, int K,
     cudaFree(dy);
     cudaFree(scratch);
 }
+
+// Q5_1 dp4a has only the MoE decode launcher: one expert (index 0), top_k 1.
+void q5_1_moe_single_expert(const void* W, const block_q8_1* q8, const float* d8, half* y, int N, int K,
+                            cudaStream_t stream) {
+    int32_t* d_idx = nullptr;
+    cudaMalloc(&d_idx, sizeof(int32_t));
+    cudaMemset(d_idx, 0, sizeof(int32_t));
+    gemv_q5_1_q8_1_moe_decode(W, d_idx, q8, d8, y, N, K, static_cast<size_t>(N) * (K / 32) * 24, 0, 0, 1,
+                              stream);
+    cudaDeviceSynchronize();
+    cudaFree(d_idx);
+}
 }  // namespace
 
+TEST(GgufRef, Q5_1_GemvDp4aMoe) { run_dp4a_gemv("Q5_1", QType::Q5_1, 256, 1024, q5_1_moe_single_expert); }
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
 // Q4_0 dp4a-GEMV vs fp64 reference surfaced AUDIT.md F1: Q4_0_Traits::dp4a_block read
 // nibbles INTERLEAVED (2k=low,2k+1=high) while standard ggml Q4_0 is SPLIT (e=low,e+16=high),

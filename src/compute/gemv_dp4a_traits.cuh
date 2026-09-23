@@ -484,9 +484,9 @@ struct DequantTraits<DPQTag::Q3_K> {
     }
 };
 
-// Convenience aliases
-// Q5_1: 24 bytes per 32 elements: [2B delta_fp16] [2B min_fp16] [16B low_nibbles] [4B high_bits]
-// Dequant: val = q5 * delta + min, where q5 = low4 | (hi1 << 4), range 0..31
+// Q5_1: 24 bytes per 32 elements: [2B delta_fp16] [2B min_fp16] [4B high_bits] [16B low_nibbles]; element e <
+// 16 = low nibble of qs[e], e + 16 = high nibble. Dequant: val = q5 * delta + min, q5 = low4 | (hi1 << 4),
+// 0..31 Dequant: val = q5 * delta + min, where q5 = low4 | (hi1 << 4), range 0..31
 template <>
 struct DequantTraits<DPQTag::Q5_1> {
     static constexpr int kBlockBytes = 24;
@@ -504,11 +504,13 @@ struct DequantTraits<DPQTag::Q5_1> {
         memcpy(&m_w_h, bp + 2, sizeof(half));
         float d_w = __half2float(d_w_h);
         float m_w = __half2float(m_w_h);
-        const uint8_t* qh = bp + 4;  // 4 bytes high bits (comes FIRST in Q5_1)
-        const uint8_t* qs = bp + 8;  // 16 bytes low nibbles
-
-        uint32_t hbits;
-        memcpy(&hbits, qh, sizeof(uint32_t));
+        // 24-B blocks keep qh (offset 4) and qs (offset 8) 4-aligned: word loads, not byte loads.
+        const uint32_t* bw = reinterpret_cast<const uint32_t*>(bp);
+        const uint32_t hbits = __ldg(bw + 1);  // 4 bytes high bits (comes FIRST in Q5_1)
+        uint32_t qsw[4];                       // 16 bytes low nibbles
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+            qsw[i] = __ldg(bw + 2 + i);
 
         int32_t sumi = 0;
         int32_t q8_sum_int = 0;
@@ -521,8 +523,12 @@ struct DequantTraits<DPQTag::Q5_1> {
 #pragma unroll
             for (int j = 0; j < 4; j++) {
                 int idx = base + j;
-                uint8_t byte = qs[idx / 2];
-                int lo = (idx & 1) ? (byte >> 4) & 0xF : byte & 0xF;
+                // ggml Q5_1 is SPLIT like Q4_0 (AUDIT F1): element e < 16 = low nibble of qs[e],
+                // element e + 16 = high nibble of qs[e]. The interleaved read (qs[e/2], e&1) paired
+                // weights with the wrong activations (GgufRef.Q5_1_GemvDp4aMoe rms 0.297).
+                const int bi = idx & 15;
+                const uint8_t byte = static_cast<uint8_t>(qsw[bi / 4] >> (8 * (bi % 4)));
+                int lo = (idx >= 16) ? (byte >> 4) & 0xF : byte & 0xF;
                 int hi = (hbits >> idx) & 1;
                 int q5 = lo | (hi << 4);  // 0..31
                 packed |= (q5 & 0xFF) << (j * 8);

@@ -10,6 +10,21 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · Decode GEMV levers after #2100: one fix, four refutations
+
+[PROV: commit=c5785b31+branch fix/q5_1-dp4a-split date=2026-09-23 hw=RTX5090
+ncu=ncu_cell.sh full kernel=inventory.sh BIN_DIR/BIN tg128, 2 runs per arm unless noted]
+
+| Lever | Cell | Before | After | Verdict |
+|---|---|---|---|---|
+| Q5_1 dp4a: split nibble read (correctness, see CHANGELOG) + word loads | gemma-4-26B Q4_K_M | `moe_decode<Q5_1>` 10.14 / 10.26 us | 9.71 / 9.82 us; kernel sum -1.0 ms/rep | shipped |
+| FP8 GEMV (`gemv_fp8_e4m3`, 23.7 %): 4 row loads in flight per lane (38 -> 64 regs) | Qwen3.6-35B GGUF | 8.5 us/call, tg 291.45 | 9.1 us, 279.12 | refuted |
+| MoE dp4a: L2 prefetch of the weight rows before the activation staging barrier | Qwen3-30B-A3B Q4_K_M | `moe_gate_up` 11.0 us, tg 318.31 | 11.9 us, 307.61 | refuted |
+| MoE dp4a gate+up: NR = 2 / 4 rows per warp (48 -> 61 regs at NR 2) | Qwen3-30B-A3B Q4_K_M | 11.22 / 11.31 us, kernel sum 369.1 / 369.4 ms | NR 2: 11.01 / 11.07 us, sum 369.7 / 370.4; NR 4: 11.77 / 11.81 us | refuted |
+| Q8_0 dp4a: aligned words + funnel shift instead of byte loads (LM head, 258 -> 23 byte loads) | gpt-oss-20b / gemma-4-26B | `fp32_kernel<Q8_0>` 430.3 / 533.1 us | 452.1 / 553.4 us | refuted: neighbouring lanes' byte loads hit the same sectors |
+
+ncu before (unlocked clocks): `gemv_fp8_e4m3` DRAM active 59-69 %, long_scoreboard 24.8, occupancy 46 %; `moe_gate_up<Q4_K>` 13.4 us, DRAM active 60.3 %, long_scoreboard 39.3, occupancy 70 %; `moe_decode<Q6_K>` DRAM active 45.3 %. These 6-12 us calls pay launch ramp and tail; more bytes in flight per warp did not reach the DRAM floor.
+
 ## 2026-09-23 · dp4a decode GEMVs: word loads for Q6_K and the Q8_1 activations
 
 [PROV: commit=b71c150e+branch perf/q6k-gemv-loads date=2026-09-23 hw=RTX5090

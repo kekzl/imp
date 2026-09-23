@@ -305,7 +305,9 @@ def main():
     # blocks read in place vs the ggml formula (dense BM 128, MoE BM 32 and 128, odd superblock count).
     # 1130 -> 1131: GptOssSinkRef.PagedDecodeHd64SinkMatchesReference (test-attention): F16 multitok
     # decode at hd=64 with learned sinks vs fp64, split-K and single-split.
-    PINNED = 1131
+    # 1131 -> 1132: GgufRef.Q5_1_GemvDp4aMoe (test-quant): Q5_1 dp4a MoE decode vs the fp64 ggml
+    # reference; red on main (interleaved nibble read, rms 0.297).
+    PINNED = 1132
 
     text = CMAKE.read_text()
     mods = module_sources(text)
