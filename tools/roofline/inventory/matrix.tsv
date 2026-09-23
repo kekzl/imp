@@ -1,0 +1,15 @@
+# key	model path under ~/models	extra imp-cli args
+# heroes (scripts/bench_competitive.sh) + roofline cells (tools/roofline/config.json) + current NVFP4 targets
+q8-8b	Qwen3-8B-Q8_0.gguf
+q6k-14b	Qwen3-14B-Q6_K.gguf
+q4k-q36-35b	qwen3.6-35B-A3B-gguf/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+q4k-gemma4-26b	gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
+mxfp4-gptoss-20b	gpt-oss-20b-mxfp4.gguf
+q4k-q3-30b	Qwen3-30B-A3B-Q4_K_M/Qwen3-30B-A3B-Q4_K_M.gguf
+q4k-gemma3-12b	gemma-3-12b-it-Q4_K_M.gguf
+nvfp4-14b	Qwen3-14B-NVFP4
+nvfp4-q3-30b	Qwen3-30B-A3B-NVFP4-Modelopt
+nvfp4-q36-35b	Qwen3.6-35B-A3B-NVFP4
+nvfp4-q38-27b	Qwen3.8-27B-NVFP4-vllm
+nvfp4-nemotron-30b	Nemotron-3-Nano-30B-A3B-NVFP4
+nvfp4-gemma4-26b	Gemma-4-26B-A4B-it-NVFP4

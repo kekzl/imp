@@ -527,7 +527,7 @@ if(IMP_BUILD_TOOLS)
     tools/imp-cli/mode_oneshot.cpp
     tools/imp-cli/mode_perplexity.cpp
     )
-    target_link_libraries(imp-cli PRIVATE imp imp_warnings)
+    target_link_libraries(imp-cli PRIVATE imp imp_warnings CUDA::nvtx3)
     if(IMP_ALLOC_INTERPOSE)
         target_link_options(imp-cli PRIVATE ${IMP_WRAP_LINK_FLAGS})
     endif()

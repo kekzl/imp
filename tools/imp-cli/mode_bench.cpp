@@ -4,11 +4,23 @@
 #include "json_report.h"
 #include "memory/vram_query.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 #include <chrono>
 #include <cstdio>
 #include <vector>
 
 namespace imp_cli {
+
+namespace {
+// NVTX phase ranges for nsys: tools/roofline/inventory splits kernels by the launching call.
+struct NvtxRange {
+    explicit NvtxRange(const char* name) { nvtxRangePushA(name); }
+    ~NvtxRange() { nvtxRangePop(); }
+    NvtxRange(const NvtxRange&) = delete;
+    NvtxRange& operator=(const NvtxRange&) = delete;
+};
+}  // namespace
 
 int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::string& resolved_model) {
     ImpError err = IMP_SUCCESS;
@@ -32,11 +44,14 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
 
     // Warmup: 1 full prefill+decode cycle (discarded)
     fprintf(stderr, "Warmup...\n");
-    imp_context_reset(ctx);
-    imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
-    for (int s = 0; s < tg_tokens; s++) {
-        int32_t tok = 0;
-        imp_decode_step(ctx, &bench_params, &tok);
+    {
+        NvtxRange r("bench:warmup");
+        imp_context_reset(ctx);
+        imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
+        for (int s = 0; s < tg_tokens; s++) {
+            int32_t tok = 0;
+            imp_decode_step(ctx, &bench_params, &tok);
+        }
     }
 
     // PP benchmark
@@ -44,7 +59,10 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     for (int rep = 0; rep < args.bench_reps; rep++) {
         imp_context_reset(ctx);
         auto t0 = std::chrono::high_resolution_clock::now();
-        err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
+        {
+            NvtxRange r("bench:pp");
+            err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
+        }
         auto t1 = std::chrono::high_resolution_clock::now();
         if (err != IMP_SUCCESS) {
             fprintf(stderr, "Prefill error on rep %d: %s\n", rep, imp_error_string(err));
@@ -63,11 +81,14 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
             break;
         }
         auto t0 = std::chrono::high_resolution_clock::now();
-        for (int s = 0; s < tg_tokens; s++) {
-            int32_t tok = 0;
-            err = imp_decode_step(ctx, &bench_params, &tok);
-            if (err != IMP_SUCCESS)
-                break;
+        {
+            NvtxRange r("bench:tg");
+            for (int s = 0; s < tg_tokens; s++) {
+                int32_t tok = 0;
+                err = imp_decode_step(ctx, &bench_params, &tok);
+                if (err != IMP_SUCCESS)
+                    break;
+            }
         }
         auto t1 = std::chrono::high_resolution_clock::now();
         if (err != IMP_SUCCESS) {
