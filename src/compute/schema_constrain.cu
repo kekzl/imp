@@ -482,17 +482,17 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     // only if the "\n</parameter>" delimiter completes inside them (run the int-only delimiter
     // automaton first; only completing tokens pay the full simulation).
     const bool xml_raw = (phase == SchemaPhase::XML_RAW_VALUE);
-    const bool xml_raw_open = xml_raw && top().xml_value_open;
+    // An enum-typed value is not free text: it takes the per-token simulation below.
+    const bool xml_raw_open = xml_raw && top().xml_value_open && !top().xml_enum;
     // The envelope phases and the XML body's VALUE_START are the same
     // full-vocab-delegation regime (category 0xFFFF) with a 1-2 char legal
     // set — include them in the first-byte prefilter.
-    const bool xml_tag_phase =
-        phase == SchemaPhase::XML_FN_OPEN || phase == SchemaPhase::XML_FN_NAME ||
-        phase == SchemaPhase::XML_PARAMS || phase == SchemaPhase::XML_PARAM_KEY ||
-        (xml_raw && !top().xml_value_open) ||
-        phase == SchemaPhase::ENVELOPE_OPEN || phase == SchemaPhase::ENVELOPE_CLOSE ||
-        (phase == SchemaPhase::VALUE_START && top().node &&
-         top().node->type == SchemaType::XML_TOOL_CALL);
+    const bool xml_tag_phase = phase == SchemaPhase::XML_FN_OPEN || phase == SchemaPhase::XML_FN_NAME ||
+                               phase == SchemaPhase::XML_PARAMS || phase == SchemaPhase::XML_PARAM_KEY ||
+                               (xml_raw && (!top().xml_value_open || top().xml_enum)) ||
+                               phase == SchemaPhase::ENVELOPE_OPEN || phase == SchemaPhase::ENVELOPE_CLOSE ||
+                               (phase == SchemaPhase::VALUE_START && top().node &&
+                                top().node->type == SchemaType::XML_TOOL_CALL);
     // FREE_VALUE delegates the whole vocabulary to the simulation exactly as the
     // XML phases do, so it needs the same first-byte prefilter or it pays ~150k
     // stack copies per decode step.
@@ -1529,6 +1529,14 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 }
                 if (!complete)
                     return false;
+                f.xml_enum = nullptr;
+                for (auto& [pname, pnode] : tool->properties) {
+                    const SchemaNode* pn = pname == f.key_buffer ? resolve_schema_ref(f.node, pnode.get())
+                                                                 : nullptr;
+                    if (pn && pn->type == SchemaType::ENUM && !pn->enum_values.empty())
+                        f.xml_enum = pn;
+                }
+                f.enum_buffer.clear();
                 f.emitted_keys.insert(f.key_buffer);
                 f.key_buffer.clear();
                 f.phase = SchemaPhase::XML_RAW_VALUE;
@@ -1555,6 +1563,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 f.xml_delim_match = 1;
                 return true;
             }
+            if (f.xml_enum)
+                return xml_enum_step(f, c);
             // Any char is legal value text; only the delimiter tracker moves.
             f.xml_delim_match = xml_delim_step(kXmlParamDelim, f.xml_delim_match, c);
             if (f.xml_delim_match == static_cast<int>(kXmlParamDelim.size())) {
@@ -1570,6 +1580,32 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             return false;
     }
     return false;
+}
+
+// Enum value: a member, then "\n</parameter>". xml_delim_match 1 with an empty buffer is the
+// value opener; with a member in the buffer it is a typed '\n' starting the delimiter.
+bool SchemaConstrainer::xml_enum_step(SchemaFrame& f, char c) const {
+    const auto& vals = f.xml_enum->enum_values;
+    const bool member = std::find(vals.begin(), vals.end(), f.enum_buffer) != vals.end();
+    const int m = f.xml_delim_match;
+    if (member && m > 0 && c == kXmlParamDelim[m]) {
+        if (++f.xml_delim_match == static_cast<int>(kXmlParamDelim.size())) {
+            f.phase = SchemaPhase::XML_PARAMS;
+            f.key_buffer.clear();
+            f.xml_delim_match = 0;
+            f.xml_enum = nullptr;
+        }
+        return true;
+    }
+    if (member && c == '\n' && m == 0) {
+        f.xml_delim_match = 1;
+        return true;
+    }
+    if (m > 1 || (m == 1 && !f.enum_buffer.empty()) || !is_valid_enum_prefix(vals, f.enum_buffer + c))
+        return false;
+    f.enum_buffer += c;
+    f.xml_delim_match = 0;
+    return true;
 }
 
 bool SchemaConstrainer::token_legal(const std::string& text) const {
