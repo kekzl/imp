@@ -2,7 +2,7 @@
 // A lane holds HEAD_DIM/32 contiguous elements, loads TOK rows straight from global before any
 // reduction; the K row is converted once and dotted against HPC Q heads. Grid: n_kv_heads x
 // (n_q_per_kv/HPC) CTAs/sequence. Softmax state is unnormalized (m,l,o), normalized once at the
-// end so the cross-warp merge is unchanged. HD=128/256; sliding window + StreamingLLM sentinel
+// end so the cross-warp merge is unchanged. HD=64/128/256; sliding window + StreamingLLM sentinel
 // as in the FP8 kernel; sink-token geometry stays on the cooperative kernel.
 // Split-K instance (batch x heads below the CTA target): walks its block share and writes one
 // (m,l,o) partial/head for the shared reduce kernel.
@@ -21,6 +21,10 @@ namespace {
 
 template <int ELEMS>
 struct LaneVec;
+template <>
+struct LaneVec<2> {
+    using type = uint32_t;
+};
 template <>
 struct LaneVec<4> {
     using type = uint2;
@@ -183,7 +187,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
     int n_heads, int n_kv_heads, int n_q_per_kv, int block_size, float scale, int max_num_blocks,
     int sliding_window, float softcap, const half* __restrict__ attn_sinks) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    static_assert(ELEMS == 4 || ELEMS == 8, "HD=128 (uint2 per lane) or HD=256 (uint4 per lane)");
+    static_assert(ELEMS == 2 || ELEMS == 4 || ELEMS == 8, "HD=64 / 128 / 256 (u32 / uint2 / uint4 per lane)");
 
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
@@ -251,7 +255,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
     const int* __restrict__ context_lens, int n_heads, int n_kv_heads, int n_q_per_kv, int block_size,
     float scale, int max_num_blocks, int num_splits, int sliding_window, float softcap) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    static_assert(ELEMS == 4 || ELEMS == 8, "HD=128 (uint2 per lane) or HD=256 (uint4 per lane)");
+    static_assert(ELEMS == 2 || ELEMS == 4 || ELEMS == 8, "HD=64 / 128 / 256 (u32 / uint2 / uint4 per lane)");
 
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
@@ -357,7 +361,7 @@ void launch_f16_splitk_multitok(const half* Q, const half* K_cache, const half* 
 }  // namespace
 
 int paged_attention_f16_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested) {
-    if (head_dim != 128 && head_dim != 256)
+    if (head_dim != 64 && head_dim != 128 && head_dim != 256)
         return 0;
     if (n_q_per_kv < 1 || n_q_per_kv > 8)
         return 0;
@@ -388,7 +392,14 @@ bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cac
     launch_f16_multitok<HD, HPCV>(Q, K_cache, V_cache, O, block_tables, context_lens, batch_size, n_heads,   \
                                   n_kv_heads, n_q_per_kv, block_size, scale, max_num_blocks, sliding_window, \
                                   softcap, attn_sinks, stream)
-    if (head_dim == 128) {
+    if (head_dim == 64) {
+        if (hpc == 4)
+            LAUNCH_F16_MT(64, 4);
+        else if (hpc == 2)
+            LAUNCH_F16_MT(64, 2);
+        else
+            LAUNCH_F16_MT(64, 1);
+    } else if (head_dim == 128) {
         if (hpc == 4)
             LAUNCH_F16_MT(128, 4);
         else if (hpc == 2)
@@ -421,7 +432,14 @@ bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cac
     launch_f16_splitk_multitok<HD, HPCV>(Q, K_cache, V_cache, partial, block_tables, context_lens,       \
                                          batch_size, n_heads, n_kv_heads, n_q_per_kv, block_size, scale, \
                                          max_num_blocks, num_splits, sliding_window, softcap, stream)
-    if (head_dim == 128) {
+    if (head_dim == 64) {
+        if (hpc == 4)
+            LAUNCH_F16_SK_MT(64, 4);
+        else if (hpc == 2)
+            LAUNCH_F16_SK_MT(64, 2);
+        else
+            LAUNCH_F16_SK_MT(64, 1);
+    } else if (head_dim == 128) {
         if (hpc == 4)
             LAUNCH_F16_SK_MT(128, 4);
         else if (hpc == 2)

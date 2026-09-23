@@ -10,6 +10,23 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · gpt-oss decode attention on the F16 multitok kernel (hd=64)
+
+[PROV: commit=origin/main+branch perf/q4k-imma-alu date=2026-09-23 hw=RTX5090
+ncu=ncu_cell.sh mxfp4-gptoss-20b tg128_ctx8k full kernel=inventory.sh BIN_DIR/BIN e2e=binary-copy A/B]
+
+| gpt-oss-20b MXFP4 | Before | After |
+|---|---|---|
+| decode attention kernel, tg128 at 8k | `paged_attention_splitk_pipeline_kernel<64>`: one CTA per Q head (grid 1x64x6), 40 us, 29.1 %; ncu: issue 18 %, stalls barrier 12.9 / long_scoreboard 8.5 | `paged_attention_splitk_f16_multitok_kernel`: 4 Q heads per CTA share each K/V row, 17 us, 14.7 % |
+| tg128 at 8k (3 pairs, all same sign) | 295.17 tok/s | 349.26 (+18.3 %) |
+| tg128 at 512 (5 pairs, all same sign) | 388.91 | 396.04 (+1.8 %) |
+| `degen_suite.py` | - | 47 checks, 0 FAIL |
+
+Cause: `paged_attention_f16_multitok_heads_per_cta` served hd 128 / 256 only; hd=64 adds a `uint32` lane vector.
+Test: `GptOssSinkRef.PagedDecodeHd64SinkMatchesReference` (learned sinks, split-K and single-split) max rel 4.27e-3; dropping the sinks in the multitok launch turns it red (8.7e-1).
+
+Q4_K MoE IMMA (`mmq_imma_q4k_raw_kernel<128,0>`, q4k-q3-30b pp512, ncu: tensor pipe ~25 %, issue 50.9 %, stalls selected 1.00 / not_selected 0.56): the Q8_0 loop and scale-layout levers (229 -> 192 regs, LDS 162 -> 98) moved the kernel sum 23.00 -> 23.25 ms (2 runs per arm), refuted. Per output and 32-K block the Q4_K form costs 1 I2F + 1 FMUL + 2 FFMA, 16 issue slots per IMMA = the full IMMA budget; the next lever is coarser activation scales (a numerics change).
+
 ## 2026-09-23 · Dense Q8_0 IMMA: scale loads and small grids
 
 [PROV: commit=fd51feb7+branch perf/q8-imma-lds date=2026-09-23 hw=RTX5090

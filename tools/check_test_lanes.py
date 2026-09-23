@@ -303,7 +303,9 @@ def main():
     # dequant formula.
     # 1128 -> 1130: MmqQ8Imma.{Q6KDenseOddSuperblocksNRMSE,MoeGroupedQ6K} (test-quant): Q6_K 210-B
     # blocks read in place vs the ggml formula (dense BM 128, MoE BM 32 and 128, odd superblock count).
-    PINNED = 1130
+    # 1130 -> 1131: GptOssSinkRef.PagedDecodeHd64SinkMatchesReference (test-attention): F16 multitok
+    # decode at hd=64 with learned sinks vs fp64, split-K and single-split.
+    PINNED = 1131
 
     text = CMAKE.read_text()
     mods = module_sources(text)
