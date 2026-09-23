@@ -67,19 +67,12 @@ Many "obvious" optimizations are proven failures on sm_120. If the installed CUD
 
 | Rule | Source |
 |------|--------|
-| Decode at batch=1: launch overhead first, memory second (post Lever 1) | Three Laws #1 in main SKILL.md |
 | **Batched decode (M<=32) is its own regime**: grid-shape/launch levers that are refuted at batch=1 PAID there three times in one wave - row-block RMSNorm +6.8% (#1769), shared-activation quantize +4.6% (#1771), producer-side quantize fusion +2.6% (#1773). The GDN-gated fusion half measured NEUTRAL +0.4% (#1774, closed unmerged): the class left after #1773 is under the noise floor. | 32-stream A/Bs 2026-08-25/26, `docs/plans/2026-08-24-qwen38-port.md` |
-| `__launch_bounds__` cost on regular paths: -4.5% to -20% | Repeated benchmarks 2026-04 to 2026-05 |
-| `mxf4nvf4.block_scale` raw MMA: 2.60× over f8f6f4 | `mxf4nvf4_mma_bench` 2026-04-25 |
-| CUDA Graph decode on prequant NVFP4 MoE: +193% to +234% | Qwen3-Coder, Qwen3.6, Gemma-4 NVFP4 - verified 2026-05-07 |
-| pp512 spread across process starts: **model-dependent**, 0.6-1.2 % on Qwen3-8B Q8_0 vs **37.6 %** on a resident NVFP4 MoE model (cuBLAS algo re-timing itself: 3.50 %; the old "2.6× cuBLAS" figure was retracted 2026-08-03) | Use `tg256` for A/B; ≤5% prefill-kernel deltas need nsys per-kernel sums, not end-to-end pp (PR #648) - see `benchmark-cuda` skill |
-| FP4 `mma.sync` measured peak ≈ 2,019 TOPS (~½ datasheet); f32-accumulate = ¼ rate | TC-rate calibration 2026-06-07 (#595/#596) |
 
 ---
 
 ## Negative results (don't repeat)
 
-- **Generic `compute_120` PTX fallback.** Lacks FP8 MMA + block-scale. Always pin `compute_120a/sm_120a`.
 - **FP8×FP8 cuBLAS prefill on sm_120.** Disabled by default since 2026-05-28: cuBLAS FP8 returns `NOT_SUPPORTED` at non-aligned M on consumer Blackwell (`engine_init_resolver.cpp`, config `attention.fp8_prefill`). Prefill levers are the FA2 family instead.
 - **NVFP4 on GDN in/out projections.** REGRESSES −9 to −20% on wide shapes; FP16 wins. Shipped answer: byte-aligned `gemm.fp8_ssm_proj` sidecar (+19% #949, +21% #962 GGUF-Q8_0). `gemm.nvfp4_ssm_proj` GGUF opt-in removed 2026-07-11 (bit-rotted to 71 tok/s). Exception: `gemm.nvfp4_attn_proj` remains opt-in.
 - **Occupancy raise / KPAR→MR reroute on the NVFP4 decode GEMV path.** Refuted by the 2026-05-30 nsys+ncu roofline sweep - decode plateau is a 4-bit-dequant co-limit (L1TEX 91%), not occupancy.
@@ -96,11 +89,7 @@ Many "obvious" optimizations are proven failures on sm_120. If the installed CUD
 - **Launch-elimination levers on graphs+PDL decode loop (2026-07-13) - the whole class.** Roofline lever list from `--no-cuda-graphs`; under conditional-graph+PDL the launch/latency-class instances largely overlap away (Qwen3-30B no-graphs sum ~1.8× real graphs-ON step). Two refutations: (a) fused gate-GEMV+top-k (−2 launches/layer, 6.9% topk_gating at 40 GB/s) **0% e2e**; (b) split-K cap reduce REGRESSED −21...−35% (Q4KM 324→211 at cap=1). Scope: batch=1 verdict - batched decode (M<=32) pays for launch/grid-shape. Block-target sweep ctx 8k (340/512/680 blocks, 85/128/170 splits for 2/3/4 waves/SM) fell 317.25 / 308.15 / 302.32 tok/s (-2.87%, -4.71%, 2026-08-14). Tried after split-K reduce 21.9% faster (#1420). MR=4 spill 40.2 us path. Kernel at 31% peak BW is not bandwidth-bound: FP8 decode critical path softmax + two `__syncthreads` per 16-token. Rule: decode lever must hold real BYTES or critical-path math - validate graphs-ON e2e A/B.
 - **C++23 `[[assume]]` in NVFP4 GEMV (2026-07-08).** Byte-identical SASS = provably inert. General rule: **SASS-diff (`cuobjdump -sass`) before any "perf-neutral" or "should help" claim** on compiler-hint changes - it settles the question in seconds.
 - **Async `wgmma` / `tcgen05` / TMEM on consumer Blackwell.** Not available - SM100 (B200) exclusives. sm_120 peak path is register `mma.sync`. (Note: the *synchronous* `nvcuda::wmma` API *does* compile on sm_120 but lowers to **HMMA** - it is not async wgmma and not the peak path; it costs extra smem traffic and a smem round-trip vs hand-written `mma.sync` with register-resident fragments.)
-- **Materializing the attention score tile (S/P) in shared memory.** Becomes barrier/L1-TEX-bound (compute util in the teens): smem round-trip + `__syncthreads` dominate. True FA2 keeps row max/sum and S/P fragments register-resident and fuses softmax into QK->PV handoff. Don't trust kernel headers claiming register-based softmax - verify against code (in-tree kernels mislabeled).
-- **`__noinline__` on device inner-loop helpers.** Spills to Local Memory (DRAM). Use `__forceinline__`.
-- **`reinterpret_cast` on Q8_0 blocks.** 34-byte blocks NOT 4-aligned. Use `memcpy()`.
-- **Skipping graph re-bench after a hot-path patch.** Compute speedup alone often shows ~0% in tok/s - the win is graph-replay-mediated. Always re-bench graphs ON.
-- **Increasing SMEM beyond `cudaDeviceProp::sharedMemPerBlockOptin`** assuming H100's 228 KB. RTX 5090 max is ~99 KB.
+- **Kernel headers claiming register-based softmax.** In-tree kernels were mislabeled; verify S/P fragments stay register-resident in the code (smem-materialized S/P = barrier/L1-TEX-bound, compute util in the teens).
 
 ## NVFP4 paged decode attention: lever was LOAD WIDTH, not traffic (2026-08-30, #1817)
 

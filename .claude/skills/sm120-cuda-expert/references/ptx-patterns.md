@@ -52,14 +52,6 @@ asm volatile(
 
 ---
 
-## FP16 → FP8 packed conversion
-
-```cuda
-asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;\n" : "=r"(fp8x2) : "r"(fp16x2));
-```
-
----
-
 ## FP4 (E2M1) ↔ FP16 / FP32 / BF16 packed conversion
 
 The naive `cvt.rn.satfinite.e2m1x2.{f32,f16x2,bf16x2}` instruction looks unsupported on sm_120 if you target a `.b32` register, but it works when you route the FP4 byte through a `.b8` register. SASS confirms hardware emission: `F2FP.SATFINITE.E2M1.F32.PACK_AB_MERGE_C`.
@@ -86,29 +78,6 @@ constexpr uint32_t kLutLo = 0x3E3C3800u;  // FP16: [0.0, 0.5, 1.0, 1.5]
 constexpr uint32_t kLutHi = 0x46444240u;  // FP16: [2.0, 3.0, 4.0, 6.0]
 asm volatile("prmt.b32 %0, %1, %2, %3;\n"
              : "=r"(out) : "r"(kLutLo), "r"(kLutHi), "r"(selector));
-```
-
----
-
-## `cp.async` for paged KV (16-byte vector load)
-
-```cuda
-asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" :: "r"(smem), "l"(glob));
-asm volatile("cp.async.commit_group;\n");
-asm volatile("cp.async.wait_group 0;\n");
-__syncthreads();  // REQUIRED before reading smem - race on SMEM otherwise
-```
-
----
-
-## Warp-XOR shuffle reduce
-
-Single-warp sum/max reduction in 5 instructions (32-lane warp).
-
-```cuda
-#pragma unroll
-for (int o = 16; o >= 1; o >>= 1)
-    val += __shfl_xor_sync(0xFFFFFFFF, val, o);
 ```
 
 ---
