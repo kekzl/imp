@@ -25,6 +25,21 @@ enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
 // Helper device functions (moved from gemm.cu, unchanged)
 // ============================================================================
 
+// The 32 activation bytes of one block_q8_1 (16-B aligned, #598) as 2x LDG.128; memcpy into an
+// int array compiled to 32 byte loads.
+__device__ __forceinline__ void load_q8_1_qs(int (&xi)[8], const block_q8_1* __restrict__ blk) {
+    const int4* p = reinterpret_cast<const int4*>(blk->qs);
+    const int4 a = __ldg(p), b = __ldg(p + 1);
+    xi[0] = a.x;
+    xi[1] = a.y;
+    xi[2] = a.z;
+    xi[3] = a.w;
+    xi[4] = b.x;
+    xi[5] = b.y;
+    xi[6] = b.z;
+    xi[7] = b.w;
+}
+
 __device__ __forceinline__ float q6k_dp4a_group_preloaded(
     const uint8_t* __restrict__ ql, const uint8_t* __restrict__ qh, const int8_t* __restrict__ sc, float d_w,
     const int* __restrict__ xqs_packed,  // [8] pre-loaded int32 from Q8_1
@@ -36,6 +51,22 @@ __device__ __forceinline__ float q6k_dp4a_group_preloaded(
 
     float group_sum = 0.0f;
 
+    // The 32 ql and 32 qh bytes of this group start 2-aligned (210-B blocks): 9 aligned words
+    // + funnel shift each instead of byte loads (96 LDG.U8 per group before). Word 9 stays
+    // inside the block (ql ends <= 128, qh <= 192).
+    uint32_t qlw[9], qhw[9];
+    const uintptr_t qla = reinterpret_cast<uintptr_t>(ql + ql_base);
+    const uintptr_t qha = reinterpret_cast<uintptr_t>(qh + qh_base);
+    const uint32_t* qlp = reinterpret_cast<const uint32_t*>(qla & ~static_cast<uintptr_t>(3));
+    const uint32_t* qhp = reinterpret_cast<const uint32_t*>(qha & ~static_cast<uintptr_t>(3));
+#pragma unroll
+    for (int i = 0; i < 9; i++) {
+        qlw[i] = __ldg(qlp + i);
+        qhw[i] = __ldg(qhp + i);
+    }
+    const uint32_t ql_s = static_cast<uint32_t>(qla & 3u) * 8u;
+    const uint32_t qh_s = static_cast<uint32_t>(qha & 3u) * 8u;
+
 #pragma unroll
     for (int sb = 0; sb < 2; sb++) {
         const int8_t sc_val = sc[2 * g + sb];
@@ -44,13 +75,10 @@ __device__ __forceinline__ float q6k_dp4a_group_preloaded(
 
 #pragma unroll
         for (int d4 = 0; d4 < 4; d4++) {
-            const int k = sub_off + d4 * 4;
-
-            uint32_t ql4;
-            memcpy(&ql4, ql + ql_base + k, 4);
+            const int w = (sub_off + d4 * 4) / 4;
+            const uint32_t ql4 = __funnelshift_r(qlw[w], qlw[w + 1], ql_s);
             const uint32_t lo4 = is_high ? ((ql4 >> 4) & 0x0F0F0F0FU) : (ql4 & 0x0F0F0F0FU);
-            uint32_t qh4;
-            memcpy(&qh4, qh + qh_base + k, 4);
+            const uint32_t qh4 = __funnelshift_r(qhw[w], qhw[w + 1], qh_s);
             const uint32_t hi4 = ((qh4 >> qh_shift) & 0x03030303U) << 4;
             const int vi = __vsubss4(lo4 | hi4, 0x20202020U);
             sumi = __dp4a(vi, xqs_packed[sb * 4 + d4], sumi);
@@ -577,7 +605,7 @@ __global__ void gemv_dp4a_kpar_kernel(const uint8_t* __restrict__ W, const block
     constexpr int STRIDE = NWARPS * 32;
     for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
+        load_q8_1_qs(xi, q8_1 + b);
         float dq = d8[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum)
@@ -622,7 +650,7 @@ __global__ void gemv_dp4a_kpar_fp32_kernel(const uint8_t* __restrict__ W, const 
     constexpr int STRIDE = NWARPS * 32;
     for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
+        load_q8_1_qs(xi, q8_1 + b);
         float dq = d8[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum)
@@ -683,7 +711,7 @@ __global__ void gemv_dp4a_kpar_qkv_kernel(const uint8_t* __restrict__ W_q, const
     constexpr int STRIDE = NWARPS * 32;
     for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
+        load_q8_1_qs(xi, q8_1 + b);
         float dq = d8[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum)
@@ -733,7 +761,7 @@ __global__ void gemv_dp4a_kpar_gate_up_kernel(const uint8_t* __restrict__ gate_w
     constexpr int STRIDE = NWARPS * 32;
     for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
+        load_q8_1_qs(xi, q8_1 + b);
         float dq = d8[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum)
