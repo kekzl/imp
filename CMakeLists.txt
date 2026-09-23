@@ -608,6 +608,7 @@ if(IMP_BUILD_SERVER)
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/rate_limit.cpp
+        tools/imp-server/logit_bias.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
@@ -886,6 +887,7 @@ if(IMP_BUILD_TESTS)
             # F2-1): the two pure policy functions behind find_model_path().
             tests/test_model_name_policy.cpp
             tools/imp-server/rate_limit.cpp
+            tools/imp-server/logit_bias.cpp
             tools/imp-server/tracing.cpp
             tests/test_tracing.cpp
             tests/test_server_request_limits.cpp

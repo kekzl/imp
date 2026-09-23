@@ -4,6 +4,7 @@
 // endpoints, Anthropic messages, misc). NOT the public handler API - that is handlers.h.
 
 #include "handlers.h"
+#include "logit_bias.h"
 #include "reasoning_split.h"
 #include "spec_usage_keys.h"
 

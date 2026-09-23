@@ -17,12 +17,19 @@ struct ParsedToolCall {
     std::string arguments;  // JSON string
     bool valid = true;      // false if arguments failed schema validation
     std::string error;      // human-readable reason when !valid
+    // XML layout only: each <parameter> value as emitted, so a string-typed param keeps "0600" (#2103).
+    std::vector<std::pair<std::string, std::string>> raw_params;
 };
 
 // validate_tool_call: checks parsed arguments are a JSON object, all `required` properties are
 // present, and present properties roughly match their declared `type`. Sets tc.valid=false +
 // tc.error on failure; a no-op when the tool or its schema can't be located.
+// Runs restore_raw_string_params first.
 void validate_tool_call(ParsedToolCall& tc, const json& tools);
+
+// A raw_params value coerced to a type its schema does not allow, where the schema allows
+// "string", goes back to the emitted text: "0600" for {"type":"string"}, not 600 (#2103).
+void restore_raw_string_params(ParsedToolCall& tc, const json& tools);
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
 

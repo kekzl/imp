@@ -353,6 +353,16 @@ class TestPerRequestCaps:
         assert r.status_code == 400
         assert "logit_bias" in r.json()["error"]["message"]
 
+    @pytest.mark.parametrize("bias", [{"abc": 1}, {"12abc": 1}, {"-5": 1}, {"7": 101}, {"7": "1"}, [1, 2]])
+    def test_malformed_logit_bias_is_refused_not_dropped(self, client, model, bias):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "logit_bias": bias,
+        })
+        assert r.status_code == 400, r.text
+        assert "logit_bias" in r.json()["error"]["message"]
+
     def test_images_above_cap(self, client, model):
         part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
         r = client.post("/v1/chat/completions", json={

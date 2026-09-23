@@ -507,6 +507,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 // dialect emits the whole call (open + arguments + close).
                 ParsedToolCall tc = std::move(seg.call);
                 tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                restore_raw_string_params(tc, ctx.params.tools);
                 if (!flush_buffered_content())
                     return false;
                 out.tool_calls.push_back(std::move(tc));

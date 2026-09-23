@@ -181,19 +181,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // text-only answer about a picture the model never received is indistinguishable from a real
     // one. The load-time WARN never reaches the client.
     if (!ctx.params.images.empty() && !model_has_vision) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message",
-               "This model cannot see images — it is loaded without a vision tower, so the " +
-                   std::to_string(ctx.params.images.size()) +
-                   " image part(s) in this request would be ignored. Vision needs either a "
-                   "Qwen3-VL checkpoint or a GGUF started with --mmproj; a multimodal "
-                   "SafeTensors checkpoint of any other family loads text-only (the load log "
-                   "says so). Send text only, or load a model that can see."},
-              {"type", "invalid_request_error"},
-              {"code", "vision_unavailable"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "This model cannot see images — it is loaded without a vision tower, so the " +
+                            std::to_string(ctx.params.images.size()) +
+                            " image part(s) in this request would be ignored. Vision needs either a "
+                            "Qwen3-VL checkpoint or a GGUF started with --mmproj; a multimodal "
+                            "SafeTensors checkpoint of any other family loads text-only (the load log "
+                            "says so). Send text only, or load a model that can see.",
+                        nullptr, "vision_unavailable");
+        return false;
+    }
+    if (const std::string err = logit_bias_vocab_error(ctx.params.logit_bias, ctx.snap.tok->vocab_size());
+        !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
         return false;
     }
 

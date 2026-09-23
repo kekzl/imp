@@ -158,18 +158,11 @@ bool parse_gemma_value(const std::string& s, size_t& p, json& out) {
     if (p == start)
         return false;
     std::string tok = s.substr(start, p - start);
-    try {
-        if (tok.find('.') != std::string::npos || tok.find('e') != std::string::npos ||
-            tok.find('E') != std::string::npos) {
-            out = std::stod(tok);
-        } else {
-            out = std::stoll(tok);
-        }
-        return true;
-    } catch (...) {
-        out = tok;  // fall back to string
-        return true;
-    }
+    // Only a whole JSON number coerces; stod/stoll read "600acab9" as 600 (#2103).
+    out = json::parse(tok, nullptr, false);
+    if (out.is_discarded() || !out.is_number())
+        out = tok;
+    return true;
 }
 
 }  // namespace

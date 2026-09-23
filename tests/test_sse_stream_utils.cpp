@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "utils.h"            // tools/imp-server/utils.h
+#include "logit_bias.h"       // tools/imp-server/logit_bias.h
 #include "reasoning_split.h"  // StreamReasoningSplitter (shared streaming demux)
 
 namespace {
@@ -406,6 +407,56 @@ TEST(ParseStopField, AbsentAndNull) {
     json body = {{"stop", nullptr}};
     EXPECT_FALSE(parse_stop_field(body, 16, out));
     EXPECT_TRUE(out.empty());
+}
+
+TEST(ParseLogitBias, AbsentAndNullAreEmpty) {
+    std::vector<std::pair<int32_t, float>> out;
+    EXPECT_EQ(parse_logit_bias(json::object(), 1024, out), "");
+    EXPECT_EQ(parse_logit_bias(json{{"logit_bias", nullptr}}, 1024, out), "");
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(ParseLogitBias, ValidEntriesAllKept) {
+    std::vector<std::pair<int32_t, float>> out;
+    json body = {{"logit_bias", {{"15", -100}, {"0", 100}, {"01", 2.5}}}};
+    ASSERT_EQ(parse_logit_bias(body, 1024, out), "");
+    ASSERT_EQ(out.size(), 3u);
+    float sum = 0.0f;
+    for (const auto& [id, b] : out)
+        sum += (id == 15 ? b : 0.0f);
+    EXPECT_EQ(sum, -100.0f);
+}
+
+TEST(ParseLogitBias, EveryMalformedEntryIsAnErrorNotADrop) {
+    // Each of these was skipped (or, "12abc", truncated to 12) with a 200.
+    const json bad[] = {
+        json::array({1, 2}), json("x"),          json{{"abc", 1}},         json{{"12abc", 1}},
+        json{{"-5", 1}},     json{{"", 1}},      json{{"99999999999", 1}}, json{{"7", "1"}},
+        json{{"7", true}},   json{{"7", 100.5}}, json{{"7", -101}},
+    };
+    for (const auto& lb : bad) {
+        std::vector<std::pair<int32_t, float>> out;
+        EXPECT_NE(parse_logit_bias(json{{"logit_bias", lb}}, 1024, out), "") << lb.dump();
+    }
+}
+
+TEST(ParseLogitBias, CapRefusesInsteadOfTruncating) {
+    json lb = json::object();
+    for (int i = 0; i < 5; ++i)
+        lb[std::to_string(i)] = 1;
+    std::vector<std::pair<int32_t, float>> out;
+    EXPECT_NE(parse_logit_bias(json{{"logit_bias", lb}}, 4, out).find("above the server limit of 4"),
+              std::string::npos);
+    out.clear();
+    EXPECT_EQ(parse_logit_bias(json{{"logit_bias", lb}}, 0, out), "");  // 0 = no cap
+    EXPECT_EQ(out.size(), 5u);
+}
+
+TEST(LogitBiasVocabError, IdAtOrAboveVocabIsNamed) {
+    const std::vector<std::pair<int32_t, float>> ok = {{0, 1.0f}, {151935, -1.0f}};
+    EXPECT_EQ(logit_bias_vocab_error(ok, 151936), "");
+    const std::vector<std::pair<int32_t, float>> bad = {{3, 1.0f}, {151936, 1.0f}};
+    EXPECT_NE(logit_bias_vocab_error(bad, 151936).find("151936"), std::string::npos);
 }
 
 TEST(ParseStopField, SingleString) {

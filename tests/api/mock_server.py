@@ -367,6 +367,14 @@ class MockHandler(BaseHTTPRequestHandler):
         if isinstance(logit_bias, dict) and len(logit_bias) > 1024:
             self._send_error(400, "logit_bias has too many entries, above the server limit of 1024 (--max-logit-bias)")
             return
+        # tools/imp-server/logit_bias.cpp: a malformed entry is a 400, not a dropped bias.
+        if logit_bias is not None and (
+            not isinstance(logit_bias, dict)
+            or any(not k.isdigit() or isinstance(v, bool) or not isinstance(v, (int, float))
+                   or not -100 <= v <= 100 for k, v in logit_bias.items())
+        ):
+            self._send_error(400, "logit_bias must map token ids to numbers in [-100, 100]")
+            return
         n_images = sum(
             1
             for m in messages
