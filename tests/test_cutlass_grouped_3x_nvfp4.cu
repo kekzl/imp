@@ -415,12 +415,12 @@ TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
     cudaMemset(d_dev_out_b, 0, static_cast<size_t>(M_total) * N * sizeof(half));
     for (int e0 = 0; e0 < ne; e0 += 2) {
         GroupedNvfp4DeviceArgs dargs_c = dargs_b;
-        dargs_c.d_M_per          = d_M_per + e0;
+        dargs_c.d_M_per = d_M_per + e0;
         dargs_c.d_expert_offsets = d_offsets + e0;
-        dargs_c.d_sfa_offsets    = d_sfa_offsets + e0;
-        dargs_c.d_alpha          = d_alpha + e0;
-        dargs_c.d_B_ptrs         = d_B_ptrs + e0;
-        dargs_c.d_SFB_ptrs       = d_SFB_ptrs + e0;
+        dargs_c.d_sfa_offsets = d_sfa_offsets + e0;
+        dargs_c.d_alpha = d_alpha + e0;
+        dargs_c.d_B_ptrs = d_B_ptrs + e0;
+        dargs_c.d_SFB_ptrs = d_SFB_ptrs + e0;
         ASSERT_TRUE(gemm_grouped_cutlass_3x_nvfp4_device_args(2, N, K, dargs_c, stream_))
             << "device-args wrapper (block at e0=" << e0 << ") failed";
     }
