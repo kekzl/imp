@@ -509,8 +509,9 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
             (qtype == QType::Q8_0 || qtype == QType::Q4_K || qtype == QType::Q6_K || qtype == QType::Q5_1 ||
              qtype == QType::Q5_K) &&
             max_rows_per_expert > 0) {
+            // Q6_K = 5: raw 210-B read; the 224-B repack (2) is not in the plane budget and declined.
             const int qkind = qtype == QType::Q4_K   ? 1
-                              : qtype == QType::Q6_K ? 2
+                              : qtype == QType::Q6_K ? 5
                               : qtype == QType::Q5_1 ? 3
                               : qtype == QType::Q5_K ? 4
                                                      : 0;

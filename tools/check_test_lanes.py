@@ -301,7 +301,9 @@ def main():
     # and replayed prefill graph give the same greedy tokens.
     # 1127 -> 1128: MmqQ8Imma.MoeGroupedQ5K (test-quant): Q5_K MoE IMMA (BM 32 and 128) vs the ggml
     # dequant formula.
-    PINNED = 1128
+    # 1128 -> 1130: MmqQ8Imma.{Q6KRawMatchesRepackBitwise,MoeGroupedQ6KRaw} (test-quant): Q6_K raw
+    # 210-B read bit-identical to the 224-B repack (dense BM 128, MoE BM 32 and 128).
+    PINNED = 1130
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -292,8 +292,8 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
                                int, const int32_t*, size_t);
 
-bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
-                 __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
+bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 5=q6k raw*/,
+                 const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     const bool capturing = imma_stream_capturing(stream);
@@ -348,41 +348,34 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         IMP_CUDA_CHECK_LAUNCH();
         return true;
     }
-    if (qkind == 2) {
-        const uint8_t* w6 = g_imma_q6k[w_blocks].blocks;
+    if (qkind == 2 || qkind == 5) {
+        // 2 = 224-B repack (cp.async), 5 = GGUF 210-B blocks read in place (no repack VRAM)
+        const bool unp = qkind == 5;
+        const uint8_t* w6 = unp ? static_cast<const uint8_t*>(w_blocks) : g_imma_q6k[w_blocks].blocks;
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
-        static bool smem_set6 = false;
-        if (!smem_set6) {
-            smem_set6 = true;
-            cudaFuncSetAttribute(mmq_imma_q6k_raw_kernel<32, false>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+        using Q6Kernel = void (*)(const int8_t*, const __half*, const uint8_t*, __half*, int, int, int,
+                                  const int32_t*, size_t);
+        const Q6Kernel k32 = unp ? mmq_imma_q6k_raw_kernel<32, false, true>
+                                 : mmq_imma_q6k_raw_kernel<32, false, false>;
+        const Q6Kernel k128b = unp ? mmq_imma_q6k_raw_kernel<128, true, true>
+                                   : mmq_imma_q6k_raw_kernel<128, true, false>;
+        const Q6Kernel k128 = unp ? mmq_imma_q6k_raw_kernel<128, false, true>
+                                  : mmq_imma_q6k_raw_kernel<128, false, false>;
+        static bool smem_set6[2] = {false, false};
+        if (!smem_set6[unp]) {
+            smem_set6[unp] = true;
+            cudaFuncSetAttribute(k32, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(q6k_smem_bytes(32)));
-            cudaFuncSetAttribute(mmq_imma_q6k_raw_kernel<128, false>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+            cudaFuncSetAttribute(k128b, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(q6k_smem_bytes(128)));
-            cudaFuncSetAttribute(mmq_imma_q6k_raw_kernel<128, true>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+            cudaFuncSetAttribute(k128, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(q6k_smem_bytes(128)));
         }
-        if (small_m) {
-            mmq_imma_q6k_raw_kernel<32, false>
-                <<<grid, kThreads, q6k_smem_bytes(32), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
-                                                                 out_f16, M, N, K, d_offsets,
-                                                                 w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else if (beta == 1.0f) {
-            mmq_imma_q6k_raw_kernel<128, true>
-                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
-                                                                  out_f16, M, N, K, d_offsets,
-                                                                  w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            mmq_imma_q6k_raw_kernel<128, false>
-                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
-                                                                  out_f16, M, N, K, d_offsets,
-                                                                  w_stride_blocks);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
+        const Q6Kernel k = small_m ? k32 : (beta == 1.0f ? k128b : k128);
+        k<<<grid, kThreads, q6k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                                          w6, out_f16, M, N, K, d_offsets,
+                                                                          w_stride_blocks);
+        IMP_CUDA_CHECK_LAUNCH();
         return true;
     }
 
@@ -459,18 +452,18 @@ bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* ou
     return gemm_common(w_q4k_blocks, 1, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
-bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M,
-                       int N, int K, cudaStream_t stream, float beta) {
+bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
+                       cudaStream_t stream, float beta, bool raw) {
     if (M < 64 || N % 2 != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
-    return gemm_common(w_q6k_blocks, 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+    return gemm_common(w_q6k_blocks, raw ? 5 : 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
                        int K, cudaStream_t stream) {
     if (N % 2 != 0) return false;
-    if (K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : kBK) != 0)
+    if (K % ((qkind == 1 || qkind == 2 || qkind == 4 || qkind == 5) ? 256 : kBK) != 0)
         return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
