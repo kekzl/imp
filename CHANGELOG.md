@@ -26,6 +26,7 @@ there instead of retelling it.
 - `imp-cli --help` named `--max-tokens` default 256; the default is 8192 (16384 with `--interactive`).
 
 ### Changed
+- Measured sm_120a limits and a kernel inventory: `tools/roofline/peaks/` (DRAM read 1692-1698 GB/s, NVFP4 `mma.sync` 1899 TOPS, FP8 f32-accumulate 490 TOPS vs 940 via `kind::mxf8f6f4`, graph node 0.47-0.68 us vs 5.7 us per stream launch, at locked 2842/13801 MHz) and `tools/roofline/inventory/` (nsys with graphs on over 13 models x 4 workloads, kernels split by the new `bench:pp`/`bench:tg` NVTX ranges of `imp-cli --bench`, ncu harness).
 - Docs are reference tables: in-scope docs 7654 -> 4074 lines, README 329 -> 136, `usage.md` split into `docs/CONFIG.md` + `CONTRIBUTING.md`, `API_FEATURES.md` split off `API.md`; 39 facts corrected, fact log `docs/audit/docs-rewrite/DISPATCH_docs_v3.md`. `docs_lint.py` gates filler words, paragraphs > 2 sentences, docs pages > 300 lines and dead anchors.
 - QSA indexer (`attention.qsa`, still default `false`) wins decode above budget: Qwen3.8-Flash-Next, 13863-token prompt, tg512 55.99-57.10 dense vs 62.28-63.84 tok/s indexer (was 57.59-58.31), pp 197.65-203.65 vs 185.21-185.64 before. Select scores across the card (128.4 -> 9.1 us per layer-step); `paged_attention_decode` split-K counts the GQA kernel's `batch * n_kv_heads` CTAs, so the 16-row prefill pass leaves the 32-CTA path (9233 -> 1588 ms per prompt). The 0.44.0 "0.3 % of the step" note was wrong: dense decode attention is 81.6 us per layer (`docs/plans/2026-09-19-qwen4exp-port.md`).
 
