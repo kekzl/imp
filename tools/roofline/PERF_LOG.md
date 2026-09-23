@@ -10,6 +10,27 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · Q6_K MoE experts read GGUF blocks in place
+
+[PROV: commit=1275b7e7+branch perf/q6k-imma-raw date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
+kernel=inventory.sh pp512 per image e2e=inventory/ab_bench.sh imp:main-1275 vs imp:q6k, 5 pairs]
+
+| Qwen3-30B-A3B Q4_K_M | Before (origin/main) | After |
+|---|---|---|
+| Q6_K expert tensor per layer, pp512 | `dequant_q6k_v2_kernel` of all 128 experts (~383 us) + FP16 grouped GEMM `Kernel2` (210 us): the 224-B repack is outside the plane budget ("0 MiB planned, 168 MiB wanted") and declines | `mmq_imma_q6k_raw_kernel<128,false,true>` 357 us |
+| `bench:pp` wall per rep | 54.74 ms | 50.13 ms |
+| e2e pp512 (median, 5 pairs, all same sign) | 9235.85 tok/s | 10280.06 (+11.3 %) |
+| e2e tg (median) | 269.51 | 269.32 |
+| PPL, 45k corpus, deterministic, 2 runs per arm | 10.9552, 10.9849 | 10.9968, 10.9875 (routing spread, no verdict) |
+| `degen_suite.py` | - | 50 checks, 0 FAIL |
+
+| Check | Result |
+|---|---|
+| `MmqQ8Imma.Q6KRawMatchesRepackBitwise` (dense BM 128, K 512 / 768) and `MoeGroupedQ6KRaw` (BM 32 / 128, empty expert, odd superblock count) | bit-identical to the 224-B repack; raw NRMSE < 2e-2 vs the ggml formula |
+| Registers | BM=128 235, 0 stack; all four staging tasks in flight: 255 + 40 B stack, so two halves ride the two kb steps |
+| Repack instances | SASS identical to origin/main (1144 / 3784 / 3920 instructions) |
+| Dense Q6_K on the same kernel (Qwen3-14B-Q6_K, `q6k_imma_max_m` sweep) | REFUTED: pp512 6957.31 -> 3746.75 tok/s, pp4096 (M=2048 chunks) 9661.77 -> 4387.18; the half-MMA split halves the int8 rate against fp16-acc HMMA. Not shipped |
+
 ## 2026-09-23 · Q5_K MoE experts on the grouped IMMA kernel
 
 [PROV: commit=55f0ee39+branch perf/moe-q5k-imma date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
