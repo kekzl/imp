@@ -263,32 +263,25 @@ bool device_args_done = false;
             expanded, d, ne, stream);
         bool ok = true;
         if (ctx.staged_blocks) {
-            // Host layer in expert blocks: stage gate+up of a block, run both GEMMs on it, next
-            // block; then down per block. Each projection still crosses PCIe once.
-            const auto* offs = static_cast<const int32_t*>(routing.expert_offsets.data);
-            const int blk = moe_.layer_stage_experts;
-            const int gate_p = std::to_underlying(ExpertProj::Gate), up_p = std::to_underlying(ExpertProj::Up);
-            for (int e0 = 0; ok && e0 < ne; e0 += blk) {
-                const int n = std::min(blk, ne - e0);
-                ok = non_gated_experts ? stage_nvfp4_block_(layer, e0, n, up_p, -1, offs, stream)
-                                       : stage_nvfp4_block_(layer, e0, n, gate_p, up_p, offs, stream);
-                if (ok && !non_gated_experts)
-                    ok = dispatch_device(ly.expert_gate_ids, da_cache.d_gate_B_ptrs, da_cache.d_gate_SFB_ptrs,
-                                         da_cache.d_gate_alpha, expert_gate_base, d, eff, e0, n);
-                ok = ok && dispatch_device(ly.expert_up_ids, da_cache.d_up_B_ptrs, da_cache.d_up_SFB_ptrs,
-                                           da_cache.d_up_alpha, expert_up_base, d, eff, e0, n);
-            }
-            if (ok) {
-                fused_act_quantize_device(non_gated_experts ? nullptr : expert_gate_base, expert_up_base, eff,
-                                          non_gated_experts ? FFNActivation::RELU_SQR : cfg.ffn_activation);
-                const int down_p = std::to_underlying(ExpertProj::Down);
-                for (int e0 = 0; ok && e0 < ne; e0 += blk) {
-                    const int n = std::min(blk, ne - e0);
-                    ok = stage_nvfp4_block_(layer, e0, n, down_p, -1, offs, stream) &&
-                         dispatch_device(ly.expert_down_ids, da_cache.d_down_B_ptrs, da_cache.d_down_SFB_ptrs,
-                                         da_cache.d_down_alpha, expert_down_base, eff, d, e0, n);
-                }
-            }
+            const auto& da = da_cache;
+            ok = run_staged_blocks_(
+                layer, stream, ctx,
+                [&](ExpertProj p, int e0, int n) {
+                    if (p == ExpertProj::Gate)
+                        return dispatch_device(ly.expert_gate_ids, da.d_gate_B_ptrs, da.d_gate_SFB_ptrs,
+                                               da.d_gate_alpha, expert_gate_base, d, eff, e0, n);
+                    if (p == ExpertProj::Up)
+                        return dispatch_device(ly.expert_up_ids, da.d_up_B_ptrs, da.d_up_SFB_ptrs,
+                                               da.d_up_alpha, expert_up_base, d, eff, e0, n);
+                    return dispatch_device(ly.expert_down_ids, da.d_down_B_ptrs, da.d_down_SFB_ptrs,
+                                           da.d_down_alpha, expert_down_base, eff, d, e0, n);
+                },
+                [&] {
+                    fused_act_quantize_device(non_gated_experts ? nullptr : expert_gate_base, expert_up_base,
+                                              eff,
+                                              non_gated_experts ? FFNActivation::RELU_SQR
+                                                                : cfg.ffn_activation);
+                });
         } else {
         if (!non_gated_experts)
             ok = ok && dispatch_device(ly.expert_gate_ids,

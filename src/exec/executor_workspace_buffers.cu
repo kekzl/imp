@@ -50,6 +50,18 @@ static_assert(kExecGrouped3xStagingBytes == kGrouped3xStagingBytes,
 static_assert(kExecGrouped3xWorkspaceBytes == kGrouped3xWorkspaceBytes,
               "exec_t2_demand's grouped-3x workspace drifted from gemm_cutlass_grouped_3x.h");
 
+namespace {
+struct HostStageGeometry {
+    int chunks, experts, slots;
+};
+// Host-expert prefill staging: moe.stage_expert_chunks blocks (CUTLASS path only) hold 2 projection
+// slots of n_experts/chunks experts; 1 block holds all 3 projections of every expert.
+HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int want_chunks) {
+    const int chunks = staged_cutlass ? std::clamp(want_chunks, 1, std::max(1, n_experts)) : 1;
+    return {chunks, (n_experts + chunks - 1) / chunks, chunks > 1 ? 2 : kExpertProjCount};
+}
+}  // namespace
+
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     const auto& cfg = model_->config();
 
@@ -650,13 +662,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             const bool want_layer_stage = nvfp4_host_experts && stage_cfg.n_experts > 0 &&
                                           !model_->host_pinned_allocs().empty();
             size_t stage_proj_bytes = 0, stage_sf_proj = 0;
-            // Chunked (moe.stage_expert_chunks > 1, CUTLASS path only): 2 slots of n_experts/chunks.
-            const int stage_chunks = dispatch_policy().moe.staged_cutlass_prefill
-                                         ? std::clamp(dispatch_policy().moe.stage_expert_chunks, 1,
-                                                      std::max(1, stage_cfg.n_experts))
-                                         : 1;
-            const int stage_experts = (stage_cfg.n_experts + stage_chunks - 1) / stage_chunks;
-            const int stage_slots = stage_chunks > 1 ? 2 : kExpertProjCount;
+            const auto [stage_chunks, stage_experts, stage_slots] = host_stage_geometry(
+                stage_cfg.n_experts, dispatch_policy().moe.staged_cutlass_prefill, dispatch_policy().moe.stage_expert_chunks);
             if (want_layer_stage) {
                 const int64_t d_model = stage_cfg.d_model;
                 const int64_t eff_ff = stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;

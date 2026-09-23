@@ -1007,6 +1007,11 @@ private:
     // SfAtom view and the per-expert pointer entries [e0, e0 + n) of each projection filled.
     bool stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1, const int32_t* expert_offsets,
                             cudaStream_t stream);
+    // The chunked CUTLASS prefill of a staged-in-blocks host layer: gemm(proj, e0, n) per block,
+    // act_quantize between the gate+up and the down pass. False on any stage or GEMM failure.
+    bool run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
+                            const std::function<bool(ExpertProj, int, int)>& gemm,
+                            const std::function<void()>& act_quantize);
 
 public:
     // Throws when a MoE layer's NVFP4 experts are host-resident and nothing

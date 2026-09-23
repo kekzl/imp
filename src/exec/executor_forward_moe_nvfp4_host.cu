@@ -28,6 +28,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -325,6 +326,32 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
                                            cudaMemcpyHostToDevice, stream));
     }
     return true;
+}
+
+bool GraphExecutor::run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
+                                       const std::function<bool(ExpertProj, int, int)>& gemm,
+                                       const std::function<void()>& act_quantize) {
+    // Stage gate+up of one expert block, run both GEMMs on it, next block; then down per block.
+    // Each projection still crosses PCIe once; the buffer holds 2 projections of one block.
+    const auto* offs = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
+    const int blk = moe_.layer_stage_experts, ne = ctx.ne;
+    const int gate_p = std::to_underlying(ExpertProj::Gate), up_p = std::to_underlying(ExpertProj::Up);
+    bool ok = blk > 0;
+    for (int e0 = 0; ok && e0 < ne; e0 += blk) {
+        const int n = std::min(blk, ne - e0);
+        ok = ctx.non_gated_experts ? stage_nvfp4_block_(layer, e0, n, up_p, -1, offs, stream)
+                                   : stage_nvfp4_block_(layer, e0, n, gate_p, up_p, offs, stream);
+        ok = ok && (ctx.non_gated_experts || gemm(ExpertProj::Gate, e0, n)) && gemm(ExpertProj::Up, e0, n);
+    }
+    if (!ok)
+        return false;
+    act_quantize();
+    for (int e0 = 0; ok && e0 < ne; e0 += blk) {
+        const int n = std::min(blk, ne - e0);
+        ok = stage_nvfp4_block_(layer, e0, n, std::to_underlying(ExpertProj::Down), -1, offs, stream) &&
+             gemm(ExpertProj::Down, e0, n);
+    }
+    return ok;
 }
 
 // Stages a host-resident layer for prefill and reports whether it can
