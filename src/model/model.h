@@ -105,9 +105,6 @@ public:
     // allocation. Used by Phase-4b drop-source to gate cudaFreeAsync.
     bool is_base_gpu_allocation(void* ptr) const;
 
-    // Estimate total raw bytes for all expert packed tensors (for VRAM budget decisions).
-    size_t estimate_expert_bytes() const;
-
     ModelConfig config_;
     ModelProfile profile_;
     HFConfigLoader::GenerationConfig generation_config_;

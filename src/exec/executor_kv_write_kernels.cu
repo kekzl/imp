@@ -388,30 +388,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     }
 }
 
-// BitDecoding Phase 3c FP16 residual ring write. blockIdx.x=token_idx,
-// blockIdx.y selects K(0)/V(1); threads stripe across slot_elems =
-// n_kv_heads*head_dim. Per-token destination (host-resolved to
-// (seq_slot,layer,K|V,ring_slot)) comes from a per-token pointer array.
-// Replaces per-layer cudaMemcpyAsync pairs that serialized on the copy engine (-3x decode regression at 4K
-// ctx).
-__global__ void residual_kv_write_multi_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    half* const* __restrict__ residual_k_dst_ptrs,
-    half* const* __restrict__ residual_v_dst_ptrs,
-    int slot_elems) {
-    const int token_idx = blockIdx.x;
-    const bool is_v = (blockIdx.y == 1);
-
-    half* dst = is_v ? residual_v_dst_ptrs[token_idx] : residual_k_dst_ptrs[token_idx];
-    if (dst == nullptr) return;
-    const half* src = (is_v ? v_in : k_in) + static_cast<int64_t>(token_idx) * slot_elems;
-
-    for (int i = threadIdx.x; i < slot_elems; i += blockDim.x) {
-        dst[i] = src[i];
-    }
-}
-
 // Graph-safe single-seq variant: reads write_idx from a device pointer at
 // execution time, so the captured kernel sees the current ring state
 // across replays. blockIdx.x in {0,1} selects K or V; threads stripe across slot_elems.

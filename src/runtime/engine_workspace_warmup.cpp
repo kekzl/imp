@@ -452,7 +452,7 @@ void Engine::warmup() {
     // + async mempool fully named) cannot account for IS the rest (invariant A1.5).
     //
     // This reads the per-pool ledger, which is why note() is no longer gated on
-    // --mem-report: with an empty ledger the residual is the whole device, and
+    // VRAM audit table: with an empty ledger the residual is the whole device, and
     // charging from it collapsed the 35B's KV pool 4096 -> 512 tokens (B80).
     //
     // Take the larger: the window can only see a subset, so a window reading HIGHER means the

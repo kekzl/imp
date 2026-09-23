@@ -103,15 +103,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
 // token into the per-(seq,layer) residual ring slot, replacing a pair of
 // per-layer cudaMemcpyAsync calls (the D2D copy engine serialized small
 // transfers and dominated decode tg/s, -3x on Qwen3-4B Q8 NVFP4-KV @4K).
-// Multi-seq form: n_tokens>1 with device pointer arrays.
-__global__ void residual_kv_write_multi_kernel(
-    const half* __restrict__ k_in,                  // [n_tokens, slot_elems]
-    const half* __restrict__ v_in,                  // [n_tokens, slot_elems]
-    half* const* __restrict__ residual_k_dst_ptrs,  // [n_tokens] device array of dst pointers
-    half* const* __restrict__ residual_v_dst_ptrs,  // [n_tokens] device array of dst pointers
-    int slot_elems);
-
-// Graph-capture-safe variant: resolves the destination ring slot at kernel
+// Graph-capture-safe form: resolves the destination ring slot at kernel
 // execution time from the device-resident `widx` + the persistent slot
 // index. Caller passes the per-(seq_slot,layer) K/V base pointer, not the ring slot (computed inside the
 // kernel).

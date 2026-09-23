@@ -97,9 +97,6 @@ void silu_inplace(Tensor& x, cudaStream_t stream);
 // Squared ReLU: out[i] = max(0, x[i])^2  (Nemotron-H expert activation)
 void relu_sqr_inplace(Tensor& x, cudaStream_t stream);
 
-// Element-wise multiply: out[i] = a[i] * b[i]
-void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
-
 // Sigmoid multiply: out[i] = a[i] * sigmoid(b[i])
 void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 

@@ -19,7 +19,6 @@ struct CommonArgs {
     std::string model_path;
     std::string revision;  // --revision: HuggingFace model revision (branch/tag/commit)
 
-    int device = 0;
     int gpu_layers = -1;  // -1 = all on GPU
     // 8192 for both tools: imp-cli's old default of 256 predates reasoning models, where the
     // think block alone overruns it and the answer returns empty (finish_reason=length).
@@ -35,7 +34,6 @@ struct CommonArgs {
     // not a contract (#1583). Everything human-readable goes to stderr.
     bool json_out = false;
 
-    bool mem_report = false;      // --mem-report: full VRAM attribution table at init
     int vram_budget_mb = 0;       // --vram-budget: hard per-process VRAM cap in MiB (0 = uncapped)
     int min_kv_tokens = 0;        // --min-kv-tokens: floor KV capacity (0 = auto)
     bool no_cuda_graphs = false;  // disable CUDA Graph capture for decode

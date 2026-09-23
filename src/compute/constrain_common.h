@@ -142,22 +142,8 @@ static inline uint16_t classify_token(const std::string& text) {
 // CI actually runs. #1197 lived here precisely because nothing tested it.
 #ifdef __CUDACC__
 
-// Shared GPU kernel: applies category bitmask to logits, setting -FLT_MAX for tokens whose
-// category doesn't match the mask.
-
-__global__ inline void constrain_mask_kernel(float* __restrict__ logits,
-                                             const uint16_t* __restrict__ token_cats,
-                                             const uint16_t* __restrict__ allowed_mask, int vocab_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < vocab_size) {
-        if ((token_cats[idx] & *allowed_mask) == 0) {
-            logits[idx] = -FLT_MAX;
-        }
-    }
-}
-
-// Extended mask kernel with per-token allow (schema constraining): tokens must pass BOTH the
-// category mask AND token_allow when use_token_allow is true.
+// Mask kernel (JSON and schema constraining): tokens must pass the category mask, and
+// token_allow too when use_token_allow is true.
 
 // vocab_size is the LOGITS width (model vocab); n_classified is the tokenizer vocab the
 // constrainer classified. SafeTensors models pad lm_head past n_classified; those padding ids

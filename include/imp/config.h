@@ -10,7 +10,7 @@ extern "C" {
 
 typedef struct {
     // Device
-    int device_id;
+    int device_id;  // must be 0: imp drives one sm_120a device (docs/DESIGN_DECISIONS.md)
 
     // Memory
     size_t kv_cache_max_blocks;  // Max KV cache blocks, 0 = auto

@@ -140,7 +140,7 @@ TEST(JsonConstrainFsmTest, MidDocumentStateAfterNestedArrayClose) {
 }
 
 // ===========================================================================
-// Test 9: GPU mask kernel — constrain_mask_kernel masks invalid tokens
+// Test 9: GPU mask kernel - constrain_mask_allow_kernel (category mask only) masks invalid tokens
 // ===========================================================================
 TEST(JsonConstrainTest, MaskAllowsValidTokens) {
     SKIP_IF_NO_CUDA();
@@ -169,7 +169,7 @@ TEST(JsonConstrainTest, MaskAllowsValidTokens) {
     cudaMemcpy(d_mask, &h_mask, sizeof(uint16_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_logits, h_logits, vocab * sizeof(float), cudaMemcpyHostToDevice);
 
-    constrain_mask_kernel<<<1, vocab>>>(d_logits, d_cats, d_mask, vocab);
+    constrain_mask_allow_kernel<<<1, vocab>>>(d_logits, d_cats, nullptr, d_mask, vocab, vocab, false);
     cudaDeviceSynchronize();
 
     float h_out[vocab];

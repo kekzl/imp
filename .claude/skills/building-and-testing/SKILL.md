@@ -112,7 +112,7 @@ Advisory jobs: `Lint`, `clang-tidy`, `Mock API contract`, `Real API contract (mo
 ## Determinism and quality
 
 - `--set runtime.deterministic=true`: temp=0 reproducibility incl. MoE routing atomics and top-k races; implies `runtime.deterministic_gemm`; promoted process-wide since #542; default OFF. Qwen3.6-35B stays non-deterministic at temp=0 (routing flips); never assert exact output there.
-- 5 `DISABLED_` tests with reasons: 2 determinism boundaries (cross-context GDN, FMHA smem), the rest benches. Do not re-enable.
+- 7 `DISABLED_` tests with reasons: 2 determinism boundaries (cross-context GDN, FMHA smem), the rest benches without assertions. Do not re-enable.
 - `imp-cli --perplexity <file>` is teacher-forced prefill (chunk-aware since #553); use `tools/analysis/ppl_corpus_45k.txt`, not the 199-token `ppl_corpus.txt`.
 - `imp-cli --json`: one JSON document on stdout, logs on stderr (#1715).
 

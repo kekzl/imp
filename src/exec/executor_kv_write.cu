@@ -269,7 +269,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                             static_cast<half*>(base_k), static_cast<half*>(base_v),
                             state.kv_manager->d_residual_widx_ptr(), slot, slot_elems);
                         IMP_CUDA_CHECK_LAUNCH();
-                        // No host advance_residual: ring state lives on device, advanced
+                        // Ring state lives on device, advanced
                         // once per step by advance_residual_state_kernel in forward_logits.
                     }
                 }
@@ -294,7 +294,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                         d_widx, slot_elems);
                     IMP_CUDA_CHECK_LAUNCH();
                 }
-                // No host advance_residual: the ring advances on device once per step via
+                // The ring advances on device once per step via
                 // advance_residual_state_multi_kernel, inside the captured graph. The host
                 // call this replaces ran only at capture time, so replays left the ring where capture found
                 // it.

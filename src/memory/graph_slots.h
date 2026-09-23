@@ -150,7 +150,7 @@ public:
     int num_slots() const { return num_slots_; }
     int free_slots() const;
     // Times acquire() declined. A non-zero count in a steady-state server is
-    // the signal that the caps or the slot count are wrong, so --mem-report
+    // the signal that the caps or the slot count are wrong, so the VRAM audit table
     // and the I2 soak can both see it.
     uint64_t declines() const;
     // Reason breakdown, for the same readers.

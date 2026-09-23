@@ -281,7 +281,8 @@ double bench_cublas(__half* A, __half* B, __half* D, int M, int N, int K, int it
     return (double)ms / iters;
 }
 
-TEST_F(GemmCaptureSm120, BenchVsCublasLt_ProductionShapes) {
+// Manual A/B print, no assertion: run with --gtest_also_run_disabled_tests.
+TEST_F(GemmCaptureSm120, DISABLED_BenchVsCublasLt_ProductionShapes) {
     gemm_init();
 
     // Shapes representative of NVFP4 MoE prefill FP16 GEMMs that hit this kernel

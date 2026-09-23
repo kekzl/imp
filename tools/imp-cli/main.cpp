@@ -165,7 +165,6 @@ int main(int argc, char** argv) {
         sampling.top_k = gen.top_k;
 
     // CLI flags override auto-detection (only when explicitly set)
-    config.device_id = args.device;
     // CLI is single-request — always cap batch size to 1
     config.max_batch_size = 1;
     // max_seq_len: 0 = auto-detect in engine (from model metadata + VRAM)
