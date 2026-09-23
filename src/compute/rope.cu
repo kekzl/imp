@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <algorithm>
 #include <cmath>
 #include "core/pdl_device.cuh"
 
@@ -61,31 +62,15 @@ __device__ __forceinline__ int mrope_position(const MRopeParams& m, int fallback
     return m.positions[static_cast<int64_t>(axis) * m.stride + token_idx];
 }
 
-// --------------------------------------------------------------------------
-// Unified RoPE kernel with YaRN support (FP32 and FP16 via template)
-// --------------------------------------------------------------------------
-template <typename T>
-__global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const int* __restrict__ positions,
-                                    int batch, int seq_len, int n_heads, int n_kv_heads, int head_dim,
-                                    float theta, float inv_scaling, int rope_pairs, bool neox,
-                                    float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-                                    const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
-    using Traits = RopeTraits<T>;
-
-    const int token_idx = blockIdx.x;
-    const int head_idx = blockIdx.y;
-    const int pair_idx = threadIdx.x;
-
-    // PDL (no-op on a plain launch): Q/K/positions are the previous kernels'
-    // outputs; the KV write that follows may be scheduled once we hold them.
-    pdl_wait();
-    pdl_trigger();
-    if (pair_idx >= rope_pairs)
-        return;
-
+// Per (token, pair) rotation angle, moved verbatim out of rope_forward_kernel.
+__device__ __forceinline__ void rope_angle(const MRopeParams& mrope, const int* __restrict__ positions,
+                                           int token_idx, int pair_idx, float theta, float inv_scaling,
+                                           int rope_pairs, float ext_factor, float attn_factor,
+                                           float corr_dim_0, float corr_dim_1,
+                                           const float* __restrict__ longrope_inv_freqs, float& cos_val,
+                                           float& sin_val) {
     const int pos = mrope_position(mrope, positions[token_idx], pair_idx, token_idx);
 
-    float cos_val, sin_val;
     if (longrope_inv_freqs) {
         // Pre-computed effective frequencies (base_freq/divisor already applied in gguf_loader).
         // longrope_inv_freqs[i] = theta^(-2i/hd) / freq_divisor[i], ready to use directly.
@@ -108,6 +93,41 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
         double angle = static_cast<double>(pos) * static_cast<double>(freq);
         rope_sincos(angle, &sin_val, &cos_val);
     }
+}
+
+// --------------------------------------------------------------------------
+// Unified RoPE kernel with YaRN support (FP32 and FP16 via template)
+// --------------------------------------------------------------------------
+template <typename T>
+__global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const int* __restrict__ positions,
+                                    int batch, int seq_len, int n_heads, int n_kv_heads, int head_dim,
+                                    float theta, float inv_scaling, int rope_pairs, bool neox,
+                                    float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
+                                    const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
+    using Traits = RopeTraits<T>;
+
+    // One block per (token, head group): row y == 0 computes each pair's angle once (FP64 pow + sincos, 1/64
+    // rate on GeForce), every row applies it to its heads (was one block per
+    // (token, head): gpt-oss-20b pp4096 669 us per call).
+    __shared__ float2 s_cs[512];
+    const int token_idx = blockIdx.x;
+    const int pair_idx = threadIdx.x;
+
+    // PDL (no-op on a plain launch): Q/K/positions are the previous kernels'
+    // outputs; the KV write that follows may be scheduled once we hold them.
+    pdl_wait();
+    pdl_trigger();
+    if (threadIdx.y == 0 && pair_idx < rope_pairs) {
+        float cos_val, sin_val;
+        rope_angle(mrope, positions, token_idx, pair_idx, theta, inv_scaling, rope_pairs, ext_factor,
+                   attn_factor, corr_dim_0, corr_dim_1, longrope_inv_freqs, cos_val, sin_val);
+        s_cs[pair_idx] = make_float2(cos_val, sin_val);
+    }
+    __syncthreads();
+    if (pair_idx >= rope_pairs)
+        return;
+    const float cos_val = s_cs[pair_idx].x;
+    const float sin_val = s_cs[pair_idx].y;
 
     // NeoX pair layout for partial RoPE: pair=(i, i+rope_pairs), both within the first
     // rope_dim=2*rope_pairs dims. Matches llama.cpp ggml_rope_neox/LLAMA_ROPE_TYPE_IMROPE
@@ -115,23 +135,26 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
     // stay unchanged.
     const int idx0 = neox ? pair_idx : (2 * pair_idx);
     const int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
+    const int max_heads = max(n_heads, n_kv_heads);
 
-    if (head_idx < n_heads) {
-        int64_t base = static_cast<int64_t>(token_idx) * n_heads * head_dim +
-                       static_cast<int64_t>(head_idx) * head_dim;
-        float q0 = Traits::load(Q, base + idx0);
-        float q1 = Traits::load(Q, base + idx1);
-        Traits::store(Q, base + idx0, q0 * cos_val - q1 * sin_val);
-        Traits::store(Q, base + idx1, q0 * sin_val + q1 * cos_val);
-    }
-
-    if (head_idx < n_kv_heads) {
-        int64_t base = static_cast<int64_t>(token_idx) * n_kv_heads * head_dim +
-                       static_cast<int64_t>(head_idx) * head_dim;
-        float k0 = Traits::load(K, base + idx0);
-        float k1 = Traits::load(K, base + idx1);
-        Traits::store(K, base + idx0, k0 * cos_val - k1 * sin_val);
-        Traits::store(K, base + idx1, k0 * sin_val + k1 * cos_val);
+    for (int head_idx = blockIdx.y * blockDim.y + threadIdx.y; head_idx < max_heads;
+         head_idx += gridDim.y * blockDim.y) {
+        if (head_idx < n_heads) {
+            int64_t base = static_cast<int64_t>(token_idx) * n_heads * head_dim +
+                           static_cast<int64_t>(head_idx) * head_dim;
+            float q0 = Traits::load(Q, base + idx0);
+            float q1 = Traits::load(Q, base + idx1);
+            Traits::store(Q, base + idx0, q0 * cos_val - q1 * sin_val);
+            Traits::store(Q, base + idx1, q0 * sin_val + q1 * cos_val);
+        }
+        if (head_idx < n_kv_heads) {
+            int64_t base = static_cast<int64_t>(token_idx) * n_kv_heads * head_dim +
+                           static_cast<int64_t>(head_idx) * head_dim;
+            float k0 = Traits::load(K, base + idx0);
+            float k1 = Traits::load(K, base + idx1);
+            Traits::store(K, base + idx0, k0 * cos_val - k1 * sin_val);
+            Traits::store(K, base + idx1, k0 * sin_val + k1 * cos_val);
+        }
     }
 }
 
@@ -161,10 +184,18 @@ void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, floa
 
     const int effective_rope_dim = (rope_dim > 0) ? rope_dim : head_dim;
     const int pairs = effective_rope_dim / 2;
+    if (pairs == 0)
+        return;
     const int block_x = (pairs <= 512) ? pairs : 512;
 
-    dim3 grid(total_tokens, max_heads);
-    dim3 block(block_x);
+    // Rows cover the heads (256 threads, at most max_heads rows). Short batches (decode) spread
+    // the heads over grid.y as well, >= 340 blocks: one block for all 64 gpt-oss heads at M = 1
+    // cost tg128 -0.9 %; prefill keeps one block per token, the angle computed once.
+    const int block_y = std::max(1, std::min(max_heads, 256 / block_x));
+    const int head_blocks_max = (max_heads + block_y - 1) / block_y;
+    const int head_blocks = std::max(1, std::min(head_blocks_max, (340 + total_tokens - 1) / total_tokens));
+    dim3 grid(total_tokens, head_blocks);
+    dim3 block(block_x, block_y);
 
     const float inv_scaling = 1.0f / scaling;
     float cd0 = 0.0f, cd1 = 0.0f;

@@ -1,4 +1,5 @@
 #include "compute/ssm.h"
+#include "compute/ssm_scan_reg.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -630,31 +631,31 @@ __global__ void ssm_scan_kernel(
     }
 }
 
-static void ssm_scan_launch(const half* x, const half* B, const half* C, const half* dt, const float* A_log,
-                            const float* D, const float* dt_bias, void* h_state, half* y, const half* z,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            QType h_dtype, cudaStream_t stream, const int* d_real_n = nullptr,
-                            void* h_snap = nullptr, const int* d_snap_n = nullptr) {
-    // Pick s_tiles to maximize thread count per block (power of 2, up to 1024 threads)
+// Legacy kernel's s-tiling: largest power of 2 <= min(state_size, 1024 / head_dim).
+static int ssm_scan_s_tiles(int head_dim_ssm, int state_size) {
     int hd = std::max(head_dim_ssm, 1);
     int max_s_tiles = std::min(state_size, 1024 / hd);
     int s_tiles = 1;
     while (s_tiles * 2 <= max_s_tiles)
         s_tiles *= 2;
+    return s_tiles;
+}
 
+void ssm_scan_legacy_launch(const SsmScanArgs& a, bool fp16) {
+    const int s_tiles = ssm_scan_s_tiles(a.head_dim_ssm, a.state_size);
+    int hd = std::max(a.head_dim_ssm, 1);
     int threads = hd * s_tiles;
     size_t smem_bytes = (s_tiles > 1) ? static_cast<size_t>(hd) * s_tiles * sizeof(float) : 0;
+    bool fused = (a.z != nullptr);
 
-    bool fp16 = (h_dtype == QType::F16);
-    bool fused = (z != nullptr);
-
-#define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                              \
-    do {                                                                                               \
-        ssm_scan_kernel<H_FP16_V, FUSE_V>                                                              \
-            <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z,  \
-                                                       n_tokens, n_heads, head_dim_ssm, state_size,    \
-                                                       n_groups, s_tiles, d_real_n, h_snap, d_snap_n); \
-        IMP_CUDA_CHECK_LAUNCH();                                                                       \
+#define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                                \
+    do {                                                                                                 \
+        ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                \
+            <<<a.n_heads, threads, smem_bytes, a.stream>>>(a.x, a.B, a.C, a.dt, a.A_log, a.D, a.dt_bias, \
+                                                           a.h_state, a.y, a.z, a.n_tokens, a.n_heads,   \
+                                                           a.head_dim_ssm, a.state_size, a.n_groups,     \
+                                                           s_tiles, a.d_real_n, a.h_snap, a.d_snap_n);   \
+        IMP_CUDA_CHECK_LAUNCH();                                                                         \
     } while (0)
 
     if (fp16) {
@@ -669,6 +670,19 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C, const h
             SSM_SCAN_LAUNCH(false, false);
     }
 #undef SSM_SCAN_LAUNCH
+}
+
+static void ssm_scan_launch(const half* x, const half* B, const half* C, const half* dt, const float* A_log,
+                            const float* D, const float* dt_bias, void* h_state, half* y, const half* z,
+                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            QType h_dtype, cudaStream_t stream, const int* d_real_n = nullptr,
+                            void* h_snap = nullptr, const int* d_snap_n = nullptr) {
+    const SsmScanArgs a{x,      B,        C,        dt,      A_log,        D,          dt_bias,  h_state,
+                        y,      z,        n_tokens, n_heads, head_dim_ssm, state_size, n_groups, d_real_n,
+                        h_snap, d_snap_n, stream};
+    const bool fp16 = (h_dtype == QType::F16);
+    if (!ssm_scan_reg_launch(a, ssm_scan_s_tiles(head_dim_ssm, state_size), fp16))
+        ssm_scan_legacy_launch(a, fp16);
 }
 
 void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt, const Tensor& A_log,

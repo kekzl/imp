@@ -292,7 +292,10 @@ def main():
     # hands it, which is the configuration where passing the constant cap changed the order.
     # 1138 -> 1139: QsaIndexer.SixteenRowGqaSplitKMatchesGqaKernel (test-attention): 16 rows x
     # 24/2 heads engage split-K instead of the 32-CTA GQA kernel, output within 2e-3.
-    PINNED = 1122  # +1 SchemaConstrainTest.XmlToolCallEnumValueConstrained (needs CUDA for apply_mask)
+    # 1121 -> 1122: SchemaConstrainTest.XmlToolCallEnumValueConstrained (needs CUDA for apply_mask).
+    # 1122 -> 1125: SSMScanTest.{RegisterScanBitIdenticalToLegacy,RegisterScanRefusesUnsupportedShape,
+    # RegisterScanMatchesDoubleReference} (test-moe-gdn): register Mamba2 scan vs the legacy kernel.
+    PINNED = 1125
 
     text = CMAKE.read_text()
     mods = module_sources(text)
