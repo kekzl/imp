@@ -31,7 +31,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
                                            const int8_t* __restrict__ B,
                                            const __half* __restrict__ Bsc, int8_t (*sA)[kRow],
                                            int8_t (*sB)[kRow], __half (*sAsc)[2],
-                                           float (*sArs)[2], __half (*sBsc)[2][2], int base_m,
+                                           float (*sArs)[2], __half (*sBsc)[kBN][2], int base_m,
                                            int M, int K, int subs, int k_base,
                                            int base_n_rows) {
 #pragma unroll
@@ -58,9 +58,11 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
             cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 #pragma unroll
-    for (int i = tid; i < kBN; i += kThreads) {
-        cp_async_ca_8(&sBsc[i][0][0], Bsc + (static_cast<size_t>(i) * subs + kb0) * 2,
-                      (base_n_rows < 0) || (i < base_n_rows));
+    for (int i = tid; i < kBN * 2; i += kThreads) {
+        // kb-major [kb][n][2]: one fragment's two columns read as one 8-B word
+        const int n = i >> 1, kb = i & 1;
+        cp_async_ca_4(&sBsc[kb][n][0], Bsc + (static_cast<size_t>(n) * subs + kb0 + kb) * 2,
+                      (base_n_rows < 0) || (n < base_n_rows));
     }
 }
 
@@ -122,7 +124,7 @@ __global__ void __launch_bounds__(kThreads)
     __shared__ int8_t sB[kStages][kBN][kRow];
     __shared__ __half sAsc[kStages][BM][2];
     __shared__ float sArs[kStages][BM][2];
-    __shared__ __half sBsc[kStages][kBN][2][2];
+    __shared__ __half sBsc[kStages][2][kBN][2];
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -188,8 +190,9 @@ __global__ void __launch_bounds__(kThreads)
                 const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk + 16]);
                 // c0,c1 = rows (rl) cols (cl*2, cl*2+1); c2,c3 = rows (rl+8)
                 const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
-                const __half2 ab_lo = *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo][kb][0]);
-                const __half2 ab_hi = *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo + 1][kb][0]);
+                const uint2 ab = *reinterpret_cast<const uint2*>(&sBsc[stage][kb][ncol_lo][0]);
+                const __half2 ab_lo = *reinterpret_cast<const __half2*>(&ab.x);
+                const __half2 ab_hi = *reinterpret_cast<const __half2*>(&ab.y);
                 const float al = __half2float(__low2half(ab_lo));
                 const float bl = __half2float(__high2half(ab_lo));
                 const float ah = __half2float(__low2half(ab_hi));
