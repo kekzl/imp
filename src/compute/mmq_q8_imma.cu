@@ -412,11 +412,22 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         }
     }
 
+    // Dense grid under half the SMs (k/v projections: 32 CTAs at M=512, N=1024): the BM=32 tile
+    // gives 4x the CTAs; each output keeps its k order, so the result is bit-identical.
+    static const int n_sms = [] {
+        int dev = 0, v = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&v, cudaDevAttrMultiProcessorCount, dev);
+        return v;
+    }();
+    const bool dense_small_grid =
+        d_offsets == nullptr && beta == 0.0f && static_cast<int>(grid.x * grid.y) * 2 < n_sms;
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
-    if (small_m) {
+    if (small_m || dense_small_grid) {
+        const dim3 g32(grid.x, (grid_m_rows + 31) / 32, ne);
         mmq_imma_kernel<32, false, false>
-            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
+            <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                           out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (beta == 1.0f) {
         mmq_imma_kernel<128, true, false>
