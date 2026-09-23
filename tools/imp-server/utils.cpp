@@ -691,7 +691,7 @@ ChannelSegments split_channel_segments(const std::string& text) {
     return out;
 }
 
-ChannelSegments split_harmony_channels(const std::string& text) {
+ChannelSegments split_harmony_channels(const std::string& text, bool starts_in_final) {
     // gpt-oss Harmony output: "<|channel|>analysis<|message|>...<|end|><|start|>assistant<|channel|>
     // final<|message|>..."; analysis/commentary -> reasoning_content, final -> content, all control
     // markup and <|start|>role plumbing stripped.
@@ -703,10 +703,10 @@ ChannelSegments split_harmony_channels(const std::string& text) {
     static const std::string CALL = "<|call|>";
 
     ChannelSegments out;
-    std::string cur;        // current channel name; empty = no active channel
-    std::string recipient;  // "functions.NAME" from the channel header, if any
-    std::string tool_body;  // body of a call addressed to a recipient
-    bool in_msg = false;
+    std::string cur = starts_in_final ? "final" : "";  // current channel name; empty = no active channel
+    std::string recipient;                             // "functions.NAME" from the channel header, if any
+    std::string tool_body;                             // body of a call addressed to a recipient
+    bool in_msg = starts_in_final;
     const size_t n = text.size();
     size_t i = 0;
     auto at = [&](const std::string& m) { return text.compare(i, m.size(), m) == 0; };

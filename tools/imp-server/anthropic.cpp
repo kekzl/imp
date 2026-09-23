@@ -548,8 +548,13 @@ std::string thinking_signature(const std::string& thinking) {
 }
 
 bool thinking_display_omitted(const json& anth_body) {
+    // Opt-in dialect (#1541): no enabled/adaptive `thinking` = no thinking block, also for a model
+    // that reasons regardless of enable_thinking (gpt-oss Harmony always opens the analysis channel).
     if (!anth_body.contains("thinking") || !anth_body["thinking"].is_object())
-        return false;
+        return true;
+    const std::string t = anth_body["thinking"].value("type", "");
+    if (t != "enabled" && t != "adaptive")
+        return true;
     return anth_body["thinking"].value("display", "") == "omitted";
 }
 

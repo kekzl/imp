@@ -171,6 +171,10 @@ private:
     int32_t hm_channel_id_ = -1;  // <|channel|>
     int32_t hm_return_id_ = -1;   // <|return|>  (stop)
     int32_t hm_call_id_ = -1;     // <|call|>    (stop, tool call)
+    // suppress_thinking on Harmony: the generation prompt ends on <|channel|>final<|message|>
+    // (no analysis channel), so a whole-reply constraint lands in content.
+    void harmony_open_final_(const Tokenizer& tok, std::vector<int32_t>& tokens,
+                             bool suppress_thinking) const;
 
     // Vision tokens (Gemma-3)
     int32_t boi_id_ = -1;             // <start_of_image>

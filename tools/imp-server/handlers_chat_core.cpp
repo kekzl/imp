@@ -326,6 +326,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // which the reconcile step below would then read as reasoning that never closes.
     ctx.snap.suppress_thinking = imp::server::should_stamp_thinking_off(
         ctx.snap.is_think_model, ctx.snap.enable_thinking, budget_disables_thinking, want_thinking);
+    // Harmony: suppress_thinking makes the template end on <|channel|>final<|message|>.
+    ctx.snap.suppress_thinking = ctx.snap.suppress_thinking || harmony_final_only(ctx);
     ctx.snap.reasoning_effort = ctx.params.reasoning_effort;
 
     // If thinking IS enabled, remove the provisional <think> stop token.
@@ -886,7 +888,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             harmony_raw = content;
             // gpt-oss Harmony: splits <|channel|>analysis|final<|message|>... into reasoning_content
             // (analysis) and content (final); without this the raw markup leaks verbatim (#760).
-            auto segs = split_harmony_channels(content);
+            auto segs = split_harmony_channels(content, /*starts_in_final=*/ctx.snap.suppress_thinking);
             content = std::move(segs.content);
             if (state.default_args.reasoning_format != "none")
                 reasoning_content = std::move(segs.reasoning);

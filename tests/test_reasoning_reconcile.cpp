@@ -117,3 +117,18 @@ TEST(StructuredOutputThinking, NeverStampsWhenThinkingIsActuallyOn) {
     // Not a reasoning model at all: nothing to say either way.
     EXPECT_FALSE(should_stamp_thinking_off(/*is_think_model=*/false, false, true, false));
 }
+
+// gpt-oss reasons in the analysis channel regardless of enable_thinking: a whole-reply constraint
+// with no channel header landed nowhere and content came back empty (degen_suite constrained 4/4).
+TEST(StructuredOutputThinking, HarmonyConstraintSkipsTheAnalysisChannel) {
+    using imp::server::harmony_skip_analysis;
+    EXPECT_TRUE(harmony_skip_analysis(true, /*json_mode=*/true, false, false, false, false));
+    EXPECT_TRUE(harmony_skip_analysis(true, false, false, /*schema=*/true, false, false));
+    EXPECT_TRUE(harmony_skip_analysis(true, false, false, false, /*regex=*/true, false));
+    EXPECT_TRUE(harmony_skip_analysis(true, false, false, false, false, /*grammar=*/true));
+    // Tool calls ride the commentary channel; an unconstrained reply keeps its reasoning.
+    EXPECT_FALSE(harmony_skip_analysis(true, true, /*has_tools=*/true, false, false, false));
+    EXPECT_FALSE(harmony_skip_analysis(true, false, false, false, false, false));
+    // Not Harmony: the <think> families go through should_stamp_thinking_off.
+    EXPECT_FALSE(harmony_skip_analysis(false, true, false, false, false, false));
+}

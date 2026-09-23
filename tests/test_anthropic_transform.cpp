@@ -959,7 +959,11 @@ TEST(AnthropicThinking, DisplayOmittedIsReadOffTheRequest) {
     EXPECT_TRUE(thinking_display_omitted(thinking_req({{"type", "enabled"}, {"display", "omitted"}})));
     EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "enabled"}, {"display", "summarized"}})));
     EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "enabled"}})));
-    EXPECT_FALSE(thinking_display_omitted(json{{"model", "m"}}));
+    EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "adaptive"}})));
+    // Not opted in: a model that reasons anyway (gpt-oss) must not return a thinking block.
+    EXPECT_TRUE(thinking_display_omitted(json{{"model", "m"}}));
+    EXPECT_TRUE(thinking_display_omitted(thinking_req({{"type", "disabled"}})));
+    EXPECT_TRUE(thinking_display_omitted(thinking_req({{"type", "bogus"}})));
 }
 
 TEST(AnthropicThinking, OmittedDropsTheThinkingBlock) {

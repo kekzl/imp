@@ -1000,7 +1000,17 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         // (<|channel|>analysis<|message|>, no <think> opener for the scan
         // above). Seed think state so answer-headroom counts reasoning from the
         // start and force-closes the channel (<|end|>) before max_tokens exhausts.
-        if (harmony_reasoning_) {
+        // A prompt ending on the final-channel opener (ChatTemplate::harmony_open_final_) has no
+        // analysis channel: seeding it would force <|end|>...final<|message|> into the answer at the budget.
+        const auto opens_final = [&] {
+            if (!ptok)
+                return false;
+            const auto op = ptok->encode("<|channel|>final<|message|>");
+            const auto& in = req->input_tokens;
+            return !op.empty() && in.size() >= op.size() &&
+                   std::equal(op.begin(), op.end(), in.end() - op.size());
+        };
+        if (harmony_reasoning_ && !opens_final()) {
             req->started_in_think = true;
             req->in_think_block = true;
         }

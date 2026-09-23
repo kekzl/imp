@@ -30,9 +30,9 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
 // proving only that it came back unedited.
 std::string thinking_signature(const std::string& thinking);
 
-// True when the request asked for `thinking.display: "omitted"`. Display is not
-// a generation setting, so it is read off the request on the way out rather
-// than transformed into the OpenAI body.
+// True when the request asked for `thinking.display: "omitted"` or did not opt into thinking
+// (enabled/adaptive). Display is not a generation setting, so it is read off the request on the
+// way out rather than transformed into the OpenAI body.
 bool thinking_display_omitted(const json& anth_body);
 
 // OpenAI finish_reason -> Anthropic stop_reason, in one place: the streaming and

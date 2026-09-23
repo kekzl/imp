@@ -250,7 +250,9 @@ ChannelSegments split_channel_segments(const std::string& text);
 // split_harmony_channels (gpt-oss): parses "<|channel|>NAME<|message|>BODY<|end|>" blocks (and
 // the <|start|>role plumbing between them) into reasoning (analysis/commentary) vs content
 // (final). All Harmony markup and role names stripped, each segment trimmed.
-ChannelSegments split_harmony_channels(const std::string& text);
+// starts_in_final: the prompt ended on <|channel|>final<|message|> (constrained request), so the
+// text opens inside the final channel without a header.
+ChannelSegments split_harmony_channels(const std::string& text, bool starts_in_final = false);
 
 // Effective max output tokens for an OpenAI-shaped body: current OpenAI SDKs
 // send "max_completion_tokens" (max_tokens is deprecated on chat/completions);
