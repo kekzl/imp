@@ -12,8 +12,8 @@ namespace imp {
 namespace {
 
 // Q6_K RAW-read kernel (per-16 scales, symmetric, no beta/rowsum term).
-// 210-B super-blocks are only 2-aligned; one-time 224-B-stride repack (+6.7% bytes)
-// restores 16-B alignment for cp.async.
+// 210-B super-blocks are only 2-aligned: UNPACKED=false reads a one-time 224-B-stride repack
+// (+6.7% bytes, cp.async), UNPACKED=true the GGUF blocks in place (register staging below).
 // Per-16 scale vs k32 MMA: HALF-MMA SPLIT, issue m16n8k32 twice as (b0,0) and (0,b1);
 // zeroed operand yields the 16-wide partial sum with its own alpha=d*sc16 (same int-op
 // count as a k16 MMA pair).
@@ -21,15 +21,11 @@ namespace {
 // j+1 -> group g=j>>2, quads (j%4, j%4+1); pair shares ql bytes [g*64..+63] (quad&1
 // selects 32-B half, quad>=2 the nibble) and qh bytes [g*32..+31] (shift quad*2).
 
-template <int BM>
-__device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict__ A,
-                                               const __half* __restrict__ Asc,
-                                               const uint8_t* __restrict__ Wq6k, int base_n,
-                                               int sblk_count, int8_t (*sA)[kRow],
-                                               uint8_t (*sQl)[kQlRow], uint8_t (*sQh)[kQhRow],
-                                               uint8_t (*sScd)[8], __half (*sAsc)[2], int base_m,
-                                               int M, int K, int subs, int k_base,
-                                               int base_n_rows) {
+template <int BM, bool LOAD_B = true>
+__device__ __forceinline__ void load_kstep_q6k(
+    int tid, const int8_t* __restrict__ A, const __half* __restrict__ Asc, const uint8_t* __restrict__ Wq6k,
+    int base_n, int sblk_count, int8_t (*sA)[kRow], uint8_t (*sQl)[kQlRow], uint8_t (*sQh)[kQhRow],
+    uint8_t (*sScd)[8], __half (*sAsc)[2], int base_m, int M, int K, int subs, int k_base, int base_n_rows) {
 #pragma unroll
     for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
@@ -43,7 +39,7 @@ __device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict
     const int j = (2 * ks) & 7;   // even sub-block of the pair
     const int g = j >> 2;         // 128-element group
 #pragma unroll
-    for (int i = tid; i < kBN * 8; i += kThreads) {
+    for (int i = tid; LOAD_B && i < kBN * 8; i += kThreads) {
         const int row = i >> 3;
         const int part = i & 7;
         const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
@@ -68,14 +64,84 @@ __device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict
     }
 }
 
+// UNPACKED staging of the GGUF 210-B blocks (2-aligned, so no cp.async): per (row, part) task,
+// part 0-3 = 16-B ql chunks, 4-5 = 16-B qh chunks, 6 = the 4 per-16 scales + d. Two halves of the
+// tasks are in flight at a time (one per kb step of the MMA loop): all four would hold 24 registers
+// across it and spill BM=128 (255 regs + 40 B stack).
+constexpr int kQ6Gguf = 210;
+constexpr int kUnpParts = 7;
+constexpr int kUnpTasks = (kBN * kUnpParts + kThreads - 1) / kThreads;
+constexpr int kUnpHalf = kUnpTasks / 2;
+static_assert(kUnpTasks == 2 * kUnpHalf, "unpacked B tasks split into two halves");
+
+struct Q6kUnpackedB {
+    uint32_t w[kUnpHalf][5];
+    uint32_t shifts;  // byte shift (0 or 16) of task i at bits [8i, 8i+8)
+};
+
+// Offsets are multiples of 4, so the shift is the 210-B block's 4-B misalignment (0 or 2 bytes).
+template <int T0>
+__device__ __forceinline__ void fetch_b_q6k_unpacked(Q6kUnpackedB& rb, int tid, const uint8_t* __restrict__ W,
+                                                     int base_n, int sblk_count, int ks, int base_n_rows) {
+    const int sblk = ks >> 2;
+    const int j = (2 * ks) & 7;
+    const int g = j >> 2;
+    rb.shifts = 0;
+#pragma unroll
+    for (int i = 0; i < kUnpHalf; ++i) {
+        const int t = tid + (T0 + i) * kThreads;
+        const int row = t / kUnpParts;
+        const int part = t % kUnpParts;
+        const bool valid = t < kBN * kUnpParts && ((base_n_rows < 0) || (row < base_n_rows));
+        const uint8_t* blk = W + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * kQ6Gguf;
+        const int off = part < 4   ? g * 64 + part * 16
+                        : part < 6 ? 128 + g * 32 + (part - 4) * 16
+                                   : 192 + 2 * j;
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(blk) + off;
+        rb.shifts |= (static_cast<uint32_t>(addr & 3u) * 8u) << (8 * i);
+        const uint32_t* wp = reinterpret_cast<const uint32_t*>(addr & ~static_cast<uintptr_t>(3));
+        const int nw = part < 6 ? 5 : 2;
+#pragma unroll
+        for (int k = 0; k < 5; ++k)
+            rb.w[i][k] = (valid && k < nw) ? __ldg(wp + k) : 0u;
+        if (part == 6 && valid)  // d: 2-B load, an aligned word would read past the last block
+            rb.w[i][2] = __ldg(reinterpret_cast<const unsigned short*>(blk + 208));
+    }
+}
+
+template <int T0>
+__device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, int tid, uint8_t (*sQl)[kQlRow],
+                                                      uint8_t (*sQh)[kQhRow], uint8_t (*sScd)[8]) {
+#pragma unroll
+    for (int i = 0; i < kUnpHalf; ++i) {
+        const int t = tid + (T0 + i) * kThreads;
+        if (t >= kBN * kUnpParts)
+            break;
+        const int row = t / kUnpParts;
+        const int part = t % kUnpParts;
+        const uint32_t s = (rb.shifts >> (8 * i)) & 0xFFu;
+        if (part < 6) {
+            uint4 v;
+            v.x = __funnelshift_r(rb.w[i][0], rb.w[i][1], s);
+            v.y = __funnelshift_r(rb.w[i][1], rb.w[i][2], s);
+            v.z = __funnelshift_r(rb.w[i][2], rb.w[i][3], s);
+            v.w = __funnelshift_r(rb.w[i][3], rb.w[i][4], s);
+            uint8_t* dst = part < 4 ? &sQl[row][part * 16] : &sQh[row][(part - 4) * 16];
+            *reinterpret_cast<uint4*>(dst) = v;
+        } else {
+            *reinterpret_cast<uint32_t*>(&sScd[row][0]) = __funnelshift_r(rb.w[i][0], rb.w[i][1], s);
+            *reinterpret_cast<uint32_t*>(&sScd[row][4]) = rb.w[i][2];  // d + 2 zero pad bytes
+        }
+    }
+}
+
 }  // namespace
 
-template <int BM, bool BETA1>
-__global__ void __launch_bounds__(kThreads)
-    mmq_imma_q6k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
-                            const uint8_t* __restrict__ Wq6k, __half* __restrict__ out, int M,
-                            int N, int K, const int32_t* __restrict__ expert_offsets,
-                            size_t w_stride_blocks) {
+template <int BM, bool BETA1, bool UNPACKED>
+__global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
+    const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const uint8_t* __restrict__ Wq6k,
+    __half* __restrict__ out, int M, int N, int K, const int32_t* __restrict__ expert_offsets,
+    size_t w_stride_blocks) {
     constexpr int kWM = (BM == 128) ? 4 : 2;
     constexpr int kWN = (BM == 128) ? 2 : 4;
     constexpr int kTileM = BM / kWM;
@@ -101,7 +167,7 @@ __global__ void __launch_bounds__(kThreads)
     const int sblk_count = K / 256;
     const int8_t* A = X_s8 + row_off * K;
     const __half* Asc = x_scale + row_off * subs;
-    const uint8_t* W = Wq6k + static_cast<size_t>(e) * w_stride_blocks * kQ6Stride;
+    const uint8_t* W = Wq6k + static_cast<size_t>(e) * w_stride_blocks * (UNPACKED ? kQ6Gguf : kQ6Stride);
     __half* C = out + row_off * N;
 
     const int tid = threadIdx.x;
@@ -140,17 +206,26 @@ __global__ void __launch_bounds__(kThreads)
             acc[i][j2][0] = acc[i][j2][1] = acc[i][j2][2] = acc[i][j2][3] = 0.0f;
 
     const int ksteps = K / kBK;
-    load_kstep_q6k<BM>(tid, A, Asc, W, base_n, sblk_count, sA(0), sQl(0), sQh(0), sScd(0),
-                       sAsc(0), base_m, rows, K, subs, 0, n_rem);
+    load_kstep_q6k<BM, !UNPACKED>(tid, A, Asc, W, base_n, sblk_count, sA(0), sQl(0), sQh(0), sScd(0), sAsc(0),
+                                  base_m, rows, K, subs, 0, n_rem);
     cp_async_commit();
+    Q6kUnpackedB rb;
+    if constexpr (UNPACKED) {
+        fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, 0, n_rem);
+        commit_b_q6k_unpacked<0>(rb, tid, sQl(0), sQh(0), sScd(0));
+        fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, 0, n_rem);
+        commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(0), sQh(0), sScd(0));
+    }
 
     for (int ks = 0; ks < ksteps; ++ks) {
         const int stage = ks & 1;
         if (ks + 1 < ksteps) {
             const int nstage = (ks + 1) & 1;
-            load_kstep_q6k<BM>(tid, A, Asc, W, base_n, sblk_count, sA(nstage), sQl(nstage),
-                               sQh(nstage), sScd(nstage), sAsc(nstage), base_m, rows, K, subs,
-                               (ks + 1) * kBK, n_rem);
+            load_kstep_q6k<BM, !UNPACKED>(tid, A, Asc, W, base_n, sblk_count, sA(nstage), sQl(nstage),
+                                          sQh(nstage), sScd(nstage), sAsc(nstage), base_m, rows, K, subs,
+                                          (ks + 1) * kBK, n_rem);
+            if constexpr (UNPACKED)
+                fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -240,6 +315,18 @@ __global__ void __launch_bounds__(kThreads)
                                                    ah2 * static_cast<float>(q3));
                 }
             }
+            // nstage was last read in iteration ks-1, whose trailing barrier orders these stores after it.
+            if constexpr (UNPACKED) {
+                if (ks + 1 < ksteps) {
+                    const int ns = (ks + 1) & 1;
+                    if (kb == 0) {
+                        commit_b_q6k_unpacked<0>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
+                        fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
+                    } else {
+                        commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
+                    }
+                }
+            }
         }
         __syncthreads();
     }
@@ -267,14 +354,16 @@ __global__ void __launch_bounds__(kThreads)
 }
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
-template __global__ void mmq_imma_q6k_raw_kernel<32, false>(const int8_t*, const __half*,
-                                                           const uint8_t*, __half*, int, int, int,
-                                                           const int32_t*, size_t);
-template __global__ void mmq_imma_q6k_raw_kernel<128, true>(const int8_t*, const __half*,
-                                                           const uint8_t*, __half*, int, int, int,
-                                                           const int32_t*, size_t);
-template __global__ void mmq_imma_q6k_raw_kernel<128, false>(const int8_t*, const __half*,
-                                                            const uint8_t*, __half*, int, int, int,
-                                                            const int32_t*, size_t);
+#define IMP_Q6K_RAW_INST(BM, BETA1, UNP)                                                                     \
+    template __global__ void mmq_imma_q6k_raw_kernel<BM, BETA1, UNP>(const int8_t*, const __half*,           \
+                                                                     const uint8_t*, __half*, int, int, int, \
+                                                                     const int32_t*, size_t);
+IMP_Q6K_RAW_INST(32, false, false)
+IMP_Q6K_RAW_INST(128, true, false)
+IMP_Q6K_RAW_INST(128, false, false)
+IMP_Q6K_RAW_INST(32, false, true)
+IMP_Q6K_RAW_INST(128, true, true)
+IMP_Q6K_RAW_INST(128, false, true)
+#undef IMP_Q6K_RAW_INST
 
 }  // namespace imp

@@ -299,9 +299,9 @@ inline int q6_element(const uint8_t* bp, int i) {
 }
 }  // namespace q6k_helpers
 
-TEST(MmqQ8Imma, Q6KDenseNRMSE) {
+// raw = GGUF 210-B blocks read in place; odd K/256 alternates the block 4-B parity row to row.
+void run_q6k_dense(int M, int N, int K, bool raw, std::vector<__half>* keep = nullptr) {
     using namespace q6k_helpers;
-    const int M = 128, N = 128, K = 512;
     std::vector<uint8_t> W;
     gen_q6k(W, N, K, 311);
     std::vector<__half> x(static_cast<size_t>(M) * K);
@@ -315,7 +315,7 @@ TEST(MmqQ8Imma, Q6KDenseNRMSE) {
     ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(M) * N * 2), cudaSuccess);
     cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
-    ASSERT_TRUE(mmq_q6k_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr));
+    ASSERT_TRUE(mmq_q6k_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr, 0.0f, raw));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<__half> out(static_cast<size_t>(M) * N);
     cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
@@ -341,9 +341,23 @@ TEST(MmqQ8Imma, Q6KDenseNRMSE) {
         }
     }
     const double nrmse = std::sqrt(err2 / std::max(ref2, 1e-30));
-    EXPECT_LT(nrmse, 2e-2) << "Q6K dense NRMSE";
+    EXPECT_LT(nrmse, 2e-2) << "Q6K dense NRMSE raw=" << raw;
     cudaFree(d_w); cudaFree(d_x); cudaFree(d_out);
     mmq_q8_imma_release_all();
+    if (keep)
+        *keep = out;
+}
+
+TEST(MmqQ8Imma, Q6KDenseNRMSE) { run_q6k_dense(128, 128, 512, false); }
+// Raw and repack stage the same smem bytes: outputs must be bit-identical.
+TEST(MmqQ8Imma, Q6KRawMatchesRepackBitwise) {
+    for (const int K : {512, 768}) {
+        std::vector<__half> rep, raw;
+        run_q6k_dense(200, 192, K, false, &rep);
+        run_q6k_dense(200, 192, K, true, &raw);
+        ASSERT_EQ(rep.size(), raw.size());
+        EXPECT_EQ(std::memcmp(rep.data(), raw.data(), rep.size() * sizeof(__half)), 0) << "K=" << K;
+    }
 }
 
 // ---- Q5_1 MoE grouped — NRMSE vs dequant reference (asymmetric β-form) ----

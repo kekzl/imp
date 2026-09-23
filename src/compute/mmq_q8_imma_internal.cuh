@@ -63,12 +63,12 @@ __global__ void mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8,
                                         const int32_t* __restrict__ expert_offsets,
                                         size_t w_stride_blocks);
 
-template <int BM, bool BETA1>
-__global__ void mmq_imma_q6k_raw_kernel(const int8_t* __restrict__ X_s8,
-                                        const __half* __restrict__ x_scale,
-                                        const uint8_t* __restrict__ Wq6k, __half* __restrict__ out,
-                                        int M, int N, int K,
-                                        const int32_t* __restrict__ expert_offsets,
+// UNPACKED: reads the GGUF 210-B blocks in place (aligned words + funnel shift, no repack copy);
+// false reads the 224-B repack (cp.async).
+template <int BM, bool BETA1, bool UNPACKED>
+__global__ void mmq_imma_q6k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                                        const uint8_t* __restrict__ Wq6k, __half* __restrict__ out, int M,
+                                        int N, int K, const int32_t* __restrict__ expert_offsets,
                                         size_t w_stride_blocks);
 
 template <int BM, bool BETA1>

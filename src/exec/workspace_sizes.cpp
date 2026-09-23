@@ -143,7 +143,8 @@ ExecShape exec_shape_of(const Model& model) {
         }
         for (const auto* w : {&L.expert_up_packed, &L.expert_down_packed, &L.expert_gate_packed}) {
             if (w->data && w->ndim >= 3 &&
-                (w->qtype == QType::Q8_0 || w->qtype == QType::Q4_K || w->qtype == QType::Q6_K))
+                (w->qtype == QType::Q8_0 || w->qtype == QType::Q4_K || w->qtype == QType::Q6_K ||
+                 w->qtype == QType::Q5_K || w->qtype == QType::Q5_1))
                 s.imma_expert_max_k = std::max(s.imma_expert_max_k, static_cast<int>(w->shape[2]));
         }
         if (L.expert_down_packed.data && L.expert_down_packed.ndim >= 3) {
