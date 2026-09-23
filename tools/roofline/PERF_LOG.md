@@ -10,6 +10,22 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · dp4a decode GEMVs: word loads for Q6_K and the Q8_1 activations
+
+[PROV: commit=b71c150e+branch perf/q6k-gemv-loads date=2026-09-23 hw=RTX5090
+ncu=ncu_cell.sh q4k-gemma3-12b tg128 full kernel=inventory.sh BIN_DIR/BIN e2e=binary-copy A/B, 5 pairs]
+
+| gemma-3-12b Q4_K_M, tg128 | Before | After |
+|---|---|---|
+| `gemv_dp4a_kpar<Q6_K>` (down) | 46.1 us; ncu DRAM active 61.9 %, stall long_scoreboard; SASS 96 `LDG.E.U8` per 8 `IDP.4A` | 33.8 us; 19 `LDG.E` + 2 `LDG.E.128` |
+| `gemv_dp4a_kpar_fp32<Q6_K>` (LM head) | 653.6 us | 512.7 us |
+| `gemv_dp4a_kpar_gate_up<Q4_K>` / `kpar<Q4_K>` | 46.6 / 11.3 us | 41.2 / 9.6 us |
+| `bench:tg` wall per rep (nsys) | 954.81 ms | 840.37 ms |
+| e2e tg (5 pairs, all same sign) | 135.40 tok/s | 155.83 (+15.1 %) |
+
+Causes: the Q6_K 210-B blocks are only 2-aligned, so `memcpy(&u32, ql + k, 4)` compiled to byte loads (now 9 aligned words + funnel shift per 32-B run; word 9 stays inside the block), and `memcpy(xi, q8_1[b].qs, 32)` into an int array compiled to 32 byte loads although `block_q8_1` is 16-B aligned for 2x LDG.128 (#598).
+Check: `GgufRef.Q6_K_GemvDp4a` red with the funnel shift forced to 0; registers 40, 0 stack.
+
 ## 2026-09-23 · gpt-oss decode attention on the F16 multitok kernel (hd=64)
 
 [PROV: commit=origin/main+branch perf/q4k-imma-alu date=2026-09-23 hw=RTX5090
