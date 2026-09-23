@@ -307,7 +307,9 @@ def main():
     # decode at hd=64 with learned sinks vs fp64, split-K and single-split.
     # 1131 -> 1132: GgufRef.Q5_1_GemvDp4aMoe (test-quant): Q5_1 dp4a MoE decode vs the fp64 ggml
     # reference; red on main (interleaved nibble read, rms 0.297).
-    PINNED = 1132
+    # 1132 -> 1134: GgufRef.{Q5_1,Q5_K}_GemvMmvq (test-quant): the two MMVQ launchers without an fp64
+    # reference; run_mmvq_gemv builds every format through format_spec.
+    PINNED = 1134
 
     text = CMAKE.read_text()
     mods = module_sources(text)
