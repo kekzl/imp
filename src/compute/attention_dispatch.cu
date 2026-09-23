@@ -60,9 +60,17 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // reaches keeps its `false` — see the KNOWN LIMIT above.
     AttnKernelSupport sup{};
     const bool has_sinks = (attn_sinks != nullptr);
-    // Learned attention sinks (#547/#992): only the FP16 WMMA FMHA tier folds them into online
-    // softmax. Route straight there; fail loudly on decline instead of a sink-blind fallback.
+    // Learned attention sinks (#547/#992): fp16-qk FA2 and the FP16 WMMA FMHA fold them into online
+    // softmax. Route only there; fail loudly on decline instead of a sink-blind fallback.
     if (has_sinks) {
+        if (rcfg.attention.fmha_fa2 == "on" && rcfg.attention.fa2_fp16qk != "never" &&
+            (sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                      stream, q_offset, /*fp16_qk=*/true,
+                                                      /*d_kv_len=*/nullptr, attn_sinks))) {
+            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
+            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FA2);
+            return;
+        }
         if (rcfg.attention.fmha_sm120 != "never" &&
             (sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window,
                                                          softcap, stream, q_offset, attn_sinks))) {
@@ -72,8 +80,8 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         }
         char msg[160];
         snprintf(msg, sizeof(msg),
-                 "attention_prefill_dispatch: learned sinks set but the FP16 WMMA FMHA "
-                 "declined head_dim=%d (or fmha_sm120=never) — no sink-capable kernel (#992)",
+                 "attention_prefill_dispatch: learned sinks set but FA2 and the FP16 WMMA FMHA "
+                 "declined head_dim=%d (or both are off) - no sink-capable kernel (#992)",
                  static_cast<int>(Q.shape[3]));
         throw std::runtime_error(msg);
     }

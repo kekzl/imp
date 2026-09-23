@@ -1202,13 +1202,11 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
 // scale absorbs amax_q*amax_k/448^2, d_amax from fa2_amax_fp16_kernel pre-launch.
 template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
           bool PVF16 = false, bool FP8SCALED = false>
-__device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, const half* __restrict__ K,
-                                                    const half* __restrict__ V, half* __restrict__ O,
-                                                    int batch_size, int seq_q, int seq_kv, int n_heads,
-                                                    int n_kv_heads, float scale, bool causal,
-                                                    int sliding_window, float softcap, int q_offset,
-                                                    const float* __restrict__ d_amax,
-                                                    const int* __restrict__ d_kv_len, bool heavy_first) {
+__device__ __forceinline__ void fmha_sm120_fa2_body(
+    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
+    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
+    int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax,
+    const int* __restrict__ d_kv_len, bool heavy_first, const half* __restrict__ sinks) {
     constexpr int Bkv = BKV;
     static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
@@ -1369,6 +1367,12 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, 
     if constexpr (FP8SCALED)
         s_eff *= fp8_sq * fp8_sk;
     const float inv_scale = 1.0f / scale;
+    if (sinks != nullptr) {
+        // gpt-oss learned sink: extra logit column without a V row. Seed m with it in raw-score units
+        // (softmax multiplies by s_eff) and l = exp(0) = 1, as the WMMA FMHA does (#547/#992).
+        mA = mB = __half2float(sinks[head_idx]) / s_eff;
+        lA = lB = 1.0f;
+    }
 
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int slot = TWOSLOT ? 0 : ((j - first_kv_tile) & 1);
@@ -1777,12 +1781,13 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
                                       bool causal, int sliding_window, float softcap, int q_offset,
                                       const float* __restrict__ d_amax = nullptr,
-                                      const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true) {
+                                      const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true,
+                                      const half* __restrict__ sinks = nullptr) {
     fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
                                                                                 seq_kv, n_heads, n_kv_heads,
                                                                                 scale, causal, sliding_window,
                                                                                 softcap, q_offset, d_amax,
-                                                                                d_kv_len, heavy_first);
+                                                                                d_kv_len, heavy_first, sinks);
 }
 
 // attention.fa2_dense_2cta: the Bq=128 TWOSLOT instance at two CTAs per SM.
@@ -1791,12 +1796,13 @@ __global__ void __launch_bounds__(Bq / 16 * 32, 2) fmha_sm120_fa2_kernel_2cta(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
     int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax = nullptr,
-    const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true) {
+    const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true,
+    const half* __restrict__ sinks = nullptr) {
     fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
                                                                                 seq_kv, n_heads, n_kv_heads,
                                                                                 scale, causal, sliding_window,
                                                                                 softcap, q_offset, d_amax,
-                                                                                d_kv_len, heavy_first);
+                                                                                d_kv_len, heavy_first, sinks);
 }
 
 static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool twoslot = false) {
@@ -1829,7 +1835,7 @@ IMP_REGISTER_CUDA_STATIC_RESET(fmha_sm120_reset_static_cuda_state);
 
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
-                            bool fp16_qk, const int* d_kv_len) {
+                            bool fp16_qk, const int* d_kv_len, const half* sinks) {
     if (Q.qtype != QType::F16)
         return false;
     if (d_kv_len != nullptr && !fp16_qk)
@@ -1848,7 +1854,10 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     // HD=128 is the tuned mainline. HD=256 (Qwen3.6 hybrids, gemma-class) is a stage-1 port behind
     // attention.fa2_hd256 (default on, #932): fp16-qk only, fixed Bq=64/Bkv=64/TWOSLOT (a double
     // buffer at HD=256 needs 135KB smem > the 99KB opt-in; TWOSLOT fits at 67.6KB).
-    if (head_dim != 128 && !(head_dim == 256 && fp16_qk && imp::process_diag_fa2_hd256()))
+    // HD=64 (gpt-oss): fp16-qk operands, f32 accumulators for QK and PV. gpt-oss has no QK norm:
+    // f16-accumulated raw logits moved its PPL 308.48 (cuBLAS) -> 267.28.
+    const bool hd64_ok = head_dim == 64 && fp16_qk;
+    if (head_dim != 128 && !hd64_ok && !(head_dim == 256 && fp16_qk && imp::process_diag_fa2_hd256()))
         return false;
 
     int device = 0;
@@ -1868,10 +1877,10 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 
     // f16-acc QK^T (#597) only applies to the fp16_qk path (the fp8 path keeps
     // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
-    const bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
+    bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
     // PV f16-accumulate rides on the f16acc path (full-rate PV MMA + halved
     // O-fragment registers); attention.fa2_pv_f16acc, default on.
-    const bool pv_f16 = f16acc && imp::process_diag_fa2_pv_f16acc();
+    bool pv_f16 = f16acc && imp::process_diag_fa2_pv_f16acc();
     int Bq, Bkv;
     bool twoslot = false;
     bool fp8_scaled = false;
@@ -1893,6 +1902,15 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                    : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true>
                             : fmha_sm120_fa2_kernel<64, 256, true, false, 64, true>;
         }
+    } else if (head_dim == 64) {
+        // hd=64: the hd=128 fp16-qk bands, f32 accumulators (f16acc/pv_f16 flags do not apply).
+        f16acc = pv_f16 = false;
+        Bkv = 64;
+        Bq = blocks_128 >= (long)sm_count ? 128 : 64;
+        twoslot = Bq == 64 && blocks_128 >= (long)(sm_count / 2);
+        kern = Bq == 128 ? fmha_sm120_fa2_kernel<128, 64, true, false, 64>
+               : twoslot ? fmha_sm120_fa2_kernel<64, 64, true, false, 64, true>
+                         : fmha_sm120_fa2_kernel<64, 64, true, false, 64>;
     } else if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
             Bq = 128, Bkv = 64;
@@ -1979,7 +1997,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                                         reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv, n_heads,
                                         n_kv_heads, scale, causal, sliding_window, softcap, q_offset,
                                         fp8_scaled ? s_d_amax : nullptr, d_kv_len,
-                                        imp::process_diag_fa2_heavy_first());
+                                        imp::process_diag_fa2_heavy_first(), sinks);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

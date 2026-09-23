@@ -233,24 +233,32 @@ TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
 
 // ---- #992: learned-sink pre-gate ------------------------------------------
 
-TEST(AttnDispatchTable, SinksRouteToFMHAEvenWhenFA2Accepts) {
-    // gpt-oss learned sinks: only the FP16 WMMA FMHA folds them into its
-    // online softmax — FA2/MXFP4/FP8 must not serve sink configs.
+TEST(AttnDispatchTable, SinksRouteToFA2WhenItAccepts) {
+    // gpt-oss learned sinks: fp16-qk FA2 and the FP16 WMMA FMHA fold them into their online
+    // softmax; MXFP4/FP8/Blackwell must not serve sink configs.
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), all_accept(), /*has_sinks=*/true),
-              AttnPrefillPath::FMHA_SM120);
+              AttnPrefillPath::FA2);
+    auto sup = all_accept();
+    sup.fa2_accepts = false;  // e.g. a head_dim FA2 has no instance for
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::FMHA_SM120);
+    auto cfg = default_cfg();
+    cfg.attention.fa2_fp16qk = "never";  // FA2 would run fp8-qk or not at all: no sink support there
+    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true), AttnPrefillPath::FMHA_SM120);
 }
 
 TEST(AttnDispatchTable, SinksWithFMHADeclineIsNoneNotBlackwell) {
     // A sink-blind fallback would produce silently wrong output — the
     // dispatcher throws (NONE), it must NOT fall through to Blackwell.
     auto sup = all_accept();
+    sup.fa2_accepts = false;
     sup.fmha_sm120_accepts = false;
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::NONE);
 }
 
-TEST(AttnDispatchTable, SinksWithFMHANeverIsNone) {
+TEST(AttnDispatchTable, SinksWithBothSinkTiersOffIsNone) {
     auto cfg = default_cfg();
     cfg.attention.fmha_sm120 = "never";
+    cfg.attention.fmha_fa2 = "off";
     EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true), AttnPrefillPath::NONE);
 }
 
@@ -310,9 +318,12 @@ TEST(AttnRoutingModelCoupling, Mxfp4ReplaysToItselfWhenAvailable) {
               AttnPrefillPath::MXFP4);
 }
 
-// The sinks pre-gate (#992) is a separate entry point in the dispatch: it either
-// runs the FP16 WMMA tier or throws. Both arms must replay.
+// The sinks pre-gate (#992) is a separate entry point in the dispatch: it runs FA2, then the
+// FP16 WMMA tier, or throws. All three arms must replay.
 TEST(AttnRoutingModelCoupling, SinksReplayToFmhaOrNone) {
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), observed_when(AttnPrefillPath::FA2),
+                                       /*has_sinks=*/true),
+              AttnPrefillPath::FA2);
     auto sup = observed_when(AttnPrefillPath::FMHA_SM120);
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::FMHA_SM120);
 

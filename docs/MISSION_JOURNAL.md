@@ -170,7 +170,7 @@ skips cudaFree on borrowed/VRAMAllocator pointers (fixed a teardown double-free)
 - Qwen3-30B-A3B NVFP4: 170.7 → **307.5 (+80%)** — now > Q4_K_M 276, ≈ llama.cpp 317.
 - Qwen3-Coder-30B NVFP4: 170.9 → **307.8 (+80%)**.
 - Gemma-4-26B NVFP4: 160.2 → **258.1 (+61%)** — **beats llama.cpp Q4_K_M 212 by +22%**.
-- Qwen3.6-35B-A3B hybrid NVFP4: 150.2 → **228.5 (+52%)** — **now matches llama.cpp 229** (was −31%).
+- Qwen3.6-35B-A3B hybrid NVFP4: 150.2 → **228.5 (+52%)** — **now matches llama.cpp 229** (was −34%; the GGUF Q4_K_M gap on 2026-05-29 was −31%).
 
 **Correctness ALL GREEN:** greedy output token-for-token IDENTICAL ON(gemv) vs OFF(CUTLASS) on 30B
 (numerically equivalent path); all models coherent incl. hybrid (GDN state intact) + Gemma-4 ("Paris");
