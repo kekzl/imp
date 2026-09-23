@@ -555,13 +555,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 }
 
-// `runtime.prefill_graph` is default-on, but capture in engine_prefill.cpp
-// needs the F16 KV append: a quantized append runs a per-chunk host absmax
-// sync, which aborts a capture. So on any quantized KV dtype the flag could
-// never fire (AUDIT_arch_2026 C-10). Resolved here, once, after the KV dtype
-// is final.
+// `runtime.prefill_graph` is default-on. Capture in engine_prefill.cpp needs an append without a
+// per-chunk host absmax sync: F16, and FP8 once its per-layer scales are calibrated. On the other
+// quantized KV dtypes the flag could never fire (AUDIT_arch_2026 C-10): resolved off here, once,
+// after the KV dtype is final.
 void Engine::init_resolve_prefill_graph_() {
-    if (!runtime_config_.runtime.prefill_graph || config_.kv_cache_dtype == QType::F16)
+    // FP8 KV captures once its per-layer scales are calibrated (engine_prefill.cpp gates on that).
+    if (!runtime_config_.runtime.prefill_graph || config_.kv_cache_dtype == QType::F16 ||
+        config_.kv_cache_dtype == QType::FP8_E4M3)
         return;
     runtime_config_.runtime.prefill_graph = false;
     IMP_LOG_INFO(

@@ -10,6 +10,7 @@
 #include "compute/dispatch_record.h"
 #include "model/image_placeholders.h"
 #include "memory/kv_cache.h"
+#include "compute/gemm.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
 
@@ -627,12 +628,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         state.n_vision_tokens = vision_.num_image_tokens();
     }
 
-    if (!is_last_chunk) {
-        if (executor_->has_decode_workspace()) {
-            executor_->use_workspace(0);
-        }
-        Tensor logits_out;
-
+    // Prefill forward, graph-replayed where it can be (see can_capture): offset-0 chunks, the last
+    // chunk included, share one runner keyed on (chunk_len, block count, FP8 KV calibration generation).
+    auto forward_prefill_logits = [&](Tensor& logits_out) {
         // Prefill graph capture (opt-in): env-gated, pool path (stable device
         // buffers), chunk shape stable (non-last chunks share chunk_len =
         // prefill_chunk_size). Captured region is forward_logits only, analogous to the decode graph pattern.
@@ -645,11 +643,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // cuBLAS call can lazily allocate workspace, illegal under capture. Run eager.
         const bool ends_at_snapshot = (snap_end > 0 && offset + chunk_len == snap_end);
         // moe_prefill_uncapturable: legacy host-args MoE prefill (GGUF Q*_K
-        // MoE) reads routing on the host - its capture guard throws, wasting a forward per chunk. Run eager (#874).
-        // Quantized KV append runs a dynamic-scale reduction with a D2H absmax
-        // sync per chunk, illegal under capture. F16 KV is the only append path
-        // that captures cleanly; run the rest eager.
-        const bool kv_append_capturable = (config_.kv_cache_dtype == QType::F16);
+        // MoE) reads routing on the host - its capture guard throws, wasting a forward per chunk. Run eager
+        // (#874). FP8 KV calibrates its scale (a D2H absmax) on the first prefill after warmup only; once
+        // every layer holds its scale, the append is a plain kernel with inv_scale baked in.
+        const bool kv_append_capturable = config_.kv_cache_dtype == QType::F16 ||
+                                          (config_.kv_cache_dtype == QType::FP8_E4M3 &&
+                                           executor_->kv_scales_calibrated());
         // Continuation chunks (offset > 0) bake ctx_len/q_offset as host args
         // into attention launches, so a replay only fits that exact offset,
         // which never repeats within a request. Replaying chunk 1's graph for
@@ -659,15 +658,35 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                  !executor_->nvfp4_dequant_uncapturable() &&
                                  !executor_->moe_prefill_uncapturable() &&
                                  // PLE gathers its n-gram rows on the host per chunk (D2H + sync).
-                                 model_->ngram_table() == nullptr;
+                                 model_->ngram_table() == nullptr &&
+                                 // n_vision_tokens is a host arg; the graph outlives the request.
+                                 state.vision_embeddings == nullptr;
+        // Capture a shape on its second consecutive sighting: capture + instantiate cost more than
+        // one eager forward (26.5 ms instantiate at pp512 on Qwen3-30B-A3B), so a one-off prompt
+        // length runs eager and leaves the cached graph in place.
+        const PrefillGraphKey key{chunk_len, static_cast<int>(block_table.size()),
+                                  executor_->kv_calibration_generation()};
+        bool use_graph = false;
         if (can_capture) {
-            const int block_count = static_cast<int>(block_table.size());
-            if (chunk_len != last_prefill_chunk_len_ || block_count != last_prefill_block_count_) {
+            if (key == prefill_graph_key_) {
+                use_graph = true;
+            } else if (key == prefill_pending_key_) {
                 prefill_graph_runner_.invalidate_for_update();
-                last_prefill_chunk_len_ = chunk_len;
-                last_prefill_block_count_ = block_count;
+                prefill_graph_key_ = key;
+                use_graph = true;
+            } else {
+                prefill_pending_key_ = key;
             }
+        }
+        if (use_graph) {
             prefill_graph_runner_.set_decode_fn([this, &state, &logits_out](cudaStream_t s) {
+                // cuBLASLt records into the capture as in the verify graphs (#847): this shape ran
+                // eagerly before (hysteresis), so Lt's algo cache is warm. The WMMA capture
+                // fallback changed greedy output on Qwen3-30B-A3B at token 11.
+                gemm_set_lt_capture_allowed(true);
+                struct LtReset {
+                    ~LtReset() { gemm_set_lt_capture_allowed(false); }
+                } lt_reset;
                 executor_->forward_logits(state, logits_out, s);
             });
             prefill_graph_runner_.execute(pf_stream);
@@ -679,11 +698,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // gate the capture with no logging, so a model that never captures
             // looked identical to one that does. Report the failing condition once per process.
             static bool logged_no_prefill_capture = false;
-            if (prefill_graph_enabled && !logged_no_prefill_capture) {
+            if (prefill_graph_enabled && !can_capture && !logged_no_prefill_capture) {
                 logged_no_prefill_capture = true;
                 IMP_LOG_INFO(
                     "prefill graph: not capturing (runtime.prefill_graph=true) — "
-                    "pf_pool=%d cuda_graphs=%d kv_append_f16=%d offset0=%d "
+                    "pf_pool=%d cuda_graphs=%d kv_append_capturable=%d offset0=%d "
                     "not_snapshot_end=%d nvfp4_dequant_capturable=%d moe_capturable=%d no_ple=%d",
                     (int)pf_pool_used, (int)config_.use_cuda_graphs, (int)kv_append_capturable,
                     (int)(offset == 0), (int)!ends_at_snapshot, (int)!executor_->nvfp4_dequant_uncapturable(),
@@ -691,6 +710,15 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             }
             executor_->forward_logits(state, logits_out, pf_stream);
         }
+    };
+
+    if (!is_last_chunk) {
+        if (executor_->has_decode_workspace()) {
+            executor_->use_workspace(0);
+        }
+        Tensor logits_out;
+
+        forward_prefill_logits(logits_out);
 
         // Teacher-forced NLL for this chunk's positions (imp_perplexity).
         // Runs eagerly after the (possibly graph-replayed) forward; hidden_
@@ -765,7 +793,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
         if (use_event_sync) {
             Tensor logits_out;
-            executor_->forward_logits(state, logits_out, pf_stream);
+            forward_prefill_logits(logits_out);
             Tensor last_logits = logits_out.slice(0, 1);
             int64_t vocab_shape[1] = {last_logits.shape[1]};
             last_logits = last_logits.reshape(1, vocab_shape);

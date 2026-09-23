@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-13
-commit: 81d22eff
+verified: 2026-09-23
+commit: c2b8f047
 -->
 
 # src/runtime - engine, scheduler, config, KV
@@ -31,7 +31,7 @@ CPU tests run in `make dev-test`; new ones go to `test-core`. Anything touching 
 
 ## Pitfalls
 
-- `runtime.prefill_graph` defaults to `true`; the legacy host-args MoE prefill path and non-F16 KV append still run eager (`engine_prefill.cpp`). Read `config.h`, not old comments.
+- `runtime.prefill_graph` defaults to `true` and covers serial offset-0 prefill only (not the ragged path); the legacy host-args MoE prefill and KV dtypes other than F16 / calibrated FP8 run eager (`engine_prefill.cpp`). Read `config.h`, not old comments.
 - `kv_cache.swa_snapshot_mb` below one snapshot size disables prefix caching entirely, which is worse than 0.
 - Anything sized off free VRAM: pin `runtime.max_batch_size` for an A/B, or the arms differ.
 

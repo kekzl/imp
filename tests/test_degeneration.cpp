@@ -217,6 +217,45 @@ TEST_F(DegenerationTest, GreedyDeterminism) {
     EXPECT_EQ(out1, out2) << "Greedy sampling not deterministic!\n  Run 1: " << out1 << "\n  Run 2: " << out2;
 }
 
+// Prefill graph (runtime.prefill_graph): a prompt length is captured on its second consecutive
+// sighting and the graph survives imp_context_reset and a one-off different length: eager,
+// captured and replayed (after an eager B) runs must produce the same greedy tokens.
+TEST_F(DegenerationTest, PrefillGraphReplayMatchesEager) {
+    // imp_prefill_with_params runs the serial prefill (imp_generate goes through the scheduler's
+    // ragged path, which this graph does not cover).
+    auto gen_greedy = [&](int n_prompt, int salt) {
+        imp_context_reset(ctx_);
+        const int vocab = imp_model_vocab_size(model_);
+        std::vector<int32_t> tokens(n_prompt);
+        for (int i = 0; i < n_prompt; i++)
+            tokens[i] = (i * 7919 + salt) % vocab;
+        ImpGenerateParams p = imp_generate_params_default();
+        p.temperature = 0.0f;
+        p.ignore_eos = 1;
+        p.max_tokens = 17;
+        std::vector<int32_t> out;
+        if (imp_prefill_with_params(ctx_, tokens.data(), n_prompt, &p) != IMP_SUCCESS)
+            return out;
+        for (int s = 0; s < 16; s++) {
+            int32_t tok = -1;
+            if (imp_decode_step(ctx_, &p, &tok) != IMP_SUCCESS)
+                break;
+            out.push_back(tok);
+        }
+        return out;
+    };
+    const auto eager = gen_greedy(200, 11);     // FP8 KV calibrates here (eager)
+    const auto pending = gen_greedy(200, 11);   // first capturable sighting (eager)
+    const auto captured = gen_greedy(200, 11);  // second sighting: capture
+    const auto other = gen_greedy(131, 5);
+    const auto replayed = gen_greedy(200, 11);
+    EXPECT_EQ(eager.size(), 16u);
+    EXPECT_EQ(other.size(), 16u);
+    EXPECT_EQ(eager, pending);
+    EXPECT_EQ(eager, captured);
+    EXPECT_EQ(eager, replayed);
+}
+
 // Test 5: Output should not contain raw special tokens
 TEST_F(DegenerationTest, NoLeakedSpecialTokens) {
     std::string out = generate(model_, ctx_, "Tell me a fun fact about dolphins.", 100);

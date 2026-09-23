@@ -317,7 +317,15 @@ public:
     void reset_kv_calibration() {
         std::fill(kv_scales_.begin(), kv_scales_.end(), 1.0f);
         std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
+        ++kv_calib_gen_;
     }
+
+    // FP8 KV append bakes inv_scale into a captured prefill graph: capturable once every layer is
+    // calibrated; the generation moves when reset_kv_calibration() drops the scales.
+    bool kv_scales_calibrated() const {
+        return std::find(kv_calibrated_.begin(), kv_calibrated_.end(), false) == kv_calibrated_.end();
+    }
+    uint64_t kv_calibration_generation() const { return kv_calib_gen_; }
 
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
@@ -837,6 +845,7 @@ private:
     // Scale = absmax / 448.0; used as inv_scale = 1/scale for write, scale for read.
     std::vector<float> kv_scales_;     // [n_kv_layers] per-layer FP8 scale
     std::vector<bool> kv_calibrated_;  // [n_kv_layers] whether scale has been calibrated
+    uint64_t kv_calib_gen_ = 0;
 
     // YaRN correction dimension boundaries [2], precomputed at init.
     // yarn_corr_dims_[0] = start (full interpolation below), yarn_corr_dims_[1] = end (full extrapolation

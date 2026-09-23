@@ -524,8 +524,11 @@ private:
     // prefill_chunk_size for all non-last chunks, so per-shape variability
     // collapses to one shape. Gated by runtime.prefill_graph.
     CudaGraphRunner prefill_graph_runner_;
-    int last_prefill_chunk_len_ = -1;
-    int last_prefill_block_count_ = -1;
+    // (chunk_len, block count, FP8 KV calibration generation): the captured shape, and the last
+    // eager shape (a repeat triggers the capture).
+    using PrefillGraphKey = std::tuple<int, int, uint64_t>;
+    PrefillGraphKey prefill_graph_key_{-1, -1, 0};
+    PrefillGraphKey prefill_pending_key_{-1, -1, 0};
     // T5b (memory/host_pinned.h): pinned staging for the graph-captured
     // greedy sample. NOT the executor's same-named member — see AUDIT B59.
     PinnedBuffer h_sample_pinned_;
