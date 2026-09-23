@@ -1,7 +1,7 @@
 // Owns IMMA prefill family memory (recompile-blast-radius split from mmq_q8_imma.cu):
-// Q8_0 weight planes, Q6_K repack, activation triple, split-K partials, and the
+// Q8_0 weight planes, activation triple, split-K partials, and the
 // preallocation that takes the latter two from the T2 arena at their planned bound.
-// Q8_0/Q6_K weight caches are direct allocations (MODEL-resident, T1/A7 step 6);
+// Q8_0 weight caches are direct allocations (MODEL-resident, T1/A7 step 6);
 // activation/split-K scratches are engine-persistent (T2, moved in A7 step 8/AUDIT B13).
 // State lives in mmq_q8_imma_internal.cuh (not file-static): mmq_q8_imma.cu's dispatch
 // reads the scratch pointers directly for kernel args.
@@ -18,22 +18,9 @@
 
 namespace imp {
 
-// Kernels that PREPARE these buffers (Q8_0 plane split, Q6_K 224-B repack, activation
-// quantizer) live here with their data, not with the dispatch.
+// Kernels that PREPARE these buffers (Q8_0 plane split, activation quantizer) live here with
+// their data, not with the dispatch.
 namespace {
-__global__ void q6k_repack_kernel(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
-                                  size_t n_blocks) {
-    const size_t b = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const size_t total = n_blocks * 105;  // 210 B as 105 u16 copies
-    if (b >= total) return;
-    const size_t blk = b / 105;
-    const size_t off = (b % 105) * 2;
-    uint16_t v;
-    memcpy(&v, src + blk * 210 + off, 2);
-    memcpy(dst + blk * kQ6Stride + off, &v, 2);
-}
-
-
 // Q8_0 SoA split: raw 34-B blocks {half d; int8 qs[32]} (2-aligned, memcpy only) ->
 // qs plane[N][K] s8 + interleaved (alpha=d, beta=0) plane[N][K/32][2].
 __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restrict__ qs_plane,
@@ -90,7 +77,6 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
 
 std::mutex g_imma_mtx;
 std::unordered_map<const void*, WeightPlanes> g_imma_weights;
-std::unordered_map<const void*, Q6kRepack> g_imma_q6k;
 ActScratch g_imma_act;
 
 // Q8_0 weight caches (up to 8.6 GiB, 1.125B/element) are taken lazily on first prefill,
@@ -178,27 +164,6 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
                                                              w.qs, w.sc, total);
     IMP_CUDA_CHECK_LAUNCH();
     g_imma_weights[src] = w;
-    return true;
-}
-
-bool imma_ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool capturing) {
-    auto it = g_imma_q6k.find(src);
-    if (it != g_imma_q6k.end() && it->second.n_blocks == n_blocks) return true;
-    if (capturing) return false;
-    Q6kRepack r;
-    r.n_blocks = n_blocks;
-    const size_t need = n_blocks * kQ6Stride;
-    if (!imma_plane_budget_take(need, "Q6_K repack", static_cast<int64_t>(n_blocks), 256))
-        return false;
-    if (cudaMalloc(&r.blocks, need) != cudaSuccess)
-        return false;
-    g_imma_plane_used += need;
-    MemAccount::instance().note("imma_q8_planes", static_cast<std::ptrdiff_t>(need));
-    const size_t total = n_blocks * 105;
-    q6k_repack_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
-        static_cast<const uint8_t*>(src), r.blocks, n_blocks);
-    IMP_CUDA_CHECK_LAUNCH();
-    g_imma_q6k[src] = r;
     return true;
 }
 
