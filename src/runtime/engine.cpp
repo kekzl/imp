@@ -253,10 +253,14 @@ void Engine::invalidate_graphs() {
 
     // #874 safety net: an exception unwound past an active prefill-chunk
     // capture leaves the stream in capture state, wedging the server
-    // permanently. Close any stray capture and drop the prefill runner here.
-    prefill_graph_runner_.invalidate();
-    last_prefill_chunk_len_ = -1;
-    last_prefill_block_count_ = -1;
+    // permanently. Close any stray capture and drop the prefill runner then.
+    // A completed prefill graph stays: it bakes only pool buffers whose
+    // contents are uploaded per request (dropping it on every imp_context_reset
+    // re-captured and re-instantiated each prefill, 14.6 ms per pp512 on Qwen3-30B).
+    cudaStreamCaptureStatus pf_capture = cudaStreamCaptureStatusNone;
+    if (prefill_stream() && cudaStreamIsCapturing(prefill_stream(), &pf_capture) == cudaSuccess &&
+        pf_capture != cudaStreamCaptureStatusNone)
+        prefill_graph_runner_.invalidate();
     abort_stream_capture(prefill_stream());
 }
 
@@ -292,6 +296,7 @@ bool Engine::lora_set(int id) {
     // kernels and with the old adapter's pointers), drop everything,
     // including the per-batch pool that invalidate_graphs() preserves.
     invalidate_graphs();
+    prefill_graph_runner_.invalidate();
     for (auto& g : decode_graph_pool_)
         g.invalidate();
     IMP_LOG_INFO("LoRA: active adapter -> %d%s", id, id == 0 ? " (base)" : "");

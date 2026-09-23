@@ -72,7 +72,9 @@ struct RuntimeConfig {
         // Capture prefill into a CUDA graph in addition to decode. Default
         // ON: safe now that graph_capture_mode defaults to "relaxed"
         // (prefill_graph_blockers_2026_05_14.md, Blocker B). Opt out per
-        // model via `--set runtime.prefill_graph=false` if one regresses.
+        // model via `--set runtime.prefill_graph=false` if one regresses. Serial prefill only
+        // (not the ragged scheduler path): offset-0 chunks, F16 or calibrated FP8 KV, a shape
+        // captured on its second consecutive sighting and kept across context resets.
         bool prefill_graph = true;
         // 0 = auto: engine sizes the decode batch from the model's weight
         // footprint (a >20 GiB MoE auto-picks 1). Positive value forces it.

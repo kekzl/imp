@@ -297,7 +297,9 @@ def main():
     # RegisterScanMatchesDoubleReference} (test-moe-gdn): register Mamba2 scan vs the legacy kernel.
     # 1125 -> 1126: GptOssSinkRef.Fa2Hd64SinkMatchesReference (test-attention): FA2 hd=64 with learned
     # sinks vs the fp64 reference incl. chunk continuation (q_offset 1024) and SWA.
-    PINNED = 1126
+    # 1126 -> 1127: DegenerationTest.PrefillGraphReplayMatchesEager (test-e2e gpu): eager, captured
+    # and replayed prefill graph give the same greedy tokens.
+    PINNED = 1127
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -10,6 +10,36 @@ commit: 679866b6
 Append-only, newest first: one entry per kernel iteration of the kernel-limits dispatch (hypothesis, before/after counters, e2e A/B, verdict).
 Peaks: [`peaks/PEAKS.md`](peaks/PEAKS.md). Inventory: [`inventory/KERNELS.md`](inventory/KERNELS.md).
 
+## 2026-09-23 · Prefill graph: last chunk, FP8 KV, kept across context resets
+
+[PROV: commit=c2b8f047+branch perf/prefill-graph-buckets date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
+gaps=tools/roofline/inventory/host_gaps.py on nsys bench:pp e2e=inventory/ab_bench.sh imp:ab-c2b8f047 vs imp:test]
+
+| Qwen3-30B-A3B-NVFP4 pp512 (FP8 KV), nsys `bench:pp` | GPU busy | idle | launches per forward |
+|---|---:|---:|---:|
+| eager (main) | 54.4 % | 45.6 %, 10-100 us gaps 29.29 ms of 91.99 | 1829 (`cudaLaunchKernel` 9.8 us each under nsys) |
+| graph, re-captured per request (first cut) | 45.4 % | 54.6 %: 3 x `cudaGraphInstantiate` 43.74 ms | same host cost + instantiate |
+| graph kept across `imp_context_reset` | 70.8 % | 29.2 %, one 26.51 ms instantiate in rep 1 | replay |
+
+| e2e, 5 pairs, medians | main | this change |
+|---|---:|---:|
+| Qwen3-30B-A3B-NVFP4 pp512 | 20024.43 tok/s (17802..22973) | 24708.99 (24281..24976), 5/5 pairs up |
+| same, rerun with cuBLASLt inside the capture (shipped) | 19687.98 | 23288.74 |
+| Qwen3-14B-NVFP4 pp512 | 19509.69 (15674..24093) | 23695.60 (18603..24511) |
+| Qwen3-8B-Q8_0 pp512, 7 pairs (shipped) | 12279..12569 | 12316..12468; pair deltas -1.73..+0.96 %, mean -0.58 %, 5 of 7 negative |
+| tg128 (all three) | 382.08 / 175.42 / 299.37 | 382.30 / 175.49 / 298.96 |
+
+| Change | Why |
+|---|---|
+| last (and only) offset-0 chunk captured, greedy event-sync path | a single-chunk prompt never took the graph before |
+| FP8 KV capturable once every layer is calibrated; generation key on `reset_kv_calibration()` | calibration is the only D2H absmax sync, first prefill after warmup only |
+| graph kept across `imp_context_reset`; dropped on an open capture (#874) or a LoRA switch | it bakes pool buffers only; dropping it re-instantiated every prefill |
+| capture on the second consecutive sighting of (chunk_len, block count, calibration generation) | capture + instantiate cost more than one eager forward: one-off lengths stay eager, the cached graph stays |
+| vision requests excluded | `n_vision_tokens` is a host arg and the graph outlives the request |
+| cuBLASLt allowed inside the capture (as in the verify graphs) | the WMMA capture fallback changed greedy output on Qwen3-30B-A3B at token 11 (`DegenerationTest.PrefillGraphReplayMatchesEager` red); the hysteresis ran the shape eagerly first |
+
+Scope: serial prefill (`imp-cli`, `imp_prefill*`). The server's default path (ragged prefill, prefix cache) never reaches it: repeat probe with `server.prefix_cache=false runtime.prefill_batch=false` captured (18 vs 16 captures) and returned byte-identical content in all 4 requests, graph on vs off. Next lever: length-bucketed graphs for the ragged path.
+
 ## 2026-09-23 · FA2 for gpt-oss: head_dim 64 + learned sinks
 
 [PROV: commit=2889d8b2+branch perf/fa2-hd64-sinks date=2026-09-23 hw=RTX5090 clocks=locked 2842/13801 MHz
