@@ -34,7 +34,6 @@ struct GemmContext {
     // Phase 5 Track D follow-up: per-Engine knobs; were read from
     // RuntimeConfig::current() in gemm_dispatch / gemm_kernel_gguf hot paths.
     // Wired by the executor's GemmContext::make caller from dispatch_policy().
-    bool q4k_hmma_enabled = false;
     bool q8_imma_enabled = false;
     bool q4k_imma_prefill = false;
     bool gemm_no_mmvq = false;
@@ -64,7 +63,6 @@ struct GemmContext {
         ctx.qscratch = &qs;
         ctx.force_fp16 = force_fp16;
         ctx.force_mmvq = force_mmvq;
-        ctx.q4k_hmma_enabled = rcfg.gemm.q4k_hmma_enabled;
         ctx.q8_imma_enabled = rcfg.gemm.q8_imma_enabled;
         ctx.q4k_imma_prefill = rcfg.gemm.q4k_imma_prefill;
         ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
