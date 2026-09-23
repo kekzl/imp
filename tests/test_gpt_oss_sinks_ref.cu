@@ -14,7 +14,9 @@
 #include "core/tensor.h"
 #include "compute/attention_cublas.h"
 #include "compute/attention_fmha_sm120.h"
+#include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/process_diag.h"
 
 #include <vector>
 #include <cmath>
@@ -373,6 +375,96 @@ TEST(GptOssSinkRef, Fa2Hd64SinkMatchesReference) {
                    with_sink ? "with-sink" : "no-sink  ", e, e_wmma);
         }
     }
+}
+
+// Paged F16 decode at the gpt-oss geometry (64/8 heads, hd=64) with learned sinks: the multitok
+// kernel (split-K and single-split) against the fp64 reference, and against the per-head kernels
+// it replaced (attention.paged_f16_multitok=1).
+TEST(GptOssSinkRef, PagedDecodeHd64SinkMatchesReference) {
+    constexpr int kBs = 16, n_heads = 64, n_kv = 8, hd = 64;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    void* d_scratch = nullptr;
+    const size_t scratch_bytes = size_t{16} << 20;
+    CUDA_CHECK(cudaMalloc(&d_scratch, scratch_bytes));
+    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+    std::vector<double> sink(n_heads);
+    std::vector<half> sink_h(n_heads);
+    for (int h = 0; h < n_heads; h++) {
+        sink_h[h] = __float2half(static_cast<float>(-1.5 + 0.5 * (h % 7)));
+        sink[h] = __half2float(sink_h[h]);
+    }
+    for (int kv_len : {16, 333, 1024}) {
+        const int nb = (kv_len + kBs - 1) / kBs;
+        auto Q = lcg_fill_f16(0x7101u + kv_len, static_cast<size_t>(n_heads) * hd, 2.0f);
+        auto K = lcg_fill_f16(0x7202u + kv_len, static_cast<size_t>(kv_len) * n_kv * hd, 2.0f);
+        auto V = lcg_fill_f16(0x7303u + kv_len, static_cast<size_t>(kv_len) * n_kv * hd, 2.0f);
+        const auto ref = ref_attention_sink(Q, K, V, sink, 1, kv_len, n_heads, n_kv, hd, false, 0);
+        // Contiguous blocks: [nb * kBs][n_kv][hd] is the ref layout, zero-padded.
+        std::vector<half> Kc(static_cast<size_t>(nb) * kBs * n_kv * hd, __float2half(0.0f)), Vc = Kc;
+        std::copy(K.begin(), K.end(), Kc.begin());
+        std::copy(V.begin(), V.end(), Vc.begin());
+        std::vector<int> bt(nb);
+        for (int i = 0; i < nb; i++)
+            bt[i] = i;
+        half *d_q, *d_k, *d_v, *d_o, *d_s;
+        int *d_bt, *d_ctx;
+        CUDA_CHECK(cudaMalloc(&d_q, Q.size() * sizeof(half)));
+        CUDA_CHECK(cudaMalloc(&d_k, Kc.size() * sizeof(half)));
+        CUDA_CHECK(cudaMalloc(&d_v, Vc.size() * sizeof(half)));
+        CUDA_CHECK(cudaMalloc(&d_o, Q.size() * sizeof(half)));
+        CUDA_CHECK(cudaMalloc(&d_s, n_heads * sizeof(half)));
+        CUDA_CHECK(cudaMalloc(&d_bt, nb * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_ctx, sizeof(int)));
+        cudaMemcpy(d_q, Q.data(), Q.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_k, Kc.data(), Kc.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_v, Vc.data(), Vc.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_s, sink_h.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_bt, bt.data(), nb * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_ctx, &kv_len, sizeof(int), cudaMemcpyHostToDevice);
+        auto tensor = [](void* d, std::initializer_list<int64_t> shape) {
+            Tensor t;
+            t.data = d;
+            t.qtype = QType::F16;
+            t.ndim = static_cast<int>(shape.size());
+            int i = 0;
+            for (auto s : shape)
+                t.shape[i++] = s;
+            t.compute_strides();
+            t.on_device = true;
+            return t;
+        };
+        const Tensor tq = tensor(d_q, {1, 1, n_heads, hd});
+        const Tensor tk = tensor(d_k, {nb, kBs, n_kv, hd}), tv = tensor(d_v, {nb, kBs, n_kv, hd});
+        Tensor to = tensor(d_o, {1, 1, n_heads, hd});
+        for (int multitok : {1, 4}) {
+            process_diag_set_paged_f16_multitok(multitok);
+            for (bool single_split : {false, true}) {
+                process_diag_set_force_splitk_fallback(single_split);
+                cudaMemset(d_o, 0, Q.size() * sizeof(half));
+                paged_attention_decode(tq, tk, tv, to, d_bt, d_ctx, kBs, scale, kv_len, 0, 0.0f, nullptr, nb,
+                                       0, d_s);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                std::vector<half> oh(Q.size());
+                cudaMemcpy(oh.data(), d_o, oh.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                std::vector<double> got(oh.size());
+                for (size_t i = 0; i < oh.size(); i++)
+                    got[i] = __half2float(oh[i]);
+                const double e = max_rel_err(got, ref);
+                EXPECT_LT(e, kRelTol) << "kv_len " << kv_len << " multitok " << multitok << " single_split "
+                                      << single_split << " rel " << e;
+                printf("[sink] paged hd64 kv_len=%4d multitok=%d %s rel=%.2e\n", kv_len, multitok,
+                       single_split ? "single" : "splitK", e);
+            }
+        }
+        process_diag_set_force_splitk_fallback(false);
+        process_diag_set_paged_f16_multitok(4);
+        for (void* p : {static_cast<void*>(d_q), static_cast<void*>(d_k), static_cast<void*>(d_v),
+                        static_cast<void*>(d_o), static_cast<void*>(d_s), static_cast<void*>(d_bt),
+                        static_cast<void*>(d_ctx)})
+            cudaFree(p);
+    }
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
 }
 
 TEST(GptOssSinkRef, LargeSinkShrinksOutputNorm) {

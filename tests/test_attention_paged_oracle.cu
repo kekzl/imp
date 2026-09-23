@@ -976,7 +976,7 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     struct Shape {
         int n_heads, n_kv_heads, head_dim;
     };
-    for (const Shape sh : {Shape{32, 8, 128}, Shape{16, 8, 256}, Shape{24, 8, 128}}) {
+    for (const Shape sh : {Shape{32, 8, 128}, Shape{16, 8, 256}, Shape{24, 8, 128}, Shape{64, 8, 64}}) {
         const float scale = 1.0f / std::sqrt((float)sh.head_dim);
         for (int force_fallback : {0, 1}) {
             process_diag_set_force_splitk_fallback(force_fallback != 0);
