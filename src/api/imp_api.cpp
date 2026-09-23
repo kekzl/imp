@@ -343,9 +343,10 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
     *out_ctx = nullptr;
 
     if (config->device_id != 0) {
-        IMP_LOG_ERROR("imp_context_create: device_id=%d; imp drives device 0 only (no multi-GPU, "
-                      "docs/DESIGN_DECISIONS.md). Select the card with CUDA_VISIBLE_DEVICES.",
-                      config->device_id);
+        IMP_LOG_ERROR(
+            "imp_context_create: device_id=%d; imp drives device 0 only (no multi-GPU, "
+            "docs/DESIGN_DECISIONS.md). Select the card with CUDA_VISIBLE_DEVICES.",
+            config->device_id);
         return IMP_ERROR_INVALID_ARG;
     }
 
