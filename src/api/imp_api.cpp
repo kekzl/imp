@@ -776,9 +776,7 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         ctx->consumed_output = 0;
 
         // Run steps until prefill completes (may take multiple steps with chunked prefill)
-        do {
-            (void)ctx->engine->step();
-        } while (req->status == imp::RequestStatus::PREFILLING);
+        imp_prefill_until_admitted(ctx, *req, n_tokens);
 
         // Report cancellation distinctly: collapsing it into OUT_OF_MEMORY hid that
         // the scheduler refused admission ("needs N KV blocks, cache has M"), a

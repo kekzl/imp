@@ -300,6 +300,31 @@ TEST(SchedulerTest, AdmissionClampsReserveToPoolSize) {
     EXPECT_EQ(prefill.size(), 1u);
     EXPECT_NE(req->status, RequestStatus::CANCELLED);
 }
+
+// The clamp above asks for the whole pool. One block held outside active_ (q4k-gemma4-26b
+// tg128_ctx8k: request PENDING forever, "no token in 8 steps") must not queue a fitting prompt.
+TEST(SchedulerTest, NothingRunningAdmitsAFittingPrompt) {
+    auto cache = KVCache::for_accounting(
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+    ASSERT_TRUE(mgr->allocate_blocks(/*seq_id=*/99, 1));
+
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+
+    auto req = std::make_shared<Request>();
+    req->id = 0;
+    req->input_tokens.resize(32, 7);  // 2 of the 3 free blocks
+    req->max_tokens = 256;
+    sched.add_request(req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    EXPECT_EQ(prefill.size(), 1u);
+    EXPECT_FALSE(sched.has_pending());
+    EXPECT_NE(req->status, RequestStatus::CANCELLED);
+}
 // 11. Continuous batching: prefill priority over decode
 TEST(SchedulerTest, PrefillPriorityOverDecode) {
     Scheduler sched(4);

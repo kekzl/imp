@@ -27,6 +27,7 @@ there instead of retelling it.
 - `imp-cli --help` named `--max-tokens` default 256; the default is 8192 (16384 with `--interactive`).
 - gpt-oss with `json_object` / `json_schema` / regex / grammar returned `content: ""` (degen_suite constrained 4 of 4 FAIL): the constraint held from token 1, the reply had no Harmony channel header. The prompt now opens `<|channel|>final<|message|>` for a constrained request without tools.
 - `/v1/messages` returned a `thinking` block without a `thinking` opt-in on gpt-oss, which reasons regardless of `enable_thinking` (degen_suite anthropic-thinking default 2 of 2 FAIL); reasoning is now dropped unless `thinking.type` is `enabled` or `adaptive`.
+- A prompt that fits the KV pool, with nothing else running, queued forever when prompt + `max_tokens` did not fit and one block was held (the #1635 clamp asked for the whole pool); it is admitted on the prompt alone. `imp_prefill_with_params` returns `IMP_ERROR_CAPACITY` for a request still held after 8 rounds instead of `IMP_SUCCESS` followed by "engine produced no token" (gemma-4-26B Q4_K_M, 8k context).
 
 ### Changed
 - Q5_K MoE experts run the grouped INT8 IMMA prefill kernel instead of dequantizing all experts to FP16 per layer: Qwen3.6-35B-A3B UD-Q4_K_M pp512 5957 -> 8661 tok/s, pp4096 13982 -> 17236. Record: `tools/roofline/PERF_LOG.md`.

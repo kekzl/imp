@@ -60,3 +60,6 @@ struct ImpContext_T {
     // Multi-token step consumption (self-speculative decode produces N tokens per step)
     size_t consumed_output = 0;
 };
+
+// Steps until the request leaves PREFILLING; still PENDING after 8 rounds = cancelled, KvCapacity.
+void imp_prefill_until_admitted(ImpContext ctx, imp::Request& req, int n_tokens);

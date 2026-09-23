@@ -460,6 +460,7 @@ set(IMP_API_SOURCES
     src/api/imp_api.cpp
     src/api/imp_api_vision.cpp
     src/api/imp_api_suspend.cpp
+    src/api/imp_api_admit.cpp
 )
 
 # --- Main library target ---
