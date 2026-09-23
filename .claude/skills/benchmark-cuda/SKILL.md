@@ -81,20 +81,7 @@ Phantom: gemma-3-12b `--bench` prints bogus tok/s (#514); trust its PPL only.
 
 ## Step 1: cudaEvent (quick A/B)
 
-```cpp
-cudaEvent_t start, stop;
-cudaEventCreate(&start); cudaEventCreate(&stop);
-for (int i = 0; i < 3; i++) kernel<<<...>>>(...);   // plus >1 s busy warmup (STOP #3)
-cudaDeviceSynchronize();
-cudaEventRecord(start);
-for (int i = 0; i < N_ITER; i++) kernel<<<...>>>(...);
-cudaEventRecord(stop);
-cudaEventSynchronize(stop);
-float ms; cudaEventElapsedTime(&ms, start, stop);
-float avg_us = (ms / N_ITER) * 1000.0f;
-```
-
-N_ITER >= 100 for kernels <100 us; report stddev; allocate outside the loop; sample clocks during the run.
+N_ITER >= 100 after >1 s busy warmup (STOP #3); sample clocks during the run.
 
 ## Step 2: ncu
 
@@ -108,14 +95,6 @@ docker run --rm --gpus all -v $HOME/models:/models \
 ```
 
 Canonical metric set: `.claude/skills/benchmark-cuda/ncu-basic.sh "<kernel-regex>" <binary> [args]`.
-
-| Metric | Meaning | Target |
-|---|---|---|
-| `sm__throughput.avg.pct_of_peak_sustained_elapsed` | SM utilization | >70% compute-bound |
-| `dram__throughput.avg.pct_of_peak_sustained_elapsed` | DRAM bandwidth | >70% memory-bound |
-| `sm__warps_active.avg.pct_of_peak_sustained_active` | achieved occupancy | context |
-| `smsp__inst_executed_pipe_tensor_op_*` | TC activity | non-zero for TC kernels |
-| `smsp__average_warps_issue_stalled_*` | stall reasons | lowest = bottleneck |
 
 ncu traps: `--launch-skip` above the launch count waits forever; ncu + CUDA graphs hangs in the async graph loop (always `--no-cuda-graphs`, as the roofline harness does); the "Available Kernels" list shows base names, template regexes do not match; `--clock-control base` does NOT stop idle downclock between replays (a launch at 0.31 GHz read 99.7% of roofline; `tools/roofline/config.json` `ncu.clock_floor_ghz=1.2` now drops such launches as `n_launches_dropped_clock`); multi-pass replay dies on TMA kernels on this WSL2 driver (the roofline runs single-pass metric groups). A low memory-stall ratio next to low bandwidth means "not bandwidth-bound", not "too few warps".
 
@@ -141,7 +120,7 @@ nsys stats timeline.nsys-rep
 
 ## Step 4: roofline
 
-`AI = FLOPs / bytes` (matmul `2*M*N*K`; bytes from `dram__bytes.sum`). Peaks: 1792 GB/s DRAM, FP16 838 TFLOPS, FP8 1677, FP4 3354 (datasheet), L2 96 MB. Measured FP4 `mma.sync` = 2019 TOPS (~1/2 datasheet), f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate. Use measured peaks or every FP4 kernel reads falsely bad. Roofline cells (`tools/roofline/config.json`): `q8-dense` Qwen3-8B-Q8_0, `nvfp4-dense` Qwen3-14B-NVFP4, `nvfp4-moe` Qwen3-30B-A3B-NVFP4, `q4k-moe`, `q4k-dense-hd256` gemma-3-12b, `nvfp4-hybrid` = Qwen3.6-35B (NOT Qwen3.8-27B). Pinned baseline `tools/roofline/history/BASELINE` (run 1d5b9230 pinned #1835).
+Peaks: 1792 GB/s DRAM, FP16 838 TFLOPS, FP8 1677, FP4 3354 (datasheet), L2 96 MB. Measured FP4 `mma.sync` = 2019 TOPS (~1/2 datasheet), f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate. Use measured peaks or every FP4 kernel reads falsely bad. Roofline cells (`tools/roofline/config.json`): `q8-dense` Qwen3-8B-Q8_0, `nvfp4-dense` Qwen3-14B-NVFP4, `nvfp4-moe` Qwen3-30B-A3B-NVFP4, `q4k-moe`, `q4k-dense-hd256` gemma-3-12b, `nvfp4-hybrid` = Qwen3.6-35B (NOT Qwen3.8-27B). Pinned baseline `tools/roofline/history/BASELINE` (run 1d5b9230 pinned #1835).
 
 ## Report template
 
@@ -182,9 +161,7 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 - pp512 delta without a decode delta (MoE spread ~38% across starts).
 - `nvidia-smi` process list as "GPU free" (Windows-side load invisible; 12.9 GiB at 96% util with no container, 2026-08-14).
 - Cold single shot; cross-day delta without live clocks; baseline refresh on a depressed day.
-- `cudaMalloc/Free` inside the timed loop.
 - Measuring after a non-default CMake build (`verify-fast` does not rebuild; an `IMP_ALLOC_INTERPOSE=ON` image reproduced -3% four times).
-- ncu wall-clock as real time (ncu serializes; use nsys or cudaEvent).
 - Wrong peak dtype; A/B with graphs ON only; multi-model back-to-back sweeps.
 - Dense decode-kernel A/B without `speculative.ngram=false` (STOP #6).
 - "perf-neutral" without a SASS diff (`cuobjdump -sass`; byte-identical SASS is proof, a bench is not).

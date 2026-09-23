@@ -85,7 +85,7 @@ FP8 prefill stays DISABLED on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `
 | 128 | 64 / 128 (TWOSLOT 2-CTA) | ~81 KB / 35 KB |
 | 256 | 32 (Bkv=64) / Bkv=32 | ~68 KB / 35 KB |
 
-`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`. Padding two access patterns at once may not fit (chunkpar histories at stride 132 next to T/P padding did not fit 99 KB); swizzle instead.
+Padding two access patterns at once may not fit (chunkpar histories at stride 132 next to T/P padding did not fit 99 KB); swizzle instead.
 
 ## Compile flags
 
@@ -102,8 +102,6 @@ FP8 prefill stays DISABLED on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `
 | `__launch_bounds__` on regular GEMV/attention paths | -4.5..-20%; min-blocks spills to DRAM; only wrapper-kernel bounds with a SASS-identical production instance |
 | Byte-pointer inner loops (`const uint8_t*` walked element-wise) | ptxas cannot merge; count `LDG.*` forms in `cuobjdump -sass` first |
 | `reinterpret_cast` on Q8_0 blocks (34 B, unaligned) | `memcpy()` |
-| `__noinline__` device helpers | spill to local; `__forceinline__` |
-| Missing `__syncthreads()` after `cp.async wait` | race |
 | Pointer advance without `sizeof(T)` | known-issues (FP8 FMHA S_tile) |
 | PDL registration without `griddepcontrol.wait` | race on the producer's output; `pdl::launch` has no default args, register at the launch site (`pdl::enable_kernel`) |
 | Isolated bench without an L2-defeating ring | reads L2; rotate >= 4 x 100 MB slabs, warm per shape |

@@ -10,12 +10,10 @@ description: Use when opening, merging, or releasing a PR for imp - branching of
 | # | Rule | Detail |
 |---|---|---|
 | 1 | Branch off fresh `origin/main`, `gh pr create --base main`, NEVER stack | `git fetch origin && git switch -c <topic> origin/main`. Stacking on a squash repo caused recovery-PR cascades. Fewer, batched PRs. |
-| 2 | English only in the repo | PR title/body, commits, comments, docs. Chat stays German. |
-| 3 | `main` merges are SQUASH | PR title = final commit subject `... (#NNNN)`. |
-| 4 | Required check = `Build` (ruleset 14716423) | Static gates block inside it since #1527 (`scripts/ci_static_gates.sh`: filesize, lanes, entrypoint, alloc, kernels, launchguards, docs, citations, hygiene). Advisory: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `clang-tidy`, `Sanitizers`. `Test lanes` is its own check (#1770). Read `gh pr checks <n>` after the merge too. |
-| 5 | One PR in flight at a time | Every merged PR dirties every open PR through `CHANGELOG.md`. Resolve, `git commit --no-verify` (the push hook gates the same tree), land serially. |
-| 6 | Perf- or VRAM-moving change refreshes `tests/perf_baseline.json` IN THE SAME PR and says so | Gate 8% decode / 8% prefill / 10% `own_peak_mb`; `scripts/gen_perf_baseline.sh` (benchmark-cuda). |
-| 7 | No em dashes anywhere in the repo | Colon, comma or full stop. All 43 releases were normalised 2026-08-13. |
+| 2 | `main` merges are SQUASH | PR title = final commit subject `... (#NNNN)`. |
+| 3 | Required check = `Build` (ruleset 14716423) | Static gates block inside it since #1527 (`scripts/ci_static_gates.sh`: filesize, lanes, entrypoint, alloc, kernels, launchguards, docs, citations, hygiene). Advisory: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `clang-tidy`, `Sanitizers`. `Test lanes` is its own check (#1770). Read `gh pr checks <n>` after the merge too. |
+| 4 | One PR in flight at a time | Every merged PR dirties every open PR through `CHANGELOG.md`. Resolve, `git commit --no-verify` (the push hook gates the same tree), land serially. |
+| 5 | Perf- or VRAM-moving change refreshes `tests/perf_baseline.json` IN THE SAME PR and says so | Gate 8% decode / 8% prefill / 10% `own_peak_mb`; `scripts/gen_perf_baseline.sh` (benchmark-cuda). |
 
 ## The auto-merge race
 
@@ -111,11 +109,4 @@ Full detail: CHANGELOG. N PRs since vX.Y.(Z-1).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Last commit missing from `main` | pushed after `gh pr create` | push all first; late additions via `--disable-auto` |
-| PR stuck BLOCKED, `Build` green | required-check name mismatch | ruleset 14716423 |
-| Recovery-PR cascade | stacked PRs | one branch per PR off fresh `origin/main` |
-| Perf gate red in CI or hook | intentional perf change, stale baseline | refresh `perf_baseline.json` in the same PR |
-| Open PR conflicted after another merged | CHANGELOG cycle | resolve, `--no-verify`, land serially |
-| `git pull` refuses | regenerated `STALE.md` | `git checkout -- docs/audit/docs-rewrite/STALE.md` |
-| German in PR/commit/docs | chat default leaked | English only |
 | Release only bumped one of {CMakeLists, CHANGELOG, BENCHMARKS} | | bump all three |
