@@ -23,7 +23,7 @@ namespace {
 // One K-step tile load, all 256 threads cooperating, loops unrolled for both BM variants:
 //   A[BM][kBK] s8, M-tail zero-filled; B[kBN][kBK] s8, weight rows always full (N % kBN == 0)
 //   Asc[BM][2] half / Ars[BM][2] float: activation scale/rowsum, d-plane cols (kb0, kb0+1)
-//   Bsc[kBN][2][2] half: weight (α, β) interleaved for both kb cols
+//   Bsc[2][kBN][2] half: weight (α, β) per kb col, kb-major
 template <int BM, bool WB>
 __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A,
                                            const __half* __restrict__ Asc,
@@ -412,8 +412,8 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         }
     }
 
-    // Dense grid under half the SMs (k/v projections: 32 CTAs at M=512, N=1024): the BM=32 tile
-    // gives 4x the CTAs; each output keeps its k order, so the result is bit-identical.
+    // Dense grid whose BM=32 version still fits one wave (k/v projections: 32 -> 128 CTAs at M=512,
+    // N=1024); 64-68 CTA grids lose to the 1.5-wave tail. Each output keeps its k order: bit-identical.
     static const int n_sms = [] {
         int dev = 0, v = 0;
         cudaGetDevice(&dev);
@@ -421,7 +421,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         return v;
     }();
     const bool dense_small_grid =
-        d_offsets == nullptr && beta == 0.0f && static_cast<int>(grid.x * grid.y) * 2 < n_sms;
+        d_offsets == nullptr && beta == 0.0f && static_cast<int>(grid.x * grid.y) * 4 <= n_sms;
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
     if (small_m || dense_small_grid) {
         const dim3 g32(grid.x, (grid_m_rows + 31) / 32, ne);
