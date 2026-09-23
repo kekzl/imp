@@ -16,9 +16,7 @@ Docs are organised by READER, not topic; `scripts/docs_lint.py` gates it.
 | 3 | A claim needs a code path; a number needs provenance. Unbacked = deleted, not softened ("experimental", "planned" are not rescue words). |
 | 3b | A number also needs something that FAILS when it drifts: gate thresholds (8%/8%/10%, `verify.sh`), hardware constants (32 GB, 1792 GB/s), dated measurements (findings, true of the afternoon named). File/LOC/test counts and build/test runtimes qualify for none: write the COMMAND that prints the number (`python3 tools/check_test_lanes.py --report`) or the magnitude ("seconds" vs "minutes"). A restated gated number does not inherit the gate (`tests/CLAUDE.md` lost this twice, #1673; bulk-applied #1827). |
 | 4 | Records are not documentation: `CHANGELOG.md`, `docs/MISSION_JOURNAL.md`, `docs/vram_audit.md`, root `AUDIT.md`, `docs/roadmap.md`, prefixes `docs/archive/`, `docs/audit/`, `docs/plans/` are lint-excluded, append-only. `docs/BENCHMARKS.md` IS linted (PROV-header allowlist); `docs/roadmap.md` is drift-gated by `check_doc_citations.py` (#1772). |
-| 5 | English in the repo. |
-| 6 | `file:line` citations in every living doc are gated (#1783): `scripts/check_doc_citations.py .` over 33 living docs (`docs/*.md`, `docs/internals/*.md`, root README/CONTRIBUTING/AGENTS/AUDIT); cite a path, not a bare basename (an ambiguous basename passes as `AMBIGUOUS`); it is the `citations` selection in `ci_static_gates.sh`, NOT the `docs` selection, and it checks the line EXISTS, not what it says. |
-| 7 | No em dashes. |
+| 5 | `file:line` citations in every living doc are gated (#1783): `scripts/check_doc_citations.py .` over 33 living docs (`docs/*.md`, `docs/internals/*.md`, root README/CONTRIBUTING/AGENTS/AUDIT); cite a path, not a bare basename (an ambiguous basename passes as `AMBIGUOUS`); it is the `citations` selection in `ci_static_gates.sh`, NOT the `docs` selection, and it checks the line EXISTS, not what it says. |
 
 ## The layers
 
@@ -94,7 +92,6 @@ No perf numbers in any `CLAUDE.md`; link `PERF.md`. L3 downgrades unprovenanced 
 ## Traps
 
 - The brief can be stale: the rewrite's own brief carried six claims the tree had refuted, two of them perf figures that would have published a phantom regression.
-- Writing an explanation a second time (PR body, then doc) means the second copy is wrong-sized.
 - A stale code comment outranks nothing (`engine_init_resolver.cpp` says "prefill is never graph-captured" beside a `true` default). This skill file is outside the citation gate: prefer path-only citations here.
 - Run the documented command before documenting it (`/v1/messages` returns a `thinking` block at `content[0]`; nothing said so until someone ran the curl).
 - De-prose sweeps (#1802 roadmap 1292 -> 761 lines, #1804 23 files +2033/-3709) work as parallel worktree agents on their own branches; re-run the citation gate after compaction (`KERNELS.md:35` became `:20`).

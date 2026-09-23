@@ -9,13 +9,12 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 
 | # | Rule |
 |---|---|
-| 1 | English only in the repo. |
-| 2 | `imp.conf.example` MUST match the parser: every key is a `B/I/F/S("...")` binder in `src/runtime/config.cpp` (surface in `src/core/config/*.h`); a dropped key logs `imp.conf: unknown key` (stale `q4k_imma_enabled` after #624). Add/remove/rename = `config.h`, `config.cpp`, `imp.conf.example` together, real default. A bogus `--set` key fails at start (`no such key`). |
-| 3 | Numbers are commit-anchored; `docs/PERF.md` owns them. `tests/perf_baseline.json` is the gate (8%/8%/10% `own_peak_mb`, `scripts/verify.sh`); README perf block is GENERATED (`scripts/sync_docs.py`, `<!-- PERF:BEGIN -->`; `--check` blocks). `docs/BENCHMARKS.md` rows: date, commit SHA, CUDA, model, quant, metric, value, exact command. |
-| 4 | Verify before you claim: grep the tree; half the staleness reports are already fixed (the "GOAL.md lists H100" flag was one). |
-| 5 | Env vars are not config: the engine reads only `IMP_CONFIG`, `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, `IMP_WORKER_TIMING`, `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`; config is `imp.conf` / `--config` / `--set`. The container surface is `IMP_CONFIG` + `IMP_SET` (#1823, `docs/DEPLOYMENT.md` "From a container"); the 19 legacy `IMP_*` entrypoint names are frozen and get no new siblings. |
-| 6 | Three blocking doc gates, in hooks and `Build`: `scripts/docs_lint.py`, `scripts/sync_docs.py --check`, `scripts/check_doc_citations.py .` (all living docs since #1783; a TU split or a de-prose compaction moves line numbers). |
-| 7 | No prose: a paragraph without a number, path or decision is deleted (#1802/#1804 sweeps). No em dashes. |
+| 1 | `imp.conf.example` MUST match the parser: every key is a `B/I/F/S("...")` binder in `src/runtime/config.cpp` (surface in `src/core/config/*.h`); a dropped key logs `imp.conf: unknown key` (stale `q4k_imma_enabled` after #624). Add/remove/rename = `config.h`, `config.cpp`, `imp.conf.example` together, real default. A bogus `--set` key fails at start (`no such key`). |
+| 2 | Numbers are commit-anchored; `docs/PERF.md` owns them. `tests/perf_baseline.json` is the gate (8%/8%/10% `own_peak_mb`, `scripts/verify.sh`); README perf block is GENERATED (`scripts/sync_docs.py`, `<!-- PERF:BEGIN -->`; `--check` blocks). `docs/BENCHMARKS.md` rows: date, commit SHA, CUDA, model, quant, metric, value, exact command. |
+| 3 | Verify before you claim: grep the tree; half the staleness reports are already fixed (the "GOAL.md lists H100" flag was one). |
+| 4 | Env vars are not config: the engine reads only `IMP_CONFIG`, `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, `IMP_WORKER_TIMING`, `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`; config is `imp.conf` / `--config` / `--set`. The container surface is `IMP_CONFIG` + `IMP_SET` (#1823, `docs/DEPLOYMENT.md` "From a container"); the 19 legacy `IMP_*` entrypoint names are frozen and get no new siblings. |
+| 5 | Three blocking doc gates, in hooks and `Build`: `scripts/docs_lint.py`, `scripts/sync_docs.py --check`, `scripts/check_doc_citations.py .` (all living docs since #1783; a TU split or a de-prose compaction moves line numbers). |
+| 6 | No prose: a paragraph without a number, path or decision is deleted (#1802/#1804 sweeps). |
 
 ## The doc set
 
@@ -52,9 +51,4 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 ## Common mistakes
 
 - A `BENCHMARKS.md` number from a cold single shot (benchmark-cuda STOP list).
-- Hand-editing the README perf block.
-- `imp.conf.example` key without a binder, or vice versa.
-- German in repo docs.
-- "Fixing" a doc from memory without grepping.
-- Confusing repo docs with the agent's private `MEMORY.md`.
 - A skill or `CLAUDE.md` carrying a count or runtime that nothing checks (docs-layers rule 3b).

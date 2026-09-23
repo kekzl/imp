@@ -105,7 +105,6 @@ Advisory jobs: `Lint`, `clang-tidy`, `Mock API contract`, `Real API contract (mo
 | nvcc arch error | target is `compute_120a/sm_120a` + optional `compute_120f` PTX (`IMP_SM120_FLAGS`) | never generic `sm_120` (sm120-cuda-expert) |
 | Compose/container ignores a config key | only `IMP_CONFIG` / `IMP_SET` reach every key (#1823); the 19 legacy `IMP_*` names in `docker-entrypoint.sh` are frozen | `-e IMP_SET="key=v key2=v"`; a bogus key fails at start (`no such key`) |
 | Value looks like an unread env var | engine reads only `IMP_CONFIG IMP_DETERMINISTIC IMP_FMHA_FA2 IMP_WORKER_TIMING IMP_SPEC_TRACE IMP_JUMP_TRACE IMP_PPL_DUMP`; the entrypoint translates the rest | grep `docker-entrypoint.sh` too |
-| `for x in $VAR` in a script produces filenames | unquoted expansion globs | `set -f` / `set +f` around the loop |
 | `git worktree remove` fails | root-owned `build-dev/` inside it | `rm -rf` via container, `git worktree prune`; a worktree also needs the `models/` symlink dir or verify-fast fails in the hook |
 | A gitignored `./imp.conf` in the repo root | dev builds with `-w /src` load it, images do not (#1784 fixed the build context) | read the `imp.conf loaded from` line in every log |
 
@@ -118,4 +117,4 @@ Advisory jobs: `Lint`, `clang-tidy`, `Mock API contract`, `Real API contract (mo
 
 ## PR / merge
 
-Branch off `origin/main`, `gh pr create --base main`, never stack. Perf-moving change: refresh `tests/perf_baseline.json` in the same PR (benchmark-cuda). Ship flow, auto-merge race, release cut: skill **shipping-prs**.
+Ship flow, auto-merge race, release cut: skill **shipping-prs**.
