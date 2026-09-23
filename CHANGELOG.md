@@ -25,6 +25,8 @@ there instead of retelling it.
 - `src/compute/CLAUDE.md` test command pointed at a non-existent `./build/test-attention`.
 - Release image: the Dockerfile compiled at `-j$(nproc)` and OOM-killed the 16 GB runner, so v0.43.0 and v0.44.0 published no image (`ghcr.io/kekzl/imp:latest` stayed 0.42.1). It now takes `scripts/build_jobs.sh` (2 jobs at 16 GB); `workflow_dispatch` with `tag=vX.Y.Z` rebuilds a release.
 - `imp-cli --help` named `--max-tokens` default 256; the default is 8192 (16384 with `--interactive`).
+- gpt-oss with `json_object` / `json_schema` / regex / grammar returned `content: ""` (degen_suite constrained 4 of 4 FAIL): the constraint held from token 1, the reply had no Harmony channel header. The prompt now opens `<|channel|>final<|message|>` for a constrained request without tools.
+- `/v1/messages` returned a `thinking` block without a `thinking` opt-in on gpt-oss, which reasons regardless of `enable_thinking` (degen_suite anthropic-thinking default 2 of 2 FAIL); reasoning is now dropped unless `thinking.type` is `enabled` or `adaptive`.
 
 ### Changed
 - Q5_K MoE experts run the grouped INT8 IMMA prefill kernel instead of dequantizing all experts to FP16 per layer: Qwen3.6-35B-A3B UD-Q4_K_M pp512 5957 -> 8661 tok/s, pp4096 13982 -> 17236. Record: `tools/roofline/PERF_LOG.md`.

@@ -34,6 +34,14 @@ inline bool should_stamp_thinking_off(bool is_think_model, bool enable_thinking,
     return is_think_model && !enable_thinking && (budget_disabled || !want_thinking);
 }
 
+// harmony_skip_analysis: gpt-oss opens the analysis channel whatever enable_thinking says; a
+// constraint over the whole reply must start in the final channel, or the constrained text has no
+// channel and content comes back empty. Tools excluded: Harmony calls ride the commentary channel.
+inline bool harmony_skip_analysis(bool harmony, bool json_mode, bool has_tools, bool has_json_schema,
+                                  bool has_regex, bool has_grammar) {
+    return harmony && !has_tools && (json_mode || has_json_schema || has_regex || has_grammar);
+}
+
 inline bool reconcile_thinking_with_prompt_tail(bool current, bool explicit_set,
                                                 bool tail_has_think, bool tail_has_close) {
     if (tail_has_think && !tail_has_close)

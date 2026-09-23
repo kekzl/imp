@@ -423,8 +423,10 @@ std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector
     if (use_jinja_ && jinja_tpl_) {
         auto tokens = apply_jinja(tok, eff_msgs, true, suppress_thinking, force_thinking,
                                   reasoning_effort);
-        if (!tokens.empty())
+        if (!tokens.empty()) {
+            harmony_open_final_(tok, tokens, suppress_thinking);
             return tokens;
+        }
         IMP_LOG_WARN("Jinja2 render produced empty result, falling back to hardcoded template");
     }
 
@@ -444,12 +446,26 @@ std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector
             return apply_deepseek_r1(tok, eff_msgs);
         case ChatTemplateFamily::PHI:
             return apply_phi(tok, eff_msgs);
-        case ChatTemplateFamily::HARMONY:
-            return apply_harmony(tok, eff_msgs);
+        case ChatTemplateFamily::HARMONY: {
+            auto tokens = apply_harmony(tok, eff_msgs);
+            harmony_open_final_(tok, tokens, suppress_thinking);
+            return tokens;
+        }
         default:
             break;
     }
     return {};
+}
+
+void ChatTemplate::harmony_open_final_(const Tokenizer& tok, std::vector<int32_t>& tokens,
+                                       bool suppress_thinking) const {
+    if (family_ != ChatTemplateFamily::HARMONY || !suppress_thinking || hm_channel_id_ < 0 ||
+        hm_message_id_ < 0)
+        return;
+    tokens.push_back(hm_channel_id_);
+    const auto fin = tok.encode("final");
+    tokens.insert(tokens.end(), fin.begin(), fin.end());
+    tokens.push_back(hm_message_id_);
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 // endpoints, Anthropic messages, misc). NOT the public handler API - that is handlers.h.
 
 #include "handlers.h"
+#include "reasoning_split.h"
 #include "spec_usage_keys.h"
 
 #include "api/imp_internal.h"
@@ -178,6 +179,14 @@ struct ChatRequestContext {
     RequestSpan trace;
     bool log_skip = false;
 };
+
+// gpt-oss: a whole-reply constraint starts in the final channel (harmony_skip_analysis).
+inline bool harmony_final_only(const ChatRequestContext& ctx) {
+    const auto& p = ctx.params;
+    return imp::server::harmony_skip_analysis(ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY,
+                                              p.json_mode, p.has_tools, !p.json_schema_str.empty(),
+                                              !p.regex_pattern.empty(), !p.grammar.empty());
+}
 
 // cache_creation_input_tokens (Anthropic): full prompt blocks newly written
 // and pinned by this request — block-rounded prompt minus prefix-cache hits.

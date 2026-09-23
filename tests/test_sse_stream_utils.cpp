@@ -247,6 +247,15 @@ TEST(HarmonySplit, FinalEndsAtReturnMarker) {
     EXPECT_TRUE(seg.reasoning.empty());
 }
 
+// A constrained request's prompt ends on the final opener, so the output carries no channel
+// header; starts_in_final opens the final channel (without it content was empty).
+TEST(HarmonySplit, OutputWithoutHeaderNeedsThePromptOpener) {
+    EXPECT_TRUE(split_harmony_channels("{\"a\": 1}<|return|>").content.empty());
+    auto seg = split_harmony_channels("{\"a\": 1}<|return|>", /*starts_in_final=*/true);
+    EXPECT_EQ(seg.content, "{\"a\": 1}");
+    EXPECT_TRUE(seg.reasoning.empty());
+}
+
 TEST(HarmonySplit, CommentaryCountsAsReasoning) {
     auto seg = split_harmony_channels(
         "<|channel|>commentary<|message|>meta<|end|><|channel|>final<|message|>ans");

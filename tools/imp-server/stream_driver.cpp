@@ -114,6 +114,10 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     const bool harmony = (tpl_family == imp::ChatTemplateFamily::HARMONY);
     std::string hm_channel, hm_name, hm_buf, hm_recipient, hm_args;
     bool hm_in_msg = false, hm_reading_name = false, hm_call_open = false;
+    if (harmony && ctx.snap.suppress_thinking) {  // the prompt already opened the final channel
+        hm_channel = "final";
+        hm_in_msg = true;
+    }
     auto hm_flush = [&](bool force) -> bool {
         size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
         if (complete == 0)
