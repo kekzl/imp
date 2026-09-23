@@ -359,10 +359,7 @@ void run_mmvq_gemv(const char* name, QType qt, int N, int K,
                                    cudaStream_t)) {
     Lcg g(0x33CCu + static_cast<uint32_t>(qt));
     std::vector<uint8_t> buf;
-    if (qt == QType::Q8_0)
-        build_q8_0(buf, N, K, g, NORMAL);
-    else
-        build_q4_k(buf, N, K, g, NORMAL);
+    format_spec(qt).build(buf, N, K, g, NORMAL);
     void* dW = to_device(buf);
     std::vector<half> hx;
     half* dx = random_x(K, g, hx);
@@ -428,5 +425,8 @@ TEST(GgufRef, Q3_K_GemvDp4a) { run_dp4a_gemv("Q3_K", QType::Q3_K, 256, 1024, gem
 
 TEST(GgufRef, Q8_0_GemvMmvq) { run_mmvq_gemv("Q8_0", QType::Q8_0, 256, 1024, ggml_mmvq_q8_0); }
 TEST(GgufRef, Q4_K_GemvMmvq) { run_mmvq_gemv("Q4_K", QType::Q4_K, 256, 1024, ggml_mmvq_q4k); }
+// Q5_1 / Q5_K MMVQ had no reference (the Q5_1 dp4a trait read its nibbles interleaved, #2101).
+TEST(GgufRef, Q5_1_GemvMmvq) { run_mmvq_gemv("Q5_1", QType::Q5_1, 256, 1024, ggml_mmvq_q5_1); }
+TEST(GgufRef, Q5_K_GemvMmvq) { run_mmvq_gemv("Q5_K", QType::Q5_K, 256, 1024, ggml_mmvq_q5k); }
 
 }  // namespace imp
