@@ -279,8 +279,7 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 }
 
 // Q6_K RAW-read kernel: per-16 scales, symmetric, no beta/rowsum term.
-// 210-B super-blocks are only 2-aligned; a one-time 224-B-stride repack (+6.7% bytes) restores 16-B alignment
-// for cp.async.
+// 210-B super-blocks are only 2-aligned: B is staged through registers (aligned words + funnel shift).
 // Per-16 scale granularity vs k32 MMA: HALF-MMA SPLIT, issue m16n8k32 twice per sub-block as (b0,0) and
 // (0,b1); the zeroed operand yields the 16-wide partial sum with its own alpha=d*sc16 (same int-op count as a
 // k16 MMA pair).
@@ -292,16 +291,14 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
                                int, const int32_t*, size_t);
 
-bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 5=q6k raw*/,
-                 const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
+bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
+                 __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     const bool capturing = imma_stream_capturing(stream);
     if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
         return false;
-    if (qkind == 2 && !imma_ensure_q6k(w_blocks, static_cast<size_t>(ne) * N * (K / 256), stream, capturing))
-        return false;
-    // qkind 3 (Q5_1) reads raw blocks — nothing to prepare
+    // qkinds 1-4 read raw blocks: nothing to prepare
     const int act_rows = d_offsets ? expanded : M;
     if (!imma_ensure_act(act_rows, K, capturing))
         return false;
@@ -348,22 +345,18 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 
         IMP_CUDA_CHECK_LAUNCH();
         return true;
     }
-    if (qkind == 2 || qkind == 5) {
-        // 2 = 224-B repack (cp.async), 5 = GGUF 210-B blocks read in place (no repack VRAM)
-        const bool unp = qkind == 5;
-        const uint8_t* w6 = unp ? static_cast<const uint8_t*>(w_blocks) : g_imma_q6k[w_blocks].blocks;
+    if (qkind == 2) {
+        // GGUF 210-B blocks read in place (no weight copy)
+        const uint8_t* w6 = static_cast<const uint8_t*>(w_blocks);
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
         using Q6Kernel = void (*)(const int8_t*, const __half*, const uint8_t*, __half*, int, int, int,
                                   const int32_t*, size_t);
-        const Q6Kernel k32 = unp ? mmq_imma_q6k_raw_kernel<32, false, true>
-                                 : mmq_imma_q6k_raw_kernel<32, false, false>;
-        const Q6Kernel k128b = unp ? mmq_imma_q6k_raw_kernel<128, true, true>
-                                   : mmq_imma_q6k_raw_kernel<128, true, false>;
-        const Q6Kernel k128 = unp ? mmq_imma_q6k_raw_kernel<128, false, true>
-                                  : mmq_imma_q6k_raw_kernel<128, false, false>;
-        static bool smem_set6[2] = {false, false};
-        if (!smem_set6[unp]) {
-            smem_set6[unp] = true;
+        const Q6Kernel k32 = mmq_imma_q6k_raw_kernel<32, false>;
+        const Q6Kernel k128b = mmq_imma_q6k_raw_kernel<128, true>;
+        const Q6Kernel k128 = mmq_imma_q6k_raw_kernel<128, false>;
+        static bool smem_set6 = false;
+        if (!smem_set6) {
+            smem_set6 = true;
             cudaFuncSetAttribute(k32, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  static_cast<int>(q6k_smem_bytes(32)));
             cudaFuncSetAttribute(k128b, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -453,17 +446,17 @@ bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* ou
 }
 
 bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
-                       cudaStream_t stream, float beta, bool raw) {
+                       cudaStream_t stream, float beta) {
     if (M < 64 || N % 2 != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
-    return gemm_common(w_q6k_blocks, raw ? 5 : 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+    return gemm_common(w_q6k_blocks, 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
                        int K, cudaStream_t stream) {
     if (N % 2 != 0) return false;
-    if (K % ((qkind == 1 || qkind == 2 || qkind == 4 || qkind == 5) ? 256 : kBK) != 0)
+    if (K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : kBK) != 0)
         return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
@@ -485,7 +478,7 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 void mmq_q8_imma_release_all() {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     // g_imma_splitk/g_imma_act are arena-owned since A7 step 8 (~Engine closes arena; only
-    // guards re-armed here). Weight/Q6_K repack caches are direct allocations: model-resident
+    // guards re-armed here). Q8_0 weight caches are direct allocations: model-resident
     // (T1, A7 step 6), keyed by source weight pointer, outlive nothing else here.
     g_imma_splitk = SplitKScratch{};
     for (auto& [_, w] : g_imma_weights) {
@@ -493,9 +486,6 @@ void mmq_q8_imma_release_all() {
         cudaFree(w.sc);
     }
     g_imma_weights.clear();
-    for (auto& [_, r] : g_imma_q6k)
-        cudaFree(r.blocks);
-    g_imma_q6k.clear();
     g_imma_act = ActScratch{};
     // The plane budget is per-model: a swap re-plans it. Give the accounting
     // back what the frees returned, or the next model starts with the previous

@@ -1,5 +1,5 @@
-// Q6_K MoE grouped IMMA: raw 210-B read (qkind 5) vs the 224-B repack (qkind 2) and the ggml
-// dequant formula. Own file: test_mmq_q8_imma.cu sits at the function-size gate.
+// Q6_K MoE grouped IMMA (qkind 2, 210-B blocks read in place) vs the ggml dequant formula.
+// Own file: test_mmq_q8_imma.cu sits at the function-size gate.
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -30,12 +30,7 @@ double q6k_weight(const uint8_t* bp, int i) {
     return __half2float(dh) * static_cast<int8_t>(bp[192 + (i >> 4)]) * (((high2 << 4) | low4) - 32);
 }
 
-struct MoeRun {
-    std::vector<__half> out;
-    double nrmse = 0;
-};
-
-MoeRun q6k_moe(const std::vector<int>& rows_per, int N, int K, unsigned seed, int qkind) {
+double q6k_moe_nrmse(const std::vector<int>& rows_per, int N, int K, unsigned seed) {
     const int ne = static_cast<int>(rows_per.size());
     std::vector<int32_t> h_off(ne + 1, 0);
     int max_rows = 0;
@@ -71,11 +66,11 @@ MoeRun q6k_moe(const std::vector<int>& rows_per, int N, int K, unsigned seed, in
     cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
     cudaMemcpy(d_off, h_off.data(), h_off.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
-    EXPECT_TRUE(mmq_imma_moe_gemm(d_w, qkind, d_x, d_out, d_off, max_rows, expanded, ne, N, K, nullptr));
+    EXPECT_TRUE(
+        mmq_imma_moe_gemm(d_w, /*qkind=*/2, d_x, d_out, d_off, max_rows, expanded, ne, N, K, nullptr));
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    MoeRun r;
-    r.out.resize(static_cast<size_t>(expanded) * N);
-    cudaMemcpy(r.out.data(), d_out, r.out.size() * 2, cudaMemcpyDeviceToHost);
+    std::vector<__half> out(static_cast<size_t>(expanded) * N);
+    cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
 
     double err2 = 0, ref2 = 0;
     for (int e = 0; e < ne; ++e)
@@ -88,7 +83,7 @@ MoeRun q6k_moe(const std::vector<int>& rows_per, int N, int K, unsigned seed, in
                         ref += static_cast<double>(__half2float(x[(size_t)row * K + sb * 256 + i])) *
                                q6k_weight(bp, i);
                 }
-                const double got = __half2float(r.out[(size_t)row * N + n]);
+                const double got = __half2float(out[(size_t)row * N + n]);
                 err2 += (got - ref) * (got - ref);
                 ref2 += ref * ref;
             }
@@ -97,21 +92,14 @@ MoeRun q6k_moe(const std::vector<int>& rows_per, int N, int K, unsigned seed, in
     cudaFree(d_out);
     cudaFree(d_off);
     mmq_q8_imma_release_all();
-    r.nrmse = std::sqrt(err2 / std::max(ref2, 1e-30));
-    return r;
+    return std::sqrt(err2 / std::max(ref2, 1e-30));
 }
 
 // BM=32 (max rows < 96) and BM=128; an empty expert; K=768 = 3 superblocks, so the 210-B block
 // parity alternates row to row; N=192 leaves a partial 128-column tile.
-TEST(MmqQ8Imma, MoeGroupedQ6KRaw) {
-    for (const auto& rows : {std::vector<int>{70, 0, 41}, std::vector<int>{70, 41, 130}}) {
-        const MoeRun raw = q6k_moe(rows, 192, 768, 601, /*qkind=*/5);
-        const MoeRun rep = q6k_moe(rows, 192, 768, 601, /*qkind=*/2);
-        EXPECT_LT(raw.nrmse, 2e-2) << "Q6_K raw MoE NRMSE, max rows " << rows[2];
-        ASSERT_EQ(raw.out.size(), rep.out.size());
-        EXPECT_EQ(std::memcmp(raw.out.data(), rep.out.data(), raw.out.size() * sizeof(__half)), 0)
-            << "raw vs repack, max rows " << rows[2];
-    }
+TEST(MmqQ8Imma, MoeGroupedQ6K) {
+    for (const auto& rows : {std::vector<int>{70, 0, 41}, std::vector<int>{70, 41, 130}})
+        EXPECT_LT(q6k_moe_nrmse(rows, 192, 768, 601), 2e-2) << "Q6_K MoE NRMSE, max rows " << rows[2];
 }
 
 }  // namespace

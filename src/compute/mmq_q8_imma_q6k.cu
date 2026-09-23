@@ -1,7 +1,7 @@
 // Q6_K RAW-read IMMA prefill kernel (sm_120a). Split out of mmq_q8_imma.cu
 // (recompile-blast-radius gate); shared tile constants/cp.async/Q6 staging strides/
 // q6k_smem_bytes() in mmq_q8_imma_internal.cuh; kernel launched from mmq_q8_imma.cu dispatch,
-// which also keeps the one-time 224-B repack kernel. Byte-identical to original.
+// which also keeps the activation quantizer.
 
 #include "compute/mmq_q8_imma_internal.cuh"
 
@@ -12,8 +12,7 @@ namespace imp {
 namespace {
 
 // Q6_K RAW-read kernel (per-16 scales, symmetric, no beta/rowsum term).
-// 210-B super-blocks are only 2-aligned: UNPACKED=false reads a one-time 224-B-stride repack
-// (+6.7% bytes, cp.async), UNPACKED=true the GGUF blocks in place (register staging below).
+// 210-B super-blocks are only 2-aligned (no cp.async): B is read in place through registers.
 // Per-16 scale vs k32 MMA: HALF-MMA SPLIT, issue m16n8k32 twice as (b0,0) and (0,b1);
 // zeroed operand yields the 16-wide partial sum with its own alpha=d*sc16 (same int-op
 // count as a k16 MMA pair).
@@ -21,11 +20,13 @@ namespace {
 // j+1 -> group g=j>>2, quads (j%4, j%4+1); pair shares ql bytes [g*64..+63] (quad&1
 // selects 32-B half, quad>=2 the nibble) and qh bytes [g*32..+31] (shift quad*2).
 
-template <int BM, bool LOAD_B = true>
-__device__ __forceinline__ void load_kstep_q6k(
-    int tid, const int8_t* __restrict__ A, const __half* __restrict__ Asc, const uint8_t* __restrict__ Wq6k,
-    int base_n, int sblk_count, int8_t (*sA)[kRow], uint8_t (*sQl)[kQlRow], uint8_t (*sQh)[kQhRow],
-    uint8_t (*sScd)[8], __half (*sAsc)[2], int base_m, int M, int K, int subs, int k_base, int base_n_rows) {
+// Activation tile + per-row activation scales of one K-step (cp.async); B is staged by the
+// register path below.
+template <int BM>
+__device__ __forceinline__ void load_kstep_q6k_a(int tid, const int8_t* __restrict__ A,
+                                                 const __half* __restrict__ Asc, int8_t (*sA)[kRow],
+                                                 __half (*sAsc)[2], int base_m, int M, int K, int subs,
+                                                 int k_base) {
 #pragma unroll
     for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
@@ -33,28 +34,6 @@ __device__ __forceinline__ void load_kstep_q6k(
         const bool valid = (base_m + row) < M;
         cp_async_cg_16(&sA[row][col],
                        A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
-    }
-    const int ks = k_base / kBK;
-    const int sblk = ks >> 2;
-    const int j = (2 * ks) & 7;   // even sub-block of the pair
-    const int g = j >> 2;         // 128-element group
-#pragma unroll
-    for (int i = tid; LOAD_B && i < kBN * 8; i += kThreads) {
-        const int row = i >> 3;
-        const int part = i & 7;
-        const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
-        const uint8_t* blk =
-            Wq6k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * kQ6Stride;
-        if (part < 4) {
-            cp_async_cg_16(&sQl[row][part * 16], blk + g * 64 + part * 16, bvalid);
-        } else if (part < 6) {
-            cp_async_cg_16(&sQh[row][(part - 4) * 16], blk + 128 + g * 32 + (part - 4) * 16,
-                           bvalid);
-        } else if (part == 6) {
-            cp_async_ca_4(&sScd[row][0], blk + 192 + 2 * j, bvalid);  // 4 per-16 scales
-        } else {
-            cp_async_ca_4(&sScd[row][4], blk + 208, bvalid);  // d (+2 pad bytes)
-        }
     }
     const int kb0 = k_base / 32;
 #pragma unroll
@@ -64,7 +43,7 @@ __device__ __forceinline__ void load_kstep_q6k(
     }
 }
 
-// UNPACKED staging of the GGUF 210-B blocks (2-aligned, so no cp.async): per (row, part) task,
+// Register staging of the GGUF 210-B blocks (2-aligned, so no cp.async): per (row, part) task,
 // part 0-3 = 16-B ql chunks, 4-5 = 16-B qh chunks, 6 = the 4 per-16 scales + d. Two halves of the
 // tasks are in flight at a time (one per kb step of the MMA loop): all four would hold 24 registers
 // across it and spill BM=128 (255 regs + 40 B stack).
@@ -137,7 +116,7 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
 
 }  // namespace
 
-template <int BM, bool BETA1, bool UNPACKED>
+template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const uint8_t* __restrict__ Wq6k,
     __half* __restrict__ out, int M, int N, int K, const int32_t* __restrict__ expert_offsets,
@@ -167,7 +146,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int sblk_count = K / 256;
     const int8_t* A = X_s8 + row_off * K;
     const __half* Asc = x_scale + row_off * subs;
-    const uint8_t* W = Wq6k + static_cast<size_t>(e) * w_stride_blocks * (UNPACKED ? kQ6Gguf : kQ6Stride);
+    const uint8_t* W = Wq6k + static_cast<size_t>(e) * w_stride_blocks * kQ6Gguf;
     __half* C = out + row_off * N;
 
     const int tid = threadIdx.x;
@@ -206,26 +185,21 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
             acc[i][j2][0] = acc[i][j2][1] = acc[i][j2][2] = acc[i][j2][3] = 0.0f;
 
     const int ksteps = K / kBK;
-    load_kstep_q6k<BM, !UNPACKED>(tid, A, Asc, W, base_n, sblk_count, sA(0), sQl(0), sQh(0), sScd(0), sAsc(0),
-                                  base_m, rows, K, subs, 0, n_rem);
+    load_kstep_q6k_a<BM>(tid, A, Asc, sA(0), sAsc(0), base_m, rows, K, subs, 0);
     cp_async_commit();
     Q6kUnpackedB rb;
-    if constexpr (UNPACKED) {
-        fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, 0, n_rem);
-        commit_b_q6k_unpacked<0>(rb, tid, sQl(0), sQh(0), sScd(0));
-        fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, 0, n_rem);
-        commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(0), sQh(0), sScd(0));
-    }
+    fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, 0, n_rem);
+    commit_b_q6k_unpacked<0>(rb, tid, sQl(0), sQh(0), sScd(0));
+    fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, 0, n_rem);
+    commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(0), sQh(0), sScd(0));
 
     for (int ks = 0; ks < ksteps; ++ks) {
         const int stage = ks & 1;
         if (ks + 1 < ksteps) {
             const int nstage = (ks + 1) & 1;
-            load_kstep_q6k<BM, !UNPACKED>(tid, A, Asc, W, base_n, sblk_count, sA(nstage), sQl(nstage),
-                                          sQh(nstage), sScd(nstage), sAsc(nstage), base_m, rows, K, subs,
-                                          (ks + 1) * kBK, n_rem);
-            if constexpr (UNPACKED)
-                fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
+            load_kstep_q6k_a<BM>(tid, A, Asc, sA(nstage), sAsc(nstage), base_m, rows, K, subs,
+                                 (ks + 1) * kBK);
+            fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -316,15 +290,13 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
                 }
             }
             // nstage was last read in iteration ks-1, whose trailing barrier orders these stores after it.
-            if constexpr (UNPACKED) {
-                if (ks + 1 < ksteps) {
-                    const int ns = (ks + 1) & 1;
-                    if (kb == 0) {
-                        commit_b_q6k_unpacked<0>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
-                        fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
-                    } else {
-                        commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
-                    }
+            if (ks + 1 < ksteps) {
+                const int ns = (ks + 1) & 1;
+                if (kb == 0) {
+                    commit_b_q6k_unpacked<0>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
+                    fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
+                } else {
+                    commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
                 }
             }
         }
@@ -354,16 +326,11 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
 }
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
-#define IMP_Q6K_RAW_INST(BM, BETA1, UNP)                                                                     \
-    template __global__ void mmq_imma_q6k_raw_kernel<BM, BETA1, UNP>(const int8_t*, const __half*,           \
-                                                                     const uint8_t*, __half*, int, int, int, \
-                                                                     const int32_t*, size_t);
-IMP_Q6K_RAW_INST(32, false, false)
-IMP_Q6K_RAW_INST(128, true, false)
-IMP_Q6K_RAW_INST(128, false, false)
-IMP_Q6K_RAW_INST(32, false, true)
-IMP_Q6K_RAW_INST(128, true, true)
-IMP_Q6K_RAW_INST(128, false, true)
-#undef IMP_Q6K_RAW_INST
+template __global__ void mmq_imma_q6k_raw_kernel<32, false>(const int8_t*, const __half*, const uint8_t*,
+                                                            __half*, int, int, int, const int32_t*, size_t);
+template __global__ void mmq_imma_q6k_raw_kernel<128, true>(const int8_t*, const __half*, const uint8_t*,
+                                                            __half*, int, int, int, const int32_t*, size_t);
+template __global__ void mmq_imma_q6k_raw_kernel<128, false>(const int8_t*, const __half*, const uint8_t*,
+                                                             __half*, int, int, int, const int32_t*, size_t);
 
 }  // namespace imp
