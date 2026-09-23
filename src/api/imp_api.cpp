@@ -776,9 +776,23 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         ctx->consumed_output = 0;
 
         // Run steps until prefill completes (may take multiple steps with chunked prefill)
-        do {
-            (void)ctx->engine->step();
-        } while (req->status == imp::RequestStatus::PREFILLING);
+        // A request the scheduler holds back stays PENDING; 8 rounds, then it is a capacity refusal,
+        // not IMP_SUCCESS followed by "no token" in imp_decode_step.
+        for (int held = 0; held < 8; ++held) {
+            do {
+                (void)ctx->engine->step();
+            } while (req->status == imp::RequestStatus::PREFILLING);
+            if (req->status != imp::RequestStatus::PENDING)
+                break;
+        }
+        if (req->status == imp::RequestStatus::PENDING) {
+            IMP_LOG_ERROR(
+                "imp_prefill: request of %d tokens still not admitted after 8 scheduler rounds "
+                "(KV pool %d blocks) - refusing",
+                n_tokens, ctx->engine->kv_manager()->kv_cache()->total_blocks());
+            req->status = imp::RequestStatus::CANCELLED;
+            req->cancel_reason = imp::CancelReason::KvCapacity;
+        }
 
         // Report cancellation distinctly: collapsing it into OUT_OF_MEMORY hid that
         // the scheduler refused admission ("needs N KV blocks, cache has M"), a

@@ -85,4 +85,4 @@ matrix=matrix.tsv (13 models x pp512/pp4096/tg128/tg128_ctx8k), Nemotron cells r
 
 | Cell | Result |
 |---|---|
-| q4k-gemma4-26b tg128_ctx8k | no decode: KV pool 7808 tokens < 9360 requested, StreamingLLM auto-enabled, `imp_decode_step: engine produced no token in 8 steps` |
+| q4k-gemma4-26b tg128_ctx8k | no decode: `--bench` pins `kv_cache.swa_sizing=off` (full KV on 30/30 layers, 25 are SWA-1024), 4 GB foreign load during the run (upload 20160 MiB for a 16086 MiB checkpoint), pool 517 blocks = 8272 tokens < 8320 needed; the request stays `PENDING` (`imp_decode_step: engine produced no token in 8 steps (status=PENDING, 0 outputs)`) although the init WARN announces a cancel at admission. Open defect: refuse, do not hang. Re-run with `--set kv_cache.swa_sizing=on` on a free card |

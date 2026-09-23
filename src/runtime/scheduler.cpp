@@ -104,8 +104,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // floor) degrades to prompt-only admission instead of queuing forever.
                 const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
                 const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
-                const int admit_blocks = std::min(blocks_needed + decode_blocks,
-                                                  std::max(blocks_needed, pool_blocks));
+                int admit_blocks = std::min(blocks_needed + decode_blocks,
+                                            std::max(blocks_needed, pool_blocks));
 
                 // Aggregate-pressure growth: the pool grows toward its ceiling here
                 // because the ceiling IS the post-weight residual already clamped at
@@ -116,6 +116,11 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     if (kvc->ceiling_blocks() > total_now)
                         kvc->try_grow_to(total_now + std::max(admit_blocks, total_now / 4));
                 }
+                // The clamp above still asks for the WHOLE pool; with nothing running no block comes back,
+                // so a prompt that fits admits on the prompt alone instead of queueing forever.
+                if (active_.empty() && !kv_manager_->can_allocate(admit_blocks) &&
+                    kv_manager_->can_allocate(blocks_needed))
+                    admit_blocks = blocks_needed;
                 if (!kv_manager_->can_allocate(admit_blocks)) {
                     // If the request needs more blocks than the KV cache can ever
                     // hold, no eviction frees enough: leaving it in pending_ busy-loops
