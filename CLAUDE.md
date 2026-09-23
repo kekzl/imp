@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-13
-commit: 81d22eff
+verified: 2026-09-23
+commit: 6ca7ee18
 -->
 
 # imp - Project Instructions
@@ -30,7 +30,7 @@ This file is the router: rules for every task. Playbooks live in skills; a rule 
 | Doc layer, header, PROV; `docs`/`citations` gate red | skill **docs-layers** |
 | VRAM, ownership, lifetime | [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md) first |
 
-Editing under `src/compute/`, `src/runtime/`, `src/model/`, `tools/imp-server/` or `tests/`: read that directory's `CLAUDE.md` first. Generic build and test commands live only here.
+Generic build and test commands live only here; directory `CLAUDE.md` files hold area rules.
 
 Doc layers (L0 `README.md`, L1 `docs/*.md`, L2 `docs/internals/`, L3 `CLAUDE.md` tree) are gated by `scripts/docs_lint.py`: root <= 2000 tokens, directory files <= 800, an L3 `verified:` more than 14 days behind the file's last commit is an error. Also canonical: `AGENTS.md` (subagent roles), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md`.
 
@@ -59,4 +59,3 @@ make verify                # full
 - Dependency pins: only `cmake/imp-deps.cmake`. Dockerfile: no `--mount=type=cache` on the build dir (ninja reused stale objects, 03a2cc19); the content-addressed `ccache` mount stays.
 - File size is gated on recompile blast radius: per file, per function body (> 500 code LOC hard), per translation unit (an `#include`d `.cu` counts against its includer). Exceptions go to `[allow]` with a reason: `docs/audit/AUDIT_FILESIZE.md`.
 - VRAM misleads rather than fails (WSL2/WDDM): a successful `cudaMalloc` proves nothing, measured bandwidth tells resident from spilled (#1103), free VRAM only decreases within a process. Capacity is planned, not discovered: `docs/internals/MEMORY.md`.
-- Match surrounding style; simple and direct, no speculative abstraction.
