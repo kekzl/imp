@@ -31,7 +31,7 @@ size_t vram_reserved_uncommitted_bytes() {
 void vram_budget_install(size_t budget_mb) {
     size_t budget = budget_mb << 20;
     // Snapshot the baseline even when uncapped: it separates "this process's allocations"
-    // from the CUDA context and any neighbour already on the card, and both --mem-report and
+    // from the CUDA context and any neighbour already on the card, and both the VRAM audit table and
     // the peak-VRAM gate need that split to say anything useful about a budget being
     // respected.
     size_t free_b = 0, total_b = 0;

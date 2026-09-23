@@ -490,8 +490,8 @@ fi
 # vram_increase_pct threshold that nothing ever read; peak VRAM creeps silently until a model
 # stops fitting (#1103, 7x decode cost).
 # Gated on own_peak, NOT device peak_used: device-used also carries the CUDA primary context
-# (~1.7 GiB) and any neighbour process. Runs its own short bench rather than piggy-backing on
-# the perf bench: --mem-report's 2ms sampler thread would perturb the number the perf gate reads.
+# (~1.7 GiB) and any neighbour process. own_peak comes from the VRAM audit table every run prints
+# at shutdown; its own short bench keeps the perf bench a separate process.
 section "peak VRAM vs baseline"
 if [ "${IMP_VERIFY_SKIP_VRAM:-0}" = "1" ]; then
     skip "peak-VRAM gate (IMP_VERIFY_SKIP_VRAM=1)"
@@ -520,11 +520,11 @@ else
         # BOTH streams: imp's INFO logs (VRAM audit table) go to STDOUT, only bench result lines go to
         # stderr. Capturing stderr alone, correct for the perf gate's own numbers, yields nothing here.
         "$BIN" --model "$VRAM_MODEL_PATH" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
-              --temperature 0 --set speculative.ngram=false --mem-report \
+              --temperature 0 --set speculative.ngram=false \
               >"$ERR_V" 2>&1
         OWN_PEAK=$(grep -oP 'own_peak=\K[0-9]+' "$ERR_V" | tail -1)
         if [ -z "$OWN_PEAK" ]; then
-            warn "could not read own_peak from --mem-report — gate not evaluated"
+            warn "could not read own_peak from the VRAM audit table — gate not evaluated"
         else
             DELTA=$(awk -v a="$OWN_PEAK" -v b="$BL_VRAM" 'BEGIN{printf "%.2f", (a-b)/b*100}')
             echo "  own peak VRAM = $OWN_PEAK MiB  (baseline $BL_VRAM, delta ${DELTA}%)"

@@ -15,7 +15,7 @@ The decode column is a per-model figure, not a gate; each comes from the sweep n
 
 Model families with a known-working code path on `main`. Throughput numbers and methodology: [`PERF.md`](PERF.md); per-row history with commands: [`BENCHMARKS.md`](BENCHMARKS.md).
 
-- VRAM figures are model weights only. The KV cache is sized *on top*, from what is left after the weight caches are built: it scales with free VRAM and the configured context (a dense server default lands around 4.6 GiB; a small model on an idle card takes far more). Bound it with `--set runtime.max_seq_len=N` / `kv_cache` settings; read the actual split with `--mem-report`.
+- VRAM figures are model weights only. The KV cache is sized *on top*, from what is left after the weight caches are built: it scales with free VRAM and the configured context (a dense server default lands around 4.6 GiB; a small model on an idle card takes far more). Bound it with `--set runtime.max_seq_len=N` / `kv_cache` settings; read the actual split in the VRAM audit table printed at init.
 - **`--max-seq-len` is imp-cli only**: `imp-server --max-seq-len N` hits the unknown-argument branch and exits 1 (#1681).
 - Anything not on this list may still load (the GGUF and SafeTensors paths cover most LLaMA-derived architectures) but is not verified end-to-end. Mixtral and Llama-4 are in the arch enum with no validated checkpoint: Mixtral's only gate is the synthetic 8-expert case in `tests/test_moe_executor.cu` plus the template-family test; Llama-4 has no dedicated gate (#1680).
 

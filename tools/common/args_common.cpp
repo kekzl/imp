@@ -15,8 +15,6 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
         args.config_path = argv[++i];
     } else if (std::strcmp(a, "--set") == 0 && i + 1 < argc) {
         args.config_overrides.push_back(argv[++i]);
-    } else if (std::strcmp(a, "--device") == 0 && i + 1 < argc) {
-        args.device = std::atoi(argv[++i]);
     } else if (std::strcmp(a, "--gpu-layers") == 0 && i + 1 < argc) {
         args.gpu_layers = std::atoi(argv[++i]);
     } else if (std::strcmp(a, "--max-tokens") == 0 && i + 1 < argc) {
@@ -35,8 +33,6 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
         // --- boolean flags ---
     } else if (std::strcmp(a, "--json") == 0) {
         args.json_out = true;
-    } else if (std::strcmp(a, "--mem-report") == 0) {
-        args.mem_report = true;
     } else if (std::strcmp(a, "--no-cuda-graphs") == 0) {
         args.no_cuda_graphs = true;
     } else if (std::strcmp(a, "--kv-fp8") == 0) {

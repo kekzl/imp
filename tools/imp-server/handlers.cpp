@@ -575,7 +575,6 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     (void)model_path;
     ImpConfig config = imp_config_default();
 
-    config.device_id = args.device;
 
     // max_batch_size precedence: --max-batch CLI > [runtime] max_batch_size (imp.conf) > 0 (engine
     // auto-sizes from weight footprint; >20 GiB MoE auto-picks 1). All paths must resolve here.

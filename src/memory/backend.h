@@ -19,7 +19,7 @@
 namespace imp {
 
 // Tags: the unit of reporting for I7 (capacity and occupancy are separate concepts,
-// reported separately). One tag per thing an operator recognizes in --mem-report, not
+// reported separately). One tag per thing an operator recognizes in the VRAM audit table, not
 // one per allocation site.
 enum class RegionTag {
     ModelResident,        // T1 arena: weights + the pre-dequant weight caches

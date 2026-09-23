@@ -123,7 +123,7 @@ vram_weights=$(echo "$vram_line" | grep -oP 'upload consumed \K[0-9]+' || echo "
 # comparable. own_peak (this process's allocations since engine init), not device peak_used
 # (which also carries the CUDA context and any neighbour process).
 own_peak=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
-              --temperature 0 --set speculative.ngram=false --mem-report 2>&1 \
+              --temperature 0 --set speculative.ngram=false 2>&1 \
            | grep -oP 'own_peak=\K[0-9]+' | tail -1)
 own_peak=${own_peak:-0}
 

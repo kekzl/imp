@@ -73,7 +73,6 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--revision <rev>` | - | HF revision when `--model` is a hub repo id |
 | `--mmproj <path>` | - | vision encoder GGUF (Gemma-3/4; Qwen3-VL carries its tower in the checkpoint) |
 | `--image <path>` | - | repeatable (Qwen3-VL: several images) |
-| `--device <n>` | `0` | CUDA device id |
 | `--gpu-layers <n>` | `-1` (all) | layers on GPU |
 | `--config <path>`, `--set sec.key=val` | - | see `imp.conf` above |
 | `--json` | off | one JSON document on stdout, human lines on stderr - see `--json` below |
@@ -81,7 +80,6 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--max-tokens <n>` | `8192` (`16384` with `--interactive`) | max tokens to generate; same default as `imp-server` |
 | `--max-seq-len <n>` / `--min-kv-tokens <n>` | auto | KV context ceiling / floor in tokens |
 | `--vram-budget <mb>` | `0` (uncapped) | hard per-process VRAM cap, see below |
-| `--mem-report` | off | full VRAM attribution table at init |
 | `--interactive` | off | interactive chat; refuses `--json` (a token stream is not one document) |
 | `--stop <str>` | - | repeatable, up to 4 |
 | `--chat-template <t>` | `auto` | `auto\|none\|chatml\|llama2\|llama3\|nemotron\|gemma\|deepseek_r1\|phi` |
@@ -114,7 +112,7 @@ KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto ta
 
 - The cap binds but is not exact: the CUDA primary context (~1.7 GiB on the reference host) and ~1.8 GiB of dequant scratch/CUTLASS scale buffers/pinned staging sit outside the sizing gates.
 - Measured on Qwen3-8B-Q8_0: `--vram-budget 16000` peaks at 19468 MiB, leave ~3.5 GiB of headroom between the sum of budgets and the card.
-- `--mem-report` prints the peak against the cap and marks `[OVER BUDGET]`.
+- The VRAM audit table printed at init and shutdown shows the peak against the cap and marks `[OVER BUDGET]`.
 - A budget too small for one `max_seq_len` sequence is refused at init, naming the blocks available, needed and the MiB to add.
 
 ## `--json` - machine-readable output

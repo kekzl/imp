@@ -48,7 +48,7 @@ MemAccount::Pool& MemAccount::pool_locked(const char* name) {
 void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
     // Deliberately NOT gated on enabled_: the per-pool ledger is what makes
     // unattributed_bytes() mean "what imp cannot account for"; gated, it would be empty on
-    // every start without --mem-report and the residual would read as the whole device
+    // every start without diagnostics.vram_audit and the residual would read as the whole device
     // (this once collapsed a KV pool from 4096 tokens to 512, AUDIT B80). Cost is a lock +
     // small map lookup per ACQUISITION, an init-time event (I2 measures zero while serving).
     // What stays gated is the expensive half: checkpoint history, the report table, the

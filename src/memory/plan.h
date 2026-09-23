@@ -133,7 +133,7 @@ struct MemoryPlan {
     size_t context_reserve = 0;
 
     size_t total() const;
-    // Every line item, largest first — the body of --mem-report.
+    // Every line item, largest first — the body of the VRAM audit table.
     std::vector<PlanLine> lines() const;
 };
 

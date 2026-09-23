@@ -147,7 +147,7 @@ struct MemoryPlan {
     std::vector<PlanLine> pools;         // SWA group, SSM state, residual ring, ...
     size_t library_reserve; size_t context_reserve;
     size_t total() const;
-    std::vector<PlanLine> lines() const;  // every line item, largest first - the --mem-report body
+    std::vector<PlanLine> lines() const;  // every line item, largest first - the VRAM audit table body
 };
 PlanResult plan_memory(const PlanInput& in);   // pure, deterministic, never touches the device
 ```
@@ -244,7 +244,7 @@ Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculat
 | V8 | Plan sufficiency | replay a recorded real allocation journal against the plan; no tier exceeded |
 | V9 | Stability under growth | VMM fake: commit/decommit across a 10x growth; `Region::base` invariant |
 
-V8 is the migration safety net: record a journal from a real GPU run once per model config, check it in, assert the planner covers it - an under-provisioned plan is then a CI failure, not a production OOM. Acceptance criterion 8 (peak VRAM vs checked-in thresholds) gates `own_peak_mb` (`tests/perf_baseline.json`, this process's allocations since init) rather than the `--mem-report` device total, in `scripts/verify.sh` next to the perf gate.
+V8 is the migration safety net: record a journal from a real GPU run once per model config, check it in, assert the planner covers it - an under-provisioned plan is then a CI failure, not a production OOM. Acceptance criterion 8 (peak VRAM vs checked-in thresholds) gates `own_peak_mb` (`tests/perf_baseline.json`, this process's allocations since init) rather than the device total in the VRAM audit table, in `scripts/verify.sh` next to the perf gate.
 
 ---
 

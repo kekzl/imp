@@ -11,6 +11,10 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Removed
+- `--device` (parsed, never reached the engine: every run used device 0) and `--mem-report` (gated nothing: the VRAM audit table prints on every run). `ImpConfig.device_id` stays in the C ABI; a non-zero value is now refused at context create.
+- 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
+
 ### Fixed
 - `--vram-budget` with an auto `max_seq_len` refused to start: the resolver sized GGUF context from raw budget VRAM (Qwen3-4B Q8_0 at 9000 MiB: 76800 tokens against a 1333-block pool). An auto value is now clamped to the built pool (21328), and an operator-set value that fits the plan no longer loses to outstanding IMMA prefill planes (856 -> 1333 blocks, planes cut 536 MiB).
 - Memory-plan failure levers were larger than their line items ("max_seq_len 76800 -> 38400 frees 43200 MiB" against a 3807 MiB budget); each lever now frees at most what the report charges, zero levers are dropped.
