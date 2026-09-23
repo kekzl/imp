@@ -145,6 +145,33 @@ __global__ void expert_stage_touched_kernel(const DevExpertSrc* __restrict__ src
     }
 }
 
+// Expert block [e0, e0 + gridDim.y) of up to two projections: grid (blocks_per_expert, n, slots),
+// slot z holds projection proj_of_slot[z] at block-local index y (chunked prefill staging).
+__global__ void expert_stage_touched_range_kernel(const DevExpertSrc* __restrict__ src,
+                                                  const int32_t* __restrict__ expert_offsets,
+                                                  char* __restrict__ stage_buf, size_t proj_bytes,
+                                                  size_t pb, size_t mb, int n_experts, int e0,
+                                                  int2 proj_of_slot) {
+    const int i = blockIdx.y, e = e0 + i, z = blockIdx.z;
+    const int p = z == 0 ? proj_of_slot.x : proj_of_slot.y;
+    if (e >= n_experts || expert_offsets[e + 1] == expert_offsets[e])
+        return;
+    const DevExpertSrc s = src[p * n_experts + e];
+    if (!s.packed || !s.ms)
+        return;
+    char* base = stage_buf + static_cast<size_t>(z) * proj_bytes;
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    const size_t t0 = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int4* sp = reinterpret_cast<const int4*>(s.packed);
+    int4* dp = reinterpret_cast<int4*>(base + static_cast<size_t>(i) * pb);
+    for (size_t j = t0; j < pb / 16; j += stride)
+        dp[j] = sp[j];
+    const int4* sm = reinterpret_cast<const int4*>(s.ms);
+    int4* dm = reinterpret_cast<int4*>(base + static_cast<size_t>(gridDim.y) * pb + static_cast<size_t>(i) * mb);
+    for (size_t j = t0; j < mb / 16; j += stride)
+        dm[j] = sm[j];
+}
+
 // grid (blocks_per_copy, kMaxEntries): block y copies miss y, packed block then micro-scales.
 __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ misses,
                                            const int* __restrict__ n_miss, size_t packed_bytes,
@@ -358,6 +385,28 @@ bool DeviceExpertCache::stage_touched(int layer, const int32_t* expert_offsets, 
     const dim3 grid(16, L.n_experts, 3);
     expert_stage_touched_kernel<<<grid, 256, 0, stream>>>(L.src, expert_offsets, stage_buf,
                                                           proj_bytes, pb, mb, L.n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
+bool DeviceExpertCache::stage_touched_range(int layer, const int32_t* expert_offsets, char* stage_buf,
+                                            size_t proj_bytes, size_t pb, size_t mb, int e0, int n,
+                                            int proj0, int proj1, cudaStream_t stream) {
+    if (!layer_ready(layer) || !expert_offsets || !stage_buf || pb % 16 != 0 || mb % 16 != 0 || n <= 0)
+        return false;
+    const DevExpertLayer& L = layers_[layer];
+    for (int p : {proj0, proj1}) {
+        if (p < 0)
+            continue;
+        const size_t i = static_cast<size_t>(layer) * 3 + p;
+        if (packed_bytes_[i] != pb || ms_bytes_[i] != mb)
+            return false;
+    }
+    if (static_cast<size_t>(n) * (pb + mb) > proj_bytes || e0 < 0 || e0 >= L.n_experts)
+        return false;
+    const dim3 grid(16, n, proj1 < 0 ? 1 : 2);
+    expert_stage_touched_range_kernel<<<grid, 256, 0, stream>>>(L.src, expert_offsets, stage_buf, proj_bytes, pb,
+                                                                mb, L.n_experts, e0, make_int2(proj0, proj1));
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

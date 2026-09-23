@@ -92,6 +92,10 @@ public:
     // when the layer is not ready or the layout differs from the cache's.
     bool stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
                        size_t pb, size_t mb, cudaStream_t stream);
+    // Block form: experts [e0, e0 + n) of projection proj0 into slot 0 and proj1 (-1 = none) into
+    // slot 1, block-local index (packed at slot + i * pb, micro-scales at slot + n * pb + i * mb).
+    bool stage_touched_range(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
+                             size_t pb, size_t mb, int e0, int n, int proj0, int proj1, cudaStream_t stream);
 
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
     size_t ms_off(int layer, int proj) const { return ms_off_[static_cast<size_t>(layer) * 3 + proj]; }

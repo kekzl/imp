@@ -1003,6 +1003,11 @@ private:
     // whether the staged copy can carry the CUTLASS prefill.
     bool stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
 
+    // Chunked staging: experts [e0, e0 + n) of p0 into slot 0 and p1 (-1 = none) into slot 1,
+    // SfAtom view and the per-expert pointer entries [e0, e0 + n) of each projection filled.
+    bool stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1, const int32_t* expert_offsets,
+                            cudaStream_t stream);
+
 public:
     // Throws when a MoE layer's NVFP4 experts are host-resident and nothing
     // can serve them from there. Call after pre_dequant_weights(): needs

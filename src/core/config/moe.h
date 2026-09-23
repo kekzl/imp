@@ -33,14 +33,18 @@ struct MoE {
     bool pin_host_experts = false;
     // Dispatch a staged host-resident MoE layer through the CUTLASS grouped
     // NVFP4 prefill instead of the per-expert dequant fallback. Needs pinned slabs.
-    // Qwen3-30B-A3B-NVFP4, 48 host layers: pp4096 2631-2748 -> 7067-7093 tok/s, tg256
-    // unchanged (the old -36 % was the host LRU path, gone with the device expert cache).
+    // Qwen3.8-Flash-Next-NVFP4: pp3692 203 -> 1143 tok/s; Qwen3-30B-A3B-NVFP4, 48 host layers:
+    // pp4096 2631-2748 -> 7067-7093. Staged in moe.stage_expert_chunks blocks (below).
     bool staged_cutlass_prefill = true;
     // Stage only the experts the routing touched, with a gather kernel from the mapped
     // pinned slabs, instead of memcpying all n_experts per projection. A prompt that
     // touches every expert moves the same bytes; a short one moves a fraction.
     // Needs pin_host_experts + device_expert_cache (it reads the cache's device views).
     bool stage_touched_only = true;
+    // Stage a host layer in this many expert blocks (gate+up per block, then down per block):
+    // the staging buffer holds 2 projections of n_experts/chunks experts instead of all 3 of
+    // n_experts, the rest goes to the expert cache. 1 = whole-layer staging.
+    int stage_expert_chunks = 4;
     // Phase 2: assert device-side mirror == host-side LRU state after every
     // cache mutation. D2H readback per update (~120 KiB): never enable in perf
     // runs, only CI/regression diagnosis.

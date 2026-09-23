@@ -55,6 +55,9 @@ struct MoeFfnContext {
     // transfers once even when the CUTLASS attempt falls through to legacy.
     StagedProj staged[kExpertProjCount]{};
     bool staged_done = false;
+    // Chunked staging (moe.stage_expert_chunks > 1): the CUTLASS dispatch stages expert blocks
+    // itself, gate+up then down; `staged` stays empty, so a legacy fallback runs unstaged.
+    bool staged_blocks = false;
 };
 
 }  // namespace imp

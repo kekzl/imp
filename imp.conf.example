@@ -581,6 +581,10 @@ staged_cutlass_prefill = true
 # 1267 -> 499 ms at 67 prompt tokens, 1328 -> 1038 ms at 1022. Needs pin_host_experts
 # + device_expert_cache.
 stage_touched_only   = true
+# Host layer staged in this many expert blocks (gate+up, then down): the buffer holds 2
+# projections x n_experts/chunks instead of 3 x n_experts, the difference goes to the expert
+# cache. 1 = whole-layer staging.
+stage_expert_chunks  = 4
 
 [gdn]
 # FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but

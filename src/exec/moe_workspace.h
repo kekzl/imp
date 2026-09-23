@@ -131,16 +131,18 @@ struct MoEWorkspace {
     // slabs, or the mmap, already lay a projection's experts back to back).
     // Sized for one layer, reused across layers (forward is sequential). Null when experts
     // are device-resident, model is not NVFP4-prequant, or one layer doesn't fit the budget.
-    void* layer_stage_buf = nullptr;      // [kExpertProjCount][n_experts * expert_bytes]
+    void* layer_stage_buf = nullptr;      // [layer_stage_slots][layer_stage_experts * expert_bytes]
     size_t layer_stage_proj_bytes = 0;    // per-projection span within the buffer
     size_t layer_stage_size = 0;          // total allocation
-    int layer_stage_experts = 0;          // n_experts the buffer was sized for
+    int layer_stage_experts = 0;          // experts per projection slot (a block when chunked)
+    int layer_stage_slots = 0;            // projection slots: 3 whole-layer, 2 chunked (gate+up, then down)
+    int layer_stage_ptr_stride = 0;       // n_experts: per-projection span of the pointer arrays
 
     // CUTLASS device-args view of the staged layer: grouped NVFP4 GEMM wants SfAtom-ordered
     // scale factors and device arrays of per-expert pointers; staged bytes carry the native
     // per-16 layout, converted once per staged layer into layer_stage_sf with rebuilt pointer
     // arrays. Lets a host-resident layer take the same prefill path as a resident one.
-    void* layer_stage_sf = nullptr;        // [kExpertProjCount][n_experts * sf_size]
+    void* layer_stage_sf = nullptr;        // [layer_stage_slots][layer_stage_experts * sf_size]
     size_t layer_stage_sf_proj_bytes = 0;  // per-projection span
     size_t layer_stage_sf_size = 0;
     const void** layer_stage_b_ptrs = nullptr;    // [kExpertProjCount * n_experts]
