@@ -12,6 +12,7 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Removed
+- Dead device code: 7 symbols without a caller (`gdn_rmsnorm_gated_silu_fp32in`, `elementwise_mul`, `residual_kv_write_multi_kernel`, `constrain_mask_kernel`, `rowwise_topm_reserve`, `Model::estimate_expert_bytes`, `KVCacheManager::advance_residual`) and 4 files linked into `libimp` that only their own tests called (`reduce.cu`, `fp8_utils.cu`, `dequant_int8.cu`, `dequant_fp16.cu`): 926 -> 910 kernels. The JSON mask test now drives the production `constrain_mask_allow_kernel`.
 - `--device` (parsed, never reached the engine: every run used device 0) and `--mem-report` (gated nothing: the VRAM audit table prints on every run). `ImpConfig.device_id` stays in the C ABI; a non-zero value is now refused at context create.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 

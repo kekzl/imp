@@ -133,13 +133,6 @@ void gdn_scan_chunkpar_bf16(const float* conv_f32, int conv_channels, const half
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
                             int n_heads, int head_dim, cudaStream_t stream, bool sigmoid_gate = false);
 
-// FP32-input variant. Reads scan output from FP32 buffer (preserves precision
-// when scan values are subnormal in FP16, ~6e-5). Writes FP16 result to `y`.
-// Use together with FP32 scan output to match llama.cpp numerics.
-void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in, const half* gate,
-                                   const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                   cudaStream_t stream, bool sigmoid_gate = false);
-
 // FP32-in, FP32-out variant. Keeps precision all the way through the normalized
 // gated activation so the downstream ssm_out GEMM can accumulate over 4096
 // terms without 6% FP16 drift (the Qwen 3.6 L0 sign-flip root cause).
@@ -148,7 +141,7 @@ void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in,
                                       cudaStream_t stream, bool sigmoid_gate = false);
 
 // FP32-output scan. Same math as `gdn_scan_fused_f32` but keeps result in FP32
-// for feeding into `gdn_rmsnorm_gated_silu_fp32in`.
+// for feeding into `gdn_rmsnorm_gated_silu_fp32inout`.
 void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,

@@ -201,10 +201,7 @@ set(IMP_MODEL_SOURCES
 )
 
 set(IMP_QUANT_SOURCES
-    src/quant/dequant_fp16.cu
-    src/quant/dequant_int8.cu
     src/quant/dequant_gpu.cu
-    src/quant/fp8_utils.cu
     src/quant/quant_gemm.cu
     src/quant/awq_transform.cpp
     src/quant/awq_norm_fold.cpp
@@ -290,7 +287,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/json_schema.cpp
     src/compute/schema_constrain.cu
     src/compute/moe_routing.cu
-    src/compute/reduce.cu
     src/compute/ssm.cu
     src/compute/gated_residual.cu
     src/compute/ple.cu
@@ -955,7 +951,6 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_kernel_registry.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
-        tests/test_reduce.cu
         tests/test_softmax.cu
         tests/test_sampling.cu
         tests/test_sampling_advanced.cu

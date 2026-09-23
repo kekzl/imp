@@ -23,11 +23,9 @@ Both layers ultimately call kernels from `src/quant/` (`dequant_q4k_to_fp16`, `q
 ## Files
 
 ### `src/quant/` - kernels + hot-path orchestration
-- `dequant_fp16.cu` - generic Q*_K -> FP16 row-block kernels
-- `dequant_int8.cu` - INT8 quant/dequant
 - `dequant_gptq.cu` - GPTQ-specific paths
 - `dequant_gpu.cu` - small device-side dequant helpers
-- `fp8_quant.cu`, `fp8_utils.cu`, `fp8_utils.cuh` - FP8 (E4M3) quant/dequant + calibration
+- `fp8_quant.cu`, `fp8_utils.cuh` - FP8 (E4M3) quant/dequant + calibration
 - `nvfp4_quant.cu`, `nvfp4_gemm.cu` - NVFP4 quant + GEMM
 - `mxfp4_gemm.cu` - MXFP4 dense GEMV/GEMM
 - `quant_gemm.cu`, `quant_gemm.h`, `quant_types.h` - shared types + dispatch shims

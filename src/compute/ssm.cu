@@ -78,26 +78,6 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t str
 }
 
 // ---------------------------------------------------------------------------
-__global__ void elementwise_mul_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
-                                            half* __restrict__ out, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        out[idx] = __float2half(__half2float(a[idx]) * __half2float(b[idx]));
-    }
-}
-
-void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream) {
-    int64_t n = a.numel();
-    int threads = 256;
-    int blocks = static_cast<int>((n + threads - 1) / threads);
-    if (a.qtype == QType::F16) {
-        elementwise_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(a.data),
-                                                                    static_cast<const half*>(b.data),
-                                                                    static_cast<half*>(out.data), n);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Conv1d decode: single token
 // ---------------------------------------------------------------------------

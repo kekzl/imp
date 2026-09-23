@@ -305,10 +305,6 @@ public:
     // Per-sequence ring state. Returns {0, 0} for unknown / out-of-range seq.
     ResidualRingState residual_state(int seq_id) const;
 
-    // Advance the ring after a write at the current write_idx.
-    // Increments write_idx (mod residual_n) and fill_count (capped at residual_n).
-    void advance_residual(int seq_id);
-
     // ── Hashing utility (public for testing) ─────────────────────────
 
     // Compute the hash for a block of tokens. `parent_hash` is the hash

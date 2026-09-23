@@ -144,14 +144,6 @@ bool topm_ensure(size_t need) {
 }
 }  // namespace
 
-void rowwise_topm_reserve(int rows, int m) {
-    if (rows <= 0 || m <= 0)
-        return;
-    if (m > kRowwiseTopMMax)
-        m = kRowwiseTopMMax;
-    (void)topm_ensure(static_cast<size_t>(rows) * kTopMSplits * m);
-}
-
 void rowwise_topm(const float* d_logits, int rows, int vocab, int m, int32_t* d_out,
                   cudaStream_t stream) {
     if (rows <= 0 || vocab <= 0 || m <= 0 || !d_logits || !d_out)

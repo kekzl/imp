@@ -821,27 +821,6 @@ static bool upload_unquantized_weight(Tensor& weight, QType qtype, QType compute
     return upload_weight(weight, qtype, compute_dtype, stream, gpu_allocs, raw_quant, 0.0f, wname, wlayer);
 }
 
-// ---------------------------------------------------------------------------
-// Model::estimate_expert_bytes
-// ---------------------------------------------------------------------------
-
-size_t Model::estimate_expert_bytes() const {
-    size_t total = 0;
-    for (int i = 0; i < n_layers(); ++i) {
-        const TransformerLayer& L = layers_[i];
-        auto add_packed = [&](const Tensor& p, QType qt) {
-            if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt))
-                return;
-            size_t row_bytes = qtype_row_bytes(qt, p.shape[2]);
-            total += static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
-        };
-        add_packed(L.expert_gate_packed, L.expert_gate_packed.qtype);
-        add_packed(L.expert_up_packed, L.expert_up_packed.qtype);
-        add_packed(L.expert_down_packed, L.expert_down_packed.qtype);
-    }
-    return total;
-}
-
 // Bundles the repeated parameters needed by all upload helpers, passed by reference to
 // avoid more than 8 params on every helper call.
 struct UploadCtx {

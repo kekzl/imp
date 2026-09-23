@@ -94,8 +94,8 @@ struct InferenceState {
     const int* d_residual_seq_slots = nullptr;     // [n_sequences] slot in [0, residual_max_seqs)
     const int* d_residual_counts = nullptr;         // [n_sequences] fill_count
     const int* d_residual_write_idxes = nullptr;    // [n_sequences] write_idx
-    // Host array of per-batch seq_ids (request ids), used by the KV write path
-    // to call KVCacheManager::advance_residual per seq. Length = n_sequences.
+    // Host array of per-batch seq_ids (request ids): the KV write path resolves the
+    // residual ring base per seq. Length = n_sequences.
     const int* h_residual_seq_ids = nullptr;
 
     // Batching

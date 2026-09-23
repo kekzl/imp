@@ -218,13 +218,6 @@ KVCacheManager::ResidualRingState KVCacheManager::residual_state(int seq_id) con
     return it->second;
 }
 
-void KVCacheManager::advance_residual(int seq_id) {
-    if (!residual_pool_ || residual_n_tokens_ <= 0) return;
-    auto& s = seq_residual_state_[seq_id];
-    s.write_idx = (s.write_idx + 1) % residual_n_tokens_;
-    if (s.fill_count < residual_n_tokens_) s.fill_count++;
-}
-
 // ─── Hashing utility ─────────────────────────────────────────────────
 
 size_t KVCacheManager::compute_block_hash(std::span<const int32_t> tokens, size_t parent_hash) {

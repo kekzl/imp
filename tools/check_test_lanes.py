@@ -292,7 +292,7 @@ def main():
     # hands it, which is the configuration where passing the constant cap changed the order.
     # 1138 -> 1139: QsaIndexer.SixteenRowGqaSplitKMatchesGqaKernel (test-attention): 16 rows x
     # 24/2 heads engage split-K instead of the 32-CTA GQA kernel, output within 2e-3.
-    PINNED = 1139
+    PINNED = 1121
 
     text = CMAKE.read_text()
     mods = module_sources(text)
