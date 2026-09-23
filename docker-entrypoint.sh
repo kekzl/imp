@@ -22,7 +22,8 @@ fi
 # If the command is not imp-server or imp-cli, exec directly (e.g. bash, sh)
 case "$CMD" in
     imp-server|imp-cli) ;;
-    *) exec "$CMD" "$@" ;;
+    # Resolved path as argv[0]: GTest death tests re-exec it with execv, which has no PATH search.
+    *) exec "$(command -v "$CMD" || echo "$CMD")" "$@" ;;
 esac
 
 args=()
