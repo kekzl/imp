@@ -2,7 +2,7 @@
 layer: L3
 audience: agents
 verified: 2026-09-23
-commit: 19dda319
+commit: 9b4a84e5
 -->
 
 # src/compute - CUDA kernels
@@ -12,7 +12,6 @@ Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only; the hot pa
 ## Invariants
 
 - One logical unit per `.cu`: touching a kernel re-`ptxas`es the whole translation unit. Split kernel / wrapper / instantiations when recompiles bite (`tools/check_filesize.py`).
-- No portability branches: no other arch, no FP16 dequant in decode.
 - Every `<<<>>>` carries `IMP_CUDA_CHECK_LAUNCH()` (CI job `Launch guards`).
 - Numeric code is bit-sensitive: move a kernel verbatim, and say so.
 - A kernel that cannot serve its input fails loud: copy `gemm()`'s scale-less-weight guard.
@@ -44,10 +43,6 @@ docker run --rm --gpus all --entrypoint test-attention imp:test --gtest_filter='
 - `__launch_bounds__` moves perf in both directions: never add or remove one without `make verify-ab`.
 - `compute-sanitizer` does not work on this WSL2 host; `make asan` covers host code only.
 - `paged_attention_decode` split-K: `total_blocks_nosplit` must count the kernel that runs without splits; GQA ratio > 8 without multitok = `paged_attention_gqa_kernel`, batch x n_kv CTAs (#2074).
-
-## Do not touch
-
-`third_party/`, CUTLASS-generated code.
 
 ## See also
 

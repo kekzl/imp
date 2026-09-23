@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-13
-commit: 81d22eff
+verified: 2026-09-23
+commit: 9b4a84e5
 -->
 
 # tools/imp-server - the HTTP surface
@@ -41,7 +41,6 @@ make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 ## Pitfalls
 
 - A test against the mock proves nothing about the server.
-- A streaming client needs `proxy_buffering off` at any reverse proxy, or TTFT equals total latency.
 - CORS is wide open on purpose (the built-in UI calls the API directly): document the proxy, do not "fix" it.
 
 ## Do not touch
