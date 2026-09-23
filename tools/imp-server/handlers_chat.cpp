@@ -696,26 +696,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     for (const auto& s : stop_sequences)
         max_stop_len = std::max(max_stop_len, s.size());
 
-    // Parse logit_bias: map of token_id (string) -> bias (float)
     std::vector<std::pair<int32_t, float>> logit_bias;
-    if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
-        // Same bound as the chat path (#1617); /v1/completions parses its own.
-        if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
-            send_json_error(res, 400, "invalid_request_error",
-                            "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
-                                " entries, above the server limit of " +
-                                std::to_string(state.max_logit_bias) + " (--max-logit-bias)");
-            return;
-        }
-        for (auto& [key, val] : body["logit_bias"].items()) {
-            try {
-                int32_t token_id = std::stoi(key);
-                float bias = val.get<float>();
-                logit_bias.emplace_back(token_id, bias);
-            } catch (...) {
-                // Skip invalid entries
-            }
-        }
+    if (const std::string err = parse_logit_bias(body, state.max_logit_bias, logit_bias); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
+        return;
     }
 
     // Parse stream_options for include_usage
@@ -759,6 +743,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         snap_is_think_model = state.is_think_model;
         snap_channel_open_id = state.channel_open_id;
         snap_max_seq_len = state.max_seq_len;
+    }
+    if (const std::string err = logit_bias_vocab_error(logit_bias, snap_tok->vocab_size()); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
+        return;
     }
 
     // The byte bound first: the merge walk over the prompt is the cost the

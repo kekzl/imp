@@ -268,27 +268,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     if (ctx.params.grammar.empty() && body.contains("guided_grammar") && body["guided_grammar"].is_string())
         ctx.params.grammar = body["guided_grammar"].get<std::string>();
 
-    // Parse logit_bias: map of token_id (string) -> bias (float)
-    if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
-        // Every logit_bias entry costs a blocking device-to-host copy per decode step, so map size
-        // multiplies the cost of every token, not of the request (#1617). Refuse rather than truncate:
-        // a silently dropped bias changes output without saying so.
-        if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
-            send_json_error(res, 400, "invalid_request_error",
-                            "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
-                                " entries, above the server limit of " +
-                                std::to_string(state.max_logit_bias) + " (--max-logit-bias)");
-            return false;
-        }
-        for (auto& [key, val] : body["logit_bias"].items()) {
-            try {
-                int32_t token_id = std::stoi(key);
-                float bias = val.get<float>();
-                ctx.params.logit_bias.emplace_back(token_id, bias);
-            } catch (...) {
-                // Skip invalid entries
-            }
-        }
+    if (const std::string err = parse_logit_bias(body, state.max_logit_bias, ctx.params.logit_bias);
+        !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
+        return false;
     }
 
     // Parse stream_options for include_usage

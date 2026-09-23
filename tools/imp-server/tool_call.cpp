@@ -241,28 +241,12 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
             break;
         std::string val = body.substr(val_start, pv_end - val_start);
         trim(val);
-        // Coerce bare numerics / true/false; otherwise keep as string.
-        json jv;
-        try {
-            if (val == "true")
-                jv = true;
-            else if (val == "false")
-                jv = false;
-            else if (val == "null")
-                jv = nullptr;
-            else if (!val.empty() && (val[0] == '-' || val[0] == '.' || (val[0] >= '0' && val[0] <= '9'))) {
-                if (val.find('.') != std::string::npos || val.find('e') != std::string::npos ||
-                    val.find('E') != std::string::npos) {
-                    jv = std::stod(val);
-                } else {
-                    jv = std::stoll(val);
-                }
-            } else {
-                jv = val;
-            }
-        } catch (...) {
+        // Only a whole JSON scalar literal coerces; "600acab9" stays a string (#2103).
+        // validate_tool_call restores `val` for string-typed params.
+        json jv = json::parse(val, nullptr, false);
+        if (jv.is_discarded() || !(jv.is_number() || jv.is_boolean() || jv.is_null()))
             jv = val;
-        }
+        tc.raw_params.emplace_back(key, val);
         args[key] = std::move(jv);
         pos = pv_end + pv_adv;
     }
@@ -798,7 +782,41 @@ static json find_tool_schema(const json& tools, const std::string& name) {
     return json::object();
 }
 
+void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
+    if (tc.raw_params.empty())
+        return;
+    const json schema = find_tool_schema(tools, tc.name);
+    if (!schema.is_object() || !schema.contains("properties") || !schema["properties"].is_object())
+        return;
+    json args = json::parse(tc.arguments, nullptr, false);
+    if (!args.is_object())
+        return;
+    bool changed = false;
+    for (const auto& [key, raw] : tc.raw_params) {
+        const json& p = schema["properties"].value(key, json::object());
+        if (!p.is_object() || !args.contains(key) || args[key].is_string())
+            continue;
+        const json types = p.contains("type") ? p["type"] : json();
+        const auto allows = [&](const char* t) {
+            return types == t ||
+                   (types.is_array() && std::find(types.begin(), types.end(), t) != types.end());
+        };
+        if (!allows("string"))
+            continue;
+        bool other_ok = false;
+        for (const char* t : {"integer", "number", "boolean", "null"})
+            other_ok |= allows(t) && json_type_matches(args[key], t);
+        if (!other_ok) {
+            args[key] = raw;
+            changed = true;
+        }
+    }
+    if (changed)
+        tc.arguments = dump_safe(args);
+}
+
 void validate_tool_call(ParsedToolCall& tc, const json& tools) {
+    restore_raw_string_params(tc, tools);
     json schema = find_tool_schema(tools, tc.name);
     if (!schema.is_object() || schema.empty())
         return;  // no schema to validate against — leave as-is

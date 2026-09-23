@@ -510,6 +510,44 @@ TEST(ToolCallQwen36Xml, CoercesScalarTypes) {
     EXPECT_TRUE(args["n"].is_null());
 }
 
+// #2103: stod/stoll read a numeric prefix, so a hex id became 600 / 84.0 / 1e10.
+TEST(ToolCallQwen36Xml, DigitLeadingNonNumberStaysAString) {
+    for (const char* id :
+         {"600acab9a967586f", "84ed1861359f79ce", "1e10aa00bb11cc22", "007", "1.2.3", "-x"}) {
+        ParsedToolCall tc;
+        ASSERT_TRUE(
+            parse_qwen36_xml_call(std::string("<function=f><parameter=id>") + id + "</parameter></function>",
+                                  tc));
+        EXPECT_EQ(json::parse(tc.arguments)["id"], id) << id;
+    }
+}
+
+TEST(ToolCallGemma, UnquotedDigitLeadingTokenIsNotCutToANumber) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_gemma_tool_call_body("call:f{id:600acab9,n:12}", tc));
+    json args = json::parse(tc.arguments);
+    EXPECT_EQ(args["id"], "600acab9");
+    EXPECT_EQ(args["n"], 12);
+}
+
+TEST(ToolCallQwen36Xml, StringSchemaKeepsTheEmittedText) {
+    const json tools = json::parse(R"([{"type":"function","function":{"name":"read_source","parameters":{
+        "type":"object","properties":{"source_id":{"type":"string"},"offset":{"type":"integer"},
+        "tag":{"type":["string","null"]}}}}}])");
+    ParsedToolCall tc;
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=read_source><parameter=source_id>0600</parameter>"
+                              "<parameter=offset>0</parameter><parameter=tag>1.50</parameter>"
+                              "</function>",
+                              tc));
+    validate_tool_call(tc, tools);
+    EXPECT_TRUE(tc.valid) << tc.error;
+    json args = json::parse(tc.arguments);
+    EXPECT_EQ(args["source_id"], "0600");
+    EXPECT_EQ(args["offset"], 0);
+    EXPECT_EQ(args["tag"], "1.50");
+}
+
 TEST(ToolCallQwen36Xml, NameIsTrimmed) {
     ParsedToolCall tc;
     ASSERT_TRUE(parse_qwen36_xml_call("<function= spaced_name >\n</function>", tc));
