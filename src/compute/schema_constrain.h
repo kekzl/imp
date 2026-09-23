@@ -95,6 +95,9 @@ struct SchemaFrame {
     const SchemaNode* xml_tool = nullptr;
     int xml_delim_match = 0;
     bool xml_value_open = false;
+    // Parameter whose schema is an enum: the raw value must be one member (enum_buffer), then
+    // the delimiter. Null = free raw text.
+    const SchemaNode* xml_enum = nullptr;
 
     // True right after a ',' inside an object: a key is now mandatory, so the
     // object may not close (`}`) until another key/value is emitted — prevents
@@ -263,6 +266,8 @@ private:
 
     // Check if prefix matches any enum value
     bool is_valid_enum_prefix(const std::vector<std::string>& values, const std::string& prefix) const;
+    // XML enum parameter: one value char (member prefix, then "\n</parameter>"); false = illegal.
+    bool xml_enum_step(SchemaFrame& f, char c) const;
 
     // True if the current string can legally close: regex accepts and length
     // constraints satisfied.

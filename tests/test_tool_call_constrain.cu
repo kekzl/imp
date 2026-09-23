@@ -624,6 +624,61 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValue) {
     EXPECT_TRUE(at_done[2]) << "an empty value must be a legal, closable call";
 }
 
+// An enum-typed parameter is not free text on the XML dialect: the value is one member, then the
+// delimiter. Qwen3.8-Flash-Next wrote `ARCHIVED` into an enum [open, closed, pending] under
+// strict, 39 of 40 greedy runs (2026-09-23).
+TEST(SchemaConstrainTest, XmlToolCallEnumValueConstrained) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"set", R"({"type":"object","properties":{"mode":{"type":"string","enum":["on","off"]}},)"
+                R"("required":["mode"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+    auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    feed("<tool_call>\n<function=set>\n<parameter=mode>\n");
+    auto at_value = allowed();
+    EXPECT_TRUE(at_value[id('o')]);
+    EXPECT_FALSE(at_value[id('x')]) << "a non-member first char must be masked";
+    EXPECT_FALSE(at_value[id('\n')]) << "an empty value is not a member";
+
+    feed("o");
+    auto at_o = allowed();
+    EXPECT_TRUE(at_o[id('n')]);
+    EXPECT_TRUE(at_o[id('f')]);
+    EXPECT_FALSE(at_o[id('\n')]) << "'o' is not a complete member";
+
+    feed("n");
+    auto at_on = allowed();
+    EXPECT_TRUE(at_on[id('\n')]) << "a complete member may close";
+    EXPECT_FALSE(at_on[id('f')]) << "'onf' prefixes no member";
+
+    feed("\n</parameter>\n</function>\n</tool_call>");
+    EXPECT_TRUE(allowed()[2]) << "the call must be complete and closable";
+}
+
 // A model may close an empty value with a SINGLE newline (<parameter=k>\n</parameter>): the
 // forced value-opening newline doubles as the delimiter start (tracker seeded); without it
 // the close tag is swallowed as value text and EOS stays masked to max_tokens.
