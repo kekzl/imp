@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-13
-commit: 81d22eff
+verified: 2026-09-23
+commit: 9b4a84e5
 -->
 
 # src/model - loaders, architectures, weight upload
@@ -36,10 +36,6 @@ GGUF and SafeTensors loading, the architecture registry, tensor-name mapping, up
 - Cost a loader task from the checkpoint (`config.json`, tensor names), not from its model category.
 - The failure mode here is a silently skipped tensor: count assigned vs total, refuse on a shortfall.
 - `IMP_LOG_DEBUG` is invisible at the default log level: a skip reported only there is not reported.
-
-## Do not touch
-
-`third_party/` GGUF headers.
 
 ## See also
 

@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-22
-commit: 2c436aba
+verified: 2026-09-23
+commit: 9b4a84e5
 -->
 
 # tests - lanes, and which one gates
@@ -15,7 +15,6 @@ Most GTest macros run in no CI lane: they need a GPU and CI has none. `make chec
 - New CPU tests go to test-core, into its explicit source list in `CMakeLists.txt` (`imp_add_test_module`).
 - The unit lane has no skips. A test that needs a GPU or a model file lives in a GPU binary: `test-kv` (`test_kv_cache_gpu.cpp`) or `test-e2e` outside `_unit_e2e_filter` (`test_real_checkpoints.cpp`, tokenizer parity). Bookkeeping tests use `KVCache::for_accounting()`; config-only tests read `tests/fixtures/` (`IMP_TEST_FIXTURES_DIR`).
 - A green test counts only after mutation validation: break the covered code, confirm the test fails.
-- A test whose input cannot reach the defect is worthless even when correct.
 
 ## Entry points
 
@@ -33,7 +32,6 @@ make test-gpu        # the GPU suite; started wrong it silently skips most
 ## Pitfalls
 
 - `--gtest_filter` on a `TEST_P`/`TYPED_TEST` suite without wildcards matches 0 tests and reports `PASSED`: `*DetEvalE2ETest*`, not `DetEvalE2ETest.*` (a CPU-lane guard asserts this).
-- A surviving mutant is a test hole only if it is not equivalent.
 - A timed-out mutation run leaves the mutation in the tree: back the file up to the scratchpad first, never `git checkout` to undo it.
 - Test-model env vars pointing at a wrong path skip whole batteries silently.
 - `paged_attention_set_splitk_scratch` is process-global: a test that sets it resets it to `(nullptr, 0)`, or the next tests in the binary inherit a foreign buffer (2 reds, #2072).
