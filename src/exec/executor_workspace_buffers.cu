@@ -50,6 +50,18 @@ static_assert(kExecGrouped3xStagingBytes == kGrouped3xStagingBytes,
 static_assert(kExecGrouped3xWorkspaceBytes == kGrouped3xWorkspaceBytes,
               "exec_t2_demand's grouped-3x workspace drifted from gemm_cutlass_grouped_3x.h");
 
+namespace {
+struct HostStageGeometry {
+    int chunks, experts, slots;
+};
+// Host-expert prefill staging: moe.stage_expert_chunks blocks (CUTLASS path only) hold 2 projection
+// slots of n_experts/chunks experts; 1 block holds all 3 projections of every expert.
+HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int want_chunks) {
+    const int chunks = staged_cutlass ? std::clamp(want_chunks, 1, std::max(1, n_experts)) : 1;
+    return {chunks, (n_experts + chunks - 1) / chunks, chunks > 1 ? 2 : kExpertProjCount};
+}
+}  // namespace
+
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     const auto& cfg = model_->config();
 
@@ -642,6 +654,28 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // the loop above cannot see them.
                 has_host_experts = has_host_experts || nvfp4_host_experts;
             }
+            // Whole-layer staging for host NVFP4 prefill (allocated below, after the cache): packed
+            // bytes plus the CUTLASS SfAtom view per projection. The automatic cache share pays for
+            // it, not the KV pool that plans after both (Qwen3.8-Flash-Next: 1500 MiB, KV ceiling
+            // 8192 -> 4471 blocks when it came out of the residual).
+            const auto& stage_cfg = model_->config();
+            const bool want_layer_stage = nvfp4_host_experts && stage_cfg.n_experts > 0 &&
+                                          !model_->host_pinned_allocs().empty();
+            size_t stage_proj_bytes = 0, stage_sf_proj = 0;
+            const auto [stage_chunks, stage_experts, stage_slots] = host_stage_geometry(
+                stage_cfg.n_experts, dispatch_policy().moe.staged_cutlass_prefill, dispatch_policy().moe.stage_expert_chunks);
+            if (want_layer_stage) {
+                const int64_t d_model = stage_cfg.d_model;
+                const int64_t eff_ff = stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;
+                const size_t sf_gate = cutlass_nvfp4_sf_size(static_cast<int>(eff_ff),
+                                                             static_cast<int>(d_model));
+                const size_t sf_down = cutlass_nvfp4_sf_size(static_cast<int>(d_model),
+                                                             static_cast<int>(eff_ff));
+                stage_proj_bytes = static_cast<size_t>(stage_experts) * max_expert_raw;
+                stage_sf_proj = static_cast<size_t>(stage_experts) * std::max(sf_gate, sf_down);
+            }
+            const size_t stage_reserve = static_cast<size_t>(stage_slots) *
+                                         (stage_proj_bytes + stage_sf_proj);
             if (has_host_experts && !dispatch_policy().moe.no_expert_cache) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
@@ -671,6 +705,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     const int auto_pct =
                         nvfp4_host_experts ? kExpertCacheAutoPctHostResident : 15;
                     budget = budget / 100 * auto_pct;
+                    budget = budget > stage_reserve ? budget - stage_reserve : 0;
                 }
                 const auto& mcfg = model_->config();
                 bool debug_parity = dispatch_policy().moe.expert_cache_debug_parity;
@@ -695,14 +730,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // Whole-layer staging buffer for NVFP4 host prefill, sized for one layer and reused
             // across layers (forward is sequential, each layer overwrites the previous).
             // Batches per-expert transfers (~768 KiB + ~96 KiB, below PCIe bandwidth) into one
-            // ~110 MiB projection transfer. Only effective with moe.pin_host_experts: large
-            // transfers pay off only from a pinned source.
-            const auto& stage_cfg = model_->config();
-            if (nvfp4_host_experts && stage_cfg.n_experts > 0 &&
-                dispatch_policy().moe.pin_host_experts) {
-                const size_t proj_bytes =
-                    static_cast<size_t>(stage_cfg.n_experts) * max_expert_raw;
-                const size_t total = static_cast<size_t>(kExpertProjCount) * proj_bytes;
+            // ~110 MiB projection transfer. Only effective from pinned slabs, which weight_upload
+            // makes by default since #2069 (the moe.pin_host_experts flag stays false there):
+            // gating on the flag left Qwen3.8-Flash-Next on the legacy path, pp13863 218 tok/s.
+            if (want_layer_stage) {
+                const size_t proj_bytes = stage_proj_bytes;
+                const size_t total = static_cast<size_t>(stage_slots) * proj_bytes;
                 // Only worth it if it fits comfortably: this runs on a model
                 // that already did not fit, so never take the last of VRAM.
                 size_t free_mem = 0, total_mem = 0;
@@ -712,26 +745,19 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     if (moe_.layer_stage_buf) {
                         moe_.layer_stage_proj_bytes = proj_bytes;
                         moe_.layer_stage_size = total;
-                        moe_.layer_stage_experts = stage_cfg.n_experts;
+                        moe_.layer_stage_experts = stage_experts;
+                        moe_.layer_stage_slots = stage_slots;
+                        moe_.layer_stage_ptr_stride = stage_cfg.n_experts;
                         IMP_LOG_INFO(
-                            "MoE layer staging buffer: %.2f MiB (%d experts x 3 projections, "
-                            "one layer at a time)",
-                            total / (1024.0 * 1024.0), stage_cfg.n_experts);
+                            "MoE layer staging buffer: %.2f MiB (%d experts x %d projection slots, "
+                            "%d expert block(s) per layer)",
+                            total / (1024.0 * 1024.0), stage_experts, stage_slots, stage_chunks);
 
                         // SfAtom scales + per-expert pointer arrays, so the staged layer takes the CUTLASS
                         // device-args path instead of the per-expert dequant fallback. Sized from the largest
                         // projection (gate/up and down differ).
-                        const int64_t d_model = stage_cfg.d_model;
-                        const int64_t eff_ff =
-                            stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;
-                        const size_t sf_gate = cutlass_nvfp4_sf_size(
-                            static_cast<int>(eff_ff), static_cast<int>(d_model));
-                        const size_t sf_down = cutlass_nvfp4_sf_size(
-                            static_cast<int>(d_model), static_cast<int>(eff_ff));
-                        const size_t sf_proj =
-                            static_cast<size_t>(stage_cfg.n_experts) * std::max(sf_gate, sf_down);
-                        const size_t sf_total =
-                            static_cast<size_t>(kExpertProjCount) * sf_proj;
+                        const size_t sf_proj = stage_sf_proj;
+                        const size_t sf_total = static_cast<size_t>(stage_slots) * sf_proj;
                         const size_t ptr_count =
                             static_cast<size_t>(kExpertProjCount) * stage_cfg.n_experts;
                         moe_.layer_stage_sf = vram_alloc(vram_alloc_, sf_total, "moe_layer_stage_sf");

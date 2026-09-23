@@ -410,6 +410,29 @@ TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
         << "device-args (mode b) output differs from host-args (" << mismatches_b << " / "
         << ref_out.size() << " mismatches, max_err=" << max_abs_err_b << ")";
 
+    // ----- Mode (b) in expert blocks {0,1} + {2,3}: every per-expert array sliced at e0, A/D
+    //       bases unchanged (absolute prefix sums). The chunked host-expert prefill relies on it. -----
+    cudaMemset(d_dev_out_b, 0, static_cast<size_t>(M_total) * N * sizeof(half));
+    for (int e0 = 0; e0 < ne; e0 += 2) {
+        GroupedNvfp4DeviceArgs dargs_c = dargs_b;
+        dargs_c.d_M_per = d_M_per + e0;
+        dargs_c.d_expert_offsets = d_offsets + e0;
+        dargs_c.d_sfa_offsets = d_sfa_offsets + e0;
+        dargs_c.d_alpha = d_alpha + e0;
+        dargs_c.d_B_ptrs = d_B_ptrs + e0;
+        dargs_c.d_SFB_ptrs = d_SFB_ptrs + e0;
+        ASSERT_TRUE(gemm_grouped_cutlass_3x_nvfp4_device_args(2, N, K, dargs_c, stream_))
+            << "device-args wrapper (block at e0=" << e0 << ") failed";
+    }
+    cudaStreamSynchronize(stream_);
+    cudaMemcpy(dev_out_b.data(), d_dev_out_b, dev_out_b.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    int mismatches_c = 0;
+    for (size_t i = 0; i < ref_out.size(); ++i)
+        if (__half2float(ref_out[i]) != __half2float(dev_out_b[i]))
+            mismatches_c++;
+    EXPECT_EQ(mismatches_c, 0) << "device-args in expert blocks differs from host-args (" << mismatches_c
+                               << " / " << ref_out.size() << " mismatches)";
+
     // ----- Cleanup -----
     for (int i = 0; i < ne; ++i) free_expert(experts[i]);
     cudaFree(d_A_fp16);

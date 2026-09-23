@@ -196,7 +196,10 @@ bool device_args_done = false;
             [&](const std::vector<TensorID>& weight_ids,
                 const void** pre_d_B, const void** pre_d_SFB,
                 float* pre_d_alpha, char* c_base, int K_in,
-                int N_out) -> bool {
+                int N_out, int e0 = 0, int n_e = -1) -> bool {
+                // Expert block [e0, e0 + n_e): the offset arrays are absolute prefix sums, so a
+                // block is a slice of every per-expert array with the A/D bases unchanged.
+                const int n_grp = n_e < 0 ? ne : n_e;
                 const void** d_B   = pre_d_B;
                 const void** d_SFB = pre_d_SFB;
                 float*       d_a   = pre_d_alpha;
@@ -233,18 +236,18 @@ bool device_args_done = false;
                 }
 
                 imp::GroupedNvfp4DeviceArgs dargs{};
-                dargs.d_M_per          = moe_.d_M_per;
+                dargs.d_M_per          = moe_.d_M_per + e0;
                 dargs.d_expert_offsets = static_cast<const int32_t*>(
-                    routing.expert_offsets.data);
-                dargs.d_sfa_offsets    = moe_.d_sfa_offsets;
-                dargs.d_alpha          = d_a;
+                    routing.expert_offsets.data) + e0;
+                dargs.d_sfa_offsets    = moe_.d_sfa_offsets + e0;
+                dargs.d_alpha          = d_a + e0;
                 dargs.base_A_packed    = moe_.cutlass3x_packed;
                 dargs.base_A_sf        = moe_.cutlass3x_sf;
-                dargs.d_B_ptrs         = d_B;
-                dargs.d_SFB_ptrs       = d_SFB;
+                dargs.d_B_ptrs         = d_B + e0;
+                dargs.d_SFB_ptrs       = d_SFB + e0;
                 dargs.base_D           = c_base;
                 return imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
-                    ne, N_out, K_in, dargs, stream);
+                    n_grp, N_out, K_in, dargs, stream);
             };
 
         // Gate/Up share input quantization (K_in=d): fused gather+quantize reads
@@ -259,6 +262,27 @@ bool device_args_done = false;
             static_cast<const int*>(routing.expert_offsets.data),
             expanded, d, ne, stream);
         bool ok = true;
+        if (ctx.staged_blocks) {
+            const auto& da = da_cache;
+            ok = run_staged_blocks_(
+                layer, stream, ctx,
+                [&](ExpertProj p, int e0, int n) {
+                    if (p == ExpertProj::Gate)
+                        return dispatch_device(ly.expert_gate_ids, da.d_gate_B_ptrs, da.d_gate_SFB_ptrs,
+                                               da.d_gate_alpha, expert_gate_base, d, eff, e0, n);
+                    if (p == ExpertProj::Up)
+                        return dispatch_device(ly.expert_up_ids, da.d_up_B_ptrs, da.d_up_SFB_ptrs,
+                                               da.d_up_alpha, expert_up_base, d, eff, e0, n);
+                    return dispatch_device(ly.expert_down_ids, da.d_down_B_ptrs, da.d_down_SFB_ptrs,
+                                           da.d_down_alpha, expert_down_base, eff, d, e0, n);
+                },
+                [&] {
+                    fused_act_quantize_device(non_gated_experts ? nullptr : expert_gate_base, expert_up_base,
+                                              eff,
+                                              non_gated_experts ? FFNActivation::RELU_SQR
+                                                                : cfg.ffn_activation);
+                });
+        } else {
         if (!non_gated_experts)
             ok = ok && dispatch_device(ly.expert_gate_ids,
                                        da_cache.d_gate_B_ptrs,
@@ -285,6 +309,7 @@ bool device_args_done = false;
                                  da_cache.d_down_SFB_ptrs,
                                  da_cache.d_down_alpha,
                                  expert_down_base, eff, d);
+        }
         }
         if (ok) {
             device_args_done = true;

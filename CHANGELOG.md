@@ -17,6 +17,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- Host-resident NVFP4 MoE prefill ran the legacy per-expert path since #2069 (the whole-layer staging gate read `moe.pin_host_experts`, which stays false when weight_upload pins). Qwen3.8-Flash-Next-NVFP4: pp3692 202.67 / 196.39 -> 1143.25 / 1130.68 tok/s, TTFT at 193 tokens 4920 / 4740 -> 1024 / 1042 ms; staged CUTLASS prefill on by default, staged in 4 expert blocks (`moe.stage_expert_chunks`, buffer 1350 -> 225 MiB) so the expert cache keeps 221 of 227 slots (tg512 59.80 / 55.81 vs 60.09 / 58.23).
 - `--vram-budget` with an auto `max_seq_len` refused to start: the resolver sized GGUF context from raw budget VRAM (Qwen3-4B Q8_0 at 9000 MiB: 76800 tokens against a 1333-block pool). An auto value is now clamped to the built pool (21328), and an operator-set value that fits the plan no longer loses to outstanding IMMA prefill planes (856 -> 1333 blocks, planes cut 536 MiB).
 - Memory-plan failure levers were larger than their line items ("max_seq_len 76800 -> 38400 frees 43200 MiB" against a 3807 MiB budget); each lever now frees at most what the report charges, zero levers are dropped.
 - `src/compute/CLAUDE.md` test command pointed at a non-existent `./build/test-attention`.

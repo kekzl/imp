@@ -358,7 +358,7 @@ Qwen3-30B-A3B Q4_K_M unless marked.
 | graphs under offload | BLOCKED | `moe.allow_graphs_under_offload` capture aborts on host-read routing; prefetching a layer ahead is unreachable |
 | NVFP4 offload | correct since 2026-08-13 | before it, "mandatory on-device" was unenforced and answered WRONG at 88.77 tok/s; resident 361.97 -> 384.03, full offload 23.03 |
 | `moe.pin_host_experts` (default off) | +14.8% pp512 (6/6), 4.4x load time | WSL2 cannot page-lock mmap; per-layer device staging 317.6 -> 790.8 tok/s only with pinning |
-| `moe.staged_cutlass_prefill` | opt-in | +136% prefill, -36% decode after long prompts (unexplained): pp512 663.2 -> 1563.9, tg 59.4 -> 37.7 |
+| `moe.staged_cutlass_prefill` | default on since 2026-09-22 | the -36 % decode (tg 59.4 -> 37.7) was the host LRU path; with the device expert cache pp4096 2631-2748 -> 7067-7093 tok/s, tg256 unchanged (Qwen3-30B-A3B-NVFP4, 48 host layers) |
 | cache budget (`moe.expert_cache_budget_pct`) | 2.47x from a config value, floor is exact | 5% 10.51 tok/s, 15% (default) 20.99, 30% 30.51; below `3*top_k` slots/layer the cache retains nothing (#1374) |
 | final regime | transfer-bound, as modelled | H2D 150 GB at ~51 GB/s = 41% of step, kernels ~26%, launches ~24% |
 
