@@ -275,6 +275,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cu
     src/compute/mmq_q8_imma_q4k.cu
+    src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q51.cu
     src/compute/moe_routing_permute.cu
@@ -1028,6 +1029,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
+        tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q4k_hmma.cu
         tests/test_weight_dispatch.cu
     )
