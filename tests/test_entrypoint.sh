@@ -160,5 +160,14 @@ if [ -f "$COMPOSE" ]; then
     done
 fi
 
+# --- passthrough keeps an exec-able argv[0] --------------------------------
+# GTest threadsafe death tests re-exec argv[0] with execv (no PATH search): a bare
+# `test-compute` made CudaFaultSignalTest's child die with ENOENT.
+# An ELF, not a script: the kernel hands a #! interpreter the resolved path either way.
+# `bash -s` reports its own argv[0] as $0.
+ln -s "$(command -v bash)" "$STUB_DIR/argv0-probe"
+OUT=$(echo 'echo "<$0>"' | env -i PATH="$STUB_DIR:/usr/bin:/bin" bash "$ENTRYPOINT" argv0-probe -s)
+check "passthrough: argv[0] is the resolved path" "<$STUB_DIR/argv0-probe>" present "$OUT"
+
 echo "entrypoint: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
