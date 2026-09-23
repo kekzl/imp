@@ -272,7 +272,10 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         // smaller.
         const size_t kRuntimeHeadroom =
             std::max(static_cast<size_t>(512ULL * 1024 * 1024), vram_allocator_headroom(total_mem));
-        size_t total_reserve = kMoeReserve + kRuntimeHeadroom;
+        // The SSM/GDN state slab is allocated after this phase (engine_kv_cache_init, lazily per
+        // slot under vram.lazy_commit), so live free VRAM still counts it: without the charge the
+        // cache took it and Qwen3.6-35B-A3B UD-Q4_K_M could not commit recurrent slot 5 of 12.
+        size_t total_reserve = kMoeReserve + kRuntimeHeadroom + budget.ssm_footprint_bytes;
         moe_budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
         // Prequant models: the plan grants the MoE slab its measured demand, so the guarantee
         // holds even when cudaMemGetInfo under-reports free after async frees (AUDIT B62). The
