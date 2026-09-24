@@ -55,7 +55,10 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
         // greedy can pick a banned token (e.g. Gemma-4 NVFP4 picks <|channel>) and
         // the request finishes immediately since is_stop_token treats banned
         // tokens as stop tokens. forward() already does this; match its impl in every sampling entry point.
-        if (st.banned_tokens != nullptr && st.n_banned_tokens > 0) {
+        if (st.banned_tokens != nullptr && st.n_banned_tokens > 0 && st.d_banned_tokens != nullptr &&
+            st.n_d_banned_tokens == st.n_banned_tokens) {
+            launch_ban_logits(lp, st.d_banned_tokens, st.n_banned_tokens, vocab, stream);
+        } else if (st.banned_tokens != nullptr && st.n_banned_tokens > 0) {
             float neg_inf = -1e30f;
             for (int bi = 0; bi < st.n_banned_tokens; bi++) {
                 int32_t tid = st.banned_tokens[bi];

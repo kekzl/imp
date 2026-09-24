@@ -12,6 +12,7 @@
 #include "memory/kv_cache.h"
 #include "compute/gemm.h"
 #include "compute/sampling.h"
+#include "exec/executor_sampling_internal.h"  // launch_ban_logits
 #include "core/logging.h"
 
 #include <climits>
@@ -802,7 +803,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // argmax, or the channel marker triggers is_stop_token and the
             // request finishes with 0 completion tokens. Same logic as
             // GraphExecutor::forward/apply_pre_sample (executor.cu), inlined here because sample_greedy_device runs on raw logits.
-            if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
+            if (state.banned_tokens != nullptr && state.n_banned_tokens > 0 &&
+                state.d_banned_tokens != nullptr && state.n_d_banned_tokens == state.n_banned_tokens) {
+                launch_ban_logits(static_cast<float*>(last_logits.data), state.d_banned_tokens,
+                                  state.n_banned_tokens, static_cast<int>(last_logits.shape[0]), pf_stream);
+            } else if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
                 float* lp = static_cast<float*>(last_logits.data);
                 int vocab = static_cast<int>(last_logits.shape[0]);
                 float neg_inf = -1e30f;

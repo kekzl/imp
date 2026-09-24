@@ -106,6 +106,7 @@ bool Engine::init_features() {
     }
 
     build_banned_token_list();
+    (void)banned_tokens_device_(decode_stream());  // upload in the loading phase (I2)
 
     // Cache think token IDs for stop-suppression during reasoning.
     // Only treat as think model if <think> is a CONTROL token (from GGUF metadata),
