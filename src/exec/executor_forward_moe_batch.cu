@@ -476,13 +476,20 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         IMP_LOG_INFO("MoE prefill: FP16 batch + grouped GEMM path (n=%d, expanded=%d)", n,
                      expanded);
 
-    // One D2H sync per layer for expert offsets
-    moe_host_args_capture_guard(stream);
-    std::vector<int32_t> h_offsets(ne + 1);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                       static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                       cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    // Host offsets (one D2H + sync) only for the dequant fallback. The IMMA path sizes its grid
+    // from rows/expert <= n (a token picks an expert once) and its tile from 2x the mean.
+    std::vector<int32_t> h_offsets;
+    auto host_offsets = [&]() -> const int32_t* {
+        if (h_offsets.empty()) {
+            moe_host_args_capture_guard(stream);
+            h_offsets.resize(ne + 1);
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                               static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                               cudaMemcpyDeviceToHost, stream));
+            cudaStreamSynchronize(stream);
+        }
+        return h_offsets.data();
+    };
 
     char* buf = static_cast<char*>(moe_.batch_dequant_buf);
     char* gathered_base = static_cast<char*>(moe_.gathered.data);
@@ -495,9 +502,8 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     // the grouped INT8 IMMA kernel (fused dequant, one launch over all
     // experts) instead of materializing every expert to FP16. Other qtypes
     // and FP32-out fall through to the legacy path.
-    int max_rows_per_expert = 0;
-    for (int e = 0; e < ne; ++e)
-        max_rows_per_expert = std::max(max_rows_per_expert, h_offsets[e + 1] - h_offsets[e]);
+    const int max_rows_per_expert = std::min(n, expanded);
+    const int rows_hint = 2 * ((expanded + ne - 1) / ne);
     const bool moe_imma = dispatch_policy().gemm.moe_imma_prefill;
 
     auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
@@ -518,7 +524,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
                                   reinterpret_cast<const __half*>(a_base),
                                   reinterpret_cast<__half*>(c_base),
                                   static_cast<const int32_t*>(routing.expert_offsets.data),
-                                  max_rows_per_expert, expanded, ne, N_dim, K_dim, stream))
+                                  max_rows_per_expert, expanded, ne, N_dim, K_dim, stream, rows_hint))
                 return;
         }
         size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -527,7 +533,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         std::vector<const void*> b_ptrs(ne);
         for (int e = 0; e < ne; ++e)
             b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
-        gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,
+        gemm_moe_batched(a_base, c_base, host_offsets(), b_ptrs.data(), K_dim, N_dim,
                          QType::F16, ne, stream, moe_.d_work_ptrs, out_dtype);
     };
 

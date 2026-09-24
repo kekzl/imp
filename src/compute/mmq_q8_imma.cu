@@ -299,7 +299,7 @@ using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const
 
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
-                 const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
+                 const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     const bool capturing = imma_stream_capturing(stream);
     if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
@@ -311,7 +311,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     imma_quantize_act(x_f16, act_rows, K, stream);
 
     const int grid_m_rows = d_offsets ? h_max_rows : M;
-    const bool small_m = d_offsets && h_max_rows < 96;
+    const bool small_m = d_offsets && (rows_hint > 0 ? rows_hint : h_max_rows) < 96;
     const int bm = small_m ? 32 : 128;
     dim3 grid((N + kBN - 1) / kBN, (grid_m_rows + bm - 1) / bm, ne);
 
@@ -471,13 +471,13 @@ bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* ou
 
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
-                       int K, cudaStream_t stream) {
+                       int K, cudaStream_t stream, int rows_hint) {
     if (N % 2 != 0) return false;
     if (K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : kBK) != 0)
         return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
-                                d_offsets, h_max_rows, expanded, ne);
+                                d_offsets, h_max_rows, expanded, ne, rows_hint);
     static bool logged = false;
     if (ok && !logged) {
         logged = true;

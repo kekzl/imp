@@ -492,6 +492,56 @@ TEST(MmqQ8Imma, MoeGroupedQ8) {
     mmq_q8_imma_release_all();
 }
 
+// The MoE prefill sizes the grid from the bound rows/expert <= n instead of reading the offsets
+// back (no D2H + sync per layer): surplus CTAs must exit on their offsets, and the tile hint must
+// not change which rows are written.
+TEST(MmqQ8Imma, MoeGroupedGridBoundMatchesExactMaxRows) {
+    const int ne = 4, N = 128, K = 256;
+    const int rows_per[ne] = {37, 0, 96, 19};
+    int32_t h_off[ne + 1] = {0};
+    for (int e = 0; e < ne; ++e) h_off[e + 1] = h_off[e] + rows_per[e];
+    const int expanded = h_off[ne];
+    std::vector<uint8_t> W;
+    gen_q8_weight(W, ne * N, K, 93);
+    std::vector<__half> x(static_cast<size_t>(expanded) * K);
+    std::mt19937 rng(94);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x) v = __float2half(nd(rng));
+    uint8_t* d_w; __half *d_x, *d_out; int32_t* d_off;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(expanded) * N * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_off, sizeof(h_off)), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
+
+    auto run = [&](int max_rows, int hint) {
+        cudaMemset(d_out, 0xFF, static_cast<size_t>(expanded) * N * 2);  // NaN: an unwritten row shows
+        EXPECT_TRUE(mmq_imma_moe_gemm(d_w, 0, d_x, d_out, d_off, max_rows, expanded, ne, N, K, nullptr, hint));
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        std::vector<__half> out(static_cast<size_t>(expanded) * N);
+        cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
+        return out;
+    };
+    const auto exact = run(96, 0);          // BM 128, grid from the true max
+    const auto bound = run(expanded, 0);    // BM 128, grid from the bound: 152 rows
+    const auto small = run(expanded, 32);   // BM 32 by hint, grid from the bound
+    for (size_t i = 0; i < exact.size(); ++i) {
+        ASSERT_FALSE(std::isnan(__half2float(small[i]))) << "row " << i / N << " never written";
+        ASSERT_EQ(std::memcmp(&exact[i], &bound[i], 2), 0) << "element " << i;
+    }
+    double err2 = 0, ref2 = 0;
+    for (size_t i = 0; i < exact.size(); ++i) {
+        const double a = __half2float(exact[i]), b = __half2float(small[i]);
+        err2 += (a - b) * (a - b);
+        ref2 += a * a;
+    }
+    EXPECT_LT(std::sqrt(err2 / std::max(ref2, 1e-30)), 1e-3) << "BM 32 vs BM 128";
+    cudaFree(d_w); cudaFree(d_x); cudaFree(d_out); cudaFree(d_off);
+    mmq_q8_imma_release_all();
+}
+
 TEST(MmqQ8Imma, DeclineShapes) {
     // N odd / K not multiple of 64 / M < 2 → false. (M down to 2 is accepted
     // since the small-M split-K path — spec-decode verify chunks.)
