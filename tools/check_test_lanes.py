@@ -312,7 +312,9 @@ def main():
     # 1134 -> 1128: tests/test_mmq_q4k_hmma.cu (6, test-quant) removed with gemm.q4k_hmma_enabled (#2107).
     # 1128 -> 1129: MmqQ8Imma.MoeGroupedGridBoundMatchesExactMaxRows (test-quant): the MoE grid sized
     # from the bound rows/expert <= n matches the exact max; a grid from the tile hint fails.
-    PINNED = 1129
+    # 1129 -> 1130: SchemaConstrainTest.XmlToolCallLiteralEnumValue (test-moe-gdn): a non-string enum
+    # member constrains an XML tool parameter; needs the tokenizer-backed mask (CUDA).
+    PINNED = 1130
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -140,7 +140,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
         auto probe = parse_json_schema(json_schema);
         const SchemaNode* probe_res = probe ? resolve_schema_ref(probe.get(), probe.get()) : nullptr;
         if (probe_res && probe_res->type == SchemaType::OBJECT && probe_res->properties.empty() &&
-            probe_res->enum_values.empty()) {
+            !probe_res->has_enum()) {
             IMP_LOG_INFO("ConstraintManager: free-form object schema → any-JSON constrainer");
             use_schema = false;
             json_mode = true;
