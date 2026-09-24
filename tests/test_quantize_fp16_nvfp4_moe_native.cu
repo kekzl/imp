@@ -449,35 +449,42 @@ TEST(QuantizeMoeNative, CompactAlphaAndSfaOffsetsWide512) {
     cudaStreamDestroy(stream);
 }
 
-// build_sfa_bases_device must write base + d_sfa_offsets[e] per expert.
-// Phase 3c-full Step 2a foundation.
-TEST(QuantizeMoeNative, BuildSfaBasesDevice) {
-    const int ne = 4;
-    // Simulate base SFA slab via a known device pointer (any aligned alloc).
+// compute_sfa_offsets_device with d_sfa_bases_out: bases[e] == base + offsets[e] from the same launch.
+TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceWritesBases) {
+    const int ne = 6;
+    const int K = 256;
+    const int32_t h_M[ne] = {0, 1, 127, 128, 129, 256};
+    int32_t* d_M = nullptr;
+    int64_t* d_offsets = nullptr;
+    uint8_t** d_bases = nullptr;
     void* d_base = nullptr;
-    cudaMalloc(&d_base, 65536);  // 64 KiB sentinel buffer (only addresses matter)
-    const int64_t h_offsets[ne + 1] = {0, 512, 1024, 1024, 2560};  // bytes
-    int64_t*  d_offsets = nullptr;
-    uint8_t** d_bases   = nullptr;
+    cudaMalloc(&d_M, ne * sizeof(int32_t));
     cudaMalloc(&d_offsets, (ne + 1) * sizeof(int64_t));
-    cudaMalloc(&d_bases,   ne       * sizeof(uint8_t*));
-    cudaMemcpy(d_offsets, h_offsets, (ne + 1) * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_bases, ne * sizeof(uint8_t*));
+    cudaMalloc(&d_base, 65536);  // only addresses matter
+    cudaMemset(d_bases, 0, ne * sizeof(uint8_t*));
+    cudaMemcpy(d_M, h_M, ne * sizeof(int32_t), cudaMemcpyHostToDevice);
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    imp::build_sfa_bases_device(d_bases, d_base, d_offsets, ne, stream);
+    imp::compute_sfa_offsets_device(d_M, d_offsets, ne, K, stream, d_bases, d_base);
     EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
 
+    int64_t off[ne + 1] = {};
     uint8_t* got[ne] = {};
+    cudaMemcpy(off, d_offsets, (ne + 1) * sizeof(int64_t), cudaMemcpyDeviceToHost);
     cudaMemcpy(got, d_bases, ne * sizeof(uint8_t*), cudaMemcpyDeviceToHost);
+    int64_t expected = 0;
     for (int e = 0; e < ne; ++e) {
-        uint8_t* expected = static_cast<uint8_t*>(d_base) + h_offsets[e];
-        EXPECT_EQ(got[e], expected) << "base[" << e << "] mismatch";
+        EXPECT_EQ(off[e], expected) << "offset[" << e << "]";
+        EXPECT_EQ(got[e], static_cast<uint8_t*>(d_base) + expected) << "base[" << e << "]";
+        expected += static_cast<int64_t>(imp::cutlass_nvfp4_sf_size(h_M[e], K));
     }
 
-    cudaFree(d_base);
+    cudaFree(d_M);
     cudaFree(d_offsets);
     cudaFree(d_bases);
+    cudaFree(d_base);
     cudaStreamDestroy(stream);
 }
 

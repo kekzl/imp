@@ -76,24 +76,11 @@ void compact_alpha_active(
 // moe_prefill_graphs_plan_2026_05_10.
 // Padding: n_row_tiles=ceil(M_e/128), n_k_tiles=ceil(K/64), bytes=n_row_tiles*n_k_tiles*512
 // (see cutlass_nvfp4_sf_size, gemm_cutlass_sm120.cu). Single-block 256-thread; n_experts<=256.
-void compute_sfa_offsets_device(
-    const int32_t* d_M_per,
-    int64_t* d_sfa_offsets_out,
-    int n_experts,
-    int K,
-    cudaStream_t stream);
-
-// Builds device array of per-expert base pointers into the SfAtom-padded SFA slab:
-// d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e]. Replaces the host-side loop in
-// executor_forward_moe.cu's quantize_once lambda, eliminating an H2D (Phase 3c-full
-// Step 2 prerequisite). Single-block 256-thread launch; safe in a captured graph.
-// n_experts <= 256.
-void build_sfa_bases_device(
-    uint8_t** d_sfa_bases_out,
-    void* base_sf,
-    const int64_t* d_sfa_offsets,
-    int n_experts,
-    cudaStream_t stream);
+// d_sfa_bases_out (nullable): also writes d_sfa_bases_out[e] = base_sf + offset[e] in the
+// same launch. Capture-safe.
+void compute_sfa_offsets_device(const int32_t* d_M_per, int64_t* d_sfa_offsets_out, int n_experts, int K,
+                                cudaStream_t stream, uint8_t** d_sfa_bases_out = nullptr,
+                                void* base_sf = nullptr);
 
 // Zeros the active prefix of an SFA staging buffer, reading the true byte count from
 // d_sfa_offsets[n_experts] instead of a worst-case cudaMemsetAsync(buf,0,max_bytes).

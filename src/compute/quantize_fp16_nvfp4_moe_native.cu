@@ -425,12 +425,10 @@ constexpr int kSfAtomKElems = 64;
 constexpr int kSfAtomSize   = 512;
 }  // anonymous
 
-__global__ void compute_sfa_offsets_kernel(
-    const int32_t* __restrict__ d_M_per,
-    int64_t*       __restrict__ d_sfa_offsets_out,
-    int n_experts,
-    int K)
-{
+__global__ void compute_sfa_offsets_kernel(const int32_t* __restrict__ d_M_per,
+                                           int64_t* __restrict__ d_sfa_offsets_out,
+                                           uint8_t** __restrict__ d_sfa_bases_out,
+                                           uint8_t* __restrict__ base_sf, int n_experts, int K) {
     // Same chunked layout as compact_alpha_active_kernel: thread t owns experts
     // [t * chunk, (t + 1) * chunk), block scan over the 256 chunk totals.
     constexpr int NT = 256;
@@ -467,6 +465,8 @@ __global__ void compute_sfa_offsets_kernel(
         const int e = e0 + i;
         if (e < n_experts) {
             d_sfa_offsets_out[e] = excl;
+            if (d_sfa_bases_out)
+                d_sfa_bases_out[e] = base_sf + excl;
             excl += bytes_of(e);
         }
     }
@@ -474,13 +474,8 @@ __global__ void compute_sfa_offsets_kernel(
         d_sfa_offsets_out[n_experts] = s_scan[NT - 1];
 }
 
-void compute_sfa_offsets_device(
-    const int32_t* d_M_per,
-    int64_t* d_sfa_offsets_out,
-    int n_experts,
-    int K,
-    cudaStream_t stream)
-{
+void compute_sfa_offsets_device(const int32_t* d_M_per, int64_t* d_sfa_offsets_out, int n_experts, int K,
+                                cudaStream_t stream, uint8_t** d_sfa_bases_out, void* base_sf) {
     if (n_experts <= 0) {
         if (d_sfa_offsets_out)
             cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream);
@@ -489,35 +484,8 @@ void compute_sfa_offsets_device(
     IMP_CHECK(n_experts <= 256 * kScanMaxChunk,
               "compute_sfa_offsets: n_experts=%d exceeds the single-block scan limit %d", n_experts,
               256 * kScanMaxChunk);
-    compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(
-        d_M_per, d_sfa_offsets_out, n_experts, K);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-// Writes d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e]. One thread per expert.
-__global__ void build_sfa_bases_kernel(
-    uint8_t**      __restrict__ d_sfa_bases_out,
-    uint8_t*       __restrict__ base_sf,
-    const int64_t* __restrict__ d_sfa_offsets,
-    int n_experts)
-{
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e < n_experts)
-        d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e];
-}
-
-void build_sfa_bases_device(
-    uint8_t** d_sfa_bases_out,
-    void* base_sf,
-    const int64_t* d_sfa_offsets,
-    int n_experts,
-    cudaStream_t stream)
-{
-    if (n_experts <= 0) return;
-    int threads = std::min(n_experts, 256);
-    int blocks  = (n_experts + threads - 1) / threads;
-    build_sfa_bases_kernel<<<blocks, threads, 0, stream>>>(
-        d_sfa_bases_out, static_cast<uint8_t*>(base_sf), d_sfa_offsets, n_experts);
+    compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(d_M_per, d_sfa_offsets_out, d_sfa_bases_out,
+                                                      static_cast<uint8_t*>(base_sf), n_experts, K);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
