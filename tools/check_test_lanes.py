@@ -310,7 +310,9 @@ def main():
     # 1132 -> 1134: GgufRef.{Q5_1,Q5_K}_GemvMmvq (test-quant): the two MMVQ launchers without an fp64
     # reference; run_mmvq_gemv builds every format through format_spec.
     # 1134 -> 1128: tests/test_mmq_q4k_hmma.cu (6, test-quant) removed with gemm.q4k_hmma_enabled (#2107).
-    PINNED = 1128
+    # 1128 -> 1129: MmqQ8Imma.MoeGroupedGridBoundMatchesExactMaxRows (test-quant): the MoE grid sized
+    # from the bound rows/expert <= n matches the exact max; a grid from the tile hint fails.
+    PINNED = 1129
 
     text = CMAKE.read_text()
     mods = module_sources(text)

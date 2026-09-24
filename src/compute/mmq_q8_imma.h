@@ -42,11 +42,12 @@ bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* ou
 // MoE grouped prefill GEMM over ne experts in one launch (gridDim.z=ne).
 // w_blocks[ne][N][K] packed GGUF blocks; x_f16[expanded][K] gathered activations
 // (expert-contiguous); out_f16[expanded][N]; d_offsets device int32[ne+1] row offsets.
-// h_max_rows: host max rows/expert, sizes grid.y (<96 picks BM=32 small-M tile;
+// h_max_rows: upper bound on rows/expert, sizes grid.y (surplus CTAs exit on their offsets);
+// rows_hint (0 = h_max_rows) picks the tile: <96 selects BM=32 small-M (
 // pp512 top-8/128 routing averages ~32 rows/expert). qkind: 0=Q8_0, 1=Q4_K, 2=Q6_K, 3=Q5_1, 4=Q5_K.
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
-                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
-                       int K, cudaStream_t stream);
+                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N, int K,
+                       cudaStream_t stream, int rows_hint = 0);
 
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();
