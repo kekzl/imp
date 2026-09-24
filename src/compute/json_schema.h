@@ -129,8 +129,11 @@ struct SchemaNode {
     int min_items = -1;
     int max_items = -1;
 
-    // ENUM
+    // ENUM: string members (content without quotes) and non-string members as their raw JSON
+    // text ("1", "-2.5", "true", "null"), emitted verbatim.
     std::vector<std::string> enum_values;
+    std::vector<std::string> enum_literals;
+    bool has_enum() const { return !enum_values.empty() || !enum_literals.empty(); }
 
     // ANY_OF
     std::vector<std::unique_ptr<SchemaNode>> any_of;

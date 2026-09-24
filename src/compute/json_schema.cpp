@@ -227,6 +227,48 @@ private:
         return true;
     }
 
+    // Raw text of a scalar non-string literal: true, false, null or an RFC 8259 number.
+    // Returns false (position unchanged) for anything else, including objects and arrays.
+    bool parse_scalar_literal(std::string& out) {
+        skip_ws();
+        const size_t start = pos_;
+        for (const char* word : {"true", "false", "null"}) {
+            const size_t n = strlen(word);
+            if (pos_ + n <= len_ && strncmp(data_ + pos_, word, n) == 0) {
+                pos_ += n;
+                out.assign(word);
+                return true;
+            }
+        }
+        auto digits = [&] {
+            const size_t d0 = pos_;
+            while (!eof() && peek() >= '0' && peek() <= '9')
+                pos_++;
+            return pos_ - d0;
+        };
+        if (peek() == '-')
+            pos_++;
+        const size_t int0 = pos_;
+        const size_t n_int = digits();
+        bool ok = n_int > 0 && !(n_int > 1 && data_[int0] == '0');
+        if (ok && peek() == '.') {
+            pos_++;
+            ok = digits() > 0;
+        }
+        if (ok && (peek() == 'e' || peek() == 'E')) {
+            pos_++;
+            if (peek() == '+' || peek() == '-')
+                pos_++;
+            ok = digits() > 0;
+        }
+        if (!ok) {
+            pos_ = start;
+            return false;
+        }
+        out.assign(data_ + start, pos_ - start);
+        return true;
+    }
+
     bool parse_bool() {
         skip_ws();
         if (pos_ + 4 <= len_ && strncmp(data_ + pos_, "true", 4) == 0) {
@@ -483,16 +525,17 @@ private:
                 } else {
                     skip_ws();
                     while (!eof() && peek() != ']') {
-                        // #1564: a non-string enum member has no representation - the FSM emits
-                        // enum as quoted string content (schema_constrain.cu:733). Refuse rather
-                        // than constrain to something else.
-                        if (peek() != '"') {
-                            fail(
-                                "enum members must be strings; a number, boolean or null "
-                                "enum cannot be enforced by this build");
+                        // Strings go to enum_values, scalars to enum_literals (emitted verbatim);
+                        // an object or array member has no FSM representation (#1564).
+                        std::string lit;
+                        if (peek() == '"') {
+                            node->enum_values.push_back(parse_string());
+                        } else if (parse_scalar_literal(lit)) {
+                            node->enum_literals.push_back(std::move(lit));
+                        } else {
+                            fail("enum members must be strings, numbers, booleans or null");
                             break;
                         }
-                        node->enum_values.push_back(parse_string());
                         skip_ws();
                         if (peek() == ',') {
                             pos_++;
@@ -568,15 +611,17 @@ private:
                 node->type = SchemaType::ANY_OF;
             } else if (key == "const") {
                 // #1567: const is enum with one member, and the FSM already
-                // has that path. Same string-only limit as enum above.
+                // has that path. Same member types as enum above.
                 skip_ws();
-                if (peek() != '"') {
-                    fail(
-                        "const must be a string; a number, boolean or null const "
-                        "cannot be enforced by this build");
-                } else {
+                std::string lit;
+                if (peek() == '"') {
                     node->enum_values.push_back(parse_string());
                     node->type = SchemaType::ENUM;
+                } else if (parse_scalar_literal(lit)) {
+                    node->enum_literals.push_back(std::move(lit));
+                    node->type = SchemaType::ENUM;
+                } else {
+                    fail("const must be a string, number, boolean or null");
                 }
             } else if (is_unenforceable_keyword(key)) {
                 // #1567: these are assertions, not annotations - dropping one answers a
@@ -605,7 +650,7 @@ private:
         // Enum takes precedence over a co-declared "type" (JSON key order is not
         // significant; {"type":"string","enum":[...]} must not demote back to a
         // free string, which the constrainer would then accept any value for).
-        if (!node->enum_values.empty() && node->type != SchemaType::REF)
+        if (node->has_enum() && node->type != SchemaType::REF)
             node->type = SchemaType::ENUM;
 
         // #1729: an object with no properties/additionalProperties defaults to
@@ -723,6 +768,7 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     c->additional_properties = additional_properties;
     c->required = required;
     c->enum_values = enum_values;
+    c->enum_literals = enum_literals;
     c->pattern = pattern;
     c->min_length = min_length;
     c->max_length = max_length;
@@ -782,10 +828,9 @@ static bool collect_tool_defs(const std::vector<std::pair<std::string, std::stri
         // parameter keys as tags, and a schema with none has no tag to render.
         const bool free_form_object = res && res->type == SchemaType::OBJECT &&
                                       res->properties.empty() && res->additional_properties;
-        const bool enforceable =
-            res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
-                    (!xml && free_form_object) ||
-                    (!xml && res->type == SchemaType::ENUM && !res->enum_values.empty()));
+        const bool enforceable = res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
+                                         (!xml && free_form_object) ||
+                                         (!xml && res->type == SchemaType::ENUM && res->has_enum()));
         if (!enforceable)
             return false;
         if (xml) {

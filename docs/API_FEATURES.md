@@ -17,7 +17,7 @@ post-validation.
 | form | status |
 |---|---|
 | `response_format: {"type": "json_object"}` | ✅ |
-| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated. An `integer` is bounded at 19 digits (int64's width): unbounded, the sampler could stay in the digit state above temperature 0 and emit a 40-digit population (#1540) |
+| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated. An `integer` is bounded at 19 digits (int64's width): unbounded, the sampler could stay in the digit state above temperature 0 and emit a 40-digit population (#1540). `enum`/`const` members may be strings, numbers, booleans or `null`; a non-string member is emitted exactly as written (`1.0` does not match `1`) |
 | `response_format: {"type": "regex"}` / `guided_regex` | ✅ |
 | `response_format: {"type": "grammar"}` / `grammar` / `guided_grammar` | ✅ GBNF, a pushdown simulator, so recursive and bracket-balanced formats work |
 

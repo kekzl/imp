@@ -35,6 +35,7 @@ enum class SchemaPhase : uint8_t {
     NUMBER_VALUE,        // Inside a number
     LITERAL_VALUE,       // Generating true/false/null
     ENUM_VALUE,          // Inside an enum string (constrained to exact matches)
+    ENUM_LITERAL,        // Inside a non-string enum member (number/true/false/null, verbatim)
     ENVELOPE_OPEN,       // Forcing the tool-call open literal (e.g. "<tool_call>\n")
     ENVELOPE_CLOSE,      // Forcing the tool-call close literal (e.g. "\n</tool_call>")
     // Qwen-Coder XML tool-call body (SchemaType::XML_TOOL_CALL). One frame
@@ -268,6 +269,8 @@ private:
     bool is_valid_enum_prefix(const std::vector<std::string>& values, const std::string& prefix) const;
     // XML enum parameter: one value char (member prefix, then "\n</parameter>"); false = illegal.
     bool xml_enum_step(SchemaFrame& f, char c) const;
+    // ENUM_LITERAL: one char; a complete member hands a non-extending char back to the parent.
+    bool enum_literal_step(std::vector<SchemaFrame>& stk, char c) const;
 
     // True if the current string can legally close: regex accepts and length
     // constraints satisfied.

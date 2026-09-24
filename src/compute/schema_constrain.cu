@@ -33,8 +33,8 @@ static int effective_max_items(const SchemaNode* root, const SchemaNode* array_n
     if (array_node->max_items >= 0)
         return array_node->max_items;
     const SchemaNode* items = resolve_schema_ref(root, array_node->items.get());
-    if (items && items->type == SchemaType::ENUM && !items->enum_values.empty())
-        return static_cast<int>(items->enum_values.size());
+    if (items && items->type == SchemaType::ENUM && items->has_enum())
+        return static_cast<int>(items->enum_values.size() + items->enum_literals.size());
     return INT_MAX;
 }
 
@@ -286,8 +286,14 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
                     mask |= CAT_NULL_START;
                     break;
                 case SchemaType::ENUM:
-                    mask |= CAT_QUOTE;
-                    break;  // enum values are strings
+                    if (!f.node->enum_values.empty())
+                        mask |= CAT_QUOTE;
+                    for (const auto& v : f.node->enum_literals)
+                        mask |= v[0] == 't'   ? CAT_TRUE_START
+                                : v[0] == 'f' ? CAT_FALSE_START
+                                : v[0] == 'n' ? CAT_NULL_START
+                                              : CAT_NUMBER_START;
+                    break;
                 case SchemaType::XML_TOOL_CALL:
                     // '<' (and tolerated leading whitespace) span categories —
                     // per-token simulation decides, like the XML phases below.
@@ -420,6 +426,9 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         case SchemaPhase::ENUM_VALUE:
             return CAT_STRING_CHAR | CAT_QUOTE;
 
+        case SchemaPhase::ENUM_LITERAL:
+            return 0xFFFF;  // member chars or the parent's terminator: per-token simulation decides
+
         case SchemaPhase::ENVELOPE_OPEN:
         case SchemaPhase::ENVELOPE_CLOSE:
             // Envelope chars ('<', '/', letters, newline) span categories —
@@ -496,7 +505,7 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     // FREE_VALUE delegates the whole vocabulary to the simulation exactly as the
     // XML phases do, so it needs the same first-byte prefilter or it pays ~150k
     // stack copies per decode step.
-    const bool first_byte_prefilter = xml_tag_phase || free_value_phase;
+    const bool first_byte_prefilter = xml_tag_phase || free_value_phase || phase == SchemaPhase::ENUM_LITERAL;
     bool first_ok[256];
     if (first_byte_prefilter) {
         for (int c = 0; c < 256; c++) {
@@ -719,7 +728,9 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                         cands = "\"";
                         break;  // opening quote; interior is free
                     case SchemaType::ENUM:
-                        cands = "\"";
+                        cands = f.node->enum_values.empty() ? "" : "\"";
+                        for (const auto& v : f.node->enum_literals)
+                            cands += v[0];  // a mixed enum is a real choice: nothing forced
                         break;
                     case SchemaType::NULL_TYPE:
                         cands = "n";
@@ -993,12 +1004,14 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     }
                     return false;
                 case SchemaType::ENUM:
-                    if (c == '"') {
+                    if (c == '"' && !f.node->enum_values.empty()) {
                         f.phase = SchemaPhase::ENUM_VALUE;
                         f.enum_buffer.clear();
                         return true;
                     }
-                    return false;
+                    f.phase = SchemaPhase::ENUM_LITERAL;
+                    f.enum_buffer.clear();
+                    return enum_literal_step(stk, c);
                 case SchemaType::ANY_OF:
                     // anyOf is hard to constrain precisely — accept as free string.
                     f.phase = SchemaPhase::STRING_VALUE;
@@ -1403,6 +1416,9 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             return true;
         }
 
+        case SchemaPhase::ENUM_LITERAL:
+            return enum_literal_step(stk, c);
+
         case SchemaPhase::ENVELOPE_OPEN: {
             // Optional whitespace before the open literal (models emit "\n\n"
             // after </think>); inside the literal every char is forced.
@@ -1533,7 +1549,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 for (auto& [pname, pnode] : tool->properties) {
                     const SchemaNode* pn = pname == f.key_buffer ? resolve_schema_ref(f.node, pnode.get())
                                                                  : nullptr;
-                    if (pn && pn->type == SchemaType::ENUM && !pn->enum_values.empty())
+                    if (pn && pn->type == SchemaType::ENUM && pn->has_enum())
                         f.xml_enum = pn;
                 }
                 f.enum_buffer.clear();
@@ -1584,9 +1600,33 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
 
 // Enum value: a member, then "\n</parameter>". xml_delim_match 1 with an empty buffer is the
 // value opener; with a member in the buffer it is a typed '\n' starting the delimiter.
+bool SchemaConstrainer::enum_literal_step(std::vector<SchemaFrame>& stk, char c) const {
+    SchemaFrame& f = stk.back();
+    const auto& lits = f.node->enum_literals;
+    if (is_valid_enum_prefix(lits, f.enum_buffer + c)) {
+        f.enum_buffer += c;
+        const bool member = std::find(lits.begin(), lits.end(), f.enum_buffer) != lits.end();
+        if (member && std::none_of(lits.begin(), lits.end(), [&](const std::string& v) {
+                return v.size() > f.enum_buffer.size() &&
+                       v.compare(0, f.enum_buffer.size(), f.enum_buffer) == 0;
+            })) {
+            stk.pop_back();  // complete and no member extends it: done, like LITERAL_VALUE
+            sim_fixup_parent(stk);
+        }
+        return true;
+    }
+    if (std::find(lits.begin(), lits.end(), f.enum_buffer) == lits.end())
+        return false;  // not a member and c does not extend one
+    stk.pop_back();
+    sim_fixup_parent(stk);
+    return sim_advance(stk, c);  // reprocess the terminator in the parent, as NUMBER_VALUE does
+}
+
 bool SchemaConstrainer::xml_enum_step(SchemaFrame& f, char c) const {
     const auto& vals = f.xml_enum->enum_values;
-    const bool member = std::find(vals.begin(), vals.end(), f.enum_buffer) != vals.end();
+    const auto& lits = f.xml_enum->enum_literals;  // raw text in XML: a literal is just a value
+    const bool member = std::find(vals.begin(), vals.end(), f.enum_buffer) != vals.end() ||
+                        std::find(lits.begin(), lits.end(), f.enum_buffer) != lits.end();
     const int m = f.xml_delim_match;
     if (member && m > 0 && c == kXmlParamDelim[m]) {
         if (++f.xml_delim_match == static_cast<int>(kXmlParamDelim.size())) {
@@ -1601,7 +1641,8 @@ bool SchemaConstrainer::xml_enum_step(SchemaFrame& f, char c) const {
         f.xml_delim_match = 1;
         return true;
     }
-    if (m > 1 || (m == 1 && !f.enum_buffer.empty()) || !is_valid_enum_prefix(vals, f.enum_buffer + c))
+    if (m > 1 || (m == 1 && !f.enum_buffer.empty()) ||
+        (!is_valid_enum_prefix(vals, f.enum_buffer + c) && !is_valid_enum_prefix(lits, f.enum_buffer + c)))
         return false;
     f.enum_buffer += c;
     f.xml_delim_match = 0;

@@ -254,13 +254,69 @@ TEST(SchemaParserDesync, AdditionalPropertiesFalseStillParses) {
     EXPECT_EQ(node->properties.size(), 1u);
 }
 
-// #1564: parse_string() has the same non-consuming default, so {"enum":[1,2,3]} produced
-// enum_values=={""} and constrained the model to the empty string. The FSM emits enums as
-// quoted string content, so a numeric member has no representation: refusing is correct.
-TEST(SchemaParserDesync, NonStringEnumIsRefused) {
-    EXPECT_EQ(parse_json_schema(R"({"type":"integer","enum":[1,2,3]})"), nullptr);
-    EXPECT_EQ(parse_json_schema(R"({"enum":[true,false]})"), nullptr);
-    EXPECT_EQ(parse_json_schema(R"({"enum":[null]})"), nullptr);
+// #1564: {"enum":[1,2,3]} once parsed to enum_values=={""}. Scalars are raw literals now;
+// an object or array member has no FSM representation and is still refused.
+TEST(SchemaParserDesync, NonStringEnumMembersAreLiterals) {
+    auto node = parse_json_schema(R"({"type":"integer","enum":[1,-20,3.5e2]})");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->type, SchemaType::ENUM);
+    EXPECT_TRUE(node->enum_values.empty());
+    EXPECT_EQ(node->enum_literals, (std::vector<std::string>{"1", "-20", "3.5e2"}));
+    auto mixed = parse_json_schema(R"({"enum":["a",true,null]})");
+    ASSERT_NE(mixed, nullptr);
+    EXPECT_EQ(mixed->enum_values, std::vector<std::string>{"a"});
+    EXPECT_EQ(mixed->enum_literals, (std::vector<std::string>{"true", "null"}));
+    auto c = parse_json_schema(R"({"const":false})");
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(c->enum_literals, std::vector<std::string>{"false"});
+    EXPECT_EQ(parse_json_schema(R"({"enum":[{"a":1}]})"), nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"enum":[[1]]})"), nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"enum":[01]})"), nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"const":[1]})"), nullptr);
+}
+
+// Non-string enum members are emitted verbatim; "1" vs "10" ends on the parent's terminator.
+TEST(SchemaEnumLiteral, NumbersBooleansNullAndMixed) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"n":{"enum":[1,10,-2.5]},)"
+                       R"("b":{"enum":[true,null]},"m":{"enum":["a",2]},"c":{"const":5}},)"
+                       R"("required":["n","b","m","c"]})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"n": 1, "b": true, "m": "a", "c": 5})"));
+    EXPECT_TRUE(sc->token_legal(R"({"n": 10, "b": null, "m": 2, "c": 5})"));
+    EXPECT_TRUE(sc->token_legal(R"({"n": -2.5,)"));
+    EXPECT_FALSE(sc->token_legal(R"({"n": 2)"));
+    EXPECT_FALSE(sc->token_legal(R"({"n": 100)"));
+    EXPECT_FALSE(sc->token_legal(R"({"n": 1.0)"));
+    EXPECT_FALSE(sc->token_legal(R"({"n": ")")) << "an opening quote would dead-end a literal-only enum";
+    EXPECT_FALSE(sc->token_legal(R"({"n": 1, "b": false)"));
+    EXPECT_FALSE(sc->token_legal(R"({"n": 1, "b": true, "m": "2)"));
+    EXPECT_FALSE(sc->token_legal(R"({"n": 1, "b": true, "m": "a", "c": 6)"));
+}
+
+// Jump-ahead forcing: a mixed enum is a real first-char choice, a single literal is forced whole.
+TEST(SchemaEnumLiteral, ForcedTextRespectsLiterals) {
+    std::string out;
+    auto mixed = make_fsm(R"({"enum":["a",1]})");
+    ASSERT_NE(mixed, nullptr);
+    EXPECT_EQ(mixed->forced_text(out, 8), 0) << "forcing '\"' would make the literal 1 unreachable";
+    auto strings = make_fsm(R"({"enum":["a","b"]})");
+    ASSERT_NE(strings, nullptr);
+    out.clear();
+    EXPECT_EQ(strings->forced_text(out, 8), 1);
+    EXPECT_EQ(out, "\"");
+    auto single = make_fsm(R"({"const":-5})");
+    ASSERT_NE(single, nullptr);
+    out.clear();
+    single->forced_text(out, 8);
+    EXPECT_EQ(out.substr(0, 1), "-");
+}
+
+// A root-level literal enum admits nothing after its last member char.
+TEST(SchemaEnumLiteral, RootLiteralRejectsTrailingChars) {
+    auto sc = make_fsm(R"({"enum":[true]})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal("true"));
+    EXPECT_FALSE(sc->token_legal("truex"));
 }
 
 TEST(SchemaParserDesync, StringEnumStillParses) {
@@ -395,8 +451,11 @@ TEST(SchemaUnenforceableKeywords, ConstIsEnforcedAsASingleValueEnum) {
     EXPECT_EQ(node->type, SchemaType::ENUM);
     ASSERT_EQ(node->enum_values.size(), 1u);
     EXPECT_EQ(node->enum_values[0], "fixed");
-    // Same string-only limit as enum, and for the same reason.
-    EXPECT_EQ(parse_json_schema(R"({"const":42})"), nullptr);
+    // Same member types as enum: a scalar is a literal, an object is refused.
+    auto num = parse_json_schema(R"({"const":42})");
+    ASSERT_NE(num, nullptr);
+    EXPECT_EQ(num->enum_literals, std::vector<std::string>{"42"});
+    EXPECT_EQ(parse_json_schema(R"({"const":{"a":1}})"), nullptr);
 }
 
 // #1609: recursive descent over a request body. 10^5 nested "items" objects

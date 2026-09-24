@@ -679,6 +679,47 @@ TEST(SchemaConstrainTest, XmlToolCallEnumValueConstrained) {
     EXPECT_TRUE(allowed()[2]) << "the call must be complete and closable";
 }
 
+// Non-string enum members are raw text in the XML dialect: {"enum":[1,true]} constrains the
+// value to "1" or "true" (was a 400 at parse time, #1564).
+TEST(SchemaConstrainTest, XmlToolCallLiteralEnumValue) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = build_xml_tool_call_schema(
+        {{"set", R"({"type":"object","properties":{"v":{"enum":[1,true]}},"required":["v"]})"}});
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+    auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    feed("<tool_call>\n<function=set>\n<parameter=v>\n");
+    auto at_value = allowed();
+    EXPECT_TRUE(at_value[id('1')]);
+    EXPECT_TRUE(at_value[id('t')]);
+    EXPECT_FALSE(at_value[id('x')]) << "a non-member first char must be masked";
+
+    feed("1");
+    EXPECT_TRUE(allowed()[id('\n')]) << "\"1\" is a complete member";
+    feed("\n</parameter>\n</function>\n</tool_call>");
+    EXPECT_TRUE(allowed()[2]) << "the call must be complete and closable";
+}
+
 // A model may close an empty value with a SINGLE newline (<parameter=k>\n</parameter>): the
 // forced value-opening newline doubles as the delimiter start (tracker seeded); without it
 // the close tag is swallowed as value text and EOS stays masked to max_tokens.
