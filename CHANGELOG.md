@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- `imp.conf.example` claimed `gemm.nvfp4_decode_all` takes Gemma-3-12B Q4_K_M from 77 to 141 tok/s (+82 %); measured 2026-09-24 it is 157.5 -> 165.0 (+4.5 %), Qwen3-30B-A3B Q4_K_M 337 -> 361 (+7.2 %), and pp512 drops (-10 % on Qwen3-30B). Default stays off.
 - `docker run imp:test test-compute` failed `CudaFaultSignalTest.IllegalAddressIsStickyAndThrowsAtTheNextForward` (3 of 3): the entrypoint exec'd a bare `test-compute`, and the GTest death test re-execs `argv[0]` with `execv`, which has no PATH search (`execv(test-compute) failed: No such file or directory`). Passthrough commands now get their resolved path; `imp-tests` was never affected.
 - `logit_bias` dropped malformed entries and still answered 200: non-numeric keys, `"12abc"` (applied as token 12), values outside [-100, 100], ids outside the vocabulary. `/v1/chat/completions` and `/v1/completions` now share one parser and return 400 with `param: logit_bias`; `ParseLogitBias.*` (test-core) and `tests/api/test_errors.py`.
 - Qwen-Coder XML and Gemma-4 tool calls cut digit-leading strings to a numeric prefix (`source_id: "600acab9a967586f"` arrived as `600`, 15 of 15, #2103); only a whole JSON literal coerces now, and a parameter whose schema type is `string` keeps the emitted text (`"0600"`).
