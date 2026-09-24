@@ -152,6 +152,10 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     // measured on Qwen3.8-27B at 8 streams).
     state.banned_tokens = banned_token_ids_.empty() ? nullptr : banned_token_ids_.data();
     state.n_banned_tokens = static_cast<int>(banned_token_ids_.size());
+    // Device twin of the same list: the eager sampler bans with one kernel instead of one
+    // 4-byte H2D copy per id (gemma-3: ~6250 ids, 50 % GPU idle in pp512).
+    state.d_banned_tokens = d_banned_tokens_.get();
+    state.n_d_banned_tokens = state.d_banned_tokens ? state.n_banned_tokens : 0;
 
     // Force </think> via logit manipulation when the budget is exceeded: the
     // model generates it itself so it lands in the KV cache correctly. Scans
@@ -189,6 +193,8 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     if (state.force_token < 0 && stop_mask_.n() > 0 && stop_mask_active(req, think_end_id_)) {
         state.banned_tokens = stop_mask_.ids.data();
         state.n_banned_tokens = stop_mask_.n();
+        state.d_banned_tokens = stop_mask_.d_ids.get();
+        state.n_d_banned_tokens = state.d_banned_tokens ? state.n_banned_tokens : 0;
     }
 }
 

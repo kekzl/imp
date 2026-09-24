@@ -148,9 +148,11 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     // Ban special tokens (e.g. <|im_start|>, <|im_end|>) from generation: chat
     // template delimiters that must never appear in model output, else the
     // model can start a phantom new turn and degenerate (Qwen3, Llama3, etc.).
-    if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
-        // Small list (typically 2-5 tokens) — copy to device and set to -inf.
-        // Use a small stack-allocated device buffer via cudaMemcpyAsync.
+    if (state.banned_tokens != nullptr && state.n_banned_tokens > 0 && state.d_banned_tokens != nullptr &&
+        state.n_d_banned_tokens == state.n_banned_tokens) {
+        launch_ban_logits(logits_ptr, state.d_banned_tokens, state.n_banned_tokens, vocab_size, stream);
+    } else if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
+        // No device twin: one 4-byte copy per id.
         float neg_inf = -1e30f;
         for (int bi = 0; bi < state.n_banned_tokens; bi++) {
             int32_t tid = state.banned_tokens[bi];
