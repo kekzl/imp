@@ -226,7 +226,7 @@
     {
       "name": "gemm_imma_prefill",
       "group": "gemm",
-      "regex": "mmq_imma_kernel|mmq_q4k_imma_tile_kernel|mmq_q4k_hmma_kernel|mmq_splitk_finalize_kernel|mmq_imma_q4k_raw_kernel|mmq_imma_q6k_raw_kernel"
+      "regex": "mmq_imma_kernel|mmq_q4k_imma_tile_kernel|mmq_splitk_finalize_kernel|mmq_imma_q4k_raw_kernel|mmq_imma_q6k_raw_kernel"
     },
     {
       "name": "quant_imma_marshal",

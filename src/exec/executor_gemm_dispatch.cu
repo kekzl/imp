@@ -25,7 +25,6 @@
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/mmq_q8_imma.h"
-#include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
 #include "core/pdl.h"
 #include "compute/activation.h"
@@ -68,6 +67,17 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
 
     const QType qtype = weight.qtype;
 
+    // Q4_K with no FP16 cache (tier Undefined on gemma-3: every dense Q4_K weight): IMMA
+    // reads the blocks in place instead of a per-call dequant to FP16 + cuBLAS.
+    const int M = static_cast<int>(input.shape[0]);
+    if (ctx.q4k_imma_prefill && qtype == QType::Q4_K && !weight.dropped_source && M >= 2 &&
+        input.qtype == QType::F16 && output.qtype == QType::F16 && input.stride[0] == weight.shape[1] &&
+        output.stride[0] == weight.shape[0] &&
+        mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
+                          reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
+                          static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta))
+        return;
+
     if (ctx.beta != 0.0f) {
         auto it = wc->fp16.find(weight.data);
         if (it != wc->fp16.end()) {
@@ -106,7 +116,6 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
         return;
     }
 
-    const int M = static_cast<int>(input.shape[0]);
 
     // Generic dequant catch-all (M>1 prefill for uncached weights)
     if (M > 1 && input.qtype == QType::F16 && !weight.dropped_source) {
@@ -548,18 +557,6 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 if (ok)
                     return;
             }
-        }
-
-        // Q4_K HMMA GEMM: in-SMEM dequant + FP16 HMMA m16n8k16 tile kernel.
-        // Config-gated (gemm.q4k_hmma_enabled, default false). Bypasses
-        // dequant-to-FP16 + cuBLAS by decoding Q4_K nibbles directly in SMEM.
-        if (ctx.q4k_hmma_enabled && h.source_qtype == QType::Q4_K &&
-            prefill == StorageTier::FP16 && ctx.beta == 0.0f && M >= 32) {
-            int N = static_cast<int>(h.shape[0]);
-            int K = static_cast<int>(h.shape[1]);
-            if (try_q4k_hmma_dispatch(input.data, h.source_data, output.data,
-                                      M, N, K, ctx.stream))
-                return;
         }
 
         // dp4a dense: computes directly from Q4_K/Q5_K blocks (0.55 B/elem)

@@ -301,7 +301,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q4k_imma_tile.cu
     src/compute/mmq_q8_imma.cu
     src/compute/mmq_q8_imma_scratch.cu
-    src/compute/mmq_q4k_hmma.cu
 )
 
 if(IMP_USE_CUTLASS)
@@ -400,7 +399,6 @@ set(IMP_EXEC_SOURCES
     src/exec/gemm_kernel_cutlass_nvfp4.cu
     src/exec/gemm_kernel_gguf.cu
     src/exec/gemm_kernel_generic_dequant.cu
-    src/exec/gemm_kernel_q4k_hmma.cu
     src/exec/gemm_scratch.cu
     src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cu
@@ -1034,7 +1032,6 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q8_imma.cu
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q6k.cu
-        tests/test_mmq_q4k_hmma.cu
         tests/test_weight_dispatch.cu
     )
     if(IMP_USE_CUTLASS)

@@ -19,7 +19,6 @@
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/mmq_q8_imma.h"
-#include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
 #include "core/pdl.h"
 #include "compute/ptx92_utils.cuh"

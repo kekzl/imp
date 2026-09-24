@@ -12,6 +12,7 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Removed
+- `gemm.q4k_hmma_enabled` and its Q4_K HMMA kernel (`mmq_q4k_hmma`, opt-in since #458, never measured): gemma-3-12b Q4_K_M pp512 305.74 tok/s against 4539.80 default.
 - Dead device code: 7 symbols without a caller (`gdn_rmsnorm_gated_silu_fp32in`, `elementwise_mul`, `residual_kv_write_multi_kernel`, `constrain_mask_kernel`, `rowwise_topm_reserve`, `Model::estimate_expert_bytes`, `KVCacheManager::advance_residual`) and 4 files linked into `libimp` that only their own tests called (`reduce.cu`, `fp8_utils.cu`, `dequant_int8.cu`, `dequant_fp16.cu`): 926 -> 910 kernels. The JSON mask test now drives the production `constrain_mask_allow_kernel`.
 - `--device` (parsed, never reached the engine: every run used device 0) and `--mem-report` (gated nothing: the VRAM audit table prints on every run). `ImpConfig.device_id` stays in the C ABI; a non-zero value is now refused at context create.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
@@ -34,6 +35,7 @@ there instead of retelling it.
 - A prompt that fits the KV pool, with nothing else running, queued forever when prompt + `max_tokens` did not fit and one block was held (the #1635 clamp asked for the whole pool); it is admitted on the prompt alone. `imp_prefill_with_params` returns `IMP_ERROR_CAPACITY` for a request still held after 8 rounds instead of `IMP_SUCCESS` followed by "engine produced no token" (gemma-4-26B Q4_K_M, 8k context).
 
 ### Changed
+- `gemm.q4k_imma_prefill` default `false` -> `true`, and it now reaches Q4_K weights with no FP16 cache (tier Undefined: every dense Q4_K weight on gemma-3), which ran a per-call dequant + cuBLAS; before, only the NVFP4-overlay branch called it, so on gemma-3-12b Q4_K_M the flag launched no IMMA kernel. gemma-3-12b Q4_K_M kernel time pp512 814.6 -> 771.9 ms, pp4096 3793.8 -> 3746.4 ms, PPL 9.9819 -> 9.9805, degen_suite 32/0 FAIL both arms; Qwen3-30B-A3B Q4_K_M neutral.
 - Dependencies: CUTLASS v4.7.1 -> v4.8.0 (`098de2a6`). imp uses `GroupProblemShape`, not the deprecated `GroupedGemmArguments`; no source change. Paired A/B x3 vs v4.7.1, tg128 / pp512: Qwen3-4B Q8_0 -0.11 % / -1.90 %, Qwen3.8-27B NVFP4 -1.18 % / -1.71 %, Qwen3.6-35B-A3B NVFP4 +0.96 % / +1.88 % (all inside the 2 % gate); test-quant 244, test-moe-gdn 184, test-attention 283 pass.
 - Q5_K MoE experts run the grouped INT8 IMMA prefill kernel instead of dequantizing all experts to FP16 per layer: Qwen3.6-35B-A3B UD-Q4_K_M pp512 5957 -> 8661 tok/s, pp4096 13982 -> 17236. Record: `tools/roofline/PERF_LOG.md`.
 - Q6_K MoE experts read the GGUF 210-B blocks in place on the grouped IMMA kernel; the 224-B repack they needed was outside the plane budget, so they dequantized every layer. Qwen3-30B-A3B Q4_K_M pp512 9236 -> 10280 tok/s, no extra VRAM. Record: `tools/roofline/PERF_LOG.md`.

@@ -15,18 +15,13 @@ struct GEMM {
     bool no_dp4a_lm = false;
     bool no_mmvq = false;
     bool no_mmvq_q8_0 = false;
-    // Q4_K x FP16 HMMA GEMM: in-SMEM nibble decode + FP16 tensor core
-    // m16n8k16 tile kernel. Phase 0 scaffold (default off). When enabled,
-    // prefill (M >= 32) Q4_K weights bypass dequant-to-FP16 + cuBLAS.
-    bool q4k_hmma_enabled = false;
     // Q8_0 INT8 IMMA prefill GEMM: fused dequant on int8 tensor cores
     // (s8.s8.s32, full rate unlike the quartered f32-accumulate paths),
     // replacing dequant-to-FP16 -> cuBLAS for Q8_0 prefill (M>=64). Default on.
     bool q8_imma_enabled = true;
-    // Q4_K dense prefill via the IMMA kernel (symmetric-s8 + alpha/beta form,
-    // unified beta*rowsum epilogue). Experimental, default off. Distinct from
-    // the retired 64x32 q4k_imma kernel (plateaued at 40 TOPS).
-    bool q4k_imma_prefill = false;
+    // Q4_K dense prefill via the IMMA kernel for weights with no FP16 cache (dequant + cuBLAS
+    // otherwise). gemma-3-12b Q4_K_M kernel time pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805.
+    bool q4k_imma_prefill = true;
     // MoE batch prefill via the grouped IMMA kernel (one launch over all
     // experts, gridDim.z=expert, BM=32). Covers Q8_0/Q4_K expert tensors; Q6_K
     // down_proj stays on dequant->cuBLAS. Default on; false re-enables the
