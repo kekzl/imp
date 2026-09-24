@@ -106,11 +106,11 @@ bool device_args_done = false;
     // moe.nvfp4_device_args: default on; set false to force the legacy
     // host-args + smallM dispatch for A/B or workarounds.
     const bool da_enabled = dispatch_policy().moe.nvfp4_device_args;
-    // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2
-    // only and has no per-expert bias hooks — the legacy host-args path below
-    // runs apply_expert_activation (GPT_OSS_GLU-aware) with bias seams.
+    // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2 only and has no
+    // per-expert bias hooks; the unstaged path below runs bias + apply_expert_activation
+    // (GPT_OSS_GLU) + a plain quantize instead. The staged path keeps gpt-oss on legacy.
     const bool use_device_args =
-        da_enabled && cfg.arch != ModelArch::GPT_OSS &&
+        da_enabled && (cfg.arch != ModelArch::GPT_OSS || !ctx.staged_blocks) &&
         moe_.d_M_per && moe_.d_M_per_count >= ne &&
         moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
         moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
@@ -302,13 +302,34 @@ bool device_args_done = false;
                 non_gated_experts ? FFNActivation::RELU_SQR : cfg.ffn_activation;
             const char* gate_for_fused =
                 non_gated_experts ? nullptr : expert_gate_base;
-            fused_act_quantize_device(gate_for_fused, expert_up_base, eff,
-                                      act_type);
+            const auto* d_offs = static_cast<const int32_t*>(routing.expert_offsets.data);
+            if (model_->profile().is_gpt_oss) {
+                // gpt-oss (#547): biases before the clamped GLU, then a plain quantize; the
+                // fused kernel has neither. Same seams as the legacy path, no host read.
+                moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, d_offs, ne,
+                                           expanded, eff, stream);
+                moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, d_offs, ne, expanded,
+                                           eff, stream);
+                apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
+                                        non_gated_experts, expanded, eff, compute_dtype_, cfg.ffn_activation,
+                                        stream);
+                prep_sfa(eff);
+                imp::quantize_fp16_to_nvfp4_cutlass_moe(
+                    moe_.expert_swiglu.data, moe_.cutlass3x_packed,
+                    reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs), d_offs, expanded, eff, ne,
+                    stream);
+            } else {
+                fused_act_quantize_device(gate_for_fused, expert_up_base, eff,
+                                          act_type);
+            }
             ok = dispatch_device(ly.expert_down_ids,
                                  da_cache.d_down_B_ptrs,
                                  da_cache.d_down_SFB_ptrs,
                                  da_cache.d_down_alpha,
                                  expert_down_base, eff, d);
+            if (ok && model_->profile().is_gpt_oss)
+                moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offs, ne, expanded,
+                                           d, stream);
         }
         }
         if (ok) {
