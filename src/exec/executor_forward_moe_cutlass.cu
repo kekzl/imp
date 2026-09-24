@@ -142,11 +142,9 @@ bool device_args_done = false;
         // SFA buffer prep — shared by both gate/up quant
         // (K_in = d) and the fused down-input quant (K_in = eff).
         auto prep_sfa = [&](int K_in) {
-            imp::compute_sfa_offsets_device(
-                moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream);
-            imp::build_sfa_bases_device(
-                reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
-                moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, stream);
+            imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream,
+                                            reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
+                                            moe_.cutlass3x_sf);
             // Zeroes only the ACTIVE prefix of the SFA staging buffer: padded rows of
             // the SfAtom layout must be 0 for clean CUTLASS reads. QW5 (#604) replaces
             // the full cudaMemsetAsync with a bounded device kernel that reads
