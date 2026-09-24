@@ -29,8 +29,9 @@ methodology: [`PERF.md`](PERF.md). Refresh via `scripts/gen_perf_baseline.sh`.
 
 ## Decode vs llama.cpp (dense GGUF)
 
-Same card, same GGUF, same flags, decode tok/s; imp defaults (n-gram speculation on) against
-llama.cpp defaults, full offload, flash attention on.
+Same card, same GGUF, same flags, decode tok/s; imp defaults (n-gram speculation on; dense Q8_0 / Q6_K
+decode through an NVFP4 copy, level with llama.cpp at source precision: [cost](quantization.md#choosing-a-quant))
+against llama.cpp defaults, full offload, flash attention on.
 
 | Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead |
 |---|---:|---:|---:|---:|

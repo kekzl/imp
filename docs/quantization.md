@@ -187,6 +187,21 @@ The `auto` allowlist and per-family quality gate (`kv_fp8_hint_default_safe` /
 Quick guidance, not a benchmark:
 
 - **Q8_0**: cleanest baseline; use when quality matters and VRAM allows.
+- **Decode on dense Q8_0 / Q6_K / Q5 GGUF** runs an NVFP4 copy of the weights by default
+  (`NVFP4 decode: auto -> mode 1`); prefill stays at source precision. `--no-nvfp4` or
+  `diagnostics.no_nvfp4_decode_cache = true` decodes at source precision.
+
+| model | decode-path PPL, source -> default | tg128 source -> default | llama.cpp tg128 |
+|---|---|---|---:|
+| Qwen3-8B Q8_0 | 10.7277 -> 11.3713 (+6.0 %) | 159.31 / 158.96 -> 292.78 / 295.59 | 160.1 |
+| Qwen3-14B Q6_K | 9.2289 -> 9.4524 (+2.4 %) | 115.39 / 115.55 -> 169.53 / 168.81 | 114.8 |
+
+[PROV: commit=38e435dd date=2026-09-24 hw=RTX5090 model=Qwen3-8B,Qwen3-14B quant=Q8_0,Q6_K cuda=13.4
+       path=gguf-nvfp4-decode-cache n=2-alternating-runs
+       cmd=`imp-cli --perplexity ppl_corpus_45k.txt --prefill-chunk-size 1 --set runtime.deterministic=true [--no-nvfp4]`;
+       tg from `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --set speculative.ngram=false`;
+       llama.cpp column: BENCHMARKS.md competitive table (2026-08-30)]
+
 - **Q4_K_M**: most VRAM-efficient GGUF, sufficient for most chat; degenerates on long code-gen on
   Gemma-4 (use Q5_K_M or Q8_0 there). **Q6_K** is in between, good MoE pick on Qwen3-Coder-30B.
 - **IQ4_NL / IQ4_XS**: load and run since #556 via the dequant path (FP16-cache decode like
