@@ -579,7 +579,15 @@ class Suite:
 
         probe = "List the first eight prime numbers, separated by commas, nothing else."
         n = 1000 if self.is_reasoning else 60
-        before = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)["content"]
+
+        # Both sides read the probe from the prefix cache: a cold prefill (FP16) against a
+        # cached-prefix prefill (FP8 KV, other M) flipped a greedy token with no growth at all (#2109).
+        def cached(r):
+            return (r["raw"].get("usage") or {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
+
+        self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)
+        warm = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)
+        before = warm["content"]
 
         # Outgrow the pool: one token per ~4 characters, so ask for more
         # characters than the pool currently holds tokens.
@@ -605,10 +613,14 @@ class Suite:
             self.skip("kv-growth", "same answer across a growth event",
                       f"pool did not grow ({blocks} -> {grown} blocks); prompt was too small")
             return
-        after = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)["content"]
+        r = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)
+        if cached(r) != cached(warm):  # the growth prompt evicted the probe: re-warm once
+            r = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)
+        after = r["content"]
         self.record("kv-growth", f"greedy answer identical across growth ({blocks} -> {grown} blocks)",
                     after == before and bool(before.strip()),
-                    f"before={before[:60]!r} after={after[:60]!r}")
+                    f"before={before[:60]!r} after={after[:60]!r} "
+                    f"cached={cached(warm)}/{cached(r)}")
 
     # -- multi-turn state ----------------------------------------------------
     def cat_multi_turn(self):
@@ -633,6 +645,10 @@ class Suite:
     def cat_stream(self):
         q = [{"role": "user", "content": "List the numbers from 1 to 10, comma separated."}]
         n = 1000 if self.is_reasoning else 120
+        # Warm the prefix cache so stream and non-stream both read it (cold vs cached prefill
+        # alone flipped a greedy token on Qwen3-30B-A3B, #2109).
+        if not self.skip_det:
+            self.srv.chat(q, max_tokens=n)
         s = self.srv.chat_stream(q, max_tokens=n)
         self.record("stream", "SSE terminates with [DONE]", s["done"])
         self.record("stream", "finish_reason chunk present",
