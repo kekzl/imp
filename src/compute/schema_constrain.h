@@ -132,6 +132,9 @@ public:
     // battery in the `unit` lane (no GPU runner in CI); the grammar bugs it surfaces have
     // shipped before (#761, #850, #1014). Not for engine use.
     bool init_grammar_for_test(std::unique_ptr<SchemaNode> schema);
+    // CPU tests: `texts` become the vocab (ids = indices, no device buffers); returns the
+    // category AND allow mask apply_mask would upload for the current state.
+    std::vector<uint8_t> mask_for_test(const std::vector<std::string>& texts);
 
     // Apply logit mask before sampling.
     void apply_mask(float* d_logits, int vocab_size, cudaStream_t stream);
@@ -205,6 +208,8 @@ private:
     // Per-token classification (shared pattern with JsonConstrainer)
     std::vector<uint16_t> token_categories_;
     std::vector<std::string> token_texts_;
+    // 1 = no '"', '\\' or control byte: stays inside a free string. Built on first mask.
+    std::vector<uint8_t> token_plain_;
 
     // Per-token allow mask for fine-grained control (key names, enum values)
     std::vector<uint8_t> token_allow_;

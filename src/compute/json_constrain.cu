@@ -7,6 +7,7 @@
 #include <cfloat>
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <utility>
 
 namespace imp {
@@ -560,6 +561,80 @@ static bool string_token_needs_simulation(const std::string& text) {
     return false;
 }
 
+// Whole-token validation: the category bitmask only inspects a token's first character class,
+// so multi-char tokens can smuggle grammar violations past it. Simulates every category-
+// passing candidate through the FSM (advance_char strict mode). Shortcuts, all exact: inside
+// strings a token without '"', '\\' or a control byte cannot change FSM state; a token whose
+// first byte (or, with <= 16 legal first bytes, first two bytes) fails is not simulated.
+size_t JsonConstrainer::build_token_allow(uint16_t mask, int n_classified) {
+    if (token_needs_sim_.size() != token_texts_.size()) {
+        token_needs_sim_.resize(token_texts_.size());
+        for (size_t i = 0; i < token_texts_.size(); i++)
+            token_needs_sim_[i] = string_token_needs_simulation(token_texts_[i]);
+    }
+    const bool in_string = g_.current_state == JsonState::IN_STRING ||
+                           g_.current_state == JsonState::IN_STRING_ESCAPE;
+    bool first_ok[256];
+    int n_first = 0;
+    for (int c = 0; c < 256; c++) {
+        JsonGrammar probe = g_;
+        first_ok[c] = probe.advance_char(static_cast<char>(c));
+        n_first += first_ok[c];
+    }
+    int16_t second_row[256];
+    std::fill(std::begin(second_row), std::end(second_row), int16_t(-1));
+    std::vector<std::array<bool, 256>> second_ok;
+    if (n_first <= 16) {
+        for (int c = 0; c < 256; c++) {
+            if (!first_ok[c])
+                continue;
+            second_row[c] = static_cast<int16_t>(second_ok.size());
+            auto& row = second_ok.emplace_back();
+            JsonGrammar base = g_;
+            base.advance_char(static_cast<char>(c));
+            for (int d = 0; d < 256; d++) {
+                JsonGrammar probe = base;
+                row[d] = probe.advance_char(static_cast<char>(d));
+            }
+        }
+    }
+    size_t n_allowed = 0;
+    for (int i = 0; i < n_classified; i++) {
+        uint8_t allow = 0;
+        if ((token_categories_[i] & mask) != 0) {
+            const std::string& text = token_texts_[i];
+            if (token_categories_[i] == CAT_EOS) {
+                allow = 1;  // EOS already gated by the mask (DONE state only)
+            } else if (in_string && !token_needs_sim_[i]) {
+                allow = 1;
+            } else if (!text.empty() && !first_ok[static_cast<unsigned char>(text[0])]) {
+                allow = 0;
+            } else if (text.size() >= 2 && second_row[static_cast<unsigned char>(text[0])] >= 0 &&
+                       !second_ok[second_row[static_cast<unsigned char>(text[0])]]
+                                 [static_cast<unsigned char>(text[1])]) {
+                allow = 0;
+            } else {
+                allow = sim_token_valid(text) ? 1 : 0;
+            }
+        }
+        token_allow_[i] = allow;
+        n_allowed += allow;
+    }
+    return n_allowed;
+}
+
+std::vector<uint8_t> JsonConstrainer::mask_for_test(const std::vector<std::string>& texts) {
+    vocab_size_ = static_cast<int>(texts.size());
+    token_texts_ = texts;
+    token_categories_.resize(texts.size());
+    for (size_t i = 0; i < texts.size(); i++)
+        token_categories_[i] = classify_token(texts[i]);
+    token_needs_sim_.clear();
+    token_allow_.assign(texts.size(), 0);
+    build_token_allow(compute_allowed_mask(), vocab_size_);
+    return token_allow_;
+}
+
 void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
     if (!initialized_ || !dev_.categories() || !dev_.allowed_mask())
         return;
@@ -569,36 +644,14 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
 
     uint16_t mask = compute_allowed_mask();
 
-    // Whole-token validation: the category bitmask only inspects a token's first character class,
-    // so multi-char tokens can smuggle grammar violations past it. Simulates every category-
-    // passing candidate through the FSM (advance_char strict mode) to build a per-token allow
-    // list. Hot-path shortcut: inside strings, tokens without '"' or '\\' can never change FSM
-    // state, skip the simulation.
     if (token_allow_.size() != static_cast<size_t>(vocab_size))
         token_allow_.assign(vocab_size, 0);
-    const bool in_string = g_.current_state == JsonState::IN_STRING ||
-                           g_.current_state == JsonState::IN_STRING_ESCAPE;
-    size_t n_allowed = 0;
     // vocab_size is the LOGITS width (model vocab); token_categories_/token_texts_ only cover the
     // TOKENIZER vocab (vocab_size_). SafeTensors models pad the lm_head past the tokenizer vocab
     // (e.g. Qwen3-8B-NVFP4: 151936 vs 151669); iterating to vocab_size read token_texts_ out of
     // bounds (host SIGBUS). Padding ids stay allow=0, masked via n_classified.
     const int n_classified = std::min(vocab_size, vocab_size_);
-    for (int i = 0; i < n_classified; i++) {
-        uint8_t allow = 0;
-        if ((token_categories_[i] & mask) != 0) {
-            const std::string& text = token_texts_[i];
-            if (token_categories_[i] == CAT_EOS) {
-                allow = 1;  // EOS already gated by the mask (DONE state only)
-            } else if (in_string && !string_token_needs_simulation(text)) {
-                allow = 1;
-            } else {
-                allow = sim_token_valid(text) ? 1 : 0;
-            }
-        }
-        token_allow_[i] = allow;
-        n_allowed += allow;
-    }
+    size_t n_allowed = build_token_allow(mask, n_classified);
 
     // Force-close safety net: the narrowed mask offers only closers, which isn't legal in every
     // state (e.g. after a key the grammar demands ':' and a value). Narrowing there used to leave
@@ -610,20 +663,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
         g_.remaining_budget = -1;  // disable narrowing for this recompute
         mask = compute_allowed_mask();
         g_.remaining_budget = saved;
-        for (int i = 0; i < n_classified; i++) {
-            uint8_t allow = 0;
-            if ((token_categories_[i] & mask) != 0) {
-                const std::string& text = token_texts_[i];
-                if (token_categories_[i] == CAT_EOS)
-                    allow = 1;
-                else if (in_string && !string_token_needs_simulation(text))
-                    allow = 1;
-                else
-                    allow = sim_token_valid(text) ? 1 : 0;
-            }
-            token_allow_[i] = allow;
-            n_allowed += allow;
-        }
+        n_allowed = build_token_allow(mask, n_classified);
     }
 
     // Empty-allow guard: if NOTHING passes (over-tight schema/state combo),
