@@ -1058,6 +1058,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     if (it_pre != metadata.end() && !it_pre->second.str_val.empty()) {
         tokenizer->set_pre_tokenizer(it_pre->second.str_val);
         IMP_LOG_INFO("Tokenizer pre-tokenizer: %s", it_pre->second.str_val.c_str());
+        // GGUF drops tokenizer.json's normalizer; of the HF sources only Qwen's declares NFC.
+        if (tok_type != "bert")
+            tokenizer->set_nfc(it_pre->second.str_val == "qwen2" || it_pre->second.str_val == "qwen35");
     }
 
     // add_bos_token flag (Qwen3: 0, LLaMA: 1)

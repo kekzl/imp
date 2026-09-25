@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- The tokenizer composed NFD input (NFC) for every model; HF does so only under an NFC `normalizer`, so gpt-oss, Nemotron, Phi-4 (null) and Gemma-4 (Replace) tokenized `e` + U+0301 differently. `tokenizer.json` decides (GGUF: the `qwen2`/`qwen35` pre-tokenizers only), and NFC composes conjoining Hangul jamo (U+1100 U+1161 -> U+AC00; previously never). `NfcNormalize.*`, `TokenizerNormalizer.*` (test-text).
 - JSON Schema `enum`/`const` with a number, boolean or `null` member was a 400 (`{"enum":[1,2]}`, Pydantic `Literal[1, 2]`, `IntEnum`); such members are now emitted verbatim, mixed with strings too, also as Qwen-Coder XML tool parameters. Objects and arrays as members stay a 400. `SchemaEnumLiteral.*` (test-core).
 - `degen_suite` `kv-growth` and `stream == non-stream` compared a cold prefill with a cached-prefix one; that alone flipped a greedy token (Qwen3-30B-A3B Q4_K_M + `nvfp4_decode_all`: kv-growth FAIL 3 of 5 with no growth involved, #2109). Both sides now read a warm prefix cache: 0 of 5, full suite 50/0 FAIL x2 per arm.
 - `imp.conf.example` claimed `gemm.nvfp4_decode_all` takes Gemma-3-12B Q4_K_M from 77 to 141 tok/s (+82 %); measured 2026-09-24 it is 157.5 -> 165.0 (+4.5 %), Qwen3-30B-A3B Q4_K_M 337 -> 361 (+7.2 %), and pp512 drops (-10 % on Qwen3-30B). Default stays off.

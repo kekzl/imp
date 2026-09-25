@@ -786,6 +786,41 @@ TEST(TokenizerAddedTokens, NormalizedFalseNonSpecialIsAtomic) {
     EXPECT_TRUE(contains_id(tok.encode("<|ctrl|>"), 202));
 }
 
+TEST(NfcNormalize, LatinCombiningAndHangulJamoCompose) {
+    EXPECT_EQ(nfc_normalize("e\xcc\x81"), "\xc3\xa9");                   // e + U+0301 -> U+00E9
+    EXPECT_EQ(nfc_normalize("\xe1\x84\x80\xe1\x85\xa1"), "\xea\xb0\x80");  // U+1100 U+1161 -> U+AC00
+    // U+1112 U+1161 U+11AB -> U+D55C (han), U+1100 U+1173 U+11AF -> U+AE00 (geul)
+    EXPECT_EQ(nfc_normalize("\xe1\x84\x92\xe1\x85\xa1\xe1\x86\xab\xe1\x84\x80\xe1\x85\xb3\xe1\x86\xaf"),
+              "\xed\x95\x9c\xea\xb8\x80");
+    // A trailing consonant alone and precomposed text stay as they are.
+    EXPECT_EQ(nfc_normalize("a\xe1\x86\xa8"), "a\xe1\x86\xa8");
+    EXPECT_EQ(nfc_normalize("\xed\x95\x9c"), "\xed\x95\x9c");
+}
+
+// HF: tokenizer.json without an NFC normalizer (gpt-oss, Nemotron, Phi-4: null; Gemma-4: Replace)
+// passes NFD input through; Qwen (NFC) composes.
+TEST(TokenizerNormalizer, NfcOnlyWhenTheJsonDeclaresIt) {
+    const std::string model = R"JSON("model": { "type": "BPE", "vocab": { "a": 0 }, "merges": [] })JSON";
+    const struct {
+        const char* normalizer;
+        bool nfc;
+    } cases[] = {
+        {"", false},
+        {R"JSON(, "normalizer": null)JSON", false},
+        {R"JSON(, "normalizer": {"type": "NFC"})JSON", true},
+        {R"JSON(, "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "x"})JSON", false},
+        {R"JSON(, "normalizer": {"type": "Sequence", "normalizers": [{"type": "Lowercase"}, {"type": "NFC"}]})JSON",
+         true},
+    };
+    for (const auto& c : cases) {
+        std::string path = write_temp_tokenizer_json("{" + model + c.normalizer + "}");
+        Tokenizer tok;
+        ASSERT_TRUE(tok.load(path)) << c.normalizer;
+        std::remove(path.c_str());
+        EXPECT_EQ(tok.nfc(), c.nfc) << c.normalizer;
+    }
+}
+
 TEST(TokenizerAddedTokens, NormalizedTrueIsNotPromoted) {
     std::string path = write_temp_tokenizer_json(kAddedTokenJson);
     Tokenizer tok;

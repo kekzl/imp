@@ -32,6 +32,8 @@ public:
     // Set tokenizer type: "spm" (SentencePiece) or "gpt2" (byte-level BPE)
     void set_type(const std::string& type) { type_ = type; }
     const std::string& type() const { return type_; }
+    bool nfc() const { return nfc_; }
+    void set_nfc(bool v) { nfc_ = v; }
 
     // Control BOS token prepending
     void set_add_bos(bool add) { add_bos_ = add; }
@@ -167,6 +169,9 @@ private:
     bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
     std::string chat_template_str_;          // Raw Jinja2 template from GGUF
+    // encode() applies NFC. tokenizer.json sets it from `normalizer` (HF: null / Replace do not
+    // compose, so gpt-oss / Nemotron / Phi-4 / Gemma-4 see NFD input as-is); GGUF: Qwen pre only.
+    bool nfc_ = true;
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
     std::unordered_map<std::string, int> merge_ranks_;
@@ -196,5 +201,9 @@ std::vector<std::string> o200k_pre_tokenize(const std::string& text);
 // cl100k pre-tokenizer scan (GPT-4/tiktoken lineage, Phi-4; #657): qwen2
 // rules with digit groups of up to three. Exposed for unit tests.
 std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
+
+// NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
+// and algorithmic Hangul L+V(+T). Exposed for unit tests.
+std::string nfc_normalize(const std::string& text);
 
 }  // namespace imp

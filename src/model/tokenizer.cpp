@@ -932,6 +932,23 @@ bool Tokenizer::load(const std::string& path) {
         build_special_pieces();
     }
 
+    // HF composes only under an NFC normalizer, alone or inside a Sequence; null / absent /
+    // Replace (Gemma-4) pass NFD input through.
+    nfc_ = false;
+    if (const JValue* norm = jobj_find(root, "normalizer"); norm && norm->type == JType::OBJECT) {
+        std::string nt;
+        jobj_get_string(*norm, "type", nt);
+        nfc_ = nt == "NFC";
+        const JValue* seq = nt == "Sequence" ? jobj_find(*norm, "normalizers") : nullptr;
+        if (seq && seq->type == JType::ARRAY) {
+            for (const auto& n : seq->arr) {
+                std::string inner;
+                if (n.type == JType::OBJECT && jobj_get_string(n, "type", inner) && inner == "NFC")
+                    nfc_ = true;
+            }
+        }
+    }
+
     // Detect pre-tokenizer type
     const JValue* pre_tok = jobj_find(root, "pre_tokenizer");
     if (pre_tok && pre_tok->type == JType::OBJECT) {
@@ -2004,12 +2021,13 @@ static std::string normalize_nfc(const std::string& text) {
     if (text.empty())
         return text;
 
-    // Quick check: if no bytes in the combining mark range (0xCC-0xCD in UTF-8),
-    // the text has no combining marks and is already NFC.
+    // Quick check: combining marks U+0300-036F lead with 0xCC/0xCD, conjoining Hangul jamo
+    // U+1100-11FF with 0xE1 0x84-0x87. Neither present: already NFC for this implementation.
     bool has_combining = false;
     for (size_t i = 0; i + 1 < text.size(); i++) {
         uint8_t c = static_cast<uint8_t>(text[i]);
-        if (c == 0xCC || c == 0xCD) {
+        uint8_t c1 = static_cast<uint8_t>(text[i + 1]);
+        if (c == 0xCC || c == 0xCD || (c == 0xE1 && c1 >= 0x84 && c1 <= 0x87)) {
             has_combining = true;
             break;
         }
@@ -2032,6 +2050,20 @@ static std::string normalize_nfc(const std::string& text) {
     while (i < codepoints.size()) {
         uint32_t cp = codepoints[i];
 
+        // Hangul (Unicode 3.12): L U+1100-1112 + V U+1161-1175 -> LV, LV + T U+11A8-11C2 -> LVT.
+        constexpr uint32_t kSBase = 0xAC00, kLBase = 0x1100, kVBase = 0x1161, kTBase = 0x11A7;
+        constexpr uint32_t kLCount = 19, kVCount = 21, kTCount = 28;
+        if (cp >= kLBase && cp < kLBase + kLCount && i + 1 < codepoints.size() &&
+            codepoints[i + 1] >= kVBase && codepoints[i + 1] < kVBase + kVCount) {
+            cp = kSBase + ((cp - kLBase) * kVCount + (codepoints[i + 1] - kVBase)) * kTCount;
+            i++;
+        }
+        if (cp >= kSBase && cp < kSBase + kLCount * kVCount * kTCount && (cp - kSBase) % kTCount == 0 &&
+            i + 1 < codepoints.size() && codepoints[i + 1] > kTBase && codepoints[i + 1] < kTBase + kTCount) {
+            cp += codepoints[i + 1] - kTBase;
+            i++;
+        }
+
         // Try to compose with following combining marks
         while (i + 1 < codepoints.size() && is_combining_mark(codepoints[i + 1])) {
             uint32_t composed = try_compose(cp, codepoints[i + 1]);
@@ -2052,11 +2084,13 @@ static std::string normalize_nfc(const std::string& text) {
 
 }  // anonymous namespace
 
+std::string nfc_normalize(const std::string& text) { return normalize_nfc(text); }
+
 // ---- Encode dispatch ----
 
 std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) const {
-    // NFC normalization: compose decomposed Unicode sequences
-    std::string normalized = normalize_nfc(text);
+    // NFC normalization: compose decomposed Unicode sequences (only where the tokenizer has one)
+    std::string normalized = nfc_ ? normalize_nfc(text) : text;
     if (type_ == "gpt2") {
         return encode_gpt2(normalized);
     }
