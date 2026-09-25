@@ -21,13 +21,16 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // H[0..state_size-1,d]. Shared memory: K_norm[SS]+Q_norm[SS]+reduce[block_dim].
 // SPLIT: threads cooperating on one state column. SPLIT=1 at SS=128 needs 128 regs for state
 // alone and ptxas spills; SPLIT=2 halves the state per thread, partners in adjacent lanes reduce
-// via one __shfl_xor_sync. Every HD=SS=128 launch runs SPLIT=2 (kScanSplit128, AUDIT_arch_2026
+// via one __shfl_xor_sync. Every HD=SS=128 launch runs SPLIT=2 (launch_scan128, AUDIT_arch_2026
 // A2-3); HD=SS=64 stays at 1.
 // StateT: h_state storage type, float (default) or bf16 (gdn.state_bf16, halves state traffic).
 // All arithmetic stays FP32 in registers; only loads/stores convert. FP16 state was refuted for
 // GDN (subnormal truncation at ~6e-5 breaks near-zero heads); bf16 keeps FP32's range.
-template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float>
-__global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
+// CSPLIT: CTAs per head along HD (blockIdx.z), each owning HD/CSPLIT state columns. The delta rule
+// is column-independent; K/Q normalisation is recomputed per CTA. Not with fac_in/fac_out (one
+// per-head buffer, read at start and written at end by different CTAs).
+template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float, int CSPLIT = 1>
+__global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
     const half* __restrict__ beta_all,   // [n_tokens, n_heads] FP16
@@ -65,19 +68,46 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
-    pdl_wait();  // every global read below (row offsets, lengths, state, conv rows) may be a predecessor's write
+    // SPLIT partners are ADJACENT lanes (d = tid / SPLIT), so the cross-partner
+    // reductions below are a warp shuffle rather than a shared-memory round.
+    const int d = static_cast<int>(blockIdx.z) * (HD / CSPLIT) +
+                  ((SPLIT == 1) ? static_cast<int>(threadIdx.x) : static_cast<int>(threadIdx.x) / SPLIT);
+    const int part = (SPLIT == 1) ? 0 : static_cast<int>(threadIdx.x) % SPLIT;
+    constexpr int SS_PER = SS / SPLIT;   // state rows this thread owns
+    const int s_base = part * SS_PER;
+    // Each thread holds SS_PER floats of one column of H[SS, HD].
+    float H_reg[SS_PER];
+    // Single-sequence state was last written by this layer's scan one step (or chunk) earlier, never
+    // by the immediate predecessor: fetch it before the PDL wait. CSPLIT > 1 loads registers (220
+    // regs); at CSPLIT=1 that second load site spills (255 regs + 576 B stack), so it prefetches L2.
+    const bool state_early = seq_slots == nullptr;
+    if constexpr (CSPLIT > 1) {
+        if (state_early) {
+            const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+            for (int s = 0; s < SS_PER; s++)
+                H_reg[s] = static_cast<float>(H_col[(s_base + s) * HD]);
+        }
+    } else if (state_early) {
+        constexpr int kNT = HD * SPLIT / CSPLIT;
+        constexpr int kSeg = (HD / CSPLIT) * static_cast<int>(sizeof(StateT));
+        constexpr int kLines = (kSeg + 127) / 128;
+        const char* base = reinterpret_cast<const char*>(h_state + static_cast<size_t>(h) * SS * HD +
+                                                         blockIdx.z * (HD / CSPLIT));
+        for (int i = threadIdx.x; i < SS * kLines; i += kNT)
+            asm volatile("prefetch.global.L2 [%0];" ::"l"(base + static_cast<size_t>(i / kLines) * HD *
+                                                                     sizeof(StateT) +
+                                                      (i % kLines) * 128));
+    }
+    const float A_h = A_log[h];
+    const float dtb_h = dt_bias[h];
+    pdl_wait();  // every global read below (row offsets, lengths, slots, conv rows) may be a predecessor's write
     const int seq = blockIdx.y;
     size_t seq_row0 = static_cast<size_t>(seq) * n_tokens;
     if (seq_row_offsets) {
         seq_row0 = static_cast<size_t>(seq_row_offsets[seq]);
         n_tokens = seq_row_offsets[seq + 1] - seq_row_offsets[seq];
     }
-    // SPLIT partners are ADJACENT lanes (d = tid / SPLIT), so the cross-partner
-    // reductions below are a warp shuffle rather than a shared-memory round.
-    const int d = (SPLIT == 1) ? static_cast<int>(threadIdx.x) : static_cast<int>(threadIdx.x) / SPLIT;
-    const int part = (SPLIT == 1) ? 0 : static_cast<int>(threadIdx.x) % SPLIT;
-    constexpr int SS_PER = SS / SPLIT;   // state rows this thread owns
-    const int s_base = part * SS_PER;
     // Padded verify chunk (#847): y is produced for every row (pads are causally invisible
     // downstream), but the committed h_state is the register snapshot at the real last row - H_reg
     // keeps evolving through pads only to define their (discarded) y values.
@@ -115,14 +145,8 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const int BC_size = n_groups * SS;
     const float scale = rsqrtf(static_cast<float>(HD));
 
-    // Load per-head constants
-    const float A_h = A_log[h];
-    const float dtb_h = dt_bias[h];
-
     // Load state into registers — the critical optimization.
-    // Each thread holds SS floats = one column of H[SS, HD].
-    float H_reg[SS_PER];
-    {
+    if (CSPLIT == 1 || !state_early) {
         const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS_PER; s++)
@@ -167,20 +191,22 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
         {
             // Indexed by the REAL thread id, not by the column: with SPLIT > 1
             // two threads share `d` and would both write s_k[d] and s_reduce[d].
-            constexpr int NT = HD * SPLIT;
+            constexpr int NT = HD * SPLIT / CSPLIT;
             const int tid = static_cast<int>(threadIdx.x);
             // Load K and Q into shared memory
-            if (tid < SS) {
-                s_k[tid] = K_g[tid];
-                s_q[tid] = Q_g[tid];
+            for (int i = tid; i < SS; i += NT) {
+                s_k[i] = K_g[i];
+                s_q[i] = Q_g[i];
             }
             __syncthreads();
 
             // Parallel sum-of-squares reduction
             float k_sq = 0.0f, q_sq = 0.0f;
             for (int i = tid; i < SS; i += NT) {
-                k_sq += s_k[i] * s_k[i];
-                q_sq += s_q[i] * s_q[i];
+                // __fmul_rn blocks FMA contraction: NT < SS then sums round(a^2) + round(b^2), the
+                // same bits as the NT >= SS tree, so every CSPLIT is bit-identical.
+                k_sq += __fmul_rn(s_k[i], s_k[i]);
+                q_sq += __fmul_rn(s_q[i], s_q[i]);
             }
             // Block reduction for k_sq
             s_reduce[tid] = k_sq;
@@ -212,9 +238,9 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
 
             // Normalize in-place
             __syncthreads();
-            if (tid < SS) {
-                s_k[tid] *= k_inv;
-                s_q[tid] *= q_inv;
+            for (int i = tid; i < SS; i += NT) {
+                s_k[i] *= k_inv;
+                s_q[i] *= q_inv;
             }
             __syncthreads();
         }
@@ -333,6 +359,28 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
 // Host launchers
 // ---------------------------------------------------------------------------
 
+// HD=SS=128, SPLIT=2 launch. Column split (CSPLIT=4) when the head x sequence grid covers at
+// most kScanColSplitMaxCtas CTAs (single-stream decode: 48 CTAs on 170 SMs) and no factored spare.
+constexpr int kScanColSplit = 4;
+constexpr int kScanColSplitMaxCtas = 96;
+
+template <typename YOut, typename StateT, typename... Args>
+void launch_scan128(int n_heads, int n_seq, bool factored, cudaStream_t stream, Args... args) {
+    constexpr int SPLIT = 2;
+    const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
+    if (!factored && n_heads * n_seq <= kScanColSplitMaxCtas) {
+        auto* k = gdn_scan_fused_kernel<128, 128, YOut, SPLIT, StateT, kScanColSplit>;
+        pdl::enable_kernel(k);
+        pdl::launch(k, dim3(n_heads, n_seq, kScanColSplit), dim3(128 * SPLIT / kScanColSplit), smem, stream,
+                    args...);
+    } else {
+        auto* k = gdn_scan_fused_kernel<128, 128, YOut, SPLIT, StateT>;
+        pdl::enable_kernel(k);
+        pdl::launch(k, dim3(n_heads, n_seq), dim3(128 * SPLIT), smem, stream, args...);
+    }
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 
 // Batched fused scan over N independent sequences, n_tokens rows each: lets concurrent GDN
 // decode batch. The scan is sequential in tokens (can't parallelise one sequence's timeline),
@@ -364,14 +412,10 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         // threads share one column, so a warp touches 32/SPLIT distinct columns at 128/SPLIT
         // bytes/access. SPLIT=2 is where the register spill is gone and access is still half a cache
         // line. Do not raise it without re-measuring.
-        constexpr int SPLIT = 2;
-        const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
-        pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, half, SPLIT>);
-        pdl::launch(gdn_scan_fused_kernel<128, 128, half, SPLIT>, dim3(grid), dim3(128 * SPLIT), size_t(smem), stream,
-            conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
+        launch_scan128<half, float>(n_heads, n_seq, fac_out != nullptr || fac_in != nullptr, stream, conv_f32,
+            alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
             conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
             seq_row_offsets, out_slots, snap_slots, fac_out, fac_in, fac_stride);
-        IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         const size_t smem = (2 * 64 + 64) * sizeof(float);
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, half>);
@@ -409,23 +453,16 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16_batched: no kernel for HD=" +
                                  std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
-    dim3 grid(n_heads, n_seq);
-    constexpr int SPLIT = 2;
-    const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
-    pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, half, SPLIT, __nv_bfloat16>);
-        pdl::launch(gdn_scan_fused_kernel<128, 128, half, SPLIT, __nv_bfloat16>, dim3(grid), dim3(128 * SPLIT), size_t(smem), stream,
+    launch_scan128<half, __nv_bfloat16>(n_heads, n_seq, fac_out != nullptr || fac_in != nullptr, stream,
         conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
         grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride, seq_row_offsets, out_slots,
         snap_slots, fac_out, fac_in, fac_stride);
-    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused scan: all tokens in one launch. conv_f32: [n_tokens,conv_channels] FP32 (Q|K|V
 // interleaved per token). grouped_layout: 0=GGUF tiled (g=h%n_groups), 1=HF SafeTensors grouped
 // (g=h/n_v_per_k). Single-sequence HD=SS=128 launches run SPLIT=2 (255 regs+88-96B local frame
-// at SPLIT=1 vs 180 regs, none, at SPLIT=2); 256 threads, reduce buffer HD*SPLIT floats.
-constexpr int kScanSplit128 = 2;
-constexpr size_t kScanSmem128 = (2 * 128 + 128 * kScanSplit128) * sizeof(float);
+// at SPLIT=1 vs 180 regs, none, at SPLIT=2); launched through launch_scan128.
 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -436,13 +473,10 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 
     // Template dispatch for common sizes
     if (head_dim_ssm == 128 && state_size == 128) {
-        pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, half, kScanSplit128>);
-        pdl::launch(gdn_scan_fused_kernel<128, 128, half, kScanSplit128>, dim3(n_heads),
-                    dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
+        launch_scan128<half, float>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                     dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                    static_cast<float*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0),
+                    static_cast<float*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), int64_t(0),
                     static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
-        IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, half>);
         pdl::launch(gdn_scan_fused_kernel<64, 64, half>, dim3(n_heads), dim3(64), size_t(smem), stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
@@ -479,13 +513,10 @@ void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* a
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size));
-    pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, half, kScanSplit128, __nv_bfloat16>);
-    pdl::launch(gdn_scan_fused_kernel<128, 128, half, kScanSplit128, __nv_bfloat16>, dim3(n_heads),
-                dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
+    launch_scan128<half, __nv_bfloat16>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                 dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                static_cast<__nv_bfloat16*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0),
+                static_cast<__nv_bfloat16*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), int64_t(0),
                 static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
-    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32-output variant — writes scan result as FP32 for downstream
@@ -497,13 +528,10 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                             const int* d_snap_n) {
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
     if (head_dim_ssm == 128 && state_size == 128) {
-        pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, float, kScanSplit128>);
-        pdl::launch(gdn_scan_fused_kernel<128, 128, float, kScanSplit128>, dim3(n_heads),
-                    dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
+        launch_scan128<float, float>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                     dt_bias, h_state, y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
                     d_real_n, h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
                     static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
-        IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, float>);
         pdl::launch(gdn_scan_fused_kernel<64, 64, float>, dim3(n_heads), dim3(64), size_t(smem), stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
@@ -534,13 +562,10 @@ void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_fp32out_bf16: no kernel for HD=" +
                                  std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
-    pdl::enable_kernel(gdn_scan_fused_kernel<128, 128, float, kScanSplit128, __nv_bfloat16>);
-    pdl::launch(gdn_scan_fused_kernel<128, 128, float, kScanSplit128, __nv_bfloat16>, dim3(n_heads),
-                dim3(128 * kScanSplit128), size_t(kScanSmem128), stream, conv_f32, alpha, beta, A_log,
+    launch_scan128<float, __nv_bfloat16>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                 dt_bias, h_state, y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
                 d_real_n, h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
                 static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
-    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Reference scan kernel: unfused semantics for validation. One block/v_head, block size =
