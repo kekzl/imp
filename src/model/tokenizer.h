@@ -27,7 +27,7 @@ public:
                     int eos_id);
 
     // Load BPE merge rules (for GPT2-style tokenizers)
-    void load_merges(const std::vector<std::string>& merges);
+    void load_merges(const std::vector<std::string>& merges, bool build_pairs = true);
 
     // Set tokenizer type: "spm" (SentencePiece) or "gpt2" (byte-level BPE)
     void set_type(const std::string& type) { type_ = type; }
@@ -175,6 +175,14 @@ private:
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
     std::unordered_map<std::string, int> merge_ranks_;
+    // Id form of merge_ranks_ for encode_gpt2: (left id << 32 | right id) -> {rank, merged id}.
+    // Valid only when every merge of two vocab tokens yields a vocab token. byte_ids_ -1: byte has
+    // no token, a chunk containing it takes the string path.
+    std::unordered_map<uint64_t, std::pair<int, int32_t>> merge_pairs_;
+    int32_t byte_ids_[256] = {};
+    bool merge_pairs_ok_ = false;
+    void build_merge_pairs();
+    void bpe_gpt2_ids(const std::string& chunk, std::vector<int32_t>& out) const;
 
     // Per-token type from GGUF (NORMAL=1, CONTROL=3, etc.). Empty if not available.
     std::vector<int32_t> token_types_;

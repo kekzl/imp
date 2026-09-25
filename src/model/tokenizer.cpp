@@ -854,7 +854,7 @@ bool Tokenizer::load(const std::string& path) {
                 merge_strs.push_back(m.arr[0].str_val + " " + m.arr[1].str_val);
             }
         }
-        load_merges(merge_strs);
+        load_merges(merge_strs, false);  // pairs built once at the end of load()
         IMP_LOG_INFO("tokenizer.json: loaded %zu merges", merge_strs.size());
     }
 
@@ -1050,6 +1050,7 @@ bool Tokenizer::load(const std::string& path) {
         }
     }
 
+    build_merge_pairs();  // after added_tokens, which may extend token_to_id_
     IMP_LOG_INFO("tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s", type_.c_str(),
                  static_cast<int>(vocab_.size()), bos_id_, eos_ids_.empty() ? -1 : eos_ids_[0],
                  add_space_prefix_ ? "true" : "false");
@@ -1076,12 +1077,105 @@ bool Tokenizer::load_vocab(const std::vector<std::string>& tokens, const std::ve
     return true;
 }
 
-void Tokenizer::load_merges(const std::vector<std::string>& merges) {
+void Tokenizer::load_merges(const std::vector<std::string>& merges, bool build_pairs) {
     merge_ranks_.clear();
     merge_ranks_.reserve(merges.size());
     for (size_t i = 0; i < merges.size(); i++) {
         merge_ranks_[merges[i]] = static_cast<int>(i);
     }
+    if (build_pairs)
+        build_merge_pairs();
+}
+
+void Tokenizer::build_merge_pairs() {
+    merge_pairs_.clear();
+    merge_pairs_ok_ = false;
+    if (merge_ranks_.empty() || token_to_id_.empty())
+        return;
+    for (int b = 0; b < 256; b++) {
+        auto it = token_to_id_.find(byte_to_gpt2(static_cast<uint8_t>(b)));
+        byte_ids_[b] = it == token_to_id_.end() ? -1 : it->second;  // -1: chunk takes the string path
+    }
+    // A pair (A, B) has a rank iff A + " " + B is a merge key: every space in a key is a split.
+    merge_pairs_.reserve(merge_ranks_.size());
+    for (const auto& [key, rank] : merge_ranks_) {
+        for (size_t sp = key.find(' '); sp != std::string::npos; sp = key.find(' ', sp + 1)) {
+            auto l = token_to_id_.find(key.substr(0, sp));
+            auto r = token_to_id_.find(key.substr(sp + 1));
+            if (l == token_to_id_.end() || r == token_to_id_.end())
+                continue;
+            auto m = token_to_id_.find(key.substr(0, sp) + key.substr(sp + 1));
+            if (m == token_to_id_.end()) {
+                IMP_LOG_INFO("BPE merges: string path (merge '%s' yields no token)", key.c_str());
+                merge_pairs_.clear();
+                return;
+            }
+            const uint64_t k = (static_cast<uint64_t>(static_cast<uint32_t>(l->second)) << 32) |
+                               static_cast<uint32_t>(r->second);
+            merge_pairs_[k] = {rank, m->second};
+        }
+    }
+    merge_pairs_ok_ = true;
+    IMP_LOG_INFO("BPE merges: id path, %zu pairs", merge_pairs_.size());
+}
+
+// encode_gpt2 BPE on token ids; same merge order and re-validation as the string path.
+void Tokenizer::bpe_gpt2_ids(const std::string& chunk, std::vector<int32_t>& out) const {
+    const int ns = static_cast<int>(chunk.size());
+    if (ns == 0)
+        return;
+    std::vector<int32_t> sym(ns);
+    std::vector<int> sprev(ns), snext(ns), sseq(ns, 0);
+    std::vector<char> sdel(ns, 0);
+    for (int i = 0; i < ns; i++) {
+        sym[i] = byte_ids_[static_cast<uint8_t>(chunk[i])];
+        sprev[i] = i - 1;
+        snext[i] = i + 1;
+    }
+    auto lookup = [&](int32_t a, int32_t b) -> const std::pair<int, int32_t>* {
+        auto it = merge_pairs_.find((static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+                                    static_cast<uint32_t>(b));
+        return it == merge_pairs_.end() ? nullptr : &it->second;
+    };
+    struct Merge {
+        int rank;
+        int pos;
+        int seq;
+    };
+    auto cmp = [](const Merge& a, const Merge& b) {
+        return a.rank != b.rank ? a.rank > b.rank : a.pos > b.pos;
+    };
+    std::priority_queue<Merge, std::vector<Merge>, decltype(cmp)> pq(cmp);
+    for (int i = 0; i + 1 < ns; i++)
+        if (auto m = lookup(sym[i], sym[i + 1]))
+            pq.push({m->first, i, 0});
+    while (!pq.empty()) {
+        auto [rank, pos, s] = pq.top();
+        pq.pop();
+        if (sdel[pos] || sseq[pos] != s)
+            continue;
+        const int right = snext[pos];
+        if (right >= ns || sdel[right])
+            continue;
+        auto cur = lookup(sym[pos], sym[right]);
+        if (cur == nullptr || cur->first != rank)
+            continue;
+        sym[pos] = cur->second;
+        sdel[right] = 1;
+        sseq[pos]++;
+        snext[pos] = snext[right];
+        if (snext[right] < ns)
+            sprev[snext[right]] = pos;
+        if (sprev[pos] >= 0)
+            if (auto m = lookup(sym[sprev[pos]], sym[pos]))
+                pq.push({m->first, sprev[pos], sseq[sprev[pos]]});
+        if (snext[pos] < ns)
+            if (auto m = lookup(sym[pos], sym[snext[pos]]))
+                pq.push({m->first, pos, sseq[pos]});
+    }
+    for (int i = 0; i < ns; i++)
+        if (!sdel[i])
+            out.push_back(sym[i]);
 }
 
 // ---- BPE Encode (SentencePiece style) ----
@@ -1141,31 +1235,34 @@ std::vector<PieceChunk> split_on_special(const std::string& text,
             out.push_back({text, -1});
         return out;
     }
-    size_t i = 0;
-    std::string cur;
+    // Candidates bucketed by first byte, each bucket in `specials` order (longest first).
+    std::vector<std::vector<int>> by_byte(256);
+    for (int s = 0; s < static_cast<int>(specials.size()); s++)
+        if (!specials[s].first.empty())
+            by_byte[static_cast<uint8_t>(specials[s].first[0])].push_back(s);
+    size_t i = 0, cur = 0;
     while (i < text.size()) {
         bool matched = false;
-        for (const auto& [piece, id] : specials) {
+        for (int s : by_byte[static_cast<uint8_t>(text[i])]) {
+            const auto& [piece, id] = specials[s];
             size_t L = piece.size();
-            if (L == 0 || i + L > text.size())
+            if (i + L > text.size())
                 continue;
             if (std::memcmp(text.data() + i, piece.data(), L) == 0) {
-                if (!cur.empty()) {
-                    out.push_back({std::move(cur), -1});
-                    cur.clear();
-                }
+                if (i > cur)
+                    out.push_back({text.substr(cur, i - cur), -1});
                 out.push_back({"", id});
                 i += L;
+                cur = i;
                 matched = true;
                 break;
             }
         }
-        if (!matched) {
-            cur += text[i++];
-        }
+        if (!matched)
+            i++;
     }
-    if (!cur.empty())
-        out.push_back({std::move(cur), -1});
+    if (text.size() > cur)
+        out.push_back({text.substr(cur), -1});
     return out;
 }
 }  // namespace
@@ -1652,6 +1749,7 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     auto pieces = split_on_special(text, special_pieces_);
     std::vector<int32_t> out_ids;
     out_ids.reserve(text.size());
+    std::unordered_map<std::string, std::vector<int32_t>> chunk_ids;  // per call: repeated words
     for (const auto& piece : pieces) {
         if (piece.special_id >= 0) {
             out_ids.push_back(piece.special_id);
@@ -1687,6 +1785,15 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         all_ids.reserve(bpe_text.size());  // rough estimate
 
         for (const auto& chunk : chunks) {
+            if (merge_pairs_ok_ && std::none_of(chunk.begin(), chunk.end(), [&](char c) {
+                    return byte_ids_[static_cast<uint8_t>(c)] < 0;
+                })) {
+                auto [it, fresh] = chunk_ids.try_emplace(chunk);
+                if (fresh)
+                    bpe_gpt2_ids(chunk, it->second);
+                all_ids.insert(all_ids.end(), it->second.begin(), it->second.end());
+                continue;
+            }
             // 2. Convert each byte to GPT2 unicode character
             std::vector<std::string> symbols;
             symbols.reserve(chunk.size());
@@ -1801,296 +1908,11 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     return out_ids;
 }
 
-// NFC normalization: handles the most common combining sequences for Latin scripts
-// (accented characters), which cover the vast majority of real-world NFC cases.
-
-namespace {
-
-// Composition table: (base_codepoint, combining_codepoint) → composed_codepoint
-struct NfcEntry {
-    uint32_t base;
-    uint32_t combining;
-    uint32_t composed;
-};
-
-// Most common Latin composition pairs (base + combining mark → precomposed)
-// Combining marks: 0x0300 (grave), 0x0301 (acute), 0x0302 (circumflex),
-//   0x0303 (tilde), 0x0304 (macron), 0x0308 (diaeresis), 0x030C (caron)
-static const NfcEntry kNfcTable[] = {
-    // Grave accent (0x0300)
-    {0x0041, 0x0300, 0x00C0},  // À
-    {0x0045, 0x0300, 0x00C8},  // È
-    {0x0049, 0x0300, 0x00CC},  // Ì
-    {0x004F, 0x0300, 0x00D2},  // Ò
-    {0x0055, 0x0300, 0x00D9},  // Ù
-    {0x0061, 0x0300, 0x00E0},  // à
-    {0x0065, 0x0300, 0x00E8},  // è
-    {0x0069, 0x0300, 0x00EC},  // ì
-    {0x006F, 0x0300, 0x00F2},  // ò
-    {0x0075, 0x0300, 0x00F9},  // ù
-
-    // Acute accent (0x0301)
-    {0x0041, 0x0301, 0x00C1},  // Á
-    {0x0043, 0x0301, 0x0106},  // Ć
-    {0x0045, 0x0301, 0x00C9},  // É
-    {0x0049, 0x0301, 0x00CD},  // Í
-    {0x004C, 0x0301, 0x0139},  // Ĺ
-    {0x004E, 0x0301, 0x0143},  // Ń
-    {0x004F, 0x0301, 0x00D3},  // Ó
-    {0x0052, 0x0301, 0x0154},  // Ŕ
-    {0x0053, 0x0301, 0x015A},  // Ś
-    {0x0055, 0x0301, 0x00DA},  // Ú
-    {0x0059, 0x0301, 0x00DD},  // Ý
-    {0x005A, 0x0301, 0x0179},  // Ź
-    {0x0061, 0x0301, 0x00E1},  // á
-    {0x0063, 0x0301, 0x0107},  // ć
-    {0x0065, 0x0301, 0x00E9},  // é
-    {0x0069, 0x0301, 0x00ED},  // í
-    {0x006C, 0x0301, 0x013A},  // ĺ
-    {0x006E, 0x0301, 0x0144},  // ń
-    {0x006F, 0x0301, 0x00F3},  // ó
-    {0x0072, 0x0301, 0x0155},  // ŕ
-    {0x0073, 0x0301, 0x015B},  // ś
-    {0x0075, 0x0301, 0x00FA},  // ú
-    {0x0079, 0x0301, 0x00FD},  // ý
-    {0x007A, 0x0301, 0x017A},  // ź
-
-    // Circumflex (0x0302)
-    {0x0041, 0x0302, 0x00C2},  // Â
-    {0x0043, 0x0302, 0x0108},  // Ĉ
-    {0x0045, 0x0302, 0x00CA},  // Ê
-    {0x0047, 0x0302, 0x011C},  // Ĝ
-    {0x0048, 0x0302, 0x0124},  // Ĥ
-    {0x0049, 0x0302, 0x00CE},  // Î
-    {0x004A, 0x0302, 0x0134},  // Ĵ
-    {0x004F, 0x0302, 0x00D4},  // Ô
-    {0x0053, 0x0302, 0x015C},  // Ŝ
-    {0x0055, 0x0302, 0x00DB},  // Û
-    {0x0057, 0x0302, 0x0174},  // Ŵ
-    {0x0059, 0x0302, 0x0176},  // Ŷ
-    {0x0061, 0x0302, 0x00E2},  // â
-    {0x0063, 0x0302, 0x0109},  // ĉ
-    {0x0065, 0x0302, 0x00EA},  // ê
-    {0x0067, 0x0302, 0x011D},  // ĝ
-    {0x0068, 0x0302, 0x0125},  // ĥ
-    {0x0069, 0x0302, 0x00EE},  // î
-    {0x006A, 0x0302, 0x0135},  // ĵ
-    {0x006F, 0x0302, 0x00F4},  // ô
-    {0x0073, 0x0302, 0x015D},  // ŝ
-    {0x0075, 0x0302, 0x00FB},  // û
-    {0x0077, 0x0302, 0x0175},  // ŵ
-    {0x0079, 0x0302, 0x0177},  // ŷ
-
-    // Tilde (0x0303)
-    {0x0041, 0x0303, 0x00C3},  // Ã
-    {0x004E, 0x0303, 0x00D1},  // Ñ
-    {0x004F, 0x0303, 0x00D5},  // Õ
-    {0x0061, 0x0303, 0x00E3},  // ã
-    {0x006E, 0x0303, 0x00F1},  // ñ
-    {0x006F, 0x0303, 0x00F5},  // õ
-
-    // Diaeresis/Umlaut (0x0308)
-    {0x0041, 0x0308, 0x00C4},  // Ä
-    {0x0045, 0x0308, 0x00CB},  // Ë
-    {0x0049, 0x0308, 0x00CF},  // Ï
-    {0x004F, 0x0308, 0x00D6},  // Ö
-    {0x0055, 0x0308, 0x00DC},  // Ü
-    {0x0059, 0x0308, 0x0178},  // Ÿ
-    {0x0061, 0x0308, 0x00E4},  // ä
-    {0x0065, 0x0308, 0x00EB},  // ë
-    {0x0069, 0x0308, 0x00EF},  // ï
-    {0x006F, 0x0308, 0x00F6},  // ö
-    {0x0075, 0x0308, 0x00FC},  // ü
-    {0x0079, 0x0308, 0x00FF},  // ÿ
-
-    // Caron/Háček (0x030C)
-    {0x0043, 0x030C, 0x010C},  // Č
-    {0x0044, 0x030C, 0x010E},  // Ď
-    {0x0045, 0x030C, 0x011A},  // Ě
-    {0x004E, 0x030C, 0x0147},  // Ň
-    {0x0052, 0x030C, 0x0158},  // Ř
-    {0x0053, 0x030C, 0x0160},  // Š
-    {0x0054, 0x030C, 0x0164},  // Ť
-    {0x005A, 0x030C, 0x017D},  // Ž
-    {0x0063, 0x030C, 0x010D},  // č
-    {0x0064, 0x030C, 0x010F},  // ď
-    {0x0065, 0x030C, 0x011B},  // ě
-    {0x006E, 0x030C, 0x0148},  // ň
-    {0x0072, 0x030C, 0x0159},  // ř
-    {0x0073, 0x030C, 0x0161},  // š
-    {0x0074, 0x030C, 0x0165},  // ť
-    {0x007A, 0x030C, 0x017E},  // ž
-
-    // Cedilla (0x0327)
-    {0x0043, 0x0327, 0x00C7},  // Ç
-    {0x0063, 0x0327, 0x00E7},  // ç
-    {0x0053, 0x0327, 0x015E},  // Ş
-    {0x0073, 0x0327, 0x015F},  // ş
-
-    // Ring above (0x030A)
-    {0x0041, 0x030A, 0x00C5},  // Å
-    {0x0061, 0x030A, 0x00E5},  // å
-    {0x0055, 0x030A, 0x016E},  // Ů
-    {0x0075, 0x030A, 0x016F},  // ů
-
-    // Macron (0x0304)
-    {0x0041, 0x0304, 0x0100},  // Ā
-    {0x0045, 0x0304, 0x0112},  // Ē
-    {0x0049, 0x0304, 0x012A},  // Ī
-    {0x004F, 0x0304, 0x014C},  // Ō
-    {0x0055, 0x0304, 0x016A},  // Ū
-    {0x0061, 0x0304, 0x0101},  // ā
-    {0x0065, 0x0304, 0x0113},  // ē
-    {0x0069, 0x0304, 0x012B},  // ī
-    {0x006F, 0x0304, 0x014D},  // ō
-    {0x0075, 0x0304, 0x016B},  // ū
-};
-
-static constexpr int kNfcTableSize = sizeof(kNfcTable) / sizeof(kNfcTable[0]);
-
-// Decodes one UTF-8 codepoint at pos, advances pos. On truncated input (multi-byte sequence
-// cut short at end of string), returns U+FFFD and advances to end-of-string rather than
-// returning a partial codepoint and reading past the end.
-static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
-    uint8_t c = static_cast<uint8_t>(s[pos]);
-    uint32_t cp;
-    int len;
-    if ((c & 0x80) == 0) {
-        cp = c;
-        len = 1;
-    } else if ((c & 0xE0) == 0xC0) {
-        cp = c & 0x1F;
-        len = 2;
-    } else if ((c & 0xF0) == 0xE0) {
-        cp = c & 0x0F;
-        len = 3;
-    } else if ((c & 0xF8) == 0xF0) {
-        cp = c & 0x07;
-        len = 4;
-    } else {
-        pos++;
-        return 0xFFFD;
-    }
-    if (pos + static_cast<size_t>(len) > s.size()) {
-        pos = s.size();
-        return 0xFFFD;
-    }
-    for (int i = 1; i < len; i++) {
-        cp = (cp << 6) | (static_cast<uint8_t>(s[pos + i]) & 0x3F);
-    }
-    pos += len;
-    return cp;
-}
-
-// Encode a Unicode codepoint to UTF-8 and append to result
-static void nfc_encode_utf8(std::string& out, uint32_t cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
-
-// Check if a codepoint is a combining mark (Unicode General Category Mn/Mc/Me)
-// Simplified: only checks the combining diacritical marks block (0x0300-0x036F)
-// which covers the vast majority of combining marks in practice.
-static bool is_combining_mark(uint32_t cp) { return (cp >= 0x0300 && cp <= 0x036F); }
-
-// Look up composition in table
-static uint32_t try_compose(uint32_t base, uint32_t combining) {
-    for (int i = 0; i < kNfcTableSize; i++) {
-        if (kNfcTable[i].base == base && kNfcTable[i].combining == combining) {
-            return kNfcTable[i].composed;
-        }
-    }
-    return 0;  // no composition found
-}
-
-// Normalize a UTF-8 string to NFC form (basic Latin coverage)
-static std::string normalize_nfc(const std::string& text) {
-    if (text.empty())
-        return text;
-
-    // Quick check: combining marks U+0300-036F lead with 0xCC/0xCD, conjoining Hangul jamo
-    // U+1100-11FF with 0xE1 0x84-0x87. Neither present: already NFC for this implementation.
-    bool has_combining = false;
-    for (size_t i = 0; i + 1 < text.size(); i++) {
-        uint8_t c = static_cast<uint8_t>(text[i]);
-        uint8_t c1 = static_cast<uint8_t>(text[i + 1]);
-        if (c == 0xCC || c == 0xCD || (c == 0xE1 && c1 >= 0x84 && c1 <= 0x87)) {
-            has_combining = true;
-            break;
-        }
-    }
-    if (!has_combining)
-        return text;
-
-    // Decode to codepoints, compose adjacent base+combining pairs
-    std::vector<uint32_t> codepoints;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        codepoints.push_back(nfc_decode_utf8(text, pos));
-    }
-
-    // Compose: scan for base + combining mark pairs
-    std::string result;
-    result.reserve(text.size());
-
-    size_t i = 0;
-    while (i < codepoints.size()) {
-        uint32_t cp = codepoints[i];
-
-        // Hangul (Unicode 3.12): L U+1100-1112 + V U+1161-1175 -> LV, LV + T U+11A8-11C2 -> LVT.
-        constexpr uint32_t kSBase = 0xAC00, kLBase = 0x1100, kVBase = 0x1161, kTBase = 0x11A7;
-        constexpr uint32_t kLCount = 19, kVCount = 21, kTCount = 28;
-        if (cp >= kLBase && cp < kLBase + kLCount && i + 1 < codepoints.size() &&
-            codepoints[i + 1] >= kVBase && codepoints[i + 1] < kVBase + kVCount) {
-            cp = kSBase + ((cp - kLBase) * kVCount + (codepoints[i + 1] - kVBase)) * kTCount;
-            i++;
-        }
-        if (cp >= kSBase && cp < kSBase + kLCount * kVCount * kTCount && (cp - kSBase) % kTCount == 0 &&
-            i + 1 < codepoints.size() && codepoints[i + 1] > kTBase && codepoints[i + 1] < kTBase + kTCount) {
-            cp += codepoints[i + 1] - kTBase;
-            i++;
-        }
-
-        // Try to compose with following combining marks
-        while (i + 1 < codepoints.size() && is_combining_mark(codepoints[i + 1])) {
-            uint32_t composed = try_compose(cp, codepoints[i + 1]);
-            if (composed != 0) {
-                cp = composed;
-                i++;
-            } else {
-                break;  // can't compose further
-            }
-        }
-
-        nfc_encode_utf8(result, cp);
-        i++;
-    }
-
-    return result;
-}
-
-}  // anonymous namespace
-
-std::string nfc_normalize(const std::string& text) { return normalize_nfc(text); }
-
 // ---- Encode dispatch ----
 
 std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) const {
     // NFC normalization: compose decomposed Unicode sequences (only where the tokenizer has one)
-    std::string normalized = nfc_ ? normalize_nfc(text) : text;
+    std::string normalized = nfc_ ? nfc_normalize(text) : text;
     if (type_ == "gpt2") {
         return encode_gpt2(normalized);
     }

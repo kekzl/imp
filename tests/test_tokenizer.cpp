@@ -408,6 +408,59 @@ TEST(TokenizerGPT2Test, LongString) {
     EXPECT_EQ(decoded, long_str);
 }
 
+// GPT-2 bytes_to_unicode: printable bytes map to themselves, the rest to 256 + n in byte order.
+static std::string gpt2_byte(uint8_t b) {
+    uint32_t cp = b;
+    if (!((b >= '!' && b <= '~') || (b >= 0xA1 && b <= 0xAC) || b >= 0xAE)) {
+        uint32_t n = 0;
+        for (int x = 0; x < b; x++)
+            if (!((x >= '!' && x <= '~') || (x >= 0xA1 && x <= 0xAC) || x >= 0xAE))
+                n++;
+        cp = 256 + n;
+    }
+    std::string s;
+    if (cp < 0x80) {
+        s += static_cast<char>(cp);
+    } else {
+        s += static_cast<char>(0xC0 | (cp >> 6));
+        s += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+    return s;
+}
+
+// Byte tokens 0..255 at ids 0..255 (optionally one byte left out), then `extra` pieces.
+static Tokenizer make_byte_bpe(const std::vector<std::string>& extra, const std::vector<std::string>& merges,
+                               int skip_byte = -1) {
+    std::vector<std::string> tokens;
+    for (int b = 0; b < 256; b++)
+        tokens.push_back(b == skip_byte ? std::string("<unused>") : gpt2_byte(static_cast<uint8_t>(b)));
+    for (const auto& e : extra)
+        tokens.push_back(e);
+    Tokenizer tok;
+    tok.load_vocab(tokens, std::vector<float>(tokens.size(), 0.0f), 0, 0);
+    tok.set_type("gpt2");
+    tok.set_add_bos(false);
+    tok.load_merges(merges);
+    return tok;
+}
+
+TEST(TokenizerGPT2Test, StaleRankAfterRightNeighborMerged) {
+    // "y z" (rank 0) consumes y before "x y" (rank 1) pops; x + yz is no merge: [x, yz].
+    auto t = [](char c) { return gpt2_byte(static_cast<uint8_t>(c)); };
+    Tokenizer tok = make_byte_bpe({t('y') + t('z'), t('x') + t('y')},
+                                  {t('y') + " " + t('z'), t('x') + " " + t('y')});
+    EXPECT_EQ(tok.encode("xyz"), (std::vector<int32_t>{'x', 256}));
+    EXPECT_EQ(tok.encode("xy"), (std::vector<int32_t>{257}));
+}
+
+TEST(TokenizerGPT2Test, ByteWithoutTokenDropsOnlyThatByte) {
+    // 0xC0 has no token (never valid UTF-8; DeepSeek-V2 omits it): "ab" still merges.
+    auto t = [](char c) { return gpt2_byte(static_cast<uint8_t>(c)); };
+    Tokenizer tok = make_byte_bpe({t('a') + t('b')}, {t('a') + " " + t('b')}, 0xC0);
+    EXPECT_EQ(tok.encode("ab"), (std::vector<int32_t>{256}));
+    EXPECT_EQ(tok.encode("ab\xC0"), (std::vector<int32_t>{256}));
+}
+
 // ---- Type dispatch ----
 
 TEST(TokenizerDispatchTest, SPMDefault) {
