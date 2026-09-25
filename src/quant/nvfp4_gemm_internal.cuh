@@ -6,6 +6,7 @@
 // MOVED VERBATIM: do not rewrite, reorder, or change numeric behavior, hot-path code must
 // stay bit-identical.
 
+#include "quant/nvfp4_gemm.h"
 #include "quant/fp8_utils.cuh"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -52,6 +53,23 @@ static int nvfp4_n_sms() {
 // enough blocks for good SM occupancy (>= kMinBlocksPerSM blocks/SM).
 static bool use_multirow(int n_mb, int mr_blocks) {
     return n_mb <= 512 && mr_blocks >= kMinBlocksPerSM * nvfp4_n_sms();
+}
+
+// Norm fold (nvfp4_gemm.h NvFP4NormFoldOut/In). gain: gamma[row] + offset, a weight, so the
+// caller loads it before pdl_wait. emit: once per output row, after h is final.
+__device__ __forceinline__ float norm_fold_gain(const NvFP4NormFoldOut& f, int row) {
+    return f.ssq ? __half2float(f.gamma[row]) + f.offset : 0.0f;
+}
+__device__ __forceinline__ void norm_fold_emit(const NvFP4NormFoldOut& f, int row, half hv, float gain) {
+    const float h = __half2float(hv);
+    f.out[row] = __float2half(h * gain * kNormFoldPrescale);
+    atomicAdd(f.ssq, __float2ull_rn(h * h * kNormFoldSsqScale));
+}
+// scale: read after pdl_wait (ssq is the producer's write); 1 when the fold is off.
+__device__ __forceinline__ float norm_fold_scale(const NvFP4NormFoldIn& f) {
+    return f.ssq ? rsqrtf(static_cast<float>(static_cast<double>(*f.ssq) / kNormFoldSsqScale) / f.d + f.eps) *
+                       (1.0f / kNormFoldPrescale)
+                 : 1.0f;
 }
 
 // fp8_e4m3_to_float_fast moved to quant/fp8_utils.cuh (shared with MXFP4 +

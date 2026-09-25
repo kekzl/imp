@@ -384,6 +384,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor.cu
     src/exec/executor_sampling.cu
     src/exec/executor_gemm_smallm.cu
+    src/exec/executor_norm_fold.cu
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/sparse_attn_select.cu
@@ -996,6 +997,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemv_kpar_loop.cu
         tests/test_nvfp4_gemm_batched.cu
         tests/test_nvfp4_gemv_gemma3_dims.cu
+        tests/test_nvfp4_norm_fold.cu
         tests/test_nvfp4_gemv_gdn_input.cu
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)

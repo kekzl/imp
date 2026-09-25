@@ -20,7 +20,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
     const uint8_t* __restrict__ packed_k, const uint8_t* __restrict__ ms_k, float ts_k,
     const uint8_t* __restrict__ packed_v, const uint8_t* __restrict__ ms_v, float ts_v,
     const half* __restrict__ x, half* __restrict__ yq, half* __restrict__ yk, half* __restrict__ yv,
-    int q_rows, int k_rows, int v_rows, int K) {
+    int q_rows, int k_rows, int v_rows, int K,
+    NvFP4NormFoldIn fold) {
     pdl_wait();
     const int bid = blockIdx.x;
     const int tid = threadIdx.x;
@@ -59,7 +60,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
     pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
-        out[local_row] = __float2half(total);
+        out[local_row] = __float2half(total * norm_fold_scale(fold));
 }
 
 // Fused Gate+Up: 2 weight matrices, shared input, separate outputs. Grid: 2*rows blocks
@@ -67,7 +68,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_gate_up_fused_kernel(
     const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
     const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
-    const half* __restrict__ x, half* __restrict__ yg, half* __restrict__ yu, int rows, int K) {
+    const half* __restrict__ x, half* __restrict__ yg, half* __restrict__ yu, int rows, int K,
+    NvFP4NormFoldIn fold) {
     pdl_wait();
     const int bid = blockIdx.x;
     const int tid = threadIdx.x;
@@ -100,7 +102,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_gate_up_fused_kernel(
     pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
-        out[local_row] = __float2half(total);
+        out[local_row] = __float2half(total * norm_fold_scale(fold));
 }
 
 // Multi-row variants of fused kernels (NR rows/block, 256 threads, 8 warps), used when K is
@@ -114,7 +116,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_qkv_fused_mr_kernel(
     const uint8_t* __restrict__ packed_k, const uint8_t* __restrict__ ms_k, float ts_k,
     const uint8_t* __restrict__ packed_v, const uint8_t* __restrict__ ms_v, float ts_v,
     const half* __restrict__ x, half* __restrict__ yq, half* __restrict__ yk, half* __restrict__ yv,
-    int q_rows, int k_rows, int v_rows, int K) {
+    int q_rows, int k_rows, int v_rows, int K,
+    NvFP4NormFoldIn fold) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int global_row = blockIdx.x * NR + warp_id;
@@ -159,7 +162,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_qkv_fused_mr_kernel(
     pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
-        out[local_row] = __float2half(acc);
+        out[local_row] = __float2half(acc * norm_fold_scale(fold));
 }
 
 // Multi-row gate+up fused.
@@ -167,7 +170,8 @@ template <int NR>
 __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel(
     const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
     const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
-    const half* __restrict__ x, half* __restrict__ yg, half* __restrict__ yu, int rows, int K) {
+    const half* __restrict__ x, half* __restrict__ yg, half* __restrict__ yu, int rows, int K,
+    NvFP4NormFoldIn fold) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int global_row = blockIdx.x * NR + warp_id;
@@ -206,7 +210,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel
     pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
-        out[local_row] = __float2half(acc);
+        out[local_row] = __float2half(acc * norm_fold_scale(fold));
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +219,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel
 
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk, const NvFP4QuantResult& wv,
                           const half* x, half* yq, half* yk, half* yv, int q_rows, int k_rows, int v_rows,
-                          int K, cudaStream_t stream) {
+                          int K, cudaStream_t stream, const NvFP4NormFoldIn& fold) {
     int total_rows = q_rows + k_rows + v_rows;
     const int n_mb = K / kMicroBlockSize;
     constexpr int NR = 8;
@@ -228,7 +232,7 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
                     reinterpret_cast<const uint8_t*>(wk.micro_scales), wk.tensor_scale,
                     reinterpret_cast<const uint8_t*>(wv.packed_data),
                     reinterpret_cast<const uint8_t*>(wv.micro_scales), wv.tensor_scale, x, yq, yk, yv, q_rows,
-                    k_rows, v_rows, K);
+                    k_rows, v_rows, K, fold);
     } else {
         pdl::launch(gemv_nvfp4_qkv_fused_kernel, dim3(total_rows), dim3(kKparThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(wq.packed_data),
@@ -237,12 +241,12 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
                     reinterpret_cast<const uint8_t*>(wk.micro_scales), wk.tensor_scale,
                     reinterpret_cast<const uint8_t*>(wv.packed_data),
                     reinterpret_cast<const uint8_t*>(wv.micro_scales), wv.tensor_scale, x, yq, yk, yv, q_rows,
-                    k_rows, v_rows, K);
+                    k_rows, v_rows, K, fold);
     }
 }
 
 void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu, const half* x, half* yg,
-                              half* yu, int rows, int K, cudaStream_t stream) {
+                              half* yu, int rows, int K, cudaStream_t stream, const NvFP4NormFoldIn& fold) {
     int total_rows = 2 * rows;
     const int n_mb = K / kMicroBlockSize;
     constexpr int NR = 8;
@@ -252,13 +256,13 @@ void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult
                     stream, reinterpret_cast<const uint8_t*>(wg.packed_data),
                     reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
                     reinterpret_cast<const uint8_t*>(wu.packed_data),
-                    reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale, x, yg, yu, rows, K);
+                    reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale, x, yg, yu, rows, K, fold);
     } else {
         pdl::launch(gemv_nvfp4_gate_up_fused_kernel, dim3(total_rows), dim3(kKparThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(wg.packed_data),
                     reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
                     reinterpret_cast<const uint8_t*>(wu.packed_data),
-                    reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale, x, yg, yu, rows, K);
+                    reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale, x, yg, yu, rows, K, fold);
     }
 }
 

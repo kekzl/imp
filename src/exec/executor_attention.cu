@@ -652,7 +652,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int M_o = wo_nvfp4.N;
         int K_o = wo_nvfp4.K;
         gemv_nvfp4_residual(wo_nvfp4, static_cast<const half*>(ao.data), static_cast<half*>(h.data),
-                            static_cast<const half*>(h.data), M_o, K_o, stream);
+                            static_cast<const half*>(h.data), M_o, K_o, stream,
+                            norm_fold_arm_(layer, /*after_ffn=*/false, view_tokens(norm_out_, 1)));
     } else if (will_fuse_o_residual) {
         int K_o = static_cast<int>(ly.wo.shape[1]);
         int M_o = static_cast<int>(ly.wo.shape[0]);

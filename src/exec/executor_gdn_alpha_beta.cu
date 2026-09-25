@@ -119,7 +119,8 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
 }
 
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
-                                            Tensor& gate_out, int n_heads, cudaStream_t stream) {
+                                            Tensor& gate_out, int n_heads, cudaStream_t stream,
+                                            const NvFP4NormFoldIn& fold) {
     if (!dispatch_policy().gdn.m1_fused || cur_spec_verify_ || calib_ || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
@@ -146,7 +147,7 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
     const bool ok = gemv_nvfp4_gdn_input_fused(w_in, w_gate, wa, wb, static_cast<int>(N),
                                                static_cast<const half*>(input.data), static_cast<half*>(proj.data),
                                                static_cast<half*>(gate_out.data), alpha_out, beta_out,
-                                               static_cast<int>(K), stream);
+                                               static_cast<int>(K), stream, fold);
     if (ok && !gdn_m1_input_logged_) {
         gdn_m1_input_logged_ = true;
         IMP_LOG_INFO("gdn M=1 fused input GEMV ACTIVE (K=%lld, rows %lld + %lld + 2 x %lld)", (long long)K,
@@ -164,7 +165,7 @@ bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, c
     return nvfp4_decode_weight_(ly.ssm_out_id, w) && w.N == h.shape[1];
 }
 
-void GraphExecutor::gdn_out_residual_m1_(const TransformerLayer& ly, const Tensor& y, Tensor& h,
+void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, const Tensor& y, Tensor& h,
                                          cudaStream_t stream) {
     NvFP4QuantResult w;
     if (!nvfp4_decode_weight_(ly.ssm_out_id, w) || w.K != y.shape[1] || w.N != h.shape[1] ||
@@ -173,7 +174,8 @@ void GraphExecutor::gdn_out_residual_m1_(const TransformerLayer& ly, const Tenso
     // One thread owns each output row: it reads residual[row] before it
     // writes y[row], so h may be both.
     gemv_nvfp4_residual(w, static_cast<const half*>(y.data), static_cast<half*>(h.data),
-                        static_cast<const half*>(h.data), static_cast<int>(w.N), static_cast<int>(w.K), stream);
+                        static_cast<const half*>(h.data), static_cast<int>(w.N), static_cast<int>(w.K), stream,
+                        norm_fold_arm_(layer, /*after_ffn=*/false, view_tokens(norm_out_, 1)));
     if (!gdn_m1_out_logged_) {
         gdn_m1_out_logged_ = true;
         IMP_LOG_INFO("gdn M=1 out-projection with residual epilogue ACTIVE (N=%lld, K=%lld)", (long long)w.N,
@@ -182,7 +184,8 @@ void GraphExecutor::gdn_out_residual_m1_(const TransformerLayer& ly, const Tenso
 }
 
 bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
-                                           Tensor& k_out, Tensor& v_out, cudaStream_t stream) {
+                                           Tensor& k_out, Tensor& v_out, cudaStream_t stream,
+                                           const NvFP4NormFoldIn& fold) {
     if (!dispatch_policy().gdn.m1_fused || cur_spec_verify_ || calib_)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || q_out.qtype != QType::F16 ||
@@ -198,7 +201,7 @@ bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Ten
         return false;
     gemv_nvfp4_qkv_fused(wq, wk, wv, static_cast<const half*>(input.data), static_cast<half*>(q_out.data),
                          static_cast<half*>(k_out.data), static_cast<half*>(v_out.data), static_cast<int>(wq.N),
-                         static_cast<int>(wk.N), static_cast<int>(wv.N), static_cast<int>(K), stream);
+                         static_cast<int>(wk.N), static_cast<int>(wv.N), static_cast<int>(K), stream, fold);
     if (!attn_m1_qkv_logged_) {
         attn_m1_qkv_logged_ = true;
         IMP_LOG_INFO("attention M=1 fused q|k|v NVFP4 GEMV ACTIVE (K=%lld, rows %lld + %lld + %lld)",

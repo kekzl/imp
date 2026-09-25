@@ -7,6 +7,26 @@
 
 namespace imp {
 
+// RMSNorm folded into an M=1 producer/consumer GEMV pair. Producer (residual GEMV) writes
+// out[r] = half(h[r] * (gamma[r] + offset) * kNormFoldPrescale) and adds h[r]^2 to *ssq;
+// consumer scales its fp32 dot by rsqrt(*ssq / d + eps) / kNormFoldPrescale. 2^-2 keeps
+// |h * gamma| <= 2.71 * 65504 inside FP16. ssq = nullptr disables either side.
+// ssq is fixed point (h^2 * 2^20, uint64): integer atomics are order-independent, float
+// atomics made decode run-to-run nondeterministic (decode-path PPL 5.1080 / 5.1112).
+inline constexpr float kNormFoldPrescale = 0.25f;
+inline constexpr float kNormFoldSsqScale = 1048576.0f;
+struct NvFP4NormFoldOut {
+    const half* gamma = nullptr;
+    float offset = 0.0f;
+    half* out = nullptr;
+    unsigned long long* ssq = nullptr;
+};
+struct NvFP4NormFoldIn {
+    const unsigned long long* ssq = nullptr;
+    float d = 1.0f;
+    float eps = 0.0f;
+};
+
 // NVFP4 GEMV: y = A_nvfp4 @ x. A is packed_data+micro_scales+tensor_scale; x [K] or [K,1]
 // FP16; y [M] or [M,1] FP16.
 void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStream_t stream = nullptr);
@@ -25,7 +45,7 @@ void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y, int M, i
 
 // FP32 output GEMV for LM head: y[M] = A_nvfp4[M,K] @ x[K] (float output)
 void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y, int M, int K,
-                          cudaStream_t stream);
+                          cudaStream_t stream, const NvFP4NormFoldIn& fold = {});
 
 // Batched-M FP32 GEMV (LM head at batch>1): y[n_act, N_out] computed in one weight
 // pass per launch. x is [n_act, K] row-major, y is [n_act, N_out] row-major.
@@ -87,23 +107,24 @@ void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, i
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk, const NvFP4QuantResult& wv,
                           const half* x, half* yq, half* yk, half* yv, int q_rows, int k_rows, int v_rows,
-                          int K, cudaStream_t stream);
+                          int K, cudaStream_t stream, const NvFP4NormFoldIn& fold = {});
 
 // Fused Gate+Up: 2 weight matrices, shared input, separate outputs
 void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu, const half* x, half* yg,
-                              half* yu, int rows, int K, cudaStream_t stream);
+                              half* yu, int rows, int K, cudaStream_t stream, const NvFP4NormFoldIn& fold = {});
 
 // M=1 GDN input projections in one launch: in_proj+gate (NVFP4) and alpha+beta (FP16
 // [ab_rows,K]) on one x. Returns false when K%16!=0, K>8192, or a weight's K differs; the
 // caller keeps its four-call path. Registered for PDL by nvfp4_gemv_pdl_register().
 bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantResult& w_gate, const half* w_alpha,
                                 const half* w_beta, int ab_rows, const half* x, half* y_in, half* y_gate,
-                                half* y_alpha, half* y_beta, int K, cudaStream_t stream);
+                                half* y_alpha, half* y_beta, int K, cudaStream_t stream,
+                                const NvFP4NormFoldIn& fold = {});
 void nvfp4_gdn_input_pdl_register();
 
 // GEMV with residual add: y[M] = A_nvfp4[M,K] @ x[K] + residual[M]
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y, const half* residual, int M,
-                         int K, cudaStream_t stream);
+                         int K, cudaStream_t stream, const NvFP4NormFoldOut& fold = {});
 
 // Fused SwiGLU + GEMV + residual: y[M] = A_nvfp4[M,K] @ swiglu(gate,up) + residual[M]
 // Eliminates separate SwiGLU kernel launch. gate, up: [K] FP16 on device.

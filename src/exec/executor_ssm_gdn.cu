@@ -321,14 +321,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // Producer fusion: quantizes into the small-M scratch inside the norm
     // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
     // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
-    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
-
     // M=1 decode 4-way input fusion: when the load-time pack succeeded, runs a
     // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slices
     // the output for proj/gate_out/alpha/beta, saving 3 GEMV launches per
     // layer per decode step. Prefill (n>1) keeps the 4-call path (avoids deinterleaving the GEMM output).
     const bool fused_input = (n == 1) && (ly.gdn_input_packed.data != nullptr) &&
                              (gdn_fused_proj_buf_.data != nullptr);
+    // Norm fold: only the M=1 fused NVFP4 input GEMV reads a folded `no`; if it declines, the
+    // norm runs right before the fallback projections.
+    const NvFP4NormFoldIn in_fold = norm_fold_or_norm_(!fused_input, h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream);
     int packed_conv_channels = fused_input ? ly.gdn_packed_conv_channels : 0;
     int packed_inner = fused_input ? ly.gdn_packed_inner : 0;
     int packed_n_heads = fused_input ? ly.gdn_packed_n_heads : 0;
@@ -359,7 +360,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
         // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
         // launch; alpha/beta land in the 4-call layout of step 4 below.
-        m1_fused_input = try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream);
+        m1_fused_input = try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold);
+        if (!m1_fused_input && in_fold.ssq)
+            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
         gate_paired = m1_fused_input ||
                       try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx);
         if (!gate_paired)
@@ -963,7 +966,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     } else if (gdn_out_residual_m1_ok_(ly, n, h) && !dump_hidden_dir()) {
         // M=1 (gdn.m1_fused): h = out_proj(y) + h in the GEMV epilogue; the
         // residual save above was skipped under the same gate.
-        gdn_out_residual_m1_(ly, y_buf, h, stream);
+        gdn_out_residual_m1_(layer, ly, y_buf, h, stream);
     } else if (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h) && !dump_hidden_dir()) {
         // Batched-decode NVFP4: h += out_proj(y) via the smallm accumulate path (h
         // still holds the residual, see run_ssm's twin). An active dump dir keeps

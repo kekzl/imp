@@ -79,9 +79,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // 1. Save residual (skip if fused down-proj+residual will handle it).
     //    For FP32 accumulator path: residual is kept in fp32_hidden_, skip FP16 copy.
     // Qwen3.5: uses post_attn_norm instead of ffn_norm (ffn_norm is null)
-    const Tensor& ffn_norm_w = (ly.ffn_norm.data != nullptr)         ? ly.ffn_norm
-                               : (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm
-                                                                     : ly.attn_norm;
+    const Tensor& ffn_norm_w = ffn_norm_weight_(ly);
     const bool has_post_ffn_norm = (ly.post_ffn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_ffn_norm);
 
@@ -174,8 +172,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                      stream);
         } else if (nvfp4_ffn) {
-            // NVFP4 gate+up: RMSNorm to FP16, then NVFP4 fused GEMV
-            rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
+            // NVFP4 gate+up: RMSNorm to FP16 (or folded into the producer), then NVFP4 fused GEMV
+            const NvFP4NormFoldIn ffn_fold = norm_fold_or_norm_(true, h, ffn_norm_w, no, kInvalidTensorID, n, eps, stream);
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
             // Pick source: secondary NVFP4 cache (Q8_0/Q6_K/Q5_K) is already a
             // populated struct; primary-tier handle needs reconstruction.
@@ -194,7 +192,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             NvFP4QuantResult nv_u = nv_u_secondary ? nv_u_it->second : from_handle(hwu);
             gemv_nvfp4_gate_up_fused(nv_g, nv_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
-                                     stream);
+                                     stream, ffn_fold);
         } else if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(ffn_norm_w.data),
@@ -366,7 +364,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     geglu(go, uo, so, stream);
                 }
                 gemv_nvfp4_residual(wd_nvfp4, static_cast<const half*>(so.data), static_cast<half*>(h.data),
-                                    static_cast<const half*>(h.data), M_d, K_d, stream);
+                                    static_cast<const half*>(h.data), M_d, K_d, stream,
+                                    norm_fold_arm_(layer, /*after_ffn=*/true, no));
             }
         } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);

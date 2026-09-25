@@ -24,38 +24,42 @@ namespace imp {
 __global__ void gemv_nvfp4_kpar_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
                                        float tensor_scale, const half* x, half* y, int M, int K);
 __global__ void gemv_nvfp4_kpar_fp32_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
-                                            float tensor_scale, const half* x, float* y, int M, int K);
+                                            float tensor_scale, const half* x, float* y, int M, int K,
+                                            NvFP4NormFoldIn fold);
 template <int NR>
 __global__ void gemv_nvfp4_multirow_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
                                            float tensor_scale, const half* x, half* y, int M, int K);
 template <int NR>
 __global__ void gemv_nvfp4_multirow_fp32_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
-                                                float tensor_scale, const half* x, float* y, int M, int K);
+                                                float tensor_scale, const half* x, float* y, int M, int K,
+                                                NvFP4NormFoldIn fold);
 __global__ void gemv_nvfp4_residual_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
                                            float tensor_scale, const half* x, half* y, const half* residual,
-                                           int M, int K);
+                                           int M, int K, NvFP4NormFoldOut fold);
 template <int NR>
 __global__ void gemv_nvfp4_residual_mr_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
                                               float tensor_scale, const half* x, half* y,
-                                              const half* residual, int M, int K);
+                                              const half* residual, int M, int K, NvFP4NormFoldOut fold);
 __global__ void gemv_nvfp4_qkv_fused_kernel(const uint8_t* packed_q, const uint8_t* ms_q, float ts_q,
                                             const uint8_t* packed_k, const uint8_t* ms_k, float ts_k,
                                             const uint8_t* packed_v, const uint8_t* ms_v, float ts_v,
                                             const half* x, half* yq, half* yk, half* yv, int q_rows,
-                                            int k_rows, int v_rows, int K);
+                                            int k_rows, int v_rows, int K, NvFP4NormFoldIn fold);
 template <int NR>
 __global__ void gemv_nvfp4_qkv_fused_mr_kernel(const uint8_t* packed_q, const uint8_t* ms_q, float ts_q,
                                                const uint8_t* packed_k, const uint8_t* ms_k, float ts_k,
                                                const uint8_t* packed_v, const uint8_t* ms_v, float ts_v,
                                                const half* x, half* yq, half* yk, half* yv, int q_rows,
-                                               int k_rows, int v_rows, int K);
+                                               int k_rows, int v_rows, int K, NvFP4NormFoldIn fold);
 __global__ void gemv_nvfp4_gate_up_fused_kernel(const uint8_t* packed_g, const uint8_t* ms_g, float ts_g,
                                                 const uint8_t* packed_u, const uint8_t* ms_u, float ts_u,
-                                                const half* x, half* yg, half* yu, int rows, int K);
+                                                const half* x, half* yg, half* yu, int rows, int K,
+                                                NvFP4NormFoldIn fold);
 template <int NR>
 __global__ void gemv_nvfp4_gate_up_fused_mr_kernel(const uint8_t* packed_g, const uint8_t* ms_g, float ts_g,
                                                    const uint8_t* packed_u, const uint8_t* ms_u, float ts_u,
-                                                   const half* x, half* yg, half* yu, int rows, int K);
+                                                   const half* x, half* yg, half* yu, int rows, int K,
+                                                   NvFP4NormFoldIn fold);
 __global__ void gemv_nvfp4_swiglu_residual_kernel(const uint8_t* packed_data, const uint8_t* micro_scales,
                                                   float tensor_scale, const half* gate, const half* up,
                                                   half* y, const half* residual, int M, int K);

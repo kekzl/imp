@@ -172,8 +172,10 @@
                                  static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                                  static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream);
         } else if (nvfp4_qkv) {
-            // NVFP4 fused QKV: RMSNorm to FP16, then NVFP4 GEMV (no Q8_1 needed)
-            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+            // NVFP4 fused QKV: RMSNorm to FP16 (or folded into the producer), then NVFP4 GEMV
+            // QSA decode reads the normalised `no` after this GEMV: no fold on its layers.
+            const NvFP4NormFoldIn qkv_fold =
+                norm_fold_or_norm_(!qsa_layer_(layer), h, ly.attn_norm, no, kInvalidTensorID, n, eps, stream);
             // Pick the NvFP4QuantResult: secondary cache (Q8_0+NVFP4-decode) is
             // already a populated struct; primary-tier handle needs reconstruction.
             auto from_handle = [](const WeightHandle* hw) {
@@ -196,7 +198,7 @@
             int K = nv_q.K;
             gemv_nvfp4_qkv_fused(nv_q, nv_k, nv_v, static_cast<const half*>(no.data),
                                  static_cast<half*>(qv.data), static_cast<half*>(kk.data),
-                                 static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream);
+                                 static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream, qkv_fold);
         } else if (fused_qkv) {
             // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
             int K = static_cast<int>(ly.wq.shape[1]);
@@ -216,6 +218,8 @@
             // Gemma-4 FP32 accum path: read the FP32 residual directly to avoid the
             // FP16 round-trip that drops ~1-2% precision per layer and drifts the
             // last-token hidden state (sign-flip at L29).
+            // Norm fold: only try_attn_qkv_fused_m1_ below reads a folded `no` (n == 1).
+            NvFP4NormFoldIn m1_fold{};
             if (using_fp32_accum && prof.is_gemma4) {
                 Tensor fp32_h = view_tokens(fp32_hidden_, n);
                 rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
@@ -223,7 +227,8 @@
                 // Producer fusion: quantize into the small-M scratch inside
                 // the norm kernel when Q will take that route (batched
                 // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
-                rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.wq_id, n, eps, stream, norm_w_off_);
+                m1_fold = norm_fold_or_norm_(n == 1 && !qsa_layer_(layer) && ly.wv.data != nullptr, h, ly.attn_norm,
+                                             no, ly.wq_id, n, eps, stream);
             }
 
             // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs
@@ -300,7 +305,9 @@
                     // nvfp4_qkv path above already fuses): q|k|v in one
                     // NVFP4 GEMV launch instead of three.
                     if (!qkv_multi && n == 1 && ly.wv.data != nullptr)
-                        qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, stream);
+                        qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, stream, m1_fold);
+                    if (!qkv_multi && m1_fold.ssq)
+                        rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
                     if (!qkv_multi) {
                         gemm_via_handle_(ly.wq_id, no, q_target, ctx);
                         gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);

@@ -10,6 +10,7 @@
 #include "compute/moe_routing.h"
 #include "compute/json_constrain.h"
 #include "compute/schema_constrain.h"
+#include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 // Note: quant/turboquant.h removed (TurboQuant retired Phase 5, 2026-05-17).
 #include "compute/gemm_cutlass_sm120.h"
@@ -285,6 +286,26 @@ public:
     // reading `no` (q/gate/GDN in); further readers skip via the act-quant hint.
     void rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no, TensorID consumer_id,
                              int n, float eps, cudaStream_t stream, float weight_offset);
+    // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
+    // NVFP4 residual producer, targets the next norm. take: at that norm; ssq == nullptr means
+    // run rmsnorm() as before.
+    // Pre-FFN norm weight; Qwen3.5+ carries post_attn_norm instead of ffn_norm.
+    static const Tensor& ffn_norm_weight_(const TransformerLayer& ly) {
+        return ly.ffn_norm.data != nullptr ? ly.ffn_norm : ly.post_attn_norm.data != nullptr ? ly.post_attn_norm
+                                                                                              : ly.attn_norm;
+    }
+    void norm_fold_begin_(int n, cudaStream_t stream);
+    NvFP4NormFoldOut norm_fold_arm_(int layer, bool after_ffn, const Tensor& no);
+    NvFP4NormFoldIn norm_fold_take_(const Tensor& norm_w, const Tensor& no, const Tensor& h, float eps);
+    // take (when allow), else rmsnorm_for_smallm_() into no.
+    NvFP4NormFoldIn norm_fold_or_norm_(bool allow, const Tensor& h, const Tensor& w, Tensor& no,
+                                       TensorID consumer_id, int n, float eps, cudaStream_t stream);
+    unsigned long long* norm_fold_ssq_ = nullptr;  // fixed-point slots, engine arena, zeroed per M=1 forward
+    int norm_fold_slot_ = 0;
+    bool norm_fold_on_ = false;       // this forward: n == 1, flag on, not deterministic
+    const void* norm_fold_gamma_ = nullptr;
+    const void* norm_fold_out_ = nullptr;
+    unsigned long long* norm_fold_pending_ = nullptr;
     // Fused swiglu+quantize when the down projection takes the small-M
     // route; falls back to plain swiglu() internally.
     void swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
@@ -929,13 +950,13 @@ private:
     // weight/shape doesn't fit. alpha/beta land in ssm_dt_buf_ (alpha at 0,
     // beta at the 256-byte-aligned offset) for the scan to read.
     bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
-                                 int n_heads, cudaStream_t stream);
+                                 int n_heads, cudaStream_t stream, const NvFP4NormFoldIn& fold);
     bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
-    void gdn_out_residual_m1_(const TransformerLayer& ly, const Tensor& y, Tensor& h, cudaStream_t stream);
+    void gdn_out_residual_m1_(int layer, const TransformerLayer& ly, const Tensor& y, Tensor& h, cudaStream_t stream);
     // M=1 attention q|k|v in one NVFP4 GEMV launch on gated-attention models
     // (the ungated nvfp4_qkv path already does this). Same decline contract.
     bool try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out, Tensor& k_out,
-                                Tensor& v_out, cudaStream_t stream);
+                                Tensor& v_out, cudaStream_t stream, const NvFP4NormFoldIn& fold);
     // General form: 2..3 weights on one input (attention q|k|v adds the
     // striped k/v shapes to q's single-stripe wave). Outputs must have row
     // stride N.
