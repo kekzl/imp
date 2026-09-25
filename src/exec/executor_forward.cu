@@ -195,6 +195,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
 
     // Store for use by run_ffn (which doesn't receive the InferenceState).
     cur_n_tokens_ = n;
+    norm_fold_begin_(n, stream);
     // Decode step counter for debug dump tagging. Shared with GDN path via
     // debug_decode_step() so run_gdn can tag its dumps with the same step.
     int& s_decode_step = debug_decode_step();
@@ -751,7 +752,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             gemm_cublaslt(no_last, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
         } else if (lm_is_nvfp4) {
             Tensor no_last = view_tokens(norm_out_, 1);
-            rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
+            const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_last, model_->output_norm(), no_last,
+                                                               kInvalidTensorID, 1, cfg.rms_norm_eps, stream);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             NvFP4QuantResult nvfp4_lm_r;
             if (lm_nvfp4_secondary) {
@@ -766,7 +768,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 nvfp4_lm_r.K = cfg.d_model;
             }
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_last.data),
-                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream, lm_fold);
         } else if (use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_last = view_tokens(norm_out_, 1);
@@ -842,7 +844,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             gemm_cublaslt(no_final, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
         } else if (n == 1 && lm_is_nvfp4) {
             Tensor no_final = view_tokens(norm_out_, 1);
-            rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
+            const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_final, model_->output_norm(), no_final,
+                                                               kInvalidTensorID, 1, cfg.rms_norm_eps, stream);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
             NvFP4QuantResult nvfp4_lm_r;
             if (lm_nvfp4_secondary) {
@@ -857,7 +860,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 nvfp4_lm_r.K = cfg.d_model;
             }
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
-                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream, lm_fold);
         } else if (n == 1 && use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_final = view_tokens(norm_out_, 1);

@@ -56,6 +56,10 @@ struct GEMM {
     // 128-row tile: avoids reading the CUTLASS weight sweep below the compute
     // floor at small batch. Same W4A4 numerics as CUTLASS. Default on.
     bool nvfp4_lm_head_smallm = true;
+    // M=1 decode: the RMSNorm between an NVFP4 residual GEMV and the next NVFP4 GEMV folds into
+    // both (producer writes h*gamma/4 + atomic sum of squares, consumer scales by rsqrt).
+    // Fixed-point integer atomics: deterministic, also under runtime.deterministic.
+    bool nvfp4_norm_fold = true;
     // Small-M (<=32) NVFP4 GEMM for batched decode. v1 (W4A16 dequant+HMMA)
     // won isolated but lost the real 32-stream step: synchronous SIMT loads
     // are exposed to the GDN scan's L2 pressure. v2 uses native block-scaled

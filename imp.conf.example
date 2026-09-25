@@ -662,6 +662,9 @@ nvfp4_lm_head_cutlass = true
 # norm-fused activation quantize) ahead of the CUTLASS 128-row tile: Qwen3-14B
 # at 32 streams 365 us per step on CUTLASS against a 268 us weight floor.
 nvfp4_lm_head_smallm = true
+# M=1 decode: the RMSNorm between an NVFP4 residual GEMV and the next NVFP4 GEMV
+# folds into both kernels (one launch fewer per norm); deterministic.
+nvfp4_norm_fold      = true
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false

@@ -314,7 +314,9 @@ def main():
     # from the bound rows/expert <= n matches the exact max; a grid from the tile hint fails.
     # 1129 -> 1130: SchemaConstrainTest.XmlToolCallLiteralEnumValue (test-moe-gdn): a non-string enum
     # member constrains an XML tool parameter; needs the tokenizer-backed mask (CUDA).
-    PINNED = 1130
+    # 1130 -> 1132: NvFP4NormFold.MatchesRmsnormThenGemv{,WithWeightOffset} (test-quant): residual GEMV
+    # + folded consumer vs residual GEMV + rmsnorm + consumer, h bit-identical.
+    PINNED = 1132
 
     text = CMAKE.read_text()
     mods = module_sources(text)

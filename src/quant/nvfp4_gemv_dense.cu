@@ -42,7 +42,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_kernel(
 // FP32 output variant for LM head projection (sampling needs float logits).
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
-    const half* __restrict__ x, float* __restrict__ y, int M, int K) {
+    const half* __restrict__ x, float* __restrict__ y, int M, int K,
+    NvFP4NormFoldIn fold) {
     const int row = blockIdx.x;
     if (row >= M)
         return;
@@ -59,7 +60,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_fp32_kernel(
     pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
-        y[row] = total;
+        y[row] = total * norm_fold_scale(fold);
 }
 
 // Multi-row GEMV: NR rows per block, 256 threads (8 warps), each warp handles one row.
@@ -99,7 +100,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_kernel(
 template <int NR>
 __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
-    const half* __restrict__ x, float* __restrict__ y, int M, int K) {
+    const half* __restrict__ x, float* __restrict__ y, int M, int K,
+    NvFP4NormFoldIn fold) {
     const int block_row_base = blockIdx.x * NR;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
@@ -121,7 +123,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
     pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
-        y[row] = acc;
+        y[row] = acc * norm_fold_scale(fold);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,13 +131,15 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
 // ---------------------------------------------------------------------------
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
-    const half* __restrict__ x, half* __restrict__ y, const half* __restrict__ residual, int M, int K) {
+    const half* __restrict__ x, half* __restrict__ y, const half* __restrict__ residual, int M, int K,
+    NvFP4NormFoldOut fold) {
     const int row = blockIdx.x;
     if (row >= M)
         return;
+    const int tid = threadIdx.x;
+    const float gain = tid == 0 ? norm_fold_gain(fold, row) : 0.0f;
     pdl_wait();
 
-    const int tid = threadIdx.x;
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
@@ -146,8 +150,12 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_residual_kernel(
 
     pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
-    if (tid == 0)
-        y[row] = __float2half(total + __half2float(residual[row]));
+    if (tid == 0) {
+        const half hv = __float2half(total + __half2float(residual[row]));
+        y[row] = hv;
+        if (fold.ssq)
+            norm_fold_emit(fold, row, hv, gain);
+    }
 }
 
 // Fused SwiGLU+GEMV+residual: y[row] = A_nvfp4[row,:] @ swiglu(gate,up) + residual[row].
@@ -224,12 +232,14 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_geglu_residual_kernel
 template <int NR>
 __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_residual_mr_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
-    const half* __restrict__ x, half* __restrict__ y, const half* __restrict__ residual, int M, int K) {
+    const half* __restrict__ x, half* __restrict__ y, const half* __restrict__ residual, int M, int K,
+    NvFP4NormFoldOut fold) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int row = blockIdx.x * NR + warp_id;
     if (row >= M || warp_id >= NR)
         return;
+    const float gain = lane == 0 ? norm_fold_gain(fold, row) : 0.0f;
     pdl_wait();
 
     const int K_half = K / 2;
@@ -244,8 +254,12 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_residual_mr_kernel(
 
     pdl_trigger();
     acc = warp_reduce(acc);
-    if (lane == 0)
-        y[row] = __float2half(acc + __half2float(residual[row]));
+    if (lane == 0) {
+        const half hv = __float2half(acc + __half2float(residual[row]));
+        y[row] = hv;
+        if (fold.ssq)
+            norm_fold_emit(fold, row, hv, gain);
+    }
 }
 
 // Multi-row SwiGLU + residual.
@@ -336,18 +350,18 @@ void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y, int M, i
 }
 
 void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y, int M, int K,
-                          cudaStream_t stream) {
+                          cudaStream_t stream, const NvFP4NormFoldIn& fold) {
     const int n_mb = K / kMicroBlockSize;
     constexpr int NR = 8;
     int mr_blocks = (M + NR - 1) / NR;
     if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_multirow_fp32_kernel<NR>, dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(A.packed_data),
-                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, M, K);
+                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, M, K, fold);
     } else {
         pdl::launch(gemv_nvfp4_kpar_fp32_kernel, dim3(M), dim3(kKparThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(A.packed_data),
-                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, M, K);
+                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, M, K, fold);
     }
 }
 
@@ -356,18 +370,20 @@ void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y, in
 
 
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y, const half* residual, int M,
-                         int K, cudaStream_t stream) {
+                         int K, cudaStream_t stream, const NvFP4NormFoldOut& fold) {
     const int n_mb = K / kMicroBlockSize;
     constexpr int NR = 8;
     int mr_blocks = (M + NR - 1) / NR;
     if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_residual_mr_kernel<NR>, dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(A.packed_data),
-                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, residual, M, K);
+                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, residual, M, K,
+                    fold);
     } else {
         pdl::launch(gemv_nvfp4_residual_kernel, dim3(M), dim3(kKparThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(A.packed_data),
-                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, residual, M, K);
+                    reinterpret_cast<const uint8_t*>(A.micro_scales), A.tensor_scale, x, y, residual, M, K,
+                    fold);
     }
 }
 

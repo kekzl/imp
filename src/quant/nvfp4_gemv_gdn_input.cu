@@ -32,6 +32,7 @@ struct GdnInputArgs {
     half* y_alpha;
     const half* w_beta;
     half* y_beta;
+    NvFP4NormFoldIn fold;
     int ab_rows;
     const half* x;
     int K;
@@ -106,7 +107,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
 #pragma unroll
             for (int w = 1; w < kKparWarps; w++)
                 total += warp_sums[half_id][w];
-            a.y_gate[row] = __float2half(total);
+            a.y_gate[row] = __float2half(total * norm_fold_scale(a.fold));
         }
         return;
     }
@@ -137,7 +138,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
     pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
-        out[local_row] = __float2half(acc);
+        out[local_row] = __float2half(acc * norm_fold_scale(a.fold));
 }
 
 }  // namespace
@@ -145,7 +146,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
 bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantResult& w_gate,
                                 const half* w_alpha, const half* w_beta, int ab_rows, const half* x,
                                 half* y_in, half* y_gate, half* y_alpha, half* y_beta, int K,
-                                cudaStream_t stream) {
+                                cudaStream_t stream, const NvFP4NormFoldIn& fold) {
     const int n_mb = K / kMicroBlockSize;
     if (K % 16 != 0 || n_mb > 512 || w_in.K != K || w_gate.K != K || ab_rows <= 0)
         return false;
@@ -167,6 +168,7 @@ bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantRe
     a.ab_rows = ab_rows;
     a.x = x;
     a.K = K;
+    a.fold = fold;
     const int blocks = (a.in_rows + kGdnInputNR - 1) / kGdnInputNR +
                        (a.gate_rows + kGdnGateRowsPerBlock - 1) / kGdnGateRowsPerBlock +
                        (2 * ab_rows + kGdnInputNR - 1) / kGdnInputNR;
