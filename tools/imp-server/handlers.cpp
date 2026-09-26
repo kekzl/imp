@@ -186,8 +186,19 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
         return results;
     std::string base_prefix = base.string() + "/";
 
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
+    for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
+         it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec)
+            break;
+        const auto& entry = *it;
         const auto& path = entry.path();
+        // Hidden entries (".flash-next-lm-only", ".cache") are scratch, not models: /v1/models
+        // listed them and a client's picker offered them.
+        if (!path.filename().empty() && path.filename().string()[0] == '.') {
+            if (entry.is_directory())
+                it.disable_recursion_pending();
+            continue;
+        }
         // GGUF files
         if ((entry.is_regular_file() || entry.is_symlink()) && path.extension() == ".gguf" &&
             path.string().find(".no_exist") == std::string::npos) {

@@ -177,7 +177,7 @@ that never finish a body - cap connections per peer at the proxy.
 | `GET /health` | liveness. Answers before a model is loaded, and 200 while suspended or mid-swap |
 | `GET /ready` | readiness. 200 only when an inference request would be taken now; 503 with `code` `no_model`, `suspended`, `swapping` or `draining` otherwise. Point an orchestrator's readiness probe here, its liveness probe at `/health` |
 | `GET /metrics` | Prometheus. Latency histograms (request, TTFT, inter-token, queue), decode batch size, refusal and cancellation counters, and a memory breakdown that separates capacity from occupancy |
-| `GET /v1/models` | what is loaded, and what else is in the models directory. Requests must name the served model; any other value gets `404 model_not_found` - inference never triggers a load/swap on its own |
+| `GET /v1/models` | what is loaded, and what else is in the models directory. Hidden entries (a leading `.`) are skipped. A request naming another listed model swaps to it (`server.model_swap`, default on, 2 s for Qwen3-4B Q8_0); a name not in the directory gets `404 model_not_found` |
 | `POST /admin/suspend` | park the weights in host RAM (`[suspend] device_reset`, default on: also `cudaDeviceReset()` so `nvidia-smi` reads ~0 MiB) and free the GPU. Inference answers 503, `/health` reports `"suspended": true` at 200. Fails cleanly (507) when host `MemAvailable` is below snapshot size + `[suspend] host_ram_headroom_mb`. Models whose device buffers are transformed in place after upload (native MXFP4 GGUF, gpt-oss, Gemma-4 fused-expert split) are refused with 501 |
 | `POST /admin/resume` | restore from RAM (no mmap re-read, no requantization), serving again in seconds. Sessions/KV do not survive; only weights stay warm |
 
