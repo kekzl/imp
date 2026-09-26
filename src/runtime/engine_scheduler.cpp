@@ -698,19 +698,21 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
         int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
                                        : st.total_blocks + st.free_blocks + st.cached_blocks;
+        // O(live sequences), so only read once the 10 % line is crossed.
+        const int unmet = st.free_blocks + reclaimable < pool_total / 10 ? scheduler_->active_unmet_kv_blocks() : 0;
         // A pool below its ceiling is not under pressure, it is under-committed:
         // pressure on the committed part is the growth trigger, and the valve
         // reads the pool after the growth. Without this a pool starting at 25 %
         // (kv_cache.growable_initial_pct) armed StreamingLLM and demoted graphs
         // once while filling and once more near its real end.
         if (kv_cache_raw_ && kv_cache_raw_->ceiling_blocks() > pool_total &&
-            kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
+            kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total, unmet)) {
             kv_cache_raw_->try_grow_to(pool_total + std::max(64, pool_total / 4));
             st = kv_manager_->stats();
             reclaimable = kv_manager_->num_reclaimable_cached_blocks();
             pool_total = kv_cache_raw_->total_blocks();
         }
-        if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total)) {
+        if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total, unmet)) {
             config_.streaming_kv_enabled = true;
             streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
             int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
@@ -721,9 +723,9 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             config_.streaming_kv_window = win;
             executor_->set_streaming_kv(n_sinks, win);
             IMP_LOG_WARN(
-                "KV cache >90%% full (%d free + %d reclaimable of %d blocks) - auto-enabling "
-                "StreamingLLM (sinks=%d, window=%d, kv_cache.dtype=%s)",
-                st.free_blocks, reclaimable, pool_total, n_sinks, win,
+                "KV cache >90%% full (%d free + %d reclaimable of %d blocks, live sequences need "
+                "%d more) - auto-enabling StreamingLLM (sinks=%d, window=%d, kv_cache.dtype=%s)",
+                st.free_blocks, reclaimable, pool_total, unmet, n_sinks, win,
                 kv_cache_raw_ ? qtype_name(kv_cache_raw_->qtype()) : "unknown");
             demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
         }
@@ -731,21 +733,21 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
                graph_demotion_ == GraphDemotionReason::StreamingKvKvPressure) {
         // The way back (AUDIT_arch_2026 C-3): the valve above armed
         // StreamingLLM and dropped graphs on a pool that was momentarily
-        // full. Once a fifth of it is free again and no live sequence was
-        // ever evicted (a sentinel in a block table would be read by a
-        // replayed graph), both are undone. Runs only while the auto-arm
-        // is the demotion reason, so a configured StreamingLLM stays.
+        // full. Once a fifth of it is free again and no live sequence
+        // carries an evicted window (a sentinel in a block table would be
+        // read by a replayed graph), both are undone. Runs only while the
+        // auto-arm is the demotion reason, so a configured StreamingLLM stays.
         auto st = kv_manager_->stats();
         const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
         const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
                                              : st.total_blocks + st.free_blocks + st.cached_blocks;
         if (kv_pressure_repromotes_graphs(st.free_blocks, reclaimable, pool_total,
-                                          streaming_kv_evicted_blocks_.load(std::memory_order_relaxed))) {
+                                          scheduler_->active_evicted_count())) {
             config_.streaming_kv_enabled = false;
             executor_->set_streaming_kv(0, 0);
             IMP_LOG_INFO(
-                "KV cache pressure cleared (%d free + %d reclaimable of %d blocks, nothing "
-                "evicted) - StreamingLLM auto-enable lifted",
+                "KV cache pressure cleared (%d free + %d reclaimable of %d blocks, no live "
+                "sequence evicted) - StreamingLLM auto-enable lifted",
                 st.free_blocks, reclaimable, pool_total);
             promote_graphs_();
         }
@@ -768,8 +770,8 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
                 const int freed = kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
                 if (freed > 0) {
                     req->evicted_kv_tokens += freed * kv_bs;
-                    // Pins the graph demotion: a sentinel now sits in a
-                    // live block table (graph_eligibility.h).
+                    // Pins the graph demotion while this sequence lives: a
+                    // sentinel now sits in its block table (graph_eligibility.h).
                     streaming_kv_evicted_blocks_.fetch_add(static_cast<uint64_t>(freed),
                                                            std::memory_order_relaxed);
                 }

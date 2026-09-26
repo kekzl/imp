@@ -129,11 +129,10 @@ TEST(ServingSignalsTest, MidDecodeKvExhaustionFinishesAsCapacity) {
     be.stop();
 }
 
-// AUDIT_arch_2026 C-3: the KV-pressure valve used to be a latch. A 35-block pool near its
-// end arms StreamingLLM and demotes graphs with nothing evicted (eviction threshold is above
-// max_seq_len); once the request finishes, the next decode step must find the pool freed and
-// lift both, and the following request must decode correctly with graphs back on.
-TEST(ServingSignalsTest, GraphsComeBackWhenThePressureClearsWithoutEvictions) {
+// A request whose prompt + max_tokens fit the pool runs it past 90 % inside the blocks it was
+// promised at admission: the valve must stay shut. It used to arm here and evict the request's
+// own context (a 112k prompt on a 123k pool lost 108400 tokens and answered wrong).
+TEST(ServingSignalsTest, ARequestInsideItsPromiseNeverArmsTheValve) {
     if (!model_exists())
         GTEST_SKIP() << "Model not found: " << model_path();
     Loaded m;
@@ -146,22 +145,14 @@ TEST(ServingSignalsTest, GraphsComeBackWhenThePressureClearsWithoutEvictions) {
 
     Served a{make_request(m.ctx, long_prompt(), 400, 1.0f)};
     be.submit(a.sr);
-    ASSERT_TRUE(drain(a, 180000)) << "the first request never finished";
+    ASSERT_TRUE(drain(a, 180000)) << "the request never finished";
     EXPECT_EQ(a.finish, "length")
         << "33 of 35 blocks must fit; a capacity cancel means the pool sizing moved";
-    EXPECT_EQ(engine->streaming_kv_auto_enables(), 1u)
-        << "the valve did not fire: the pool never ran under a tenth free";
-    EXPECT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::StreamingKvKvPressure);
+    EXPECT_EQ(a.tokens, 400);
+    EXPECT_EQ(engine->streaming_kv_auto_enables(), 0u) << "the valve fired on a promise the pool keeps";
     EXPECT_EQ(engine->streaming_kv_evicted_blocks(), 0u);
-
-    Served b{make_request(m.ctx, "The capital of France is", 8, 0.0f)};
-    be.submit(b.sr);
-    ASSERT_TRUE(drain(b, 60000)) << "the second request never finished";
-    EXPECT_EQ(b.finish, "length");
-    EXPECT_EQ(engine->graph_repromotions(), 1u);
-    EXPECT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::None)
-        << "the demotion outlived the pressure that caused it";
-    EXPECT_EQ(engine->executor()->streaming_window(), 0) << "StreamingLLM stayed armed";
+    EXPECT_EQ(a.sr->request->evicted_kv_tokens, 0);
+    EXPECT_EQ(engine->graph_demotion_reason(), imp::GraphDemotionReason::None);
     be.stop();
 }
 
@@ -188,6 +179,18 @@ TEST(ServingSignalsTest, QuantizedKvPressureArmsTheValveAndTheRequestFinishes) {
     EXPECT_EQ(engine->streaming_kv_auto_enables(), 1u) << "the valve did not fire on the quantised pool";
     EXPECT_GT(engine->streaming_kv_evicted_blocks(), 0u) << "armed, but nothing was evicted";
     EXPECT_GT(r.sr->request->evicted_kv_tokens, 0);
+
+    // AUDIT_arch_2026 C-3: the evicting sequence is gone, so the next request must find the
+    // valve lifted and keep its whole context. A process-lifetime eviction count used to pin
+    // StreamingLLM for every later request (a 40k prompt then lost 36784 tokens).
+    // ~120 + 150 tokens: past the 164-token eviction threshold, inside the 24-block pool.
+    Served b{make_request(m.ctx, long_prompt(), 150, 1.0f)};
+    be.submit(b.sr);
+    ASSERT_TRUE(drain(b, 60000)) << "the second request never finished";
+    EXPECT_EQ(b.finish, "length");
+    EXPECT_EQ(b.sr->request->evicted_kv_tokens, 0) << "StreamingLLM outlived the sequence it evicted";
+    EXPECT_EQ(engine->executor()->streaming_window(), 0) << "StreamingLLM stayed armed";
+    EXPECT_EQ(engine->graph_repromotions(), 1u) << "the graph demotion outlived the evicting sequence";
     be.stop();
 }
 

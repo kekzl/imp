@@ -71,22 +71,36 @@ TEST(GraphEligibility, NoneIsNotMidRunAndNamesItself) {
 
 // The decision itself, not only the enum (AUDIT_arch_2026 C-4). The #1879
 // shape: a 3000-block pool with 0 free and 984 reclaimable is NOT exhausted.
+// A need of 1000 blocks isolates the 10 % line.
 TEST(GraphEligibility, KvPressureCountsReclaimableBlocksAsFree) {
-    EXPECT_FALSE(kv_pressure_demotes_graphs(/*free=*/0, /*reclaimable=*/984, /*total=*/3000));
-    EXPECT_TRUE(kv_pressure_demotes_graphs(0, 0, 3000));
-    EXPECT_TRUE(kv_pressure_demotes_graphs(299, 0, 3000));
-    EXPECT_FALSE(kv_pressure_demotes_graphs(300, 0, 3000)) << "a tenth exactly is not under a tenth";
-    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 0)) << "no pool, no pressure";
-    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 9)) << "total/10 == 0 can never be undercut";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(/*free=*/0, /*reclaimable=*/984, /*total=*/3000, /*unmet=*/1000));
+    EXPECT_TRUE(kv_pressure_demotes_graphs(0, 0, 3000, 1000));
+    EXPECT_TRUE(kv_pressure_demotes_graphs(299, 0, 3000, 1000));
+    EXPECT_FALSE(kv_pressure_demotes_graphs(300, 0, 3000, 1000)) << "a tenth exactly is not under a tenth";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 0, 1000)) << "no pool, no pressure";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 9, 1000)) << "total/10 == 0 can never be undercut";
 }
 
-// The way back (C-3): a fifth free lifts it, an eviction pins it.
-TEST(GraphEligibility, KvPressureLiftsAtAFifthUnlessSomethingWasEvicted) {
+// A nearly full pool is not under pressure while its supply covers what the live
+// sequences still need. The 112k-prompt shape on a 7703-block pool: 674 free, 126 needed.
+TEST(GraphEligibility, KvPressureIgnoresAPoolThatCoversTheLiveNeed) {
+    EXPECT_FALSE(kv_pressure_demotes_graphs(674, 0, 7703, 126)) << "the prompt's own tail fits";
+    EXPECT_TRUE(kv_pressure_demotes_graphs(674, 0, 7703, 674)) << "need equal to supply leaves no margin";
+    EXPECT_TRUE(kv_pressure_demotes_graphs(100, 0, 7703, 50)) << "50 spare is under 1 % (77)";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(87, 0, 7703, 10)) << "exactly 1 % spare is not under it";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(0, 0, 35, 0)) << "a full pool that needs nothing more";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(2, 0, 35, 2)) << "a small pool covering the need exactly";
+    EXPECT_TRUE(kv_pressure_demotes_graphs(1, 0, 24, 38)) << "a generation longer than the pool";
+    EXPECT_FALSE(kv_pressure_demotes_graphs(800, 0, 7703, 5000)) << "the 10 % line still gates first";
+}
+
+// The way back (C-3): a fifth free lifts it, a live evicted sequence pins it.
+TEST(GraphEligibility, KvPressureLiftsAtAFifthUnlessALiveSequenceWasEvicted) {
     EXPECT_FALSE(kv_pressure_repromotes_graphs(299, 0, 3000, 0)) << "still under the trigger";
     EXPECT_FALSE(kv_pressure_repromotes_graphs(599, 0, 3000, 0)) << "between the two lines: hysteresis";
     EXPECT_TRUE(kv_pressure_repromotes_graphs(600, 0, 3000, 0));
     EXPECT_TRUE(kv_pressure_repromotes_graphs(0, 600, 3000, 0)) << "reclaimable counts on the way back too";
-    EXPECT_FALSE(kv_pressure_repromotes_graphs(3000, 0, 3000, 1)) << "one evicted block pins the demotion";
+    EXPECT_FALSE(kv_pressure_repromotes_graphs(3000, 0, 3000, 1)) << "a live evicted sequence pins the demotion";
     EXPECT_FALSE(kv_pressure_repromotes_graphs(0, 0, 0, 0));
 }
 

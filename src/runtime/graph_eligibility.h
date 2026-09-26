@@ -45,19 +45,24 @@ bool graph_demotion_is_mid_run(GraphDemotionReason r);
 // The mid-run trigger, as arithmetic the CPU lane can pin (AUDIT_arch_2026
 // C-4): counts the pool exhausted when free + reclaimable prefix-cache
 // blocks fall under a tenth of it. Free-list-alone false-fired at a third
-// reclaimable, costing 2387 -> 1443 tok/s (#1879).
-inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total) {
-    return pool_total > 0 && free_blocks + reclaimable_blocks < pool_total / 10;
+// reclaimable, costing 2387 -> 1443 tok/s (#1879). `unmet` = blocks the live
+// sequences still need for context + remaining max_tokens: while the supply
+// covers them plus 1 % of the pool, eviction would only drop context (a 112k
+// prompt on a 123k pool lost 108400 tokens and answered wrong).
+inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total, int unmet) {
+    const int supply = free_blocks + reclaimable_blocks;
+    return pool_total > 0 && supply < pool_total / 10 && unmet > 0 &&
+           supply < unmet + pool_total / 100;
 }
 
 // The way back (C-3): lifted when a fifth of the pool is free again
-// (hysteresis against flapping at the 10 % line), only while StreamingLLM has
-// evicted nothing (an evicted window leaves -1 sentinels a replayed graph
-// would read, #948 class, and dropped KV can't be re-materialised). Recovers
-// the case of a pool that spiked from many short sequences (never evicts).
+// (hysteresis against flapping at the 10 % line), only while no LIVE sequence
+// carries an evicted window (its -1 sentinels would be read by a replayed
+// graph, #948 class). A finished sequence takes its sentinels with it: a
+// process-lifetime count kept StreamingLLM armed for every later request.
 inline bool kv_pressure_repromotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total,
-                                          uint64_t evicted_blocks) {
-    return evicted_blocks == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;
+                                          int live_evicted_seqs) {
+    return live_evicted_seqs == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;
 }
 
 // Caps a bounded async-loop burst's step count against the tokens it has
