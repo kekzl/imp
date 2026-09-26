@@ -32,8 +32,7 @@ public:
     [[nodiscard]] int pending_count() const;  // admitted, not yet in a batch
     // Live sequences whose KV StreamingLLM evicted (engine thread only, like schedule()).
     [[nodiscard]] int active_evicted_count() const;
-    // KV blocks the live sequences still need to reach context + remaining max_tokens,
-    // beyond the table entries they hold (engine thread only).
+    // Sum of kv_unmet_blocks (graph_eligibility.h) over the live sequences (engine thread only).
     [[nodiscard]] int active_unmet_kv_blocks() const;
 
     // Memory-aware scheduling: set KV cache manager to check budget

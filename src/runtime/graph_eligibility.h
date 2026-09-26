@@ -13,6 +13,7 @@
 // Header-only and dependency-free (no CUDA, no RuntimeConfig) so the CPU test
 // lane can cover the enum-name binding without a GPU.
 
+#include <algorithm>
 #include <cstdint>
 
 namespace imp {
@@ -42,13 +43,27 @@ const char* graph_demotion_reason_name(GraphDemotionReason r);
 // True for the reasons that are decided while requests are already running.
 bool graph_demotion_is_mid_run(GraphDemotionReason r);
 
+// The valve looks this many tokens ahead per sequence, not to max_tokens: a
+// worst-case max_tokens evicted a 118k prompt whose reply stopped at 206 tokens.
+// Covers a graph burst between two checks (runtime.decode_burst 128 tokens).
+inline constexpr int kKvValveHorizonTokens = 512;
+
+// Blocks one live sequence still needs for its next min(remaining, horizon)
+// tokens beyond the `held` table entries; the last sampled token never reaches KV.
+inline int kv_unmet_blocks(int ctx_len, int remaining, int held, int block_size) {
+    const int ahead = std::min(remaining, kKvValveHorizonTokens);
+    if (ahead <= 0 || block_size <= 0)
+        return 0;
+    return std::max(0, (ctx_len + ahead - 1 + block_size - 1) / block_size - held);
+}
+
 // The mid-run trigger, as arithmetic the CPU lane can pin (AUDIT_arch_2026
 // C-4): counts the pool exhausted when free + reclaimable prefix-cache
 // blocks fall under a tenth of it. Free-list-alone false-fired at a third
-// reclaimable, costing 2387 -> 1443 tok/s (#1879). `unmet` = blocks the live
-// sequences still need for context + remaining max_tokens: while the supply
-// covers them plus 1 % of the pool, eviction would only drop context (a 112k
-// prompt on a 123k pool lost 108400 tokens and answered wrong).
+// reclaimable, costing 2387 -> 1443 tok/s (#1879). `unmet` = sum of
+// kv_unmet_blocks over the live sequences: while the supply covers it plus 1 %
+// of the pool, eviction would only drop context (a 112k prompt on a 123k pool
+// lost 108400 tokens and answered wrong).
 inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total, int unmet) {
     const int supply = free_blocks + reclaimable_blocks;
     return pool_total > 0 && supply < pool_total / 10 && unmet > 0 &&

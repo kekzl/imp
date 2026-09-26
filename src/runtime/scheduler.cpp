@@ -1,4 +1,5 @@
 #include "runtime/scheduler.h"
+#include "runtime/graph_eligibility.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/kv_cache.h"
 #include "memory/recurrent_snapshot_store.h"
@@ -296,11 +297,8 @@ int Scheduler::active_unmet_kv_blocks() const {
     for (const auto& r : active_) {
         if (r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED)
             continue;
-        const int remaining = std::max(0, r->max_tokens - static_cast<int>(r->output_tokens.size()));
-        // The last sampled token is never written to KV.
-        const int need = (r->context_len() + remaining - 1 + bs - 1) / bs;
-        const int held = static_cast<int>(kv_manager_->block_table(r->id).size());
-        unmet += std::max(0, need - held);
+        unmet += kv_unmet_blocks(r->context_len(), r->max_tokens - static_cast<int>(r->output_tokens.size()),
+                                 static_cast<int>(kv_manager_->block_table(r->id).size()), bs);
     }
     return unmet;
 }
