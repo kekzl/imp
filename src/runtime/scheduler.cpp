@@ -282,5 +282,27 @@ bool Scheduler::has_pending() const { return !pending_.empty(); }
 
 int Scheduler::active_count() const { return static_cast<int>(active_.size()); }
 int Scheduler::pending_count() const { return static_cast<int>(pending_.size()); }
+int Scheduler::active_evicted_count() const {
+    return static_cast<int>(std::ranges::count_if(active_, [](const auto& r) {
+        return r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED &&
+               r->evicted_kv_tokens > 0;
+    }));
+}
+int Scheduler::active_unmet_kv_blocks() const {
+    if (!kv_manager_)
+        return 0;
+    const int bs = kv_manager_->kv_cache()->block_size();
+    int unmet = 0;
+    for (const auto& r : active_) {
+        if (r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED)
+            continue;
+        const int remaining = std::max(0, r->max_tokens - static_cast<int>(r->output_tokens.size()));
+        // The last sampled token is never written to KV.
+        const int need = (r->context_len() + remaining - 1 + bs - 1) / bs;
+        const int held = static_cast<int>(kv_manager_->block_table(r->id).size());
+        unmet += std::max(0, need - held);
+    }
+    return unmet;
+}
 
 }  // namespace imp

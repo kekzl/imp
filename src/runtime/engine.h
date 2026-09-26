@@ -356,8 +356,8 @@ public:
     uint64_t streaming_kv_auto_enables() const noexcept {
         return streaming_kv_auto_enables_.load(std::memory_order_relaxed);
     }
-    // Blocks StreamingLLM actually evicted from live sequences. Non-zero pins
-    // the demotion for the rest of the process (graph_eligibility.h).
+    // Blocks StreamingLLM evicted, process total. The demotion stays pinned only
+    // while a live sequence carries evicted KV (Scheduler::active_evicted_count).
     uint64_t streaming_kv_evicted_blocks() const noexcept {
         return streaming_kv_evicted_blocks_.load(std::memory_order_relaxed);
     }
