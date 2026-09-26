@@ -6,6 +6,7 @@
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "utils.h"
+#include "completion_prompt.h"
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
@@ -628,13 +629,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     }
 
     // Extract prompt
-    std::string prompt = body.value("prompt", "");
-    if (prompt.empty()) {
-        res.status = 400;
-        json err = {{"error",
-                     {{"message", "\"prompt\" is required and must not be empty"},
-                      {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(err), "application/json");
+    std::string prompt;
+    std::vector<int32_t> prompt_ids;
+    if (const std::string err = parse_completion_prompt(body, prompt, prompt_ids); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "prompt");
         return;
     }
 
@@ -754,8 +752,19 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     if (!prompt_within_input_budget(res, prompt.size(), state.max_input_tokens, "prompt"))
         return;
 
-    // Tokenize raw prompt (no chat template)
-    std::vector<int32_t> tokens = snap_tok->encode(prompt);
+    // Tokenize raw prompt (no chat template); token ids go in as given, echo reads their text.
+    for (const int32_t id : prompt_ids) {
+        if (id >= snap_tok->vocab_size()) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "prompt token id " + std::to_string(id) + " is outside the vocabulary (" +
+                                std::to_string(snap_tok->vocab_size()) + ")",
+                            "prompt");
+            return;
+        }
+    }
+    if (!prompt_ids.empty())
+        prompt = snap_tok->decode(prompt_ids);
+    std::vector<int32_t> tokens = prompt_ids.empty() ? snap_tok->encode(prompt) : prompt_ids;
     int n_prompt_tokens = static_cast<int>(tokens.size());
 
     // Server-side input-token limit (--max-input-tokens). Reject pre-prefill.
