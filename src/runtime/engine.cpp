@@ -194,6 +194,10 @@ bool Engine::encoder_embed(std::span<const int32_t> tokens, std::vector<float>& 
     return imp::encoder_embed(*model_, *ews, tokens, out.data(), stream_);
 }
 
+int Engine::encoder_max_tokens() const {
+    return encoder_ws_storage_ ? static_cast<const imp::EncoderWorkspace*>(encoder_ws_storage_)->max_tokens : 0;
+}
+
 cudaStream_t Engine::prefill_stream() const {
     return (config_.use_green_contexts && green_ctx_.is_available()) ? green_ctx_.prefill_stream() : stream_;
 }

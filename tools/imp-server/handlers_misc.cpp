@@ -786,6 +786,15 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             framed.insert(framed.end(), tokens.begin(), tokens.begin() + n_tokens);
             if (sep >= 0 && framed.back() != sep)
                 framed.push_back(sep);
+            // Over the encoder's window the forward failed and answered 500 "input too long for the
+            // encoder workspace?"; it is the caller's input, so a 400 naming both counts.
+            if (const int cap = engine->encoder_max_tokens(); static_cast<int>(framed.size()) > cap) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "input " + std::to_string(input_idx) + " is " + std::to_string(framed.size()) +
+                                    " tokens; this encoder takes at most " + std::to_string(cap),
+                                "input", "context_length_exceeded");
+                return;
+            }
             std::vector<float> emb;
             if (!engine->encoder_embed(framed, emb)) {
                 nlohmann::json error = {

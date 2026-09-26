@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- `/v1/embeddings` on an encoder model (nomic-embed-text-v1.5) answered 500 "encoder forward failed" for an input past the encoder window; now 400 `context_length_exceeded` naming the count and the cap (3002 > 2048), 2042 tokens still pass.
 - `/v1/models` listed hidden entries of the models directory (`.flash-next-lm-only`) as models; they are skipped. `docs/DEPLOYMENT.md` said a request never swaps the model; it does (`server.model_swap`, default on).
 - Qwen3.6-35B-A3B-NVFP4 at defaults did not start on a card with ~2 GB taken by the desktop (v0.44.0 included): graph prewarm needed one recurrent slot per batch size and threw when slot 1 could not commit. Prewarm now uses the slots that commit. The admission gate committed the same slot for every request admitted in one round, so 60 of 68 concurrent requests failed `internal_error`; now 0 of 68.
 - GDN hybrids (Qwen3.8/3.6): a fully rejected n-gram verify adopted a recurrent-state snapshot the default scans (fused f32/bf16, chunkwise) never wrote, so the state after it came from uninitialized VRAM. Qwen3.8-27B tool calls were cut mid-call (`finish: stop`, raw XML in `content`) in 5 of 16 fresh processes, 4 of 4 with the slab poisoned; now 0 of 12. `GdnVerifySnapshotTest.*`.
