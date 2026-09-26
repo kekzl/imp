@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- Streaming with thinking off on a model that reasons anyway (Phi-4-reasoning): the `<think>` it opens with is a provisional stop id and was dropped before the reasoning splitter, so the whole chain of thought streamed as `content` while non-streaming split it. The opener now reaches the splitter.
 - Qwen3.6-35B-A3B on a tight card: warmup handed back every recurrent slot, the lazily loaded vision tower (851.8 MiB) then took the pages at the first image, and no request was admitted again, text included (503 reading "prompt needs more KV blocks"). The first serving slot stays committed; the refusal names `recurrent_state_unavailable`. Vision probe 0/8 -> 8/8, text afterwards answers.
 - `/v1/embeddings` on an encoder model (nomic-embed-text-v1.5) answered 500 "encoder forward failed" for an input past the encoder window; now 400 `context_length_exceeded` naming the count and the cap (3002 > 2048), 2042 tokens still pass.
 - `/v1/models` listed hidden entries of the models directory (`.flash-next-lm-only`) as models; they are skipped. `docs/DEPLOYMENT.md` said a request never swaps the model; it does (`server.model_swap`, default on).
