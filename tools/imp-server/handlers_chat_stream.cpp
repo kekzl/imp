@@ -60,7 +60,7 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // Harmony reasoning is its own mechanism (not the deepseek <think> path), so
     // it's gated on reasoning_format alone — emit reasoning_content unless the
     // caller explicitly asked for none.
-    dialect.harmony_reasoning_on = (state.default_args.reasoning_format != "none");
+    dialect.harmony_reasoning_on = (state.default_args.reasoning_format != "none") && !ctx.snap.hide_reasoning;
     dialect.emit_text = [&](const std::string& text) -> bool {
         if (text.empty())
             return true;

@@ -35,6 +35,9 @@ public:
     std::string feed(const std::string& piece);
     // Bytes of an unfinished character are held: an empty feed() result is then not an empty token.
     bool holding() const { return !carry_.empty(); }
+    // Drops held bytes whose character a special token interrupted: glued to the marker they hid it
+    // from exact matching (gpt-oss "\xf0\x9f<|channel|>" -> "final" and invalid UTF-8 in content).
+    void discard() { carry_.clear(); }
 
 private:
     std::string carry_;

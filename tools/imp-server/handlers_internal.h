@@ -147,6 +147,7 @@ struct ChatStateSnapshot {
     std::vector<imp::ToolFunction> tool_defs;
     bool tools_via_jinja = false;
     bool enable_thinking = false, suppress_thinking = false;
+    bool hide_reasoning = false;  // Harmony thinking off: analysis runs, reasoning_content is dropped
     std::string reasoning_effort;  // copied from params; stamped into the Jinja context
     std::vector<int32_t> tokens;
     int n_prompt_tokens = 0;
@@ -365,8 +366,8 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
 // SCAN (the model decides); ctx.snap.enable_thinking starts in REASONING.
 imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestContext& ctx, const ServerState& state,
                                                           bool use_reasoning);
-// Non-streaming stop sequences go through that splitter (answer text only) when the request has
-// stops and the deepseek reasoning split applies (not Harmony).
+// Non-streaming stop sequences match the answer only when the request has stops and a reasoning
+// split applies: Harmony (final channel) or deepseek (that splitter).
 bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state);
 // Non-streaming wait loops (chat and /v1/completions): the finish reason that ends the request
 // before its next token, or nullptr. --request-timeout -> "length" (#1590); a client that hung up
