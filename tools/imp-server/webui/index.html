@@ -236,6 +236,18 @@
     color: var(--ice2);
     margin: 18px 0 4px;
   }
+  .body table {
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 0.92em;
+    white-space: normal;
+  }
+  .body th, .body td {
+    border: 1px solid var(--line);
+    padding: 4px 10px;
+    text-align: left;
+  }
+  .body th { color: var(--ice2); font-weight: 600; background: rgba(133, 147, 184, 0.06); }
   .body code {
     font-family: var(--mono);
     font-size: 0.86em;
@@ -1028,8 +1040,35 @@ function markup(src) {
   // The heading owns its margins, so the blank line after it is swallowed:
   // with white-space: pre-wrap it would otherwise double the gap.
   s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n+|$)/gm, "<h4>$1</h4>");
+  s = tables(s);
   s = s.replace(FENCE_SLOT, (_, i) => codeBlock(fences[i][0], fences[i][1]));
   return s;
+}
+
+// GFM tables: a row of cells, a |---| separator, then rows until a line without "|". Models emit
+// them constantly and they showed as raw pipes. Cells arrive escaped and inline-styled.
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+function tables(s) {
+  const lines = s.split("\n");
+  const out = [];
+  const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].includes("|") || i + 1 >= lines.length || !lines[i + 1].includes("|") ||
+        !TABLE_SEP.test(lines[i + 1])) {
+      out.push(lines[i]);
+      continue;
+    }
+    const head = cells(lines[i]);
+    const rows = [];
+    let j = i + 2;
+    while (j < lines.length && lines[j].includes("|") && lines[j].trim() !== "") rows.push(cells(lines[j++]));
+    // Like the heading, the table owns its margins: the line break after it is swallowed.
+    out.push("<table><thead><tr>" + head.map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>" +
+             rows.map((r) => "<tr>" + r.map((c) => "<td>" + c + "</td>").join("") + "</tr>").join("") +
+             "</tbody></table>" + (j < lines.length ? lines[j++] : ""));
+    i = j - 1;
+  }
+  return out.join("\n");
 }
 
 const rawText = new WeakMap();  // model turn element -> the markdown it renders
