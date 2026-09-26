@@ -236,6 +236,7 @@
     color: var(--ice2);
     margin: 18px 0 4px;
   }
+  .body a { color: var(--ember); text-decoration: underline; text-underline-offset: 2px; }
   .body table {
     border-collapse: collapse;
     margin: 10px 0;
@@ -1035,6 +1036,11 @@ function markup(src) {
     return SENT + (fences.length - 1) + SENT;
   });
   s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  // Links showed as raw [text](url). http(s) only: a javascript: or data: target stays text. The
+  // source is already escaped, and a quote cannot close the attribute because the URL has none.
+  s = s.split(/(<code>[\s\S]*?<\/code>)/).map((part, k) => k % 2 ? part :
+        part.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)"'<>]+)\)/g,
+                     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')).join("");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   // The heading owns its margins, so the blank line after it is swallowed:
