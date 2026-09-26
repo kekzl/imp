@@ -55,6 +55,47 @@ def test_streaming_content_matches_nonstream(client, model):
     assert content == expected
 
 
+def _stream_parts(client, payload):
+    r = client.post("/v1/chat/completions", json={**payload, "stream": True})
+    assert r.status_code == 200
+    content, reasoning, lp_bytes = "", "", bytearray()
+    for ev in parse_sse(r.text):
+        for c in ev.get("choices") or []:
+            d = c.get("delta", {})
+            content += d.get("content") or ""
+            reasoning += d.get("reasoning_content") or ""
+            for t in (c.get("logprobs") or {}).get("content") or []:
+                lp_bytes.extend(t["bytes"])  # a byte-level token alone is not valid UTF-8
+    return content, reasoning, lp_bytes.decode("utf-8", errors="replace")
+
+
+def test_stop_matches_the_answer_on_both_transports(client, model, is_mock):
+    """Any model family: a stop the model quotes while reasoning must not end the request, and both
+    transports cut the answer at the same place. gpt-oss (Harmony) streaming ignored stop entirely
+    and non-streaming returned content '' (stop matched in the analysis channel)."""
+    if is_mock:
+        pytest.skip("needs the real engine")
+    payload = {"model": model, "messages": [{"role": "user", "content":
+               "Repeat exactly: alpha beta END_OF_LIST gamma delta"}],
+               "max_tokens": 600, "temperature": 0, "seed": 1, "stop": ["END_OF_LIST"]}
+    r = client.post("/v1/chat/completions", json=payload)
+    assert r.status_code == 200
+    ns = r.json()["choices"][0]["message"]["content"] or ""
+    s, _, _ = _stream_parts(client, payload)
+    assert "alpha" in ns and "END_OF_LIST" not in ns, ns
+    assert s == ns
+
+
+def test_stream_logprob_tokens_spell_the_content(client, model, is_mock):
+    """Harmony streaming emitted no logprobs for its final channel ('' against content 'Hi!')."""
+    if is_mock:
+        pytest.skip("needs the real engine")
+    content, _, lp = _stream_parts(client, {
+        "model": model, "messages": [{"role": "user", "content": "Say hi."}], "max_tokens": 400,
+        "temperature": 0, "logprobs": True, "top_logprobs": 1, "enable_thinking": False})
+    assert content and lp == content, (lp[:120], content[:120])
+
+
 def test_stream_nonstream_agree_across_truncation_points(client, model):
     """Transport must not change content, at any truncation point.
 

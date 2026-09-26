@@ -63,8 +63,9 @@ const char* nonstream_should_stop_(ServerState& state, ServerRequest& sr,
 }
 
 bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state) {
-    return !ctx.params.stop_sequences.empty() && ctx.snap.tpl_family != imp::ChatTemplateFamily::HARMONY &&
-           (ctx.snap.is_think_model || ctx.snap.enable_thinking) && state.default_args.reasoning_format == "deepseek";
+    return !ctx.params.stop_sequences.empty() &&
+           (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY ||
+            ((ctx.snap.is_think_model || ctx.snap.enable_thinking) && state.default_args.reasoning_format == "deepseek"));
 }
 
 bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
@@ -147,7 +148,11 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         hm_in_msg = true;
     }
     auto hm_flush = [&](bool force) -> bool {
-        size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
+        // force (a marker closed the block): an unfinished character is dropped, never sent as raw
+        // bytes, which strict clients reject as invalid UTF-8 in the SSE JSON.
+        size_t complete = utf8_complete_len(hm_buf);
+        if (force && complete < hm_buf.size())
+            hm_buf.resize(complete);
         if (complete == 0)
             return true;
         std::string chunk = hm_buf.substr(0, complete);
@@ -355,13 +360,18 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
         // A token can end mid-character; hold the partial bytes until the next
         // one completes them, or the delta ships half a character as U+FFFD.
-        std::string piece = utf8_stitch.feed(snap_tok->decode_token(token));
+        const std::string raw_piece = snap_tok->decode_token(token);
+        const bool hm_marker = harmony && (raw_piece == "<|channel|>" || raw_piece == "<|message|>" ||
+                                           raw_piece == "<|end|>" || raw_piece == "<|return|>" ||
+                                           raw_piece == "<|start|>" || raw_piece == "<|call|>");
+        if (hm_marker)
+            utf8_stitch.discard();
+        std::string piece = hm_marker ? raw_piece : utf8_stitch.feed(raw_piece);
 
         // gpt-oss Harmony channel routing. Markers arrive as atomic
         // special-token pieces.
         if (harmony) {
-            if (piece == "<|channel|>" || piece == "<|message|>" || piece == "<|end|>" ||
-                piece == "<|return|>" || piece == "<|start|>" || piece == "<|call|>") {
+            if (hm_marker) {
                 if (hm_in_msg && !hm_flush(/*force=*/true))
                     return false;
                 if (piece == "<|channel|>") {
@@ -420,10 +430,14 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             }
             if (!hm_in_msg)  // role text / inter-block plumbing
                 continue;
-            hm_buf += piece;
-            if (!hm_flush(/*force=*/false))
-                return false;
-            continue;
+            if (hm_call_open || hm_channel != "final") {
+                hm_buf += piece;
+                if (!hm_flush(/*force=*/false))
+                    return false;
+                continue;
+            }
+            // Final channel = the answer: the normal content path below, so stop sequences and
+            // per-token logprobs apply (both skipped Harmony: stop never matched, logprobs empty).
         }
 
         // Gemma-4 channel filter strips "<|channel>NAME\n" headers; `<channel|>` is a channel-switch
@@ -449,7 +463,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // Reasoning/content demux (DeepSeek <think>): routes reasoning to the dialect's reasoning sink,
         // returns the user-visible content for this step (empty when the whole piece was reasoning or
         // still held for boundary detection).
-        if (think_active) {
+        if (think_active && !harmony) {
             const bool held = piece.empty() && utf8_stitch.holding();
             auto rs = think_split.feed(std::move(piece), token, held);
             out.n_reasoning_tokens += rs.reasoning_tokens;
@@ -471,7 +485,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 
         // With tools present, the streaming tool-call filter returns user-visible content and completed
         // calls in stream order; content after the last call falls through to the normal emission path.
-        if (has_tools) {
+        if (has_tools && !harmony) {
             auto segs = tool_filter.feed(std::move(piece));
             piece.clear();
             using SegKind = imp::server::StreamToolCallFilter::Segment::Kind;

@@ -326,8 +326,16 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // which the reconcile step below would then read as reasoning that never closes.
     ctx.snap.suppress_thinking = imp::server::should_stamp_thinking_off(
         ctx.snap.is_think_model, ctx.snap.enable_thinking, budget_disables_thinking, want_thinking);
-    // Harmony: suppress_thinking makes the template end on <|channel|>final<|message|>.
-    ctx.snap.suppress_thinking = ctx.snap.suppress_thinking || harmony_final_only(ctx);
+    // Harmony: suppress_thinking makes the template end on <|channel|>final<|message|>, only for a
+    // whole-reply constraint. gpt-oss cannot skip analysis: prefilled final, it wrote its reasoning
+    // into content (3/18 replies vs 0/18 at effort low). Thinking off = effort low, reasoning dropped.
+    if (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY) {
+        ctx.snap.suppress_thinking = harmony_final_only(ctx);
+        ctx.snap.hide_reasoning =
+            (ctx.params.enable_thinking_set && !ctx.params.enable_thinking_requested) || budget_disables_thinking;
+        if (ctx.snap.hide_reasoning && ctx.params.reasoning_effort.empty())
+            ctx.params.reasoning_effort = "low";
+    }
     ctx.snap.reasoning_effort = ctx.params.reasoning_effort;
 
     // If thinking IS enabled, remove the provisional <think> stop token.
@@ -797,7 +805,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             if (!ctx.params.stop_sequences.empty()) {
                 const std::string piece = ctx.snap.tok->decode_token(token);
                 output_text += piece;
-                stop_content += stops_skip_reasoning ? stop_split.feed(piece, token).content : std::string();
+                if (stops_skip_reasoning && ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY)
+                    stop_content = split_harmony_channels(output_text, ctx.snap.suppress_thinking).content;
+                else if (stops_skip_reasoning)
+                    stop_content += stop_split.feed(piece, token).content;
                 // Earliest occurrence and which entry matched (#1550), the streaming path's matcher.
                 const auto hd = imp::stream::holdback_decision(stops_skip_reasoning ? stop_content : output_text,
                                                                0, ctx.params.stop_sequences);
@@ -877,7 +888,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             // (analysis) and content (final); without this the raw markup leaks verbatim (#760).
             auto segs = split_harmony_channels(content, /*starts_in_final=*/ctx.snap.suppress_thinking);
             content = std::move(segs.content);
-            if (state.default_args.reasoning_format != "none")
+            if (state.default_args.reasoning_format != "none" && !ctx.snap.hide_reasoning)
                 reasoning_content = std::move(segs.reasoning);
         } else if ((ctx.snap.is_think_model || ctx.snap.enable_thinking) &&
                    state.default_args.reasoning_format == "deepseek") {
