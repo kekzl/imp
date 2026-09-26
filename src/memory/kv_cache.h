@@ -226,6 +226,9 @@ private:
     Region region_;
     bool growable_ = false;
     std::atomic<uint64_t> growths_{0};
+    // Last affordable count the "growth capped" line printed: admission retries
+    // growth every scheduling round while a request waits (27799 lines in one run).
+    std::atomic<int> last_capped_logged_{-1};
     double residency_gbps_ = 0.0;  // probe_residency() result, 0 = not probed
     int committed_blocks_ = 0;  // blocks whose memory is backed in every layer
     // What may be handed out. Mirrored here rather than read from the block

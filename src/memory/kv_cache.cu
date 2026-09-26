@@ -637,12 +637,14 @@ int KVCache::try_grow_to(int wanted) {
         const size_t spare = free_now > headroom ? free_now - headroom : 0;
         const size_t affordable = static_cast<size_t>(have) + spare / per_block;
         if (affordable < static_cast<size_t>(target)) {
-            IMP_LOG_INFO(
-                "KV cache: growth capped %d -> %d blocks by free VRAM (%.0f MiB free, %.0f MiB "
-                "allocator headroom kept)",
-                target, static_cast<int>(affordable), free_now / (1024.0 * 1024.0),
-                headroom / (1024.0 * 1024.0));
-            target = static_cast<int>(affordable);
+            const int capped = static_cast<int>(affordable);
+            if (last_capped_logged_.exchange(capped, std::memory_order_relaxed) != capped) {
+                IMP_LOG_INFO(
+                    "KV cache: growth capped %d -> %d blocks by free VRAM (%.0f MiB free, %.0f MiB "
+                    "allocator headroom kept)",
+                    target, capped, free_now / (1024.0 * 1024.0), headroom / (1024.0 * 1024.0));
+            }
+            target = capped;
         }
         if (target <= have)
             return have;
