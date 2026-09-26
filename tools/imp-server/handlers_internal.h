@@ -362,6 +362,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  const std::vector<int32_t>& input_tokens, int completion_idx,
                                                  bool stream);
+// 503 for an admission refusal (handlers_chat.cpp): recurrent = no recurrent-state slot could be
+// committed, which read as "prompt needs more KV blocks" and sent the caller to shorten it.
+void send_capacity_error_(httplib::Response& res, const ServerState& state, bool recurrent);
 // The reasoning/content splitter both transports run (stream_driver.cpp). use_reasoning allows
 // SCAN (the model decides); ctx.snap.enable_thinking starts in REASONING.
 imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestContext& ctx, const ServerState& state,

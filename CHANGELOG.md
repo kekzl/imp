@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- Qwen3.6-35B-A3B on a tight card: warmup handed back every recurrent slot, the lazily loaded vision tower (851.8 MiB) then took the pages at the first image, and no request was admitted again, text included (503 reading "prompt needs more KV blocks"). The first serving slot stays committed; the refusal names `recurrent_state_unavailable`. Vision probe 0/8 -> 8/8, text afterwards answers.
 - `/v1/embeddings` on an encoder model (nomic-embed-text-v1.5) answered 500 "encoder forward failed" for an input past the encoder window; now 400 `context_length_exceeded` naming the count and the cap (3002 > 2048), 2042 tokens still pass.
 - `/v1/models` listed hidden entries of the models directory (`.flash-next-lm-only`) as models; they are skipped. `docs/DEPLOYMENT.md` said a request never swaps the model; it does (`server.model_swap`, default on).
 - Qwen3.6-35B-A3B-NVFP4 at defaults did not start on a card with ~2 GB taken by the desktop (v0.44.0 included): graph prewarm needed one recurrent slot per batch size and threw when slot 1 could not commit. Prewarm now uses the slots that commit. The admission gate committed the same slot for every request admitted in one round, so 60 of 68 concurrent requests failed `internal_error`; now 0 of 68.

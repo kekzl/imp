@@ -834,21 +834,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // same length never helps. 503 with the reason (not 200 with an empty completion, which read as
         // "the model chose to say nothing").
         if (std::strcmp(finish, "capacity") == 0) {
-            // floored: true when the pool fell back to its rescue floor (a few hundred tokens) - "shorten
-            // the prompt" is not actionable advice there, it's a startup fault. Name which situation this is.
-            bool floored = false;
-            if (state.ctx && state.ctx->engine)
-                floored = state.ctx->engine->kv_pool_floored();
-            send_json_error(res, 503, "capacity_error",
-                            floored
-                                ? "The KV pool fell back to its rescue floor at startup, so it holds only "
-                                  "a few hundred tokens. This lasts as long as the process and retrying "
-                                  "will not help: restart the server on a free card. GET /health reports "
-                                  "code kv_pool_floored and the exact capacity."
-                                : "Request does not fit the KV cache: the prompt needs more blocks than "
-                                  "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
-                                  "the server more VRAM (see the engine log for the exact block counts).",
-                            /*param=*/nullptr, floored ? "kv_pool_floored" : "context_length_exceeded");
+            send_capacity_error_(res, state,
+                                 active_req && active_req->cancel_reason == imp::CancelReason::RecurrentCapacity);
             return;
         }
 

@@ -892,6 +892,26 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 // POST /v1/messages/count_tokens: runs the real request chain (convert, parse, snapshot,
 // tokenize) without submitting to the engine; returns {"input_tokens": N}. Used by Claude Code
 // for context tracking/auto-compaction.
+void send_capacity_error_(httplib::Response& res, const ServerState& state, bool recurrent) {
+    // floored: the pool fell back to its rescue floor (a few hundred tokens) - "shorten the prompt"
+    // is not actionable there, it's a startup fault. Name which situation this is.
+    const bool floored = state.ctx && state.ctx->engine && state.ctx->engine->kv_pool_floored();
+    const char* msg =
+        recurrent ? "No recurrent-state slot could be committed for this request: the card has no VRAM left "
+                    "above the allocator headroom (a lazily loaded vision tower or another tenant took it). "
+                    "Retry after other requests finish, or give the server more VRAM; the prompt length is "
+                    "not the cause."
+        : floored ? "The KV pool fell back to its rescue floor at startup, so it holds only "
+                    "a few hundred tokens. This lasts as long as the process and retrying "
+                    "will not help: restart the server on a free card. GET /health reports "
+                    "code kv_pool_floored and the exact capacity."
+                  : "Request does not fit the KV cache: the prompt needs more blocks than "
+                    "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
+                    "the server more VRAM (see the engine log for the exact block counts).";
+    send_json_error(res, 503, "capacity_error", msg, /*param=*/nullptr,
+                    recurrent ? "recurrent_state_unavailable" : floored ? "kv_pool_floored" : "context_length_exceeded");
+}
+
 void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     namespace anth = imp_server::anthropic;
 

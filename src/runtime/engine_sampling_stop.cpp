@@ -267,8 +267,16 @@ int Engine::acquire_recurrent_slot_(int req_id) {
 void Engine::trim_recurrent_slots_after_warmup_() {
     if (!ssm_state_ || !ssm_state_->lazy())
         return;
+    // The slot the next request pops stays committed: with every slot handed back, a lazy upload
+    // (the Qwen3-VL tower, ~1 GB at the first image) could take the pages and no request was ever
+    // admitted again, text included (Qwen3.6-35B-A3B on a card with ~2 GB desktop baseline).
+    const int keep = free_recurrent_slots_.empty() ? 0 : free_recurrent_slots_.back();
     int trimmed = 0, held = 0;
     for (int s = 0; s < ssm_state_->max_sequences(); ++s) {
+        if (s == keep && ssm_state_->slot_committed(s)) {
+            ++held;
+            continue;
+        }
         bool free_slot = true;
         for (const auto& [req, slot] : recurrent_slot_of_)
             if (slot == s) {
@@ -282,6 +290,10 @@ void Engine::trim_recurrent_slots_after_warmup_() {
         if (ssm_state_->slot_committed(s) && ssm_state_->decommit_slot(s))
             ++trimmed;
     }
+    if (!ssm_state_->slot_committed(keep) && !ssm_state_->ensure_slot(keep))
+        IMP_LOG_WARN("SSM state: the first serving slot (%d) could not be committed after warmup; the first "
+                     "request will retry it at admission",
+                     keep);
     IMP_LOG_INFO("SSM state: %d slot(s) decommitted after warmup (%d still held), %.0f MiB committed",
                  trimmed, held, ssm_state_->committed_bytes() / (1024.0 * 1024.0));
 }
