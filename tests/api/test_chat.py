@@ -1,5 +1,7 @@
 """Tests for POST /v1/chat/completions (non-streaming)."""
 
+import json
+
 import pytest
 
 
@@ -267,3 +269,46 @@ def test_tokenize_takes_content_or_prompt(client, model):
     assert len(a.json()["tokens"]) > 0
     r = client.post("/tokenize", json={"model": model})
     assert r.status_code == 400
+
+
+def _chat(client, body, stream=False):
+    body = dict(body, stream=stream)
+    r = client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 200, r.text
+    if not stream:
+        m = r.json()["choices"][0]["message"]
+        return m.get("content") or "", m.get("reasoning_content") or ""
+    content, reasoning = "", ""
+    for line in r.text.splitlines():
+        if line.startswith("data:") and line[5:].strip() != "[DONE]":
+            ch = json.loads(line[5:]).get("choices") or [{}]
+            d = ch[0].get("delta", {})
+            content += d.get("content") or ""
+            reasoning += d.get("reasoning_content") or ""
+    return content, reasoning
+
+
+def test_chat_template_kwargs_enable_thinking_false_turns_thinking_off(client, model, is_mock):
+    """chat_template_kwargs.enable_thinking (vLLM/SGLang form) was ignored: Qwen3.8 reasoned
+    121 chars with it false. It must act as the top-level field does."""
+    if is_mock:
+        pytest.skip("needs a think model")
+    base = {"model": model, "messages": [{"role": "user", "content": "Say the word apple."}],
+            "max_tokens": 200, "temperature": 0}
+    _, r_top = _chat(client, dict(base, enable_thinking=False))
+    _, r_kw = _chat(client, dict(base, chat_template_kwargs={"enable_thinking": False}))
+    assert r_top == "" and r_kw == "", (r_top[:120], r_kw[:120])
+
+
+def test_stop_sequence_matches_the_answer_not_the_reasoning(client, model, is_mock):
+    """Non-stream matched stop sequences on raw output, so a stop the model quoted while reasoning
+    ended the request with empty content; streaming matched the answer only."""
+    if is_mock:
+        pytest.skip("needs a think model")
+    body = {"model": model, "messages": [{"role": "user", "content":
+            "Repeat exactly: alpha beta END_OF_LIST gamma delta"}],
+            "max_tokens": 400, "temperature": 0, "stop": ["END_OF_LIST"], "enable_thinking": True}
+    c_ns, r_ns = _chat(client, body)
+    c_s, _ = _chat(client, body, stream=True)
+    assert "alpha" in c_ns and "END_OF_LIST" not in c_ns, (c_ns, r_ns[:120])
+    assert c_ns == c_s

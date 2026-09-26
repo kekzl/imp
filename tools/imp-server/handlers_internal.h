@@ -61,12 +61,12 @@ struct ChatRequestParams {
     // prediction_text: OpenAI Predicted Outputs "prediction" body field (concatenated text).
     // Tokenized in the snapshot stage and fed to the n-gram draft corpus; never forwarded as output.
     std::string prediction_text;
-    bool enable_thinking_requested = false;  // value of "enable_thinking" if present
+    bool enable_thinking_requested = false;  // enable_thinking, or chat_template_kwargs.enable_thinking
     // reasoning_effort: passed to the chat template verbatim (empty = template default). Legal
     // values are the template's business - Qwen3.8 takes xhigh/medium/low, OpenAI low/medium/high.
     std::string reasoning_effort;
     std::string lora_name;                   // "lora" body field (empty = base model)
-    bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
+    bool enable_thinking_set = false;        // true iff either carried a boolean
     // Stop sequences
     std::vector<std::string> stop_sequences;
     size_t max_stop_len = 0;
@@ -357,6 +357,13 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  const std::vector<int32_t>& input_tokens, int completion_idx,
                                                  bool stream);
+// The reasoning/content splitter both transports run (stream_driver.cpp). use_reasoning allows
+// SCAN (the model decides); ctx.snap.enable_thinking starts in REASONING.
+imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestContext& ctx, const ServerState& state,
+                                                          bool use_reasoning);
+// Non-streaming stop sequences go through that splitter (answer text only) when the request has
+// stops and the deepseek reasoning split applies (not Harmony).
+bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state);
 void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
                               std::shared_ptr<imp::Request>& imp_req,
                               std::shared_ptr<ServerRequest>& server_req,

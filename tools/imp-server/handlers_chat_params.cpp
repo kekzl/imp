@@ -471,9 +471,18 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         return false;
     }
 
-    // Parse enable_thinking (only meaningful for think models; checked in orchestrator)
-    ctx.params.enable_thinking_requested = body.value("enable_thinking", false);
-    ctx.params.enable_thinking_set = body.contains("enable_thinking") && body["enable_thinking"].is_boolean();
+    // Parse enable_thinking (only meaningful for think models; checked in orchestrator). The top-level
+    // field wins; else chat_template_kwargs.enable_thinking (vLLM/SGLang form, OpenAI SDK extra_body),
+    // which was ignored: Qwen3.8 reasoned with it false.
+    const json* think_src = nullptr;
+    if (body.contains("enable_thinking") && body["enable_thinking"].is_boolean())
+        think_src = &body["enable_thinking"];
+    else if (body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object() &&
+             body["chat_template_kwargs"].contains("enable_thinking") &&
+             body["chat_template_kwargs"]["enable_thinking"].is_boolean())
+        think_src = &body["chat_template_kwargs"]["enable_thinking"];
+    ctx.params.enable_thinking_set = think_src != nullptr;
+    ctx.params.enable_thinking_requested = think_src != nullptr && think_src->get<bool>();
 
     // reasoning_effort: handed to the chat template verbatim. A non-string is ignored rather than
     // rejected, matching the other optional scalars; a template that dislikes the value raises its

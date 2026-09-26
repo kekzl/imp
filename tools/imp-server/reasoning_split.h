@@ -116,7 +116,10 @@ public:
 
     // Feed one decoded token piece (with its token id). Returns the
     // reasoning/content split for this step.
-    Result feed(std::string piece, int token) {
+    // piece_held: `piece` is empty only because the caller holds bytes of an unfinished UTF-8
+    // character (Utf8Stitch). Read as an empty special token it sent an emoji-first answer with
+    // thinking off to reasoning_content, 39 of 39 tokens, content empty.
+    Result feed(std::string piece, int token, bool piece_held = false) {
         Result r;
         std::string work = std::move(piece);
         bool token_live = true;  // token-id checks apply only to the real token
@@ -161,7 +164,7 @@ public:
                     token_live = false;
                     continue;  // the remainder after the closer is content
                 }
-                if (scan_count_ == 1 && work.empty()) {
+                if (scan_count_ == 1 && work.empty() && !piece_held) {
                     phase_ = ThinkPhase::REASONING;
                     r.reasoning_tokens++;
                     return r;

@@ -33,6 +33,8 @@ std::string sanitize_for_echo(std::string_view in, size_t max_len);
 class Utf8Stitch {
 public:
     std::string feed(const std::string& piece);
+    // Bytes of an unfinished character are held: an empty feed() result is then not an empty token.
+    bool holding() const { return !carry_.empty(); }
 
 private:
     std::string carry_;

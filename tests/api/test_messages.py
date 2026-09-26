@@ -90,6 +90,17 @@ def _assert_anthropic_error(r, status, err_type="invalid_request_error"):
     assert body["error"]["message"], body
 
 
+# A decodable image: with weights loaded, the "AA" placeholder reached the vision decoder and
+# came back 400 "Failed to process image", which read as the allowlist refusing the block.
+_PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+
+def _not_refused_by_allowlist(r):
+    # A remote image URL passes the allowlist and is refused later by the fetch policy
+    # (--allow-remote-images); that 400 is not the one these tests guard against.
+    return r.status_code != 400 or "remote URLs are disabled" in r.text
+
+
 @pytest.mark.nomodel
 class TestMessagesValidation:
     """Rejections. Reached before the server resolves a model, hence `nomodel`."""
@@ -196,7 +207,7 @@ class TestMessagesValidation:
     # legitimate replay must not start getting refused. Not a 400 - these reach
     # the model lookup, which is a 404/503 on a server with no weights.
     @pytest.mark.parametrize("block", [
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PNG_1X1}},
         {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
         {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
         {"type": "tool_result", "tool_use_id": "t1", "content": "42"},
@@ -204,7 +215,7 @@ class TestMessagesValidation:
          "content": [{"type": "text", "text": "42"}]},
         {"type": "tool_result", "tool_use_id": "t1", "content": [
             {"type": "image",
-             "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]},
+             "source": {"type": "base64", "media_type": "image/png", "data": _PNG_1X1}}]},
         {"type": "thinking", "thinking": "hm"},
         {"type": "redacted_thinking", "data": "zz"},
     ])
@@ -213,7 +224,7 @@ class TestMessagesValidation:
             model=model,
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}, block]}],
         ))
-        assert r.status_code != 400, r.text
+        assert _not_refused_by_allowlist(r), r.text
 
     # The `system` field sat outside the block walk entirely, so every shape
     # flatten_system cannot fold reached the model and the system prompt was
@@ -245,7 +256,7 @@ class TestMessagesValidation:
                       {"role": "system", "content": [
                           {"type": "text", "text": "s"},
                           {"type": "image",
-                           "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}]}]},
+                           "source": {"type": "base64", "media_type": "image/png", "data": _PNG_1X1}}]}]},
     ])
     def test_foldable_system_is_not_refused(self, client, model, body):
         r = client.post("/v1/messages", json=_msg(model=model, **body))
