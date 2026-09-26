@@ -310,7 +310,11 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             }
             continue;
         }
-        if (!evt.is_last && is_structural_stop)
+        // Thinking off keeps <think> as a provisional stop id, yet a model that always reasons
+        // (Phi-4-reasoning) opens with it anyway: dropped here, the splitter never saw the opener and
+        // streamed the whole chain of thought as content while non-stream split it at </think>.
+        const bool think_opener = think_active && token == ctx.snap.think_start_id;
+        if (!evt.is_last && is_structural_stop && !think_opener)
             continue;
 
         // Check stop conditions (EOS/stop tokens already detected by engine).
