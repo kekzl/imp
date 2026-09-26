@@ -135,7 +135,8 @@ server default (`--think-budget`, 0.5) applies and these fields turn it off -
 | field | dialect | effect |
 |---|---|---|
 | `think_budget` | OpenAI | fraction of `max_tokens` reserved for reasoning. **0 disables thinking** |
-| `enable_thinking` | OpenAI | `false` disables thinking |
+| `enable_thinking` | OpenAI | `false` disables thinking; `chat_template_kwargs.enable_thinking` (vLLM/SGLang form) is read when the top-level field is absent |
+| `stop` | OpenAI | matched against the answer only, never the reasoning, on both transports |
 | `thinking: {type: "disabled"}` | Anthropic | same, and zeroes the budget |
 | `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. **Required to get it at all on this dialect** (#1541); `adaptive` is what current SDKs send |
 | `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |

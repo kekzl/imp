@@ -64,6 +64,35 @@ TEST(StreamReasoningSplit, OpenerInOutputRoutesToReasoning) {
     EXPECT_EQ(r.content, "the answer");
 }
 
+// Thinking off, answer starts with an emoji: its first byte-fallback token decodes to bytes the
+// UTF-8 stitch holds, so the splitter sees "" first. Read as an empty special token it routed the
+// whole answer to reasoning (Qwen3.8-27B, 39 of 39 tokens, content empty).
+TEST(StreamReasoningSplit, HeldPartialCharacterIsNotAnEmptyThinkToken) {
+    StreamReasoningSplitter s(ThinkPhase::SCAN, -1, -1);
+    s.set_release_on_plain_text(true);
+    Split out;
+    auto r = s.feed("", 1, /*piece_held=*/true);
+    out.reasoning += r.reasoning;
+    out.content += r.content;
+    for (const std::string p : {"\xF0\x9F\x8D\x8E", "\xF0\x9F\x9A\x80", " hi"}) {
+        r = s.feed(p, 1);
+        out.reasoning += r.reasoning;
+        out.content += r.content;
+    }
+    auto fin = s.finish();
+    out.reasoning += fin.reasoning;
+    out.content += fin.content;
+    EXPECT_EQ(out.reasoning, "");
+    EXPECT_EQ(out.content, "\xF0\x9F\x8D\x8E\xF0\x9F\x9A\x80 hi");
+
+    // A genuinely empty first token (a special opener that decodes to "") still opens reasoning.
+    StreamReasoningSplitter t(ThinkPhase::SCAN, -1, -1);
+    t.set_release_on_plain_text(true);
+    auto e = drive(t, {"", "plan ", "</think>", "answer"});
+    EXPECT_EQ(e.content, "answer");
+    EXPECT_NE(e.reasoning.find("plan"), std::string::npos) << e.reasoning;
+}
+
 // Generation that starts inside a template-opened block: no opener arrives, and
 // the phase says so up front.
 TEST(StreamReasoningSplit, PromptOpenedBlockStartsInReasoning) {

@@ -698,6 +698,11 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
         std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
+        // Stop sequences match the answer only, as on the streaming path (same splitter): matched on raw
+        // output they ended Qwen3.8 inside its reasoning with empty content. Cut after extraction below.
+        const bool stops_skip_reasoning = stops_skip_reasoning_(ctx, state);
+        auto stop_split = make_think_splitter_(ctx, state, /*use_reasoning=*/stops_skip_reasoning);
+        std::string stop_content;  // answer text seen so far, when stops_skip_reasoning
 
         auto ns_request_start = std::chrono::steady_clock::now();
         auto t_prev_token = std::chrono::high_resolution_clock::now();  // last delivered token (ITL)
@@ -800,24 +805,16 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             // Check text-level stop sequences
             if (!ctx.params.stop_sequences.empty()) {
-                output_text += ctx.snap.tok->decode_token(token);
-                bool stop_found = false;
-                // Finds the earliest-occurring stop sequence and which one matched (#1550, Anthropic shim
-                // reports it) - taking the first list entry regardless of position cuts at the wrong offset
-                // when two stop sequences are both present.
-                size_t best = std::string::npos;
-                for (const auto& stop : ctx.params.stop_sequences) {
-                    auto pos = output_text.find(stop);
-                    if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
-                        best = pos;
-                        matched_stop = stop;
-                    }
-                }
-                if (best != std::string::npos) {
-                    output_text = output_text.substr(0, best);
-                    stop_found = true;
-                }
-                if (stop_found) {
+                const std::string piece = ctx.snap.tok->decode_token(token);
+                output_text += piece;
+                stop_content += stops_skip_reasoning ? stop_split.feed(piece, token).content : std::string();
+                // Earliest occurrence and which entry matched (#1550), the streaming path's matcher.
+                const auto hd = imp::stream::holdback_decision(stops_skip_reasoning ? stop_content : output_text,
+                                                               0, ctx.params.stop_sequences);
+                if (hd.complete_match) {
+                    matched_stop = ctx.params.stop_sequences[static_cast<size_t>(hd.matched_index)];
+                    if (!stops_skip_reasoning)
+                        output_text.resize(hd.flush_len);
                     finish = "stop";
                     g_shim_stop_sequence = matched_stop;
                     break;
@@ -909,6 +906,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         } else if (ctx.snap.is_think_model && state.default_args.reasoning_format != "none") {
             strip_think_block(content);
         }
+        if (stops_skip_reasoning && !matched_stop.empty())
+            content.resize(std::min(content.size(), content.find(matched_stop)));
 
         // Gemma-4 channel headers "<|channel>NAME[<channel|>]..." wrap both CoT and answer: "thought"
         // goes to reasoning_content, "final" stays in content. Falls back to strip-only for

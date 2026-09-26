@@ -18,6 +18,10 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- `chat_template_kwargs.enable_thinking` (vLLM/SGLang form, OpenAI SDK `extra_body`) was ignored: Qwen3.8 reasoned with it `false`, and `tools/analysis/agentic_compare.py --thinking-off` measured thinking on. Read when the top-level field is absent.
+- Non-streaming `stop` sequences matched the reasoning too: a stop the model quoted while thinking ended the request with empty `content` and `imp_finish_detail: reasoning_budget_exhausted`. Now the answer only, as streaming did.
+- Streaming with thinking off sent an answer that starts with an emoji entirely to `reasoning_content` (39 of 39 tokens, `content` empty): the held first UTF-8 byte read as an empty think opener. Stream and non-stream now return the same text at a fixed seed (4 of 4 cases, was 2).
+- `tests/api/test_messages.py`: 4 not-refused cases sent an undecodable `"AA"` image and failed 400 against a server with a vision model; a valid 1x1 PNG now.
 - The KV-pressure valve counted each live sequence's whole remaining `max_tokens` as need. After three long requests (pool 7904 blocks, 486 of them cached) a 118676-token prompt with `max_tokens` 12000 lost 114864 tokens; it now looks 512 tokens ahead (`kKvValveHorizonTokens`): same sequence 0 evicted. A fresh server grows to 8293 blocks and never evicted. `GraphEligibility.UnmetBlocksLookOnlyAHorizonAhead`.
 - `KV cache: growth capped` logged once per scheduling round while a request waited at admission (16139 lines for 4 long requests); now once per new cap (1 line).
 - The KV-pressure valve (StreamingLLM auto-arm) fired at 90 % pool use even when the live sequences' context + remaining `max_tokens` fit, and once anything was evicted it stayed armed for the process lifetime. Qwen3.8-27B-NVFP4 at defaults: a 112k-token needle prompt lost 108400 tokens and answered wrong, then every later 40k prompt lost 36784; now 3 of 3 found, 0 evicted. `ServingSignalsTest.*`, `GraphEligibility.KvPressure*`.

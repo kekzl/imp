@@ -17,6 +17,38 @@
 #include <cstdio>
 #include <cstring>
 
+imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestContext& ctx, const ServerState& state,
+                                                          bool use_reasoning) {
+    imp::server::ThinkPhase phase;
+    if (ctx.snap.enable_thinking)
+        phase = imp::server::ThinkPhase::REASONING;  // <think> in prefill
+    else if (use_reasoning && ctx.params.think_budget > 0.0f)
+        phase = imp::server::ThinkPhase::SCAN;  // model decides
+    else
+        phase = imp::server::ThinkPhase::CONTENT;  // no extraction
+    // agent_scan_limit: when tools suppress the thinking default, the template renders a pre-closed
+    // think block, but a model that reasons anyway emits only the CLOSER - the SCAN opener it's
+    // waiting for never arrives, so at the default budget the whole CoT streamed as the answer
+    // (found via Claude Code against imp-server). Holding longer here is safe: an agent client is
+    // waiting for a tool call anyway. Default 256; server.agent_scan_limit tunes it (AUDIT_arch_2026 E-4).
+    const int agent_scan_limit = (state.ctx && state.ctx->engine)
+                                     ? state.ctx->engine->runtime_config().server.agent_scan_limit
+                                     : 256;
+    const bool has_tools = ctx.params.has_tools;
+    imp::server::StreamReasoningSplitter split(phase, ctx.snap.think_start_id, ctx.snap.think_end_id,
+                                               has_tools ? std::max(agent_scan_limit, 1) : 8);
+    // Without tools the SCAN hold (8 tokens) buys almost nothing but every thinking-off answer paid
+    // it in full before its first delta - measured TTFT 99-126ms client-side vs 17-43ms server-side
+    // (Qwen3.8-27B-NVFP4). Released as soon as the first word proves the answer started.
+    split.set_release_on_plain_text(!has_tools);
+    return split;
+}
+
+bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state) {
+    return !ctx.params.stop_sequences.empty() && ctx.snap.tpl_family != imp::ChatTemplateFamily::HARMONY &&
+           (ctx.snap.is_think_model || ctx.snap.enable_thinking) && state.default_args.reasoning_format == "deepseek";
+}
+
 bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                       const std::shared_ptr<ServerRequest>& server_req, StreamDialect& d,
                       StreamLoopResult& out) {
@@ -30,7 +62,6 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     const bool enable_thinking = ctx.snap.enable_thinking;
     const bool has_tools = ctx.params.has_tools;
     const auto tpl_family = ctx.snap.tpl_family;
-    const float think_budget = ctx.params.think_budget;
     const auto snap_tok = ctx.snap.tok;
     const bool snap_have_template = ctx.snap.have_template;
     const auto& snap_stop_token_ids = ctx.snap.stop_token_ids;
@@ -64,28 +95,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     const bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
                                 (ctx.snap.is_think_model || enable_thinking));
     const bool think_active = use_reasoning || enable_thinking;
-    imp::server::ThinkPhase think_start_phase;
-    if (enable_thinking)
-        think_start_phase = imp::server::ThinkPhase::REASONING;  // <think> in prefill
-    else if (use_reasoning && think_budget > 0.0f)
-        think_start_phase = imp::server::ThinkPhase::SCAN;  // model decides
-    else
-        think_start_phase = imp::server::ThinkPhase::CONTENT;  // no extraction
-    // agent_scan_limit: when tools suppress the thinking default, the template renders a pre-closed
-    // think block, but a model that reasons anyway emits only the CLOSER - the SCAN opener it's
-    // waiting for never arrives, so at the default budget the whole CoT streamed as the answer
-    // (found via Claude Code against imp-server). Holding longer here is safe: an agent client is
-    // waiting for a tool call anyway. Default 256; server.agent_scan_limit tunes it (AUDIT_arch_2026 E-4).
-    const int agent_scan_limit = (state.ctx && state.ctx->engine)
-                                     ? state.ctx->engine->runtime_config().server.agent_scan_limit
-                                     : 256;
-    const int scan_limit = has_tools ? std::max(agent_scan_limit, 1) : 8;
-    imp::server::StreamReasoningSplitter think_split(think_start_phase, ctx.snap.think_start_id,
-                                                     ctx.snap.think_end_id, scan_limit);
-    // Without tools the SCAN hold (8 tokens) buys almost nothing but every thinking-off answer paid
-    // it in full before its first delta - measured TTFT 99-126ms client-side vs 17-43ms server-side
-    // (Qwen3.8-27B-NVFP4). Released as soon as the first word proves the answer started.
-    think_split.set_release_on_plain_text(!has_tools);
+    imp::server::StreamReasoningSplitter think_split = make_think_splitter_(ctx, state, use_reasoning);
 
     // Rejoins characters the tokenizer split across two tokens, before any
     // consumer sees the piece — the think splitter and tool filter match on raw
@@ -422,7 +432,8 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // returns the user-visible content for this step (empty when the whole piece was reasoning or
         // still held for boundary detection).
         if (think_active) {
-            auto rs = think_split.feed(std::move(piece), token);
+            const bool held = piece.empty() && utf8_stitch.holding();
+            auto rs = think_split.feed(std::move(piece), token, held);
             out.n_reasoning_tokens += rs.reasoning_tokens;
             if (!rs.reasoning.empty() && !d.emit_reasoning(rs.reasoning))
                 return false;
