@@ -590,6 +590,15 @@ TEST(ToolResponseFormat, NonStringContentSerialized) {
     EXPECT_EQ(json::parse(out), (json{{"temp", 20}}));
 }
 
+TEST(ToolResponseFormat, TextPartsAreJoinedNotSerialized) {
+    // OpenAI allows tool content as an array of text parts; the model saw the serialized array.
+    json msg = {{"content", json::array({{{"type", "text"}, {"text", "a"}}, {{"type", "text"}, {"text", "b"}}})}};
+    EXPECT_EQ(format_tool_response(ChatTemplateFamily::CHATML, msg), "a\nb");
+    json mixed = {{"content", json::array({{{"type", "text"}, {"text", "a"}}, {{"type", "image_url"}}})}};
+    EXPECT_EQ(json::parse(format_tool_response(ChatTemplateFamily::CHATML, mixed)), mixed["content"])
+        << "a non-text part keeps the serialized fallback";
+}
+
 TEST(ToolResponseFormat, NullOrAbsentContentIsEmpty) {
     EXPECT_EQ(format_tool_response(ChatTemplateFamily::CHATML, json{{"content", nullptr}}), "");
     EXPECT_EQ(format_tool_response(ChatTemplateFamily::CHATML, json::object()), "");
@@ -628,6 +637,16 @@ TEST(ToolCallReconstruct, ChatMLWrapsParsedCall) {
     json parsed = json::parse(inner);
     EXPECT_EQ(parsed["name"], "foo");
     EXPECT_EQ(parsed["arguments"], (json{{"a", 1}}));
+}
+
+TEST(ToolCallReconstruct, ObjectArgumentsAreAcceptedLikeTheirString) {
+    // Ollama-style clients send arguments as the object; value(..., "{}") threw type_error.302.
+    json as_obj = json::array({{{"function", {{"name", "foo"}, {"arguments", {{"a", 1}}}}}}});
+    json as_str = json::array({{{"function", {{"name", "foo"}, {"arguments", "{\"a\":1}"}}}}});
+    EXPECT_EQ(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, as_obj, ""),
+              reconstruct_tool_call_output(ChatTemplateFamily::CHATML, as_str, ""));
+    json bad_name = json::array({{{"function", {{"name", 5}, {"arguments", "{}"}}}}});
+    EXPECT_NO_THROW(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, bad_name, ""));
 }
 
 TEST(ToolCallReconstruct, Llama3WrapsCall) {

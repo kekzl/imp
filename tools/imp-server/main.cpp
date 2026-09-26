@@ -10,6 +10,7 @@
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include "request_field_types.h"
 
 #include <csignal>
 #include <cstdio>
@@ -403,8 +404,9 @@ int main(int argc, char** argv) {
         try {
             std::rethrow_exception(std::move(ep));
         } catch (const nlohmann::json::exception& e) {
+            const std::string field = wrong_field_type_message(req.body);
             send_dialect_error(res, req.path, 400, "invalid_request_error", "invalid_request_error",
-                               e.what());
+                               field.empty() ? std::string(e.what()) : field);
         } catch (const std::exception& e) {
             send_dialect_error(res, req.path, 500, "server_error", "api_error", e.what());
         } catch (...) {
