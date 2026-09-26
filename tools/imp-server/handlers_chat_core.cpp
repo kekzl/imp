@@ -326,6 +326,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // which the reconcile step below would then read as reasoning that never closes.
     ctx.snap.suppress_thinking = imp::server::should_stamp_thinking_off(
         ctx.snap.is_think_model, ctx.snap.enable_thinking, budget_disables_thinking, want_thinking);
+    // Text-level thinkers (Nemotron: <think> is a plain token, is_think_model false) reason by template
+    // default and the #1431 constraint then engaged mid-reasoning: Nemotron-3-Nano at temp 0.7 returned
+    // no JSON in 5/10 json_object and 8/10 json_schema replies. Their template gets thinking off too.
+    if (!ctx.snap.is_think_model && ctx.snap.have_template && ctx.snap.chat_tpl.mentions_thinking() &&
+        !(ctx.params.enable_thinking_set && ctx.params.enable_thinking_requested) &&
+        (ctx.params.json_mode || !ctx.params.json_schema_str.empty() || !ctx.params.regex_pattern.empty() ||
+         !ctx.params.grammar.empty()))
+        ctx.snap.suppress_thinking = true;
     // Harmony: suppress_thinking makes the template end on <|channel|>final<|message|>, only for a
     // whole-reply constraint. gpt-oss cannot skip analysis: prefilled final, it wrote its reasoning
     // into content (3/18 replies vs 0/18 at effort low). Thinking off = effort low, reasoning dropped.

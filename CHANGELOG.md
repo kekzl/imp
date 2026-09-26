@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- Structured output on text-level thinkers (Nemotron-3-Nano: `<think>` is a plain token): thinking stayed on by template default and the JSON constraint engaged mid-reasoning, so no JSON came back in 5/10 `json_object` and 8/10 `json_schema` replies at temperature 0.7. Their template now gets thinking off under a constraint, as special-token thinkers did since #1431: 0/10 and 0/10.
 - Streaming with thinking off on a model that reasons anyway (Phi-4-reasoning): the `<think>` it opens with is a provisional stop id and was dropped before the reasoning splitter, so the whole chain of thought streamed as `content` while non-streaming split it. The opener now reaches the splitter.
 - Qwen3.6-35B-A3B on a tight card: warmup handed back every recurrent slot, the lazily loaded vision tower (851.8 MiB) then took the pages at the first image, and no request was admitted again, text included (503 reading "prompt needs more KV blocks"). The first serving slot stays committed; the refusal names `recurrent_state_unavailable`. Vision probe 0/8 -> 8/8, text afterwards answers.
 - `/v1/embeddings` on an encoder model (nomic-embed-text-v1.5) answered 500 "encoder forward failed" for an input past the encoder window; now 400 `context_length_exceeded` naming the count and the cap (3002 > 2048), 2042 tokens still pass.
