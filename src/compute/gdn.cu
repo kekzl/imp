@@ -467,7 +467,7 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                        int grouped_layout, const int* d_real_n) {
+                        int grouped_layout, const int* d_real_n, float* h_snap, const int* d_snap_n) {
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce[HD]
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
 
@@ -475,19 +475,20 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
     if (head_dim_ssm == 128 && state_size == 128) {
         launch_scan128<half, float>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                     dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                    static_cast<float*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), int64_t(0),
+                    h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
                     static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
     } else if (head_dim_ssm == 64 && state_size == 64) {
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, half>);
         pdl::launch(gdn_scan_fused_kernel<64, 64, half>, dim3(n_heads), dim3(64), size_t(smem), stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                            static_cast<float*>(nullptr), nullptr, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
+                                            h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Fallback: per-token loop (for unsupported HD/SS sizes). The host
         // loop cannot bound itself by a device-side length — reject padded
         // verify chunks loudly instead of advancing state through pad rows.
-        if (d_real_n != nullptr)
+        // Same for a snapshot request: an unwritten slab is adopted as garbage.
+        if (d_real_n != nullptr || h_snap != nullptr)
             throw std::runtime_error("gdn_scan_fused_f32: padded verify chunk unsupported for HD=" +
                                      std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
         int inner = n_heads * head_dim_ssm;
@@ -509,13 +510,14 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                         cudaStream_t stream, int grouped_layout, const int* d_real_n) {
+                         cudaStream_t stream, int grouped_layout, const int* d_real_n, __nv_bfloat16* h_snap,
+                         const int* d_snap_n) {
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size));
     launch_scan128<half, __nv_bfloat16>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                 dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                static_cast<__nv_bfloat16*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), int64_t(0),
+                h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
                 static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<const int*>(nullptr), static_cast<float*>(nullptr), static_cast<const float*>(nullptr), 0);
 }
 

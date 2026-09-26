@@ -854,7 +854,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // verify chunks and short inputs stay on the routes below. Works for both state dtypes.
             const bool use_chunkpar = dispatch_policy().gdn.chunkpar_scan && !use_ref && n >= 128 &&
                                       state.d_chunk_len == nullptr && gdn_chunkpar_ws_ != nullptr &&
-                                      head_dim_ssm == 128 && ssize == 128;
+                                      head_dim_ssm == 128 && ssize == 128 && h_snap == nullptr;
             if (use_chunkpar) {
                 if (state_bf16) {
                     gdn_scan_chunkpar_bf16(conv_f32, conv_channels,
@@ -885,21 +885,26 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                        static_cast<const float*>(ly.ssm_a.data),
                                        static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                        static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize,
-                                       n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len);
+                                       n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len,
+                                       static_cast<float*>(h_snap), h_snap ? state.d_snap_n : nullptr);
             } else if (state_bf16) {
                 gdn_scan_fused_bf16(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                     static_cast<const half*>(beta_proj_out.data),
                                     static_cast<const float*>(ly.ssm_a.data),
                                     static_cast<const float*>(ly.ssm_dt_b.data),
                                     static_cast<__nv_bfloat16*>(h_st), static_cast<half*>(y_buf.data), n,
-                                    n_heads, head_dim_ssm, ssize, n_groups, stream, gl, state.d_chunk_len);
+                                    n_heads, head_dim_ssm, ssize, n_groups, stream, gl, state.d_chunk_len,
+                                    static_cast<__nv_bfloat16*>(h_snap), h_snap ? state.d_snap_n : nullptr);
             } else {
+                // The verify snapshot (h_snap) was dropped on these three default-path calls: only
+                // gdn.fp32_scan passed it, and a matched==0 verify adopted an unwritten slab.
                 gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                    static_cast<const half*>(beta_proj_out.data),
                                    static_cast<const float*>(ly.ssm_a.data),
                                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                                   stream, gl, state.d_chunk_len);
+                                   stream, gl, state.d_chunk_len, static_cast<float*>(h_snap),
+                                   h_snap ? state.d_snap_n : nullptr);
             }
         }
     }

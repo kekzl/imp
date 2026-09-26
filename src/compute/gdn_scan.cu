@@ -1,6 +1,9 @@
 #include "compute/gdn_internal.cuh"
 #include "core/logging.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace imp {
 
 // Phase 1b.1 chunkwise SSD scan prototype (Mamba2 SSD adapted to the GDN delta rule). Same
@@ -460,7 +463,13 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
 void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n) {
+                            cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
+                            float* h_snap, const int* d_snap_n) {
+    // Same single-chunk contract as gdn_scan_chunkwise_fp32out below.
+    const bool single_chunk = (chunk_size <= 0 || n_tokens <= chunk_size);
+    if (h_snap && !single_chunk)
+        throw std::runtime_error("gdn_scan_chunkwise_f32: h_snap needs a single chunk (n_tokens=" +
+                                 std::to_string(n_tokens) + ", chunk_size=" + std::to_string(chunk_size) + ")");
     gdn_scan_chunkwise_dispatch<half>(
         conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, head_dim_ssm,
         state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
@@ -468,7 +477,7 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
             int n_tok_chunk, const int* d_real_n_chunk) {
             gdn_scan_fused_f32(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
                                n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
-                               grouped_layout, d_real_n_chunk);
+                               grouped_layout, d_real_n_chunk, h_snap, d_snap_n);
         });
 }
 
@@ -480,11 +489,14 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
                                 cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
                                 float* h_snap, const int* d_snap_n) {
     // Snapshot row is in whole-range coordinates, so it only travels when the range is one
-    // chunk. A verify chunk (a few rows vs a 64-row chunk size) always qualifies; a long
-    // prefill does not.
+    // chunk. A verify chunk (a few rows vs a 64-row chunk size) always qualifies; anything else
+    // is refused, since a silently unwritten slab is adopted as garbage state.
     const bool single_chunk = (chunk_size <= 0 || n_tokens <= chunk_size);
-    float* const snap = single_chunk ? h_snap : nullptr;
-    const int* const snap_n = single_chunk ? d_snap_n : nullptr;
+    if (h_snap && !single_chunk)
+        throw std::runtime_error("gdn_scan_chunkwise_fp32out: h_snap needs a single chunk (n_tokens=" +
+                                 std::to_string(n_tokens) + ", chunk_size=" + std::to_string(chunk_size) + ")");
+    float* const snap = h_snap;
+    const int* const snap_n = d_snap_n;
     gdn_scan_chunkwise_dispatch<float>(
         conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens, n_heads,
         head_dim_ssm, state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
