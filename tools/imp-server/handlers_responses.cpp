@@ -4,6 +4,7 @@
 
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "request_field_types.h"
 #include "stream_driver.h"
 #include "utils.h"
 #include "tool_call.h"
@@ -342,6 +343,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const std::exception& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
@@ -358,7 +360,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     try {
         oai_body = rsp::responses_to_openai_body(body);
     } catch (const std::exception& e) {
-        send_json_error(res, 400, "invalid_request_error", e.what());
+        const std::string field = wrong_field_type_message(req.body);
+        send_json_error(res, 400, "invalid_request_error", field.empty() ? std::string(e.what()) : field);
         return;
     }
 

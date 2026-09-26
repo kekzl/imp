@@ -164,6 +164,90 @@ class TestParameterAcceptance:
 
 
 @pytest.mark.nomodel
+class TestWrongFieldType:
+    """A wrong-typed scalar answered 400 "[json.exception.type_error.302] type must be number, but
+    is string" without the field, and /v1/messages answered 500. The binary names the field."""
+
+    @pytest.mark.parametrize("path,body,field", [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}], "temperature": "hot"}, "temperature"),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": 5}]}, "messages[0].content"),
+        ("/v1/completions", {"prompt": "hi", "echo": "yes"}, "echo"),
+        ("/v1/responses", {"input": "hi", "max_output_tokens": "10"}, "max_output_tokens"),
+        ("/v1/embeddings", {"input": "hi", "encoding_format": 5}, "encoding_format"),
+        ("/v1/messages", {"max_tokens": "10", "messages": [{"role": "user", "content": "hi"}]}, "max_tokens"),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}], "logprobs": "yes"}, "logprobs"),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}],
+                                  "stream_options": {"include_usage": "yes"}}, "stream_options.include_usage"),
+        ("/v1/chat/completions", {"messages": [1]}, "messages[0]"),
+        ("/v1/responses", {"input": "hi", "tools": [1]}, "tools[0]"),
+        ("/v1/messages", {"max_tokens": 8, "messages": [1]}, "messages[0]"),
+        ("/v1/messages/count_tokens", {"messages": [1]}, "messages[0]"),
+        ("/v1/rerank", {"query": "q", "documents": ["a"], "top_n": "2"}, "top_n"),
+        ("/v1/rerank", {"query": "q", "documents": ["a"], "return_documents": "yes"}, "return_documents"),
+    ])
+    def test_names_the_field(self, client, model, is_mock, path, body, field):
+        if is_mock:
+            pytest.skip("the mock does not reproduce the binary's parser")
+        r = client.post(path, json=dict(body, model=model), headers={"anthropic-version": "2023-06-01"})
+        assert r.status_code == 400, r.text
+        msg = r.json()["error"]["message"]
+        assert f'"{field}"' in msg and "json.exception" not in msg, msg
+
+
+@pytest.mark.nomodel
+def test_assistant_tool_call_with_text_parts_is_accepted(client, model, is_mock):
+    """Assistant content as text parts next to tool_calls is valid OpenAI; it answered a raw 400."""
+    if is_mock:
+        pytest.skip("the mock does not reproduce the binary's parser")
+    r = client.post("/v1/chat/completions", json={"model": model, "max_tokens": 4, "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "text", "text": "calling"}],
+         "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "ok"}]},
+    ]})
+    assert r.status_code != 400, r.text
+
+
+@pytest.mark.nomodel
+@pytest.mark.parametrize("path,extra", [
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/completions", {"prompt": "hi"}),
+])
+def test_null_fields_mean_absent(client, model, is_mock, path, extra):
+    """OpenAI fields are nullable; "seed": null and friends answered a raw 400 type_error.302."""
+    if is_mock:
+        pytest.skip("the mock does not reproduce the binary's parser")
+    nulls = {k: None for k in ("seed", "temperature", "top_p", "n", "presence_penalty", "frequency_penalty",
+                               "logprobs", "top_logprobs", "stream", "stop", "max_tokens", "echo")}
+    if path == "/v1/completions":
+        nulls.pop("top_logprobs")
+    r = client.post(path, json=dict(extra, model=model, **nulls))
+    assert r.status_code != 400, r.text
+
+
+@pytest.mark.nomodel
+class TestSamplerRange:
+    """repetition_penalty 0 or < 0, min_p and penalties outside their range passed the parser; the
+    penalty kernel divides positive logits by repetition_penalty."""
+
+    @pytest.mark.parametrize("path,extra", [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+        ("/v1/completions", {"prompt": "hi"}),
+    ])
+    @pytest.mark.parametrize("field,value", [
+        ("repetition_penalty", 0), ("repetition_penalty", -1), ("min_p", 5), ("presence_penalty", 100),
+        ("frequency_penalty", -100),
+    ])
+    def test_rejects_out_of_range(self, client, model, is_mock, path, extra, field, value):
+        if is_mock:
+            pytest.skip("the mock does not reproduce the binary's parser")
+        r = client.post(path, json=dict(extra, model=model, **{field: value}),
+                        headers={"anthropic-version": "2023-06-01"})
+        assert r.status_code == 400, r.text
+        assert f'"{field}"' in r.json()["error"]["message"], r.text
+
+
+@pytest.mark.nomodel
 class TestModelField:
     def test_missing_model_field(self, client):
         r = client.post("/v1/chat/completions", json={

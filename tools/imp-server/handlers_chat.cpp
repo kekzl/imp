@@ -5,6 +5,7 @@
 #include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "request_field_types.h"
 #include "utils.h"
 #include "completion_prompt.h"
 #include "tool_call.h"
@@ -587,6 +588,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const json::parse_error& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
@@ -934,6 +936,7 @@ void handle_count_tokens(const httplib::Request& req, httplib::Response& res, Se
     json anth_body;
     try {
         anth_body = json::parse(req.body);
+        drop_null_fields(anth_body);
     } catch (const std::exception& e) {
         send_anthropic_error(400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
@@ -947,8 +950,9 @@ void handle_count_tokens(const httplib::Request& req, httplib::Response& res, Se
     try {
         oai_body = anth::anthropic_to_openai_body(anth_body);
     } catch (const std::exception& e) {
+        const std::string field = wrong_field_type_message(req.body);
         send_anthropic_error(400, "invalid_request_error",
-                             std::string("Failed to transform Anthropic body: ") + e.what());
+                             field.empty() ? std::string("Failed to transform Anthropic body: ") + e.what() : field);
         return;
     }
 

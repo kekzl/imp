@@ -57,6 +57,7 @@ void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerSt
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const json::parse_error& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;

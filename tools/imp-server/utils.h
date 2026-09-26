@@ -21,6 +21,33 @@ using json = nlohmann::json;
 // client- or model-supplied text.
 std::string dump_safe(const json& j);
 
+// OpenAI content as an array of {"type":"text","text":...} parts: true and the texts joined by "\n".
+// False for anything else (a string, or a non-text part), leaving `out` untouched.
+inline bool join_text_parts(const json& content, std::string& out) {
+    if (!content.is_array() || content.empty())
+        return false;
+    std::string joined;
+    for (const auto& part : content) {
+        if (!part.is_object() || part.value("type", "") != "text" || !part.contains("text") ||
+            !part["text"].is_string())
+            return false;
+        if (!joined.empty())
+            joined += "\n";
+        joined += part["text"].get<std::string>();
+    }
+    out = std::move(joined);
+    return true;
+}
+
+// Top-level null means "not set" in OpenAI and Anthropic requests; body.value() threw a raw
+// type_error.302 on it (18 field/endpoint pairs, e.g. "seed": null). No-op on a non-object.
+inline void drop_null_fields(json& body) {
+    if (!body.is_object())
+        return;
+    for (auto it = body.begin(); it != body.end();)
+        it = it->is_null() ? body.erase(it) : std::next(it);
+}
+
 // Printable-ASCII, length-capped copy of a client-supplied string, for the
 // cases where one is echoed back into a response (#1618).
 std::string sanitize_for_echo(std::string_view in, size_t max_len);
