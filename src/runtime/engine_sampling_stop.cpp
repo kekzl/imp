@@ -296,10 +296,19 @@ bool Engine::recurrent_slot_admissible_() {
             free_recurrent_slots_.push_back(s);
         recurrent_slots_initialized_ = true;
     }
-    if (free_recurrent_slots_.empty())
+    // Admitted requests take their slot later, at prefill: one scheduling round admits several
+    // before any pops. Committing back() for each passed them all on the one committed slot and
+    // the second acquire threw inside step(), failing the whole batch (Qwen3.6-35B-A3B, 60 of 68
+    // concurrent requests internal_error). The request asking now pops after those already waiting.
+    int waiting = 0;
+    for (const int id : scheduler_->active_ids())
+        if (recurrent_slot_of_.find(id) == recurrent_slot_of_.end())
+            ++waiting;
+    const int pos = static_cast<int>(free_recurrent_slots_.size()) - 1 - waiting;
+    if (pos < 0)
         return true;  // max_batch_size holds the line, not this gate
-    // acquire_recurrent_slot_ pops from the back: commit exactly that slot.
-    return ssm_state_->ensure_slot(free_recurrent_slots_.back());
+    // acquire_recurrent_slot_ pops from the back: commit the slot this request will get.
+    return ssm_state_->ensure_slot(free_recurrent_slots_[static_cast<size_t>(pos)]);
 }
 
 int Engine::recurrent_slot(int req_id) const {

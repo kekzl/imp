@@ -283,6 +283,13 @@ bool Scheduler::has_pending() const { return !pending_.empty(); }
 
 int Scheduler::active_count() const { return static_cast<int>(active_.size()); }
 int Scheduler::pending_count() const { return static_cast<int>(pending_.size()); }
+std::vector<int> Scheduler::active_ids() const {
+    std::vector<int> ids;
+    ids.reserve(active_.size());
+    for (const auto& r : active_)
+        ids.push_back(r->id);
+    return ids;
+}
 int Scheduler::active_evicted_count() const {
     return static_cast<int>(std::ranges::count_if(active_, [](const auto& r) {
         return r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED &&
