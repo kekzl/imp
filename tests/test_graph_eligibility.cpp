@@ -94,6 +94,18 @@ TEST(GraphEligibility, KvPressureIgnoresAPoolThatCoversTheLiveNeed) {
     EXPECT_FALSE(kv_pressure_demotes_graphs(800, 0, 7703, 5000)) << "the 10 % line still gates first";
 }
 
+// The valve's need looks kKvValveHorizonTokens ahead, not to max_tokens: a 118676-token
+// prompt with max_tokens 12000 on a 7904-block pool needs 32 blocks, not 750.
+TEST(GraphEligibility, UnmetBlocksLookOnlyAHorizonAhead) {
+    EXPECT_EQ(kv_unmet_blocks(118676, 12000, 7418, 16), (118676 + 511 + 15) / 16 - 7418) << "capped at 512 tokens";
+    EXPECT_EQ(kv_unmet_blocks(118676, 12000, 7418, 16), 32);
+    EXPECT_EQ(kv_unmet_blocks(160, 400, 10, 16), 35 - 10) << "under the horizon: to max_tokens, minus the last token";
+    EXPECT_EQ(kv_unmet_blocks(160, 1, 10, 16), 0) << "the last sampled token needs no slot";
+    EXPECT_EQ(kv_unmet_blocks(160, 0, 10, 16), 0) << "nothing left to generate";
+    EXPECT_EQ(kv_unmet_blocks(160, 400, 40, 16), 0) << "a table already past the need";
+    EXPECT_EQ(kv_unmet_blocks(160, 400, 10, 0), 0) << "no block size, no need";
+}
+
 // The way back (C-3): a fifth free lifts it, a live evicted sequence pins it.
 TEST(GraphEligibility, KvPressureLiftsAtAFifthUnlessALiveSequenceWasEvicted) {
     EXPECT_FALSE(kv_pressure_repromotes_graphs(299, 0, 3000, 0)) << "still under the trigger";
