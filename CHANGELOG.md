@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- Graph prewarm captured every other decode batch size (Qwen3.8-27B-NVFP4 16/28, Qwen3-8B-NVFP4 17/32): each size was held for one decode step, and a one-step size did not capture. Budgets now step by 2: 28/28 and 32/32, prewarm 0.9 -> 1.4 s and 0.3 -> 0.5 s.
 - The built-in web UI showed markdown tables as raw `| a | b |` lines (its renderer knew code, bold, italic and headings only); GFM tables now render. Qwen3.8 "put the result in a markdown table" in an 8-turn real chat: raw pipes -> table.
 - `/v1/completions` sent a text prompt without the BOS its tokenizer asks for (`add_bos_token`; the chat path gets it from the template). Gemma-4 UD-Q4_K_M answered "The capital of France is" with " is is is is ..."; now "The capital of France is **Paris**.". Token-id prompts stay as given; Qwen (no BOS) unchanged.
 - Structured output on text-level thinkers (Nemotron-3-Nano: `<think>` is a plain token): thinking stayed on by template default and the JSON constraint engaged mid-reasoning, so no JSON came back in 5/10 `json_object` and 8/10 `json_schema` replies at temperature 0.7. Their template now gets thinking off under a constraint, as special-token thinkers did since #1431: 0/10 and 0/10.
