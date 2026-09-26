@@ -23,12 +23,14 @@
 # 8 deliberate benchmarks (`Bench*`, they measure and print), 6 MMVQ cases on
 # `compare_dp4a_vs_mmvq` (18 EXPECTs inside) and 2 GDN cases on
 # `chunkpar_matches_fused` (18 ASSERTs inside). Zero real gaps at this commit.
+# A templated harness call (`check_x<float>(0)`) matches too: without the
+# `<...>` group the 3 GdnVerifySnapshot cases read as 3 new gaps (19 vs 16).
 #
 # Usage: awk -f tests_without_assertions.awk $(find tests -name '*.cpp' -o -name '*.cu')
 
 function verdict(name, body) {
   if (body !~ /EXPECT|ASSERT|SUCCEED|FAIL|GTEST_SKIP/ &&
-      body !~ /(run|check|expect|verify|assert)[a-zA-Z0-9_]*\(/) print FILENAME ": " name
+      body !~ /(run|check|expect|verify|assert)[a-zA-Z0-9_]*(<[^>]*>)?\(/) print FILENAME ": " name
 }
 
 # Raw-string state, evaluated before the block rules. `was_raw` is what the
