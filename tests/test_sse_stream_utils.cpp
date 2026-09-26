@@ -12,6 +12,7 @@
 #include "utils.h"            // tools/imp-server/utils.h
 #include "logit_bias.h"       // tools/imp-server/logit_bias.h
 #include "completion_prompt.h"  // tools/imp-server/completion_prompt.h
+#include "request_field_types.h"  // tools/imp-server/request_field_types.h
 #include "reasoning_split.h"  // StreamReasoningSplitter (shared streaming demux)
 
 namespace {
@@ -375,6 +376,71 @@ TEST(StreamReasoningSplit, PassThroughInContentPhase) {
 
 // OpenAI compliance helpers (utils.cpp): max_completion_tokens precedence and the 16-entry
 // stop-sequence cap used by parse_chat_request_params.
+
+// A wrong-typed scalar threw json::type_error and the client read "[json.exception.type_error.302]
+// type must be number, but is string" without the field; the message now names it.
+TEST(WrongFieldTypeMessage, NamesTheFirstWrongTypedField) {
+    EXPECT_EQ(wrong_field_type_message(R"({"model":"m","temperature":"hot"})"),
+              "\"temperature\" must be a number, got string");
+    EXPECT_EQ(wrong_field_type_message(R"({"model":5})"), "\"model\" must be a string, got number");
+    EXPECT_EQ(wrong_field_type_message(R"({"echo":"yes"})"), "\"echo\" must be a boolean, got string");
+    EXPECT_EQ(wrong_field_type_message(R"({"top_p":[1]})"), "\"top_p\" must be a number, got array");
+    EXPECT_EQ(wrong_field_type_message(R"({"messages":[{"role":"user","content":"a"},{"role":"user","content":5}]})"),
+              "\"messages[1].content\" must be a string or an array of content parts, got number");
+}
+
+TEST(WrongFieldTypeMessage, ValidBodiesAndNullsAreNotReported) {
+    EXPECT_EQ(wrong_field_type_message(R"({"model":"m","temperature":0.7,"max_tokens":10,"stream":true})"), "");
+    EXPECT_EQ(wrong_field_type_message(R"({"model":"m","temperature":null})"), "") << "null means absent";
+    EXPECT_EQ(wrong_field_type_message("not json"), "");
+    EXPECT_EQ(wrong_field_type_message("[1,2]"), "");
+    EXPECT_EQ(wrong_field_type_message(R"({"logprobs":true,"stream_options":{"include_usage":false}})"), "");
+    EXPECT_EQ(wrong_field_type_message(R"({"logprobs":5})"), "") << "completions logprobs is an int";
+}
+
+TEST(WrongFieldTypeMessage, NestedShapes) {
+    EXPECT_EQ(wrong_field_type_message(R"({"logprobs":"yes"})"),
+              "\"logprobs\" must be a boolean or a number, got string");
+    EXPECT_EQ(wrong_field_type_message(R"({"stream_options":{"include_usage":"yes"}})"),
+              "\"stream_options.include_usage\" must be a boolean, got string");
+    EXPECT_EQ(wrong_field_type_message(R"({"messages":[{"role":"user","content":"a"},1]})"),
+              "\"messages[1]\" must be an object, got number");
+    EXPECT_EQ(wrong_field_type_message(R"({"tools":[{"type":"function"},"x"]})"),
+              "\"tools[1]\" must be an object, got string");
+}
+
+TEST(OutOfRangeMessage, RejectsValuesThePenaltyKernelMisreads) {
+    EXPECT_EQ(out_of_range_message({{"repetition_penalty", 0}}), "\"repetition_penalty\" must be greater than 0");
+    EXPECT_EQ(out_of_range_message({{"repetition_penalty", -1.5}}), "\"repetition_penalty\" must be greater than 0");
+    EXPECT_EQ(out_of_range_message({{"min_p", 5}}), "\"min_p\" must be between 0 and 1");
+    EXPECT_EQ(out_of_range_message({{"min_p", -0.1}}), "\"min_p\" must be between 0 and 1");
+    EXPECT_EQ(out_of_range_message({{"typical_p", 0}}), "\"typical_p\" must be greater than 0 and at most 1");
+    EXPECT_EQ(out_of_range_message({{"presence_penalty", 2.5}}), "\"presence_penalty\" must be between -2 and 2");
+    EXPECT_EQ(out_of_range_message({{"frequency_penalty", -100}}), "\"frequency_penalty\" must be between -2 and 2");
+}
+
+TEST(DropNullFields, TopLevelNullsGoNestedNullsStay) {
+    json body = {{"seed", nullptr}, {"temperature", 0.5}, {"stop", nullptr},
+                 {"messages", json::array({{{"role", "assistant"}, {"content", nullptr}}})}};
+    drop_null_fields(body);
+    EXPECT_FALSE(body.contains("seed"));
+    EXPECT_FALSE(body.contains("stop"));
+    EXPECT_EQ(body["temperature"], 0.5);
+    EXPECT_TRUE(body["messages"][0]["content"].is_null()) << "nested null is content: null, not absence";
+    EXPECT_EQ(body.value("seed", -1), -1) << "value() no longer throws on the dropped field";
+    json arr = json::array({nullptr});
+    drop_null_fields(arr);
+    EXPECT_EQ(arr.size(), 1u);
+}
+
+TEST(OutOfRangeMessage, AcceptsBoundsAndDefaults) {
+    EXPECT_EQ(out_of_range_message({{"repetition_penalty", 1.05}, {"min_p", 0}, {"typical_p", 1},
+                                    {"presence_penalty", -2}, {"frequency_penalty", 2}}),
+              "");
+    EXPECT_EQ(out_of_range_message({{"min_p", 1}, {"repetition_penalty", 100}}), "");
+    EXPECT_EQ(out_of_range_message({{"min_p", "x"}}), "") << "types are the type check's job";
+    EXPECT_EQ(out_of_range_message(json::object()), "");
+}
 
 // /v1/completions prompt shapes. A list was a raw 400 "[json.exception.type_error.302] type must be
 // string, but is array"; lm-eval local-completions sends token ids.

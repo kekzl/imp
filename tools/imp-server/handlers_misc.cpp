@@ -34,6 +34,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const json::parse_error& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
@@ -109,6 +110,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const json::parse_error& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
@@ -458,6 +460,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const json::parse_error& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
