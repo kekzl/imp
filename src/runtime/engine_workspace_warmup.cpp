@@ -535,10 +535,23 @@ void Engine::warmup() {
     // ~1000-token prompt so max_ctx sits in the 1024 pow2 bucket, keeping the growth-only
     // re-capture trigger (engine_scheduler.cpp) quiet for real requests up to that context. Runs
     // before reset_kv_calibration below so synthetic tokens leave no calibration trace.
-    if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs &&
-        config_.max_batch_size > 1) {
+    // Each prewarm row holds its own recurrent slot. On a lazy slab the rows beyond what the card
+    // can commit threw out of context create (Qwen3.6-35B-A3B at defaults: slot 1 of 26), where
+    // serving would have admitted them one by one; prewarm only the sizes whose slots commit.
+    int prewarm_n = std::min(config_.max_batch_size, (int)kMaxGraphPoolSize);
+    if (ssm_state_ && ssm_state_->lazy()) {
+        int committed = 0;
+        while (committed < prewarm_n && ssm_state_->ensure_slot(committed))
+            ++committed;
+        if (committed < prewarm_n)
+            IMP_LOG_WARN("graph prewarm: %d of %d recurrent slots commit on this card; prewarming %d "
+                         "batch sizes (the rest capture on first use)",
+                         committed, prewarm_n, committed);
+        prewarm_n = committed;
+    }
+    if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs && prewarm_n > 1) {
         const auto t0 = std::chrono::steady_clock::now();
-        const int n = std::min(config_.max_batch_size, (int)kMaxGraphPoolSize);
+        const int n = prewarm_n;
         const int anchor_len = std::min(1000, std::max(16, config_.max_seq_len - 64));
         std::vector<std::shared_ptr<Request>> reqs;
         reqs.reserve(n);

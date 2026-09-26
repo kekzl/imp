@@ -30,6 +30,8 @@ public:
     [[nodiscard]] bool has_pending() const;
     [[nodiscard]] int active_count() const;
     [[nodiscard]] int pending_count() const;  // admitted, not yet in a batch
+    // Ids of the admitted requests (engine thread only, like schedule()).
+    [[nodiscard]] std::vector<int> active_ids() const;
     // Live sequences whose KV StreamingLLM evicted (engine thread only, like schedule()).
     [[nodiscard]] int active_evicted_count() const;
     // Sum of kv_unmet_blocks (graph_eligibility.h) over the live sequences (engine thread only).
