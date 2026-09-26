@@ -316,7 +316,7 @@ def main():
     # member constrains an XML tool parameter; needs the tokenizer-backed mask (CUDA).
     # 1130 -> 1132: NvFP4NormFold.MatchesRmsnormThenGemv{,WithWeightOffset} (test-quant): residual GEMV
     # + folded consumer vs residual GEMV + rmsnorm + consumer, h bit-identical.
-    PINNED = 1132
+    PINNED = 1135
 
     text = CMAKE.read_text()
     mods = module_sources(text)
