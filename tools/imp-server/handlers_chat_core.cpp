@@ -707,19 +707,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         auto ns_request_start = std::chrono::steady_clock::now();
         auto t_prev_token = std::chrono::high_resolution_clock::now();  // last delivered token (ITL)
         for (;;) {
-            // Check request timeout
-            if (state.request_timeout > 0) {
-                auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
-                if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                    server_req->cancel();
-                    state.metrics.requests_timed_out++;
-                    state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
-                                                                server_req->queue_ms.load(
-                                                                    std::memory_order_relaxed));
-                    finish = "length";
-                    break;
-                }
-            }
+            // Request timeout, or the client hung up (no sink here to fail a write on).
+            if ((finish = nonstream_should_stop_(state, *server_req, ns_request_start, ctx.client_gone)))
+                break;
 
             // Read next token from the batching engine
             TokenEvent evt{};

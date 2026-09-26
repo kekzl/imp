@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -165,6 +166,9 @@ struct ChatStateSnapshot {
 struct ChatRequestContext {
     ChatRequestParams params;
     ChatStateSnapshot snap;
+    // httplib's per-connection probe (req.is_connection_closed): the non-streaming loop has no sink
+    // to fail a write on, so a client that hung up kept its generation running to max_tokens.
+    std::function<bool()> client_gone;
     std::string req_id;
     std::string comp_id;
     int64_t created = 0;
@@ -364,6 +368,12 @@ imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestConte
 // Non-streaming stop sequences go through that splitter (answer text only) when the request has
 // stops and the deepseek reasoning split applies (not Harmony).
 bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state);
+// Non-streaming wait loops (chat and /v1/completions): the finish reason that ends the request
+// before its next token, or nullptr. --request-timeout -> "length" (#1590); a client that hung up
+// -> "cancelled", as streaming reports it. Either cancels the engine request and counts it.
+const char* nonstream_should_stop_(ServerState& state, ServerRequest& sr,
+                                   std::chrono::steady_clock::time_point start,
+                                   const std::function<bool()>& client_gone);
 void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
                               std::shared_ptr<imp::Request>& imp_req,
                               std::shared_ptr<ServerRequest>& server_req,

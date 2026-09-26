@@ -9,6 +9,7 @@ External state:  Running imp-server or mock server (OOM tests need mock --oom).
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -187,6 +188,39 @@ class TestClientDisconnect:
             })
             assert r.status_code == 200
             assert "choices" in r.json()
+
+    @pytest.mark.parametrize("path,body", [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "Write a very long story."}]}),
+        ("/v1/completions", {"prompt": "Once upon a time"}),
+    ])
+    def test_disconnect_non_stream_cancels_generation(self, base_url, model, is_mock, path, body):
+        """A non-streaming loop has no sink to fail a write on: a client that hung up kept its
+        generation running to max_tokens (1008 tokens, 13.5 s for nobody). It must be cancelled."""
+        if is_mock:
+            pytest.skip("needs the real engine")
+
+        def metric(name):
+            text = httpx.get(f"{base_url}/metrics", timeout=10.0).text
+            return next((float(l.split()[-1]) for l in text.splitlines() if l.startswith(name + " ")), None)
+
+        before = metric("imp_requests_cancelled_total")
+        assert before is not None
+        payload = json.dumps(dict(body, model=model, max_tokens=3000, temperature=0.7,
+                                  ignore_eos=True)).encode()
+        host, port = base_url.split("//")[1].split(":")
+        s = socket.create_connection((host, int(port)))
+        s.sendall(b"POST %s HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                  % (path.encode(), len(payload)) + payload)
+        time.sleep(1.5)
+        s.close()
+        deadline = time.time() + 20
+        while time.time() < deadline and metric("imp_requests_cancelled_total") == before:
+            time.sleep(0.2)
+        assert metric("imp_requests_cancelled_total") == before + 1, "the hung-up request was not cancelled"
+        deadline = time.time() + 10
+        while time.time() < deadline and metric("imp_queue_running") != 0:
+            time.sleep(0.2)
+        assert metric("imp_queue_running") == 0, "imp_queue_running stays up on an idle server"
 
 
 class TestGracefulShutdown:
