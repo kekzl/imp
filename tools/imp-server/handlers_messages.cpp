@@ -10,6 +10,7 @@
 #include "anthropic.h"
 
 #include "runtime/request.h"
+#include "request_field_types.h"
 
 #include <chrono>
 #include <cstdio>
@@ -353,6 +354,11 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     // strict Anthropic SDK clients fail to parse (#891).
     try {
         handle_messages_impl(req, res, state, request_id);
+    } catch (const nlohmann::json::exception& e) {
+        // A field of the wrong type is the caller's error: 400 naming it, not 500 api_error.
+        const std::string field = wrong_field_type_message(req.body);
+        send_anthropic_error(res, 400, "invalid_request_error", field.empty() ? std::string(e.what()) : field,
+                             request_id);
     } catch (const std::exception& e) {
         // api_error, not server_error: the latter is not one of Anthropic's
         // error types, so an SDK switching on it lands in its default branch
@@ -385,6 +391,7 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     json anth_body;
     try {
         anth_body = json::parse(req.body);
+        drop_null_fields(anth_body);
     } catch (const std::exception& e) {
         send_anthropic_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what(),
                              request_id);
@@ -415,8 +422,10 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     try {
         oai_body = anth::anthropic_to_openai_body(anth_body);
     } catch (const std::exception& e) {
+        const std::string field = wrong_field_type_message(req.body);
         send_anthropic_error(res, 400, "invalid_request_error",
-                             std::string("Failed to transform Anthropic body: ") + e.what(), request_id);
+                             field.empty() ? std::string("Failed to transform Anthropic body: ") + e.what() : field,
+                             request_id);
         return;
     }
 

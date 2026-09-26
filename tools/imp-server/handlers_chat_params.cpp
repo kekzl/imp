@@ -68,6 +68,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     json body;
     try {
         body = json::parse(req.body);
+        drop_null_fields(body);
     } catch (const json::parse_error& e) {
         send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return false;
@@ -172,6 +173,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // ignored, `max_tokens` still ends the request.
     ctx.params.ignore_eos = body.value("ignore_eos", false);
     // Parse logprobs parameters
+    if (const auto lp = body.find("logprobs"); lp != body.end() && !lp->is_null() && !lp->is_boolean()) {
+        send_json_error(res, 400, "invalid_request_error",
+                        std::string("\"logprobs\" must be a boolean, got ") + lp->type_name());
+        return false;
+    }
     ctx.params.req_logprobs = body.value("logprobs", false);
     ctx.params.top_logprobs = body.value("top_logprobs", 0);
     if (ctx.params.top_logprobs < 0)
@@ -373,9 +379,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             // itself emits, not the ChatML JSON body - a JSON replay teaches the model the wrong dialect for
             // its NEXT call, exactly what the armed XML grammar forbids.
             std::string content_str;
-            if (msg.contains("content") && !msg["content"].is_null()) {
+            // Array content (text parts) is valid OpenAI; get<std::string>() answered it with a raw 400.
+            if (msg.contains("content") && msg["content"].is_string())
                 content_str = msg["content"].get<std::string>();
-            }
+            else if (msg.contains("content"))
+                join_text_parts(msg["content"], content_str);
             std::string reconstructed = reconstruct_tool_call_output(ctx.snap.tpl_family, msg["tool_calls"],
                                                                      content_str, tool_xml_dialect);
             ctx.params.chat_msgs.push_back({"assistant", reconstructed, prior_reasoning(msg)});

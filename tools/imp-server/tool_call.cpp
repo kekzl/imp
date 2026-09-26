@@ -686,8 +686,15 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
     for (const auto& tc : tool_calls) {
         if (!tc.contains("function"))
             continue;
-        std::string name = tc["function"].value("name", "");
-        std::string args = tc["function"].value("arguments", "{}");
+        const json& fn = tc["function"];
+        std::string name = fn.contains("name") && fn["name"].is_string() ? fn["name"].get<std::string>() : "";
+        // arguments is a JSON string per OpenAI; Ollama-style clients send the object itself, which
+        // value(..., "{}") answered with a raw 400 type_error.302.
+        std::string args = "{}";
+        if (fn.contains("arguments") && fn["arguments"].is_string())
+            args = fn["arguments"].get<std::string>();
+        else if (fn.contains("arguments") && !fn["arguments"].is_null())
+            args = dump_safe(fn["arguments"]);
 
         if (family == imp::ChatTemplateFamily::LLAMA3) {
             result += "\n<function=";
@@ -868,7 +875,11 @@ std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg
     std::string content;
     if (msg.contains("content") && !msg["content"].is_null()) {
         const auto& c = msg["content"];
-        content = c.is_string() ? c.get<std::string>() : dump_safe(c);
+        // An array of text parts is the OpenAI spec shape: the texts, not the serialized array.
+        if (c.is_string())
+            content = c.get<std::string>();
+        else if (!join_text_parts(c, content))
+            content = dump_safe(c);
     }
 
     if (family == imp::ChatTemplateFamily::LLAMA3) {

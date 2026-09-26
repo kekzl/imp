@@ -2,6 +2,7 @@
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "model_name_policy.h"
+#include "request_field_types.h"
 #include "utils.h"
 #include "tool_call.h"
 #include "anthropic.h"
@@ -888,6 +889,11 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
             res.set_content(dump_safe(err), "application/json");
             return false;
         }
+    }
+
+    if (const std::string range = out_of_range_message(body); !range.empty()) {
+        send_json_error(res, 400, "invalid_request_error", range);
+        return false;
     }
 
     if (!validate_constraints(body, res))
