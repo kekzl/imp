@@ -584,5 +584,26 @@ TEST(SchemaAdditionalProperties, DeclaredPropertiesStayStrictWhenKeywordAbsent) 
     EXPECT_FALSE(sc->token_legal(R"({"a":"x","b":"y"})"));
 }
 
+// The mask's first/second-byte prefilter may only skip tokens token_legal rejects: at each
+// step an allowed token is token_legal, and the walk token of a conforming document is allowed.
+TEST(SchemaConstrainPropertyTest, PrefilteredMaskMatchesTokenLegal) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"mode":{"enum":["append","apply","nop"]}},
+                           "required":["mode"]})");
+    ASSERT_NE(sc, nullptr);
+    const std::vector<std::string> texts = {"{", "\"", "mode", "mod",  "\":", "app", "apx",
+                                            "a", "ap", "end",  "ly",   "no",  "np",  "\"}",
+                                            "x", "}",  "\"m",  "\"mo", "\"x", "pend"};
+    const std::vector<int> walk = {0, 1, 2, 4, 1, 5, 9, 13};  // {"mode":"append"}
+    for (size_t s = 0; s < walk.size(); s++) {
+        const auto mask = sc->mask_for_test(texts);
+        for (size_t i = 0; i < texts.size(); i++) {
+            if (mask[i])
+                EXPECT_TRUE(sc->token_legal(texts[i])) << "step " << s << " allowed '" << texts[i] << "'";
+        }
+        EXPECT_TRUE(mask[walk[s]]) << "step " << s << " masked the walk token '" << texts[walk[s]] << "'";
+        sc->update(walk[s]);
+    }
+}
+
 }  // namespace
 }  // namespace imp

@@ -1,6 +1,7 @@
 #include "compute/schema_constrain.h"
 #include "compute/json_constrain.h"  // reuse token category definitions
 #include "compute/constrain_common.h"
+#include "compute/schema_xml_delim.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -46,17 +47,6 @@ static int effective_max_items(const SchemaNode* root, const SchemaNode* array_n
 static const char* const kXmlFnOpen = "<function=";
 static const std::string kXmlParamOpen = "\n<parameter=";
 static const std::string kXmlFnClose = "\n</function>";
-static const std::string kXmlParamDelim = "\n</parameter>";
-
-// Delimiter tracker for the raw-value phase: one KMP step over the delimiter. Chars are
-// never rejected (any text is a legal value); a dead partial match falls back and retries.
-// Relies on the delimiter's first char '\n' appearing nowhere else in it, making every
-// KMP border 0 - a mismatch can only ask "did this char restart a match".
-static int xml_delim_step(const std::string& target, int len, char c) {
-    if (len < static_cast<int>(target.size()) && c == target[len])
-        return len + 1;
-    return c == target[0] ? 1 : 0;
-}
 
 // Chosen tool's parameter schema for an XML body frame (root defs entry). REVERSE scan:
 // hoisted "<tool>/<def>" entries precede tool entries, so a tool whose name collides with
@@ -453,115 +443,6 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             return CAT_WHITESPACE;
     }
     return 0xFFFF;
-}
-
-// ---------------------------------------------------------------------------
-// Compute per-token allow mask (for key names and enum values)
-// ---------------------------------------------------------------------------
-
-void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
-    need_token_allow_ = false;
-
-    if (stack_.empty())
-        return;
-
-    // Full per-token legality: a candidate is allowed only if simulating its whole text stays
-    // legal at every char - catches multi-char tokens spanning phase transitions (`{}` on
-    // unmet required keys, `":"` as a bogus enum value, `0.98` for an integer) that the
-    // first-char category mask misses. Category mask still runs alongside (governs
-    // EOS/whitespace/structural first-char); a token must pass BOTH.
-    // Cost control (runs per decode step over the whole vocab; token_legal deep-copies the
-    // frame stack per candidate): category prefilter skips simulation for tokens the category
-    // mask already fails; in a free string value, any token without '"','\\' or a raw control
-    // char stays inside the string by construction, so simulation is skipped (pattern/enum/key
-    // strings still simulate).
-    need_token_allow_ = true;
-    const SchemaPhase phase = top().phase;
-    // A free value whose grammar sits inside a string is the same regime as a
-    // schema-described free string, and string content is most of what a free
-    // value costs, so give it the same O(1) shortcut (#1729).
-    const bool free_value_phase = (phase == SchemaPhase::FREE_VALUE);
-    const bool free_string = (phase == SchemaPhase::STRING_VALUE) ||
-                             (free_value_phase &&
-                              top().free_grammar.current_state == JsonState::IN_STRING);
-    // XML cost control: XML phases delegate the whole vocab to per-token simulation
-    // (category 0xFFFF), which deep-copies the frame stack per candidate (unchecked, near the
-    // full vocab per step). Two shortcuts: tag phases probe all 256 first chars once on a
-    // cloned stack and reject by first byte; open raw values accept any text and are illegal
-    // only if the "\n</parameter>" delimiter completes inside them (run the int-only delimiter
-    // automaton first; only completing tokens pay the full simulation).
-    const bool xml_raw = (phase == SchemaPhase::XML_RAW_VALUE);
-    // An enum-typed value is not free text: it takes the per-token simulation below.
-    const bool xml_raw_open = xml_raw && top().xml_value_open && !top().xml_enum;
-    // The envelope phases and the XML body's VALUE_START are the same
-    // full-vocab-delegation regime (category 0xFFFF) with a 1-2 char legal
-    // set — include them in the first-byte prefilter.
-    const bool xml_tag_phase = phase == SchemaPhase::XML_FN_OPEN || phase == SchemaPhase::XML_FN_NAME ||
-                               phase == SchemaPhase::XML_PARAMS || phase == SchemaPhase::XML_PARAM_KEY ||
-                               (xml_raw && (!top().xml_value_open || top().xml_enum)) ||
-                               phase == SchemaPhase::ENVELOPE_OPEN || phase == SchemaPhase::ENVELOPE_CLOSE ||
-                               (phase == SchemaPhase::VALUE_START && top().node &&
-                                top().node->type == SchemaType::XML_TOOL_CALL);
-    // FREE_VALUE delegates the whole vocabulary to the simulation exactly as the
-    // XML phases do, so it needs the same first-byte prefilter or it pays ~150k
-    // stack copies per decode step.
-    const bool first_byte_prefilter = xml_tag_phase || free_value_phase || phase == SchemaPhase::ENUM_LITERAL;
-    bool first_ok[256];
-    if (first_byte_prefilter) {
-        for (int c = 0; c < 256; c++) {
-            std::vector<SchemaFrame> probe = stack_;
-            first_ok[c] = sim_advance(probe, static_cast<char>(c));
-        }
-    }
-    for (int i = 0; i < vocab_size_; i++) {
-        if ((token_categories_[i] & cat_mask) == 0) {
-            token_allow_[i] = 0;  // masked by category — simulation irrelevant
-            continue;
-        }
-        const std::string& text = token_texts_[i];
-        if (first_byte_prefilter && !text.empty() &&
-            !first_ok[static_cast<unsigned char>(text[0])]) {
-            token_allow_[i] = 0;
-            continue;
-        }
-        if (xml_raw_open && !text.empty()) {
-            int m = top().xml_delim_match;
-            bool completes = false;
-            for (char ch : text) {
-                m = xml_delim_step(kXmlParamDelim, m, ch);
-                if (m == static_cast<int>(kXmlParamDelim.size())) {
-                    completes = true;
-                    break;
-                }
-            }
-            token_allow_[i] = completes ? (token_legal(text) ? 1 : 0) : 1;
-            continue;
-        }
-        if (free_string && !text.empty()) {
-            bool plain = true;
-            for (char c : text) {
-                if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20) {
-                    plain = false;
-                    break;
-                }
-            }
-            if (plain) {
-                token_allow_[i] = 1;
-                continue;
-            }
-        }
-        token_allow_[i] = token_legal(text) ? 1 : 0;
-    }
-    // EOS must not stop generation mid-value: its rendered text ("<|im_end|>") would pass the
-    // anything-goes value scan above, so this check runs post-loop. The hazard is not XML-only
-    // (#1199): "<|im_end|>" is plain ASCII, so classify_token tags it CAT_STRING_CHAR and the
-    // category mask does not govern it inside a string. A model reaching EOS mid-string ended
-    // the request with the document open, returning a 200 with invalid JSON.
-    // Unconditional is correct: this function only runs on a non-empty stack; apply_mask
-    // returns earlier when the root value is complete, the one place EOS is legal.
-    for (int32_t e : eos_tokens_)
-        if (e >= 0 && e < vocab_size_)
-            token_allow_[e] = 0;
 }
 
 // ---------------------------------------------------------------------------

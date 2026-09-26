@@ -288,6 +288,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/json_constrain.cu
     src/compute/json_schema.cpp
     src/compute/schema_constrain.cu
+    src/compute/schema_constrain_mask.cpp
     src/compute/moe_routing.cu
     src/compute/ssm.cu
     src/compute/ssm_scan_reg.cu

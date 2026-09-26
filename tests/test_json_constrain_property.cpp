@@ -525,5 +525,23 @@ TEST(JsonConstrainFsm, AcceptsUmlautsInsideStrings) {
     EXPECT_TRUE(fsm.sim_token_valid("ö")) << "lone umlaut rejected inside a string";
 }
 
+// The mask's first/second-byte prefilter may only skip tokens sim_token_valid rejects: at each
+// step an allowed token simulates legal, and the walk token of a valid document is allowed.
+TEST(JsonConstrainFsm, PrefilteredMaskMatchesSimulation) {
+    JsonConstrainer c;
+    const std::vector<std::string> texts = {"{", "\"a", "\"", "a", "\":", "true", "tx", "}",
+                                            "1", "12",  "1.", ".", "\"}", "x",    "{}", "\"a\""};
+    const std::vector<int> walk = {0, 1, 4, 5, 7};  // {"a":true}
+    for (size_t s = 0; s < walk.size(); s++) {
+        const auto mask = c.mask_for_test(texts);
+        for (size_t i = 0; i < texts.size(); i++) {
+            if (mask[i])
+                EXPECT_TRUE(c.sim_token_valid(texts[i])) << "step " << s << " allowed '" << texts[i] << "'";
+        }
+        EXPECT_TRUE(mask[walk[s]]) << "step " << s << " masked the walk token '" << texts[walk[s]] << "'";
+        c.update(walk[s]);
+    }
+}
+
 }  // namespace
 }  // namespace imp

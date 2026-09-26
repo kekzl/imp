@@ -130,6 +130,9 @@ public:
     // apply_mask() needs an initialised GPU vocabulary, but the force-close narrowing (#1104)
     // lives in this mask, not the grammar simulator, so sim_token_valid() cannot observe it.
     uint16_t allowed_categories_for_test() const { return compute_allowed_mask(); }
+    // CPU tests: `texts` become the vocab (ids = indices, no device buffers); returns the
+    // per-token allow list apply_mask would upload for the current state.
+    std::vector<uint8_t> mask_for_test(const std::vector<std::string>& texts);
 
     // Advance the FSM over raw text (tests use this to reach mid-document
     // states; the decode path goes through update()).
@@ -181,6 +184,9 @@ private:
 
     // Per-token whole-token-validated allow list (host side)
     std::vector<uint8_t> token_allow_;
+    // 1 = has '"', '\\' or a control byte (simulated inside strings). Built on first mask.
+    std::vector<uint8_t> token_needs_sim_;
+    size_t build_token_allow(uint16_t mask, int n_classified);
     // categories + allowed-mask + token-allow, one lifetime (F-18)
     ConstrainDeviceBuffers dev_;
     std::vector<int32_t> eos_ids_;
