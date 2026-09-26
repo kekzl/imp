@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- The built-in web UI showed markdown links as raw `[text](url)`; http(s) links now render (new tab, `noopener`), any other scheme stays text, and links inside code stay code. `tools/imp-server/webui/dev/markup_test.js` (11 renderer cases in node, no GPU).
 - The built-in web UI showed markdown tables as raw `| a | b |` lines (its renderer knew code, bold, italic and headings only); GFM tables now render. Qwen3.8 "put the result in a markdown table" in an 8-turn real chat: raw pipes -> table.
 - `/v1/completions` sent a text prompt without the BOS its tokenizer asks for (`add_bos_token`; the chat path gets it from the template). Gemma-4 UD-Q4_K_M answered "The capital of France is" with " is is is is ..."; now "The capital of France is **Paris**.". Token-id prompts stay as given; Qwen (no BOS) unchanged.
 - Structured output on text-level thinkers (Nemotron-3-Nano: `<think>` is a plain token): thinking stayed on by template default and the JSON constraint engaged mid-reasoning, so no JSON came back in 5/10 `json_object` and 8/10 `json_schema` replies at temperature 0.7. Their template now gets thinking off under a constraint, as special-token thinkers did since #1431: 0/10 and 0/10.
