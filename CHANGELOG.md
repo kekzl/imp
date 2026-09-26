@@ -18,6 +18,7 @@ there instead of retelling it.
 - 12 orphaned files: the root `./imp` compose wrapper, `bench/docker-compose.bench.yml`, `bench/vllm_bench_pp512.py`, 5 `tools/analysis` sweeps, 3 `tools/mutation` probes, a redundant `.gitkeep`.
 
 ### Fixed
+- `/v1/completions` refused every list `prompt` with a raw `[json.exception.type_error.302]` 400. Token-id lists (lm-eval `local-completions`) and one-element lists now run; the token-id prompt returns the same text as its string at temperature 0. A batch of prompts is a named 400. `ParseCompletionPrompt.*`.
 - `chat_template_kwargs.enable_thinking` (vLLM/SGLang form, OpenAI SDK `extra_body`) was ignored: Qwen3.8 reasoned with it `false`, and `tools/analysis/agentic_compare.py --thinking-off` measured thinking on. Read when the top-level field is absent.
 - Non-streaming `stop` sequences matched the reasoning too: a stop the model quoted while thinking ended the request with empty `content` and `imp_finish_detail: reasoning_budget_exhausted`. Now the answer only, as streaming did.
 - Streaming with thinking off sent an answer that starts with an emoji entirely to `reasoning_content` (39 of 39 tokens, `content` empty): the held first UTF-8 byte read as an empty think opener. Stream and non-stream now return the same text at a fixed seed (4 of 4 cases, was 2).

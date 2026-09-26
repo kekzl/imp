@@ -11,6 +11,7 @@
 
 #include "utils.h"            // tools/imp-server/utils.h
 #include "logit_bias.h"       // tools/imp-server/logit_bias.h
+#include "completion_prompt.h"  // tools/imp-server/completion_prompt.h
 #include "reasoning_split.h"  // StreamReasoningSplitter (shared streaming demux)
 
 namespace {
@@ -374,6 +375,39 @@ TEST(StreamReasoningSplit, PassThroughInContentPhase) {
 
 // OpenAI compliance helpers (utils.cpp): max_completion_tokens precedence and the 16-entry
 // stop-sequence cap used by parse_chat_request_params.
+
+// /v1/completions prompt shapes. A list was a raw 400 "[json.exception.type_error.302] type must be
+// string, but is array"; lm-eval local-completions sends token ids.
+TEST(ParseCompletionPrompt, AcceptsStringIdsAndOneElementLists) {
+    for (const json& p : {json("hi"), json::array({"hi"})}) {
+        std::string text;
+        std::vector<int32_t> ids;
+        EXPECT_EQ(parse_completion_prompt({{"prompt", p}}, text, ids), "") << p.dump();
+        EXPECT_EQ(text, "hi");
+        EXPECT_TRUE(ids.empty());
+    }
+    for (const json& p : {json::array({1, 2, 3}), json::array({json::array({1, 2, 3})})}) {
+        std::string text;
+        std::vector<int32_t> ids;
+        EXPECT_EQ(parse_completion_prompt({{"prompt", p}}, text, ids), "") << p.dump();
+        EXPECT_EQ(ids, (std::vector<int32_t>{1, 2, 3}));
+        EXPECT_TRUE(text.empty());
+    }
+}
+
+TEST(ParseCompletionPrompt, RefusesBatchesAndMalformedShapesByName) {
+    std::string text;
+    std::vector<int32_t> ids;
+    EXPECT_NE(parse_completion_prompt({{"prompt", json::array({"a", "b"})}}, text, ids).find("batch"), std::string::npos);
+    EXPECT_NE(parse_completion_prompt({{"prompt", json::array({json::array({1}), json::array({2})})}}, text, ids).find("batch"),
+              std::string::npos);
+    for (const json& body : {json::object(), json{{"prompt", ""}}, json{{"prompt", 5}}, json{{"prompt", json::array()}},
+                             json{{"prompt", json::array({1, -2})}}, json{{"prompt", json::array({1, "x"})}}}) {
+        const std::string err = parse_completion_prompt(body, text, ids);
+        EXPECT_NE(err.find("\"prompt\" is required"), std::string::npos) << body.dump() << " -> " << err;
+    }
+    EXPECT_TRUE(text.empty() && ids.empty());
+}
 
 TEST(ParseMaxTokensField, DefaultWhenAbsent) {
     EXPECT_EQ(parse_max_tokens_field(json::object(), 8192), 8192);
