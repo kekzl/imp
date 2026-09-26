@@ -756,6 +756,12 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     if (!prompt_ids.empty())
         prompt = snap_tok->decode(prompt_ids);
     std::vector<int32_t> tokens = prompt_ids.empty() ? snap_tok->encode(prompt) : prompt_ids;
+    // A raw text prompt gets the BOS the tokenizer asks for (add_bos_token; llama.cpp and vLLM do the
+    // same); the chat path gets it from its template. Without it Gemma-4 answered "The capital of
+    // France is" with " is is is ...". Token-id prompts are taken as given.
+    if (prompt_ids.empty() && snap_tok->add_bos() && snap_tok->bos_id() >= 0 &&
+        (tokens.empty() || tokens.front() != snap_tok->bos_id()))
+        tokens.insert(tokens.begin(), snap_tok->bos_id());
     int n_prompt_tokens = static_cast<int>(tokens.size());
 
     // Server-side input-token limit (--max-input-tokens). Reject pre-prefill.
