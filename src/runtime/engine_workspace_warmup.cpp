@@ -552,7 +552,8 @@ void Engine::warmup() {
     if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs && prewarm_n > 1) {
         const auto t0 = std::chrono::steady_clock::now();
         const int n = prewarm_n;
-        const int anchor_len = std::min(1000, std::max(16, config_.max_seq_len - 64));
+        const int anchor_budget = 2 * n + 8;
+        const int anchor_len = std::min(1000, std::max(16, config_.max_seq_len - std::max(64, anchor_budget)));
         std::vector<std::shared_ptr<Request>> reqs;
         reqs.reserve(n);
         for (int i = 0; i < n; i++) {
@@ -567,14 +568,16 @@ void Engine::warmup() {
             // The +4 base keeps the shortest request alive across the chunked-prefill window
             // where late requests still prefill while early ones already decode; a base of 2 let
             // the first request finish before the batch assembled fully, so size n never captured.
-            req->max_tokens = is_anchor ? n + 8 : i + 4;
+            // Budgets step by 2: a size held for one decode step did not capture (Qwen3.8-27B:
+            // 16/28, every other size missing); two steps per size capture 28/28.
+            req->max_tokens = is_anchor ? anchor_budget : 2 * i + 4;
             req->temperature = 0.0f;
             req->ignore_eos = true;
             scheduler_->add_request(req);
             reqs.push_back(std::move(req));
         }
-        // n+2 decode steps finish the whole ladder; prefill takes a few more.
-        const int step_budget = 4 * n + 32;
+        // 2n+8 decode steps finish the whole ladder; prefill takes a few more.
+        const int step_budget = 6 * n + 32;
         int steps = 0;
         auto unfinished = [&]() {
             for (const auto& r : reqs)
