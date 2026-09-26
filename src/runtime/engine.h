@@ -235,6 +235,8 @@ public:
     // Only valid when the loaded model is encoder-only (profile().is_encoder).
     bool encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out);
     bool is_encoder_model() const { return encoder_ws_storage_ != nullptr; }
+    // Tokens one encoder_embed call can take, [CLS]/[SEP] included (0 = not an encoder).
+    int encoder_max_tokens() const;
 
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id,
