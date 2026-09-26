@@ -27,11 +27,13 @@ public:
                     int eos_id);
 
     // Load BPE merge rules (for GPT2-style tokenizers)
-    void load_merges(const std::vector<std::string>& merges);
+    void load_merges(const std::vector<std::string>& merges, bool build_pairs = true);
 
     // Set tokenizer type: "spm" (SentencePiece) or "gpt2" (byte-level BPE)
     void set_type(const std::string& type) { type_ = type; }
     const std::string& type() const { return type_; }
+    bool nfc() const { return nfc_; }
+    void set_nfc(bool v) { nfc_ = v; }
 
     // Control BOS token prepending
     void set_add_bos(bool add) { add_bos_ = add; }
@@ -167,9 +169,20 @@ private:
     bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
     std::string chat_template_str_;          // Raw Jinja2 template from GGUF
+    // encode() applies NFC. tokenizer.json sets it from `normalizer` (HF: null / Replace do not
+    // compose, so gpt-oss / Nemotron / Phi-4 / Gemma-4 see NFD input as-is); GGUF: Qwen pre only.
+    bool nfc_ = true;
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
     std::unordered_map<std::string, int> merge_ranks_;
+    // Id form of merge_ranks_ for encode_gpt2: (left id << 32 | right id) -> {rank, merged id}.
+    // Valid only when every merge of two vocab tokens yields a vocab token. byte_ids_ -1: byte has
+    // no token, a chunk containing it takes the string path.
+    std::unordered_map<uint64_t, std::pair<int, int32_t>> merge_pairs_;
+    int32_t byte_ids_[256] = {};
+    bool merge_pairs_ok_ = false;
+    void build_merge_pairs();
+    void bpe_gpt2_ids(const std::string& chunk, std::vector<int32_t>& out) const;
 
     // Per-token type from GGUF (NORMAL=1, CONTROL=3, etc.). Empty if not available.
     std::vector<int32_t> token_types_;
@@ -196,5 +209,9 @@ std::vector<std::string> o200k_pre_tokenize(const std::string& text);
 // cl100k pre-tokenizer scan (GPT-4/tiktoken lineage, Phi-4; #657): qwen2
 // rules with digit groups of up to three. Exposed for unit tests.
 std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
+
+// NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
+// and algorithmic Hangul L+V(+T). Exposed for unit tests.
+std::string nfc_normalize(const std::string& text);
 
 }  // namespace imp
