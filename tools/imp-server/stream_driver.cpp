@@ -44,6 +44,24 @@ imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestConte
     return split;
 }
 
+const char* nonstream_should_stop_(ServerState& state, ServerRequest& sr,
+                                   std::chrono::steady_clock::time_point start,
+                                   const std::function<bool()>& client_gone) {
+    const char* finish = nullptr;
+    if (state.request_timeout > 0 && std::chrono::steady_clock::now() - start > std::chrono::seconds(state.request_timeout)) {
+        state.metrics.requests_timed_out++;
+        finish = "length";
+    } else if (client_gone && client_gone()) {
+        state.metrics.requests_cancelled++;
+        finish = "cancelled";
+    }
+    if (finish) {
+        sr.cancel();
+        state.metrics.observe_unadmitted_queue_wait(sr.t_submit, sr.queue_ms.load(std::memory_order_relaxed));
+    }
+    return finish;
+}
+
 bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state) {
     return !ctx.params.stop_sequences.empty() && ctx.snap.tpl_family != imp::ChatTemplateFamily::HARMONY &&
            (ctx.snap.is_think_model || ctx.snap.enable_thinking) && state.default_args.reasoning_format == "deepseek";

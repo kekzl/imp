@@ -288,6 +288,9 @@ void BatchingEngine::worker_loop() {
 
         if (active_requests_.empty()) {
             decode_batch_last.store(0, std::memory_order_relaxed);
+            // The split below runs only while something is active: idle, imp_queue_running kept the
+            // last batch's count (1 after every single request).
+            queue_running.store(0, std::memory_order_relaxed);
             continue;
         }
 

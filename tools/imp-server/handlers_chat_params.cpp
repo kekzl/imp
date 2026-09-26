@@ -57,6 +57,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         ctx.log_client_request_id = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
     ctx.trace.traceparent = req.get_header_value("traceparent");
     ctx.log_raw_body = req.body;
+    ctx.client_gone = req.is_connection_closed;
     ctx.log_skip = g_in_anthropic_shim;
 
     // #1607: bound the nesting before any recursive parser sees it.

@@ -96,6 +96,7 @@ struct CompletionCtx {
     bool req_logprobs;
     bool snap_is_think_model;
     bool ignore_eos;
+    std::function<bool()> client_gone;  // req.is_connection_closed
 };
 
 // SSE path. The body is the move-verbatim contents of the old `if (stream)`
@@ -457,18 +458,8 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
     double ttft_ms = -1.0;
     auto t_prev_token = t_start;  // last delivered token (ITL)
     for (;;) {
-        if (state.request_timeout > 0) {
-            auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
-            if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                server_req->cancel();
-                state.metrics.requests_timed_out++;
-                state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
-                                                            server_req->queue_ms.load(
-                                                                std::memory_order_relaxed));
-                finish = "length";
-                break;
-            }
-        }
+        if ((finish = nonstream_should_stop_(state, *server_req, ns_comp_start, c.client_gone)))
+            break;
 
         TokenEvent evt{};
         if (!server_req->pop_token(evt)) {
@@ -889,7 +880,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                              include_usage,
                              req_logprobs,
                              snap_is_think_model,
-                             ignore_eos};
+                             ignore_eos,
+                             req.is_connection_closed};
     if (stream) {
         stream_completion_response_(res, state, cctx, server_req);
     } else {
