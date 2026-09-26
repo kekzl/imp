@@ -153,6 +153,25 @@ TEST(SchedulerTest, RemovesFinishedRequests) {
     sched.schedule(prefill, decode);
     EXPECT_EQ(sched.active_count(), 1);
 }
+// The recurrent-slot admission gate counts active_ids() without a slot as waiting for one. A
+// finished request stays in active_ until the next schedule() and released its slot: counting it
+// shifted the gate onto a deeper slot, or past pos < 0 where it admits unchecked.
+TEST(SchedulerTest, ActiveIdsSkipFinishedAndCancelled) {
+    Scheduler sched(4);
+    std::vector<std::shared_ptr<Request>> reqs;
+    for (int id : {11, 12, 13}) {
+        auto r = std::make_shared<Request>();
+        r->id = id;
+        r->input_tokens = {1};
+        sched.add_request(r);
+        reqs.push_back(r);
+    }
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    reqs[0]->status = RequestStatus::FINISHED;
+    reqs[1]->status = RequestStatus::CANCELLED;
+    EXPECT_EQ(sched.active_ids(), std::vector<int>{13}) << "before the next schedule() erases them";
+}
 // 10. Memory-aware scheduling
 TEST(SchedulerTest, MemoryAwareScheduling) {
     // Admission is bookkeeping: memory-aware tests build an accounting cache (block ids/counts,

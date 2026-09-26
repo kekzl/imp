@@ -286,8 +286,11 @@ int Scheduler::pending_count() const { return static_cast<int>(pending_.size());
 std::vector<int> Scheduler::active_ids() const {
     std::vector<int> ids;
     ids.reserve(active_.size());
+    // Finished/cancelled requests linger in active_ until the next schedule() erases them; they
+    // released their slot and are not waiting for one.
     for (const auto& r : active_)
-        ids.push_back(r->id);
+        if (r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED)
+            ids.push_back(r->id);
     return ids;
 }
 int Scheduler::active_evicted_count() const {
