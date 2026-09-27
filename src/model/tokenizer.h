@@ -8,6 +8,8 @@
 
 namespace imp {
 
+struct SplitSequence;  // tokenizer_pretok.cpp
+
 // #1606: largest token id a tokenizer.json may declare. Ids arrive as JSON doubles and
 // index vocab_/scores_/token_types_ directly, needing both bounds: below zero is an OOB
 // write, near INT_MAX the max_id+1 sizing wraps. 4M is ~16x the largest shipped vocabulary
@@ -169,6 +171,7 @@ private:
 
     std::string type_ = "spm";   // "spm" or "gpt2"
     std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
+    std::shared_ptr<const SplitSequence> split_seq_;  // pre_tokenizer_ == "split-seq"
     bool add_bos_ = true;
     bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
@@ -214,6 +217,12 @@ std::vector<std::string> qwen35_pre_tokenize(const std::string& text);
 std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
 std::vector<std::string> o200k_pre_tokenize(const std::string& text);
 std::vector<std::string> nemotron_pre_tokenize(const std::string& text);
+
+// tokenizer.json pre-tokenizer given as a Sequence of Split(Isolated) regexes plus Digits
+// (DeepSeek-V2 / Coder-V2). Steps: "re:<regex>" or "digits:<individual 0|1>". Accepts only the
+// regex forms it can match exactly ([\s?]<class>[+], \s+$); nullptr otherwise.
+std::shared_ptr<const SplitSequence> compile_split_sequence(const std::vector<std::string>& steps);
+std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, const std::string& text);
 
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.

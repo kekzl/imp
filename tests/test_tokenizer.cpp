@@ -860,6 +860,48 @@ TEST(PreTokenizeUnicodeTest, CasedRunsUseUnicodeCase) {
 }
 #undef EMOJI
 
+// DeepSeek-V2-shaped Split sequence. Truths: HF tokenizers 0.23.2 pre_tokenize_str on
+// Sequence([Split(r, "isolated") for r in the steps] + [Digits(individual_digits=True)]).
+TEST(PreTokenizeSplitSequenceTest, MatchesHfOnDeepSeekShapedSteps) {
+    auto seq = compile_split_sequence({"re:[\r\n]", "re:\\s?[A-Za-z\xc3\x80-\xc3\xbf]+",
+                                       "re:\\s?[!-/:-~\xe3\x80\x80-\xe3\x80\x82]+", "re:\\s+$",
+                                       "re:[\xe4\xb8\x80-\xe9\xbe\xa5]+", "digits:1"});
+    ASSERT_NE(seq, nullptr);
+    auto split = [&](const std::string& s) { return split_sequence_pre_tokenize(*seq, s); };
+    EXPECT_EQ(split("  two leading"), (Chunks{" ", " two", " leading"}));
+    EXPECT_EQ(split("Hello, world!\n"), (Chunks{"Hello", ",", " world", "!", "\n"}));
+    EXPECT_EQ(split("x = 12345;  "), (Chunks{"x", " =", " ", "1", "2", "3", "4", "5", ";", "  "}));
+    EXPECT_EQ(split("\xe4\xb8\xad\xe6\x96\x87"
+                    "abc\xe3\x80\x82"),
+              (Chunks{"\xe4\xb8\xad\xe6\x96\x87", "abc", "\xe3\x80\x82"}));
+    EXPECT_EQ(split("caf\xc3\xa9  \xc3\xa9t\xc3\xa9  "),
+              (Chunks{"caf", "\xc3\xa9", " ", " \xc3\xa9", "t", "\xc3\xa9", "  "}));
+    EXPECT_EQ(split("a\xe3\x80\x80"
+                    "b"),
+              (Chunks{"a",
+                      "\xe3\x80\x80"
+                      "b"}));  // U+3000 is the \s of \s?
+    EXPECT_EQ(split("ab  \n  cd"), (Chunks{"ab", "  ", "\n", " ", " cd"}));
+    EXPECT_EQ(split(" \xc2\xb2x"), (Chunks{" ", "\xc2\xb2", "x"}));  // U+00B2 is a Digits piece
+}
+
+// Onig (Ruby syntax) $ also matches before any "\n", not only at the end.
+TEST(PreTokenizeSplitSequenceTest, TrailingSpaceDollarIsEndOfLine) {
+    auto seq = compile_split_sequence({"re:\\s+$"});
+    ASSERT_NE(seq, nullptr);
+    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "ab  \ncd"), (Chunks{"ab", "  ", "\ncd"}));
+    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "ab \t\n\ncd  "), (Chunks{"ab", " \t\n", "\ncd", "  "}));
+    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "a  b"), (Chunks{"a  b"}));
+}
+
+TEST(PreTokenizeSplitSequenceTest, RefusesRegexItCannotMatchExactly) {
+    EXPECT_EQ(compile_split_sequence({"re:\\p{L}+"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({"re:[^a-z]+"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({"re:[a-z]+|[0-9]+"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({"!"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({}), nullptr);
+}
+
 // HF matches an added token atomically iff normalized=false (special only governs decode
 // -skipping). Qwen3's <think>/</think>/<tool_call> ship special=false, normalized=false and
 // MUST tokenize atomically, not BPE-split; a regression breaks the <think>-as-stop-token

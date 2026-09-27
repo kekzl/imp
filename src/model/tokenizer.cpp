@@ -644,13 +644,33 @@ bool Tokenizer::load(const std::string& path) {
         } else if (pt_type == "Sequence") {
             // Check inner pre-tokenizers for ByteLevel or Metaspace
             const JValue* pretoks = jobj_find(*pre_tok, "pretokenizers");
+            // Steps for a regex list no family scanner covers (DeepSeek-V2); "!" = not expressible.
+            std::vector<std::string> split_steps;
+            bool byte_level_regex = false;
             if (pretoks && pretoks->type == JType::ARRAY) {
                 for (const auto& pt : pretoks->arr) {
                     if (pt.type != JType::OBJECT)
                         continue;
                     std::string inner_type;
                     jobj_get_string(pt, "type", inner_type);
+                    if (inner_type == "Digits") {
+                        const JValue* ind = jobj_find(pt, "individual_digits");
+                        split_steps.push_back(ind && ind->type == JType::NUMBER && ind->num_val != 0.0
+                                                  ? "digits:1"
+                                                  : "digits:0");
+                        continue;
+                    }
                     if (inner_type == "Split") {
+                        std::string behavior, rx_step;
+                        jobj_get_string(pt, "behavior", behavior);
+                        const JValue* inv = jobj_find(pt, "invert");
+                        const JValue* pat = jobj_find(pt, "pattern");
+                        if (pat && pat->type == JType::OBJECT && jobj_get_string(*pat, "Regex", rx_step) &&
+                            behavior == "Isolated" &&
+                            !(inv && inv->type == JType::NUMBER && inv->num_val != 0.0))
+                            split_steps.push_back("re:" + rx_step);
+                        else
+                            split_steps.push_back("!");
                         // The Split step's regex names the family (tokenizer_pretok.cpp); an unmatched
                         // regex falls to gpt2_pre_tokenize (#657). Case classes: o200k (contractions)
                         // or Nemotron-H (none, single digits); else digit triples: cl100k; [\p{L}\p{M}]+
@@ -677,6 +697,8 @@ bool Tokenizer::load(const std::string& path) {
                             add_space_prefix_ = (prefix->num_val != 0.0);
                         else
                             add_space_prefix_ = false;
+                        const JValue* ur = jobj_find(pt, "use_regex");
+                        byte_level_regex = !ur || ur->type != JType::NUMBER || ur->num_val != 0.0;
                         break;
                     }
                     if (inner_type == "Metaspace") {
@@ -686,6 +708,15 @@ bool Tokenizer::load(const std::string& path) {
                             add_space_prefix_ = (prefix->num_val != 0.0);
                         break;
                     }
+                }
+                if (pre_tokenizer_.empty() && !split_steps.empty() && !byte_level_regex && type_ == "gpt2") {
+                    split_seq_ = compile_split_sequence(split_steps);
+                    if (split_seq_)
+                        pre_tokenizer_ = "split-seq";
+                    else
+                        IMP_LOG_WARN(
+                            "tokenizer.json: pre-tokenizer regex list not supported, using the generic "
+                            "split");
                 }
             }
         }
@@ -1477,6 +1508,8 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             chunks = nemotron_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "cl100k") {
             chunks = cl100k_pre_tokenize(bpe_text);
+        } else if (pre_tokenizer_ == "split-seq" && split_seq_) {
+            chunks = split_sequence_pre_tokenize(*split_seq_, bpe_text);
         } else {
             chunks = gpt2_pre_tokenize(bpe_text);
         }

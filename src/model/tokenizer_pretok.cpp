@@ -3,7 +3,10 @@
 #include "model/tokenizer.h"
 #include "model/unicode_class.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -209,6 +212,190 @@ std::vector<std::string> o200k_pre_tokenize(const std::string& text) {
 
 std::vector<std::string> nemotron_pre_tokenize(const std::string& text) {
     return scan(text, {Contractions::kNone, true, false, 1, true});
+}
+
+// ---- Split sequence (DeepSeek-V2): each step re-splits every piece, matches isolated ----
+
+struct SplitSequence {
+    enum class Kind { kClass, kTrailingSpace, kDigits };
+    struct Step {
+        Kind kind;
+        bool opt_space = false;                             // leading \s?
+        bool plus = false;                                  // class+ (else one codepoint)
+        bool individual = false;                            // Digits: one piece per digit
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;  // sorted, inclusive
+    };
+    std::vector<Step> steps;
+};
+
+namespace {
+
+using Step = SplitSequence::Step;
+using Kind = SplitSequence::Kind;
+
+// "[...]" with literal codepoints, ranges and \r \n \t \\ \- \[ \] escapes; no negation, no classes.
+bool parse_class(const std::string& rx, size_t& i, std::vector<std::pair<uint32_t, uint32_t>>& out) {
+    if (i >= rx.size() || rx[i] != '[' || (i + 1 < rx.size() && rx[i + 1] == '^'))
+        return false;
+    i++;
+    auto next_cp = [&](uint32_t& cp) {
+        size_t len;
+        if (rx[i] == '\\') {
+            if (i + 1 >= rx.size())
+                return false;
+            const char e = rx[i + 1];
+            cp = e == 'r' ? '\r' : e == 'n' ? '\n' : e == 't' ? '\t' : static_cast<unsigned char>(e);
+            if (!(e == 'r' || e == 'n' || e == 't' || e == '\\' || e == '-' || e == '[' || e == ']'))
+                return false;
+            i += 2;
+            return true;
+        }
+        cp = decode_utf8_at(rx, i, &len);
+        i += len;
+        return true;
+    };
+    while (i < rx.size() && rx[i] != ']') {
+        uint32_t lo, hi;
+        if (!next_cp(lo))
+            return false;
+        hi = lo;
+        if (i + 1 < rx.size() && rx[i] == '-' && rx[i + 1] != ']') {
+            i++;
+            if (!next_cp(hi) || hi < lo)
+                return false;
+        }
+        out.emplace_back(lo, hi);
+    }
+    if (i >= rx.size() || out.empty())
+        return false;
+    i++;  // ']'
+    std::sort(out.begin(), out.end());
+    return true;
+}
+
+bool parse_step(const std::string& spec, Step& st) {
+    if (spec.rfind("digits:", 0) == 0) {
+        st.kind = Kind::kDigits;
+        st.individual = spec == "digits:1";
+        return true;
+    }
+    if (spec.rfind("re:", 0) != 0)
+        return false;
+    const std::string rx = spec.substr(3);
+    if (rx == "\\s+$") {
+        st.kind = Kind::kTrailingSpace;
+        return true;
+    }
+    st.kind = Kind::kClass;
+    size_t i = 0;
+    if (rx.rfind("\\s?", 0) == 0) {
+        st.opt_space = true;
+        i = 3;
+    }
+    if (!parse_class(rx, i, st.ranges))
+        return false;
+    if (i < rx.size() && rx[i] == '+') {
+        st.plus = true;
+        i++;
+    }
+    return i == rx.size();
+}
+
+bool in_ranges(const Step& st, uint32_t cp) {
+    auto it = std::upper_bound(st.ranges.begin(), st.ranges.end(), std::make_pair(cp, UINT32_MAX));
+    return it != st.ranges.begin() && cp <= (it - 1)->second;
+}
+
+bool space_at(const std::string& s, size_t k, size_t* len) {
+    return (cp_class(decode_utf8_at(s, k, len)) & unicode::kSpace) != 0;
+}
+
+constexpr size_t kNoMatch = std::string::npos;
+
+size_t step_len(const std::string& t, size_t k) {
+    size_t len;
+    decode_utf8_at(t, k, &len);
+    return len;
+}
+
+// Leftmost-first match [start, end) at or after `from`, or false.
+bool find_match(const Step& st, const std::string& t, size_t from, size_t& start, size_t& end) {
+    const size_t n = t.size();
+    for (size_t i = from, len; i < n; i += len) {
+        const uint32_t cp = decode_utf8_at(t, i, &len);
+        if (st.kind == Kind::kDigits) {
+            if (!(cp_class(cp) & unicode::kNumber))
+                continue;
+            start = i;
+            end = i + len;
+            size_t l2;
+            while (!st.individual && end < n && (cp_class(decode_utf8_at(t, end, &l2)) & unicode::kNumber))
+                end += l2;
+            return true;
+        }
+        if (st.kind == Kind::kTrailingSpace) {
+            // \s+$ with Ruby $ (end of text or before "\n"): the longest such run from i.
+            size_t k = i, best = kNoMatch, l2;
+            while (k < n && space_at(t, k, &l2)) {
+                k += l2;
+                if (k == n || t[k] == '\n')
+                    best = k;
+            }
+            if (best == kNoMatch) {
+                if (k > i)
+                    len = k - i;  // every start inside this run fails the same way
+                continue;
+            }
+            start = i;
+            end = best;
+            return true;
+        }
+        size_t j = i, l2;
+        if (st.opt_space && (cp_class(cp) & unicode::kSpace) && i + len < n &&
+            in_ranges(st, decode_utf8_at(t, i + len, &l2)))
+            j = i + len;
+        else if (!in_ranges(st, cp))
+            continue;
+        start = i;
+        end = j + step_len(t, j);
+        while (st.plus && end < n && in_ranges(st, decode_utf8_at(t, end, &l2)))
+            end += l2;
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+std::shared_ptr<const SplitSequence> compile_split_sequence(const std::vector<std::string>& steps) {
+    auto seq = std::make_shared<SplitSequence>();
+    for (const auto& s : steps) {
+        Step st;
+        if (!parse_step(s, st))
+            return nullptr;
+        seq->steps.push_back(std::move(st));
+    }
+    return seq->steps.empty() ? nullptr : seq;
+}
+
+std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, const std::string& text) {
+    std::vector<std::string> pieces{text}, next;
+    for (const Step& st : seq.steps) {
+        next.clear();
+        for (const std::string& p : pieces) {
+            size_t last = 0, start, end;
+            while (find_match(st, p, last, start, end)) {
+                if (start > last)
+                    next.push_back(p.substr(last, start - last));
+                next.push_back(p.substr(start, end - start));
+                last = end;
+            }
+            if (last < p.size())
+                next.push_back(p.substr(last));
+        }
+        pieces.swap(next);
+    }
+    return pieces;
 }
 
 }  // namespace imp
