@@ -32,8 +32,8 @@ struct GEMM {
     // models. Default off.
     bool nvfp4_decode_all = false;
     // Quantize a native-precision LM head to an NVFP4 decode cache ("auto"|"on"
-    // |"off", legacy bool accepted). Excluded for GDN/SSM-hybrid models (NVFP4
-    // LM head degrades recurrent-state quality). auto = ON for native BF16/F16
+    // |"off", legacy bool accepted). GDN/SSM-hybrid models also get it while
+    // nvfp4_lm_head_gdn = true (default, below). auto = ON for native BF16/F16
     // heads and small dense GGUF heads (d_model<=4096); off for larger/MoE GGUF heads.
     std::string nvfp4_lm_head = "auto";
     // FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F): sm_120 runs
