@@ -379,10 +379,11 @@ MemBudgetStat memory_budget_stat() {
     return s;
 }
 
-void trim_device_mempool() {
+size_t trim_device_mempool() {
     // Retire pending async frees before trimming, otherwise their blocks are
     // still referenced and survive the trim.
     cudaDeviceSynchronize();
+    size_t released = 0;
     int dev = 0;
     cudaMemPool_t pool = nullptr;
     if (cudaGetDevice(&dev) == cudaSuccess &&
@@ -396,11 +397,13 @@ void trim_device_mempool() {
         IMP_LOG_INFO("mempool trim: reserved %.0f->%.0f MiB used %.0f->%.0f MiB (rc=%s)",
                      rsv_before / kMiB, rsv_after / kMiB, used_before / kMiB, used_after / kMiB,
                      cudaGetErrorString(te));
+        released = rsv_before > rsv_after ? static_cast<size_t>(rsv_before - rsv_after) : 0;
     }
     // Clear any sticky error (e.g. sync/trim during process-exit teardown when
     // the runtime has already torn the pool down) so a later cudaGetLastError
     // in a caller's destructor doesn't misattribute it.
     (void)cudaGetLastError();
+    return released;
 }
 
 }  // namespace imp

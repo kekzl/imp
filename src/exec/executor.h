@@ -223,6 +223,7 @@ public:
     // Must be called AFTER model weights are uploaded to GPU.
     // budget: VRAM budget with per-phase caps computed by Engine::plan_vram_budget().
     void pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget);
+    void regrow_expert_cache_();
 
     // Allocates the gemm_nvfp4 dequant workspace sized to the max NVFP4 weight.
     // Must run AFTER pre_dequant_weights(). Skips if no NVFP4 weights exist or
@@ -715,6 +716,11 @@ private:
     // LRU cache for host-resident expert weights on GPU.
     // Keeps recently-used experts in VRAM to avoid repeated H2D copies.
     ExpertLRUCache expert_cache_;
+    // First sizing of expert_cache_ (allocate_workspaces), kept so pre_dequant_weights can
+    // re-init the still-empty cache with the bytes Phase 4b freed on top.
+    size_t expert_cache_budget_ = 0;
+    size_t expert_cache_slot_raw_ = 0;
+    bool expert_cache_nvfp4_slots_ = false;
     DeviceExpertCache dev_expert_cache_;  // decode: routing -> slots -> gather, all on device
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).

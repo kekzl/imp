@@ -715,6 +715,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                                  expert_cache_.n_slots_,
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),
                                  budget / (1024.0 * 1024.0));
+                    expert_cache_budget_ = budget;
+                    expert_cache_slot_raw_ = max_expert_raw;
+                    expert_cache_nvfp4_slots_ = nvfp4_host_experts;
                     // Slot-index buffer for the host-offload decode path: one
                     // block of top_k int32 per projection.
                     int idx_count = kExpertProjCount * std::max(1, mcfg.n_experts_active);

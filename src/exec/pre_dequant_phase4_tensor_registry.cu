@@ -8,6 +8,7 @@
 #include "core/logging.h"
 #include "quant/dequant_gpu.h"
 #include "exec/storage_planner.h"
+#include "memory/mem_account.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -537,6 +538,12 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
 
     size_t skipped_shared_count = 0;
     size_t skipped_shared_bytes = 0;
+    // The one free site of this phase: untrack, async free, mark (the pointer stays a cache key).
+    auto free_source = [&](Tensor& t) {
+        mut_model->release_gpu_allocation(t.data);
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
+        t.dropped_source = true;
+    };
     auto try_mark = [&](Tensor& t, TensorID id) -> bool {
         if (id == kInvalidTensorID || !t.data || t.dropped_source)
             return false;
@@ -558,9 +565,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             skipped_shared_bytes += bytes;
             return false;
         }
-        mut_model->release_gpu_allocation(t.data);
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
-        t.dropped_source = true;
+        free_source(t);
         marked_bytes += bytes;
         marked_count++;
         return true;
@@ -580,6 +585,35 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         // try_mark(L.w_down_shared, L.w_down_shared_id);  // residual-fuse uses original
         try_mark(L.ssm_in, L.ssm_in_id);
         try_mark(L.ssm_out, L.ssm_out_id);
+    }
+    // F16 GDN input pack: run_gdn reads it only at n == 1, and that GEMV takes the FP8
+    // sidecar whenever an entry with row scales exists (executor_gemm_dispatch.cu, decode
+    // tier FP8). The pointer stays as the sidecar key; the bytes are dead weight.
+    int dropped_packs = 0;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        auto& L = mut_model->layer(i);
+        Tensor& p = L.gdn_input_packed;
+        if (!p.data || p.dropped_source || p.qtype != QType::F16 || L.gdn_input_packed_id == kInvalidTensorID)
+            continue;
+        const auto it = wcache_->fp8.find(p.data);
+        if (it == wcache_->fp8.end() || it->second.d_row_scales == nullptr ||
+            registry_->handle(L.gdn_input_packed_id).decode_tier != StorageTier::FP8 ||
+            !mut_model->is_base_gpu_allocation(p.data))
+            continue;
+        const size_t bytes = qtype_row_bytes(p.qtype, p.shape[1]) * static_cast<size_t>(p.shape[0]);
+        free_source(p);
+        wcache_->dropped_gdn_pack_bytes += bytes;
+        ++dropped_packs;
+    }
+    if (wcache_->dropped_gdn_pack_bytes > 0) {
+        cudaStreamSynchronize(stream);
+        wcache_->dropped_gdn_pack_released_bytes =
+            std::min(wcache_->dropped_gdn_pack_bytes, trim_device_mempool());
+        IMP_LOG_INFO("Phase-4b: freed %d F16 GDN input packs (%.1f MiB, %.1f MiB back to the driver); "
+                     "M=1 decode reads their FP8 sidecar",
+                     dropped_packs,
+                     wcache_->dropped_gdn_pack_bytes / (1024.0 * 1024.0),
+                     wcache_->dropped_gdn_pack_released_bytes / (1024.0 * 1024.0));
     }
     if (mut_model->out_proj_id != kInvalidTensorID)
         try_mark(mut_model->out_proj_, mut_model->out_proj_id);

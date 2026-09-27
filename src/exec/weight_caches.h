@@ -76,6 +76,10 @@ struct WeightCaches {
     void* fp8_ssm_sidecar_data = nullptr;
     size_t fp8_ssm_sidecar_data_size = 0;
     float* fp8_ssm_sidecar_row_scales = nullptr;
+    // F16 GDN input packs freed in Phase 4b: only the M=1 decode reads a pack, through its
+    // FP8 sidecar entry (keyed by the freed pointer). Bytes go back to the expert cache.
+    size_t dropped_gdn_pack_bytes = 0;
+    size_t dropped_gdn_pack_released_bytes = 0;  // of those, what the pool trim returned to the driver
 
     // --- NVFP4 decode weight cache ---
     // Mode: 0=off, 1=additive, 2=only
