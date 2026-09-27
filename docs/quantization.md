@@ -139,7 +139,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 
 ### Quality, `--calib` vs round-to-nearest
 
-`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, **not**
+`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, rebuilt by `tools/analysis/make_ppl_corpus.sh`, **not**
 `ppl_corpus.txt`, whose 199 tokens invert the model-size trend); reproducible with
 `tools/analysis/awq_ppl_ab.sh`.
 

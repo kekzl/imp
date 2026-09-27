@@ -47,7 +47,7 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 
 ## Judging quantization quality
 
-- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens); the 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19%; +1.0% vs -0.03% on FP8 SSM).
+- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, rebuild with `tools/analysis/make_ppl_corpus.sh`); the 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19%; +1.0% vs -0.03% on FP8 SSM).
 - `--set runtime.deterministic=true` both arms (implies `runtime.deterministic_gemm`; 0.35% run-to-run otherwise); `--set speculative.mtp_k=0` (`--perplexity` otherwise loads the MTP head, +0.79 GiB, floors the 35B KV pool).
 - Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels (routing flips): >1% = broken, below = no verdict. Numerics judge: Qwen3.8-27B-NVFP4-vllm (deterministic, fused GDN 4.6283).
 - 35B recipe when model + caches fill 30 GB: corpus in ~1k-token slices (3200 chars), `--max-seq-len 1280`, both arms per slice, token-weighted NLL; warm-cache mount (`/root/.cache/imp/warm`) makes runs ~7 s; do NOT mount the library-reserve measurement (4399 MiB whole-init worsens the plan).
