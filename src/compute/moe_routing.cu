@@ -67,6 +67,9 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
         }
         __syncthreads();
         float gmax = s_warp[0];
+        // Every warp must read the max before warp 0 overwrites slot 0 with its partial sum:
+        // without this barrier a late warp took a sum as the max and top-k picked wrong experts.
+        __syncthreads();
 
         // Step 2: Compute exp and sum for softmax
         float local_sum = 0.0f;
@@ -257,6 +260,8 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
         }
         __syncthreads();
         float gmax = s_warp_scratch[0];
+        // Same barrier as topk_gating_kernel: slot 0 is rewritten with a partial sum below.
+        __syncthreads();
 
         // Compute exp and sum
         float local_sum = 0.0f;

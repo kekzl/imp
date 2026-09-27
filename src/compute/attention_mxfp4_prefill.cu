@@ -195,6 +195,8 @@ __global__ void mxfp4_attn_softmax_kernel(half* __restrict__ S, int seq_q, int s
     }
     __syncthreads();
     max_val = s_reduce[0];
+    // Slot 0 is rewritten with warp 0's partial sum below: every warp reads the max first.
+    __syncthreads();
 
     // --- Pass 2: exp + sum ---
     float sum_val = 0.0f;

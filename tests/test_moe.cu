@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <numeric>
 #include <vector>
+#include <random>
 #include <set>
 #include <cstring>
 #include "core/process_diag.h"
@@ -274,6 +275,43 @@ TEST(MoERoutingWideTest, ExpertsAbove256AreCandidates) {
     }
     free_tensor(d_gate);
     free_routing(routing);
+}
+
+// Softmax slot 0 held the max and then warp 0's partial sum; a warp that read it late took
+// the sum as the max and top-k picked wrong experts (Qwen3.8-Flash-Next, Qwen3-30B-A3B PPL
+// moved +-0.7 % between identical runs). 50 launches x 4096 tokens, every set checked.
+TEST(MoERoutingWideTest, SoftmaxTopKMatchesTheReferenceOnEveryLaunch) {
+    constexpr int n_tokens = 4096, n_experts = 512, top_k = 10, launches = 50;
+    std::vector<float> logits(static_cast<size_t>(n_tokens) * n_experts);
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> dist(-8.0f, 0.0f);
+    for (size_t i = 0; i < logits.size(); ++i)
+        logits[i] = dist(rng) + 1e-6f * static_cast<float>(i % n_experts);  // no ties
+    std::vector<int> ref_indices(static_cast<size_t>(n_tokens) * top_k);
+    std::vector<float> ref_weights(static_cast<size_t>(n_tokens) * top_k);
+    cpu_topk_gating(logits.data(), n_tokens, n_experts, top_k, ref_indices.data(), ref_weights.data());
+    int64_t shape[2] = {n_tokens, n_experts};
+    Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
+    int wrong_tokens = 0, first_launch = -1;
+    for (int l = 0; l < launches; ++l) {
+        MoeRoutingResult routing{};
+        moe_topk_gating(d_gate, top_k, routing, /*stream=*/nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        auto h_indices = to_host<int32_t>(routing.expert_indices);
+        for (int t = 0; t < n_tokens; ++t) {
+            std::set<int> got(h_indices.begin() + t * top_k, h_indices.begin() + (t + 1) * top_k);
+            std::set<int> want(ref_indices.begin() + t * top_k, ref_indices.begin() + (t + 1) * top_k);
+            if (got != want) {
+                ++wrong_tokens;
+                if (first_launch < 0)
+                    first_launch = l;
+            }
+        }
+        free_routing(routing);
+    }
+    EXPECT_EQ(wrong_tokens, 0) << "wrong top-k sets over " << launches << " x " << n_tokens
+                               << " tokens, first in launch " << first_launch;
+    free_tensor(d_gate);
 }
 
 // ---------------------------------------------------------------------------
