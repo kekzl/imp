@@ -26,6 +26,32 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         return;
     quant_pipeline_.build(*model_, dispatch_policy(), *vram_alloc_, budget, stream,
                           wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
+    regrow_expert_cache_();
+}
+
+// The expert cache was sized in allocate_workspaces, before Phase 4b freed the F16 GDN input
+// packs. It is still empty here (the device tables and the first request come later), so it
+// is re-created with those bytes on top: everything allocated after sees the same free VRAM.
+void GraphExecutor::regrow_expert_cache_() {
+    const size_t freed = wcache_.dropped_gdn_pack_released_bytes;
+    if (freed == 0 || expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
+        return;
+    const auto& mcfg = model_->config();
+    const int before = expert_cache_.slots_per_layer_;
+    expert_cache_.destroy();
+    const size_t budget = expert_cache_budget_ + freed;
+    if (!expert_cache_.init(expert_cache_slot_raw_, budget, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
+                            dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_)) {
+        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB failed, retrying the original %.0f MiB",
+                      budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0));
+        expert_cache_.init(expert_cache_slot_raw_, expert_cache_budget_, vram_alloc_, mcfg.n_layers,
+                           mcfg.n_experts, dispatch_policy().moe.expert_cache_debug_parity,
+                           expert_cache_nvfp4_slots_);
+        return;
+    }
+    expert_cache_budget_ = budget;
+    IMP_LOG_INFO("Expert LRU cache: %d -> %d slots/layer with the %.1f MiB of freed GDN input packs",
+                 before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0));
 }
 
 void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAllocator& alloc,

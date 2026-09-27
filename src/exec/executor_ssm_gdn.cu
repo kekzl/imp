@@ -325,8 +325,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slices
     // the output for proj/gate_out/alpha/beta, saving 3 GEMV launches per
     // layer per decode step. Prefill (n>1) keeps the 4-call path (avoids deinterleaving the GEMM output).
-    const bool fused_input = (n == 1) && (ly.gdn_input_packed.data != nullptr) &&
-                             (gdn_fused_proj_buf_.data != nullptr);
+    // A dropped pack (Phase 4b) is served by its FP8 sidecar, which writes F16 only.
+    const bool fused_input = (n == 1) && ly.gdn_input_packed.data && gdn_fused_proj_buf_.data &&
+                             (!ly.gdn_input_packed.dropped_source || compute_dtype_ == QType::F16);
     // Norm fold: only the M=1 fused NVFP4 input GEMV reads a folded `no`; if it declines, the
     // norm runs right before the fallback projections.
     const NvFP4NormFoldIn in_fold = norm_fold_or_norm_(!fused_input, h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream);

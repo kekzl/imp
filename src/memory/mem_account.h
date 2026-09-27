@@ -120,7 +120,8 @@ private:
 // reuse, so cudaFreeAsync alone only parks weights-sized memory in the pool; the next
 // plain-cudaMalloc path can't see it and OOMs. Call after tearing down anything that
 // freed large async allocations. Safe at process exit.
-void trim_device_mempool();
+// Returns the bytes handed back to the driver (reserved before - after).
+size_t trim_device_mempool();
 
 // I7: capacity is not occupancy (MEMORY.md). A single "VRAM used" number cannot
 // distinguish a KV pool 90% full from one 90% reserved and empty, and every capacity
