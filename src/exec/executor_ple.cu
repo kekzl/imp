@@ -98,7 +98,9 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
         IMP_LOG_ERROR("PLE: batched decode (%d sequences) shares one n-gram context; output is wrong",
                       state.ssm_n_seq);
     }
-    if (!ple_prepared_) {
+    // A graph replay never runs this host code, so ple_prepared_ outlives the last decode step:
+    // a prefill must not take those rows (it inherited the previous request's n-gram state).
+    if (!ple_prepared_ || state.is_prefill) {
         // Eager path (prefill, or a decode step the engine did not prepare): read the ids
         // back and do the host half here. Pinned landing zone: a D2H into pageable memory
         // is a staged copy (245 us on WSL2).
