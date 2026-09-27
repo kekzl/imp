@@ -25,13 +25,12 @@ jobs:
     steps:
       - name: Enable squash auto-merge
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The merge is attributed to the token that armed auto-merge. Armed with
+          # GITHUB_TOKEN it starts no push run on main (GitHub loop prevention) and
+          # leaves the head branch (#2141-#2147: 0 of 7 main commits got CI, 7 of 7
+          # branches stayed). AUTO_MERGE_TOKEN (fine-grained PAT, this repo only:
+          # Contents + Pull requests read/write) fixes both; GITHUB_TOKEN is the
+          # fallback while the secret is unset.
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        # --delete-branch is not redundant with the repository's
-        # deleteBranchOnMerge setting. An auto-merge request carries its own
-        # delete preference, and that is what GitHub honours at merge time, so
-        # arming without the flag leaves the head branch behind however the
-        # repository is configured. Measured 2026-08-21: #1531 armed by this
-        # workflow left its branch; #1532, re-armed by hand with the flag in the
-        # same hour, deleted its own. 21 branches had accumulated that way.
         run: gh pr merge --auto --squash --delete-branch "$PR_URL"

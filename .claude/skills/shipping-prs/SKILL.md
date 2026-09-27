@@ -17,7 +17,7 @@ description: Use when opening, merging, or releasing a PR for imp - branching of
 
 ## The auto-merge race
 
-`auto-merge.yml` arms `gh pr merge --auto --squash --delete-branch` (the flag is what deletes the branch, #1534) the moment a non-draft owner PR is opened (opened / ready_for_review / reopened). The squash fires the instant `Build` is green.
+`auto-merge.yml` arms `gh pr merge --auto --squash --delete-branch` the moment a non-draft owner PR is opened (opened / ready_for_review / reopened). The squash fires the instant `Build` is green. Armed with the `AUTO_MERGE_TOKEN` PAT the merge starts CI on `main` and deletes the branch; on the `GITHUB_TOKEN` fallback it does neither (#2141-#2147: 0 of 7), so run `gh workflow run CI --ref main` after a release merge.
 
 - Push ALL commits before `gh pr create`. Draft PRs are not armed.
 - After the merge: `git log -1 --stat origin/main`; when a late commit changed a NUMBER, grep `main` for the corrected value (#1081 shipped disproved figures; #1082 fixed them). Lost commit precedent: `a5403bd5` in #718.
