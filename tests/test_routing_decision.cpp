@@ -165,10 +165,17 @@ TEST(MoePrefillTable, DefaultPicksDeviceArgs) {
               MoePrefillPath::DEVICE_ARGS);
 }
 
-TEST(MoePrefillTable, GptOssSkipsDeviceArgsTakesGrouped) {
-    // gpt-oss is arch-gated off device-args AND smallM → host-args grouped
-    // (with bias seams), even when smallM would otherwise apply.
+TEST(MoePrefillTable, GptOssUnstagedTakesDeviceArgs) {
+    // #2116: unstaged gpt-oss runs device-args (bias + GPT_OSS_GLU + plain quantize). The
+    // model said GROUPED/LEGACY and the dispatch logged "routing model disagrees" once per run.
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, default_cfg(), all_ready()),
+              MoePrefillPath::DEVICE_ARGS);
+}
+
+TEST(MoePrefillTable, GptOssStagedSkipsDeviceArgsAndSmallMTakesGrouped) {
+    // Staged gpt-oss stays off device-args, and smallM stays off for gpt-oss.
     auto ws = all_ready();
+    ws.staged_blocks = true;
     auto cfg = default_cfg();
     cfg.moe.nvfp4_smallM = true;  // would route others to smallM
     EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, ws), MoePrefillPath::GROUPED);
