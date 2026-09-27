@@ -2,14 +2,9 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-**This is a changelog, not a journal.** One to three lines per entry: what
-changed, from the reader's side, plus the number or issue that makes it
-checkable. The investigation behind a change (hypotheses, what was ruled out,
-how it was measured) belongs in `docs/` (`quantization.md`, `roadmap.md`,
-`AUDIT.md`, `docs/plans/`) or in `docs/MISSION_JOURNAL.md`, and the entry links
-there instead of retelling it.
-
 ## [Unreleased]
+
+## [0.45.0] - 2026-09-27
 
 ### Removed
 - `gemm.q4k_hmma_enabled` and its Q4_K HMMA kernel (`mmq_q4k_hmma`, opt-in since #458, never measured): gemma-3-12b Q4_K_M pp512 305.74 tok/s against 4539.80 default.
