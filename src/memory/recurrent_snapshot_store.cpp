@@ -20,9 +20,12 @@ RecurrentSnapshotStore::~RecurrentSnapshotStore() {
     // Entries still held by requests free their buffers via the deleter.
 }
 
-void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes) {
+void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes,
+                                  size_t sidecar_bytes) {
     entry_bytes_ = entry_bytes;
-    int want = (entry_bytes > 0) ? static_cast<int>(budget_bytes / entry_bytes) : 0;
+    sidecar_bytes_ = sidecar_bytes;
+    buf_bytes_ = entry_bytes + sidecar_bytes;
+    int want = (entry_bytes > 0) ? static_cast<int>(budget_bytes / buf_bytes_) : 0;
     if (want <= 0) {
         IMP_LOG_INFO("RecurrentSnapshotStore: disabled (budget %.0f MiB < one %.1f MiB slot)",
                      budget_bytes / (1024.0 * 1024.0), entry_bytes / (1024.0 * 1024.0));
@@ -36,7 +39,7 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     pool_ = std::make_shared<BufferPool>();
     for (int i = 0; i < want; ++i) {
         void* p = nullptr;
-        if (cudaMalloc(&p, entry_bytes_) != cudaSuccess)
+        if (cudaMalloc(&p, buf_bytes_) != cudaSuccess)
             break;
         pool_->free_bufs.push_back(p);
         allocated_bufs_++;
@@ -70,10 +73,10 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
                  capacity_, want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
     // Host tier: pinned, so the eviction D2H and the restore H2D run as
     // stream-ordered async copies. Same eager policy, a failed pin caps it.
-    const int want_host = static_cast<int>(host_budget_bytes / entry_bytes);
+    const int want_host = static_cast<int>(host_budget_bytes / buf_bytes_);
     for (int i = 0; i < want_host; ++i) {
         void* p = nullptr;
-        if (cudaHostAlloc(&p, entry_bytes_, cudaHostAllocDefault) != cudaSuccess)
+        if (cudaHostAlloc(&p, buf_bytes_, cudaHostAllocDefault) != cudaSuccess)
             break;
         pool_->free_host_bufs.push_back(p);
         host_capacity_++;
@@ -173,7 +176,7 @@ void RecurrentSnapshotStore::evict_device_lru_(cudaStream_t stream) {
     if (host_capacity_ > 0 && host_entries_.count(victim) == 0) {
         void* hbuf = acquire_host_buffer_();
         if (hbuf &&
-            cudaMemcpyAsync(hbuf, dev->data, entry_bytes_, cudaMemcpyDeviceToHost, stream) == cudaSuccess) {
+            cudaMemcpyAsync(hbuf, dev->data, buf_bytes_, cudaMemcpyDeviceToHost, stream) == cudaSuccess) {
             host_entries_[victim] = make_entry_(victim, dev->n_tokens, hbuf, /*on_host=*/true);
             host_lru_.push_back(victim);
             host_lru_map_[victim] = std::prev(host_lru_.end());
@@ -210,15 +213,24 @@ void* RecurrentSnapshotStore::acquire_buffer_(cudaStream_t stream) {
     return nullptr;  // every buffer is held by an in-flight request
 }
 
-bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cudaStream_t stream) {
-    if (!enabled() || src == nullptr || n_tokens <= 0)
+bool RecurrentSnapshotStore::copy_in_(void* buf, const void* src, const void* sidecar_src, cudaMemcpyKind kind,
+                                      cudaStream_t stream) const {
+    if (cudaMemcpyAsync(buf, src, entry_bytes_, kind, stream) != cudaSuccess)
+        return false;
+    return sidecar_bytes_ == 0 || cudaMemcpyAsync(static_cast<char*>(buf) + entry_bytes_, sidecar_src,
+                                                  sidecar_bytes_, kind, stream) == cudaSuccess;
+}
+
+bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cudaStream_t stream,
+                                  const void* sidecar_src) {
+    if (!enabled() || src == nullptr || n_tokens <= 0 || (sidecar_bytes_ > 0 && sidecar_src == nullptr))
         return false;
     if (entries_.count(key) != 0 || host_entries_.count(key) != 0)
         return true;  // identical prefix already snapshotted (either tier)
     void* buf = acquire_buffer_(stream);
     if (!buf)
-        return save_to_host_(key, n_tokens, src, stream);
-    if (cudaMemcpyAsync(buf, src, entry_bytes_, cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+        return save_to_host_(key, n_tokens, src, sidecar_src, stream);
+    if (!copy_in_(buf, src, sidecar_src, cudaMemcpyDeviceToDevice, stream)) {
         std::lock_guard<std::mutex> lk(pool_->mu);
         pool_->free_bufs.push_back(buf);
         return false;
@@ -234,7 +246,8 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
 // prefix, since the host tier had free slots the whole time. Save straight into the host
 // tier instead: the same one-slab D2H an eviction issues, and find() already serves host
 // entries.
-bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void* src, cudaStream_t stream) {
+bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src,
+                                          cudaStream_t stream) {
     void* hbuf = host_capacity_ > 0 ? acquire_host_buffer_() : nullptr;
     if (!hbuf) {
         ++dropped_saves_;
@@ -246,7 +259,7 @@ bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void*
                 capacity_, host_capacity_);
         return false;
     }
-    if (cudaMemcpyAsync(hbuf, src, entry_bytes_, cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+    if (!copy_in_(hbuf, src, sidecar_src, cudaMemcpyDeviceToHost, stream)) {
         std::lock_guard<std::mutex> lk(pool_->mu);
         pool_->free_host_bufs.push_back(hbuf);
         return false;

@@ -382,6 +382,13 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
                 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
                     ssm_state_->seq_base(slot), req.recurrent_restore->data,
                     ssm_state_->per_seq_bytes(), cudaMemcpyDefault, stream));
+                if (const size_t side = recurrent_snapshots_->sidecar_bytes(); side > 0) {
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                        executor_->ple_state_data(),
+                        static_cast<const char*>(req.recurrent_restore->data) + ssm_state_->per_seq_bytes(), side,
+                        cudaMemcpyDefault, stream));
+                    executor_->ple_resume_context(req.input_tokens.data(), n);
+                }
                 IMP_LOG_DEBUG("RecurrentSnapshot: restored %d-token state for req %d (slot %d, %s)",
                               req.recurrent_restore->n_tokens, req.id, slot,
                               req.recurrent_restore->on_host ? "host tier" : "device");
@@ -484,7 +491,7 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
     if (it == recurrent_slot_of_.end())
         return;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream))
+    if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream, executor_->ple_state_data()))
         return;
     // The tail block must survive free_sequence: hash it now, under the same key.
     kv_manager_->register_partial_block(req.id, forwarded, key);
@@ -511,7 +518,8 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     if (it == recurrent_slot_of_.end())
         return;
     const auto t0 = std::chrono::steady_clock::now();
-    if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream)) {
+    if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream,
+                                   executor_->ple_state_data())) {
         // The copy must complete before anything else mutates the slot: later
         // prefill chunks are ordered on this stream, but the first DECODE step
         // may run on a different stream (green contexts). One sync per prefill.

@@ -1154,6 +1154,12 @@ public:
     // per decode step with the host copies of the batch's token ids and positions.
     void prepare_decode_step_host(const int32_t* ids, const int32_t* positions, int n,
                                   cudaStream_t stream);
+    // PLE sequence state for recurrent snapshots: the conv rows (device, 0 bytes without a
+    // PLE block) ride as the snapshot sidecar; the n-gram context is rebuilt from the
+    // tokens before the resume position (`prev`, the last n_prev of them).
+    size_t ple_state_bytes() const { return ple_conv_state_.data ? ple_conv_state_.nbytes() : 0; }
+    void* ple_state_data() const { return ple_conv_state_.data; }
+    void ple_resume_context(const int32_t* prev, int n_prev);
 
 private:
 

@@ -6,8 +6,9 @@
 // alloc). Only the pinned staging row block and the conv state are PLE-owned.
 //
 // Sequence state (the 2 context tokens and the 9 conv rows) is single-sequence: reset when the
-// chunk starts at position 0, carried otherwise. Batched decode and prefix-cache resumes are not
-// modelled yet (logged once).
+// chunk starts at position 0, carried otherwise. A prefix-cache resume restores the conv rows
+// from the recurrent snapshot sidecar and the context via ple_resume_context. Batched decode is
+// not modelled (logged once).
 
 #include "compute/gated_residual.h"
 #include "compute/gemm.h"
@@ -167,6 +168,16 @@ void GraphExecutor::prepare_decode_step_host(const int32_t* ids, const int32_t* 
     dev_expert_cache_.take_over(stream);
     if (model_->ngram_table() != nullptr && n > 0)
         ple_prepare_host_(ids, n, positions[0], stream);
+}
+
+void GraphExecutor::ple_resume_context(const int32_t* prev, int n_prev) {
+    if (model_->ngram_table() == nullptr)
+        return;
+    const int ctx_len = static_cast<int>(ple_ctx_.size());
+    for (int i = 0; i < ctx_len; i++) {
+        const int src = n_prev - ctx_len + i;
+        ple_ctx_[i] = (src >= 0) ? prev[src] : model_->config().ple_eos_token_id;
+    }
 }
 
 }  // namespace imp

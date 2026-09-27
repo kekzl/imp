@@ -640,6 +640,34 @@ class Suite:
         r3 = self.srv.chat(msgs, max_tokens=n)
         self.record("multi-turn", "turn 3 recalls turn-1 fact (271)",
                     "271" in r3["content"], f"content={r3['content'][:140]!r}")
+        if not self.skip_det:
+            self._turn2_resend_identical()
+
+    def _turn2_resend_identical(self):
+        # The resend restores from a different recurrent snapshot (turn-1 transcript, then the
+        # first send's prefill snapshot, >= 256 prompt tokens): state the snapshot misses flips the
+        # greedy answer (PLE conv rows on Qwen3.8-Flash-Next: 305c86 vs ab6606). Thinking off, so
+        # the turn-1 transcript is the rendered history.
+        name = "turn 2 resent from a prefix snapshot gives the same answer"
+        kw = {"chat_template_kwargs": {"enable_thinking": False}}
+        sys_msg = ("You are a precise assistant. Answer in full sentences and explain your reasoning "
+                   "step by step so the reader can follow along without prior knowledge of the topic. "
+                   "Prefer concrete physical mechanisms over vague generalities, and name the quantities involved.")
+        msgs = [{"role": "system", "content": sys_msg},
+                {"role": "user", "content": "Describe the water cycle in about 150 words."}]
+        a1 = self.srv.chat(msgs, max_tokens=250, **kw)["content"]
+        msgs += [{"role": "assistant", "content": a1 or "Water evaporates and falls as rain."},
+                 {"role": "user", "content": "Now explain which step is most affected by climate change and why."}]
+        first = self.srv.chat(msgs, max_tokens=120, **kw)
+        again = self.srv.chat(msgs, max_tokens=120, **kw)
+        cached = [(r["raw"].get("usage") or {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                  for r in (first, again)]
+        if not cached[1]:
+            self.skip("multi-turn", name, f"no prefix restore happened (cached={cached})")
+            return
+        self.record("multi-turn", name,
+                    first["content"] == again["content"] and bool(first["content"].strip()),
+                    f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}")
 
     # -- stream protocol -----------------------------------------------------
     def cat_stream(self):
