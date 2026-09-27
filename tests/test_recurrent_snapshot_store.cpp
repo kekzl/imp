@@ -228,5 +228,37 @@ TEST(RecurrentSnapshotStoreTest, ClearDropsEntriesButHeldBufferStaysValid) {
     held.reset();  // recycles into the pool, freed by the store dtor
 }
 
+// PLE conv rows live outside the SSM slab: the sidecar must sit at data + entry_bytes in
+// both tiers, survive the device -> host eviction, and a save without it must be refused.
+TEST(RecurrentSnapshotStoreTest, SidecarTravelsWithTheSlabThroughBothTiers) {
+    SKIP_IF_NO_CUDA();
+    constexpr size_t kSide = 512;
+    RecurrentSnapshotStore store;
+    store.init(kEntryBytes, kEntryBytes + kSide, /*host_budget_bytes=*/kEntryBytes + kSide, kSide);
+    ASSERT_EQ(store.capacity(), 1);
+    ASSERT_EQ(store.host_capacity(), 1);
+    ASSERT_EQ(store.sidecar_bytes(), kSide);
+    DeviceSrc a(0x11), b(0x22), side_a(0x5A), side_b(0x6B);
+    EXPECT_FALSE(store.save(9, 16, a.d, nullptr)) << "a sidecar store needs the sidecar source";
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr, side_a.d));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr, side_b.d));  // evicts 1 -> host
+    cudaStreamSynchronize(nullptr);
+    auto read_side = [&](const RecurrentSnapshotEntry& e) {
+        std::vector<uint8_t> h(kSide);
+        EXPECT_EQ(cudaMemcpy(h.data(), static_cast<const char*>(e.data) + kEntryBytes, kSide, cudaMemcpyDefault),
+                  cudaSuccess);
+        return h;
+    };
+    auto e1 = store.find(1);
+    ASSERT_NE(e1, nullptr);
+    EXPECT_TRUE(e1->on_host);
+    EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
+    EXPECT_EQ(read_side(*e1), std::vector<uint8_t>(kSide, 0x5A));
+    auto e2 = store.find(2);
+    ASSERT_NE(e2, nullptr);
+    EXPECT_FALSE(e2->on_host);
+    EXPECT_EQ(read_side(*e2), std::vector<uint8_t>(kSide, 0x6B));
+}
+
 }  // namespace
 }  // namespace imp

@@ -45,10 +45,12 @@ public:
     // entry_bytes: size of one snapshot (the SSM per-seq slab).
     // budget_bytes: total device memory cap; capacity = budget / entry_bytes.
     // host_budget_bytes: pinned host memory cap for evicted entries (0 = off).
-    void init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes = 0);
+    // sidecar_bytes: per-entry tail after the slab for state outside it (PLE conv rows), 0 = none.
+    void init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes = 0, size_t sidecar_bytes = 0);
 
     bool enabled() const { return capacity_ > 0; }
     size_t entry_bytes() const { return entry_bytes_; }
+    size_t sidecar_bytes() const { return sidecar_bytes_; }
     int capacity() const { return capacity_; }
     int host_capacity() const { return host_capacity_; }
     int size() const { return static_cast<int>(entries_.size()); }
@@ -64,7 +66,8 @@ public:
     // `stream`). When every device slab is held by an in-flight request, the save goes
     // straight into the host tier instead. Returns false only when no slab of either tier is
     // free or on a copy failure.
-    bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream);
+    // With a sidecar, `sidecar_src` (device, sidecar_bytes) lands at data + entry_bytes.
+    bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream, const void* sidecar_src = nullptr);
     // Saves that landed in the host tier because no device slab was free, and
     // saves dropped because no slab of either tier was.
     int host_direct_saves() const { return host_direct_saves_; }
@@ -86,13 +89,17 @@ private:
     void* acquire_buffer_(cudaStream_t stream);
     void* acquire_host_buffer_();
     void evict_device_lru_(cudaStream_t stream);
-    bool save_to_host_(size_t key, int n_tokens, const void* src, cudaStream_t stream);
+    bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src, cudaStream_t stream);
+    bool copy_in_(void* buf, const void* src, const void* sidecar_src, cudaMemcpyKind kind,
+                  cudaStream_t stream) const;
     int host_direct_saves_ = 0;
     int dropped_saves_ = 0;
     std::shared_ptr<RecurrentSnapshotEntry> make_entry_(size_t key, int n_tokens, void* buf, bool on_host);
 
     std::shared_ptr<BufferPool> pool_;
     size_t entry_bytes_ = 0;
+    size_t sidecar_bytes_ = 0;
+    size_t buf_bytes_ = 0;  // entry_bytes_ + sidecar_bytes_
     int capacity_ = 0;
     int host_capacity_ = 0;
     int allocated_bufs_ = 0;  // pre-allocated at init (== capacity_)

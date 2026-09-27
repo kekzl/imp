@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.
 - Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.
 
 ## [0.45.0] - 2026-09-27
