@@ -662,8 +662,10 @@ class Suite:
         again = self.srv.chat(msgs, max_tokens=120, **kw)
         cached = [(r["raw"].get("usage") or {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
                   for r in (first, again)]
-        if not cached[1]:
-            self.skip("multi-turn", name, f"no prefix restore happened (cached={cached})")
+        # Both sends must restore: a fresh prefill against a restored one differs by the chunk
+        # split alone (#2152), not by snapshot state (Qwen3.6-35B: cached=[0, 304]).
+        if not (cached[0] and cached[1]):
+            self.skip("multi-turn", name, f"not both sends restored (cached={cached})")
             return
         self.record("multi-turn", name,
                     first["content"] == again["content"] and bool(first["content"].strip()),
