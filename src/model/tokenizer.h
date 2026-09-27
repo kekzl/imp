@@ -104,6 +104,10 @@ public:
         build_special_pieces();
     }
     bool has_token_types() const { return !token_types_.empty(); }
+    // tokenizer.json added-token whitespace stripping: bit 0 lstrip, bit 1 rstrip.
+    uint8_t strip_flags(int32_t id) const {
+        return id >= 0 && static_cast<size_t>(id) < strip_flags_.size() ? strip_flags_[id] : 0;
+    }
     bool is_control_token(int id) const {
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] == 3;
     }
@@ -191,6 +195,10 @@ private:
     // Empty when the source carries no added_tokens array.
     std::vector<bool> added_token_ids_;
 
+    // Per-id `lstrip` (bit 0) / `rstrip` (bit 1) of tokenizer.json added_tokens: the match
+    // swallows adjacent whitespace (Phi-4 <|im_end|>). Empty when none sets them.
+    std::vector<uint8_t> strip_flags_;
+
     // Cached special-token strings (CONTROL type) sorted by length descending, so encode_*
     // pre-splits input on these literals and multi-character markers (e.g. <|tool_call>)
     // round-trip as their assigned single-token id instead of being BPE'd as raw bytes.
@@ -198,17 +206,14 @@ private:
     void build_special_pieces();
 };
 
-// Qwen2/Qwen3 pre-tokenizer scan (canonical regex segmentation; #657).
-// Exposed for unit tests — production use is inside Tokenizer::encode_*.
+// Regex pre-tokenizer scans (tokenizer_pretok.cpp; #657), one per tokenizer.json regex family.
+// qwen2: Qwen2/Qwen3; qwen35: letter runs include \p{M}; cl100k: digit triples (Phi-4, Llama 3);
+// o200k: case-aware letter runs (gpt-oss); nemotron: o200k without contractions, single digits.
 std::vector<std::string> qwen2_pre_tokenize(const std::string& text);
-
-// o200k pre-tokenizer scan (gpt-oss / GPT-4o family; #657). Case-aware letter
-// runs, digit triples, slash-aware symbol runs. Exposed for unit tests.
-std::vector<std::string> o200k_pre_tokenize(const std::string& text);
-
-// cl100k pre-tokenizer scan (GPT-4/tiktoken lineage, Phi-4; #657): qwen2
-// rules with digit groups of up to three. Exposed for unit tests.
+std::vector<std::string> qwen35_pre_tokenize(const std::string& text);
 std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
+std::vector<std::string> o200k_pre_tokenize(const std::string& text);
+std::vector<std::string> nemotron_pre_tokenize(const std::string& text);
 
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.
