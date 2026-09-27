@@ -364,7 +364,8 @@ struct TransformerLayer {
     //   [conv_channels, conv_channels+inner)       -> z / gate_out
     //   [conv_channels+inner, ...+n_heads)         -> alpha
     //   [conv_channels+inner+n_heads, total_out)   -> beta
-    // When set, ssm_in/gdn_gate/gdn_alpha/gdn_beta device memory is released (.data=nullptr).
+    // A copy: ssm_in/gdn_gate/gdn_alpha/gdn_beta stay live (prefill reads them). Phase 4b frees
+    // this pack once its FP8 sidecar exists (only n == 1 reads it); .data stays as the cache key.
     Tensor gdn_input_packed;
     int gdn_packed_conv_channels = 0;
     int gdn_packed_inner = 0;

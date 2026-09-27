@@ -351,6 +351,36 @@ __global__ void quantize_fp8_rows_kernel(const half* __restrict__ in, uint8_t* _
     }
 }
 
+// Inverse of quantize_fp8_rows_kernel: out[row][i] = q[row][i] * scale[row], 8 bytes per thread step.
+__global__ void dequantize_fp8_rows_kernel(const uint8_t* __restrict__ in, const float* __restrict__ d_row_scales,
+                                           half* __restrict__ out, int K) {
+    const int row = blockIdx.x;
+    const float s = d_row_scales[row];
+    const uint2* r = reinterpret_cast<const uint2*>(in + static_cast<int64_t>(row) * K);
+    half* o = out + static_cast<int64_t>(row) * K;
+    for (int i = threadIdx.x; i < K / 8; i += blockDim.x) {
+        const uint2 v = r[i];
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(&v);
+        __align__(16) half h[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            __nv_fp8_e4m3 q;
+            *reinterpret_cast<uint8_t*>(&q) = b[j];
+            h[j] = __float2half(static_cast<float>(q) * s);
+        }
+        *reinterpret_cast<uint4*>(o + 8 * i) = *reinterpret_cast<const uint4*>(h);
+    }
+}
+
+void dequantize_fp8_rows_async(const void* input_fp8, const float* d_row_scales, void* output_fp16, int rows,
+                               int K, cudaStream_t stream) {
+    if (!input_fp8 || !d_row_scales || !output_fp16 || rows <= 0 || K <= 0 || (K % 8) != 0)
+        return;
+    dequantize_fp8_rows_kernel<<<rows, 256, 0, stream>>>(static_cast<const uint8_t*>(input_fp8), d_row_scales,
+                                                         static_cast<half*>(output_fp16), K);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,
                              float* d_row_scales, cudaStream_t stream) {
     if (!input_fp16 || !output_fp8 || !d_row_scales || rows <= 0 || K <= 0)

@@ -406,29 +406,47 @@ size_t trim_device_mempool() {
     return released;
 }
 
-cudaMemPool_t release_on_free_pool() {
-    static cudaMemPool_t pool = [] {
-        int dev = 0;
-        cudaMemPool_t p = nullptr;
-        if (cudaGetDevice(&dev) != cudaSuccess)
-            return p;
-        cudaMemPoolProps props{};
-        props.allocType = cudaMemAllocationTypePinned;
-        props.location.type = cudaMemLocationTypeDevice;
-        props.location.id = dev;
-        if (cudaMemPoolCreate(&p, &props) != cudaSuccess) {
-            (void)cudaGetLastError();
-            return static_cast<cudaMemPool_t>(nullptr);
-        }
-        uint64_t threshold = 0;  // the default for a new pool, set so it is explicit
-        cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &threshold);
+namespace {
+cudaMemPool_t make_release_on_free_pool() {
+    int dev = 0;
+    cudaMemPool_t p = nullptr;
+    if (cudaGetDevice(&dev) != cudaSuccess)
         return p;
-    }();
-    return pool;
+    cudaMemPoolProps props{};
+    props.allocType = cudaMemAllocationTypePinned;
+    props.location.type = cudaMemLocationTypeDevice;
+    props.location.id = dev;
+    if (cudaMemPoolCreate(&p, &props) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return nullptr;
+    }
+    uint64_t threshold = 0;  // the default for a new pool, set so it is explicit
+    cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &threshold);
+    return p;
+}
+}  // namespace
+
+cudaMemPool_t release_on_free_pool(ReleasePool which) {
+    static cudaMemPool_t pools[2] = {make_release_on_free_pool(), make_release_on_free_pool()};
+    return pools[static_cast<int>(which)];
 }
 
-size_t release_on_free_pool_reserved() {
-    cudaMemPool_t pool = release_on_free_pool();
+namespace {
+thread_local int g_release_scope = -1;  // ReleasePool of the innermost live scope, -1 = none
+}  // namespace
+
+ReleasePoolScope::ReleasePoolScope(ReleasePool which) : prev_(g_release_scope) {
+    g_release_scope = static_cast<int>(which);
+}
+ReleasePoolScope::~ReleasePoolScope() { g_release_scope = prev_; }
+
+cudaError_t malloc_async_in_scope(void** ptr, size_t size, cudaStream_t stream) {
+    cudaMemPool_t pool = g_release_scope >= 0 ? release_on_free_pool(static_cast<ReleasePool>(g_release_scope)) : nullptr;
+    return pool ? cudaMallocFromPoolAsync(ptr, size, pool, stream) : cudaMallocAsync(ptr, size, stream);
+}
+
+size_t release_on_free_pool_reserved(ReleasePool which) {
+    cudaMemPool_t pool = release_on_free_pool(which);
     unsigned long long rsv = 0;
     if (pool == nullptr || cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv) != cudaSuccess)
         return 0;

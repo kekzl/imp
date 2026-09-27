@@ -43,6 +43,19 @@ inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_sourc
     return is_dense && d_model <= 4096;
 }
 
+// Any MoE layer whose packed experts stay on the host (the expert cache then gets freed VRAM).
+inline bool has_host_resident_experts(const Model& m) {
+    for (int i = 0; i < m.config().n_layers; ++i) {
+        const auto& L = m.layer(i);
+        if (L.expert_up_packed.data && !L.expert_up_packed.on_device)
+            return true;
+        // NVFP4-prequant checkpoints hold per-expert 2-D tensors instead of a packed 3-D one.
+        if (!L.expert_w_up.empty() && L.expert_w_up[0].data && !L.expert_w_up[0].on_device)
+            return true;
+    }
+    return false;
+}
+
 // Infer StorageTier from which wcache_ map the source pointer landed in.
 inline StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
     if (wc.cutlass_nvfp4.count(src_ptr))

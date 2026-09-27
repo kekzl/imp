@@ -6,6 +6,7 @@
 // dequant->cuBLAS safety-net fallback, pulled out of the kernel grab-bag.
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
+#include "exec/gemm_dispatch_fallback.h"
 #include "exec/gemm_kernel_registry.h"
 #include "exec/executor.h"
 #include "compute/weight_dispatch.h"
@@ -58,7 +59,7 @@ static bool dequant_scratch_fits(const QuantScratch* qs, const Tensor& weight) {
 
 // Uncached fallback: safety net for weights without a WeightHandle
 // (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
-static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
+void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
                                             Tensor& output, const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
@@ -315,6 +316,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
             return;
+    }
+
+    // Phase 4b freed the source: rebuild it from a copy, never read source_data.
+    if (h.source_released) {
+        released_source_gemm_(h, input, output, ctx);
+        return;
     }
 
     if (h.primary_tier == StorageTier::Undefined) {

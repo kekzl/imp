@@ -76,10 +76,15 @@ struct WeightCaches {
     void* fp8_ssm_sidecar_data = nullptr;
     size_t fp8_ssm_sidecar_data_size = 0;
     float* fp8_ssm_sidecar_row_scales = nullptr;
-    // F16 GDN input packs freed in Phase 4b: only the M=1 decode reads a pack, through its
-    // FP8 sidecar entry (keyed by the freed pointer). Bytes go back to the expert cache.
-    size_t dropped_gdn_pack_bytes = 0;
-    size_t dropped_gdn_pack_released_bytes = 0;  // of those, what the pool trim returned to the driver
+    // GDN bytes Phase 4b freed (F16 input packs; with host-resident experts also the F16
+    // ssm_in / gdn_gate / ssm_out) and what of them reached the driver: the expert cache grows by it.
+    size_t dropped_gdn_bytes = 0;
+    size_t dropped_gdn_released_bytes = 0;
+    // Released ssm_in: FP8 view into its pack's sidecar rows, keyed by the freed pointer.
+    std::unordered_map<const void*, FP8CacheEntry> released_fp8_view;
+    // F16 rebuild target for released sources (released_source_gemm_), sized for the largest.
+    void* released_f16_scratch = nullptr;
+    size_t released_f16_scratch_bytes = 0;
 
     // --- NVFP4 decode weight cache ---
     // Mode: 0=off, 1=additive, 2=only

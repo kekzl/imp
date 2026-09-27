@@ -124,12 +124,26 @@ private:
 // Returns the bytes handed back to the driver (reserved before - after).
 size_t trim_device_mempool();
 
-// Device mempool with release threshold 0, created on first use (null if creation fails):
+// Device mempools with release threshold 0, created on first use (null if creation fails):
 // a cudaFreeAsync'd block goes back to the driver at the next sync instead of sharing a
-// chunk with long-lived allocations. For weights that may be freed after load (GDN packs).
-cudaMemPool_t release_on_free_pool();
+// chunk with long-lived allocations. One pool per class Phase 4b may free, so a class that
+// stays live does not pin the chunks of one that is freed.
+enum class ReleasePool { GdnPacks = 0, GdnSources = 1 };
+cudaMemPool_t release_on_free_pool(ReleasePool which);
 // Its reserved bytes (cudaMemPoolAttrReservedMemCurrent), 0 without a pool.
-size_t release_on_free_pool_reserved();
+size_t release_on_free_pool_reserved(ReleasePool which);
+// cudaMallocAsync, from the release-on-free pool of the innermost live ReleasePoolScope if any.
+cudaError_t malloc_async_in_scope(void** ptr, size_t size, cudaStream_t stream);
+class ReleasePoolScope {
+public:
+    explicit ReleasePoolScope(ReleasePool which);
+    ~ReleasePoolScope();
+    ReleasePoolScope(const ReleasePoolScope&) = delete;
+    ReleasePoolScope& operator=(const ReleasePoolScope&) = delete;
+
+private:
+    int prev_;
+};
 
 // I7: capacity is not occupancy (MEMORY.md). A single "VRAM used" number cannot
 // distinguish a KV pool 90% full from one 90% reserved and empty, and every capacity

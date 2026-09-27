@@ -307,5 +307,44 @@ TEST_F(FP8GemmTest, RowscaleGemvFromQ8SourceMatchesReference) {
     cudaFree(d_row_scales);
 }
 
+// Rebuild of a freed ssm_in from its pack's FP8 rows (released_source_gemm_): dequantizing is exact,
+// so re-quantizing the rebuilt rows returns the same bytes and row scales.
+TEST_F(FP8GemmTest, DequantizeRowsRoundTripsTheSidecar) {
+    constexpr int M = 96, K = 2560;
+    std::vector<half> src(static_cast<size_t>(M) * K);
+    uint32_t s = 17u;
+    for (size_t i = 0; i < src.size(); ++i) {
+        s = s * 1664525u + 1013904223u;
+        const float row_mag = 0.01f * static_cast<float>(1 + (i / K) % 7);  // rows of different magnitude
+        src[i] = __float2half(row_mag * (static_cast<float>(s >> 8) / 16777216.0f - 0.5f));
+    }
+    void *d_src = nullptr, *d_back = nullptr, *q1 = nullptr, *q2 = nullptr;
+    float *s1 = nullptr, *s2 = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_src, src.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_back, src.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&q1, src.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&q2, src.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&s1, M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&s2, M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_src, src.data(), src.size() * sizeof(half), cudaMemcpyHostToDevice), cudaSuccess);
+    quantize_fp8_rows_async(d_src, q1, M, K, s1, stream_);
+    dequantize_fp8_rows_async(q1, s1, d_back, M, K, stream_);
+    quantize_fp8_rows_async(d_back, q2, M, K, s2, stream_);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    std::vector<uint8_t> h1(src.size()), h2(src.size());
+    std::vector<float> hs1(M), hs2(M);
+    cudaMemcpy(h1.data(), q1, h1.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h2.data(), q2, h2.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hs1.data(), s1, M * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hs2.data(), s2, M * sizeof(float), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(h1, h2) << "re-quantized rebuild differs from the sidecar";
+    for (int r = 0; r < M; ++r)
+        EXPECT_NEAR(hs2[r], hs1[r], 1e-3f * hs1[r]) << "row " << r;
+    for (void* p : {d_src, d_back, q1, q2})
+        cudaFree(p);
+    cudaFree(s1);
+    cudaFree(s2);
+}
+
 }  // namespace
 }  // namespace imp

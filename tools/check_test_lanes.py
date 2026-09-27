@@ -320,7 +320,9 @@ def main():
     # the PLE conv-row sidecar survives save, host-tier eviction and restore (cudaMalloc/HostAlloc).
     # 1136 -> 1137: MoERoutingWideTest.SoftmaxTopKMatchesTheReferenceOnEveryLaunch (test-moe-gdn):
     # the softmax top-k race needs the real kernel under launch contention (CUDA).
-    PINNED = 1137
+    # 1137 -> 1139: FP8GemmTest.DequantizeRowsRoundTripsTheSidecar (test-compute) and
+    # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
+    PINNED = 1139
 
     text = CMAKE.read_text()
     mods = module_sources(text)

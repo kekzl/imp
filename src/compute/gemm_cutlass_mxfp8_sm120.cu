@@ -8,6 +8,7 @@
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -180,6 +181,51 @@ void quantize_fp16_to_mxfp8_cutlass(const void* src_fp16, void* dst_data, void* 
     quantize_fp16_mxfp8_cutlass_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
         reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+// Inverse of quantize_fp16_mxfp8_cutlass_kernel: one thread per 32-element block.
+__global__ void dequantize_mxfp8_cutlass_fp16_kernel(const uint8_t* __restrict__ data, const uint8_t* __restrict__ sf,
+                                                     half* __restrict__ out, int rows, int K, int n_k_tiles) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int K_groups = K / kMx8SFVecSize;
+    if (idx >= rows * K_groups)
+        return;
+    const int row = idx / K_groups;
+    const int k_group = idx % K_groups;
+    const size_t base = static_cast<size_t>(row) * K + static_cast<size_t>(k_group) * kMx8SFVecSize;
+    const float s = mx8_ue8m0_to_float(sf[mx8_sfatom_offset(row, k_group, n_k_tiles)]);
+    const uint4* src = reinterpret_cast<const uint4*>(data + base);
+    uint4* dst = reinterpret_cast<uint4*>(out + base);
+#pragma unroll
+    for (int v = 0; v < 2; v++) {
+        const uint4 q = src[v];
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(&q);
+#pragma unroll
+        for (int h = 0; h < 2; h++) {
+            __align__(16) half o[8];
+#pragma unroll
+            for (int j = 0; j < 8; j++) {
+                __nv_fp8_e4m3 e;
+                *reinterpret_cast<uint8_t*>(&e) = b[h * 8 + j];
+                o[j] = __float2half(static_cast<float>(e) * s);
+            }
+            dst[v * 2 + h] = *reinterpret_cast<const uint4*>(o);
+        }
+    }
+}
+
+void dequantize_mxfp8_cutlass_to_fp16(const CutlassMxFP8Weight& w, void* dst_fp16, cudaStream_t stream) {
+    IMP_CHECK(w.data && w.scale_factors && dst_fp16 && w.K % kMx8SFVecSize == 0,
+              "dequantize_mxfp8_cutlass_to_fp16: empty weight or K=%lld not a multiple of %d",
+              static_cast<long long>(w.K), kMx8SFVecSize);
+    const int rows = static_cast<int>(w.N), K = static_cast<int>(w.K);
+    const int total = rows * (K / kMx8SFVecSize);
+    const int n_k_tiles = (K + kMx8AtomKElems - 1) / kMx8AtomKElems;
+    const int threads = 256;
+    dequantize_mxfp8_cutlass_fp16_kernel<<<(total + threads - 1) / threads, threads, 0, stream>>>(
+        static_cast<const uint8_t*>(w.data), static_cast<const uint8_t*>(w.scale_factors),
+        static_cast<half*>(dst_fp16), rows, K, n_k_tiles);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

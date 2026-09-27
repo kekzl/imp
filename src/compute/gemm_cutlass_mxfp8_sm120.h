@@ -32,6 +32,8 @@ size_t cutlass_mxfp8_sf_size(int rows, int K);
 // FP16 [M,K] -> E4M3 [M,K] + SfAtom UE8M0. K % 32 == 0; dst_sf is cleared first (atom padding).
 void quantize_fp16_to_mxfp8_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream);
+// Inverse: the [N, K] copy back to FP16 rows (serves small-M GEMMs once the F16 source is freed).
+void dequantize_mxfp8_cutlass_to_fp16(const CutlassMxFP8Weight& w, void* dst_fp16, cudaStream_t stream);
 
 // D[M,N] FP16 = A[M,K] (MXFP8 RowMajor + SFA) x B[N,K]^T (MXFP8 + SFB). False when CUTLASS
 // declines the shape or the workspace is too small (the caller falls back).
