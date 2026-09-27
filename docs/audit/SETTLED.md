@@ -6,7 +6,7 @@ This file exists because the 2026-07-29 architecture audit spent most of its bud
 refuting its own hypotheses. Its §15 names the cause: *"Several of these are the reason
 hypotheses 1, 3, 4, 5, 7, 8, 9 and 11 came back REFUTED"* — eight of thirteen described
 duplication that earlier campaigns had already collapsed. §19 names the other half:
-*"Several dispatch priors were stale … 9 vs 16 architectures, C++20 vs C++23, `src/graph/`
+*"Several dispatch priors were stale … 9 vs 16 architectures, C++20 vs C++23, [`src/graph/`](https://github.com/kekzl/imp/tree/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph)
 vs `src/exec/`, missing histograms that exist"* — the brief the hypotheses were generated
 from carried five verifiably wrong facts about the repo.
 
@@ -106,7 +106,7 @@ loop, and the shared part is already factored out.
   not re-run this sweep on it without a reason. Two of the three are worth remembering
   because they are different failure modes: the FP8 one was orphaned by `d5dd4bbd`, which
   replaced its four launch sites with one `write_kv_cache_fp8_fused_kernel`; the bias one
-  was **never launched at all** — it entered the tree under the old `src/graph/` path with
+  was **never launched at all** — it entered the tree under the old [`src/graph/`](https://github.com/kekzl/imp/tree/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph) path with
   no caller, gained a header declaration it never needed, and was carried through the
   file-size split #784 by three commits that each moved it without noticing.
 - **`write_kv_cache_fused_kernel` is the only FP16 KV-write path, deliberately.** The
@@ -136,11 +136,11 @@ loop, and the shared part is already factored out.
   `cfg.attention.mxfp4_blockscale` and `attention_dispatch.cu` reads it, so the config path
   never depended on the setter. The setter is gone; the knob works.
 - **Two whole modules were dead and are gone (2026-08-03):**
-  - `src/compute/gemv_ggml_compat.h` + `src/compute/gemv_ggml_compat.cu` (174 lines). Its only export had no callers, its
+  - [`src/compute/gemv_ggml_compat.h`](https://github.com/kekzl/imp/blob/be6ea222557cc3cac3c6ab949593d0fa763d3910/src/compute/gemv_ggml_compat.h) + [`src/compute/gemv_ggml_compat.cu`](https://github.com/kekzl/imp/blob/be6ea222557cc3cac3c6ab949593d0fa763d3910/src/compute/gemv_ggml_compat.cu) (174 lines). Its only export had no callers, its
     kernel was launched only by that dead wrapper, and the three
     `#include "compute/gemv_ggml_compat.h"` in the MoE executors were the sole mention in
     those files.
-  - `src/core/threading.h` + `src/core/threading.cpp` (88 lines) — a `ThreadPool` class that appeared nowhere
+  - [`src/core/threading.h`](https://github.com/kekzl/imp/blob/be6ea222557cc3cac3c6ab949593d0fa763d3910/src/core/threading.h) + [`src/core/threading.cpp`](https://github.com/kekzl/imp/blob/be6ea222557cc3cac3c6ab949593d0fa763d3910/src/core/threading.cpp) (88 lines) — a `ThreadPool` class that appeared nowhere
     but its own declaration and definition. `core/threading.h` was included by exactly one
     file: its own `.cpp`. (Grepping `ThreadPool` across the repo hits Python files where
     the word is coincidental — restrict to C++ globs.)
@@ -348,7 +348,7 @@ one command.
 | 9 architectures | **16** enumerators | count them in `src/model/model_arch.h` |
 | 6 tested models | ~30 validated checkpoints | `docs/MODELS.md` |
 | C++20 | **C++23** | the standard in `CMakeLists.txt` |
-| `src/graph/` exists | renamed to `src/exec/`; `src/lora/` exists and was unlisted | `ls src/` |
+| [`src/graph/`](https://github.com/kekzl/imp/tree/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph) exists | renamed to `src/exec/`; `src/lora/` exists and was unlisted | `ls src/` |
 | no p50/p99 histograms | Prometheus histograms exist | `grep _bucket` in `tools/imp-server/handlers_misc.cpp` |
 | `/v1/messages` streaming is synthetic | real handler plus the shared stream driver | `tools/imp-server/handlers_messages.cpp` |
 

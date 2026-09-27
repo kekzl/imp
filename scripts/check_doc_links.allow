@@ -1,0 +1,15 @@
+# scripts/check_doc_links.sh allowlist: "<doc> <path>" per line, reason in the comment above.
+# Only for mentions that never were a path in this repo, so neither a fix nor a permalink exists.
+# git branch name, not a path
+docs/archive/benchmarks_pre_v0.44.md docs/skills-generalize
+# the row says "no #include in src/include resolves": a searched location, not a file
+docs/archive/housekeeping_2026_06_13.md src/include
+# proposed tool, never built
+docs/audit/AUDIT_arch_2026.md tools/check_config_example.py
+# the row records that this path does not exist
+docs/audit/AUDIT_arch_2026.md docs/STALE.md
+# plan-proposed files, built under other names
+docs/plans/2026-05-28-q4k-mmq-kernel-design.md src/exec/gemm_kernel_q4k_mmq.cu
+docs/plans/2026-08-28-sparse-decode-attention.md src/compute/attention_sparse_select.cu
+# llama.cpp source path, external repo (also matches the models/ gitignore rule)
+docs/internals/vision_gemma4v_spec.md tools/mtmd/models/gemma4v.cpp

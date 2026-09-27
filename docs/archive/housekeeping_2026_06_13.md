@@ -10,7 +10,7 @@ Branch: `housekeeping/docs-truth-pass` (off `main`).
 ## Executive summary
 
 This codebase was already audited for structural debt and dead code **three times**
-(`docs/audit/structural_consistency_2026_06_06.md`,
+([`docs/audit/structural_consistency_2026_06_06.md`](https://github.com/kekzl/imp/blob/57d1f8ff6d3faf3d4a604a6e8a6a6e25b52b3031/docs/audit/structural_consistency_2026_06_06.md),
 `structural_debt_2026_06_08.md`, `structural_debt_2026_06_09.md`). The dead-code
 seam was largely mined in PR #635 (5 dead kernels, 116 LOC) and the structural
 big-ticket findings (C1/C2/C4) were **refuted on verification**. A fresh full-tree
@@ -76,7 +76,7 @@ Every hit is in **refutation context** — the docs already state these numbers 
 wrong:
 
 - `GOAL.md:86` — "the '20× grouped-GEMM gap' premise is refuted".
-- `docs/audit/performance_agent_readiness_2026_05_31.md:13–17,39,208` — "The central
+- [`docs/audit/performance_agent_readiness_2026_05_31.md:13–17,39,208`](https://github.com/kekzl/imp/blob/52a895a1c63dd26cc61f29d23edac32e3b5155c6/docs/audit/performance_agent_readiness_2026_05_31.md) — "The central
   audit premise is outdated… '1258' value… conclusively refuted".
 - `CHANGELOG.md:694` — historical record ("CUTLASS 3.x… scaffold (#22) — path for
   sm_100+"); changelog is an append-only archive, left untouched.
@@ -87,7 +87,7 @@ wrong:
 
 The vast majority of `wgmma|hopper|sm_100|tcgen05|tmem` hits are **legitimate
 negative statements** ("no `tcgen05`/TMEM/`wgmma` — those are datacenter Blackwell
-only") in `README.md`, `GOAL.md`, `docs/sm120.md`, `Dockerfile`, the `ptx-status-*`
+only") in `README.md`, `GOAL.md`, [`docs/sm120.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/sm120.md), `Dockerfile`, the `ptx-status-*`
 survey docs, and `tools/analysis/*.sh`. Per the mission these **must stay** and were
 left intact.
 
