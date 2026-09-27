@@ -43,6 +43,10 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# No job writes to the repo; artifacts and caches need no token scope.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build
