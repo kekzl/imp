@@ -406,4 +406,33 @@ size_t trim_device_mempool() {
     return released;
 }
 
+cudaMemPool_t release_on_free_pool() {
+    static cudaMemPool_t pool = [] {
+        int dev = 0;
+        cudaMemPool_t p = nullptr;
+        if (cudaGetDevice(&dev) != cudaSuccess)
+            return p;
+        cudaMemPoolProps props{};
+        props.allocType = cudaMemAllocationTypePinned;
+        props.location.type = cudaMemLocationTypeDevice;
+        props.location.id = dev;
+        if (cudaMemPoolCreate(&p, &props) != cudaSuccess) {
+            (void)cudaGetLastError();
+            return static_cast<cudaMemPool_t>(nullptr);
+        }
+        uint64_t threshold = 0;  // the default for a new pool, set so it is explicit
+        cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &threshold);
+        return p;
+    }();
+    return pool;
+}
+
+size_t release_on_free_pool_reserved() {
+    cudaMemPool_t pool = release_on_free_pool();
+    unsigned long long rsv = 0;
+    if (pool == nullptr || cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv) != cudaSuccess)
+        return 0;
+    return static_cast<size_t>(rsv);
+}
+
 }  // namespace imp

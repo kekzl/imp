@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Changed
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).
+- GDN input packs come from a release-on-free mempool, so freeing them returns all 2896.9 MiB instead of 1760.0 on Qwen3.8-Flash-Next: expert cache 263 -> 290 slots/layer, hit rate 78.9 -> 80.7 %, tg512 prose 63.66 -> 66.22 tok/s (medians, 3 pairs).
 
 ### Fixed
 - Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.

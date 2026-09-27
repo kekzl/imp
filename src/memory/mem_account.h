@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda_runtime_api.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -122,6 +123,13 @@ private:
 // freed large async allocations. Safe at process exit.
 // Returns the bytes handed back to the driver (reserved before - after).
 size_t trim_device_mempool();
+
+// Device mempool with release threshold 0, created on first use (null if creation fails):
+// a cudaFreeAsync'd block goes back to the driver at the next sync instead of sharing a
+// chunk with long-lived allocations. For weights that may be freed after load (GDN packs).
+cudaMemPool_t release_on_free_pool();
+// Its reserved bytes (cudaMemPoolAttrReservedMemCurrent), 0 without a pool.
+size_t release_on_free_pool_reserved();
 
 // I7: capacity is not occupancy (MEMORY.md). A single "VRAM used" number cannot
 // distinguish a KV pool 90% full from one 90% reserved and empty, and every capacity

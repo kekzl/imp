@@ -590,6 +590,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     // sidecar whenever an entry with row scales exists (executor_gemm_dispatch.cu, decode
     // tier FP8). The pointer stays as the sidecar key; the bytes are dead weight.
     int dropped_packs = 0;
+    const size_t pack_pool_before = release_on_free_pool_reserved();
     for (int i = 0; i < cfg.n_layers; ++i) {
         auto& L = mut_model->layer(i);
         Tensor& p = L.gdn_input_packed;
@@ -607,8 +608,10 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     }
     if (wcache_->dropped_gdn_pack_bytes > 0) {
         cudaStreamSynchronize(stream);
+        // A threshold-0 pool releases at the sync above; the default pool needs the trim.
+        const size_t pack_pool_released = pack_pool_before - std::min(pack_pool_before, release_on_free_pool_reserved());
         wcache_->dropped_gdn_pack_released_bytes =
-            std::min(wcache_->dropped_gdn_pack_bytes, trim_device_mempool());
+            std::min(wcache_->dropped_gdn_pack_bytes, pack_pool_released + trim_device_mempool());
         IMP_LOG_INFO("Phase-4b: freed %d F16 GDN input packs (%.1f MiB, %.1f MiB back to the driver); "
                      "M=1 decode reads their FP8 sidecar",
                      dropped_packs,
