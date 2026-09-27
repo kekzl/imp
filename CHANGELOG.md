@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.
+
 ## [0.45.0] - 2026-09-27
 
 ### Removed
