@@ -59,7 +59,7 @@ Not in here:       one line: what a reviewer would look for and not find
 
 ## CHANGELOG entries
 
-- One to three lines: what changed for the reader, the number that makes it checkable, `(#NNNN)`. v0.31.0's cut went 389 -> 93 lines for 35 entries.
+- One to three lines and at most 360 characters (`tools/check_changelog_form.py`, gated): what changed for the reader, the number that makes it checkable, `(#NNNN)`. v0.31.0's cut went 389 -> 93 lines for 35 entries.
 - Write it short at PR time; before a release cut count lines per entry (>5 = journal).
 - New entries merge into the EXISTING `### Added` / `### Changed` / `### Fixed` block of `[Unreleased]`: a second `### Added` fails `check-release.sh` ("repeats a '###' heading").
 - Plain punctuation; no internal vocabulary without a greppable symbol; every number names model, quant, unit.
