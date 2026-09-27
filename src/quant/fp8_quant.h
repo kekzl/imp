@@ -24,6 +24,9 @@ void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, 
 // to d_row_scales and the quantized rows to output_fp8. Async, init-time.
 void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,
                              float* d_row_scales, cudaStream_t stream = nullptr);
+// Inverse: FP16 rows = E4M3 rows * d_row_scales[row]. K % 8 == 0, 16-byte aligned rows.
+void dequantize_fp8_rows_async(const void* input_fp8, const float* d_row_scales, void* output_fp16, int rows,
+                               int K, cudaStream_t stream = nullptr);
 
 // Fully async calibrate+quantize: no host sync, all on device.
 // Caller provides reusable temp buffers d_block_maxes[max_grid] and d_absmax[1].

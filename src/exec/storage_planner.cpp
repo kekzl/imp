@@ -162,10 +162,9 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
         add_tensor(L.w_down_shared, TensorKind::W_DOWN, plan, next_id, total, hints);
         add_tensor(L.ssm_in, TensorKind::SSM_IN, plan, next_id, total, hints);
         add_tensor(L.ssm_out, TensorKind::SSM_OUT, plan, next_id, total, hints);
-        // gdn_gate is intentionally NOT enumerated for overlay caching: it's consumed only by
-        // the specialized GDN scan kernel via the raw L.gdn_gate.data pointer, never through
-        // gemm_dispatch. An overlay copy would burn VRAM with no consumer (see PR #43's
-        // per-kind gap diagnostic).
+        // gdn_gate is NOT enumerated for overlay caching: run_gdn runs it as a GEMM through
+        // gdn_gate_id, and its copies (phase-3d NVFP4/MXFP8 prefill, the pack's FP8 sidecar) are
+        // built outside this plan. No scan kernel reads it.
         for (const auto& e : L.expert_w_gate)
             add_tensor(e, TensorKind::EXPERT_GATE, plan, next_id, total, hints);
         for (const auto& e : L.expert_w_up)

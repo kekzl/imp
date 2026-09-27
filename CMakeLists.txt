@@ -397,6 +397,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase3_gdn_prefill.cu
     src/exec/pre_dequant_phase3_moe.cu
     src/exec/executor_gemm_dispatch.cu
+    src/exec/executor_gemm_released.cu
     src/exec/activation_calibrator.cu
     src/exec/gemm_kernel_registry.cu
     src/exec/gemm_kernel_cutlass_nvfp4.cu

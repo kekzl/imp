@@ -15,6 +15,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/executor_helpers.h"
+#include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"
 #include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
@@ -60,8 +61,11 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
     const auto& gemm_cfg = dispatch_policy().gemm;
     ProjSelection nv = parse_projection_selection(gemm_cfg.nvfp4_gdn_proj_prefill,
                                                   "gemm.nvfp4_gdn_proj_prefill");
-    ProjSelection mx = parse_projection_selection(gemm_cfg.mxfp8_gdn_proj_prefill,
-                                                  "gemm.mxfp8_gdn_proj_prefill");
+    // "auto": gate,out copies with host-resident experts, where Phase 4b frees the F16 sources.
+    std::string mx_spec = gemm_cfg.mxfp8_gdn_proj_prefill;
+    if (mx_spec == "auto")
+        mx_spec = pre_dequant_internal::has_host_resident_experts(*model_) ? "gate,out" : "false";
+    ProjSelection mx = parse_projection_selection(mx_spec, "gemm.mxfp8_gdn_proj_prefill");
     if (!nv.any() && !mx.any())
         return;
     if (nv.any() && !cutlass_sm120_nvfp4_available()) {

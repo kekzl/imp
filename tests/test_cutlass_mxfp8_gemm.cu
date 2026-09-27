@@ -150,3 +150,68 @@ TEST(CutlassMxFP8Gemm, PartialSfAtomKTile) {
         return;
     EXPECT_LT(rel_rms(d, ref), 0.05);
 }
+
+static float e4m3_to_float(uint8_t b) {
+    const int e = (b >> 3) & 0xF, m = b & 7;
+    const float v = e == 0 ? std::ldexp(m / 8.0f, -6) : std::ldexp(1.0f + m / 8.0f, e - 7);
+    return (b & 0x80) ? -v : v;
+}
+
+// Same addressing as mx8_sfatom_offset (128 rows x 4 K-groups per 512-byte atom).
+static int sfatom_offset(int row, int k_group, int n_k_tiles) {
+    const int row_local = row % 128, k_local = k_group % 4;
+    return ((row / 128) * n_k_tiles + k_group / 4) * 512 + (row_local % 32) * 16 + (row_local / 32) * 4 + k_local;
+}
+
+// The rebuild of a freed F16 GDN weight from its MXFP8 copy (released_source_gemm_): every element
+// equals the host decode E4M3(byte) * 2^(scale - 127) bit for bit, and the rebuilt weight stays
+// within E4M3 rounding of the source. Partial atoms in both dimensions (300 x 1120).
+TEST(CutlassMxFP8Gemm, DequantizeMatchesTheHostDecode) {
+    constexpr int N = 300, K = 1120;
+    std::mt19937 rng(5u);
+    std::normal_distribution<float> dist(0.0f, 0.05f);
+    std::vector<half> src(static_cast<size_t>(N) * K);
+    for (auto& v : src)
+        v = __float2half(dist(rng));
+    const size_t sf_bytes = cutlass_mxfp8_sf_size(N, K);
+    void *d_src = nullptr, *d_back = nullptr, *q1 = nullptr, *sf1 = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_src, src.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_back, src.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&q1, src.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&sf1, sf_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_src, src.data(), src.size() * sizeof(half), cudaMemcpyHostToDevice), cudaSuccess);
+    quantize_fp16_to_mxfp8_cutlass(d_src, q1, sf1, N, K, nullptr);
+    CutlassMxFP8Weight w;
+    w.data = q1;
+    w.scale_factors = sf1;
+    w.N = N;
+    w.K = K;
+    dequantize_mxfp8_cutlass_to_fp16(w, d_back, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<uint8_t> hq1(src.size()), hs1(sf_bytes);
+    std::vector<half> back(src.size());
+    cudaMemcpy(hq1.data(), q1, hq1.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hs1.data(), sf1, sf_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(back.data(), d_back, back.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    const int n_k_tiles = (K + 127) / 128;
+    int mismatches = 0;
+    for (int r = 0; r < N; ++r) {
+        for (int k = 0; k < K; ++k) {
+            const size_t i = static_cast<size_t>(r) * K + k;
+            const float scale = std::ldexp(1.0f, hs1[sfatom_offset(r, k / 32, n_k_tiles)] - 127);
+            const half want = __float2half(e4m3_to_float(hq1[i]) * scale);
+            if (__half_as_ushort(want) != __half_as_ushort(back[i]))
+                ++mismatches;
+        }
+    }
+    EXPECT_EQ(mismatches, 0) << "rebuilt elements differ from the host decode";
+    double err = 0.0, ref = 0.0;
+    for (size_t i = 0; i < src.size(); ++i) {
+        const double a = __half2float(src[i]), b = __half2float(back[i]);
+        err += (a - b) * (a - b);
+        ref += a * a;
+    }
+    EXPECT_LT(std::sqrt(err / ref), 0.05) << "rebuild outside E4M3 rounding of the source";
+    for (void* p : {d_src, d_back, q1, sf1})
+        cudaFree(p);
+}

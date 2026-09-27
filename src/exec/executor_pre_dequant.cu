@@ -33,7 +33,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 // packs. It is still empty here (the device tables and the first request come later), so it
 // is re-created with those bytes on top: everything allocated after sees the same free VRAM.
 void GraphExecutor::regrow_expert_cache_() {
-    const size_t freed = wcache_.dropped_gdn_pack_released_bytes;
+    const size_t freed = wcache_.dropped_gdn_released_bytes;
     if (freed == 0 || expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
         return;
     const auto& mcfg = model_->config();
@@ -50,7 +50,7 @@ void GraphExecutor::regrow_expert_cache_() {
         return;
     }
     expert_cache_budget_ = budget;
-    IMP_LOG_INFO("Expert LRU cache: %d -> %d slots/layer with the %.1f MiB of freed GDN input packs",
+    IMP_LOG_INFO("Expert LRU cache: %d -> %d slots/layer with the %.1f MiB of freed GDN weights",
                  before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0));
 }
 

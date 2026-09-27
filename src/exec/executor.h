@@ -936,6 +936,8 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // Source freed in Phase 4b: rebuild from a copy (executor_gemm_dispatch.cu).
+    void released_source_gemm_(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx);
     // Sibling-pair small-M dispatch: two weights consuming the SAME input,
     // both routing to the smallm v2 kernel, run as one launch
     // (gemm_nvfp4_smallm_v2_pair_a4). False (and no-op) when either weight

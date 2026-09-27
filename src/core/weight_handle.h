@@ -36,6 +36,9 @@ struct WeightHandle {
     QType source_qtype = QType::NONE;
     void* source_scales = nullptr;
     float source_tensor_scale = 1.0f;
+    // Phase 4b freed the source bytes (source_data stays as the cache key): paths not covered
+    // by a copy rebuild the F16 weight from wcache (released_source_gemm_), never read source_data.
+    bool source_released = false;
 
     union {
         struct {

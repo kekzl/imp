@@ -586,37 +586,76 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         try_mark(L.ssm_in, L.ssm_in_id);
         try_mark(L.ssm_out, L.ssm_out_id);
     }
-    // F16 GDN input pack: run_gdn reads it only at n == 1, and that GEMV takes the FP8
-    // sidecar whenever an entry with row scales exists (executor_gemm_dispatch.cu, decode
-    // tier FP8). The pointer stays as the sidecar key; the bytes are dead weight.
-    int dropped_packs = 0;
-    const size_t pack_pool_before = release_on_free_pool_reserved();
+    // GDN bytes no path reads any more:
+    // - the F16 input pack: only n == 1 reads it, through its FP8 row-scale sidecar (decode tier FP8);
+    // - with host-resident experts, the F16 ssm_in / gdn_gate / ssm_out once M > 32 has its NVFP4 (in)
+    //   and MXFP8 (gate, out) copy: smaller M rebuild them from those copies (released_source_gemm_).
+    const bool host_experts = pre_dequant_internal::has_host_resident_experts(*model_);
+    auto bytes_of = [](const Tensor& t) { return qtype_row_bytes(t.qtype, t.shape[1]) * static_cast<size_t>(t.shape[0]); };
+    auto releasable = [&](const Tensor& t, TensorID id) {
+        return t.data && !t.dropped_source && t.qtype == QType::F16 && t.ndim == 2 && id != kInvalidTensorID &&
+               mut_model->is_base_gpu_allocation(t.data);
+    };
+    int dropped_packs = 0, released_layers = 0;
+    auto pools_reserved = [] {
+        return release_on_free_pool_reserved(ReleasePool::GdnPacks) +
+               release_on_free_pool_reserved(ReleasePool::GdnSources);
+    };
+    const size_t pool_before = pools_reserved();
     for (int i = 0; i < cfg.n_layers; ++i) {
         auto& L = mut_model->layer(i);
         Tensor& p = L.gdn_input_packed;
-        if (!p.data || p.dropped_source || p.qtype != QType::F16 || L.gdn_input_packed_id == kInvalidTensorID)
+        const auto pk = p.data ? wcache_->fp8.find(p.data) : wcache_->fp8.end();
+        const bool pack_sidecar = pk != wcache_->fp8.end() && pk->second.d_row_scales != nullptr &&
+                                  L.gdn_input_packed_id != kInvalidTensorID &&
+                                  registry_->handle(L.gdn_input_packed_id).decode_tier == StorageTier::FP8;
+        if (pack_sidecar && releasable(p, L.gdn_input_packed_id)) {
+            wcache_->dropped_gdn_bytes += bytes_of(p);
+            free_source(p);
+            ++dropped_packs;
+        }
+        const bool copies = pack_sidecar && L.gdn_packed_conv_channels == L.ssm_in.shape[0] &&
+                            wcache_->cutlass_nvfp4_prefill.count(L.ssm_in.data) != 0 &&
+                            wcache_->cutlass_mxfp8_prefill.count(L.gdn_gate.data) != 0 &&
+                            wcache_->cutlass_mxfp8_prefill.count(L.ssm_out.data) != 0;
+        if (!host_experts || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
+            !releasable(L.gdn_gate, L.gdn_gate_id) || !releasable(L.ssm_out, L.ssm_out_id))
             continue;
-        const auto it = wcache_->fp8.find(p.data);
-        if (it == wcache_->fp8.end() || it->second.d_row_scales == nullptr ||
-            registry_->handle(L.gdn_input_packed_id).decode_tier != StorageTier::FP8 ||
-            !mut_model->is_base_gpu_allocation(p.data))
-            continue;
-        const size_t bytes = qtype_row_bytes(p.qtype, p.shape[1]) * static_cast<size_t>(p.shape[0]);
-        free_source(p);
-        wcache_->dropped_gdn_pack_bytes += bytes;
-        ++dropped_packs;
+        const size_t largest = std::max({bytes_of(L.ssm_in), bytes_of(L.gdn_gate), bytes_of(L.ssm_out)});
+        if (wcache_->released_f16_scratch_bytes < largest) {
+            vram_free(vram_alloc_, wcache_->released_f16_scratch);
+            wcache_->released_f16_scratch = vram_alloc(vram_alloc_, largest, "gdn_released_f16_scratch");
+            wcache_->released_f16_scratch_bytes = wcache_->released_f16_scratch ? largest : 0;
+            if (!wcache_->released_f16_scratch)
+                break;
+        }
+        FP8CacheEntry view = pk->second;  // pack rows [0, conv_channels) are ssm_in
+        const int64_t in_shape[2] = {L.ssm_in.shape[0], L.ssm_in.shape[1]};
+        view.weight = Tensor(pk->second.weight.data, QType::FP8_E4M3, 2, in_shape, true);
+        wcache_->released_fp8_view[L.ssm_in.data] = view;
+        for (auto [t, id] : {std::pair{&L.ssm_in, L.ssm_in_id}, std::pair{&L.gdn_gate, L.gdn_gate_id},
+                             std::pair{&L.ssm_out, L.ssm_out_id}}) {
+            wcache_->dropped_gdn_bytes += bytes_of(*t);
+            registry_->handle(id).source_released = true;
+            free_source(*t);
+        }
+        ++released_layers;
     }
-    if (wcache_->dropped_gdn_pack_bytes > 0) {
+    if (wcache_->dropped_gdn_bytes > 0) {
         cudaStreamSynchronize(stream);
         // A threshold-0 pool releases at the sync above; the default pool needs the trim.
-        const size_t pack_pool_released = pack_pool_before - std::min(pack_pool_before, release_on_free_pool_reserved());
-        wcache_->dropped_gdn_pack_released_bytes =
-            std::min(wcache_->dropped_gdn_pack_bytes, pack_pool_released + trim_device_mempool());
-        IMP_LOG_INFO("Phase-4b: freed %d F16 GDN input packs (%.1f MiB, %.1f MiB back to the driver); "
-                     "M=1 decode reads their FP8 sidecar",
-                     dropped_packs,
-                     wcache_->dropped_gdn_pack_bytes / (1024.0 * 1024.0),
-                     wcache_->dropped_gdn_pack_released_bytes / (1024.0 * 1024.0));
+        const size_t pool_released = pool_before - std::min(pool_before, pools_reserved());
+        // Minus what the release costs (rebuild scratch, and the MXFP8 copies "auto" builds for
+        // it), so every later allocation sees the same free VRAM as without the release.
+        const size_t released = std::min(wcache_->dropped_gdn_bytes, pool_released + trim_device_mempool());
+        const size_t price = wcache_->released_f16_scratch_bytes +
+                             (released_layers > 0 ? wcache_->cutlass_mxfp8_prefill_bytes : 0);
+        wcache_->dropped_gdn_released_bytes = released - std::min(released, price);
+        IMP_LOG_INFO("Phase-4b: freed %d F16 GDN input packs and the F16 in/gate/out of %d layers "
+                     "(%.1f MiB; %.1f MiB back to the driver, %.1f MiB to the expert cache after the "
+                     "rebuild scratch and MXFP8 copies)",
+                     dropped_packs, released_layers, wcache_->dropped_gdn_bytes / (1024.0 * 1024.0),
+                     released / (1024.0 * 1024.0), wcache_->dropped_gdn_released_bytes / (1024.0 * 1024.0));
     }
     if (mut_model->out_proj_id != kInvalidTensorID)
         try_mark(mut_model->out_proj_, mut_model->out_proj_id);

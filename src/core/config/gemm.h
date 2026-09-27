@@ -115,7 +115,9 @@ struct GEMM {
     // 45k PPL: in +0.08%, gate -0.51%, out -0.18% (NVFP4 +0.32 / +0.01 / +0.47%); pp4096
     // Qwen3.6-35B in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies on
     // Qwen3.6-35B leave its KV pool 50 blocks at stock flags (NVFP4 in, 270 MiB: 225).
-    std::string mxfp8_gdn_proj_prefill = "false";
+    // "auto" = gate,out when the experts are host-resident: Phase 4b then frees the F16 in/gate/out
+    // and M<=32 rows rebuild from these copies (Flash-Next 45k PPL +0.31 % / -0.21 % per window).
+    std::string mxfp8_gdn_proj_prefill = "auto";
     // FP8 decode sidecar for full-precision attention projections (wq/wk/wv/wo),
     // same per-row-scale mechanism as fp8_ssm_proj, decode-only (M=1).
     // "auto" = on only for gpt-oss (dense BF16 weights get no NVFP4 decode

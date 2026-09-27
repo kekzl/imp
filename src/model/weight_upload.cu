@@ -58,6 +58,8 @@ static bool host_pin_ram_available(size_t bytes) {
 // cache needs a device view on every host-resident layer or it serves none of them.
 static bool g_pin_host_experts_fits = true;
 
+// Allocations run through malloc_async_in_scope: weights Phase 4b may free (GDN projections)
+// are uploaded inside a ReleasePoolScope so every freed byte reaches the driver.
 static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t stream = nullptr) {
     size_t reserve = g_vram_reserve;
     // Use cached free memory (updated at start of each upload pass)
@@ -66,7 +68,7 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
             *ptr = nullptr;
             return cudaErrorMemoryAllocation;
         }
-        cudaError_t err = cudaMallocAsync(ptr, size, stream);
+        cudaError_t err = malloc_async_in_scope(ptr, size, stream);
         if (err == cudaSuccess) {
             g_total_allocated += size;
             MemAccount::instance().note("WEIGHTS", static_cast<std::ptrdiff_t>(size));
@@ -82,7 +84,7 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
     }
-    cudaError_t err = cudaMallocAsync(ptr, size, stream);
+    cudaError_t err = malloc_async_in_scope(ptr, size, stream);
     if (err == cudaSuccess && g_upload_log)
         g_upload_log->note_alloc(*ptr, size);
     return err;
@@ -1417,9 +1419,11 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i, const UploadCtx
 static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx& ctx) {
     // SSM weights (Mamba2)
     if (L.ssm_in.data && !L.ssm_in.on_device) {
+        ReleasePoolScope scope(ReleasePool::GdnSources);
         UPLOAD_OR_FAIL(L.ssm_in, L.ssm_in.qtype, "ssm_in", i, ctx);
     }
     if (L.ssm_out.data && !L.ssm_out.on_device) {
+        ReleasePoolScope scope(ReleasePool::GdnSources);
         UPLOAD_OR_FAIL(L.ssm_out, L.ssm_out.qtype, "ssm_out", i, ctx);
     }
     // SSM tensors that convert to compute_dtype (FP16): conv1d weights, norm
@@ -1518,6 +1522,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
     // immediate state collapse). Upload raw Q8_0 instead so the qtype stays consistent with the
     // on-device bytes.
     if (L.gdn_gate.data && !L.gdn_gate.on_device) {
+        ReleasePoolScope scope(ReleasePool::GdnSources);
         UPLOAD_OR_FAIL(L.gdn_gate, L.gdn_gate.qtype, "gdn_gate", i, ctx);
     }
     if (L.gdn_alpha.data && !L.gdn_alpha.on_device) {
@@ -1556,13 +1561,8 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         size_t es = 2;  // F16 / BF16 = 2 bytes
         size_t total_bytes = static_cast<size_t>(total_out) * d_model * es;
         void* d_packed = nullptr;
-        // Own pool: Phase 4b frees the pack once its FP8 sidecar exists, and every byte must
-        // reach the driver (from the default pool 1137 of 2897 MiB stayed in shared chunks).
-        cudaMemPool_t pack_pool = release_on_free_pool();
-        const cudaError_t pack_rc = pack_pool
-                                        ? cudaMallocFromPoolAsync(&d_packed, total_bytes, pack_pool, ctx.stream)
-                                        : cudaMallocAsync(&d_packed, total_bytes, ctx.stream);
-        if (pack_rc == cudaSuccess && d_packed) {
+        ReleasePoolScope pack_scope(ReleasePool::GdnPacks);  // Phase 4b frees it (default pool kept 1137 MiB)
+        if (malloc_async_in_scope(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
             char* base = static_cast<char*>(d_packed);
             // Concat in N (rows): each weight is a contiguous [out, d_model] block,
