@@ -84,6 +84,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     const bool staged_covers = stage_layer_for_prefill_(layer, stream, ctx);
 
     MoePrefillWorkspace obs{};
+    obs.staged_blocks = ctx.staged_blocks;
     static const bool force_off = dispatch_policy().moe.no_cutlass3x;
     const bool ids_cover = covers_ids(ly.expert_up_ids) && covers_ids(ly.expert_down_ids) &&
                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));

@@ -28,12 +28,12 @@ struct MoePrefillWorkspace {
     bool smallM_available = false;   // gemm_grouped_nvfp4_smallM_available()
     bool smallM_under_threshold = false;  // max active M <= nvfp4_smallM_threshold
     bool grouped_ready = false;      // host-args grouped path can run this layer
+    bool staged_blocks = false;      // host-expert staged prefill (ctx.staged_blocks)
 };
 
-// Reproduces the path selection in try_run_moe_cutlass3x_nvfp4_prefill_. gpt-oss
-// (#574/#547) is arch-gated off device-args and smallM tiers (fused act+quantize kernel
-// has no GLU-clamp/per-expert-bias hooks); it takes the GROUPED tier, which applies bias
-// seams + GPT_OSS_GLU activation.
+// Reproduces the path selection in try_run_moe_cutlass3x_nvfp4_prefill_. gpt-oss runs
+// device-args unstaged (bias + GPT_OSS_GLU + plain quantize, #2116); staged it stays off
+// device-args. smallM stays off for gpt-oss (#574/#547: no GLU-clamp/per-expert-bias hooks).
 inline MoePrefillPath select_moe_prefill_path(ModelArch arch, const DispatchPolicy& rcfg,
                                               const MoePrefillWorkspace& ws) {
     const bool is_gpt_oss = (arch == ModelArch::GPT_OSS);
@@ -44,9 +44,9 @@ inline MoePrefillPath select_moe_prefill_path(ModelArch arch, const DispatchPoli
     if (rcfg.moe.no_cutlass3x || !ws.grouped_available)
         return MoePrefillPath::LEGACY;
 
-    // Tier 1: device-args fast path. Gated by moe.nvfp4_device_args, off for
+    // Tier 1: device-args fast path. Gated by moe.nvfp4_device_args, off for staged
     // gpt-oss, requires the full device-args workspace.
-    if (rcfg.moe.nvfp4_device_args && !is_gpt_oss && ws.device_args_ready)
+    if (rcfg.moe.nvfp4_device_args && !(is_gpt_oss && ws.staged_blocks) && ws.device_args_ready)
         return MoePrefillPath::DEVICE_ARGS;
 
     // Tier 2: smallM path. Opt-in (moe.nvfp4_smallM), off for gpt-oss, only
