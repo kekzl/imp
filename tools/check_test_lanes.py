@@ -318,7 +318,9 @@ def main():
     # + folded consumer vs residual GEMV + rmsnorm + consumer, h bit-identical.
     # 1135 -> 1136: RecurrentSnapshotStoreTest.SidecarTravelsWithTheSlabThroughBothTiers (test-kv):
     # the PLE conv-row sidecar survives save, host-tier eviction and restore (cudaMalloc/HostAlloc).
-    PINNED = 1136
+    # 1136 -> 1137: MoERoutingWideTest.SoftmaxTopKMatchesTheReferenceOnEveryLaunch (test-moe-gdn):
+    # the softmax top-k race needs the real kernel under launch contention (CUDA).
+    PINNED = 1137
 
     text = CMAKE.read_text()
     mods = module_sources(text)
