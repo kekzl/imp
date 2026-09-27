@@ -1556,7 +1556,13 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         size_t es = 2;  // F16 / BF16 = 2 bytes
         size_t total_bytes = static_cast<size_t>(total_out) * d_model * es;
         void* d_packed = nullptr;
-        if (cudaMallocAsync(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
+        // Own pool: Phase 4b frees the pack once its FP8 sidecar exists, and every byte must
+        // reach the driver (from the default pool 1137 of 2897 MiB stayed in shared chunks).
+        cudaMemPool_t pack_pool = release_on_free_pool();
+        const cudaError_t pack_rc = pack_pool
+                                        ? cudaMallocFromPoolAsync(&d_packed, total_bytes, pack_pool, ctx.stream)
+                                        : cudaMallocAsync(&d_packed, total_bytes, ctx.stream);
+        if (pack_rc == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
             char* base = static_cast<char*>(d_packed);
             // Concat in N (rows): each weight is a contiguous [out, d_model] block,
