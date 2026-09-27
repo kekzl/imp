@@ -23,6 +23,9 @@ on:
   # a day after the baseline was already fixed on a branch.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   roofline-check:
     name: Roofline regress + plots

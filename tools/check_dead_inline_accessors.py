@@ -53,12 +53,16 @@ ALLOWLIST = ROOT / "tools" / "dead_inline_allowlist.txt"
 
 # An inline definition: optional specifiers, return type, name, argument list, optional
 # trailing const/noexcept/override, then `{` on the SAME line. Requiring the brace on the line
-# is what separates a definition from a declaration.
+# is what separates a definition from a declaration. Unambiguous on purpose (CodeQL py/redos):
+# `const` is a specifier or a qualifier, never a type token ("A\tconst" x20 took 0.33 s, x4 per 2
+# more), and template args are bracket-matched 3 deep instead of `<[^;{}]*>` spanning several `>`.
+_TA = r"[^;{}<>]"
+_TPL = "<(?:" + _TA + "|<(?:" + _TA + "|<" + _TA + "*>)*>)*>"
 DEF_RE = re.compile(
     r"^[ \t]*"
     r"(?:\[\[nodiscard\]\][ \t]*)?"
-    r"(?:(?:static|constexpr|inline|virtual|explicit|friend)[ \t]+)*"
-    r"(?:[A-Za-z_][\w:]*(?:[ \t]*<[^;{}]*>)?(?:[ \t]*(?:const|\*|&))*[ \t]+)+"
+    r"(?:(?:static|constexpr|inline|virtual|explicit|friend|const)[ \t]+)*"
+    r"(?:(?!const\b)[A-Za-z_][\w:]*(?:[ \t]*" + _TPL + r")?(?:[ \t]+const\b|[ \t]*[*&])*[ \t]+)+"
     r"([A-Za-z_]\w*)[ \t]*\("
     r"[^;{}]*\)[ \t]*"
     r"(?:const[ \t]*)?(?:noexcept[ \t]*)?(?:override[ \t]*)?(?:const[ \t]*)?"
