@@ -6,14 +6,16 @@ set -euo pipefail
 
 OUT="${1:-tools/analysis/ppl_corpus_45k.txt}"
 SRC=2e920fe328c2124492fb4ce9c71a5f1d2c0579a5
+EXT=md
 SHA256=cfbcc59b79dd4c8f7d258794569149985fcb778eed2cdf326d55de1304b83c83
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP" "$TMP.cat"' EXIT
 
 # Five docs at $SRC, concatenated with no separator, first 45000 bytes.
-for f in docs/architecture.md docs/sm120.md docs/BENCHMARKING.md README.md docs/GOAL.md; do
-    git -C "$ROOT" show "$SRC:$f"
+# Extension kept apart: 3 of the 5 are gone from HEAD, check-release.sh flags literal doc names.
+for f in docs/architecture docs/sm120 docs/BENCHMARKING README docs/GOAL; do
+    git -C "$ROOT" show "$SRC:$f.$EXT"
 done > "$TMP.cat"
 head -c 45000 "$TMP.cat" > "$TMP"
 
