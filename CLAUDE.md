@@ -52,7 +52,7 @@ make verify                # full
 ## Conventions
 
 - English in the repo (PRs, commits, comments, docs); chat with the user in German. No em dashes in the repo.
-- CHANGELOG: 1-3 lines per entry plus the number that makes it checkable; the investigation goes to `docs/`.
+- CHANGELOG: 1-3 lines and <= 360 characters per entry (gated) plus the number that makes it checkable; the investigation goes to `docs/`.
 - Branch off `main`, `gh pr create --base main`, never stack PRs; batch.
 - Perf is gated: `tests/perf_baseline.json` (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only for an intentional move, and say so in the PR.
 - Runtime config is `RuntimeConfig` (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). Env vars seeded into it: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`; into `diagnostics.*`: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING`. No ad-hoc env reads.
