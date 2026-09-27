@@ -112,6 +112,7 @@ tools/roofline/history/raw/**/*.sqlite
 tools/roofline/plots/
 tools/roofline/__pycache__/
 .superpowers/
+# PPL KPI corpus, rebuilt byte-identical by tools/analysis/make_ppl_corpus.sh.
 tools/analysis/ppl_corpus_45k.txt
 
 # AWQ activation statistics from `imp-cli --calibrate`. Multi-MB, model- and

@@ -105,7 +105,7 @@ Pick the first probe whose family matches the change; two probes after shared-co
 
 ## Perplexity
 
-- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens). The 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19% real).
+- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, rebuild with `tools/analysis/make_ppl_corpus.sh`). The 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19% real).
 - `--set runtime.deterministic=true` both arms (0.35% run-to-run otherwise); `--set speculative.mtp_k=0` (auto loads the head, +0.79 GiB); `gdn.state_bf16` pinned equal (+0.21% by design).
 - Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels (routing flips): >1% = broken, below that no verdict. Judge on Qwen3.8-27B-NVFP4-vllm.
 - PPL runs prefill; it cannot see decode-only paths or a degenerate low-PPL model. Pair it with the suite in section 0.
