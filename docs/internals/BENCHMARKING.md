@@ -94,7 +94,7 @@ arms.
 |---|---|---|
 | TTFT | first content delta minus request send, per request | client |
 | TPOT | (last token - first token) / (output tokens - 1), per request | client |
-| ITL | gap between consecutive token deltas, pooled over every token of every request | client |
+| ITL | gap between consecutive token deltas, pooled over every token of every request; p90 and max reported beside the trio | client |
 | E2E, normalized latency | request wall; E2E / output tokens | client |
 | req/s, output / input / total tok/s | over the level's wall | client |
 | goodput | requests with TTFT <= `--slo-ttft-ms` AND TPOT <= `--slo-tpot-ms` (defaults 500 and 50), as req/s and tok/s; attainment = their share of finished requests | client |
@@ -112,10 +112,32 @@ Percentiles are p50 / p95 / p99 with linear interpolation; no latency is reporte
 - The level's wall includes the closed loop's tail, so keep `--requests-per-level` at least twice the concurrency (the default).
 - Not reported: tok/s per GPU and cost per token, imp targets one card.
 - The published table is in [`../PERF.md`](../PERF.md) ("Serving KPIs").
+- `--process-workers`: one OS process per stream instead of a thread, so C streams do not stamp tokens through one GIL; the published table used threads. Unit test of the ITL math: `tests/api/test_serving_kpi_itl.py`.
 
 ```
 python3 tools/analysis/serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,32 \
     --max-tokens 300 --md-out kpi.md --json kpi.json
+```
+
+## Cold start
+
+`scripts/bench_cold_start.sh` starts the imp-server container N times (`--repeats`, default 3) and prints per run, in ms:
+
+| column | from | to |
+|---|---|---|
+| `run_ms` | host before `docker run` | container `State.StartedAt` |
+| `to_load_ms` | `State.StartedAt` | first `Loading model:` log line (`docker logs --timestamps`) |
+| `load_ms` | `Loading model:` | `/health` reports `model_loaded:true` (50 ms poll) |
+| `ttft_ms` | ready | first `max_tokens=1` response returned |
+| `total_ms` | host before `docker run` | first token |
+
+- Header: image, image id, OCI revision label, repo commit; last row is the per-column median.
+- The page cache is never dropped (needs root): run 1 is the coldest, the `cache` column is `fincore`'s resident share of the model files or `unknown`.
+- stdout is block-buffered until the listen banner; the `Loading model:` line is released with the first engine log line, so `to_load_ms` can read late by that gap.
+- `--dry-run` prints the commands; `--mock` runs `tests/api/mock_server.py` in `python:3.12-slim` on CPU to check the plumbing.
+
+```
+IMP_TEST_IMG=imp:test IMP_CS_MODEL=Qwen3.8-Flash-Next-NVFP4 bash scripts/bench_cold_start.sh --repeats 3
 ```
 
 ## Profiling builds
