@@ -28,6 +28,8 @@ enum class GraphDemotionReason {
     StreamingKvConfigured,       // block table mutates per decode step
     ExpertsOnHost,               // MoE host-offload; captured decode would replay stale pointers
     PinnedSampleBufUnavailable,  // pinned host buffer allocation failed at warmup
+    MoeDecodeCacheIncomplete,    // a device-resident MoE layer has no NVFP4 decode cache (legacy path is not
+                                 // graph-safe)
 
     // ── mid-run ──────────────────────────────────────────────────────
     // A mid-run demotion, not an init property: kept distinct so it can't be
