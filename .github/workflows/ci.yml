@@ -469,39 +469,23 @@ jobs:
           name: imp-build
           path: build
 
-      # Wheels = the toolkit's own versions (cudart 13.4.49, cuBLAS 13.7.0.27). Cached under a
-      # constant key, saved on push only; a pythonhosted fetch of the 420 MB wheel took ~35 s.
-      - name: Cache CUDA runtime wheels
-        if: github.event_name == 'push'
-        id: wheels-push
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /tmp/cuda-whl
-          key: cuda-whl-cudart13.4.49-cublas13.7.0.27
-      - name: Restore CUDA runtime wheels (no save)
-        if: github.event_name != 'push'
-        id: wheels
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /tmp/cuda-whl
-          key: cuda-whl-cudart13.4.49-cublas13.7.0.27
-
       - name: Install python and the CUDA runtime libs
         run: |
           sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-pip python3-venv curl ca-certificates
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-venv curl ca-certificates
+          # Toolkit versions: cudart 13.4.49, cuBLAS 13.7.0.27 (440 MB, 4.5 s in run 36470329804).
+          # Fetched in the background while pip runs; sha256-verified (H-6).
+          mkdir -p /tmp/cuda-whl
+          curl -fsSL https://files.pythonhosted.org/packages/e6/cb/b5959bff298d114338aaf4bface538ca9f2a721c439618fb252162f6192e/nvidia_cuda_runtime-13.4.49-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl -o /tmp/cuda-whl/cudart.whl
+          curl -fsSL -w 'cublas wheel: %{size_download} B in %{time_total} s\n' https://files.pythonhosted.org/packages/da/b3/358ee3e2237d4d663cd7a50e4dae3b07bbc5c93bf1eab034c17d66b7e428/nvidia_cublas-13.7.0.27-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cuda-whl/cublas.whl &
+          fetch=$!
           # A venv rather than --break-system-packages: the lock file pins the
           # whole transitive set, and pip cannot replace Debian's own copy of
           # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
           python3 -m venv /tmp/api-venv
           /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
-          mkdir -p /tmp/cuda-whl
-          if [ ! -f /tmp/cuda-whl/cudart.whl ] || [ ! -f /tmp/cuda-whl/cublas.whl ]; then
-            curl -fsSL https://files.pythonhosted.org/packages/e6/cb/b5959bff298d114338aaf4bface538ca9f2a721c439618fb252162f6192e/nvidia_cuda_runtime-13.4.49-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl -o /tmp/cuda-whl/cudart.whl
-            curl -fsSL -w 'cublas wheel: %{size_download} B in %{time_total} s\n' https://files.pythonhosted.org/packages/da/b3/358ee3e2237d4d663cd7a50e4dae3b07bbc5c93bf1eab034c17d66b7e428/nvidia_cublas-13.7.0.27-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cuda-whl/cublas.whl
-          fi
-          # Verified on every run, cache hit included (H-6).
+          wait "$fetch"
           echo '0b228cc646acda27e9b512b8b94417c3ff8b3d24a0ad9b1d6603dc6c2a908046  /tmp/cuda-whl/cudart.whl' | sha256sum -c -
           echo '481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4  /tmp/cuda-whl/cublas.whl' | sha256sum -c -
           python3 -m zipfile -e /tmp/cuda-whl/cudart.whl /tmp/cuda-libs
