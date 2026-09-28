@@ -449,16 +449,16 @@ jobs:
   # need generated tokens are the ones NOT marked `nomodel`; they stay in the
   # local `make test-server` lane.
   #
-  # Ubuntu 26.04: the binary needs GLIBC_2.43, a plain ubuntu-24.04 runner cannot load it.
-  # CUDA base image (211 MB) + cuBLAS wheel, not devel (4353 MB, 62 s of a 92 s job):
-  # ldd imp-server needs only libcudart.so.13 (base) and libcublas{,Lt}.so.13 (wheel).
+  # ubuntu:26.04 (GLIBC_2.43; the 24.04 runner cannot load the binary) + cudart/cuBLAS wheels,
+  # not nvidia/cuda devel (4353 MB, 62 s init of a 92 s median job). ldd imp-server needs
+  # only libcudart.so.13, libcublas.so.13, libcublasLt.so.13 beyond libc/libstdc++.
   real-api:
     name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.4.1-base-ubuntu26.04@sha256:9b091bbc3e1481238346e90d93f63684af509c08ab32218f98793141fc540fd9
+      image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -469,11 +469,26 @@ jobs:
           name: imp-build
           path: build
 
-      - name: Install python
+      # Wheels = the toolkit's own versions (cudart 13.4.49, cuBLAS 13.7.0.27). Cached under a
+      # constant key, saved on push only; a pythonhosted fetch of the 420 MB wheel took ~35 s.
+      - name: Cache CUDA runtime wheels
+        if: github.event_name == 'push'
+        id: wheels-push
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/cuda-whl
+          key: cuda-whl-cudart13.4.49-cublas13.7.0.27
+      - name: Restore CUDA runtime wheels (no save)
+        if: github.event_name != 'push'
+        id: wheels
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/cuda-whl
+          key: cuda-whl-cudart13.4.49-cublas13.7.0.27
+
+      - name: Install python and the CUDA runtime libs
         run: |
           sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
-          # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
-          rm -f /etc/apt/sources.list.d/cuda*.list
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-pip python3-venv curl ca-certificates
           # A venv rather than --break-system-packages: the lock file pins the
@@ -481,11 +496,17 @@ jobs:
           # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
           python3 -m venv /tmp/api-venv
           /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
-          # cuBLAS 13.7.0.27 = the devel image's libcublas; wheel fetched and sha256-verified (H-6).
-          curl -fsSL https://files.pythonhosted.org/packages/da/b3/358ee3e2237d4d663cd7a50e4dae3b07bbc5c93bf1eab034c17d66b7e428/nvidia_cublas-13.7.0.27-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cublas.whl
-          echo '481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4  /tmp/cublas.whl' | sha256sum -c -
-          python3 -m zipfile -e /tmp/cublas.whl /tmp/cublas
-          echo "LD_LIBRARY_PATH=/tmp/cublas/nvidia/cu13/lib:/usr/local/cuda/lib64" >> "$GITHUB_ENV"
+          mkdir -p /tmp/cuda-whl
+          if [ ! -f /tmp/cuda-whl/cudart.whl ] || [ ! -f /tmp/cuda-whl/cublas.whl ]; then
+            curl -fsSL https://files.pythonhosted.org/packages/e6/cb/b5959bff298d114338aaf4bface538ca9f2a721c439618fb252162f6192e/nvidia_cuda_runtime-13.4.49-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl -o /tmp/cuda-whl/cudart.whl
+            curl -fsSL -w 'cublas wheel: %{size_download} B in %{time_total} s\n' https://files.pythonhosted.org/packages/da/b3/358ee3e2237d4d663cd7a50e4dae3b07bbc5c93bf1eab034c17d66b7e428/nvidia_cublas-13.7.0.27-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cuda-whl/cublas.whl
+          fi
+          # Verified on every run, cache hit included (H-6).
+          echo '0b228cc646acda27e9b512b8b94417c3ff8b3d24a0ad9b1d6603dc6c2a908046  /tmp/cuda-whl/cudart.whl' | sha256sum -c -
+          echo '481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4  /tmp/cuda-whl/cublas.whl' | sha256sum -c -
+          python3 -m zipfile -e /tmp/cuda-whl/cudart.whl /tmp/cuda-libs
+          python3 -m zipfile -e /tmp/cuda-whl/cublas.whl /tmp/cuda-libs
+          echo "LD_LIBRARY_PATH=/tmp/cuda-libs/nvidia/cu13/lib" >> "$GITHUB_ENV"
           echo "/tmp/api-venv/bin" >> "$GITHUB_PATH"
 
       - name: Run the API contract against imp-server
