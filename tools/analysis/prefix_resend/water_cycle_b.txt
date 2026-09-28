@@ -1,0 +1,5 @@
+The water cycle is a continuous process driven by solar energy and gravity. It begins with **evaporation**, where the sun’s thermal energy increases the kinetic energy of water molecules in oceans and lakes. As these molecules move faster, they break free from liquid bonds and transition into a gaseous state called **water vapor**.
+
+As this vapor rises into the cooler upper atmosphere, it undergoes **condensation**. The decrease in temperature causes the vapor to lose energy and cluster around microscopic particles like dust or salt (known as condensation nuclei), forming liquid droplets or ice crystals that create clouds.
+
+When these droplets collide and grow heavy enough to overcome atmospheric updrafts, **precipitation** occurs, falling as rain, snow, or hail. Finally, gravity pulls this water back to Earth through **surface runoff** or **infiltration** into groundwater, eventually returning it to bodies of water to repeat the cycle.
