@@ -38,13 +38,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8080")
     ap.add_argument("--sends", type=int, default=3)
+    ap.add_argument("--no-warm", action="store_true", help="skip the turn-1 request (no turn-1 prefix blocks)")
     ap.add_argument("a1", nargs="*", default=sorted(str(p) for p in pathlib.Path(__file__).parent.glob("water_cycle_*.txt")))
     args = ap.parse_args()
     model = post(args.url, "/v1/models")["data"][0]["id"]
     bad = 0
     for a1_file in args.a1:
         base = [{"role": "system", "content": SYS}, {"role": "user", "content": Q1}]
-        chat(args.url, model, base, 250)  # caches the turn-1 prefix, as a real conversation does
+        if not args.no_warm:
+            chat(args.url, model, base, 250)  # caches the turn-1 prefix, as a real conversation does
         msgs = base + [{"role": "assistant", "content": pathlib.Path(a1_file).read_text()},
                        {"role": "user", "content": Q2}]
         outs, info = [], []

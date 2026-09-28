@@ -41,7 +41,7 @@ Usage:
                                         (non-deterministic at temp=0 — skips
                                         the stream==non-stream equality check)
 
-Exit code: 0 = all pass, 1 = at least one FAIL, 2 = server unreachable.
+Exit code: 0 = all pass (XFAIL allowed), 1 = at least one FAIL or XPASS, 2 = server unreachable.
 """
 
 import argparse
@@ -376,6 +376,14 @@ class Suite:
         mark = "\033[32mPASS\033[0m" if ok else "\033[31mFAIL\033[0m"
         print(f"  [{mark}] {name}" + (f" — {detail}" if detail and not ok else ""))
 
+    def xfail(self, cat, name, ok, issue, detail=""):
+        # Known defect: failing is XFAIL (counted, not a FAIL); passing is XPASS, a hard failure,
+        # so the marker cannot outlive the fix.
+        status = "XPASS" if ok else "XFAIL"
+        self.results.append((cat, name, status, f"{issue} {detail}"))
+        color = "31" if ok else "33"
+        print(f"  [\033[{color}m{status}\033[0m] {name}: {issue} {detail}")
+
     def skip(self, cat, name, why):
         self.results.append((cat, name, "SKIP", why))
         print(f"  [\033[33mSKIP\033[0m] {name} — {why}")
@@ -667,9 +675,14 @@ class Suite:
         if not cached[1]:
             self.skip("multi-turn", name, f"resend did not restore (cached={cached})")
             return
-        self.record("multi-turn", name,
-                    first["content"] == again["content"] and bool(first["content"].strip()),
-                    f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}")
+        same = first["content"] == again["content"] and bool(first["content"].strip())
+        detail = f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}"
+        if not cached[0]:
+            # Hybrid: the first send found no snapshot; the resend pairs its snapshot with KV
+            # blocks of the turn-1 forward (#2174).
+            self.xfail("multi-turn", name, same, "#2174", detail)
+            return
+        self.record("multi-turn", name, same, detail)
 
     # -- stream protocol -----------------------------------------------------
     def cat_stream(self):
@@ -1075,13 +1088,14 @@ def main():
                              f"server connection lost: {e} — possible crash, "
                              f"check docker logs / RestartCount")
 
-    fails = [r for r in suite.results if r[2] == "FAIL"]
+    fails = [r for r in suite.results if r[2] in ("FAIL", "XPASS")]
+    n_xfail = sum(1 for r in suite.results if r[2] == "XFAIL")
     print(f"\n{'='*60}")
     print(f"degen_suite: {len(suite.results)} checks, "
-          f"{len(fails)} FAIL, {sum(1 for r in suite.results if r[2]=='SKIP')} skipped "
+          f"{len(fails)} FAIL, {n_xfail} XFAIL, {sum(1 for r in suite.results if r[2]=='SKIP')} skipped "
           f"({time.time()-t0:.0f}s)")
     for cat, name, status, detail in fails:
-        print(f"  FAIL [{cat}] {name}: {detail[:200]}")
+        print(f"  {status} [{cat}] {name}: {detail[:200]}")
 
     if args.json_out:
         with open(args.json_out, "w") as f:
