@@ -1,3 +1,4 @@
+#include "compute/cublas_gemm_algo.h"
 #include "compute/attention_cublas.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
@@ -20,7 +21,6 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 
 namespace imp {
 
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 // Coverage instrumentation (FA2-coverage dispatch): counts materialized-cuBLAS prefill launches.
 // A Gemma-4 prefill test asserts this stays 0, proving the legacy path is unreachable for the
@@ -428,7 +428,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                                    CUDA_R_16F, ld_q, static_cast<long long>(head_dim), &beta_f,
                                    use_fp32_s ? static_cast<void*>(S_f32) : static_cast<void*>(S_base),
                                    use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s, strideS, n_heads,
-                                   CUBLAS_COMPUTE_32F, kGemmAlgo);
+                                   CUBLAS_COMPUTE_32F, cublas_gemm_algo());
 
         // Softcap (if enabled): applied to whichever buffer the softmax reads —
         // S_f32 on the use_fp32_s path, S_base otherwise. Gemma-2 sets softcap=50;
@@ -468,10 +468,11 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
         // O = P × V (always FP16). P is read from S_prob (== S_base on the
         // FP16-S path; the non-overlapping FP16 region on the FP32-S path).
-        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f,
-                                   V_base, CUDA_R_16F, ld_k, static_cast<long long>(head_dim), S_prob,
-                                   CUDA_R_16F, ld_s, strideS, &zero_f, O_base, CUDA_R_16F, ld_o,
-                                   static_cast<long long>(head_dim), n_heads, CUBLAS_COMPUTE_32F, kGemmAlgo);
+        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f, V_base,
+                                   CUDA_R_16F, ld_k, static_cast<long long>(head_dim), S_prob, CUDA_R_16F,
+                                   ld_s, strideS, &zero_f, O_base, CUDA_R_16F, ld_o,
+                                   static_cast<long long>(head_dim), n_heads, CUBLAS_COMPUTE_32F,
+                                   cublas_gemm_algo());
 
     } else {
         // GQA path: single batched call with explicit pointer arrays; multiple Q heads share one K/V head.
@@ -490,7 +491,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                             (const void**)s_attn_d_ptrs, CUDA_R_16F, ld_k,
                             (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_q, &beta_f,
                             (void**)(s_attn_d_ptrs + 2 * n_heads), use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s,
-                            n_heads, CUBLAS_COMPUTE_32F, kGemmAlgo);
+                            n_heads, CUBLAS_COMPUTE_32F, cublas_gemm_algo());
 
         // Softcap (if enabled): applied to S_f32 on the use_fp32_s path, else S_base
         // (same fix as the MHA path above — was dropped on FP32-S for Gemma-2).
@@ -536,7 +537,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                             (const void**)s_attn_d_ptrs, CUDA_R_16F, ld_k,
                             (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_s, &zero_f,
                             (void**)(s_attn_d_ptrs + 2 * n_heads), CUDA_R_16F, ld_o, n_heads,
-                            CUBLAS_COMPUTE_32F, kGemmAlgo);
+                            CUBLAS_COMPUTE_32F, cublas_gemm_algo());
     }
 }
 

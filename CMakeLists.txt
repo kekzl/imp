@@ -90,6 +90,10 @@ if(IMP_ALLOC_INTERPOSE)
     set(IMP_WRAP_LINK_FLAGS
         "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
     message(STATUS "Allocation interposition ENABLED (measurement build)")
+    # Canary for uninitialized reads (#2168): fill every new device allocation with this byte.
+    set(IMP_ALLOC_POISON_BYTE "-1" CACHE STRING "Fill byte for new device allocations, -1 = off")
+    set_source_files_properties(src/memory/alloc_interpose.cpp PROPERTIES
+        COMPILE_DEFINITIONS "IMP_ALLOC_POISON_BYTE=${IMP_ALLOC_POISON_BYTE}")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 # libFuzzer binaries per fuzz/ target (#1620); needs clang, g++ has no -fsanitize=fuzzer.
@@ -744,6 +748,8 @@ if(IMP_BUILD_TESTS)
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
         tests/test_prefill_pacing.cpp
+        # Minimum prompt chunk (#2152): chunk-split and prefix-reuse caps, header-only.
+        tests/test_prompt_tail.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
