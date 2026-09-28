@@ -359,8 +359,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         }
     }
 
-    // 4+5+6. QK-norm + RoPE: fused into single kernel for decode (n=1)
-    //    For prefill or models without QK-norm, use separate kernels.
+    // 4+5+6. QK-norm + RoPE: one fused kernel at every row count (full-head norms);
+    //    sub-head norms and models without QK-norm use separate kernels.
     //    For decode with FP16 cache: fuse K-RoPE into KV write (saves 1 launch).
     bool rope_k_deferred = false;  // true when K-RoPE will be fused into KV write
     {
@@ -386,13 +386,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = dispatch_policy().attention.no_qknorm_fused;
-        // Fused QK-norm+RoPE covers batched-decode rows too (n<=64, one CTA per
-        // head x token), replacing three separate launches per layer at 32
-        // streams. Applies the norm weight over the full head; sub-head norm
+        // Fused QK-norm+RoPE: one CTA per head x token, replacing three separate
+        // launches per layer. Applies the norm weight over the full head; sub-head norm
         // layouts (norm dim < head_dim) stay on the separate path.
         const bool full_head_norm = ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr &&
                                     ly.attn_q_norm.shape[0] == hd && ly.attn_k_norm.shape[0] == hd;
-        if (has_qk_norm && n <= 64 && (n == 1 || full_head_norm) && qv.qtype == QType::F16 &&
+        // No row-count cap: a prompt row must take the same QK-norm arithmetic in a 14-row
+        // tail chunk as in the full prefill (#2152). grid.y = n <= 65535.
+        if (has_qk_norm && n <= 65535 && (n == 1 || full_head_norm) && qv.qtype == QType::F16 &&
             !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
             // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
             // intermediate values in FP32 shared memory.

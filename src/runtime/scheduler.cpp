@@ -1,5 +1,6 @@
 #include "runtime/scheduler.h"
 #include "runtime/graph_eligibility.h"
+#include "runtime/prompt_tail.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/kv_cache.h"
 #include "memory/recurrent_snapshot_store.h"
@@ -168,6 +169,11 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     // Hybrid models cap reuse at the recurrent-snapshot
                     // boundary (and attach the snapshot to the request).
                     int max_reuse = prefix_reuse_limit_ ? prefix_reuse_limit_(*req) : -1;
+                    const bool snapshot_cap = max_reuse >= 0;
+                    // Attention-only: leave >= kMinPromptChunkRows rows to re-prefill,
+                    // blocks past the cap are allocated fresh, never rewritten shared.
+                    if (!snapshot_cap)
+                        max_reuse = prompt_reuse_cap_blocks(static_cast<int>(req->input_tokens.size()), bs);
                     int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens,
                                                                           max_reuse, req->prefix_salt);
                     if (reused < 0) {
@@ -176,7 +182,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         ++it;
                         continue;
                     }
-                    if (max_reuse >= 0 && reused != max_reuse) {
+                    if (snapshot_cap && reused != max_reuse) {
                         // Defensive: the snapshot boundary was probed moments ago, so this
                         // should not happen. Restore position no longer matches the reused
                         // KV prefix: release everything (a full prefill must not rewrite shared blocks) and fall back to plain allocation.

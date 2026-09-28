@@ -48,7 +48,7 @@ bool gemm_lt_capture_allowed() {
 
 // warp_reduce_sum / kGemvThreads / kGemvWarps / gemv_blocks live in
 // gemm_internal.cuh (shared with gemm_gemv_dtype.cu + gemm_moe_gemv.cu).
-// kGemmAlgo moved to gemm_batched.cu (its only remaining user).
+// cublasGemm*Ex algorithm: cublas_gemm_algo() (compute/cublas_gemm_algo.h, #2168).
 
 // ---------------------------------------------------------------------------
 // cuBLAS / cuBLASLt handles (lazily initialized)
