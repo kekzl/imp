@@ -5,7 +5,7 @@
 # VRAM-light tenant passes a memory-only check while corrupting the measurement); free VRAM =
 # "is there room for my model" (a different failure, different message).
 # Sample and take the MINIMUM memory reading, not one reading: a teardown flicker is not the
-# minimum of five samples, a real tenant is. Silent success when there is no GPU at all.
+# minimum of five samples, a real tenant is. Load: silent success when there is no GPU at all.
 # Usage: scripts/require_free_gpu.sh "<gate name>".
 set -uo pipefail
 
@@ -17,6 +17,13 @@ THRESHOLD="${IMP_GPU_FREE_MIB:-4000}"
 # Idle here reads 3-8 %. Sustained load above this is somebody computing.
 BUSY_PCT="${IMP_GPU_BUSY_PCT:-25}"
 SAMPLES="${IMP_GPU_SAMPLES:-5}"
+
+# Held by agreement (scripts/gpu_lock.sh) beats any load reading: a holder between jobs idles.
+LOCK_SH="$(dirname "$0")/gpu_lock.sh"
+if [ -f "$LOCK_SH" ] && ! bash "$LOCK_SH" check; then
+    echo "$GATE: refused, the GPU lock is held by another session (no waiting)." >&2
+    exit 1
+fi
 
 command -v nvidia-smi >/dev/null 2>&1 || exit 0
 
