@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
+#include <cstdint>
 
 namespace imp {
 
@@ -15,7 +16,10 @@ void ple_gate_value(const Tensor& key, Tensor& q_gv, const Tensor& value, int hc
 // hidden[t, c] += gv[t, c] + silu(sum_k w[c, k] * x[t - (kernel-1-k)*dilation, c]) with
 // x = conv_state (state_len = (kernel-1)*dilation rows, the sequence's past) ++ gvn; then
 // conv_state <- the last state_len rows of x. w is depthwise [channels, kernel].
-void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, Tensor& conv_state, Tensor& hidden,
-                  int channels, int kernel, int dilation, cudaStream_t stream);
+// n_seq sequences of n/n_seq rows each; sequence s's [state_len, channels] FP16 rows start at
+// conv_state + (slots ? slots[s] : 0) * slot_stride halves (slots: DEVICE, graph-stable).
+void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* conv_state, int64_t slot_stride,
+                  const int* slots, int n_seq, Tensor& hidden, int channels, int kernel, int dilation,
+                  cudaStream_t stream);
 
 }  // namespace imp

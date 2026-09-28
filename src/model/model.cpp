@@ -420,4 +420,19 @@ void apply_arch_defaults(ModelConfig& cfg) {
         cfg.rope_attn_disabled = true;
 }
 
+size_t Model::ple_state_bytes() const {
+    if (!ngram_table_)
+        return 0;
+    const size_t channels = static_cast<size_t>(config_.hc_count) * static_cast<size_t>(config_.d_model);
+    for (const auto& ly : layers_) {
+        if (ly.ple_key_proj.data == nullptr || channels == 0)
+            continue;
+        const size_t kernel = static_cast<size_t>(ly.ple_conv1d.numel()) / channels;
+        if (kernel == 0)
+            return 0;
+        return (kernel - 1) * static_cast<size_t>(ngram_table_->ngram_size()) * channels * 2;
+    }
+    return 0;
+}
+
 }  // namespace imp

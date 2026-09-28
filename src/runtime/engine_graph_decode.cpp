@@ -146,6 +146,9 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
 
 std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
                                                    cudaStream_t stream) {
+    // PLE: per-step host n-gram rows (prepare_decode_step_host), a replayed loop never stages them.
+    if (model_->ngram_table() != nullptr)
+        return {};
     int remaining = prepare_graph_loop(req);
     if (remaining <= 0)
         return {};

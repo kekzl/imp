@@ -63,6 +63,8 @@ bool Engine::init_features() {
         else if (!executor_->has_decode_workspace() ||
                  executor_->decode_max_batch() < config_.max_batch_size)
             decline = "decode workspace not allocated at max_batch";
+        else if (model_->ngram_table() != nullptr)
+            decline = "PLE model (n-gram staging and rows shared between prefill and decode)";
         else if (executor_->model_has_moe())
             decline = "MoE model (expert workspace not per-slot yet — plan phase 2)";
         else if (executor_->has_gguf_nvfp4_overlay())
