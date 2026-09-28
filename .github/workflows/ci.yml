@@ -344,17 +344,24 @@ jobs:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     env:
       CUDA_VERSION: "13.4"
+    # Default is `sh -e` (dash): `mapfile` and `< <(...)` fail there (#2187).
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0  # base SHA must be present for the changed-files diff
+      # Deps BEFORE checkout: without git, checkout falls back to a tarball (no .git),
+      # every `git` call exits 128 (#2187).
       - name: Install deps
+        shell: sh
         run: |
           sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends cmake g++ git python3 clang-tidy
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 clang-tidy
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # base SHA must be present for the changed-files diff
       # cache/restore, not cache: this job only READS compile_commands.json and
       # _deps. Plain `actions/cache` also runs a post-step that re-uploaded the
       # ~476 MB build/ under a key the Build job had already written - 29 s on
@@ -377,8 +384,10 @@ jobs:
       - name: Trust the checkout (container UID differs from the runner's)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: clang-tidy (changed .cpp only, advisory)
-        continue-on-error: true  # advisory — flip to a hard gate once baseline-clean
+      # Setup is a hard step: a failure here fails the job. Only the lint findings
+      # below are advisory (#2187: continue-on-error hid exit 128 on every run).
+      - name: Select changed .cpp + compile_commands.json
+        id: files
         run: |
           base="${{ github.event.pull_request.base.sha }}"
           [ -z "$base" ] && base="${{ github.event.before }}"
@@ -393,8 +402,9 @@ jobs:
             exit 1
           fi
           mapfile -t changed < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$' || true)
+          echo "count=${#changed[@]}" >> "$GITHUB_OUTPUT"
           if [ ${#changed[@]} -eq 0 ]; then echo "no src/tools .cpp changed — nothing to lint"; exit 0; fi
-          echo "linting ${#changed[@]} file(s): ${changed[*]}"
+          printf '%s\n' "${changed[@]}" > "$RUNNER_TEMP/tidy_files.txt"
           # compile_commands.json comes from the cached build/. If the cache missed
           # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
           # a fully cold _deps fetch is the rare worst case.
@@ -408,11 +418,19 @@ jobs:
               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
           fi
           echo "linting ${#changed[@]} changed .cpp:"; printf '  %s\n' "${changed[@]}"
-          # Drop the per-TU progress + cumulative count lines (CUTLASS/CUDA headers
-          # inflate the count into the hundreds of thousands); .clang-tidy's
-          # HeaderFilterRegex already restricts displayed diagnostics to our code.
-          clang-tidy -p build --warnings-as-errors= "${changed[@]}" 2>&1 \
-            | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' || true
+
+      - name: clang-tidy (changed .cpp only, advisory)
+        if: steps.files.outputs.count != '0'
+        continue-on-error: true  # advisory: findings only, setup failures fail the step above
+        run: |
+          mapfile -t changed < "$RUNNER_TEMP/tidy_files.txt"
+          rc=0
+          clang-tidy -p build --warnings-as-errors= "${changed[@]}" > "$RUNNER_TEMP/tidy.log" 2>&1 || rc=$?
+          # Drop per-TU progress + cumulative count lines (CUTLASS/CUDA headers
+          # inflate the count into the hundreds of thousands).
+          grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' "$RUNNER_TEMP/tidy.log" || true
+          echo "clang-tidy linted ${#changed[@]} file(s), exit $rc"
+          exit "$rc"
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against

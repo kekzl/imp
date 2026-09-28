@@ -220,7 +220,7 @@ Only relevant when a MoE model's experts do not fit in VRAM; both GGUF and
 NVFP4 experts have a working host path. NVFP4 was refused at load in #1403;
 the refusal was replaced by an implementation
 (`src/exec/executor_forward_moe_nvfp4_host.cu`, doc corrected in #1670;
-`LIMITATIONS.md:64` carries the measurement, 23.3 tok/s against 384.0
+`LIMITATIONS.md:63 23.3 tok/s against 384.0 resident` carries the measurement, 23.3 tok/s against 384.0
 resident); a placement the expert cache cannot hold at all is still refused,
 that part of #1403 stands.
 

@@ -1,59 +1,97 @@
 #!/usr/bin/env python3
-"""Verify `path:line` and bare `*.md` citations in the LIVING docs resolve.
+"""Verify `path:line anchor` and bare `docs/*.md` citations in the LIVING docs.
 
-Default scope (since 2026-08-26): docs/roadmap.md plus every doc under docs/
-and docs/internals/ and the root docs — records (docs/archive/, docs/plans/,
-docs/audit/) are excluded because their line numbers describe the commit they
-document. The two drift classes that cost are mechanical:
-
-  * a `src/foo.cpp:1234` citation whose file has since shrunk, or whose lines
-    moved, so the reader lands on unrelated code;
-  * a `src/foo.cpp:12` citation whose file was renamed or split away entirely;
-  * a bare `docs/<name>.md` reference that was renamed, which the markdown-link
-    checker never sees because it is not a link.
-
-Neither needs judgement, so neither should need a human to notice.
+Cite format: `path:LINES anchor`, one backtick span.
+  LINES  = N | N-M (range) | N,M,... or N/M/... (list)
+  anchor = literal text that must appear on the cited line (range: within it;
+           list: on every listed line). No anchor = DEAD (#2185: existence-only
+           checks passed two Makefile cites that pointed 16 and 81 lines off).
+A bare basename is resolved by the anchor when several files share the name.
+Records (docs/archive/, docs/plans/, docs/audit/) are out of scope.
 """
 import re, sys, os
 
-def check(doc, root):
-    text = open(doc, encoding="utf-8").read()
-    bad, ambiguous = [], []
+EXT = r"cpp|cu|cuh|h|hpp|c|py|sh|md|txt|cmake|json|toml|yml|yaml|conf"
+PATH = r"((?:[\w./-]+/)?((?:[\w.-]+\.(?:" + EXT + r"))|Makefile|Dockerfile))"
+CITE_START_RE = re.compile(PATH + r":\d")
+CITE_RE = re.compile(PATH + r":(\d+(?:[-\u2013]\d+)?(?:[,/]\d+(?:[-\u2013]\d+)?)*)(?: (.*))?")
 
-    # Build a basename index once: the doc cites most files by bare name
-    # (`engine_spec_ngram.cpp:1047`), not by path.
+
+def _spans(spec):
+    out = []
+    for part in re.split(r"[,/]", spec):
+        lo, _, hi = part.replace("\u2013", "-").partition("-")
+        out.append((int(lo), int(hi or lo)))
+    return out
+
+
+def _lines(path, cache={}):
+    if path not in cache:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            cache[path] = fh.read().split("\n")
+    return cache[path]
+
+
+def _verify(full, spans, anchor):
+    """'' if every span holds the anchor, else the reason."""
+    src = _lines(full)
+    n = len(src) - (1 if src and src[-1] == "" else 0)
+    for a, b in spans:
+        if b > n or a < 1 or a > b:
+            return f"file has only {n} lines"
+        if anchor not in "\n".join(src[a - 1:b]):
+            got = src[a - 1].strip()[:70]
+            return f"anchor '{anchor}' not on line {a}{'-' + str(b) if b != a else ''} (line {a}: '{got}')"
+    return ""
+
+
+def _index(root):
     index = {}
     for base, _dirs, files in os.walk(root):
         if any(x in base for x in (".git", "build", "third_party", "node_modules")):
             continue
         for f in files:
             index.setdefault(f, []).append(os.path.join(base, f))
+    return index
 
-    # path:line, with or without a leading directory
-    for m in re.finditer(r'`((?:[\w./-]+/)?([\w.-]+\.(?:cpp|cu|cuh|h|py|sh))):(\d+)', text):
-        path, basename, line = m.group(1), m.group(2), int(m.group(3))
-        full = os.path.join(root, path)
-        if not os.path.exists(full):
-            hits = index.get(basename, [])
-            if not hits:
-                # No file of that name anywhere: the citation is dead from a rename/split (e.g. the #1782
-                # scheduler split). Used to read as AMBIGUOUS and pass; now caught.
-                bad.append(f"{path}:{line} - no file of that name in the tree")
-                continue
-            if len(hits) > 1:
-                # Genuinely ambiguous: the basename exists in several places, so
-                # the line number cannot be checked. Report, do not fail.
-                ambiguous.append(f"{path}:{line} - {len(hits)} files share that name; cite the path")
-                continue
-            full = hits[0]
-        n = sum(1 for _ in open(full, encoding="utf-8", errors="replace"))
-        if line > n:
-            bad.append(f"{path}:{line} — file has only {n} lines")
+
+def check(doc, root, index=None):
+    index = index if index is not None else _index(root)
+    text = open(doc, encoding="utf-8").read()
+    bad, ambiguous = [], []
+
+    for sm in re.finditer(r"`([^`\n]+)`", text):
+        span, ln = sm.group(1), text.count("\n", 0, sm.start()) + 1
+        if not CITE_START_RE.match(span):
+            continue
+        m = CITE_RE.fullmatch(span)
+        if not m:
+            bad.append(f"{ln}: {span} - malformed cite: write `path:N anchor`, N as N, N-M, N,M or N/M")
+            continue
+        path, basename, spec, anchor = m.group(1), m.group(2), m.group(3), (m.group(4) or "").strip()
+        cite = f"{path}:{spec}"
+        if not anchor:
+            bad.append(f"{ln}: {cite} - no anchor: write `{cite} <text on that line>`")
+            continue
+        spans = _spans(spec)
+        cands = [p for p in (os.path.join(root, path), os.path.join(os.path.dirname(doc), path)) if os.path.isfile(p)]
+        cands = cands[:1] or index.get(basename, [])
+        if not cands:
+            bad.append(f"{ln}: {cite} - no file of that name in the tree")
+            continue
+        results = [(c, _verify(c, spans, anchor)) for c in cands]
+        ok = [c for c, why in results if not why]
+        if len(cands) == 1 and not ok:
+            bad.append(f"{ln}: {cite} - {results[0][1]}")
+        elif not ok:
+            bad.append(f"{ln}: {cite} - anchor '{anchor}' matches none of the {len(cands)} files named {basename}; cite the path")
+        elif len(ok) > 1:
+            ambiguous.append(f"{ln}: {cite} - anchor matches {len(ok)} files named {basename}; cite the path")
 
     # bare docs/*.md names (markdown links are already covered elsewhere)
-    for m in re.finditer(r'`(docs/[\w./-]+\.md)`', text):
+    for m in re.finditer(r"`(docs/[\w./-]+\.md)`", text):
         if not os.path.exists(os.path.join(root, m.group(1))):
-            bad.append(f"{m.group(1)} — referenced file does not exist")
+            bad.append(f"{text.count(chr(10), 0, m.start()) + 1}: {m.group(1)} - referenced file does not exist")
     return bad, ambiguous
 
 def living_docs(root):
@@ -81,14 +119,14 @@ def living_docs(root):
 if __name__ == "__main__":
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     docs = [sys.argv[2]] if len(sys.argv) > 2 else living_docs(root)
-    total_bad = 0
+    total_bad, index = 0, _index(root)
     for doc in docs:
-        bad, ambiguous = check(doc, root)
+        bad, ambiguous = check(doc, root, index)
         rel = os.path.relpath(doc, root)
         for b in sorted(set(bad)):
-            print(f"  DEAD      {rel}: {b}")
+            print(f"  DEAD      {rel}:{b}")
         for a in sorted(set(ambiguous)):
-            print(f"  AMBIGUOUS {rel}: {a}")
+            print(f"  AMBIGUOUS {rel}:{a}")
         total_bad += len(set(bad))
     print(f"{'FAIL' if total_bad else 'PASS'}: {total_bad} dead citation(s) across {len(docs)} living doc(s)")
     sys.exit(1 if total_bad else 0)
