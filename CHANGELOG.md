@@ -17,6 +17,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- GDN hybrids with `gdn.state_bf16 = false` (FP32 state): a recurrent snapshot over a 65+ row scan threw `h_snap needs a single chunk`, and at exactly 64 rows the slab stayed unwritten. Snapshot scans now run the fused kernel over the whole range (#2214).
 - `runtime.deterministic`: cuBLAS `cublasGemm*Ex` calls used `CUBLAS_GEMM_AUTOTUNE`, which times algorithms once per process, so Gemma-4 NVFP4 answered in one of two ways per server (2 of 6 vs 4 of 6). Deterministic mode now takes `CUBLAS_GEMM_DEFAULT`: 12 of 12 processes identical.
 - Expert cache regrow after GDN pack release: if both the grown and the original re-init failed, the cache stayed half-destroyed and the second failure went unlogged. It is now disabled (0 slots, pool freed) with an ERROR naming both budgets; the NVFP4 placement gate then refuses the load.
 - Prefix-cache resends on dense models: a prompt row no longer changes with its chunk (RMSNorm, QK-norm, IMMA split-K picked by row count; 1-row tails ran decode kernels). Qwen3-8B-Q8_0, FP16 KV: first-token logprob delta chunk 336 vs 0: 0.021 -> 0; resend probe 1/2 -> 0/2 FAIL.
