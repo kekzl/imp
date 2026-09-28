@@ -324,7 +324,9 @@ def main():
     # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
     # 1139 -> 1142: ExpertCacheReinitTest x3 (test-moe-gdn): reinit_or_disable against a real
     # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
-    PINNED = 1142
+    # 1142 -> 1143: FP8GemmTest.RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant (test-compute):
+    # FP8 LM-head GEMV (gemm.nvfp4_lm_head=fp8) vs fp64, bits equal for n_rows 1/3/11 (cudaMalloc).
+    PINNED = 1143
 
     text = CMAKE.read_text()
     mods = module_sources(text)

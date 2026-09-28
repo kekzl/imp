@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <cstdint>
@@ -344,6 +345,74 @@ TEST_F(FP8GemmTest, DequantizeRowsRoundTripsTheSidecar) {
         cudaFree(p);
     cudaFree(s1);
     cudaFree(s2);
+}
+
+// FP8 LM head (gemm.nvfp4_lm_head=fp8): gemv_fp8_rowscale_fp32 vs an fp64 dot over the decoded
+// codes, and per-row bits identical for n_rows = 1, 3, 11 (#2152 rule: decode, batch and PPL agree).
+TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
+    constexpr int M = 1003, K = 2560, N = 11;
+    std::vector<half> w(static_cast<size_t>(M) * K), x(static_cast<size_t>(N) * K);
+    uint32_t s = 29u;
+    auto rnd = [&s] {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<float>(s >> 8) / 16777216.0f - 0.5f;
+    };
+    for (size_t i = 0; i < w.size(); ++i)
+        w[i] = __float2half(0.02f * static_cast<float>(1 + (i / K) % 9) * rnd());
+    for (auto& v : x)
+        v = __float2half(4.0f * rnd());
+    void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr;
+    float *d_s = nullptr, *d_all = nullptr, *d_one = nullptr, *d_three = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w, w.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_q, w.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_s, M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_all, static_cast<size_t>(N) * M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_one, static_cast<size_t>(N) * M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_three, static_cast<size_t>(N) * M * sizeof(float)), cudaSuccess);
+    cudaMemcpy(d_w, w.data(), w.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    quantize_fp8_rows_async(d_w, d_q, M, K, d_s, stream_);
+    const half* hx = static_cast<const half*>(d_x);
+    ASSERT_TRUE(gemv_fp8_rowscale_fp32(d_q, d_s, hx, d_all, M, K, N, stream_));
+    for (int r = 0; r < N; ++r)
+        ASSERT_TRUE(gemv_fp8_rowscale_fp32(d_q, d_s, hx + static_cast<size_t>(r) * K,
+                                           d_one + static_cast<size_t>(r) * M, M, K, 1, stream_));
+    for (int r = 0; r < N; r += 3)
+        ASSERT_TRUE(gemv_fp8_rowscale_fp32(d_q, d_s, hx + static_cast<size_t>(r) * K,
+                                           d_three + static_cast<size_t>(r) * M, M, K, std::min(3, N - r),
+                                           stream_));
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    std::vector<uint8_t> q(w.size());
+    std::vector<float> sc(M), all(static_cast<size_t>(N) * M), one(all.size()), three(all.size());
+    cudaMemcpy(q.data(), d_q, q.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(sc.data(), d_s, M * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(all.data(), d_all, all.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(one.data(), d_one, one.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(three.data(), d_three, three.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(0, std::memcmp(all.data(), one.data(), all.size() * sizeof(float))) << "n=11 vs n=1 bits";
+    EXPECT_EQ(0, std::memcmp(all.data(), three.data(), all.size() * sizeof(float))) << "n=11 vs n=3 bits";
+    double max_rel = 0.0;
+    for (int r = 0; r < N; ++r) {
+        for (int m = 0; m < M; ++m) {
+            double acc = 0.0, mag = 0.0;
+            for (int k = 0; k < K; ++k) {
+                bool nan = false;
+                const double wv = e4m3_decode_ref(q[static_cast<size_t>(m) * K + k], nan) * sc[m];
+                const double xv = __half2float(x[static_cast<size_t>(r) * K + k]);
+                acc += wv * xv;
+                mag += std::fabs(wv * xv);
+            }
+            const double rel = std::fabs(all[static_cast<size_t>(r) * M + m] - acc) / std::max(mag, 1e-30);
+            max_rel = std::max(max_rel, rel);
+        }
+    }
+    // FP32 accumulation over K=2560 terms: error <= ~K * 2^-24 of sum|w*x| (1.5e-4); layout bugs are O(1).
+    EXPECT_LT(max_rel, 1.5e-4) << "rowscale FP32 GEMV diverges from the fp64 dot over its own codes";
+    for (void* p : {d_w, d_q, d_x})
+        cudaFree(p);
+    for (float* p : {d_s, d_all, d_one, d_three})
+        cudaFree(p);
 }
 
 }  // namespace

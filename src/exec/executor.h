@@ -548,6 +548,9 @@ private:
     // batch=1 output stays bit-identical to the FP16-activation GEMV.
     void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
                                  const std::function<void(const Tensor&, int, int)>& consume);
+    // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8): final norm + gemv_fp8_rowscale_fp32 over h's rows
+    // into lg (FP32). False = no FP8 head built; the caller keeps its own dispatch.
+    bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in
     // free_buffers).

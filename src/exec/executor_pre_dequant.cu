@@ -133,6 +133,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // projections (gemm.fp8_ssm_proj) ---
     pre_dequant_phase2b_fp8_ssm_sidecar_(cfg, stream);
 
+    // --- Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8) ---
+    fp8_lm_head_cache_(stream);
+
     // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
 

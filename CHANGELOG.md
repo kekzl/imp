@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166) for F16/BF16 and GGUF heads, GDN hybrids included; one FP32-output GEMV family serves decode, batched decode and `--perplexity` with row-count-invariant bits. 1.78x NVFP4 head bytes (Qwen3-8B 594.1 vs 333.8 MiB). Default stays `auto` (NVFP4) until the GPU A/B.
+
 ### Changed
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).
 - GDN input packs come from a release-on-free mempool, so freeing them returns all 2896.9 MiB instead of 1760.0 on Qwen3.8-Flash-Next: expert cache 263 -> 290 slots/layer, hit rate 78.9 -> 80.7 %, tg512 prose 63.66 -> 66.22 tok/s (medians, 3 pairs).

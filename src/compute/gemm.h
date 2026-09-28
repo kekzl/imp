@@ -50,6 +50,10 @@ void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStre
 // Per-row-scale variant (scale[row] = row_absmax/448, e.g. the fp8_ssm_proj sidecar).
 void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float* d_row_scales,
                        cudaStream_t stream = nullptr);
+// FP32-output variant for the FP8 LM head: W [M,K] E4M3, x [n_rows,K] FP16, y [n_rows,M] FP32.
+// One weight pass per 8 rows; row bits independent of n_rows. K % 16 == 0, else returns false.
+bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,
+                            int n_rows, cudaStream_t stream = nullptr);
 
 // Fused quantized GEMV: dequant + dot product in one pass (no intermediate FP16 buffer).
 // W: raw quantized bytes [M rows, K cols], x: [K] FP16, y: [M] FP16.

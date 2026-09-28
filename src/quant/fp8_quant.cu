@@ -1,5 +1,6 @@
 #include "quant/fp8_quant.h"
 #include "quant/fp8_utils.cuh"
+#include "quant/fp8_row_quant.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -338,17 +339,15 @@ __global__ void quantize_fp8_rows_kernel(const half* __restrict__ in, uint8_t* _
     }
     __shared__ float s_scale;
     if (threadIdx.x == 0) {
-        float sc = (m > 0.0f) ? m / kFP8E4M3Max : 1.0f;
+        float sc = fp8_rows::row_scale(m);
         s_scale = sc;
         d_row_scales[row] = sc;
     }
     __syncthreads();
 
     const float inv = 1.0f / s_scale;
-    for (int i = threadIdx.x; i < K; i += blockDim.x) {
-        __nv_fp8_e4m3 q(__half2float(r[i]) * inv);
-        o[i] = *reinterpret_cast<const uint8_t*>(&q);
-    }
+    for (int i = threadIdx.x; i < K; i += blockDim.x)
+        o[i] = fp8_rows::encode(__half2float(r[i]), inv);
 }
 
 // Inverse of quantize_fp8_rows_kernel: out[row][i] = q[row][i] * scale[row], 8 bytes per thread step.
