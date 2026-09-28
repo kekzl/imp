@@ -328,7 +328,9 @@ def main():
     # per-sequence bitwise, neighbour isolation, chunk vs token steps (kernels need a card).
     # 1145 -> 1146: LayerNormTest.RMSNormNvfp4RefusesNullWeight (test-compute): the fused norm +
     # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
-    PINNED = 1146
+    # 1146 -> 1147: MtpQwen4ExpReference.TwoDraftStepsMatchVllmMath (test-e2e): Qwen4Exp draft step
+    # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
+    PINNED = 1147
 
     text = CMAKE.read_text()
     mods = module_sources(text)

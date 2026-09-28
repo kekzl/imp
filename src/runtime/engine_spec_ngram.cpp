@@ -208,11 +208,9 @@ bool Engine::spec_ngram_model_capable_uncached_() const {
     if (model_->profile().is_moe &&
         !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
         return false;
-    // Host-resident experts: a verify step (n = k + 1 rows) streams every expert the rows
-    // touch over PCIe, 1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next against 15 ms per
-    // captured decode step (tg512 65.9 -> 40.6 tok/s with n-gram on, 2026-09-20).
-    if (experts_on_host_)
-        return false;
+    // Host-resident experts: verify rows 2..8 take the per-row decode path (run_moe_ffn, device cache
+    // or host LRU); the staged path it replaces took 1.9 s per 6 tokens (2026-09-20). Only the MTP
+    // source drafts there (step_spec_verify_). NVFP4-only: GGUF-MoE is refused above.
     if (!supports_chunked_prefill_())
         return false;
     return true;
@@ -280,7 +278,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // flag alone. The step is entered whenever ANY drafter is enabled
     // (spec_any_drafter_enabled_), letting MTP and token recycling reach the
     // verify with `speculative.ngram=false` without dragging the matcher in.
-    const bool ngram_source_on = spec_ngram_enabled_(*req);
+    // Host-resident experts: MTP drafts only (k + 1 rows, spec_ngram_model_capable_uncached_).
+    const bool ngram_source_on = spec_ngram_enabled_(*req) && !experts_on_host_;
     if (!ngram_source_on) {
         // fall through to the MTP / recycling sources below
     } else if (scfg.suffix) {
@@ -366,7 +365,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // the decode-attn route (or its gates) is unavailable. Same
     // shallow-depth economics as above: at long context a depth-1 chain
     // does not pay for the verify.
-    if (runtime_config_.speculative.token_recycling && mc.empty()) {
+    if (runtime_config_.speculative.token_recycling && !experts_on_host_ && mc.empty()) {
         spec_recycle_feed_(*req);
         const bool penalties_active = req->repetition_penalty != 1.0f ||
                                       req->frequency_penalty != 0.0f ||

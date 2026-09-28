@@ -99,27 +99,44 @@ Notation: `norm_g(x, w)` = RMSNorm with `(1 + w)` gain (T:170-177, V uses `Gemma
   `index_share_for_mtp_iteration` is absent, default False (VS:836-838, VP:579, VP:607). Each
   step runs its own indexer top-k.
 
-## imp mapping (this PR)
+## imp mapping
 
 | Reference | MtpHead field |
 | --- | --- |
 | `fc_embedding`, `fc_hidden` | `fc_embedding`, `fc_hidden` (`fc` stays null) |
-| `pre_fc_norm_{embedding,hidden}` | same names |
+| `pre_fc_norm_{embedding,hidden}` | same names; `hc_count` = 10240 / 2560 = 4 from their shapes |
 | `attn_hyper_connection`, `mlp_hyper_connection` | `attn_hc`, `mlp_hc` (`MtpHyperConnection`) |
 | `hyper_connection_mixer` | `final_mixer` (`block_inject` null) |
-| `self_attn.*`, `indexer.*` | `q/k/v/o_proj`, `q/k_norm`, `indexer_qk_proj`, `indexer_{q,k}_norm` |
+| `self_attn.*`, `indexer.*` | `q/k/v/o_proj`, `q/k_norm`, `indexer_qk_proj`, `indexer_{q,k}_norm` (host only) |
 | `mlp.gate`, `shared_expert*` | `router`, `shared_expert_*` |
-| experts + `weight_scale_inv` | `experts_fp8[512]` (`MtpFp8Expert`), host-mapped, not uploaded |
+| experts + `weight_scale_inv` | `experts_fp8[512]` host views; device: `fp8_{gate_up,down}_tab` pointer tables, FP32 `fp8_*_scales` |
 
-- `mtp_forward_implemented()` is false for this layout: `speculative.mtp_k` is forced to 0
-  (`tools/common/mtp_auto.cpp`, `Engine::init`), `enable_mtp_spec_decode` refuses, upload skips.
+- Forward: `src/compute/mtp_forward_qwen4exp.cu` (steps 1-9), attention shared with the Qwen
+  layout (`mtp_attention_row`), experts `gemv_fp8_block_moe` (E4M3 bytes unchanged, 2400 MiB,
+  one allocation per expert). The QSA indexer is not run: see resolved item 3.
+- h_prev: `GraphExecutor::view_mtp_hidden` = `hc_hidden_` rows, the post-combine stream after
+  layer 47 (the final mixer only reads it). Chain steps read `ws.d_hc_x` (`mtp_chain_hidden`).
+- `diagnostics.mtp_prenorm_h` does not apply: the reference feeds the stream un-normed (V:302-308).
+- Verify with host-resident experts: rows 2..8 run the n == 1 host-expert path per row
+  (`run_moe_decode_rows_host_`); n-gram and token recycling stay off there (`spec_drafter_state_`).
+- `speculative.mtp_k=auto` resolves to 1 on this head (`mtp_auto_k_cap`).
 - `model-fp8-mtp-ple.safetensors` maps sparse when the head is requested: no `MAP_POPULATE`,
   129 PLE table tensors skipped, `MADV_WILLNEED` on the 3072 expert tensors only.
 
-## OPEN
+## Resolved (were OPEN)
 
-| Item | Reason |
-| --- | --- |
-| Draft positions / RoPE per step | Generic proposer path (`VP` position bookkeeping) not traced line by line; assumed target position + 1 + k, as for every Eagle-style MTP. Pin before the forward. |
-| FP8 block-scale orientation | `weight_scale_inv` [5, 20] for [640, 2560] implies scale[r/128][c/128] multiplies the FP8 value (`Fp8MoEMethod`, block [128, 128]); the dequant kernel is not read here. Pin with a one-expert host dequant vs V. |
-| Draft KV / indexer cache under verify rollback | V keeps separate draft KV for layer 48; imp's hybrid spec snapshot interaction is design step 6, not pinned here. |
+Extra sources, same revision `60ad959b`: VU = `vllm/v1/spec_decode/utils.py`,
+VF = `vllm/model_executor/layers/quantization/utils/fp8_utils.py`.
+
+| Item | Answer | Reference |
+| --- | --- | --- |
+| Draft positions / RoPE per step | Pair (t_{i+1}, h_i) sits at position i, the target position of h_i; step k >= 1 at i + k. imp: `ws.mtp_pos` = pair index, chain steps append at +1. | VP:848 "Simply rotate the input ids and leave the positions unchanged", VP:856 `self.input_ids[: num_tokens - 1] = target_token_ids[1:]`, VP:864 `self._set_positions(num_tokens, target_positions)`; later steps VU:62 `new_position = position + 1` |
+| FP8 block-scale orientation | W[n, k] = fp8(W[n, k]) * scale[n / 128][k / 128], scale rows follow weight rows (N), columns K. Activation stays FP16 in imp (V also quantizes it per 128-group to FP8: a kernel detail, not model math). | VF:933 `_Bsf = _Bs.repeat_interleave(_bn, dim=0).repeat_interleave(_bk, dim=1)[:_N, :_K]`, VF:934 `_out = (_Af * _Asf) @ (_Bf * _Bsf).t()` |
+| Draft KV / indexer under verify rollback | V writes draft K/V by position (slot from position), so a rejected position is overwritten when the next round re-drafts it; seq_lens drop the rejected tail. imp: chained appends roll back to `pos_after`, the verify feed re-appends accepted pairs at their positions (`mtp_post_verify_update_`). The draft KV is separate from the target's GDN snapshot. Indexer: the draft attends densely; QSA selects every block below 512 complete blocks (2048 + 3 positions), so draft math equals V there; beyond it the draft attends to more than V (acceptance only, verify stays exact). | VU:74 `slot_id = block_id * block_size + (clamped_position % block_size)`; VP:678-683 "In padded drafter batch ... `common_attn_metadata.seq_lens -= num_rejected_tokens_gpu`"; `compute/qsa_indexer.h` lines 3-7 |
+
+## Verification
+
+`tools/analysis/mtp_qwen4exp_reference.py` computes two chained draft steps (tokens 9707, 1234;
+positions 0, 1; h_prev = hash k / 1024) in FP64 numpy from the checkpoint and writes
+`tests/data/mtp_qwen4exp_ref.txt`; `tests/test_mtp_qwen4exp_reference.cpp` runs imp's draft step
+on the same input. Band per logit: 4 x the script's FP16-storage noise + 2^-7.

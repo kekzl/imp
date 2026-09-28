@@ -559,12 +559,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // if none was set (library/test embeddings). Every Engine::* method reads
     // runtime_config_ from here on; engine_init_resolver_ helpers mutate it in place.
     runtime_config_ = take_pending_runtime_config();
-    // Library embeddings bypass tools/common/mtp_auto: same force-off for a head without a forward.
-    if (model_->mtp_.has_value() && !mtp_forward_implemented(*model_->mtp_) &&
-        runtime_config_.speculative.mtp_k != 0) {
-        runtime_config_.speculative.mtp_k = 0;
-        IMP_LOG_INFO("%s", kMtpForwardMissingLog);
-    }
 
     // Bridges the documented imp.conf [server]/[paths] keys into EngineConfig
     // (previously parsed into RuntimeConfig but never read, #541). A CLI flag /

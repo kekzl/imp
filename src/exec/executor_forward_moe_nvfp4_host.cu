@@ -582,4 +582,36 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         residual_fused = true;
 }
 
+// Rows a verify step may run through the per-row n == 1 path: MTP k <= 7. Past it the
+// per-row launches (7 per row per layer) cost more than they save; the staged path takes over.
+constexpr int kHostDecodeRowsMax = 8;
+
+bool GraphExecutor::host_decode_rows_ok_(int layer, int n, int top_k) const {
+    return n > 1 && n <= kHostDecodeRowsMax && compute_dtype_ == QType::F16 && !model_->profile().is_gpt_oss &&
+           nvfp4_host_decode_ready(model_->layer(layer), expert_cache_, moe_, top_k);
+}
+
+// Row r reads routing [r * top_k, (r + 1) * top_k) (token order: n > 1 routing sorts into separate
+// arrays) and writes its own row of h; the shared expert and residual follow in phase 8 for all rows.
+void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
+    const size_t row_bytes = static_cast<size_t>(ctx.d) * ctx.es;
+    auto row = [&](const Tensor& t, int i) {
+        const int64_t shape[2] = {1, ctx.d};
+        return Tensor(static_cast<char*>(t.data) + i * row_bytes, t.qtype, 2, shape, true);
+    };
+    for (int i = 0; i < ctx.n; ++i) {
+        MoeRoutingResult rr = ctx.routing;
+        const int64_t rs[1] = {ctx.top_k};
+        rr.expert_indices = Tensor(static_cast<int32_t*>(ctx.routing.expert_indices.data) + i * ctx.top_k,
+                                   QType::INT32, 1, rs, true);
+        rr.expert_weights = Tensor(static_cast<float*>(ctx.routing.expert_weights.data) + i * ctx.top_k,
+                                   QType::F32, 1, rs, true);
+        Tensor no = row(ctx.no, i);
+        Tensor h = row(ctx.h, i);
+        Tensor r = row(ctx.r, i);
+        run_moe_decode_nvfp4_host(layer, stream, ctx.d, ctx.eff, ctx.top_k, rr, no, h, r, ctx.moe_use_fp32_residual,
+                                  ctx.will_skip_residual_copy, ctx.residual_fused, ctx.non_gated_experts);
+    }
+}
+
 }  // namespace imp

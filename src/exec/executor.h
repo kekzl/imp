@@ -493,6 +493,11 @@ public:
 
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
+    // h_prev rows for an MTP head: the hc streams [n, hc*d] on a gated-residual model (Qwen4Exp
+    // multi_hidden after the last combine, the final mixer leaves them untouched), else hidden_.
+    Tensor view_mtp_hidden(int n_tokens) const {
+        return hc_hidden_.data != nullptr ? view_tokens(hc_hidden_, n_tokens) : view_hidden(n_tokens);
+    }
 
     // Executor reads dispatch decisions from a DispatchPolicy owned by Engine
     // (the nine former RuntimeConfig sections; RuntimeConfig::current() is
@@ -1021,6 +1026,10 @@ private:
                                    const Tensor& r, bool moe_use_fp32_residual,
                                    bool will_skip_residual_copy, bool& residual_fused,
                                    bool non_gated_experts);
+    // Host-resident NVFP4 experts, 2..kHostDecodeRowsMax rows: each row through the n == 1 path
+    // above (device expert cache, else host LRU; executor_forward_moe_nvfp4_host.cu).
+    bool host_decode_rows_ok_(int layer, int n, int top_k) const;
+    void run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
 
     // Stages every expert of one host-resident NVFP4 layer into
     // moe_.layer_stage_buf, so prefill reads them from device memory instead

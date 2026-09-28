@@ -9,6 +9,7 @@
 
 #include "compute/warp_reduce.cuh"
 #include "compute/mtp_forward.h"
+#include "compute/mtp_forward_internal.h"
 #include "compute/activation.h"     // swiglu, shared_expert_gate_scale
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"
@@ -434,7 +435,7 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot) {
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts, int top_k, int expert_d_ff, int shared_d_ff,
                             int num_heads, int num_kv_heads, int head_dim,
-                            int max_seq_len, int n_kv_slots) {
+                            int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank) {
     if (hidden_dim <= 0 || vocab_size <= 0) return false;
     n_kv_slots = std::max(1, n_kv_slots);
     auto alloc = [](void** p, size_t bytes) {
@@ -501,8 +502,10 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     // Phase 2.2 MoE buffers (only if n_experts > 0)
     const bool has_moe = n_experts > 0 && top_k > 0 && expert_d_ff > 0;
     if (ok && has_moe) {
-        ok &= alloc(&ws.d_expert_gate_up,  2 * expert_d_ff * sizeof(__half));
-        ok &= alloc(&ws.d_expert_act,      expert_d_ff * sizeof(__half));
+        // Qwen4Exp runs all top_k experts per launch: [top_k, 2 * d_ff] gate|up, [top_k, d_ff] act.
+        const size_t slots = hc_count > 0 ? static_cast<size_t>(top_k) : 1;
+        ok &= alloc(&ws.d_expert_gate_up,  slots * 2 * expert_d_ff * sizeof(__half));
+        ok &= alloc(&ws.d_expert_act,      slots * expert_d_ff * sizeof(__half));
         ok &= alloc(&ws.d_expert_outputs,  top_k * hidden_dim * sizeof(__half));
 
         // Routing pool (max 1 token for M=1 decode).
@@ -523,6 +526,16 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     if (ok && (has_moe || shared_d_ff > 0)) {
         ok &= alloc(&ws.d_post_norm, hidden_dim * sizeof(__half));
         ok &= alloc(&ws.d_moe_out,   hidden_dim * sizeof(__half));
+    }
+    if (ok && hc_count > 0 && hc_lowrank > 0) {
+        const size_t hw = static_cast<size_t>(hc_count) * hidden_dim * sizeof(__half);
+        ok &= alloc(&ws.d_hc_x, hw);
+        ok &= alloc(&ws.d_hc_normed, hw);
+        ok &= alloc(&ws.d_hc_mixw, hw);
+        ok &= alloc(&ws.d_hc_low, static_cast<size_t>(hc_lowrank) * sizeof(__half));
+        ok &= alloc(&ws.d_hc_inj, static_cast<size_t>(hc_count) * sizeof(__half));
+        ws.hc_count = hc_count;
+        ws.hc_lowrank = hc_lowrank;
     }
     if (ok && shared_d_ff > 0) {
         ok &= alloc(&ws.d_shared_gate, shared_d_ff * sizeof(__half));
@@ -626,6 +639,12 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_shared_up);
     frfn(ws.d_shared_act);
     frfn(ws.d_shared_out);
+    frfn(ws.d_hc_x);
+    frfn(ws.d_hc_normed);
+    frfn(ws.d_hc_mixw);
+    frfn(ws.d_hc_low);
+    frfn(ws.d_hc_inj);
+    ws.hc_count = ws.hc_lowrank = 0;
     ws.routing_buf.free();
     ws.h_expert_indices.reset();
     ws.h_expert_weights.reset();
@@ -673,6 +692,260 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
 // ---------------------------------------------------------------------------
 // Draft step
 // ---------------------------------------------------------------------------
+// Gated one-row attention over the MTP KV cache: ws.d_input_norm -> ws.d_attn_residual (o_proj
+// output), appends this row's K/V at ws.mtp_pos and advances it. Shared by every layout.
+void mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream) {
+    const int hd = hidden_dim;
+    const int nh = ws.num_heads;
+    const int nkv = ws.num_kv_heads;
+    const int hdh = ws.head_dim;
+    // 5.A.2 — Q (full, including gate): q_proj @ d_input_norm → [2 * nh * hdh]
+    {
+        int64_t in_shape[2]  = {1, hd};
+        int64_t out_shape[2] = {1, 2 * nh * hdh};
+        Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
+        Tensor out_view(ws.d_q_full,     QType::F16, 2, out_shape, true);
+        imp::gemm(in_view, mtp.q_proj, out_view, 1.0f, 0.0f, stream);
+    }
+    // 5.A.3 — K, V: k_proj/v_proj @ d_input_norm → [nkv * hdh] each
+    if (ws.d_k_proj && nkv > 0) {
+        int64_t in_shape[2]  = {1, hd};
+        int64_t out_shape[2] = {1, nkv * hdh};
+        Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
+        Tensor out_view(ws.d_k_proj,     QType::F16, 2, out_shape, true);
+        imp::gemm(in_view, mtp.k_proj, out_view, 1.0f, 0.0f, stream);
+    }
+    if (ws.d_v_proj && nkv > 0) {
+        int64_t in_shape[2]  = {1, hd};
+        int64_t out_shape[2] = {1, nkv * hdh};
+        Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
+        Tensor out_view(ws.d_v_proj,     QType::F16, 2, out_shape, true);
+        imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
+    }
+
+    // Attention path: with KV cache present and capacity remaining, extract Q per-head,
+    // apply fused qk-norm+RoPE, append rotated K+V to cache, run softmax attention over
+    // [0,mtp_pos+1), apply silu(gate). Else fall back to the M=1 broadcast MVP.
+    bool use_kv_scan = (ws.d_k_cache != nullptr && ws.d_v_cache != nullptr &&
+                        ws.max_seq_len > 0 && ws.mtp_pos < ws.max_seq_len);
+    if (use_kv_scan) {
+        // Extract Q (no gate) from q_full[h,0..head_dim). Layout per head: [q(head_dim),
+        // gate(head_dim)] when attn_output_gate=True (Qwen3.6). Nemotron has no gate half:
+        // its q_full is already contiguous Q, so this strided copy must not run for it.
+        const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) *
+                                   sizeof(__half);
+        cudaMemcpy2DAsync(
+            /*dst=*/ws.d_q_attn,
+            /*dpitch=*/static_cast<size_t>(hdh) * sizeof(__half),
+            /*src=*/ws.d_q_full,
+            /*spitch=*/q_src_pitch,
+            /*width=*/static_cast<size_t>(hdh) * sizeof(__half),
+            /*height=*/static_cast<size_t>(nh), cudaMemcpyDeviceToDevice, stream);
+        // Per-head RMSNorm on Q and K (Qwen3-style): reshape to [n_heads,head_dim], apply
+        // rmsnorm with arch_norm_offset for Qwen3.5/3.6's gamma=1+W convention.
+        // Independent of RoPE.
+        if (mtp.q_norm.data) {
+            int64_t q_shape[2] = {nh, hdh};
+            Tensor q_view(ws.d_q_attn, QType::F16, 2, q_shape, /*on_device=*/true);
+            imp::rmsnorm(q_view, mtp.q_norm, q_view, ws.rms_norm_eps, stream,
+                         ws.arch_norm_offset);
+        }
+        if (mtp.k_norm.data) {
+            int64_t k_shape[2] = {nkv, hdh};
+            Tensor k_view(ws.d_k_proj, QType::F16, 2, k_shape, /*on_device=*/true);
+            imp::rmsnorm(k_view, mtp.k_norm, k_view, ws.rms_norm_eps, stream,
+                         ws.arch_norm_offset);
+        }
+        // mrope-aware Q/K rotation; text-only tokens reduce all 3 mrope positions to mtp_pos
+        // (standard partial-rope). NeoX pairing only.
+        // Skipped on NoPE heads (Nemotron-H): main-model attention carries no position either
+        // (Mamba layers do); rotating here would put the draft in a different frame, costing
+        // accept rate, not correctness.
+        if (mtp.attn_rope && ws.rope_dim > 0 &&
+            ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
+            // RoPE-scaling params mirrored from the main forward (issue #897):
+            // inv_scaling = 1/freq_scale; ext_factor>0 → YaRN. Defaults leave
+            // the base (unscaled) rope unchanged. Text-only → single position.
+            mtp_apply_mrope(ws.d_q_attn, nh, ws.d_k_proj, nkv, hdh, ws.rope_dim, ws.rope_theta,
+                            ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2, ws.mtp_pos,
+                            1.0f / ws.rope_freq_scale, ws.yarn_ext_factor, ws.yarn_attn_factor,
+                            ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream);
+        }
+        const int pos = ws.mtp_pos;
+        // 5.A.4.a — append k_step, v_step into cache at pos
+        {
+            int block = 256;
+            int grid  = (nkv * hdh + block - 1) / block;
+            mtp_kv_append_kernel<<<grid, block, 0, stream>>>(
+                static_cast<const __half*>(ws.d_k_proj),
+                static_cast<const __half*>(ws.d_v_proj),
+                static_cast<__half*>(ws.d_k_cache),
+                static_cast<__half*>(ws.d_v_cache),
+                pos, nkv, hdh, /*n_rows=*/1);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        // Softmax attention scan over [0,pos+1). Shared mem = seq_len*sizeof(float); single-block
+        // design caps decode max_seq_len ~16K at 64 KiB, within sm_120's per-SM shared-mem budget.
+        // Uses opt-in dynamic shared mem.
+        {
+            const int seq_len = pos + 1;
+            const int kBlock = 256;
+            const size_t shmem_bytes = static_cast<size_t>(seq_len) * sizeof(float);
+            const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
+            mtp_attn_kv_scan_kernel<<<dim3(nh, 1), kBlock, shmem_bytes, stream>>>(
+                static_cast<const __half*>(ws.d_q_attn),
+                static_cast<const __half*>(ws.d_k_cache),
+                static_cast<const __half*>(ws.d_v_cache),
+                static_cast<__half*>(ws.d_attn_out),
+                /*base_ctx=*/pos, nh, nkv, hdh, ws.max_seq_len, scale);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        // 5.A.4.c — silu(gate) * attn_out (in-place). Only when the head
+        // actually has a gate half; without one this would multiply the
+        // output by a sigmoid of Q itself.
+        if (mtp.attn_output_gate) {
+            int block = 256;
+            int grid  = (nh * hdh + block - 1) / block;
+            mtp_gate_attn_out_kernel<<<grid, block, 0, stream>>>(
+                static_cast<__half*>(ws.d_attn_out),
+                static_cast<const __half*>(ws.d_q_full),
+                nh, hdh, /*n_rows=*/1);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        ws.mtp_pos = pos + 1;
+    } else if (mtp.attn_output_gate) {
+        // MVP fallback: silu(gate) * V_broadcast
+        int block = 256;
+        int grid  = (nh * hdh + block - 1) / block;
+        mtp_gated_v_broadcast_kernel<<<grid, block, 0, stream>>>(
+            static_cast<const __half*>(ws.d_q_full),
+            static_cast<const __half*>(ws.d_v_proj),
+            static_cast<__half*>(ws.d_attn_out),
+            nh, nkv, hdh);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        // Same fallback without a gate: softmax over one token is identity,
+        // so attn_out[h] is just V broadcast across the GQA group.
+        const int group = (nkv > 0) ? (nh / nkv) : 1;
+        for (int h = 0; h < nh; ++h) {
+            const int kv = (group > 0) ? (h / group) : 0;
+            cudaMemcpyAsync(static_cast<__half*>(ws.d_attn_out) + static_cast<size_t>(h) * hdh,
+                            static_cast<const __half*>(ws.d_v_proj) + static_cast<size_t>(kv) * hdh,
+                            static_cast<size_t>(hdh) * sizeof(__half), cudaMemcpyDeviceToDevice, stream);
+        }
+    }
+    // 5.A.5 — o_proj @ d_attn_out → d_attn_residual
+    {
+        int64_t in_shape[2]  = {1, nh * hdh};
+        int64_t out_shape[2] = {1, hd};
+        Tensor in_view (ws.d_attn_out,      QType::F16, 2, in_shape,  true);
+        Tensor out_view(ws.d_attn_residual, QType::F16, 2, out_shape, true);
+        imp::gemm(in_view, mtp.o_proj, out_view, 1.0f, 0.0f, stream);
+    }
+}
+
+// Logits of ws.d_h_final, then argmax / top-W into the caller's slot (see mtp_draft_step).
+bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
+                    int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
+                    const NvFP4QuantResult* lm_head_nvfp4, int32_t* d_out_token) {
+    // Feed-only step (prefill / verify catch-up): the KV append above is the
+    // whole point — skip the lm_head GEMV, argmax and stream sync.
+    if (out_token_id == nullptr && d_out_token == nullptr)
+        return true;
+
+    // logits = lm_head @ h_final. Prefer the NVFP4 decode-cache view of lm_head when
+    // available: full-vocab weight read dominates per-draft cost (~2.5 GB FP16 on Qwen3.6's
+    // 248k vocab); NVFP4 reads ~4x less. Draft-only precision; verification stays lossless.
+    const bool nvfp4_lm = (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
+    if (nvfp4_lm) {
+        gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
+                             static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim,
+                             stream);
+    } else {
+        int64_t h_final_shape[2] = {1, hidden_dim};
+        int64_t logits_shape[2]  = {1, vocab_size};
+        Tensor h_final_view(ws.d_h_final, QType::F16, 2, h_final_shape, true);
+        Tensor logits_view (ws.d_logits,  QType::F16, 2, logits_shape,  true);
+        imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
+    }
+
+    // argmax straight into caller's device slot: no D2H, no sync (caller drains in one copy).
+    // top_w>0: fast top-W kernel fills ws.d_topk instead, rank 0 lands in caller's slot.
+    // Rank 0 can differ from argmax on EXACT logit ties (pass structure); drafts stay lossless.
+    if (d_out_token != nullptr) {
+        if (top_w > 0) {
+            const int w = std::min(top_w, kMtpMaxTopW);
+            const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
+            if (!mtp_topw_fast(lg, nvfp4_lm, vocab_size, w, ws, stream))
+                return false;
+            if (cudaMemcpyAsync(d_out_token, ws.d_topk, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
+                cudaSuccess)
+                return false;
+            return true;
+        }
+        if (nvfp4_lm) {
+            mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
+            mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const __half*>(ws.d_logits), vocab_size, d_out_token);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        return true;
+    }
+
+    // Step 8: argmax (or top-W) → device int → D2H.
+    const bool want_topk = (out_topk_ids != nullptr && top_w > 0);
+    if (want_topk) {
+        // Top-W path (Stage 0 tree-ceiling probe): reuse the pre-allocated
+        // ws.d_topk buffer. out_token_id is set to the argmax (top-0).
+        const int w = std::min(top_w, kMtpMaxTopW);
+        if (ws.d_topk == nullptr) {
+            IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
+            return false;
+        }
+        const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
+        if (!mtp_topw_reference(lg, nvfp4_lm, vocab_size, w, ws, stream))
+            return false;
+        if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+        cudaStreamSynchronize(stream);
+        *out_token_id = out_topk_ids[0];
+        return true;
+    }
+
+    // Host path: persistent argmax scratch (ws.d_argmax) — a per-draft
+    // cudaMallocAsync/cudaFreeAsync pair costs host time on the chain.
+    int* d_idx = ws.d_argmax;
+    bool owned_idx = false;
+    if (d_idx == nullptr) {
+        if (cudaMallocAsync(&d_idx, sizeof(int), stream) != cudaSuccess) {
+            IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
+            return false;
+        }
+        owned_idx = true;
+    }
+    if (nvfp4_lm) {
+        mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+            static_cast<const float*>(ws.d_logits_f32), vocab_size, d_idx);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+            static_cast<const __half*>(ws.d_logits), vocab_size, d_idx);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        if (owned_idx) cudaFreeAsync(d_idx, stream);
+        return false;
+    }
+    if (owned_idx) cudaFreeAsync(d_idx, stream);
+    cudaStreamSynchronize(stream);
+    return true;
+}
+
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     const MtpHead& mtp,
                     const Tensor& main_tok_emb,
@@ -730,6 +1003,14 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::embedding_lookup(main_tok_emb, ws.d_tok, /*n_tokens=*/1, out_view, main_tok_emb.qtype, stream);
     }
 
+    // Qwen4Exp: hyper-connection layer (compute/mtp_forward_qwen4exp.cu) on the embedding in d_fc_in.
+    if (mtp.layout == MtpLayout::Qwen4Exp) {
+        if (!mtp_qwen4exp_layer(d_h_prev, mtp, ws, hidden_dim, stream))
+            return false;
+        return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, out_topk_ids,
+                              top_w, lm_head_nvfp4, d_out_token);
+    }
+
     // emb_norm = RMSNorm(emb, pre_fc_norm_embedding). imp::rmsnorm reads shape[0]=rows,
     // shape[1]=d_model and early-returns when d_model==0; a 1D [hidden_dim] tensor would be
     // misread as rows=hidden_dim, d_model=0 (no-op, uninitialized output). MUST use [1,hidden_dim].
@@ -770,9 +1051,6 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         mtp.input_layernorm.data && mtp.q_proj.data && mtp.k_proj.data &&
         mtp.v_proj.data && mtp.o_proj.data) {
         const int hd  = hidden_dim;
-        const int nh  = ws.num_heads;
-        const int nkv = ws.num_kv_heads;
-        const int hdh = ws.head_dim;
 
         // 5.A.1 — input_layernorm(fc_out) → d_input_norm
         {
@@ -781,149 +1059,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             Tensor in_view     (ws.d_input_norm,QType::F16, 2, hd1, true);
             imp::rmsnorm(fc_out_view, mtp.input_layernorm, in_view, 1e-6f, stream);
         }
-        // 5.A.2 — Q (full, including gate): q_proj @ d_input_norm → [2 * nh * hdh]
-        {
-            int64_t in_shape[2]  = {1, hd};
-            int64_t out_shape[2] = {1, 2 * nh * hdh};
-            Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
-            Tensor out_view(ws.d_q_full,     QType::F16, 2, out_shape, true);
-            imp::gemm(in_view, mtp.q_proj, out_view, 1.0f, 0.0f, stream);
-        }
-        // 5.A.3 — K, V: k_proj/v_proj @ d_input_norm → [nkv * hdh] each
-        if (ws.d_k_proj && nkv > 0) {
-            int64_t in_shape[2]  = {1, hd};
-            int64_t out_shape[2] = {1, nkv * hdh};
-            Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
-            Tensor out_view(ws.d_k_proj,     QType::F16, 2, out_shape, true);
-            imp::gemm(in_view, mtp.k_proj, out_view, 1.0f, 0.0f, stream);
-        }
-        if (ws.d_v_proj && nkv > 0) {
-            int64_t in_shape[2]  = {1, hd};
-            int64_t out_shape[2] = {1, nkv * hdh};
-            Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
-            Tensor out_view(ws.d_v_proj,     QType::F16, 2, out_shape, true);
-            imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
-        }
-
-        // Attention path: with KV cache present and capacity remaining, extract Q per-head,
-        // apply fused qk-norm+RoPE, append rotated K+V to cache, run softmax attention over
-        // [0,mtp_pos+1), apply silu(gate). Else fall back to the M=1 broadcast MVP.
-        bool use_kv_scan = (ws.d_k_cache != nullptr && ws.d_v_cache != nullptr &&
-                            ws.max_seq_len > 0 && ws.mtp_pos < ws.max_seq_len);
-        if (use_kv_scan) {
-            // Extract Q (no gate) from q_full[h,0..head_dim). Layout per head: [q(head_dim),
-            // gate(head_dim)] when attn_output_gate=True (Qwen3.6). Nemotron has no gate half:
-            // its q_full is already contiguous Q, so this strided copy must not run for it.
-            const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) *
-                                       sizeof(__half);
-            cudaMemcpy2DAsync(
-                /*dst=*/ws.d_q_attn,
-                /*dpitch=*/static_cast<size_t>(hdh) * sizeof(__half),
-                /*src=*/ws.d_q_full,
-                /*spitch=*/q_src_pitch,
-                /*width=*/static_cast<size_t>(hdh) * sizeof(__half),
-                /*height=*/static_cast<size_t>(nh), cudaMemcpyDeviceToDevice, stream);
-            // Per-head RMSNorm on Q and K (Qwen3-style): reshape to [n_heads,head_dim], apply
-            // rmsnorm with arch_norm_offset for Qwen3.5/3.6's gamma=1+W convention.
-            // Independent of RoPE.
-            if (mtp.q_norm.data) {
-                int64_t q_shape[2] = {nh, hdh};
-                Tensor q_view(ws.d_q_attn, QType::F16, 2, q_shape, /*on_device=*/true);
-                imp::rmsnorm(q_view, mtp.q_norm, q_view, ws.rms_norm_eps, stream,
-                             ws.arch_norm_offset);
-            }
-            if (mtp.k_norm.data) {
-                int64_t k_shape[2] = {nkv, hdh};
-                Tensor k_view(ws.d_k_proj, QType::F16, 2, k_shape, /*on_device=*/true);
-                imp::rmsnorm(k_view, mtp.k_norm, k_view, ws.rms_norm_eps, stream,
-                             ws.arch_norm_offset);
-            }
-            // mrope-aware Q/K rotation; text-only tokens reduce all 3 mrope positions to mtp_pos
-            // (standard partial-rope). NeoX pairing only.
-            // Skipped on NoPE heads (Nemotron-H): main-model attention carries no position either
-            // (Mamba layers do); rotating here would put the draft in a different frame, costing
-            // accept rate, not correctness.
-            if (mtp.attn_rope && ws.rope_dim > 0 &&
-                ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
-                // RoPE-scaling params mirrored from the main forward (issue #897):
-                // inv_scaling = 1/freq_scale; ext_factor>0 → YaRN. Defaults leave
-                // the base (unscaled) rope unchanged. Text-only → single position.
-                mtp_apply_mrope(ws.d_q_attn, nh, ws.d_k_proj, nkv, hdh, ws.rope_dim, ws.rope_theta,
-                                ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2, ws.mtp_pos,
-                                1.0f / ws.rope_freq_scale, ws.yarn_ext_factor, ws.yarn_attn_factor,
-                                ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream);
-            }
-            const int pos = ws.mtp_pos;
-            // 5.A.4.a — append k_step, v_step into cache at pos
-            {
-                int block = 256;
-                int grid  = (nkv * hdh + block - 1) / block;
-                mtp_kv_append_kernel<<<grid, block, 0, stream>>>(
-                    static_cast<const __half*>(ws.d_k_proj),
-                    static_cast<const __half*>(ws.d_v_proj),
-                    static_cast<__half*>(ws.d_k_cache),
-                    static_cast<__half*>(ws.d_v_cache),
-                    pos, nkv, hdh, /*n_rows=*/1);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
-            // Softmax attention scan over [0,pos+1). Shared mem = seq_len*sizeof(float); single-block
-            // design caps decode max_seq_len ~16K at 64 KiB, within sm_120's per-SM shared-mem budget.
-            // Uses opt-in dynamic shared mem.
-            {
-                const int seq_len = pos + 1;
-                const int kBlock = 256;
-                const size_t shmem_bytes = static_cast<size_t>(seq_len) * sizeof(float);
-                const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
-                mtp_attn_kv_scan_kernel<<<dim3(nh, 1), kBlock, shmem_bytes, stream>>>(
-                    static_cast<const __half*>(ws.d_q_attn),
-                    static_cast<const __half*>(ws.d_k_cache),
-                    static_cast<const __half*>(ws.d_v_cache),
-                    static_cast<__half*>(ws.d_attn_out),
-                    /*base_ctx=*/pos, nh, nkv, hdh, ws.max_seq_len, scale);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
-            // 5.A.4.c — silu(gate) * attn_out (in-place). Only when the head
-            // actually has a gate half; without one this would multiply the
-            // output by a sigmoid of Q itself.
-            if (mtp.attn_output_gate) {
-                int block = 256;
-                int grid  = (nh * hdh + block - 1) / block;
-                mtp_gate_attn_out_kernel<<<grid, block, 0, stream>>>(
-                    static_cast<__half*>(ws.d_attn_out),
-                    static_cast<const __half*>(ws.d_q_full),
-                    nh, hdh, /*n_rows=*/1);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
-            ws.mtp_pos = pos + 1;
-        } else if (mtp.attn_output_gate) {
-            // MVP fallback: silu(gate) * V_broadcast
-            int block = 256;
-            int grid  = (nh * hdh + block - 1) / block;
-            mtp_gated_v_broadcast_kernel<<<grid, block, 0, stream>>>(
-                static_cast<const __half*>(ws.d_q_full),
-                static_cast<const __half*>(ws.d_v_proj),
-                static_cast<__half*>(ws.d_attn_out),
-                nh, nkv, hdh);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            // Same fallback without a gate: softmax over one token is identity,
-            // so attn_out[h] is just V broadcast across the GQA group.
-            const int group = (nkv > 0) ? (nh / nkv) : 1;
-            for (int h = 0; h < nh; ++h) {
-                const int kv = (group > 0) ? (h / group) : 0;
-                cudaMemcpyAsync(static_cast<__half*>(ws.d_attn_out) + static_cast<size_t>(h) * hdh,
-                                static_cast<const __half*>(ws.d_v_proj) + static_cast<size_t>(kv) * hdh,
-                                static_cast<size_t>(hdh) * sizeof(__half), cudaMemcpyDeviceToDevice, stream);
-            }
-        }
-        // 5.A.5 — o_proj @ d_attn_out → d_attn_residual
-        {
-            int64_t in_shape[2]  = {1, nh * hdh};
-            int64_t out_shape[2] = {1, hd};
-            Tensor in_view (ws.d_attn_out,      QType::F16, 2, in_shape,  true);
-            Tensor out_view(ws.d_attn_residual, QType::F16, 2, out_shape, true);
-            imp::gemm(in_view, mtp.o_proj, out_view, 1.0f, 0.0f, stream);
-        }
+        mtp_attention_row(mtp, ws, hidden_dim, stream);  // 5.A.2 - 5.A.5
         // 5.A.6 — residual: fc_out += attn_residual
         {
             int block = 256;
@@ -934,10 +1070,6 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 hd);
             IMP_CUDA_CHECK_LAUNCH();
         }
-        // (K is computed for shape symmetry but unused in the M=1, no-history MVP.)
-        (void)mtp.k_proj;
-        (void)mtp.q_norm;
-        (void)mtp.k_norm;
     }
 
     // MLP block, two checkpoint variants: MoE (Qwen3.6-35B sidecar) 256-expert top-8 +
@@ -1186,102 +1318,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::rmsnorm(fc_out_view, mtp.final_norm, h_final_view, 1e-6f, stream);
     }
 
-    // Feed-only step (prefill / verify catch-up): the KV append above is the
-    // whole point — skip the lm_head GEMV, argmax and stream sync.
-    if (out_token_id == nullptr && d_out_token == nullptr)
-        return true;
-
-    // logits = lm_head @ h_final. Prefer the NVFP4 decode-cache view of lm_head when
-    // available: full-vocab weight read dominates per-draft cost (~2.5 GB FP16 on Qwen3.6's
-    // 248k vocab); NVFP4 reads ~4x less. Draft-only precision; verification stays lossless.
-    const bool nvfp4_lm = (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
-    if (nvfp4_lm) {
-        gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
-                             static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim,
-                             stream);
-    } else {
-        int64_t h_final_shape[2] = {1, hidden_dim};
-        int64_t logits_shape[2]  = {1, vocab_size};
-        Tensor h_final_view(ws.d_h_final, QType::F16, 2, h_final_shape, true);
-        Tensor logits_view (ws.d_logits,  QType::F16, 2, logits_shape,  true);
-        imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
-    }
-
-    // argmax straight into caller's device slot: no D2H, no sync (caller drains in one copy).
-    // top_w>0: fast top-W kernel fills ws.d_topk instead, rank 0 lands in caller's slot.
-    // Rank 0 can differ from argmax on EXACT logit ties (pass structure); drafts stay lossless.
-    if (d_out_token != nullptr) {
-        if (top_w > 0) {
-            const int w = std::min(top_w, kMtpMaxTopW);
-            const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
-            if (!mtp_topw_fast(lg, nvfp4_lm, vocab_size, w, ws, stream))
-                return false;
-            if (cudaMemcpyAsync(d_out_token, ws.d_topk, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
-                cudaSuccess)
-                return false;
-            return true;
-        }
-        if (nvfp4_lm) {
-            mtp_argmax_kernel<<<1, 256, 0, stream>>>(
-                static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            mtp_argmax_kernel<<<1, 256, 0, stream>>>(
-                static_cast<const __half*>(ws.d_logits), vocab_size, d_out_token);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-        return true;
-    }
-
-    // Step 8: argmax (or top-W) → device int → D2H.
-    const bool want_topk = (out_topk_ids != nullptr && top_w > 0);
-    if (want_topk) {
-        // Top-W path (Stage 0 tree-ceiling probe): reuse the pre-allocated
-        // ws.d_topk buffer. out_token_id is set to the argmax (top-0).
-        const int w = std::min(top_w, kMtpMaxTopW);
-        if (ws.d_topk == nullptr) {
-            IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
-            return false;
-        }
-        const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
-        if (!mtp_topw_reference(lg, nvfp4_lm, vocab_size, w, ws, stream))
-            return false;
-        if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-            return false;
-        cudaStreamSynchronize(stream);
-        *out_token_id = out_topk_ids[0];
-        return true;
-    }
-
-    // Host path: persistent argmax scratch (ws.d_argmax) — a per-draft
-    // cudaMallocAsync/cudaFreeAsync pair costs host time on the chain.
-    int* d_idx = ws.d_argmax;
-    bool owned_idx = false;
-    if (d_idx == nullptr) {
-        if (cudaMallocAsync(&d_idx, sizeof(int), stream) != cudaSuccess) {
-            IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
-            return false;
-        }
-        owned_idx = true;
-    }
-    if (nvfp4_lm) {
-        mtp_argmax_kernel<<<1, 256, 0, stream>>>(
-            static_cast<const float*>(ws.d_logits_f32), vocab_size, d_idx);
-        IMP_CUDA_CHECK_LAUNCH();
-    } else {
-        mtp_argmax_kernel<<<1, 256, 0, stream>>>(
-            static_cast<const __half*>(ws.d_logits), vocab_size, d_idx);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-    if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
-        if (owned_idx) cudaFreeAsync(d_idx, stream);
-        return false;
-    }
-    if (owned_idx) cudaFreeAsync(d_idx, stream);
-    cudaStreamSynchronize(stream);
-    return true;
+    return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, out_topk_ids, top_w,
+                          lm_head_nvfp4, d_out_token);
 }
 
 // Batched prefill feed (dense heads): same math as mtp_draft_step at M=n_rows instead of

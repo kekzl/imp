@@ -454,6 +454,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             will_skip_residual_copy, residual_fused);
         goto moe_after_experts;
     }
+    // Host-resident NVFP4 experts, 2..8 rows (a speculative verify, n = k + 1): row by row through
+    // the n == 1 host-expert path. The general path below stages whole layers over PCIe.
+    if (host_decode_rows_ok_(layer, n, top_k)) {
+        run_moe_decode_rows_host_(layer, stream, ctx);
+        goto moe_after_experts;
+    }
 
     // =========================================================================
     // GENERAL PATH: prefill or host-offloaded or non-Q6K/Q8_0 experts

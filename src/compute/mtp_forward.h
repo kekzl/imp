@@ -207,7 +207,26 @@ struct MtpDraftWorkspace {
     // to the widest feed a prefill chunk can produce.
     void* d_prenorm_rows = nullptr;
     int prenorm_rows_cap = 0;
+
+    // Qwen4Exp hyper-connection scratch (hc_count > 0): the head reads and writes an hc stream
+    // [hc_count, hidden] instead of one hidden row. d_hc_x holds multi_hidden after a step.
+    int hc_count = 0;
+    int hc_lowrank = 0;
+    void* d_hc_x = nullptr;       // [hc * hidden] stream state, next step's h_prev
+    void* d_hc_normed = nullptr;  // [hc * hidden] grouped norm, also pre_fc_norm_hidden output
+    void* d_hc_mixw = nullptr;    // [hc * hidden] mix gate logits
+    void* d_hc_low = nullptr;     // [hc_lowrank]
+    void* d_hc_inj = nullptr;     // [hc] inject weights of the pending combine
 };
+
+// Width of one h_prev row: hidden_dim, or hc_count x hidden_dim on a Qwen4Exp head.
+inline int mtp_h_prev_cols(const MtpDraftWorkspace& ws) {
+    return ws.hc_count > 0 ? ws.hc_count * ws.hidden_dim : ws.hidden_dim;
+}
+// h_prev of the next chained step: the head's h_final, or its multi_hidden hc stream (Qwen4Exp).
+inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
+    return ws.hc_count > 0 ? ws.d_hc_x : ws.d_h_final;
+}
 
 // Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
 // scratch above: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
@@ -291,7 +310,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
                             int n_experts = 0, int top_k = 0,
                             int expert_d_ff = 0, int shared_d_ff = 0,
                             int num_heads = 0, int num_kv_heads = 0, int head_dim = 0,
-                            int max_seq_len = 0, int n_kv_slots = 1);
+                            int max_seq_len = 0, int n_kv_slots = 1, int hc_count = 0, int hc_lowrank = 0);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 // Reset every MTP-side KV cache position (start of new sequences). The K/V
