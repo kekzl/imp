@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
+
 ### Changed
 - Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).

@@ -316,10 +316,12 @@ struct ShardInfo {
 // mtp_out (optional): when non-null, mtp.*/model.mtp.* tensors (which translate_name would
 // otherwise SKIP) are collected under their raw mtp.* name. keep_vision: passed through to
 // translate_name; not defaulted, since a caller that forgets it silently loses the tower.
+// sparse: shard kept only for MTP tensors next to unused ones (Qwen4Exp FP8 shard, 50 GiB of
+// PLE table vs 2.5 GiB head): no MAP_POPULATE, unused names dropped, WILLNEED on kept ranges only.
 static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map,
                        ShardInfo& shard, bool llm_compressor_format, bool keep_vision,
                        imp::llm_compressor::TranslationCounters& counters,
-                       std::unordered_map<std::string, Tensor>* mtp_out = nullptr) {
+                       std::unordered_map<std::string, Tensor>* mtp_out = nullptr, bool sparse = false) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) {
         IMP_LOG_ERROR("Failed to open: %s", path.c_str());
@@ -337,7 +339,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         return false;
     }
 
-    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE | (sparse ? 0 : MAP_POPULATE), fd, 0);
     close(fd);
     if (mmap_base == MAP_FAILED) {
         // MAP_POPULATE may fail on some filesystems; retry without it.
@@ -349,8 +351,12 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         if (mmap_base == MAP_FAILED)
             return false;
     }
-    madvise(mmap_base, file_size, MADV_WILLNEED);
-    madvise(mmap_base, file_size, MADV_SEQUENTIAL);
+    if (!sparse) {
+        madvise(mmap_base, file_size, MADV_WILLNEED);
+        madvise(mmap_base, file_size, MADV_SEQUENTIAL);
+    }
+    int n_sparse_unused = 0;
+    size_t sparse_willneed_bytes = 0;
 
     shard.mmap_base = mmap_base;
     shard.mmap_size = file_size;
@@ -401,6 +407,10 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             continue;
         if (tensor_meta.type != JType::OBJECT)
             continue;
+        if (sparse && imp::llm_compressor::name_is_unused(tensor_name, keep_vision, /*keep_mtp=*/true)) {
+            n_sparse_unused++;
+            continue;
+        }
 
         // Translate llm-compressor names → modelopt names if applicable.
         bool divert_to_mtp = false;
@@ -540,6 +550,14 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         }
 
         void* tensor_ptr = tensor_data_base + offset_start;
+        if (sparse && expected_nbytes > 0) {
+            // Page-aligned WILLNEED on this tensor's bytes only.
+            static const uintptr_t kPage = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+            const uintptr_t lo = reinterpret_cast<uintptr_t>(tensor_ptr) & ~(kPage - 1);
+            const uintptr_t hi = reinterpret_cast<uintptr_t>(tensor_ptr) + expected_nbytes;
+            madvise(reinterpret_cast<void*>(lo), hi - lo, MADV_WILLNEED);
+            sparse_willneed_bytes += expected_nbytes;
+        }
         Tensor t(tensor_ptr, dtype, ndim, shape, /*on_device=*/false);
         (divert_to_mtp ? *mtp_out : tensor_map).emplace(tensor_name, t);
 
@@ -560,6 +578,10 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             path.c_str(), n_total_dropped, n_dropped_no_dtype, n_dropped_no_shape, n_dropped_too_many_dims,
             n_dropped_no_offsets, n_dropped_offset_validation, n_dropped_dtype_unsupported,
             n_dropped_bad_shape);
+    }
+    if (sparse) {
+        IMP_LOG_INFO("SafeTensors %s: sparse map, %d unused tensors skipped, WILLNEED on %zu of %zu MiB",
+                     path.c_str(), n_sparse_unused, sparse_willneed_bytes >> 20, file_size >> 20);
     }
 
     return true;
@@ -633,18 +655,25 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     // translate_name: a vision tower usually ships as its own shard, so the drop decides its
     // fate before any tensor is looked at.
     std::set<std::string> shard_files;
+    std::set<std::string> sparse_shards;
     const bool keep_mtp = mtp_out != nullptr;
     for (auto& [fname, tensors] : shard_tensors) {
-        bool all_skip = !tensors.empty() &&
-                        std::all_of(tensors.begin(), tensors.end(),
-                                    [keep_vision, keep_mtp](const std::string& n) {
-                                        return imp::llm_compressor::name_is_unused(n, keep_vision, keep_mtp);
-                                    });
-        if (all_skip) {
+        auto all_unused = [&](bool mtp) {
+            return !tensors.empty() && std::all_of(tensors.begin(), tensors.end(), [&](const std::string& n) {
+                       return imp::llm_compressor::name_is_unused(n, keep_vision, mtp);
+                   });
+        };
+        if (all_unused(keep_mtp)) {
             IMP_LOG_INFO("Skipping shard %s (%zu tensors are MTP/vision-only and unused)", fname.c_str(),
                          tensors.size());
             continue;
         }
+        // Kept only for its MTP tensors, next to unused ones: map sparse (see load_shard).
+        const bool any_unused = std::any_of(tensors.begin(), tensors.end(), [&](const std::string& n) {
+            return imp::llm_compressor::name_is_unused(n, keep_vision, keep_mtp);
+        });
+        if (keep_mtp && all_unused(false) && any_unused)
+            sparse_shards.insert(fname);
         shard_files.insert(fname);
     }
 
@@ -672,7 +701,8 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     auto worker = [&](size_t i) {
         std::string shard_path = model_dir + "/" + shard_list[i];
         if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i], llm_compressor_format, keep_vision,
-                        per_shard_counters[i], keep_mtp ? &per_shard_mtp[i] : nullptr)) {
+                        per_shard_counters[i], keep_mtp ? &per_shard_mtp[i] : nullptr,
+                        sparse_shards.count(shard_list[i]) > 0)) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
             any_failure.store(true);
         }
@@ -897,128 +927,6 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     std::unordered_map<std::string, Tensor> mtp_tensor_map;
     ShardInfo mtp_shard{};
 
-    // Dispatches a raw mtp.* tensor map to MtpHead fields. Two MLP variants: MoE (Qwen3.6-35B):
-    // router + packed experts + gated shared expert. Dense (Qwen3.6-27B embedded head): plain
-    // SwiGLU gate/up/down mapped onto the shared_expert fields (router/experts stay empty,
-    // forward runs it as residual + shared path, no sigmoid gate).
-    auto dispatch_mtp = [](std::unordered_map<std::string, Tensor>& tm, const std::string& src,
-                           size_t bytes) -> imp::MtpHead {
-        imp::MtpHead head;
-        head.info.path = src;
-        head.info.file_bytes = bytes;
-        head.info.n_tensors = static_cast<int>(tm.size());
-        auto take = [&](const char* key, Tensor& dst) -> bool {
-            auto it = tm.find(key);
-            if (it == tm.end())
-                return false;
-            dst = it->second;
-            return true;
-        };
-        // Nemotron-3.5 layout: a miniature Nemotron, not Qwen - attention in layers.0, MoE in
-        // layers.1, mixer where Qwen says self_attn/mlp, per-expert 2-D weights instead of one
-        // packed 3-D stack. Detected on a name only this layout has, so the Qwen path below stays
-        // byte-for-byte unaffected.
-        if (tm.count(kMtpHeadKeyEhProj)) {
-            bool nok = true;
-            nok &= take("mtp.layers.0.enorm.weight", head.pre_fc_norm_embedding);
-            nok &= take("mtp.layers.0.hnorm.weight", head.pre_fc_norm_hidden);
-            nok &= take(kMtpHeadKeyEhProj, head.fc);
-            nok &= take("mtp.layers.0.norm.weight", head.input_layernorm);
-            nok &= take("mtp.layers.0.mixer.q_proj.weight", head.q_proj);
-            nok &= take("mtp.layers.0.mixer.k_proj.weight", head.k_proj);
-            nok &= take("mtp.layers.0.mixer.v_proj.weight", head.v_proj);
-            nok &= take("mtp.layers.0.mixer.o_proj.weight", head.o_proj);
-            // No q_norm / k_norm in this layout — left null on purpose.
-            nok &= take("mtp.layers.1.norm.weight", head.post_attention_layernorm);
-            nok &= take("mtp.layers.1.final_layernorm.weight", head.final_norm);
-            nok &= take("mtp.layers.1.mixer.gate.weight", head.router);
-            // Router bias is optional: absent means plain top-k.
-            take("mtp.layers.1.mixer.gate.e_score_correction_bias", head.router_score_bias);
-            nok &= take("mtp.layers.1.mixer.shared_experts.up_proj.weight", head.shared_expert_up_proj);
-            nok &= take("mtp.layers.1.mixer.shared_experts.down_proj.weight", head.shared_expert_down_proj);
-            // shared_expert_gate_proj / shared_expert_gate stay null: these
-            // experts are non-gated (squared ReLU), like the main Nemotron FFN.
-            head.experts_non_gated = true;
-            // No attn_output_gate (q_proj is n_heads*head_dim, not twice that)
-            // and NoPE attention, both as in the main Nemotron-H layers.
-            head.attn_output_gate = false;
-            head.attn_rope = false;
-
-            // Per-expert weights. Count is taken from the router's row count so
-            // a checkpoint with a different expert count still loads, and a gap
-            // in the numbering is a hard failure rather than a silent short read.
-            const int n_exp = head.router.data && head.router.ndim >= 1
-                                  ? static_cast<int>(head.router.shape[0])
-                                  : 0;
-            if (n_exp <= 0) {
-                nok = false;
-            } else {
-                head.experts_up.resize(static_cast<size_t>(n_exp));
-                head.experts_down.resize(static_cast<size_t>(n_exp));
-                for (int e = 0; e < n_exp && nok; ++e) {
-                    const std::string p = "mtp.layers.1.mixer.experts." + std::to_string(e) + ".";
-                    nok &= take((p + "up_proj.weight").c_str(), head.experts_up[static_cast<size_t>(e)]);
-                    nok &= take((p + "down_proj.weight").c_str(), head.experts_down[static_cast<size_t>(e)]);
-                }
-            }
-
-            head.loaded = nok;
-            if (nok) {
-                IMP_LOG_INFO(
-                    "MTP head loaded: %s (%d tensors, Nemotron layout, %d non-gated "
-                    "experts%s, BF16)",
-                    src.c_str(), head.info.n_tensors, n_exp,
-                    head.router_score_bias.data ? " + router bias" : "");
-            } else {
-                IMP_LOG_WARN(
-                    "MTP head at %s uses the Nemotron layout but is incomplete "
-                    "(router=%d experts=%d); spec-decode disabled",
-                    src.c_str(), head.router.data ? 1 : 0, n_exp);
-            }
-            return head;
-        }
-
-        bool ok = true;
-        ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
-        ok &= take("mtp.pre_fc_norm_hidden.weight", head.pre_fc_norm_hidden);
-        ok &= take(kMtpHeadKeyFc, head.fc);
-        ok &= take("mtp.layers.0.input_layernorm.weight", head.input_layernorm);
-        ok &= take("mtp.layers.0.post_attention_layernorm.weight", head.post_attention_layernorm);
-        ok &= take("mtp.layers.0.self_attn.q_proj.weight", head.q_proj);
-        ok &= take("mtp.layers.0.self_attn.k_proj.weight", head.k_proj);
-        ok &= take("mtp.layers.0.self_attn.v_proj.weight", head.v_proj);
-        ok &= take("mtp.layers.0.self_attn.o_proj.weight", head.o_proj);
-        ok &= take("mtp.layers.0.self_attn.q_norm.weight", head.q_norm);
-        ok &= take("mtp.layers.0.self_attn.k_norm.weight", head.k_norm);
-        ok &= take("mtp.norm.weight", head.final_norm);
-
-        const bool moe = take("mtp.layers.0.mlp.gate.weight", head.router) &&
-                         take("mtp.layers.0.mlp.experts.gate_up_proj", head.experts_gate_up_packed) &&
-                         take("mtp.layers.0.mlp.experts.down_proj", head.experts_down_packed) &&
-                         take("mtp.layers.0.mlp.shared_expert.gate_proj.weight",
-                              head.shared_expert_gate_proj) &&
-                         take("mtp.layers.0.mlp.shared_expert.up_proj.weight", head.shared_expert_up_proj) &&
-                         take("mtp.layers.0.mlp.shared_expert.down_proj.weight",
-                              head.shared_expert_down_proj) &&
-                         take("mtp.layers.0.mlp.shared_expert_gate.weight", head.shared_expert_gate);
-        const bool dense = !moe && take("mtp.layers.0.mlp.gate_proj.weight", head.shared_expert_gate_proj) &&
-                           take("mtp.layers.0.mlp.up_proj.weight", head.shared_expert_up_proj) &&
-                           take("mtp.layers.0.mlp.down_proj.weight", head.shared_expert_down_proj);
-        ok &= (moe || dense);
-
-        head.loaded = ok;
-        if (ok) {
-            IMP_LOG_INFO("MTP head loaded: %s (%d tensors, %s MLP, BF16)", src.c_str(), head.info.n_tensors,
-                         moe ? "MoE" : "dense");
-        } else {
-            IMP_LOG_WARN(
-                "MTP head detected at %s but some expected tensors were missing; "
-                "spec-decode disabled for this model",
-                src.c_str());
-        }
-        return head;
-    };
-
     // Set when the checkpoint carries an MTP head this load did not take
     // (#1537), so /health can report it instead of only the startup log.
     bool mtp_available_unloaded = false;
@@ -1035,7 +943,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                                          /*llm_compressor_format=*/false,
                                          /*keep_vision=*/false, mtp_counters);
             if (mtp_loaded) {
-                mtp_local = dispatch_mtp(mtp_tensor_map, mtp_path, static_cast<size_t>(sz));
+                mtp_local = dispatch_mtp_head(mtp_tensor_map, mtp_path, static_cast<size_t>(sz));
             } else {
                 IMP_LOG_WARN("MTP head file %s present but failed to load", mtp_path.c_str());
             }
@@ -1056,7 +964,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                 size_t bytes = 0;
                 for (const auto& kv : embedded_mtp_map)
                     bytes += kv.second.nbytes();
-                mtp_local = dispatch_mtp(embedded_mtp_map, path + " (embedded mtp.*)", bytes);
+                mtp_local = dispatch_mtp_head(embedded_mtp_map, path + " (embedded mtp.*)", bytes);
             }
         }
     } else if (probe_mtp_head(model_dir)) {

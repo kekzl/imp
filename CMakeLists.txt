@@ -178,6 +178,7 @@ set(IMP_MODEL_SOURCES
     src/model/gguf_parse.cpp
     src/model/gguf_tensor_assign.cpp
     src/model/safetensors_loader.cpp
+    src/model/mtp_head.cpp
     src/model/safetensors_writer.cpp
     src/model/safetensors_raw.cpp
     src/model/llm_compressor_loader.cpp
@@ -808,6 +809,8 @@ if(IMP_BUILD_TESTS)
         tests/test_image_placeholders.cpp
         tests/test_ngram_draft.cpp
     tests/test_mtp_presence.cpp
+        # dispatch_mtp_head layout detection on synthetic name lists (Qwen4Exp 3101 names).
+        tests/test_mtp_layout_dispatch.cpp
         tests/test_spec_gates.cpp
         # The per-request speculation contract (depth + decline reason), the
         # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All

@@ -2634,7 +2634,10 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // MTP head weights (DeepSeek-V3/Qwen3.6 sidecar, optional), Phase 2 of MTP wiring; the
     // consuming forward path is Phase 3+. Gates on VRAM here: if the upload fails, MTP is
     // disabled rather than failing the whole model load.
-    if (mtp_.has_value() && mtp_->loaded) {
+    if (mtp_.has_value() && mtp_->loaded && !mtp_forward_implemented(*mtp_)) {
+        // Host-mapped only: no draft forward for this layout, so no VRAM for it.
+        IMP_LOG_INFO("MTP head: not uploaded (%s)", kMtpForwardMissingLog);
+    } else if (mtp_.has_value() && mtp_->loaded) {
         // Refuse a head that does not fit BEFORE uploading any of it. See
         // mtp_upload_peak_bytes: a per-allocation refusal partway through
         // strands everything already uploaded for the life of the process.
@@ -2650,7 +2653,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             mtp_->loaded = false;
         }
     }
-    if (mtp_.has_value() && mtp_->loaded) {
+    if (mtp_.has_value() && mtp_->loaded && mtp_forward_implemented(*mtp_)) {
         size_t allocs_before = gpu_allocations_.size();
         size_t mtp_free_before = 0;
         vram_budget_mem_get_info(&mtp_free_before, nullptr);

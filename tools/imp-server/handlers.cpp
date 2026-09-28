@@ -699,9 +699,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     }
     // Resolve the pair against what the load produced, BEFORE the pending
     // config is stashed for Engine::init below.
-    imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k,
-                                  state.model->model->mtp_.has_value() &&
-                                      state.model->model->mtp_->loaded);
+    imp::tools::mtp_auto_finalize(
+        state.runtime_config, mtp_k, state.model->model->mtp_.has_value() && state.model->model->mtp_->loaded,
+        !state.model->model->mtp_.has_value() || imp::mtp_forward_implemented(*state.model->model->mtp_));
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
 
