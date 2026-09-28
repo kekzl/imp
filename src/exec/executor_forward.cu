@@ -729,7 +729,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 
-        if (lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
+        if (lm_head_fp8_(h_last, lg, stream)) {
+        } else if (lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             int hbs = lm_h->payload.mxfp4.hadamard_bs;
@@ -821,7 +822,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         Tensor h_final = view_tokens(hidden_, n);
         Tensor lg = view_tokens(logits_, n);
 
-        if (n == 1 && lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
+        if (lm_head_fp8_(h_final, lg, stream)) {
+        } else if (n == 1 && lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             int hbs = lm_h->payload.mxfp4.hadamard_bs;

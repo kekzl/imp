@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
+
 ### Changed
 - Hooks and make GPU targets: a linked worktree builds `imp:test-<dir>-<hash8>` (main checkout keeps `imp:test`), runners refuse an image whose `imp.tree` is not this tree, and `scripts/gpu_lock.sh` lets one session hold the card; other worktrees' hooks and targets refuse instead of starting.
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).

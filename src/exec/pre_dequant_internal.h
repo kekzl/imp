@@ -12,6 +12,7 @@
 #include "model/model.h"
 #include "model/model_config.h"
 #include "core/dispatch_policy.h"
+#include "core/config/lm_head_mode.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -21,7 +22,7 @@
 
 namespace imp::pre_dequant_internal {
 
-// #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off,
+// #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off/fp8,
 // legacy bool accepted). QUANTIZED (GGUF) heads: auto -> ON iff dense && d_model <= 4096
 // (net-positive only on small dense models; net-negative at larger sizes).
 // EXCEPTION: GDN/SSM hybrids are owned by gemm.nvfp4_lm_head_gdn (GOAL-listed, default
@@ -31,10 +32,10 @@ namespace imp::pre_dequant_internal {
 // cache wins on bytes; GOAL-listed).
 inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, bool is_dense, int d_model,
                                   bool is_gdn_hybrid = false) {
-    const std::string& v = rc.gemm.nvfp4_lm_head;
-    if (v == "on" || v == "true" || v == "1")
+    const LmHeadMode mode = lm_head_mode(rc.gemm.nvfp4_lm_head);
+    if (mode == LmHeadMode::Nvfp4)
         return true;
-    if (v == "off" || v == "false" || v == "0")
+    if (mode == LmHeadMode::Source || mode == LmHeadMode::Fp8)
         return false;
     if (!quantized_source)
         return true;

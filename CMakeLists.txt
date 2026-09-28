@@ -277,6 +277,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan_chunkpar_pass.cu
     src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
+    src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cu
     src/compute/mmq_q8_imma_q4k.cu
@@ -416,6 +417,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase0_nvfp4_loader.cu
     src/exec/pre_dequant_phase1_fp16_cache.cu
     src/exec/pre_dequant_phase2_fp8_cache.cu
+    src/exec/pre_dequant_fp8_lm_head.cu
     src/exec/pre_dequant_phase3_nvfp4_decode.cu
     src/exec/pre_dequant_phase3c_mxfp4.cu
     src/exec/pre_dequant_phase4_tensor_registry.cu
@@ -423,6 +425,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_lm_head_fp8.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
     src/quant/gpt_oss_mxfp4_convert.cu
@@ -710,6 +713,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_silent_drops.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
+        tests/test_fp8_lm_head.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
