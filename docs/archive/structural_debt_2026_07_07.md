@@ -51,7 +51,7 @@ Live env-var ground truth (for #893): the only `getenv("IMP_*")` read sites are
 - **Hardware-capability comment claims** in code added since mid-June — clean;
   no wgmma/tcgen05/FP8-prefill false claims (the FP8 *FMHA* mentions are
   accurate: that path exists on sm_120).
-- **Main docs** (`README.md`, `docs/architecture.md`, `docs/sm120.md`,
+- **Main docs** (`README.md`, [`docs/architecture.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/architecture.md), [`docs/sm120.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/sm120.md),
   `BENCHMARKING.md`) — no references to retired flags or env vars. The only
   doc drift is the niah README (#893).
 - **`/v1/messages` missing-`max_tokens` defaulting** (real Anthropic API

@@ -25,7 +25,7 @@ Five structural facts the design has to change:
 | F2 | `VRAMAllocator` is **a tracker, not an owner**: its own destructor comment says so, and it enforces its headroom in three separately-defeatable ways. | `vram_allocator.{h,cu}`, A1.2 |
 | F3 | Capacity is **discovered, not planned**: the KV pool is sized from live free VRAM *before* the weight caches exist, and the caches then re-derive their own budgets from live free VRAM again. | `vram_budget.cpp`, `split_pre_dequant_budget` docstring, A4.1 |
 | F4 | A fixed **~3.9 GiB is claimed on the first forward pass**, after the plan is final, attributed to nothing. Invariant to batch (1→16) and context (1024→4096). | measured, A1.5 |
-| F5 | `src/core/allocator.h` already contains an `ArenaAllocator` and a `PoolAllocator`. **Both are dead**: zero references anywhere in `src/ include/ tools/ tests/`. | grep, A1.6 |
+| F5 | [`src/core/allocator.h`](https://github.com/kekzl/imp/blob/7d8d1366ea06d2438ac651bb8f1b3e07f6ad5470/src/core/allocator.h) already contains an `ArenaAllocator` and a `PoolAllocator`. **Both are dead**: zero references anywhere in `src/ include/ tools/ tests/`. | grep, A1.6 |
 
 ---
 
@@ -629,7 +629,7 @@ template <size_t Stride> class BlockPool;  // T3 - free-list over one slab
 class ScratchStack;     // T4 - LIFO; scope guard restores the mark
 ```
 
-`ArenaAllocator` and `BlockPool` exist in `src/core/allocator.h` (A1.6, dead). They move to `src/memory/`, get the Backend as acquisition source and the handle types below.
+`ArenaAllocator` and `BlockPool` exist in [`src/core/allocator.h`](https://github.com/kekzl/imp/blob/7d8d1366ea06d2438ac651bb8f1b3e07f6ad5470/src/core/allocator.h) (A1.6, dead). They move to `src/memory/`, get the Backend as acquisition source and the handle types below.
 
 `ScratchStack` is new:
 

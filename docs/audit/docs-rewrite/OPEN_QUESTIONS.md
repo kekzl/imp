@@ -17,7 +17,7 @@ state either as fact until one is retired.
 
 - `CLAUDE.md:87` and `AGENTS.md:11`: "No `tcgen05` / TMEM / wgmma / **TMA-WS
   grouped GEMM**", listed among datacenter-Blackwell-only features.
-- `docs/sm120.md:31`: the `compute_120f` family-feature suffix "enables FP8 MMA
+- [`docs/sm120.md:31`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/sm120.md): the `compute_120f` family-feature suffix "enables FP8 MMA
   `kind::f8f6f4` and **TMA warp-specialized grouped GEMM tactics**".
 
 Not in dispute: imp emits plain TMA bulk-tensor loads in its own kernel.
