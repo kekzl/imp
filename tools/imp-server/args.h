@@ -60,6 +60,9 @@ struct ServerArgs : CommonArgs {
     bool allow_remote_images = false;
     std::string prefix_cache_path;  // --prefix-cache: path to persist prefix cache
     std::string log_requests_path;  // --log-requests: append JSONL of every chat/messages request
+    // --idle-unload-seconds: suspend after N s without an inference request, resume on the next
+    // one (0 = off, default). Same teardown as POST /admin/suspend (#2199).
+    int idle_unload_seconds = 0;
 };
 
 ServerArgs parse_server_args(int argc, char** argv);

@@ -311,6 +311,13 @@ ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id) {
     }
 }
 
+ImpError imp_lora_unload(ImpContext ctx, int32_t adapter_id) {
+    return imp::api_guard("imp_lora_unload", [&]() -> ImpError {
+        const bool ok = ctx && ctx->engine && ctx->engine->lora_unload(adapter_id);
+        return ok ? IMP_SUCCESS : IMP_ERROR_INVALID_ARG;
+    });
+}
+
 int imp_model_max_seq_len(ImpModel model) {
     if (!model || !model->model) {
         return 0;

@@ -218,9 +218,16 @@ struct ServerState {
     // OTLP span exporter (server.otlp_endpoint); one span set per request.
     Tracer tracer;
     ImpContext ctx = nullptr;
-    // LoRA adapters loaded at startup (--lora NAME=PATH): name -> C-API id. Per-request "lora" field
-    // selects; empty/absent = base. Swap recaptures decode graphs; adapter is engine-global (single-user).
-    std::map<std::string, int32_t> lora_ids;
+    // LoRA adapters (--lora NAME=PATH or POST /admin/lora/load): name -> entry. Per-request "lora"
+    // selects by name. `id` is the server's, stable across suspend/resume; `engine_id` is the
+    // context's (0 while suspended). Guarded by mtx.
+    struct LoraEntry {
+        int32_t id = 0;
+        int32_t engine_id = 0;
+        std::string path;
+    };
+    std::map<std::string, LoraEntry> loras;
+    int32_t next_lora_id = 1;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
@@ -269,6 +276,17 @@ struct ServerState {
     // suspended: true while /admin/suspend has torn down model+engine (VRAM freed, weights in host
     // snapshot); inference endpoints answer 503. Atomic so /health reads it lock-free; writes hold state.mtx.
     std::atomic<bool> suspended{false};
+    // --idle-unload-seconds (#2199): 0 = off. idle_suspended marks a suspend the idle timer made;
+    // only that kind resumes on the next request. last_activity_ms: steady_clock ms.
+    std::atomic<int> idle_unload_seconds{0};
+    std::atomic<bool> idle_suspended{false};
+    std::atomic<int64_t> last_activity_ms{0};
+    void touch_activity() {
+        last_activity_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count(),
+                               std::memory_order_relaxed);
+    }
     // True while load_model_into_state() runs (startup load, auto-load, swap):
     // the old engine is gone and the new one is not up. GET /ready reads it
     // without the mutex, which the swap holds for the whole load.
@@ -394,3 +412,19 @@ void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerSt
 // api-key auth applies.
 void handle_suspend(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_resume(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// Suspend/resume bodies without the HTTP wrapper. Caller holds state.mtx; returns the HTTP
+// status (200 = done) and fills `body` (response or error envelope).
+int suspend_locked(ServerState& state, json& body);
+int resume_locked(ServerState& state, json& body);
+// Resumes an idle (not an operator) suspend; caller holds state.mtx. False = 503 already in res.
+bool resume_if_idle_locked(ServerState& state, httplib::Response& res);
+
+// --idle-unload-seconds timer tick (#2199): suspends when no request arrived for N s and the
+// engine is empty. Never blocks on state.mtx. Returns true when it suspended.
+bool idle_unload_tick(ServerState& state);
+
+// POST /admin/lora/load {"path", "name"?} -> {"id", "name", "path"};
+// POST /admin/lora/unload {"id"} or {"name"}. Both drain in-flight work first (#2199).
+void handle_lora_load(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_lora_unload(const httplib::Request& req, httplib::Response& res, ServerState& state);
