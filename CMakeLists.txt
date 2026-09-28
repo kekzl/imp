@@ -1117,8 +1117,6 @@ if(IMP_BUILD_TESTS)
         # MTP must not change greedy output. The fidelity test above gates the
         # captured graph, not the speculation; this gates the accept path.
         tests/test_mtp_greedy_identity.cpp
-        # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/data fixture).
-        tests/test_mtp_qwen4exp_reference.cpp
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
@@ -1152,8 +1150,13 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
-    target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
-    target_compile_definitions(test-e2e PRIVATE IMP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/data fixture). Reads
+    # safetensors headers with nlohmann, which only the server build fetches.
+    if(TARGET nlohmann_json::nlohmann_json)
+        target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
+        target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
+        target_compile_definitions(test-e2e PRIVATE IMP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    endif()
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention
