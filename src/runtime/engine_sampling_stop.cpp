@@ -435,7 +435,7 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
             for (int m = std::min(bs - 1, total - 1 - base); m >= 1; --m) {
                 const size_t key = transcript_tail_key(hashes[b - 1], toks.subspan(static_cast<size_t>(base), m));
                 auto entry = recurrent_snapshots_->find(key);
-                if (!entry || entry->n_tokens != base + m)
+                if (!entry || entry->n_tokens != base + m || !kv_manager_->chain_intact(entry->kv_chain))
                     continue;
                 if (kv_manager_->hold_cached_block(key, req.id) < 0)
                     continue;  // the tail block was reclaimed; the state alone cannot restore
@@ -444,7 +444,9 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
             }
         }
         auto entry = recurrent_snapshots_->find(hashes[b - 1]);
-        if (entry && entry->n_tokens == b * bs) {
+        // The state pairs only with the KV its forward attended to; a chain rebound by another
+        // forward would mix two forwards (#2174): prefill from further back instead.
+        if (entry && entry->n_tokens == b * bs && kv_manager_->chain_intact(entry->kv_chain)) {
             req.recurrent_restore = std::move(entry);
             return b;
         }
@@ -452,6 +454,13 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     IMP_LOG_DEBUG("RecurrentSnapshot: no restorable prefix for req %d (%d/%d blocks cached, %d tokens)", req.id,
                   cached, total / bs, total);
     return 0;
+}
+
+// A stored snapshot for key at n tokens whose KV chain is still bound (#2174).
+static bool snapshot_still_paired(RecurrentSnapshotStore& store, const KVCacheManager& kv, size_t key,
+                                  int n_tokens) {
+    auto entry = store.find(key);
+    return entry && entry->n_tokens == n_tokens && kv.chain_intact(entry->kv_chain);
 }
 
 bool Engine::transcript_snapshot_active_() const {
@@ -485,16 +494,21 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
     if (n < bs)
         return;
     const size_t key = transcript_snapshot_key(forwarded, bs);
-    if (key == 0 || recurrent_snapshots_->contains(key))
+    if (key == 0 || snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, n))
         return;  // same transcript already stored (e.g. restored at exactly this position)
     auto it = recurrent_slot_of_.find(req.id);
     if (it == recurrent_slot_of_.end())
         return;
-    const auto t0 = std::chrono::steady_clock::now();
-    if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream, executor_->ple_state_data()))
+    // Bind this sequence's blocks, the tail block under the transcript key, to their hashes
+    // so the snapshot restores with the KV it was computed against (#2174).
+    auto chain = kv_manager_->adopt_chain(req.id, forwarded, n / bs, req.prefix_salt, n % bs != 0 ? key : 0);
+    if (chain.empty())
         return;
-    // The tail block must survive free_sequence: hash it now, under the same key.
-    kv_manager_->register_partial_block(req.id, forwarded, key);
+    recurrent_snapshots_->erase(key);
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream,
+                                    executor_->ple_state_data(), std::move(chain)))
+        return;
     // release_recurrent_slot_ runs right after and the next tenant's prefill writes the
     // slot on another stream: the copy must be complete before this returns.
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
@@ -512,14 +526,20 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
         key = KVCacheManager::compute_block_hash(
             std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
     }
-    if (recurrent_snapshots_->contains(key))
+    if (snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, snap_end))
         return;  // identical prefix already snapshotted (e.g. it was just restored)
     auto it = recurrent_slot_of_.find(req.id);
     if (it == recurrent_slot_of_.end())
         return;
+    // Bind this sequence's blocks to their hashes: the resend then reuses exactly the KV
+    // this state was computed against, not an earlier forward's copy (#2174).
+    auto chain = kv_manager_->adopt_chain(req.id, req.input_tokens, snap_end / bs, req.prefix_salt, 0);
+    if (chain.empty())
+        return;
+    recurrent_snapshots_->erase(key);
     const auto t0 = std::chrono::steady_clock::now();
     if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream,
-                                   executor_->ple_state_data())) {
+                                   executor_->ple_state_data(), std::move(chain))) {
         // The copy must complete before anything else mutates the slot: later
         // prefill chunks are ordered on this stream, but the first DECODE step
         // may run on a different stream (green contexts). One sync per prefill.

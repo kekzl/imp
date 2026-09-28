@@ -324,7 +324,7 @@ def main():
     # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
     # 1139 -> 1142: ExpertCacheReinitTest x3 (test-moe-gdn): reinit_or_disable against a real
     # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
-    PINNED = 1142
+    PINNED = 1143
 
     text = CMAKE.read_text()
     mods = module_sources(text)
