@@ -29,7 +29,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
 | `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1036) - cuBLAS in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
 | otherwise | `attention_prefill_dispatch` → the FMHA chain below |
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cu:65 if (has_sinks) {`: they route straight to the FP16 WMMA FMHA (the only sink-capable tier) and **throw** on decline rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cu:65 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 
