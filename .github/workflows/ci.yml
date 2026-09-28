@@ -144,8 +144,9 @@ jobs:
           fi
           if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             files="$(git diff --name-only "$base" HEAD)"
-            # code stays true unless EVERY changed file is markdown or under docs/.
-            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)'; then
+            # code stays true unless EVERY changed file is markdown, docs/, .claude/
+            # or a workflow other than ci.yml: none is a build input; 4/69 PR runs compiled 91-739 s for them.
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/|^\.claude/|^\.github/workflows/(codeql|auto-merge|roofline|release-docker)\.yml$)'; then
               code=false
             fi
             # `grep -c`, not `grep -q`, and no here-string. Two traps meet on
@@ -221,9 +222,21 @@ jobs:
       # handles object files separately. Restore-keys fall back to older
       # caches when src changes; ninja then incrementally rebuilds and
       # ccache provides per-TU hits even when the build cache misses.
+      # Saved on push to main only; PRs restore (main's entry via restore-keys).
+      # The post-step save cost ~27 s of the required Build check on every PR run.
       - name: Cache build directory
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.code == 'true' && github.event_name == 'push'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build
+          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
+          restore-keys: |
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
+      - name: Restore build directory (no save)
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'push'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build
           key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
@@ -385,8 +398,11 @@ jobs:
           # compile_commands.json comes from the cached build/. If the cache missed
           # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
           # a fully cold _deps fetch is the rare worst case.
-          if [ ! -f build/compile_commands.json ]; then
-            echo "::warning::no cached compile_commands.json — reconfiguring"
+          # PRs no longer save build/, so the restore is main's: a .cpp the PR adds is not in it.
+          missing=0
+          for f in "${changed[@]}"; do grep -qF "/$f\"" build/compile_commands.json 2>/dev/null || missing=$((missing+1)); done
+          if [ ! -f build/compile_commands.json ] || [ "$missing" -gt 0 ]; then
+            echo "::warning::compile_commands.json missing or lacks $missing changed file(s) - reconfiguring"
             cmake -B build -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON \
               -DIMP_BUILD_TOOLS=ON -DIMP_BUILD_BENCH=OFF -DIMP_DISABLE_120F_FALLBACK=ON \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
@@ -433,15 +449,16 @@ jobs:
   # need generated tokens are the ones NOT marked `nomodel`; they stay in the
   # local `make test-server` lane.
   #
-  # Runs in the same CUDA image the Build job compiled in: the binary is linked
-  # against that libstdc++, so a plain ubuntu-24.04 runner cannot load it.
+  # Ubuntu 26.04: the binary needs GLIBC_2.43, a plain ubuntu-24.04 runner cannot load it.
+  # CUDA base image (211 MB) + cuBLAS wheel, not devel (4353 MB, 62 s of a 92 s job):
+  # ldd imp-server needs only libcudart.so.13 (base) and libcublas{,Lt}.so.13 (wheel).
   real-api:
     name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
+      image: nvidia/cuda:13.4.1-base-ubuntu26.04@sha256:9b091bbc3e1481238346e90d93f63684af509c08ab32218f98793141fc540fd9
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -464,11 +481,18 @@ jobs:
           # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
           python3 -m venv /tmp/api-venv
           /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
+          # cuBLAS 13.7.0.27 = the devel image's libcublas; hash-pinned (H-6).
+          printf '%s\n' 'nvidia-cublas==13.7.0.27 --hash=sha256:481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4' > /tmp/cublas.txt
+          /tmp/api-venv/bin/pip install -q --no-deps -r /tmp/cublas.txt
+          libdir="$(ls -d /tmp/api-venv/lib/python3*/site-packages/nvidia/cu13/lib)"
+          echo "LD_LIBRARY_PATH=$libdir:/usr/local/cuda/lib64" >> "$GITHUB_ENV"
           echo "/tmp/api-venv/bin" >> "$GITHUB_PATH"
 
       - name: Run the API contract against imp-server
         run: |
           chmod +x build/imp-server
+          # A missing .so fails here, named, instead of as a pytest startup timeout.
+          if ldd build/imp-server | grep 'not found'; then exit 1; fi
           # conftest.py starts it model-less and shuts it down at session end.
           IMP_SERVER_BIN="$PWD/build/imp-server" \
             python3 -m pytest tests/api -m nomodel --tb=short -q
@@ -783,6 +807,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Without it `git cat-file` exits 128 (dubious ownership), the scope below
+      # falls open and run=true on every PR: 69/69 ran, 31 matched the list.
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Does this run need the sanitizer build?
         id: scope
         run: |
@@ -810,9 +839,19 @@ jobs:
       # the last 8 PR runs, which WAS the wall clock of the whole workflow (the
       # `Build` job's median is 6 min). It is the same store shape the
       # `PTX fallback` lane already uses.
+      # Saved on push to main only: each PR save was 490-701 MB with the repo cache
+      # at 10.50 of 10 GB, evicting main's entries. PRs restore main's store.
       - name: Restore ccache
-        if: steps.scope.outputs.run == 'true'
+        if: steps.scope.outputs.run == 'true' && github.event_name == 'push'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache-asan
+          key: ${{ runner.os }}-cuda13.4-ccache-asan-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.4-ccache-asan-
+      - name: Restore ccache (no save)
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'push'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache-asan
           key: ${{ runner.os }}-cuda13.4-ccache-asan-${{ github.sha }}
