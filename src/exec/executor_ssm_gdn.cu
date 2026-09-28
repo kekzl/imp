@@ -412,8 +412,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                  static_cast<size_t>(rb) * conv_channels * es_c,
                              compute_dtype_, 2, seq_shape, true);
                 ssm_conv1d_prefill_f32_silu(cst, xBC_s, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                                            conv_f32 + static_cast<size_t>(rb) * conv_channels,
-                                            conv_kernel, stream, /*d_chunk_len=*/nullptr,
+                                            conv_f32 + static_cast<size_t>(rb) * conv_channels, conv_kernel,
+                                            stream, /*d_real_n=*/nullptr,
                                             /*conv_snap=*/nullptr, /*d_snap_n=*/nullptr,
                                             /*conv_prev=*/nullptr);
             }
@@ -554,7 +554,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
         // Gather V slice from strided conv_f32 into contiguous [n, n_heads, head_dim_ssm].
         IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(v_scratch_tiled, static_cast<size_t>(inner_v) * sizeof(float),
-                                             conv_f32 + 2 * BC_size_vh,
+                                             conv_f32 + static_cast<ptrdiff_t>(2) * BC_size_vh,
                                              static_cast<size_t>(conv_channels) * sizeof(float),
                                              static_cast<size_t>(inner_v) * sizeof(float), n,
                                              cudaMemcpyDeviceToDevice, stream));
@@ -562,7 +562,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         vhead_tiled_to_grouped_f32(v_scratch_tiled, v_scratch_grouped, n, n_heads, head_dim_ssm, n_groups,
                                    stream);
         // Scatter reordered V back into conv_f32 V slice.
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(conv_f32 + 2 * BC_size_vh,
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(conv_f32 + static_cast<ptrdiff_t>(2) * BC_size_vh,
                                              static_cast<size_t>(conv_channels) * sizeof(float),
                                              v_scratch_grouped, static_cast<size_t>(inner_v) * sizeof(float),
                                              static_cast<size_t>(inner_v) * sizeof(float), n,

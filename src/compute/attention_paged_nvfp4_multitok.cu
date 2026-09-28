@@ -25,6 +25,7 @@ using nvfp4_mt::ue4m3_scale_to_float;
 
 // Walk the tokens [first_tok, n_tok) of one block for this warp, TOK at a time.
 // Updates the unnormalised (m_w, l_w, o_reg).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK>
 __device__ __forceinline__ void nvfp4_block_multitok(
     const uint8_t* __restrict__ K_block, const uint8_t* __restrict__ V_block,
@@ -105,7 +106,7 @@ __device__ __forceinline__ void nvfp4_block_multitok(
         }
     }
 }
-
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int HEAD_DIM>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_multitok_kernel(
@@ -281,7 +282,8 @@ bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* 
                                                   sliding_window, softcap, attn_sinks,
                                                   process_diag_paged_nvfp4_hpc(), stream))
         return true;
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * head_dim * sizeof(float);
+    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
+                              static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
     dim3 block(BLOCK_THREADS);
     if (num_splits > 1) {
         dim3 grid(batch_size, n_heads, num_splits);

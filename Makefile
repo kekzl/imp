@@ -680,11 +680,12 @@ format:
 format-check:
 	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
 
-# clang-tidy over host C++ TUs (advisory — findings surface, do not fail). Runs in
-# the CUDA builder image so the CUDA headers our .cpp files include are present;
-# clang-tidy is apt-installed on the fly. .cu files are out of scope (need full
-# nvcc flags). Configures first so build/compile_commands.json exists.
+# clang-tidy over host C++ TUs and the host side of src/ .cu TUs (advisory: findings
+# surface, do not fail). Runs in the CUDA builder image so the CUDA headers are present;
+# clang-tidy is apt-installed on the fly. .cu entries are rewritten to clang host-only
+# commands by tools/tidy_cu_db.py (#2210). Configures first so build/compile_commands.json exists.
 CLANG_TIDY_FILES = $$(find src tools -name '*.cpp')
+CLANG_TIDY_CU_FILES = $$(grep -o "\"file\": \"[^\"]*/src/[^\"]*\"" build/tidy-cu/compile_commands.json | cut -d\" -f4)
 tidy:
 	@docker run --rm -v $(PWD):/work -w /work imp:builder bash -c '\
 	  apt-get update -qq && apt-get install -y -qq clang-tidy >/dev/null 2>&1; \
@@ -693,4 +694,6 @@ tidy:
 	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
 	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
 	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
-	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true'
+	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true; \
+	  python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu && \
+	  clang-tidy -p build/tidy-cu --warnings-as-errors= $(CLANG_TIDY_CU_FILES) || true'

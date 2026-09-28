@@ -501,6 +501,8 @@ void mmq_q8_imma_release_all() {
     // guards re-armed here). Q8_0 weight caches are direct allocations: model-resident
     // (T1, A7 step 6), keyed by source weight pointer, outlive nothing else here.
     g_imma_splitk = SplitKScratch{};
+    // frees every entry, order-independent (#2210)
+    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (auto& [_, w] : g_imma_weights) {
         cudaFree(w.qs);
         cudaFree(w.sc);

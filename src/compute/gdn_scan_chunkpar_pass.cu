@@ -66,6 +66,7 @@ __device__ __forceinline__ void gemm_rows_x_h(const float* __restrict__ s_a, con
 
 constexpr int kPassThreads = 256;  // K2 CTA: 8 warps (see the kernel comment)
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, typename StateT>
 __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     float* __restrict__ ws_base, StateT* __restrict__ h_state, half* __restrict__ y_out,
@@ -285,6 +286,7 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
             H32_h[gi] = v;
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

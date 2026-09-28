@@ -77,7 +77,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
             }
         }
         return gpt_oss_convert_experts_to_nvfp4(blocks.data(), scales.data(), ne, N, K,
-                                                /*offset=*/0, /*stride=*/1, r, extra_scale, &ts);
+                                                /*row_offset=*/0, /*row_stride=*/1, r, extra_scale, &ts);
     };
 
     for (int i = 0; i < cfg.n_layers; ++i) {
@@ -103,17 +103,17 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
             const int64_t gu_K = gu_b.shape[2] * 32;  // K from block count
             const int64_t dn_rows = dn_b.shape[1];   // d_model
             const int64_t dn_K = dn_b.shape[2] * 32;  // d_ff
-            bool ok = gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
-                                                       static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
-                                                       gu_K, /*offset=*/0, /*stride=*/2, g, 1.0f, &g_ts) &&
-                      gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
-                                                       static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
-                                                       gu_K, /*offset=*/1, /*stride=*/2, u, 1.0f, &u_ts) &&
+            const auto* gu_bp = static_cast<const uint8_t*>(gu_b.data);
+            const auto* gu_sp = static_cast<const uint8_t*>(gu_s.data);
+            bool ok = gpt_oss_convert_experts_to_nvfp4(gu_bp, gu_sp, ne, gu_rows, gu_K, /*row_offset=*/0,
+                                                       /*row_stride=*/2, g, 1.0f, &g_ts) &&
+                      gpt_oss_convert_experts_to_nvfp4(gu_bp, gu_sp, ne, gu_rows, gu_K, /*row_offset=*/1,
+                                                       /*row_stride=*/2, u, 1.0f, &u_ts) &&
                       // down: extra 2^-4 — residual-stream rescale (see arch
                       // registry comment in model.cpp; bias scaled in the loader).
                       gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(dn_b.data),
                                                        static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
-                                                       dn_K, /*offset=*/0, /*stride=*/1, d,
+                                                       dn_K, /*row_offset=*/0, /*row_stride=*/1, d,
                                                        /*extra_scale=*/0.0625f, &d_ts);
             if (!ok) {
                 IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);

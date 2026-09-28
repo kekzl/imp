@@ -116,6 +116,7 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
 // replacing 3 separate kernels in the post-norm FP32 accumulator path
 // (saves 2 launches + 2 DRAM round-trips). Same register-cached, warp-level reduction as
 // rmsnorm_quantize_q8_1.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     const half* __restrict__ input,   // [n, d_model] pre-norm data (e.g. GEMV output)
     const half* __restrict__ norm_w,  // [d_model] RMSNorm weights
@@ -251,7 +252,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         out_row4[i] = out4;
     }
 }
-
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
 __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in,

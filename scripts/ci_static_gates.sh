@@ -38,6 +38,8 @@ if want filesize; then
     run "that gate still merges #include'd .cu" python3 tools/check_filesize.py --selftest
     run "function bodies over 500 code LOC"     python3 tools/check_function_size.py
     run "that gate still parses what it must"   python3 tools/check_function_size.py --selftest
+    run "CCN > 25 ratchet (#2210)"              python3 tools/check_complexity.py
+    run "that gate still counts what it must"   python3 tools/check_complexity.py --selftest
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py

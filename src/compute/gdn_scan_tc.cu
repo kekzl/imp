@@ -16,6 +16,7 @@ namespace wmma = nvcuda::wmma;
 // rest ~1 KiB. Fits the 96 KiB opt-in.
 // WMMA operands: KK = K~(row_major) x K~(col_major); QK = Q~(row_major) x K~(col_major);
 // KH = K~(row_major) x H_0(row_major); QH = Q~(row_major) x H_0(row_major).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -275,6 +276,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             H_col[s * HD] = H_reg[s];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 2c: fully-tuned WY-rep + TC-MMA including the H_L update. Builds on Phase 2b:
 // CHUNK=32 (half the per-chunk setup/sync/decay-precompute overhead); drops the
@@ -288,6 +290,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
 // Fits the 96 KiB opt-in.
 // Numerics: FP16 storage of K~/Q~/H_0/u_scaled drops ~3-4 mantissa bits; WMMA FP32
 // accumulate preserves per-matmul precision. Expected output ~= Phase 2b (max_diff_y ~1e-5).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -593,6 +596,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             H_col[s * HD] = H_reg[s];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers
@@ -610,9 +614,10 @@ void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, cons
         // 2*CHUNK*SS*2 = 8 KiB; s_h0_fp16 = SS*HD*2 = 32 KiB; s_kh+s_qh = 2*CHUNK*HD*4 = 16 KiB;
         // s_kk+s_qk = 2*CHUNK^2*4 = 2 KiB; s_u_fp32 = CHUNK*HD*4 = 8 KiB; rest ~1 KiB.
         // Total ~67 KiB, fits the 96 KiB opt-in.
-        const size_t smem =
-            (2 * CHUNK * SS) * sizeof(half) + (SS * HD) * sizeof(half) +
-            (2 * CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) * sizeof(float);
+        const size_t smem = (static_cast<int64_t>(2 * CHUNK) * SS) * sizeof(half) +
+                            (static_cast<int64_t>(SS) * HD) * sizeof(half) +
+                            (2 * CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) *
+                                sizeof(float);
         static bool attr_set = false;
         if (!attr_set) {
             cudaFuncSetAttribute(
@@ -638,7 +643,8 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
     if (head_dim_ssm == 128 && state_size == 128 && n_tokens >= 1) {
         constexpr int HD = 128, SS = 128, CHUNK = 32;
         // Smem (see kernel header for full breakdown): ~89 KiB total.
-        const size_t smem = (2 * CHUNK * SS) * sizeof(half) + (SS * HD) * sizeof(half) +
+        const size_t smem = (static_cast<int64_t>(2 * CHUNK) * SS) * sizeof(half) +
+                            (static_cast<int64_t>(SS) * HD) * sizeof(half) +
                             (CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) *
                                 sizeof(float);
         static bool attr_set = false;

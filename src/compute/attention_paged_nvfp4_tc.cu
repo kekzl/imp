@@ -42,6 +42,7 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 // No __launch_bounds__: with dots/weights moved to shared mem (warp-shfl reduction), the
 // register spill is gone (cuobjdump STACK:0 across HD in {64,128,256,512}); the compiler picks
 // the best occupancy/register tradeoff automatically.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_nvfp4_tc_kernel(
     const half* __restrict__ Q,
@@ -551,11 +552,13 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(crosswarp_smem), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_nvfp4_tc_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -697,6 +700,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 3b residual + reduce kernel, replacing paged_attention_reduce_kernel for the residual
 // path. Reads per-split paged partials from partial_out, processes the FP16 residual ring
@@ -713,6 +717,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
 //     / l_global
 // One block per (batch,head); NUM_WARPS warps process residual tokens round-robin, thread 0
 // reduces paged partials.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_residual_reduce_kernel(
     const float* __restrict__ partial_out,           // [b, h, num_paged_splits, 2+HD]
@@ -955,6 +960,7 @@ __global__ void paged_attention_residual_reduce_kernel(
         O[out_idx] = __float2half(final_o);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // A pipelined split-K variant (double-buffered K+V via smem) regressed this kernel: once the
 // inner loop is HW-FP4-cvt-bound, there is no longer enough work to hide K[t+1]'s prefetch
@@ -1003,11 +1009,12 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     // BitDecoding TC variant adds NUM_WARPS * 2048 bytes of WMMA scratch
     // (16x16 sQ halves + 16x16 sK halves + 16x16 sFV floats per warp).
     // Total: 8 warps × 2048 = 16 KiB. Comes BEFORE the crosswarp_reduce smem.
-    constexpr size_t TC_SCRATCH_PER_WARP =
-        (16 * 16) * sizeof(__half) + (16 * 16) * sizeof(__half) + (16 * 16) * sizeof(float);
-    size_t smem_bytes = NUM_WARPS * TC_SCRATCH_PER_WARP +
-                        NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                        NUM_WARPS * head_dim * sizeof(float);
+    constexpr size_t TC_SCRATCH_PER_WARP = (static_cast<int64_t>(16) * 16) * sizeof(__half) +
+                                           (static_cast<int64_t>(16) * 16) * sizeof(__half) +
+                                           (static_cast<int64_t>(16) * 16) * sizeof(float);
+    size_t smem_bytes = NUM_WARPS * TC_SCRATCH_PER_WARP + NUM_WARPS * sizeof(float) +
+                        NUM_WARPS * sizeof(float) +
+                        static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
 
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
@@ -1061,9 +1068,8 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         if (use_residual_reduce) {
             // Combined paged-reduce + residual-merge. Smem layout:
             //   warp_max[NUM_WARPS] + warp_l[NUM_WARPS] + warp_o[NUM_WARPS * HEAD_DIM] floats.
-            const size_t reduce_smem =
-                NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                NUM_WARPS * head_dim * sizeof(float);
+            const size_t reduce_smem = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
+                                       static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
             dim3 grid_red(batch_size, n_heads);
             dim3 block_red(BLOCK_THREADS);
 

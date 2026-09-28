@@ -25,7 +25,7 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
 
     char* ptr = static_cast<char*>(ws_.shared());
 
-    q_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
+    q_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, static_cast<int64_t>(nh) * hd,
                                align256(static_cast<size_t>(max_tokens) * nh * hd * es));
     // K and V are contiguous (no alignment gap) for strided batched GEMM: v_.data == k_.data
     // + kv_raw exactly, so output_stride = kv_raw / es.
@@ -39,7 +39,7 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
         v_ = Tensor(ptr + kv_raw, compute_dtype_, 2, kv_shape, true);
         ptr += align256(2 * kv_raw);
     }
-    attn_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
+    attn_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, static_cast<int64_t>(nh) * hd,
                                       align256(static_cast<size_t>(max_tokens) * nh * hd * es));
     proj_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
                                       align256(static_cast<size_t>(max_tokens) * d * es));

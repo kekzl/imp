@@ -51,6 +51,7 @@ __device__ __forceinline__ float norm_rope_128(float* y, float* red, const half*
 }
 
 // grid (rows, n_heads), block 128.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* __restrict__ positions,
                                         const half* __restrict__ w_q, half* __restrict__ q_out,
                                         half* __restrict__ raw_keys, QsaGeom g) {
@@ -66,6 +67,7 @@ __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* 
     const float out = norm_rope_128(y, red, w_q, pos, g);
     q_out[(static_cast<size_t>(row) * g.n_heads + head) * D + d] = __float2half(out);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // grid nb, block 128. positions != nullptr: decode, the last complete block before
 // positions[0] (one launch, blockIdx.x == 0).
@@ -94,6 +96,7 @@ __global__ void qsa_pool_blocks_kernel(const half* __restrict__ raw_keys, const 
 
 // grid (x, rows), block kScoreWarps * 32: one warp per block key (256 B, coalesced),
 // grid-stride over the row's complete blocks. score = sum_h relu(q_h . blk) / sqrt(D).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half* __restrict__ q,
                                                                      const int* __restrict__ positions,
                                                                      const half* __restrict__ block_keys,
@@ -135,6 +138,7 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Exclusive rank of `pred` over the CTA (kSelThreads = 32 warps) and the CTA total, via
 // warp ballots. `wsum` holds 33 ints; a caller reuses it only after a barrier.
