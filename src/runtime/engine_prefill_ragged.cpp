@@ -37,6 +37,9 @@ bool Engine::prefill_ragged_enabled_() {
     // The CLI's engine-global image has no per-request owner — serial only.
     if (vision_.has_input())
         return false;
+    // PLE: the n-gram context and conv rows are staged for one sequence per prefill.
+    if (model_->ngram_table() != nullptr)
+        return false;
     if (prefill_ragged_model_ok_ < 0) {
         bool ok = !model_->config_.is_mla();
         bool has_gdn = false;

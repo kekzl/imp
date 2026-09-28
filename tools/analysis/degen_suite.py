@@ -17,6 +17,8 @@ Categories (select with --only / --skip):
   kv-growth        same greedy answer before and after the KV pool grows
                    (skips unless kv_cache.growable left room to grow)
   multi-turn       state carry across turns, turn-2 garble
+  ple-isolation    concurrent requests: seq 0 identical across different neighbours
+                   (per-sequence state under batched decode; runtime.deterministic=true)
   stream           stream/non-stream consistency, SSE termination
 
 Stdlib-only (urllib) — runs on the clean host, no venv, no container.
@@ -684,6 +686,52 @@ class Suite:
             return
         self.record("multi-turn", name, same, detail)
 
+    # -- per-sequence state under batched decode -----------------------------
+    def cat_ple_isolation(self):
+        """Sequence 0's greedy answer must not depend on what its batch neighbours say.
+
+        Per-sequence recurrent/PLE state (Qwen3.8-Flash-Next: n-gram context + conv rows
+        per slot) leaks when a batched decode step reads another row's state. Two rounds,
+        same target prompt, same number of neighbours, different neighbour contents: the
+        target is byte-identical. Needs runtime.deterministic=true on the server;
+        batch-N == batch-1 is NOT asserted (docs/determinism.md, NVFP4 W4A4 at M>=2).
+        """
+        import concurrent.futures as cf
+        name = "seq 0 identical across different batch neighbours"
+        if self.skip_det:
+            self.skip("ple-isolation", name, "model flagged non-deterministic at temp=0")
+            return
+        n = 400 if self.is_reasoning else 96
+        kw = {"chat_template_kwargs": {"enable_thinking": False}}
+        target = [{"role": "user", "content":
+                   "Write the numbers from 1 to 40 as English words, separated by commas."}]
+        rounds = (["apple", "river", "stone"], ["cloud", "tiger", "paper"])
+
+        def timed(msgs, max_tokens):
+            t0 = time.time()
+            r = self.srv.chat(msgs, max_tokens=max_tokens, **kw)
+            return r, t0, time.time()
+
+        answers, overlaps = [], []
+        for words in rounds:
+            with cf.ThreadPoolExecutor(max_workers=1 + len(words)) as ex:
+                fut_t = ex.submit(timed, target, n)
+                futs_n = [ex.submit(timed, [{"role": "user", "content":
+                                             f"Repeat the word {w} two hundred times, separated by spaces."}],
+                                    n * 3) for w in words]
+                r, t0, t1 = fut_t.result()
+                spans = [f.result()[1:] for f in futs_n]
+            answers.append(r["content"])
+            # The neighbours must have been in flight while the target decoded, or the
+            # round proved nothing about batched decode.
+            overlaps.append(sum(1 for (a, b) in spans if a < t1 and b > t0))
+        if min(overlaps) == 0:
+            self.skip("ple-isolation", name, f"no neighbour overlapped the target (overlaps={overlaps})")
+            return
+        self.record("ple-isolation", name,
+                    answers[0] == answers[1] and bool(answers[0].strip()),
+                    f"overlaps={overlaps} a={answers[0][:60]!r} b={answers[1][:60]!r}")
+
     # -- stream protocol -----------------------------------------------------
     def cat_stream(self):
         q = [{"role": "user", "content": "List the numbers from 1 to 10, comma separated."}]
@@ -998,6 +1046,7 @@ CATEGORIES = {
     "long-context": Suite.cat_long_context,
     "kv-growth": Suite.cat_kv_growth,
     "multi-turn": Suite.cat_multi_turn,
+    "ple-isolation": Suite.cat_ple_isolation,
     "stream": Suite.cat_stream,
     "constrained": Suite.cat_constrained,
     "anthropic-thinking": Suite.cat_anthropic_thinking,

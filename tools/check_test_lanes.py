@@ -326,7 +326,11 @@ def main():
     # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
     # 1142 -> 1143: FP8GemmTest.RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant (test-compute):
     # FP8 LM-head GEMV (gemm.nvfp4_lm_head=fp8) vs fp64, bits equal for n_rows 1/3/11 (cudaMalloc).
-    PINNED = 1143
+    # 1143 -> 1146: PLEBatched x3 (test-moe-gdn): per-sequence PLE conv rows, batched decode vs
+    # per-sequence bitwise, neighbour isolation, chunk vs token steps (kernels need a card).
+    # 1146 -> 1147: LayerNormTest.RMSNormNvfp4RefusesNullWeight (test-compute): the fused norm +
+    # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
+    PINNED = 1147
 
     text = CMAKE.read_text()
     mods = module_sources(text)

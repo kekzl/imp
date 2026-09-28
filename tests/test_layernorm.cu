@@ -403,6 +403,31 @@ TEST(LayerNormTest, RMSNormRowBlockDecodeShapes) {
 // Fused rmsnorm+NVFP4 quantize producer must match rmsnorm() FP16 bytes and
 // quantize_fp16_to_nvfp4_into() packed nibbles and FP8 micro-scales bit-for-bit.
 // Covers near-zero rows (low scale clamp) and +-3000-range rows (micro_scale > 448 clamp).
+// Qwen4Exp has no final norm (null weight). The fused kernel dereferenced it at rows >= 2
+// (batched-decode LM head, illegal access); it must refuse so rmsnorm() applies the identity.
+TEST(LayerNormTest, RMSNormNvfp4RefusesNullWeight) {
+    const int rows = 2, cols = 2560;
+    std::vector<float> h_x((size_t)rows * cols, 0.25f);
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
+    Tensor no_weight;  // data == nullptr
+    uint8_t *packed = nullptr, *scales = nullptr;
+    ASSERT_EQ(cudaMalloc(&packed, (size_t)rows * cols / 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&scales, (size_t)rows * cols / 16), cudaSuccess);
+    EXPECT_FALSE(rmsnorm_nvfp4(d_x, no_weight, d_out, packed, scales, 1e-6f, nullptr));
+    // The fallback the LM head takes: identity copy, no fault.
+    rmsnorm(d_x, no_weight, d_out, 1e-6f, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<uint16_t> a((size_t)rows * cols), b((size_t)rows * cols);
+    cudaMemcpy(a.data(), d_x.data, a.size() * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(b.data(), d_out.data, b.size() * 2, cudaMemcpyDeviceToHost);
+    EXPECT_EQ(a, b);
+    cudaFree(packed);
+    cudaFree(scales);
+    free_gpu_tensor(d_x);
+    free_gpu_tensor(d_out);
+}
+
 TEST(LayerNormTest, RMSNormNvfp4ProducerBitIdentity) {
     constexpr float eps = 1e-5f;
     const int shapes[][2] = {{2, 2048}, {32, 5120}, {64, 8192}};

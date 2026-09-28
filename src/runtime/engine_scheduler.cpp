@@ -1509,8 +1509,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                                   needs_constrained);
     // Host work the forward must not contain (PLE rows, device expert cache take-over):
     // done here, so the graph pool can capture and replay the forward.
-    executor_->prepare_decode_step_host(batch.token_ids.data(), batch.positions.data(),
-                                        batch.total_tokens, dec_stream);
+    state.ple_host_ready = engine_internal::prepare_decode_step_host(*executor_, *model_, valid_decode, batch,
+                                                                     dec_stream);
 
     // Per-request sampling lambda
 

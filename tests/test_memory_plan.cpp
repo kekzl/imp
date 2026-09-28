@@ -428,6 +428,21 @@ TEST(SsmStatePool, PinsTheQwen38GeometryTheAllocatorTakes) {
     EXPECT_EQ(ssm_h_bytes_per_layer(qwen38_gdn(QType::F32)), 2 * ssm_h_bytes_per_layer(g));
 }
 
+TEST(SsmStatePool, ExtraTailIsNeutralAtZeroAndAlignedOtherwise) {
+    // Non-PLE models: extra_bytes_per_slot = 0 leaves the slot at the pre-tail 48 x 1736704 B.
+    auto g = qwen38_gdn(QType::F16);
+    ASSERT_EQ(g.extra_bytes_per_slot, 0u);
+    EXPECT_EQ(ssm_bytes_per_slot(g), 83361792ull);
+    EXPECT_EQ(ssm_pool_bytes(g, 64, 0), 5088ull * kMiB);
+    // Qwen4Exp PLE conv rows: 9 rows x 4*2560 ch x FP16 = 184320 B (256-aligned), per slot.
+    g.extra_bytes_per_slot = 9ull * 4 * 2560 * 2;
+    EXPECT_EQ(ssm_bytes_per_slot(g), 83361792ull + 184320ull);
+    EXPECT_EQ(ssm_pool_bytes(g, 32, 0), 32ull * (83361792ull + 184320ull));
+    // An unaligned tail is charged at the next 256 B.
+    g.extra_bytes_per_slot = 1;
+    EXPECT_EQ(ssm_bytes_per_slot(g), 83361792ull + 256ull);
+}
+
 TEST(SsmStatePool, AFailedPoolIsFatalOnlyForModelsThatHaveRecurrentLayers) {
     // "Failed to init SSM state, continuing without it" served a hybrid whose GDN layers then
     // read a null slab: fluent garbage every request, one WARN at startup. Decision is pure and

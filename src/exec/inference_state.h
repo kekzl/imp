@@ -54,6 +54,16 @@ struct InferenceState {
     // Rows past ssm_n_seq*ssm_seq_tokens are capture-bucket pads. d_chunk_len carries the
     // per-GROUP row count (uniform), not the whole chunk's. 0 = not a grouped chunk.
     int ssm_seq_tokens = 0;
+    // Qwen4Exp PLE, single-sequence forward: HOST token history (prompt, then output) the
+    // n-gram context of positions[0] is read from (tokens at pos0-2, pos0-1). Conv rows: the
+    // SSM slab tail of ssm_seq_id / ssm_seq_slots.
+    const int32_t* ple_hist_in = nullptr;
+    int ple_hist_in_n = 0;
+    const int32_t* ple_hist_out = nullptr;
+    int ple_hist_out_n = 0;
+    // prepare_decode_step_host() staged this step's PLE rows. Per state, not per executor:
+    // a graph replay skips host code, so an executor flag outlived the step (#2150).
+    bool ple_host_ready = false;
     bool ssm_grouped_chunk() const {
         return is_prefill && ssm_seq_slots != nullptr && ssm_n_seq > 1 && ssm_seq_tokens > 0;
     }
