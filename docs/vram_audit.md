@@ -157,7 +157,7 @@ reservations + WSL2/WDDM driver overhead** (baseline checkpoint 00 alone is
 
 The 1728 MiB `nvfp4_moe_ms_ref` is **not a duplicate** — #679 already frees the
 scattered per-expert source scales after the contiguous copy
-(`pre_dequant_phase3_nvfp4_decode.cu:512`, confirmed in the run log: "freed
+(`pre_dequant_phase3_moe.cu:523 cudaFreeAsync(old_sc, stream)`, confirmed in the run log: "freed
 1728.00 MiB duplicated per-expert micro-scales"). Making the SafeTensors loader
 emit a contiguous scale slab would set `scales_contig=true` and skip the *copy*,
 but the scales must be resident for NVFP4 decode either way — it only removes a
@@ -224,7 +224,7 @@ resident, free headroom 4318 → 6198 MiB.
 
 Hypothesis: lower `attention.attn_scores_mib` (default 384 → the 380 MiB cuBLAS
 materialized-scores buffer) so the FA2 path covers prefill, freeing 380 MiB. The
-stale note in `executor_workspace_buffers.cu:268` said cuBLAS was only "~30%
+stale note in `executor_workspace_buffers.cu` (line 268 when written, removed in 99c00f80) said cuBLAS was only "~30%
 faster than FMHA at n==cap"; FA2 gained ~25% since (#653/#673/#674), so parity
 seemed plausible. Tested via `--set attention.attn_scores_mib=1` (threshold=129,
 buffer → 1 MiB, FA2 handles all prefill); no rebuild (runtime knob).

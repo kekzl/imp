@@ -25,7 +25,7 @@ imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode
 |---|---|
 | NVFP4 block-scaled `mma.sync`, `kind::mxf4nvf4` | FlashAttention-2-style block scaling, not a B200 kernel design |
 | FP8 MMA `kind::f8f6f4` | `f` family-feature suffix; used for attention scores |
-| TMA bulk-tensor loads, including a CUTLASS warp-specialized grouped-GEMM mainloop | `src/compute/gemm_grouped_nvfp4_smallM.cu:65` wraps `cp.async.bulk.tensor.2d...`, emits `UTMALDG`; the shipped grouped-NVFP4 cubin was verified (`cuobjdump`, #1543) to contain a TMA-WS mainloop on native `sm_120a` SASS - the `compute_120f` PTX fallback loses it |
+| TMA bulk-tensor loads, including a CUTLASS warp-specialized grouped-GEMM mainloop | `src/compute/gemm_grouped_nvfp4_smallM.cu:65 Emits UTMALDG` wraps `cp.async.bulk.tensor.2d...`, emits `UTMALDG`; the shipped grouped-NVFP4 cubin was verified (`cuobjdump`, #1543) to contain a TMA-WS mainloop on native `sm_120a` SASS - the `compute_120f` PTX fallback loses it |
 
 Kernel designs published for B200 or Hopper do not port as-is; check which architecture a reported FP4 win was measured on. Deeper hardware notes, MMA shapes, measured ceilings: [`SM120.md`](SM120.md).
 
