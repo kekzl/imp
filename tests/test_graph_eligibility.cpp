@@ -25,6 +25,7 @@ const GraphDemotionReason kAll[] = {
     GraphDemotionReason::StreamingKvConfigured,
     GraphDemotionReason::ExpertsOnHost,
     GraphDemotionReason::PinnedSampleBufUnavailable,
+    GraphDemotionReason::MoeDecodeCacheIncomplete,
     GraphDemotionReason::StreamingKvKvPressure,
 };
 

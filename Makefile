@@ -22,7 +22,13 @@ GPU_DOCKER = $(GPU_LOCKED) docker run --rm --gpus all
 # symlinks into $(HOME)/models, which dangle inside the container. Every path
 # under $(PWD)/models therefore misses, and a missing model is a skip, so the
 # whole model suite went silently green. test-vision already mounts $(HOME).
-DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models $(DOCKER_IMG)
+# Test runs keep ~/.cache/imp (warm weight cache, library reserve) in a named volume across --rm;
+# not the compose imp-cache. bench/test-perf stay on BENCH_DOCKER_RUN (no volume): KV block
+# counts differ by library-reserve state (docs/internals/BENCHMARKING.md, 716 blocks on Qwen3-8B).
+IMP_TEST_CACHE_VOL ?= imp-test-cache
+DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models \
+             -v $(IMP_TEST_CACHE_VOL):/home/imp/.cache/imp $(DOCKER_IMG)
+BENCH_DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # Dependency pins live once in cmake/imp-deps.cmake; inject them into the Docker
 # build so the tags are not duplicated (bump that file only). Extraction is in a
@@ -72,7 +78,8 @@ build: check-deps
 # the right gate before a PR and the wrong tool for iterating.
 #
 # `make dev` mounts the working tree into the toolchain image and runs ninja
-# against a PERSISTENT build dir, so only what changed recompiles. Codegen is
+# against a PERSISTENT build dir, so only what changed recompiles. After `make dev-clean`
+# the ccache volume rebuilds all 673 steps in 7 s (645/645 hits) vs 334 s cold. Codegen is
 # identical to the image build (both -march=x86-64-v3, same toolchain layers),
 # so a dev binary is a valid thing to run tests against.
 #
@@ -87,9 +94,16 @@ build: check-deps
 # target, never `sudo` on the host.
 DEV_IMG ?= imp:toolchain
 DEV_DIR ?= build-dev
-DEV_RUN = docker run --rm -v $(PWD):/src -w /src $(DEV_IMG)
+# ccache in a named volume, shared by all worktrees: content-addressed like the image's
+# imp-ccache mount, so a hit is the object a fresh compile emits. build-dev/ stays uncached.
+DEV_CCACHE_VOL ?= imp-dev-ccache
+DEV_CCACHE_SIZE ?= 2G
+DEV_RUN = docker run --rm -v $(PWD):/src -w /src -v $(DEV_CCACHE_VOL):/ccache \
+          -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=$(DEV_CCACHE_SIZE) $(DEV_IMG)
 DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOOLS=ON \
                  -DIMP_BUILD_SERVER=ON \
+                 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                 -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
                  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
                  -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
                  -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
@@ -306,10 +320,10 @@ bench: build check-gpu
 	@echo "=== imp benchmark suite (RTX 5090) ==="
 	@echo ""
 	@echo "--- Qwen3-4B Q8_0 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-4B-Instruct-2507-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-4B-Instruct-2507-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
 	@echo "--- Qwen3-8B Q8_0 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
 	@# GDN coverage moved from Qwen3.5-4B-Q8_0 to the mxfp4 checkpoint: the Q8_0
 	@# one is not on this host, and it is the mxfp4 that the E2E battery already
@@ -318,7 +332,7 @@ bench: build check-gpu
 	@# than hidden: the Qwen3.5-4B/9B Q8_0 rows in docs/performance.md were
 	@# measured on checkpoints this target can no longer reproduce.
 	@echo "--- Qwen3.5-4B GDN MXFP4 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@# Dropped: Qwen3.5-9B GDN Q8_0 (no 9B checkpoint of any quant on this host)
 	@# and Qwen3-4B MXFP4 (qwen3-4b-instruct-2507-mxfp4.gguf is not here either).
 	@# Both were dead paths, and each recipe line aborts the target, so `make
@@ -326,7 +340,7 @@ bench: build check-gpu
 
 # Single model benchmark (quick check)
 test-perf: build check-gpu
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 
 # Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
 # harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript

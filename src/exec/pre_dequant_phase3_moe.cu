@@ -462,6 +462,21 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         scales_contig = false;
                     h_ts[e] = w.tensor_scale;
                 }
+                // Per-expert uploads land contiguous only while the async pool hands out adjacent
+                // blocks; a pool shaped by an earlier engine splits them (#2180). Restack into one
+                // slab; the originals stay for the CUTLASS prefill entries keyed on them.
+                void* data_base = experts[0].data;
+                void* slab = (shapes_ok && !data_contig)
+                                 ? vram_alloc_force(vram_alloc_, ne_z * e_packed, "nvfp4_moe_restack")
+                                 : nullptr;
+                for (int e = 0; slab && e < ne_z; ++e)
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<char*>(slab) + e * e_packed,
+                                                       experts[e].data, e_packed, cudaMemcpyDeviceToDevice,
+                                                       stream));
+                if (slab) {
+                    data_base = slab, data_contig = true;
+                    IMP_LOG_INFO("NVFP4 MoE native: restacked %d non-contiguous experts", ne_z);
+                }
                 if (shapes_ok && data_contig) {
                     const size_t total_ms = static_cast<size_t>(ne_z) * e_ms;
                     void* ms_base = experts[0].scales;
@@ -484,7 +499,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                                                            static_cast<size_t>(ne_z) * sizeof(float),
                                                            cudaMemcpyHostToDevice, stream));
                         NvFP4MoEQuantResult r;
-                        r.packed_data = experts[0].data;  // borrowed (resident, contiguous)
+                        r.packed_data = data_base;  // borrowed (resident, contiguous) or the restack slab
                         r.micro_scales = ms_base;         // borrowed or small contiguous copy
                         r.tensor_scales = d_ts;
                         r.n_experts = ne_z;
@@ -494,8 +509,8 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         r.expert_stride_ms = e_ms;
                         r.borrowed = true;  // data borrowed from model; scales/ts via VRAMAllocator
                         int64_t shp[3] = {static_cast<int64_t>(ne_z), N_z, K_z};
-                        packed = Tensor(experts[0].data, QType::NVFP4, 3, shp, /*on_device=*/true);
-                        wcache_->nvfp4_moe[experts[0].data] = r;
+                        packed = Tensor(data_base, QType::NVFP4, 3, shp, /*on_device=*/true);
+                        wcache_->nvfp4_moe[data_base] = r;
                         dctx.nvfp4_moe_count++;
                         // The contiguous micro-scale copy becomes the single source for every consumer
                         // (decode
@@ -539,6 +554,8 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                     }
                     if (d_ms_copy)
                         vram_free(vram_alloc_, d_ms_copy);
+                    if (data_base != experts[0].data)
+                        vram_free(vram_alloc_, data_base);
                 }
                 IMP_LOG_INFO("NVFP4 MoE native: zero-copy decode declined (shapes_ok=%d data_contig=%d) — "
                              "leaving on CUTLASS path",
