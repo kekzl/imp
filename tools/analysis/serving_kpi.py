@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Serving KPI sweep against an OpenAI-compatible server (imp-server; vLLM accepts the same
 # requests, /metrics differ). Per concurrency level (closed loop): latency (TTFT/TPOT/ITL/E2E,
-# p50/p95/p99; ITL also p90/max over every token gap), throughput (req/s, tok/s), goodput (requests meeting TTFT/TPOT SLOs), server
-# /metrics deltas (queue wait, decode rows/step, cache hit rate, spec acceptance, KV rejections),
-# power (nvidia-smi draw integrated, J/1k tokens, mean SM clock).
+# p50/p95/p99; ITL also p90/max over every token gap), throughput (req/s, tok/s), goodput
+# (requests meeting TTFT/TPOT SLOs), server /metrics deltas (queue wait, decode rows/step,
+# cache hit rate, spec acceptance, KV rejections), power (nvidia-smi draw integrated, J/1k
+# tokens, mean SM clock).
 # Prompts are unique per request so the prefix cache doesn't turn the sweep into a cache bench.
 # Usage: serving_kpi.py --url <url> --levels 1,8,32 --max-tokens 300 [--requests-per-level N]
 # [--prompt-tokens 0] [--slo-ttft-ms 500] [--slo-tpot-ms 50] [--ignore-eos]
