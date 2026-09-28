@@ -299,7 +299,8 @@ using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const
 
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
-                 const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0) {
+                 const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
+                 bool allow_splitk = true) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     const bool capturing = imma_stream_capturing(stream);
     if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
@@ -386,7 +387,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     // weight) to hide K-loop latency, costing ~35us regardless of N (spec-decode verify
     // bottleneck, issue #667). Splits K-steps across gridDim.z into fp32 partials, reduced
     // and beta/residual-applied by mmq_splitk_finalize_kernel.
-    if (d_offsets == nullptr && M <= 32) {
+    if (allow_splitk && d_offsets == nullptr && M <= 32) {
         const int ksteps_total = K / kBK;
         const int n_tiles = (N + kBN - 1) / kBN;
         int S = 1;
@@ -445,21 +446,23 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
 
 }  // namespace
 
-bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N,
-                      int K, cudaStream_t stream, float beta) {
+bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
+                      cudaStream_t stream, float beta, bool allow_splitk) {
     // M >= 2 (was >= 64): small-M callers (spec-decode verify chunks, short
     // prompts) are exactly where the dequant->cuBLAS fallback hurts most; the
     // tiles zero-fill the M-tail (same machinery as the MoE per-expert path).
     if (M < 2 || N % 2 != 0 || K % kBK != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
-    return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+    return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1, 0,
+                       allow_splitk);
 }
 
-bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
-                       int N, int K, cudaStream_t stream, float beta) {
+bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
+                       cudaStream_t stream, float beta, bool allow_splitk) {
     if (M < 2 || N % 2 != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
-    return gemm_common(w_q4k_blocks, 1, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+    return gemm_common(w_q4k_blocks, 1, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1, 0,
+                       allow_splitk);
 }
 
 bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,

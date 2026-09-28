@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - Expert cache regrow after GDN pack release: if both the grown and the original re-init failed, the cache stayed half-destroyed and the second failure went unlogged. It is now disabled (0 slots, pool freed) with an ERROR naming both budgets; the NVFP4 placement gate then refuses the load.
+- Prefix-cache resends on dense models: a prompt row no longer changes with its chunk (RMSNorm, QK-norm, IMMA split-K picked by row count; 1-row tails ran decode kernels). Qwen3-8B-Q8_0, FP16 KV: first-token logprob delta chunk 336 vs 0: 0.021 -> 0; resend probe 1/2 -> 0/2 FAIL.
 - Softmax MoE routing (Qwen3-30B-A3B, Qwen3.8-Flash-Next and every softmax-routed MoE): a warp could read another warp's partial sum as the softmax max, and top-k picked wrong experts (354 of 204800 routings in the new test). PPL is bit-identical across processes now: Qwen3-30B-A3B 13.0332 x3, Flash-Next 4.6353 x2.
 - Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.
 - Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.

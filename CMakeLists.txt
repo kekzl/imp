@@ -744,6 +744,8 @@ if(IMP_BUILD_TESTS)
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
         tests/test_prefill_pacing.cpp
+        # Minimum prompt chunk (#2152): chunk-split and prefix-reuse caps, header-only.
+        tests/test_prompt_tail.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
