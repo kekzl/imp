@@ -317,6 +317,8 @@ public:
     // isn't NVFP4-served; callers then keep the FP16 GEMV. Returned pointers borrow executor storage, do not
     // free.
     bool lm_head_nvfp4_view(NvFP4QuantResult& out) const;
+    // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8) for the MTP draft chain; false when not built.
+    bool lm_head_fp8_view(const void*& weight, const float*& row_scales) const;
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {

@@ -25,20 +25,24 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     // F16 quantizes in place; GGUF sources dequant in row slabs through the shared scratch.
     const bool f16_src = q == QType::F16;
     const bool gguf_src = dequant_gpu_supported(q) && qscratch_->dequant != nullptr;
-    if (!lm.data || !lm.on_device || lm.ndim != 2 || (!f16_src && !gguf_src)) {
-        IMP_LOG_WARN("FP8 LM head: skipped (source %s, on_device=%d); the head keeps its source path",
-                     qtype_name(q), lm.on_device ? 1 : 0);
+    // The final norm is uploaded in the compute dtype: F16 there = F16 hidden rows for the FP8 kernel.
+    const bool f16_compute = !model_->output_norm().data || model_->output_norm().qtype == QType::F16;
+    if (!lm.data || !lm.on_device || lm.ndim != 2 || (!f16_src && !gguf_src) || !f16_compute) {
+        IMP_LOG_WARN(
+            "FP8 LM head: skipped (source %s, on_device=%d, F16 compute=%d); the head keeps its source path",
+            qtype_name(q), lm.on_device ? 1 : 0, f16_compute ? 1 : 0);
         return;
     }
     const int rows = static_cast<int>(lm.shape[0]);
     const int cols = static_cast<int>(lm.shape[1]);
-    if (cols % 16 != 0) {
-        IMP_LOG_WARN("FP8 LM head: skipped (d_model %d not a multiple of 16)", cols);
+    if (cols % 256 != 0) {
+        IMP_LOG_WARN("FP8 LM head: skipped (d_model %d not a multiple of 256, 4 K slices of 64)", cols);
         return;
     }
     const size_t code_bytes = (static_cast<size_t>(rows) * cols + 255) & ~static_cast<size_t>(255);
     const size_t total = code_bytes + static_cast<size_t>(rows) * sizeof(float);
-    auto* bulk = static_cast<uint8_t*>(vram_alloc(vram_alloc_, total, "fp8_lm_head"));
+    // Past the headroom like the NVFP4 head (raw cudaMalloc): Phase 4b then frees the source head.
+    auto* bulk = static_cast<uint8_t*>(vram_alloc_force(vram_alloc_, total, "fp8_lm_head"));
     if (!bulk) {
         IMP_LOG_WARN("FP8 LM head: alloc of %.1f MiB failed; the head keeps its source path",
                      total / (1024.0 * 1024.0));
@@ -74,9 +78,10 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     e.d_row_scales = scales;
     wcache_->lm_head_fp8 = e;
     wcache_->lm_head_fp8_bulk = bulk;
+    wcache_->lm_head_fp8_bytes = total;
     IMP_LOG_INFO(
         "FP8 LM head: [%d x %d] %s -> E4M3 per-row scales (%.1f MiB), all LM-head rows; "
-        "source retained",
+        "source released after load if no path reads it",
         rows, cols, qtype_name(q), total / (1024.0 * 1024.0));
 }
 

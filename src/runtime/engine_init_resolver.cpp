@@ -16,6 +16,7 @@
 #include "core/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "core/config/lm_head_mode.h"
 #include "memory/vram_query.h"
 #include "memory/kv_cache.h"
 #include "memory/plan.h"
@@ -657,6 +658,7 @@ void Engine::init_resolve_quant_flags_() {
 
     // NVFP4 decode mode
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
+    config_.fp8_lm_head = lm_head_mode(runtime_config_.gemm.nvfp4_lm_head) == LmHeadMode::Fp8;
 
     if (config_.use_nvfp4_decode < 0) {
         const auto wq_qtype = model_->layer(0).wq.qtype;

@@ -80,6 +80,9 @@ struct WeightCaches {
     // `fp8` so the registry never tiers the head on it. One bulk: [vocab*d_model] codes, then scales.
     FP8CacheEntry lm_head_fp8;
     void* lm_head_fp8_bulk = nullptr;
+    // Source-head bytes Phase 4b returned to the driver, minus the FP8 head (expert-cache regrow).
+    size_t lm_head_released_bytes = 0;
+    size_t lm_head_fp8_bytes = 0;  // the FP8 head bulk (codes + scales)
     // GDN bytes Phase 4b freed (F16 input packs; with host-resident experts also the F16
     // ssm_in / gdn_gate / ssm_out) and what of them reached the driver: the expert cache grows by it.
     size_t dropped_gdn_bytes = 0;
