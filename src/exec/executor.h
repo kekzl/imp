@@ -1165,6 +1165,11 @@ public:
                                   cudaStream_t stream);
     // Tokens of n-gram context per PLE row (ngram_size - 1), 0 without PLE.
     int ple_context_len() const;
+    // Host-expert LRU cache as sized (0 without one).
+    size_t expert_cache_bytes() const {
+        return static_cast<size_t>(expert_cache_.n_slots_) * expert_cache_.slot_size_;
+    }
+    int expert_cache_slots_per_layer() const { return expert_cache_.slots_per_layer_; }
     std::vector<int32_t>& ngram_step_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
 
 private:

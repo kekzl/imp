@@ -786,6 +786,8 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_plan.cpp
         # PLE n-gram context from the token history (header-only, model/ngram_table.h).
         tests/test_ngram_context.cpp
+        # Host-resident experts: auto max_batch_size 1, explicit batch warned (header-only).
+        tests/test_expert_batch_policy.cpp
         # The KV-pool sizing arithmetic (#1251). Pure integers, so it belongs in
         # the lane CI runs — it used to be inline in engine_kv_cache_init.cpp,
         # unreachable without a GPU and a 22 GB checkpoint.

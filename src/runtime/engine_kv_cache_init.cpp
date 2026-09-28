@@ -7,6 +7,7 @@
 #include "memory/library_reserve_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
+#include "runtime/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
@@ -379,6 +380,11 @@ bool Engine::init_kv_cache() {
     executor_->verify_host_expert_placement();
     if (!executor_->init_device_expert_cache() && experts_on_host_)
         demote_graphs_(GraphDemotionReason::ExpertsOnHost);
+    if (const std::string w = host_expert_batch_warning(config_.max_batch_size, experts_on_host_,
+                                                        executor_->expert_cache_bytes(),
+                                                        executor_->expert_cache_slots_per_layer());
+        !w.empty())
+        IMP_LOG_WARN("%s", w.c_str());
 
     // KV takes the MEASURED residual, not a predicted one: this can only shrink
     // the pool relative to the budget's projection, never grow it, so it cannot
