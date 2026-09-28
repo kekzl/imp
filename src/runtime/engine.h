@@ -102,7 +102,8 @@ struct EngineConfig {
     // NVFP4 decode weight cache: -1=auto, 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
     int use_nvfp4_decode = -1;
     // nvfp4_decode_all: extend the NVFP4 decode cache to Q4_K/Q3_K/Q2_K.
-    // fp8_lm_head: gemm.nvfp4_lm_head=fp8, the budget reserves the FP8 head instead of NVFP4.
+    // fp8_lm_head: gemm.nvfp4_lm_head=fp8 or auto, the budget reserves the FP8 head instead of NVFP4
+    // (larger than NVFP4, so an auto fallback to NVFP4 stays inside the reservation).
     bool nvfp4_decode_all = false, fp8_lm_head = false;
 
     // Minimum KV cache tokens. Budget planner guarantees at least this many

@@ -3,33 +3,33 @@
   "model": "Qwen3-8B-Q8_0.gguf",
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "13.4",
-  "commit": "824140bd",
+  "commit": "702a9cd3",
   "vram_total_mb": 32607,
-  "timestamp": "2026-09-23T16:39:14Z",
+  "timestamp": "2026-09-28T12:01:38Z",
   "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=0); speculative.ngram=false",
   "reps": 5,
   "n_trials": 5,
-  "_note": "Re-pinned 2026-09-23 at 824140bd (perf/q8-imma-lds: dense Q8_0 IMMA scale loads + BM=32 small grids, outputs bit-identical). Prefill moved on purpose: pp128 5031.75 -> 6169.20, pp512 12707.44 -> 14068.06, pp4096 15776.32 -> 16341.96; tg128 299.61 -> 299.53, own_peak_mb 20642 -> 20644 (unchanged within noise). Binary-copy A/B in the same session: pp512 12611.10 -> 14044.55, pp4096 14547.22 -> 15211.47 (5 / 3 pairs, all same sign). The generator wrote 824140bd-dirty (docs_lint regenerated STALE.md); no source differed. Previous pin 2026-09-17 at 6fe00f81: tg128 299.61, pp128 5031.75, pp512 12707.44, pp4096 15776.32, own_peak_mb 20642.",
   "metrics": {
     "prefill_tps": {
-      "pp128": 6169.20,
-      "pp512": 14068.06,
-      "pp4096": 16341.96
+      "pp128": 6132.05,
+      "pp512": 14053.01,
+      "pp4096": 16197.82
     },
     "decode_tps": {
-      "tg128": 299.53
+      "tg128": 282.97
     },
     "memory_mb": {
       "model_weights": 8320,
-      "own_peak_mb": 20644,
+      "own_peak_mb": 20264,
       "own_peak_note": "peak device memory this PROCESS allocates after engine init (vram_own_peak_bytes), measured by the verify.sh peak-VRAM gate with --bench-pp 128 --bench-reps 1 --max-tokens 8 --mem-report. Excludes the CUDA primary context (~1680 MiB here) and any neighbour process, so unlike device peak_used it does not move for reasons unrelated to the change under test. Byte-identical across repeat runs."
     }
   },
-  "_thresholds_note": "Throughput thresholds were 3%/5% until 2026-08-13 and sat below this host's own between-session movement: the same tree reads 287.63 one day and 276.92 the next at healthy clocks (six quiet runs spanned 278.59-289.77), while three processes within one session agree to 0.16%. Desktop use costs a few percent more. 8% still catches what the gate exists for - the split-K mutation M29 measured -36%. own_peak_mb is byte-identical across repeat runs, so its 10% stays. paired_decode_regression_pct (make verify-ab, scripts/verify_ab.sh, AUDIT_arch_2026 H-3) judges the mean paired tg128 delta of this tree against origin/main built into imp:ab-<sha>, alternating pairs in one session, so the between-session movement above cancels. Measured 2026-09-05 on one tree built twice (eb00defe), 6 gate runs x 3 pairs: paired means +0.20 / +0.05 / -0.17 / -0.05 / -0.03 / -0.13 %, single pairs -0.78..+0.48 %, absolute 292.27-295.00 vs 291.72-293.85 tok/s (0.9 % / 0.7 % spread). 2 % is 10x the largest mean and 0 of 6 runs red; it resolves what 8 % cannot (-7.3 % shipped at +0.33 % single-arm, #1270). The single-arm 8 % stays as the coarse net. Rationale: docs/BENCHMARKING.md.",
   "thresholds": {
     "decode_regression_pct": 8,
     "prefill_regression_pct": 8,
     "vram_increase_pct": 10,
     "paired_decode_regression_pct": 2
-  }
+  },
+  "_note": "Re-pinned 2026-09-28 on purpose for #2166: gemm.nvfp4_lm_head=auto now serves the LM head as per-row FP8 E4M3 instead of NVFP4 (PPL 45k Qwen3-8B-Q8_0 11.1108 -> 10.7623 in #2176, 10.7491 on this tree). tg128 299.53 -> 282.97 (FP8 head reads 1.78x the NVFP4 head bytes), pp128 6169.20 -> 6132.05, pp512 14068.06 -> 14053.01, pp4096 16341.96 -> 16197.82, own_peak_mb 20644 -> 20264 (the Q8_0 source head is freed after load). Tree = main 702a9cd3 + this change (the generator wrote commit unknown for the uncommitted tree). Previous pin 2026-09-23 at 824140bd: Re-pinned 2026-09-23 at 824140bd (perf/q8-imma-lds: dense Q8_0 IMMA scale loads + BM=32 small grids, outputs bit-identical). Prefill moved on purpose: pp128 5031.75 -> 6169.20, pp512 12707.44 -> 14068.06, pp4096 15776.32 -> 16341.96; tg128 299.61 -> 299.53, own_peak_mb 20642 -> 20644 (unchanged within noise). Binary-copy A/B in the same session: pp512 12611.10 -> 14044.55, pp4096 14547.22 -> 15211.47 (5 / 3 pairs, all same sign). The generator wrote 824140bd-dirty (docs_lint regenerated STALE.md); no source differed. Previous pin 2026-09-17 at 6fe00f81: tg128 299.61, pp128 5031.75, pp512 12707.44, pp4096 15776.32, own_peak_mb 20642.",
+  "_thresholds_note": "Throughput thresholds were 3%/5% until 2026-08-13 and sat below this host's own between-session movement: the same tree reads 287.63 one day and 276.92 the next at healthy clocks (six quiet runs spanned 278.59-289.77), while three processes within one session agree to 0.16%. Desktop use costs a few percent more. 8% still catches what the gate exists for - the split-K mutation M29 measured -36%. own_peak_mb is byte-identical across repeat runs, so its 10% stays. paired_decode_regression_pct (make verify-ab, scripts/verify_ab.sh, AUDIT_arch_2026 H-3) judges the mean paired tg128 delta of this tree against origin/main built into imp:ab-<sha>, alternating pairs in one session, so the between-session movement above cancels. Measured 2026-09-05 on one tree built twice (eb00defe), 6 gate runs x 3 pairs: paired means +0.20 / +0.05 / -0.17 / -0.05 / -0.03 / -0.13 %, single pairs -0.78..+0.48 %, absolute 292.27-295.00 vs 291.72-293.85 tok/s (0.9 % / 0.7 % spread). 2 % is 10x the largest mean and 0 of 6 runs red; it resolves what 8 % cannot (-7.3 % shipped at +0.33 % single-arm, #1270). The single-arm 8 % stays as the coarse net. Rationale: docs/BENCHMARKING.md."
 }

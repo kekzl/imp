@@ -18,27 +18,30 @@
 namespace imp {
 
 void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
-    if (lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head) != LmHeadMode::Fp8)
+    const LmHeadMode mode = lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head);
+    if (!lm_head_mode_fp8(mode))
         return;
     const Tensor& lm = model_->output_proj();
     const QType q = lm.qtype;
     // F16 quantizes in place; GGUF sources dequant in row slabs through the shared scratch.
     const bool f16_src = q == QType::F16;
-    const bool gguf_src = dequant_gpu_supported(q) && qscratch_->dequant != nullptr;
-    // The final norm is uploaded in the compute dtype: F16 there = F16 hidden rows for the FP8 kernel.
-    const bool f16_compute = !model_->output_norm().data || model_->output_norm().qtype == QType::F16;
-    if (!lm.data || !lm.on_device || lm.ndim != 2 || (!f16_src && !gguf_src) || !f16_compute) {
-        IMP_LOG_WARN(
-            "FP8 LM head: skipped (source %s, on_device=%d, F16 compute=%d); the head keeps its source path",
-            qtype_name(q), lm.on_device ? 1 : 0, f16_compute ? 1 : 0);
+    if (!pre_dequant_internal::fp8_lm_head_eligible(*model_) || (!f16_src && qscratch_->dequant == nullptr)) {
+        // auto falls back to the #982 NVFP4 rule (Phase 3); an explicit fp8 keeps the source path.
+        const bool f16_compute = !model_->output_norm().data || model_->output_norm().qtype == QType::F16;
+        if (mode == LmHeadMode::Fp8)
+            IMP_LOG_WARN(
+                "FP8 LM head: skipped (source %s, on_device=%d, F16 compute=%d, d_model %lld); "
+                "the head keeps its source path",
+                qtype_name(q), lm.on_device ? 1 : 0, f16_compute ? 1 : 0,
+                static_cast<long long>(lm.ndim == 2 ? lm.shape[1] : 0));
+        else
+            IMP_LOG_INFO(
+                "FP8 LM head: auto, head not eligible (source %s, F16 compute=%d); NVFP4 rule applies",
+                qtype_name(q), f16_compute ? 1 : 0);
         return;
     }
     const int rows = static_cast<int>(lm.shape[0]);
     const int cols = static_cast<int>(lm.shape[1]);
-    if (cols % 256 != 0) {
-        IMP_LOG_WARN("FP8 LM head: skipped (d_model %d not a multiple of 256, 4 K slices of 64)", cols);
-        return;
-    }
     const size_t code_bytes = (static_cast<size_t>(rows) * cols + 255) & ~static_cast<size_t>(255);
     const size_t total = code_bytes + static_cast<size_t>(rows) * sizeof(float);
     // Past the headroom like the NVFP4 head (raw cudaMalloc): Phase 4b then frees the source head.

@@ -225,8 +225,9 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // it to an NVFP4 decode cache. This plan site serves only NATIVE (BF16/F16)
     // heads; quantized GGUF heads route through the phase-3 collector's
     // size/arch-gated auto rule. GDN/SSM hybrids keep FP16 unless nvfp4_lm_head_gdn.
-    if (pre_dequant_internal::nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false,
-                                                    model_->profile().is_dense, cfg.d_model)) {
+    if (pre_dequant_internal::nvfp4_lm_head_enabled(
+            dispatch_policy(), /*quantized_source=*/false, model_->profile().is_dense, cfg.d_model,
+            /*is_gdn_hybrid=*/false, pre_dequant_internal::fp8_lm_head_wanted(dispatch_policy(), *model_))) {
         bool is_gdn = false;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);

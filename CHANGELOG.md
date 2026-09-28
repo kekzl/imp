@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
 
 ### Changed
+- `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).
 - Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
 - Host-resident MoE experts: auto max_batch_size resolves to 1 (expert cache budget; Flash-Next c=8 at batch 32: 5.6 vs 7.2 out tok/s at batch 1). An explicit runtime.max_batch_size / --max-batch is kept and warned with the cache GiB and slots/layer it leaves.
 - Hooks and make GPU targets: a linked worktree builds `imp:test-<dir>-<hash8>` (main checkout keeps `imp:test`), runners refuse an image whose `imp.tree` is not this tree, and `scripts/gpu_lock.sh` lets one session hold the card; other worktrees' hooks and targets refuse instead of starting.
