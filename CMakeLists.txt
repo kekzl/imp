@@ -90,6 +90,10 @@ if(IMP_ALLOC_INTERPOSE)
     set(IMP_WRAP_LINK_FLAGS
         "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
     message(STATUS "Allocation interposition ENABLED (measurement build)")
+    # Canary for uninitialized reads (#2168): fill every new device allocation with this byte.
+    set(IMP_ALLOC_POISON_BYTE "-1" CACHE STRING "Fill byte for new device allocations, -1 = off")
+    set_source_files_properties(src/memory/alloc_interpose.cpp PROPERTIES
+        COMPILE_DEFINITIONS "IMP_ALLOC_POISON_BYTE=${IMP_ALLOC_POISON_BYTE}")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 # libFuzzer binaries per fuzz/ target (#1620); needs clang, g++ has no -fsanitize=fuzzer.
