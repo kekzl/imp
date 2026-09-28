@@ -65,7 +65,7 @@ L0/L1 throughput figures carry `[PROV: commit=<sha7> date=<YYYY-MM-DD> hw=RTX509
 
 ## Before you push
 
-`bash scripts/ci_static_gates.sh docs citations` (~2 s; the hooks run it). The `Docs` job runs `docs`; `Build` runs everything unfiltered, so a docs failure shows as `Build` red. Lint checks: forbidden tokens, unprovenanced numbers, header, generated drift, dead links, size budgets (README <= 400 lines, root `CLAUDE.md` <= 2000 tokens, per-directory <= 800), staleness > 180 days (warning -> `docs/audit/docs-rewrite/STALE.md`), refs-generator listing (`tests/refs/gen_*.py` rows in `tests/refs/README.md`, #1730). `.gitignore` respected (#1698). `STALE.md` is regenerated on every local run and blocks `git pull` until committed or `git checkout -- docs/audit/docs-rewrite/STALE.md`.
+`bash scripts/ci_static_gates.sh docs citations` (~2 s; the hooks run it). The `Docs` job runs `docs`; `Build` runs everything unfiltered, so a docs failure shows as `Build` red. Lint checks: forbidden tokens, unprovenanced numbers, header, generated drift, dead links, size budgets (README <= 400 lines, root `CLAUDE.md` <= 2000 tokens, per-directory <= 800), staleness > 180 days (warning -> `docs/audit/docs-rewrite/STALE.md`), refs-generator listing (`tests/refs/gen_*.py` rows in `tests/refs/README.md`, #1730). `.gitignore` respected (#1698). `STALE.md` is written only by `python3 scripts/docs_lint.py --write-stale`; hooks and CI leave it untouched (#2194).
 
 ## Adding a doc
 
