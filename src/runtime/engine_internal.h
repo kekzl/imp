@@ -110,7 +110,7 @@ inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
                                      const std::vector<std::shared_ptr<Request>>& rows, const Batch& batch,
                                      cudaStream_t stream) {
     const int32_t* ctx = ple_step_context(ex.ple_context_len(), model.config().ple_eos_token_id, rows,
-                                          batch.positions, batch.total_tokens, ex.ple_ctx_scratch());
+                                          batch.positions, batch.total_tokens, ex.ngram_step_scratch());
     return ex.prepare_decode_step_host(batch.token_ids.data(), batch.total_tokens,
                                        static_cast<int>(rows.size()), ctx, stream);
 }

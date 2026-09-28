@@ -1165,7 +1165,7 @@ public:
                                   cudaStream_t stream);
     // Tokens of n-gram context per PLE row (ngram_size - 1), 0 without PLE.
     int ple_context_len() const;
-    std::vector<int32_t>& ple_ctx_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
+    std::vector<int32_t>& ngram_step_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
 
 private:
 
