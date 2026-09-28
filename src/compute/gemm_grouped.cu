@@ -1,3 +1,4 @@
+#include "compute/cublas_gemm_algo.h"
 #include "compute/gemm_grouped.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
@@ -15,7 +16,6 @@
 
 namespace imp {
 
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 // cuBLAS handle, lazily initialized, process-lifetime. Uses cublasGemmEx, the same proven
 // path as gemm.cu's gemm().
@@ -299,7 +299,7 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
                                     (const void**)(d_B_ptrs + g.start), cuda_dt_ab, K,
                                     (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K, &beta,
                                     (void**)(d_C_ptrs + g.start), cuda_dt_c, N, g.count, compute_type,
-                                    kGemmAlgo);
+                                    cublas_gemm_algo());
             }
         }
     }
