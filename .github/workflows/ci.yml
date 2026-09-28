@@ -475,17 +475,17 @@ jobs:
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-pip python3-venv
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-pip python3-venv curl ca-certificates
           # A venv rather than --break-system-packages: the lock file pins the
           # whole transitive set, and pip cannot replace Debian's own copy of
           # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
           python3 -m venv /tmp/api-venv
           /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
-          # cuBLAS 13.7.0.27 = the devel image's libcublas; hash-pinned (H-6).
-          printf '%s\n' 'nvidia-cublas==13.7.0.27 --hash=sha256:481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4' > /tmp/cublas.txt
-          /tmp/api-venv/bin/pip install -q --no-deps -r /tmp/cublas.txt
-          libdir="$(ls -d /tmp/api-venv/lib/python3*/site-packages/nvidia/cu13/lib)"
-          echo "LD_LIBRARY_PATH=$libdir:/usr/local/cuda/lib64" >> "$GITHUB_ENV"
+          # cuBLAS 13.7.0.27 = the devel image's libcublas; wheel fetched and sha256-verified (H-6).
+          curl -fsSL https://files.pythonhosted.org/packages/da/b3/358ee3e2237d4d663cd7a50e4dae3b07bbc5c93bf1eab034c17d66b7e428/nvidia_cublas-13.7.0.27-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cublas.whl
+          echo '481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4  /tmp/cublas.whl' | sha256sum -c -
+          python3 -m zipfile -e /tmp/cublas.whl /tmp/cublas
+          echo "LD_LIBRARY_PATH=/tmp/cublas/nvidia/cu13/lib:/usr/local/cuda/lib64" >> "$GITHUB_ENV"
           echo "/tmp/api-venv/bin" >> "$GITHUB_PATH"
 
       - name: Run the API contract against imp-server
