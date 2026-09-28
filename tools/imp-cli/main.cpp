@@ -148,7 +148,8 @@ int main(int argc, char** argv) {
     // not end up with ngram off and nothing drafting (mtp_auto_after_load).
     mtp_k = imp::tools::mtp_auto_after_load(
         runtime_cfg, mtp_k, model->model->mtp_.has_value() && model->model->mtp_->loaded,
-        args.mtp_spec_decode_k);
+        args.mtp_spec_decode_k,
+        !model->model->mtp_.has_value() || imp::mtp_forward_implemented(*model->model->mtp_));
 
     ImpConfig config = imp_config_default();
 

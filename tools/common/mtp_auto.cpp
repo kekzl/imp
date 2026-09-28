@@ -1,10 +1,9 @@
 #include "mtp_auto.h"
 
 #include "core/logging.h"
+#include "model/mtp_head.h"
 
 namespace imp::tools {
-
-void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded);
 
 int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
     const int configured = cfg.speculative.mtp_k;
@@ -19,10 +18,12 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
     return kMtpAutoK;
 }
 
-int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag) {
-    if (explicit_flag > 0)
+int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
+                        bool head_forward) {
+    // A head without a draft forward outranks the tool flag too: nothing half-built runs.
+    if (explicit_flag > 0 && (head_forward || !head_loaded))
         return explicit_flag;  // a tool flag outranks the config
-    mtp_auto_finalize(cfg, requested_k, head_loaded);
+    mtp_auto_finalize(cfg, requested_k, head_loaded, head_forward);
     // The pending slot was stashed before the load (it gates loader
     // behaviour); re-publish so the engine takes the resolved pair.
     set_pending_runtime_config(cfg);
@@ -31,7 +32,12 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
     return cfg.speculative.mtp_k;
 }
 
-void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded) {
+void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, bool head_forward) {
+    if (head_loaded && !head_forward) {
+        cfg.speculative.mtp_k = 0;
+        IMP_LOG_INFO("%s", kMtpForwardMissingLog);
+        return;
+    }
     if (cfg.speculative.mtp_k >= 0)
         return;  // explicit configuration, nothing to resolve
 

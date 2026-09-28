@@ -21,11 +21,14 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch);
 // Phase 2, after load: installs the resolved pair into cfg and logs the decision once.
 // head_loaded is what the load actually produced: a checkpoint without a head must fall back
 // to the documented default rather than leave ngram off with nothing drafting.
-void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded);
+// head_forward=false (a head that loads but has no draft forward, qwen4_exp) forces
+// speculative.mtp_k to 0, explicit settings included.
+void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, bool head_forward = true);
 
 // Phase 2 for a caller that stashes the pending runtime config BEFORE the load (imp-cli):
 // finalize, re-publish the resolved config so Engine::init takes it, return the depth to
 // enable. explicit_flag (--mtp-spec-decode) outranks the config; pass 0 when there is none.
-int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag);
+int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
+                        bool head_forward = true);
 
 }  // namespace imp::tools
