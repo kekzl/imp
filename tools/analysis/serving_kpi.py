@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Serving KPI sweep against an OpenAI-compatible server (imp-server; vLLM accepts the same
 # requests, /metrics differ). Per concurrency level (closed loop): latency (TTFT/TPOT/ITL/E2E,
-# p50/p95/p99), throughput (req/s, tok/s), goodput (requests meeting TTFT/TPOT SLOs), server
+# p50/p95/p99; ITL also p90/max over every token gap), throughput (req/s, tok/s), goodput (requests meeting TTFT/TPOT SLOs), server
 # /metrics deltas (queue wait, decode rows/step, cache hit rate, spec acceptance, KV rejections),
 # power (nvidia-smi draw integrated, J/1k tokens, mean SM clock).
 # Prompts are unique per request so the prefix cache doesn't turn the sweep into a cache bench.
 # Usage: serving_kpi.py --url <url> --levels 1,8,32 --max-tokens 300 [--requests-per-level N]
 # [--prompt-tokens 0] [--slo-ttft-ms 500] [--slo-tpot-ms 50] [--ignore-eos]
-# [--endpoint chat|completions] [--no-power] [--json FILE] [--md-out FILE] [--tag x].
+# [--endpoint chat|completions] [--no-power] [--process-workers] [--json FILE] [--md-out FILE] [--tag x].
 import argparse
 import json
 import math
@@ -124,7 +124,8 @@ def summarize_level(records, wall_s, slo_ttft_ms, slo_tpot_ms):
         "output_tok_s": out_tokens / w, "input_tok_s": in_tokens / w,
         "total_tok_s": (out_tokens + in_tokens) / w,
         "output_tokens": out_tokens, "input_tokens": in_tokens, "cached_tokens": cached,
-        "ttft_ms": trio(ttft), "tpot_ms": trio(tpot), "itl_ms": trio(itl),
+        "ttft_ms": trio(ttft), "tpot_ms": trio(tpot),
+        "itl_ms": {**trio(itl), "p90": pct(itl, 90), "max": max(itl) if itl else float("nan")},
         "e2e_s": trio(e2e), "norm_ms_per_tok": trio(norm),
         "goodput_req_s": met / w, "goodput_tok_s": met_tokens / w,
         "slo_attainment_pct": (100.0 * met / len(ttft)) if ttft else float("nan"),
@@ -212,10 +213,10 @@ class Sampler(threading.Thread):
         super().__init__(daemon=True)
         self.url, self.power, self.period = url, power, period
         self.samples, self.power_samples = [], []  # power: (t, watts, sm_mhz)
-        self._stop = threading.Event()
+        self._halt = threading.Event()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             t = time.perf_counter()
             m, _ = scrape(self.url)
             tot, live = m.get("imp_kv_blocks_total"), m.get("imp_kv_blocks_live")
@@ -233,10 +234,10 @@ class Sampler(threading.Thread):
                     self.power_samples.append((t, float(out[0]), float(out[1])))
                 except Exception:  # noqa: BLE001
                     pass
-            self._stop.wait(self.period)
+            self._halt.wait(self.period)
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         self.join()
 
     def energy(self, t_lo, t_hi):
@@ -258,6 +259,35 @@ def make_prompt(tag, level, i, prompt_tokens):
         n = max(1, prompt_tokens // 20)
         fill = " ".join(FILLER[(i + k) % len(FILLER)] for k in range(n)) + " "
     return head + fill + QUESTIONS[i % len(QUESTIONS)]
+
+
+def consume_sse(lines, rec, clock=time.perf_counter):
+    """Stamp clock() into rec per SSE event with a token (content/reasoning/text); return usage."""
+    usage = {}
+    for raw in lines:
+        line = raw.decode("utf-8", "ignore").strip() if isinstance(raw, bytes) else raw.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            j = json.loads(payload)
+        except ValueError:
+            continue
+        if j.get("usage"):
+            usage = j["usage"]
+        ch = j.get("choices") or []
+        if not ch:
+            continue
+        c0 = ch[0]
+        d = c0.get("delta") or {}
+        if d.get("content") or d.get("reasoning_content") or c0.get("text"):
+            now = clock()
+            if rec["t_first"] is None:
+                rec["t_first"] = now
+            rec["stamps"].append(now)
+    return usage
 
 
 def one_request(args, level, i):
@@ -282,29 +312,7 @@ def one_request(args, level, i):
     usage = {}
     try:
         with urllib.request.urlopen(req, timeout=args.timeout) as r:
-            for raw in r:
-                line = raw.decode("utf-8", "ignore").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    j = json.loads(payload)
-                except ValueError:
-                    continue
-                if j.get("usage"):
-                    usage = j["usage"]
-                ch = j.get("choices") or []
-                if not ch:
-                    continue
-                c0 = ch[0]
-                d = c0.get("delta") or {}
-                if d.get("content") or d.get("reasoning_content") or c0.get("text"):
-                    now = time.perf_counter()
-                    if rec["t_first"] is None:
-                        rec["t_first"] = now
-                    rec["stamps"].append(now)
+            usage = consume_sse(r, rec)
         rec["ok"] = True
     except Exception as e:  # noqa: BLE001
         rec["err"] = str(e)
@@ -331,13 +339,24 @@ def run_level(args, level, n_requests, sampler):
 
     m0, h0 = scrape(args.url)
     n_before = len(sampler.samples)
-    t_lo = time.perf_counter()
-    threads = [threading.Thread(target=worker) for _ in range(level)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    t_hi = time.perf_counter()
+    if args.process_workers:
+        # One OS process per worker: SSE stamps of C streams do not queue on one GIL.
+        # chunksize=1 keeps the closed loop (a worker takes request i+1 when i finished).
+        import multiprocessing
+        with multiprocessing.get_context("spawn").Pool(level) as pool:
+            pool.map(time.sleep, [0.2] * level, chunksize=1)  # every worker up before t_lo
+            t_lo = time.perf_counter()
+            records = pool.starmap(one_request, [(args, level, i) for i in range(n_requests)],
+                                   chunksize=1)
+            t_hi = time.perf_counter()
+    else:
+        t_lo = time.perf_counter()
+        threads = [threading.Thread(target=worker) for _ in range(level)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        t_hi = time.perf_counter()
     m1, h1 = scrape(args.url)
     client = summarize_level(records, t_hi - t_lo, args.slo_ttft_ms, args.slo_tpot_ms)
     server = server_summary(m0, h0, m1, h1, sampler.samples[n_before:])
@@ -377,6 +396,8 @@ def markdown(results, args):
     add("TTFT p50 / p95 / p99 ms", trio("client", "ttft_ms", 0))
     add("TPOT p50 / p95 / p99 ms", trio("client", "tpot_ms", 1))
     add("ITL p50 / p95 / p99 ms", trio("client", "itl_ms", 1))
+    add("ITL p90 / max ms (every token gap)",
+        lambda r: " / ".join(fmt(r["client"]["itl_ms"][p], 1) for p in ("p90", "max")))
     add("E2E p50 / p95 / p99 s", trio("client", "e2e_s", 2))
     add("normalized p50 / p95 / p99 ms/tok", trio("client", "norm_ms_per_tok", 1))
     add(f"goodput req/s (TTFT<={args.slo_ttft_ms:.0f} ms, TPOT<={args.slo_tpot_ms:.0f} ms)",
@@ -421,6 +442,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=1, help="warmup waves at the largest level (64 tokens)")
     ap.add_argument("--timeout", type=float, default=900.0)
     ap.add_argument("--no-power", action="store_true")
+    ap.add_argument("--process-workers", action="store_true",
+                    help="one OS process per concurrent stream instead of a thread")
     ap.add_argument("--tag", default=f"kpi{int(time.time()) % 100000}")
     ap.add_argument("--json", default="")
     ap.add_argument("--md-out", default="", help="write the markdown table to this file")
@@ -446,10 +469,12 @@ def main():
         r = run_level(args, c, n, sampler)
         results.append(r)
         cl = r["client"]
+        itl = "/".join(fmt(cl["itl_ms"][p]) for p in ("p50", "p90", "p99", "max"))
         print(f"c={c}: {cl['ok']}/{cl['requests']} ok, {cl['output_tok_s']:.1f} out tok/s, "
               f"{cl['req_s']:.2f} req/s, TTFT p50/p95/p99 {fmt(cl['ttft_ms']['p50'], 0)}/"
               f"{fmt(cl['ttft_ms']['p95'], 0)}/{fmt(cl['ttft_ms']['p99'], 0)} ms, "
               f"TPOT p50/p99 {fmt(cl['tpot_ms']['p50'])}/{fmt(cl['tpot_ms']['p99'])} ms, "
+              f"ITL p50/p90/p99/max {itl} ms, "
               f"goodput {cl['goodput_req_s']:.2f} req/s ({fmt(cl['slo_attainment_pct'], 0)} %)",
               file=sys.stderr, flush=True)
         if r["sample_err"]:
