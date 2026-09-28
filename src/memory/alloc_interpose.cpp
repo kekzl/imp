@@ -167,18 +167,43 @@ Reporter g_reporter;
 
 }  // namespace
 
+#ifndef IMP_ALLOC_POISON_BYTE
+#define IMP_ALLOC_POISON_BYTE -1
+#endif
+
+// Canary (#2168): every new device allocation starts as IMP_ALLOC_POISON_BYTE instead of the
+// previous tenant's bytes. Two builds with different bytes and different results = an
+// uninitialized read. Skipped under stream capture (a memset node would land in the graph).
+static void poison(void* p, size_t size, cudaStream_t stream, bool async) {
+    if (IMP_ALLOC_POISON_BYTE < 0 || p == nullptr || size == 0)
+        return;
+    cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+    if (async && cudaStreamIsCapturing(stream, &cs) == cudaSuccess && cs != cudaStreamCaptureStatusNone)
+        return;
+    if (async)
+        cudaMemsetAsync(p, IMP_ALLOC_POISON_BYTE, size, stream);
+    else
+        cudaMemset(p, IMP_ALLOC_POISON_BYTE, size);
+}
+
 extern "C" {
 
 cudaError_t __wrap_cudaMalloc(void** devPtr, size_t size) {
     record(g_dev_sync, size, imp::RegionTag::Other, __builtin_return_address(0), true);
-    return __real_cudaMalloc(devPtr, size);
+    const cudaError_t e = __real_cudaMalloc(devPtr, size);
+    if (e == cudaSuccess)
+        poison(*devPtr, size, nullptr, false);
+    return e;
 }
 
 cudaError_t __wrap_cudaFree(void* devPtr) { return __real_cudaFree(devPtr); }
 
 cudaError_t __wrap_cudaMallocAsync(void** devPtr, size_t size, cudaStream_t stream) {
     record(g_dev_async, size, imp::RegionTag::Other, __builtin_return_address(0), true);
-    return __real_cudaMallocAsync(devPtr, size, stream);
+    const cudaError_t e = __real_cudaMallocAsync(devPtr, size, stream);
+    if (e == cudaSuccess)
+        poison(*devPtr, size, stream, true);
+    return e;
 }
 
 cudaError_t __wrap_cudaFreeAsync(void* devPtr, cudaStream_t stream) {

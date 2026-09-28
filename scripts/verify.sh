@@ -10,24 +10,21 @@
 # IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_PERF=1
 # (stale baseline; refresh via gen_perf_baseline.sh), IMP_VERIFY_TRIALS=3 (processes the perf
 # gate medians over), IMP_VERIFY_IN_DOCKER=1 (internal re-exec sentinel, do not set manually).
-# Auto-Docker fallback: re-execs inside imp:test when cmake is not on PATH (Clean-Host), using
-# the prebuilt /usr/local/bin binaries; requires make build first.
+# Auto-Docker fallback: re-execs inside the worktree image (scripts/image_tag.sh) when cmake is
+# not on PATH (Clean-Host), using the prebuilt /usr/local/bin binaries; requires make build first.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
-# Auto re-exec into imp:test when cmake is unavailable on the host (Clean-Host: no toolchains
-# installed); points IMP_VERIFY_BIN/TESTS at the runtime image's prebuilt /usr/local/bin binaries.
-# IMP_VERIFY_IN_DOCKER guards against infinite re-exec if the runtime image also lacks cmake.
+# Auto re-exec into the worktree image when cmake is unavailable on the host (Clean-Host);
+# points IMP_VERIFY_BIN/TESTS at the image's prebuilt /usr/local/bin binaries. Refuses an image
+# built from another tree (image_tag.sh check). IMP_VERIFY_IN_DOCKER guards against re-exec loops.
 if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]; then
-    if ! docker image inspect imp:test >/dev/null 2>&1; then
-        echo "verify: cmake not found on host and imp:test image not built." >&2
-        echo "        Run 'make build' first, then re-run." >&2
-        exit 1
-    fi
-    echo "verify: host cmake unavailable — re-executing in imp:test container"
-    exec docker run --rm --gpus all \
+    IMG="$(bash "$ROOT/scripts/image_tag.sh")"
+    bash "$ROOT/scripts/image_tag.sh" check "$IMG" || exit 1
+    echo "verify: host cmake unavailable, re-executing in $IMG container"
+    exec bash "$ROOT/scripts/gpu_lock.sh" run "verify.sh $*" -- docker run --rm --gpus all \
         -v "$ROOT":/src -w /src \
         -v "$HOME/models":"$HOME/models":ro \
         -e IMP_VERIFY_IN_DOCKER=1 \
@@ -41,7 +38,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
         -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
         -e IMP_VERIFY_TRIALS="${IMP_VERIFY_TRIALS:-3}" \
-        --entrypoint bash imp:test scripts/verify.sh "$@"
+        --entrypoint bash "$IMG" scripts/verify.sh "$@"
 fi
 
 MODE="${1:-fast}"
@@ -49,7 +46,7 @@ MODE="${1:-fast}"
 # Wall clock at start and summary: every measurement below is a throughput number on a card
 # shared with other sessions, and without a timestamp an overlapping neighbour job can't be
 # ruled in or out after the fact.
-# UTC with the Z: this script re-execs into the imp:test container, whose clock is UTC while
+# UTC with the Z: this script re-execs into the test image, whose clock is UTC while
 # the host runs local time; a bare local time from one side is worse than none.
 VERIFY_T_START="$(date -u +%H:%M:%SZ)"
 echo "verify: started $VERIFY_T_START ($MODE)"
@@ -417,8 +414,8 @@ else
                 [ -n "$_pp" ] && PP_ALL="$PP_ALL$_pp\n"
             done
             gpu_sample_stop
-            median() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR==0)exit 1; print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
-            spread() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR<2)exit 0; printf "%.2f", (a[NR]-a[1])/a[1]*100}'; }
+            median() { printf '%b' "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR==0)exit 1; print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
+            spread() { printf '%b' "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR<2)exit 0; printf "%.2f", (a[NR]-a[1])/a[1]*100}'; }
             # Numbers come from --bench --json (#1583), not regexed out of the stderr table (whose paren
             # spacing varies with magnitude and was undocumented, load-bearing formatting). An empty
             # capture there used to produce a median over fewer samples than the header claimed.
@@ -647,6 +644,7 @@ smoke_prompt() {
     VERDICT=$(printf '%s\n' "$ALL_TOKS" | bash "$ROOT/scripts/degen_verdict.sh" "$min_toks" 2>&1)
     if [ "${VERDICT#OK}" = "$VERDICT" ]; then
         fail "$label — ${VERDICT#FAIL }"
+        # shellcheck disable=SC2086 # split into tokens on purpose
         echo "  tokens: $(printf '%s ' $ALL_TOKS)"
         return
     fi

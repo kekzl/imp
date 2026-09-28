@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <cstdint>
@@ -344,6 +345,79 @@ TEST_F(FP8GemmTest, DequantizeRowsRoundTripsTheSidecar) {
         cudaFree(p);
     cudaFree(s1);
     cudaFree(s2);
+}
+
+// FP8 LM head (gemm.nvfp4_lm_head=fp8): gemv_fp8_rowscale_fp32 vs an fp64 dot over the decoded
+// codes; per-row bits identical when the 40 rows run in groups of 1, 3, 11, 32 or 40 (#2152 rule).
+TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
+    constexpr int M = 1003, K = 2560, N = 40;
+    std::vector<half> w(static_cast<size_t>(M) * K), x(static_cast<size_t>(N) * K);
+    uint32_t s = 29u;
+    auto rnd = [&s] {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<float>(s >> 8) / 16777216.0f - 0.5f;
+    };
+    for (size_t i = 0; i < w.size(); ++i)
+        w[i] = __float2half(0.02f * static_cast<float>(1 + (i / K) % 9) * rnd());
+    for (auto& v : x)
+        v = __float2half(4.0f * rnd());
+    void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr;
+    float *d_s = nullptr, *d_y = nullptr;
+    const size_t y_elems = static_cast<size_t>(N) * M;
+    ASSERT_EQ(cudaMalloc(&d_w, w.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_q, w.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_s, M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, y_elems * sizeof(float)), cudaSuccess);
+    cudaMemcpy(d_w, w.data(), w.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    quantize_fp8_rows_async(d_w, d_q, M, K, d_s, stream_);
+    const half* hx = static_cast<const half*>(d_x);
+    auto run_groups = [&](int group) {
+        std::vector<float> out(y_elems);
+        cudaMemset(d_y, 0xff, y_elems * sizeof(float));  // NaN fill: an unwritten logit fails below
+        for (int r = 0; r < N; r += group)
+            EXPECT_TRUE(gemv_fp8_rowscale_fp32(d_q, d_s, hx + static_cast<size_t>(r) * K,
+                                               d_y + static_cast<size_t>(r) * M, M, K, std::min(group, N - r),
+                                               stream_));
+        EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        cudaMemcpy(out.data(), d_y, y_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        return out;
+    };
+    const std::vector<float> all = run_groups(N);
+    for (int group : {1, 3, 11, 32})
+        EXPECT_EQ(0, std::memcmp(all.data(), run_groups(group).data(), y_elems * sizeof(float)))
+            << "n=" << N << " vs groups of " << group << ": row bits differ";
+
+    std::vector<uint8_t> q(w.size());
+    std::vector<float> sc(M);
+    cudaMemcpy(q.data(), d_q, q.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(sc.data(), d_s, M * sizeof(float), cudaMemcpyDeviceToHost);
+    double max_rel = 0.0;
+    bool finite = true;
+    for (int r = 0; r < N; ++r) {
+        for (int m = 0; m < M; ++m) {
+            double acc = 0.0, mag = 0.0;
+            for (int k = 0; k < K; ++k) {
+                bool nan = false;
+                const double wv = e4m3_decode_ref(q[static_cast<size_t>(m) * K + k], nan) * sc[m];
+                const double xv = __half2float(x[static_cast<size_t>(r) * K + k]);
+                acc += wv * xv;
+                mag += std::fabs(wv * xv);
+            }
+            const float got = all[static_cast<size_t>(r) * M + m];
+            finite = finite && std::isfinite(got);
+            max_rel = std::max(max_rel, std::fabs(got - acc) / std::max(mag, 1e-30));
+        }
+    }
+    printf("[fp8 head mma] M=%d K=%d N=%d max_rel=%.3e\n", M, K, N, max_rel);
+    EXPECT_TRUE(finite) << "unwritten or non-finite logit";
+    // FP32 accumulation over K=2560 terms: error <= ~K * 2^-24 of sum|w*x| (1.5e-4); layout bugs are O(1).
+    EXPECT_LT(max_rel, 1.5e-4) << "FP8 head GEMM diverges from the fp64 dot over its own codes";
+    for (void* p : {d_w, d_q, d_x})
+        cudaFree(p);
+    cudaFree(d_s);
+    cudaFree(d_y);
 }
 
 }  // namespace

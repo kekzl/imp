@@ -45,7 +45,7 @@ uint64_t Engine::model_fingerprint_() const {
     h = fnv(h, &c.rope_theta, sizeof(c.rope_theta));
 
     auto sample = [&](const Tensor& t) {
-        if (!t.data)
+        if (!t.data || t.dropped_source)  // freed after load (FP8 LM head, GDN sources)
             return;
         size_t n = std::min<size_t>(t.nbytes(), 512);
         if (n == 0)

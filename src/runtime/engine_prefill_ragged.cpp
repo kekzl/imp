@@ -13,6 +13,7 @@
 // Mamba2/MLA models, MTP, perplexity capture, SWA sizing, residual KV and
 // the fp32_scan/ref_kernel GDN routes disable the path entirely.
 
+#include "runtime/prompt_tail.h"
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
@@ -191,7 +192,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         int chunk_len = total_input - offset;
         bool is_last = true;
         if (chunk_len > eff) {
-            chunk_len = eff;
+            chunk_len = keep_prompt_tail(eff, total_input - offset);
             is_last = false;
         }
         const int snap_end = snapshot_end_(*req);
@@ -200,7 +201,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
             is_last = false;
         }
         if (chunk_len > rows_left) {
-            chunk_len = rows_left;
+            chunk_len = keep_prompt_tail(rows_left, total_input - offset);
             is_last = false;
         }
         int ctx_len = offset + chunk_len;
@@ -212,7 +213,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         // A prefix-cache hit advanced offset and recomputed chunk_len — the
         // row budget still binds.
         if (chunk_len > rows_left) {
-            chunk_len = rows_left;
+            chunk_len = keep_prompt_tail(rows_left, total_input - offset);
             is_last = false;
             ctx_len = offset + chunk_len;
         }

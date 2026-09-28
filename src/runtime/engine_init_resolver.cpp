@@ -16,10 +16,12 @@
 #include "core/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "core/config/lm_head_mode.h"
 #include "memory/vram_query.h"
 #include "memory/kv_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
+#include "runtime/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/scheduler.h"
 
@@ -516,6 +518,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }
+        const int host_layers =
+            estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now);
+        if (auto_batch_for_host_experts(auto_batch, host_layers) != auto_batch) {
+            IMP_LOG_INFO("max_batch_size: auto → 1 (expert cache budget: %d MoE layer(s) host-resident; "
+                         "VRAM-derived value was %d, set runtime.max_batch_size to override)",
+                         host_layers, auto_batch);
+            auto_batch = 1;
+        }
         config_.max_batch_size = auto_batch;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
                      "tier-floor=%d, VRAM-aware)",
@@ -656,6 +666,7 @@ void Engine::init_resolve_quant_flags_() {
 
     // NVFP4 decode mode
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
+    config_.fp8_lm_head = lm_head_mode(runtime_config_.gemm.nvfp4_lm_head) == LmHeadMode::Fp8;
 
     if (config_.use_nvfp4_decode < 0) {
         const auto wq_qtype = model_->layer(0).wq.qtype;

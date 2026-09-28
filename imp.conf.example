@@ -643,6 +643,9 @@ nvfp4_decode_all     = false
 # trade) and small dense GGUF heads (d_model <= 4096, e.g. 4B/8B: decode win
 # exceeds the PPL cost); OFF for larger/MoE GGUF heads where the 2026-07-12
 # parity sweep measured the PPL cost above the decode win (14B, 30B-A3B).
+# "fp8" = per-row FP8 E4M3 head instead (#2156): F16/BF16 or GGUF source, GDN hybrids
+# included, one tensor-core kernel (32 rows per weight pass) for decode, batch and --perplexity;
+# 1.78x NVFP4 head bytes (Qwen3-8B 594.1 vs 333.8 MiB); the source head is freed after load.
 nvfp4_lm_head        = "auto"
 # Same for GDN/SSM-hybrid models (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.

@@ -8,6 +8,7 @@ Project-scoped skills for agentic work on imp (`.claude/skills/*/SKILL.md`). Eac
 | [benchmark-cuda](benchmark-cuda/SKILL.md) | The 13 STOP facts of this box, methodology, harness table (`tools/analysis/*`), ncu/nsys recipes and traps, roofline cells, aggregate-throughput method, baseline refresh, verdict expiry | sm120-cuda-expert |
 | [sm120-cuda-expert](sm120-cuda-expert/SKILL.md) | sm_120a laws, numerics rules for tensor-core rewrites, chunk-parallel GDN scan ledger, paths that must stay active, closed classes; PTX templates + dead-end ledger in `references/` | benchmark-cuda, check-degeneration |
 | [check-degeneration](check-degeneration/SKILL.md) | Failure-mode table, server suite, GTest equivalence gates, parity arms (graphs, ragged, chunkpar, sparse), NIAH, PPL judge rules | server-api |
+| [numerics-bisect](numerics-bisect/SKILL.md) | Two paths disagree: token ids, logprob grid, hidden-state dumps and their traps, HF fp32 + llama.cpp arbitration, NLL for near-ties | check-degeneration, sm120-cuda-expert, quant-formats |
 | [server-api](server-api/SKILL.md) | Source map, flags, endpoints, semantics (thinking, constraints, prefix cache, speculation, long context, priority, request ids, OTLP tracing, model swap), validation, fingerprints | check-degeneration |
 | [add-model-arch](add-model-arch/SKILL.md) | "Is it a new arch" check, integration checklist, wrong-output fingerprints, VRAM arithmetic | quant-formats, check-degeneration |
 | [quant-formats](quant-formats/SKILL.md) | GGUF vs NVFP4 worlds, StorageTier contract, KV dtypes (NVFP4 default on Qwen3.5 family), quality judging, the two NVFP4 layouts, imp-quantize | sm120-cuda-expert |
@@ -20,7 +21,7 @@ Project-scoped skills for agentic work on imp (`.claude/skills/*/SKILL.md`). Eac
 
 Boundaries:
 
-- Measure perf: benchmark-cuda. Write the kernel: sm120-cuda-expert. Is the output still sane: check-degeneration.
+- Measure perf: benchmark-cuda. Write the kernel: sm120-cuda-expert. Is the output still sane: check-degeneration. Two paths disagree on the numbers: numerics-bisect.
 - Build/test/CI: building-and-testing. Model output via HTTP: server-api. Model loads but is wrong: add-model-arch. Bytes/scales/tiers/KV dtypes: quant-formats.
 - Who calls this: code-graph (one query). Is it dead / worth refactoring: codebase-audit (the graph produces the candidate, the audit decides). Docs consistent with code: docs-sync; layer/lint/provenance: docs-layers.
 - Open/merge/release: shipping-prs; the build behind it: building-and-testing.
@@ -36,3 +37,4 @@ Boundaries:
 | 2026-08-31 | building-and-testing, docs-layers: hook filter, numbers rule 3b (#1825, #1827, #1828) | |
 | 2026-09-02 | all 13 skills rewritten to the no-prose form (every paragraph carries a number, path or decision), refreshed vs PRs #1787-#1856: mtp auto default + bench pins, sparse decode attention, NVFP4 KV default and word loads, chunk-parallel GDN scan (3xTF32/3xFP16 rules), FA2 2-CTA + softmax, stream-K, PDL device half, OTLP tracing, priority/X-Request-Id, recurrent snapshot host tier, container `IMP_SET`, `entrypoint`/`kernels` gate groups, stale-object rebuild trap; find-stubs baselines re-measured at `c3d9689e`; every cited path, config key, make target and flag checked against the tree (`pathcheck.py`, 0 real misses); anchor diff old vs new per skill (0 facts dropped) | this table |
 | 2026-09-22 | benchmark-cuda, sm120-cuda-expert, building-and-testing vs #2072/#2074: nsys in `imp:test` + phase split + host-bound diagnosis, dead control model (FP8 KV), computed-vs-measured verdict row, one-CTA-per-row and split-count mistakes, V2 bandwidth flake, `kernels` gate needs host docker, changed-lines clang-format | descriptions unchanged |
+| 2026-09-28 | building-and-testing, check-degeneration, add-model-arch, sm120-cuda-expert, quant-formats; numerics-bisect added: GPU handshake around hooks, worktree `IMP_VERIFY_MODELS`, resend probe (#2171), tokenizer id parity (#2159), row-count kernel variants (#2152), FP8 KV mantissa, MoE act-scale chunk mates (#2167), NVFP4 LM head on Qwen3-8B (#2166) | descriptions unchanged except the new skill |
