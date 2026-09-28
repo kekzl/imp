@@ -783,6 +783,8 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
+        # PLE n-gram context from the token history (header-only, model/ngram_table.h).
+        tests/test_ngram_context.cpp
         # The KV-pool sizing arithmetic (#1251). Pure integers, so it belongs in
         # the lane CI runs — it used to be inline in engine_kv_cache_init.cpp,
         # unreachable without a GPU and a 22 GB checkpoint.
@@ -1071,6 +1073,7 @@ if(IMP_BUILD_TESTS)
         tests/test_expert_cache.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
         tests/test_mtp_feed_batch.cu
         tests/test_mtp_topw.cu

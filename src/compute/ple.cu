@@ -51,9 +51,15 @@ __global__ void ple_gate_value_kernel(const half* __restrict__ key, half* __rest
         q_gv[base + j] = __float2half(gate * __half2float(vrow[j]));
 }
 
+__device__ __forceinline__ size_t seq_state_off_(int64_t slot_stride, const int* slots, int s) {
+    return static_cast<size_t>((slots ? static_cast<int64_t>(slots[s]) : 0) * slot_stride);
+}
+
 // Grid (channels / kThreads, ceil(n / kConvRowsPerBlock)); each thread owns one channel.
+// Row t belongs to sequence s = t / rows_per_seq; its past rows start at seq_state_off_(s).
 __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __restrict__ gvn,
                                     const half* __restrict__ w, const half* __restrict__ conv_state,
+                                    int64_t slot_stride, const int* __restrict__ slots, int rows_per_seq,
                                     half* __restrict__ hidden, int channels, int n, int kernel, int dilation,
                                     int state_len) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -65,11 +71,14 @@ __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __r
     const int t0 = blockIdx.y * kConvRowsPerBlock;
     const int t1 = min(n, t0 + kConvRowsPerBlock);
     for (int t = t0; t < t1; t++) {
+        const int s = t / rows_per_seq;
+        const int row0 = s * rows_per_seq;
+        const half* st = conv_state + seq_state_off_(slot_stride, slots, s);
         float acc = 0.0f;
         for (int k = 0; k < kernel; k++) {
-            const int tp = t - (kernel - 1 - k) * dilation;
-            const half x = (tp >= 0) ? gvn[static_cast<size_t>(tp) * channels + c]
-                                     : conv_state[static_cast<size_t>(state_len + tp) * channels + c];
+            const int tp = t - row0 - (kernel - 1 - k) * dilation;
+            const half x = (tp >= 0) ? gvn[static_cast<size_t>(row0 + tp) * channels + c]
+                                     : st[static_cast<size_t>(state_len + tp) * channels + c];
             acc += wk[k] * __half2float(x);
         }
         const size_t i = static_cast<size_t>(t) * channels + c;
@@ -78,20 +87,25 @@ __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __r
     }
 }
 
-// One thread per channel reads its state_len new values before writing: no cross-thread hazard.
-__global__ void ple_conv_state_kernel(const half* __restrict__ gvn, half* __restrict__ conv_state,
-                                      int channels, int n, int state_len) {
+// Grid (channels / kThreads, n_seq). One thread per (channel, sequence) reads its state_len
+// new values before writing: no cross-thread hazard.
+__global__ void ple_conv_shift_kernel(const half* __restrict__ gvn, half* __restrict__ conv_state,
+                                      int64_t slot_stride, const int* __restrict__ slots, int rows_per_seq,
+                                      int channels, int state_len) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= channels)
         return;
+    const int s = blockIdx.y;
+    const int row0 = s * rows_per_seq;
+    half* st = conv_state + seq_state_off_(slot_stride, slots, s);
     half nv[kMaxKernel * kMaxKernel];
     for (int r = 0; r < state_len; r++) {
-        const int tp = n - state_len + r;
-        nv[r] = (tp >= 0) ? gvn[static_cast<size_t>(tp) * channels + c]
-                          : conv_state[static_cast<size_t>(state_len + tp) * channels + c];
+        const int tp = rows_per_seq - state_len + r;
+        nv[r] = (tp >= 0) ? gvn[static_cast<size_t>(row0 + tp) * channels + c]
+                          : st[static_cast<size_t>(state_len + tp) * channels + c];
     }
     for (int r = 0; r < state_len; r++)
-        conv_state[static_cast<size_t>(r) * channels + c] = nv[r];
+        st[static_cast<size_t>(r) * channels + c] = nv[r];
 }
 
 }  // namespace
@@ -108,27 +122,32 @@ void ple_gate_value(const Tensor& key, Tensor& q_gv, const Tensor& value, int hc
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, Tensor& conv_state, Tensor& hidden,
-                  int channels, int kernel, int dilation, cudaStream_t stream) {
+void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* conv_state, int64_t slot_stride,
+                  const int* slots, int n_seq, Tensor& hidden, int channels, int kernel, int dilation,
+                  cudaStream_t stream) {
     const int n = static_cast<int>(gv.shape[0]);
     const int state_len = (kernel - 1) * dilation;
-    if (n == 0)
+    if (n == 0 || n_seq <= 0)
         return;
-    if (kernel > kMaxKernel || state_len > kMaxKernel * kMaxKernel) {
-        IMP_LOG_ERROR("ple_conv_add: kernel %d dilation %d exceed the compiled limits", kernel, dilation);
+    if (kernel > kMaxKernel || state_len > kMaxKernel * kMaxKernel || n % n_seq != 0 ||
+        conv_state == nullptr) {
+        IMP_LOG_ERROR("ple_conv_add: kernel %d dilation %d rows %d sequences %d state %p not supported",
+                      kernel, dilation, n, n_seq, conv_state);
         return;
     }
+    const int rows_per_seq = n / n_seq;
     const dim3 grid((channels + kThreads - 1) / kThreads, (n + kConvRowsPerBlock - 1) / kConvRowsPerBlock);
     ple_conv_add_kernel<<<grid, kThreads, 0, stream>>>(static_cast<const half*>(gv.data),
                                                        static_cast<const half*>(gvn.data),
                                                        static_cast<const half*>(w.data),
-                                                       static_cast<const half*>(conv_state.data),
-                                                       static_cast<half*>(hidden.data), channels, n, kernel,
-                                                       dilation, state_len);
+                                                       static_cast<const half*>(conv_state), slot_stride,
+                                                       slots, rows_per_seq, static_cast<half*>(hidden.data),
+                                                       channels, n, kernel, dilation, state_len);
     IMP_CUDA_CHECK_LAUNCH();
-    ple_conv_state_kernel<<<grid.x, kThreads, 0, stream>>>(static_cast<const half*>(gvn.data),
-                                                           static_cast<half*>(conv_state.data), channels, n,
-                                                           state_len);
+    const dim3 sgrid(grid.x, n_seq);
+    ple_conv_shift_kernel<<<sgrid, kThreads, 0, stream>>>(static_cast<const half*>(gvn.data),
+                                                          static_cast<half*>(conv_state), slot_stride, slots,
+                                                          rows_per_seq, channels, state_len);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

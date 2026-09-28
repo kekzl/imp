@@ -26,6 +26,8 @@ struct SsmStateGeometry {
     int head_dim = 0;    // ssm_inner_size / n_heads
     int state_size = 0;  // ModelConfig::ssm_state_size
     QType h_dtype = QType::F32;
+    // Per-slot tail after the layers (Qwen4Exp PLE conv rows), 0 = none. 256-aligned when charged.
+    size_t extra_bytes_per_slot = 0;
 };
 
 // Every sub-allocation of the slab is 256-byte aligned, so the pool is bigger
@@ -50,9 +52,10 @@ inline size_t ssm_bytes_per_layer(const SsmStateGeometry& g) {
     return ssm_conv_bytes_per_layer(g) + ssm_h_bytes_per_layer(g);
 }
 
-// One scheduler slot: every GDN layer's conv + h state, contiguous.
+// One scheduler slot: every GDN layer's conv + h state, contiguous, then the extra tail.
 inline size_t ssm_bytes_per_slot(const SsmStateGeometry& g) {
-    return ssm_bytes_per_layer(g) * static_cast<size_t>(g.n_ssm_layers > 0 ? g.n_ssm_layers : 0);
+    return ssm_bytes_per_layer(g) * static_cast<size_t>(g.n_ssm_layers > 0 ? g.n_ssm_layers : 0) +
+           ssm_align256(g.extra_bytes_per_slot);
 }
 
 // The whole pool: the scheduler's live slots plus the slots the

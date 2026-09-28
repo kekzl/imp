@@ -179,7 +179,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                                         n_heads,
                                         (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
                                         mcfg.ssm_state_size,
-                                        config.ssm_state_dtype};
+                                        config.ssm_state_dtype,
+                                        model.ple_state_bytes()};
             ssm_footprint = ssm_pool_bytes(geom, config.max_batch_size, ssm_reserved_slots);
         }
     }

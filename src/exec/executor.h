@@ -603,14 +603,12 @@ private:
     Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
     Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
     // Qwen4Exp PLE (executor_ple.cu): pinned staging for the gathered n-gram rows, the
-    // dilated conv's past rows, the host-side n-gram context and id scratch.
+    // n-gram id scratch. Sequence state (conv rows) is the SSM slab tail per slot.
     PinnedBuffer ple_host_;
-    Tensor ple_conv_state_;  // [(kernel-1)*dilation, hc*d] FP16
-    std::vector<int32_t> ple_ctx_;
     PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
     Tensor ple_emb_dev_;         // [max_tokens, d] FP16, the gathered rows on the device
-    bool ple_prepared_ = false;  // prepare_decode_step_host() ran for the next forward
     std::vector<int64_t> ple_ids_;
+    std::vector<int32_t> ple_step_ctx_;
     cudaEvent_t ple_h2d_done_ = nullptr;
     // Qwen4Exp QSA indexer (executor_qsa.cu): per QSA layer the raw index keys [ctx, 128]
     // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
@@ -1151,23 +1149,23 @@ private:
     void qsa_debug_rows_(int layer, const InferenceState& state, const void* q_rows, const void* o_dense,
                          int rows, int p0, const int* bt, float scale, cudaStream_t stream);
     void ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream);
-    // Host half of the PLE for one chunk: n-gram hash, table gather into pinned staging,
-    // H2D into ple_emb_dev_, context update. Outside any graph capture.
-    void ple_prepare_host_(const int32_t* ids, int n, int pos0, cudaStream_t stream);
+    // Host half of the PLE for one chunk: n-gram hash, table gather into pinned staging, H2D
+    // into ple_emb_dev_. n_seq sequences of n/n_seq rows, ctx [n_seq][ngram_size-1] their
+    // contexts. Stateless; outside any graph capture.
+    void ple_prepare_host_(const int32_t* ids, int n, int n_seq, const int32_t* ctx, cudaStream_t stream);
 
 public:
     // Host work a decode step needs BEFORE its forward, so the forward itself is
     // capture-clean: PLE rows for the step's tokens (ple_prepare_host_) and the device
     // expert cache's take-over of the pool from the host LRU path. Called by the engine
-    // per decode step with the host copies of the batch's token ids and positions.
-    void prepare_decode_step_host(const int32_t* ids, const int32_t* positions, int n,
+    // per decode step with the host copies of the batch's token ids, n_seq sequences of
+    // n/n_seq rows and ple_ctx [n_seq][ple_context_len()]. True = PLE rows staged (set
+    // InferenceState::ple_host_ready); false without PLE or on a shape it does not serve.
+    bool prepare_decode_step_host(const int32_t* ids, int n, int n_seq, const int32_t* ple_ctx,
                                   cudaStream_t stream);
-    // PLE sequence state for recurrent snapshots: the conv rows (device, 0 bytes without a
-    // PLE block) ride as the snapshot sidecar; the n-gram context is rebuilt from the
-    // tokens before the resume position (`prev`, the last n_prev of them).
-    size_t ple_state_bytes() const { return ple_conv_state_.data ? ple_conv_state_.nbytes() : 0; }
-    void* ple_state_data() const { return ple_conv_state_.data; }
-    void ple_resume_context(const int32_t* prev, int n_prev);
+    // Tokens of n-gram context per PLE row (ngram_size - 1), 0 without PLE.
+    int ple_context_len() const;
+    std::vector<int32_t>& ple_ctx_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
 
 private:
 

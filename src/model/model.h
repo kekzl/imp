@@ -57,6 +57,8 @@ public:
     const Tensor& hc_mixer_down() const { return hc_mixer_down_; }
     const Tensor& hc_mixer_up() const { return hc_mixer_up_; }
     const NGramTable* ngram_table() const { return ngram_table_.get(); }  // Qwen4Exp PLE, else null
+    // Qwen4Exp PLE conv rows of one sequence: (kernel-1)*ngram_size rows x hc*d FP16. 0 without PLE.
+    size_t ple_state_bytes() const;
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }

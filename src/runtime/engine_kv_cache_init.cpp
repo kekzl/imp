@@ -745,13 +745,12 @@ bool Engine::init_kv_cache() {
             // Lazy: reserve every slot, commit one per admitted sequence
             // (scheduler admission gate below). The plan above charged the
             // whole slab either way.
-            const bool ssm_pool_ok = ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch,
-                                                      mcfg.ssm_conv_kernel, n_heads, hd, mcfg.ssm_state_size,
-                                                      config_.ssm_state_dtype, &vram_alloc_,
-                                                      ssm_reserved_slots,
-                                                      runtime_config_.vram.lazy_commit ? vmm_backend()
-                                                                                       : nullptr,
-                                                      batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size));
+            const bool ssm_pool_ok = ssm_state_->init(
+                n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
+                mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_, ssm_reserved_slots,
+                runtime_config_.vram.lazy_commit ? vmm_backend() : nullptr,
+                batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
+                model_->ple_state_bytes());
             if (ssm_pool_ok && ssm_state_->lazy() && scheduler_)
                 scheduler_->set_admission_gate([this] { return recurrent_slot_admissible_(); });
             if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
@@ -786,6 +785,11 @@ bool Engine::init_kv_cache() {
             }
         }
 
+        // PLE conv rows live in the SSM slab tail (executor_ple.cu): no slab, no PLE state.
+        if (const size_t ple = model_->ple_state_bytes();
+            ple > 0 && (!ssm_state_ || ssm_state_->extra_bytes() < ple))
+            throw std::runtime_error("PLE model without the per-slot conv rows in the SSM/GDN state slab");
+
         // Recurrent-state snapshots: KV block reuse alone cannot skip prefill
         // for a recurrent model (state at the skip boundary would be zero), so
         // hybrid prefix caching needs the snapshot store, or it must turn back off.
@@ -793,11 +797,10 @@ bool Engine::init_kv_cache() {
             int budget_mb = runtime_config_.server.recurrent_snapshot_mb;
             if (ssm_state_ && budget_mb > 0) {
                 recurrent_snapshots_ = std::make_unique<RecurrentSnapshotStore>();
-                                recurrent_snapshots_->init(
+                recurrent_snapshots_->init(
                     ssm_state_->per_seq_bytes(), static_cast<size_t>(budget_mb) << 20,
                     static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_host_mb, 0))
-                        << 20,
-                    executor_->ple_state_bytes());
+                        << 20);
                 if (recurrent_snapshots_->enabled()) {
                     scheduler_->set_prefix_reuse_limit(
                         [this](Request& r) { return hybrid_prefix_reuse_limit_(r); });
