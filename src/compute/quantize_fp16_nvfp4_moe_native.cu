@@ -1,7 +1,7 @@
 // Per-expert FP16->NVFP4 quantization, native row-major UE4M3 scale layout; feeds
 // gemm_grouped_nvfp4_smallM (MoE activation smallM prefill GEMM).
-// Matches quantize_fp16_to_nvfp4 (nvfp4_quant.cu) exactly for bit-exact single-expert
-// equivalence: two-level scaling (tensor_scale/expert + micro_scale/16 elems), FP8 UE4M3
+// Matches quantize_fp16_to_nvfp4_with_scale(tensor_scale=1) bit-exactly: FIXED activation tensor
+// scale (a row never depends on its expert mates, #2167) + micro_scale/16 elems, FP8 UE4M3
 // micro-scales, HW E2M1 (cvt.rn.satfinite.e2m1x2). Output: [M_e,K/2] packed FP4 +
 // [M_e,K/16] linear UE4M3 scales.
 
@@ -22,6 +22,9 @@ namespace imp {
 // ---------------------------------------------------------------------------
 static constexpr int kNativeMicroBlockSize = 16;  // elements per micro-block
 static constexpr float kNativeFP4E2M1Max = 6.0f;  // max representable in E2M1
+// Activation tensor scale, fixed: a per-expert batch absmax made a row's FP4 bits depend on the
+// other rows routed to its expert (#2167). Same range as the CUTLASS MoE quantize (no tensor scale).
+static constexpr float kNativeActTensorScale = 1.0f;
 
 // HW FP4 pair conversion, identical to pack_fp4_pair_hw (gemm_cutlass_sm120.cu) and
 // nvfp4_pack_pair_hw (nvfp4_quant.cu). Low nibble=v0, high nibble=v1.
@@ -49,61 +52,16 @@ __device__ __forceinline__ uint8_t native_pack_fp4_pair(float v0, float v1) {
 #endif
 }
 
-// Kernel 1: per-expert absmax reduction. Grid: blockIdx.x=expert; block: 256 threads.
-// Each CTA reduces rows [offsets[e],offsets[e+1]) over all K columns, atomicMax into
-// d_absmax[e] using uint32 atomicMax on IEEE754 bits of non-negative floats
-// (same trick as absmax_kernel in nvfp4_quant.cu).
-__global__ void nvfp4_moe_native_absmax_kernel(
-    const __half* __restrict__ src,      // [expanded, K]
-    const int* __restrict__ offsets,     // [ne+1]
-    int K,
-    float* __restrict__ d_absmax)        // [ne], pre-zeroed
-{
-    int e = blockIdx.x;
-    int M0 = offsets[e];
-    int M1 = offsets[e + 1];
-    int M_e = M1 - M0;
-    if (M_e <= 0)
-        return;
-
-    int64_t n_elem = (int64_t)M_e * K;
-
-    float local_max = 0.0f;
-    for (int64_t i = threadIdx.x; i < n_elem; i += blockDim.x) {
-        int64_t src_idx = (int64_t)M0 * K + i;
-        float v = fabsf(__half2float(src[src_idx]));
-        if (v > local_max)
-            local_max = v;
-    }
-
-    // Shared-memory block reduction.
-    __shared__ float smem[256];
-    smem[threadIdx.x] = local_max;
-    __syncthreads();
-    for (int s = 128; s > 0; s >>= 1) {
-        if (threadIdx.x < s && smem[threadIdx.x + s] > smem[threadIdx.x])
-            smem[threadIdx.x] = smem[threadIdx.x + s];
-        __syncthreads();
-    }
-
-    if (threadIdx.x == 0) {
-        unsigned int* ptr = reinterpret_cast<unsigned int*>(d_absmax + e);
-        atomicMax(ptr, __float_as_uint(smem[0]));
-    }
-}
-
 // Kernel 2: per-expert FP16->NVFP4 quantize (native row-major output). One thread per
 // 16-elem micro-block. Grid: blockIdx.x=expert, blockIdx.y=slice; block: 256 threads.
-// Scale (matches quantize_micro_block_nvfp4, nvfp4_quant.cu): tensor_scale=absmax/6
-// (1.0 if absmax==0); micro_scale_f=clamp(local_absmax/(tensor_scale*6),1/512,448)->UE4M3;
-// fp4_val=input_val/(tensor_scale*actual_scale).
+// Scale: tensor_scale=kNativeActTensorScale; micro_scale_f=clamp(local_absmax/(tensor_scale*6),
+// 1/512,448)->UE4M3; fp4_val=input_val/(tensor_scale*actual_scale).
 // Output: packed_e[m*(K/2)+kb*8+i/2]=nibble byte; sf_e[m*(K/16)+kb]=UE4M3 byte.
 __global__ void nvfp4_moe_native_quant_kernel(
     const __half* __restrict__ src,          // [expanded, K]
     void* const* __restrict__ d_packed,      // [ne] per-expert packed FP4
     void* const* __restrict__ d_sf,          // [ne] per-expert UE4M3
     const int* __restrict__ offsets,         // [ne+1]
-    const float* __restrict__ d_absmax,      // [ne]
     int K)
 {
     int e = blockIdx.x;
@@ -116,8 +74,7 @@ __global__ void nvfp4_moe_native_quant_kernel(
     auto* packed_e = static_cast<uint8_t*>(d_packed[e]);
     auto* sf_e     = static_cast<uint8_t*>(d_sf[e]);
 
-    float absmax_e = d_absmax[e];
-    float tensor_scale = (absmax_e == 0.0f) ? 1.0f : (absmax_e / kNativeFP4E2M1Max);
+    const float tensor_scale = kNativeActTensorScale;
 
     int K_blocks = K / kNativeMicroBlockSize;  // number of micro-blocks per row
     int total_mb = M_e * K_blocks;             // total micro-blocks for this expert
@@ -173,18 +130,11 @@ __global__ void nvfp4_moe_native_quant_kernel(
     }
 }
 
-// Tiny finalization kernel: convert per-expert absmax → tensor_scale (absmax/6,
-// or 1.0 if absmax==0). One thread per expert.
-__global__ void nvfp4_moe_native_finalize_scales_kernel(
-    const float* __restrict__ d_absmax,  // [ne]
-    float* __restrict__ d_tensor_scales, // [ne]
-    int n_experts)
-{
+// Per-expert activation tensor scales for the smallM alpha: the fixed kNativeActTensorScale.
+__global__ void nvfp4_moe_native_fill_scales_kernel(float* __restrict__ d_tensor_scales, int n_experts) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= n_experts)
-        return;
-    float a = d_absmax[e];
-    d_tensor_scales[e] = (a == 0.0f) ? 1.0f : (a / kNativeFP4E2M1Max);
+    if (e < n_experts)
+        d_tensor_scales[e] = kNativeActTensorScale;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,35 +163,21 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
     // Copy per-expert pointer arrays to device (host arrays passed in).
     void** d_packed_dev = nullptr;
     void** d_sf_dev     = nullptr;
-    float* d_absmax     = nullptr;
     IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_packed_dev, sizeof(void*) * n_experts, stream));
     IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_sf_dev,     sizeof(void*) * n_experts, stream));
-    IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_absmax,     sizeof(float) * n_experts, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_absmax, 0,   sizeof(float) * n_experts, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_packed_dev, d_packed_ptrs, sizeof(void*) * n_experts,
                                        cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_sf_dev,     d_sf_ptrs,     sizeof(void*) * n_experts,
                                        cudaMemcpyHostToDevice, stream));
 
-    // Pass 1: per-expert absmax (one CTA per expert, 256 threads).
-    {
-        dim3 grid(n_experts);
-        dim3 block(256);
-        nvfp4_moe_native_absmax_kernel<<<grid, block, 0, stream>>>(
-            src_fp16, d_expert_offsets, K, d_absmax);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-
-    // Optional pass 1.5: write per-expert tensor_scales = absmax/6 to caller buffer.
     if (d_tensor_scales_opt) {
         int threads = 64;
         int blocks = (n_experts + threads - 1) / threads;
-        nvfp4_moe_native_finalize_scales_kernel<<<blocks, threads, 0, stream>>>(
-            d_absmax, d_tensor_scales_opt, n_experts);
+        nvfp4_moe_native_fill_scales_kernel<<<blocks, threads, 0, stream>>>(d_tensor_scales_opt, n_experts);
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    // Pass 2: quantize (one CTA-x per expert, CTA-y slices for parallelism).
+    // Quantize (one CTA-x per expert, CTA-y slices for parallelism).
     {
         dim3 block(256);
         dim3 grid(n_experts, 16);
@@ -250,14 +186,12 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
             const_cast<void* const*>(d_packed_dev),
             const_cast<void* const*>(d_sf_dev),
             d_expert_offsets,
-            d_absmax,
             K);
         IMP_CUDA_CHECK_LAUNCH();
     }
 
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_packed_dev, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_sf_dev,     stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_absmax,     stream));
 }
 
 void quantize_fp16_to_nvfp4_moe_native(

@@ -9,8 +9,8 @@ namespace imp {
 // Input: [expanded,K] FP16, expert_offsets[ne+1] partitions rows.
 // Output per expert: packed NVFP4 [M_e,K/2] (d_packed_ptrs[e]) + UE4M3 scales
 // [M_e,K/16] (d_sf_ptrs[e]), row-major dense.
-// Two-level scaling (matches quantize_fp16_to_nvfp4, nvfp4_quant.cu):
-// tensor_scale=absmax/6; micro_scale=local_absmax/(tensor_scale*6) as FP8 UE4M3;
+// Scaling (matches quantize_fp16_to_nvfp4_with_scale(1.0), nvfp4_quant.cu): fixed activation
+// tensor_scale=1 (a row never depends on its expert mates, #2167); micro_scale=local_absmax/6 UE4M3;
 // fp4 = val/(tensor_scale*micro_scale_actual), E2M1 HW sat.
 // Read by gemm_grouped_nvfp4_smallM (cache_moe_native_nvfp4 / nvfp4_moe_ms_native).
 void quantize_fp16_to_nvfp4_moe_native(
@@ -24,7 +24,7 @@ void quantize_fp16_to_nvfp4_moe_native(
     cudaStream_t stream);
 
 // Same as above, plus writes per-expert FP32 tensor scale to d_tensor_scales
-// ([n_experts]): tensor_scale_e = absmax_e/6.0 (1.0 if absmax_e==0), matching the
+// ([n_experts]): the fixed activation tensor_scale 1.0, matching the
 // internal quant scale. Needed by the smallM grouped GEMM, which folds
 // (a_tensor_scale * b_tensor_scale) into alpha.
 void quantize_fp16_to_nvfp4_moe_native_with_scales(
