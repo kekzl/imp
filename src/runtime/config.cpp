@@ -297,7 +297,16 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.q4k_imma_prefill", cfg.gemm.q4k_imma_prefill);
     B("gemm.moe_imma_prefill", cfg.gemm.moe_imma_prefill);
     B("gemm.nvfp4_decode_all", cfg.gemm.nvfp4_decode_all);
-    S("gemm.nvfp4_lm_head", cfg.gemm.nvfp4_lm_head);
+    if (!matched && dotted_key == "gemm.nvfp4_lm_head") {
+        // auto|on|off|fp8; bool spellings map to on/off, anything else is a bad value (#1627)
+        if (val == "auto" || val == "on" || val == "off" || val == "fp8") {
+            cfg.gemm.nvfp4_lm_head = val;
+        } else {
+            bool b = parse_bool(val, false, &value_ok_local);
+            cfg.gemm.nvfp4_lm_head = b ? "on" : "off";
+        }
+        matched = true;
+    }
     if (!matched && dotted_key == "gemm.cublas_fp16_acc") {
         // tri-state auto|on|off; legacy bool spellings stay valid
         if (val == "auto" || val == "on" || val == "off") {

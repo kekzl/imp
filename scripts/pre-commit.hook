@@ -6,7 +6,7 @@
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 # Cheap static gates run FIRST, before any early exit: an allowlist-pin drift or dead doc
 # citation used to surface only at push time or in CI, after the full build+suite already ran.
@@ -45,6 +45,12 @@ fi
 if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-commit (Stage 1 / GPU)" || exit 1
 fi
+# Hold the GPU lock (holder = this hook's pid) until exit; refused if another worktree holds it.
+if [ -f "$ROOT/scripts/gpu_lock.sh" ]; then
+    bash "$ROOT/scripts/gpu_lock.sh" acquire --pid $$ "pre-commit" >/dev/null || exit 1
+    trap 'bash "$ROOT/scripts/gpu_lock.sh" release --pid $$ >/dev/null' EXIT
+fi
+IMG="$(bash "$ROOT/scripts/image_tag.sh")"
 
 # Maps the staged diff to reachable test modules: the full suite (imp-tests, ~4min after
 # build) runs when the diff touches what every module links (core, include, the build itself)
@@ -74,13 +80,15 @@ done
 MODULES="$(echo "$MODULES" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')"
 if [ "${IMP_PRECOMMIT_FULL:-0}" = "1" ] || echo " $MODULES" | grep -q " ALL"; then
     echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu (full suite)"
-    exec make -s test-gpu
+    make -s test-gpu
+    exit $?
 fi
 echo "pre-commit (Stage 1 / GPU): staged source changes → make build + modules: $MODULES(IMP_PRECOMMIT_FULL=1 runs the full suite)"
 make -s build || exit 1
+bash "$ROOT/scripts/image_tag.sh" check "$IMG" || exit 1
 for mod in $MODULES; do
     echo "pre-commit: $mod"
     # Absolute path: gtest threadsafe death tests re-exec argv[0] with execv
     # (no PATH search); a bare "test-e2e" fails DeviceFaultSignalTest.
-    docker run --rm --gpus all -v "$HOME/models:/models" imp:test "/usr/local/bin/$mod" || exit 1
+    docker run --rm --gpus all -v "$HOME/models:/models" "$IMG" "/usr/local/bin/$mod" || exit 1
 done

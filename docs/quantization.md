@@ -124,6 +124,10 @@ Not amortised away by concurrency (head read whole once per token, ~11% of the b
 `ParallelLMHead` accepts no scales (`no module or parameter named lm_head.weight_global_scale`);
 Modelopt / llm-compressor put `lm_head` in `ignore` for W4A4, no other engine has this option.
 
+`--set gemm.nvfp4_lm_head=fp8` serves the head as per-row FP8 E4M3 instead (#2156): 1.78x the
+NVFP4 head bytes, FP16 activations on every row count (decode, batch, `--perplexity`). The GPU
+PPL and decode A/B is pending, so the default stays `auto`.
+
 ### Roles that must stay full precision
 
 | Role | Why | Control |

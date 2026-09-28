@@ -4,9 +4,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
+
 ### Changed
 - Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
 - Host-resident MoE experts: auto max_batch_size resolves to 1 (expert cache budget; Flash-Next c=8 at batch 32: 5.6 vs 7.2 out tok/s at batch 1). An explicit runtime.max_batch_size / --max-batch is kept and warned with the cache GiB and slots/layer it leaves.
+- Hooks and make GPU targets: a linked worktree builds `imp:test-<dir>-<hash8>` (main checkout keeps `imp:test`), runners refuse an image whose `imp.tree` is not this tree, and `scripts/gpu_lock.sh` lets one session hold the card; other worktrees' hooks and targets refuse instead of starting.
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).
 - GDN input packs come from a release-on-free mempool, so freeing them returns all 2896.9 MiB instead of 1760.0 on Qwen3.8-Flash-Next: expert cache 263 -> 290 slots/layer, hit rate 78.9 -> 80.7 %, tg512 prose 63.66 -> 66.22 tok/s (medians, 3 pairs).
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.

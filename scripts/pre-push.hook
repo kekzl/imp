@@ -5,13 +5,16 @@
 # else IMP_VERIFY_SKIP_PERF=1 (host decode drifts several percent between sessions).
 # Paired A/B (make verify-ab, AUDIT_arch_2026 H-3) replaces the single-arm gate on kernel diffs
 # (src/compute, src/exec): 8% single-arm threshold vs 2% mean paired delta; IMP_SKIP_AB=1 falls
-# back. docker build skips when imp:test already has the tree fingerprint. Override: git push --no-verify.
+# back. docker build skips when the worktree image (scripts/image_tag.sh) already has the tree.
+# Override: git push --no-verify.
 set -uo pipefail
 
+# shellcheck disable=SC2034 # git passes <remote> <url>; kept for readers
 REMOTE="$1"
+# shellcheck disable=SC2034
 URL="$2"
 ROOT="$(git rev-parse --show-toplevel)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 SOURCE_RE='^(src/|include/|tools/|tests/|scripts/|CMakeLists\.txt|cmake/|.*\.cmake$)'
 PERF_RE='^(src/(compute|exec|quant|runtime|model)/|.*\.(cu|cuh)$|cmake/|CMakeLists\.txt|tests/perf_baseline)'
@@ -20,6 +23,7 @@ PERF_RE='^(src/(compute|exec|quant|runtime|model)/|.*\.(cu|cuh)$|cmake/|CMakeLis
 NEEDS_VERIFY=0
 NEEDS_PERF=0
 NEEDS_ROOFLINE=0
+# shellcheck disable=SC2034 # LOCAL_REF, REMOTE_REF: stdin columns, unused
 while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && continue   # delete
     if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
@@ -72,6 +76,11 @@ fi
 if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-push" || exit 1
 fi
+# Hold the GPU lock (holder = this hook's pid) until exit; refused if another worktree holds it.
+if [ -f "$ROOT/scripts/gpu_lock.sh" ]; then
+    bash "$ROOT/scripts/gpu_lock.sh" acquire --pid $$ "pre-push" >/dev/null || exit 1
+    trap 'bash "$ROOT/scripts/gpu_lock.sh" release --pid $$ >/dev/null' EXIT
+fi
 
 # Roofline (per-kernel %-of-peak, tools/roofline/) has no automated arm: CI has no GPU runner
 # and roofline.yml only re-parses committed history, so a kernel diff compares against nothing
@@ -96,13 +105,13 @@ if [ "$NEEDS_PERF" -eq 1 ]; then
     if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ "${IMP_SKIP_AB:-0}" != "1" ]; then
         echo "pre-push: kernel paths changed → make verify-fast (correctness) + paired A/B (make verify-ab)"
         IMP_VERIFY_SKIP_PERF=1 make -s verify-fast || exit 1
-        exec make -s verify-ab
+        make -s verify-ab; exit $?
     fi
     echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
-    exec make -s verify-fast
+    make -s verify-fast; exit $?
 fi
 
 echo "pre-push: source changes outside the measured paths → make verify-fast (no perf gate)"
 echo "          run the perf gate anyway with: make verify-fast"
 export IMP_VERIFY_SKIP_PERF=1
-exec make -s verify-fast
+make -s verify-fast; exit $?
