@@ -73,6 +73,9 @@ public:
     void* conv_state_in(void* slab, int ssm_layer_idx) const {
         return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_;
     }
+    void* extra_state_in(void* slab) const {
+        return extra_bytes_ ? static_cast<char*>(slab) + per_layer_bytes_ * n_ssm_layers_ : nullptr;
+    }
     void* h_state_in(void* slab, int ssm_layer_idx) const {
         return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_ + conv_bytes_;
     }

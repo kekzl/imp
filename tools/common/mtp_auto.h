@@ -21,8 +21,8 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch);
 // Phase 2, after load: installs the resolved pair into cfg and logs the decision once.
 // head_loaded is what the load actually produced: a checkpoint without a head must fall back
 // to the documented default rather than leave ngram off with nothing drafting.
-// head_auto_k_cap > 0 (mtp_auto_k_cap of the loaded head) caps the auto depth only; explicit
-// settings pass through.
+// head_auto_k_cap > 0 (mtp_auto_k_cap of the loaded head) caps the auto depth only, < 0 turns
+// auto off for that head; explicit settings pass through.
 void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, int head_auto_k_cap = 0);
 
 // Phase 2 for a caller that stashes the pending runtime config BEFORE the load (imp-cli):

@@ -591,6 +591,19 @@ bool GraphExecutor::host_decode_rows_ok_(int layer, int n, int top_k) const {
            nvfp4_host_decode_ready(model_->layer(layer), expert_cache_, moe_, top_k);
 }
 
+int GraphExecutor::moe_host_rows_capture_max() const {
+    const auto& cfg = model_->config();
+    bool any = false;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        if (!layer_has_moe(i))
+            continue;
+        if (!host_decode_rows_ok_(i, 2, cfg.n_experts_active))
+            return 0;
+        any = true;
+    }
+    return any && device_expert_cache_covers_host_layers() ? kHostDecodeRowsMax : 0;
+}
+
 // Row r reads routing [r * top_k, (r + 1) * top_k) (token order: n > 1 routing sorts into separate
 // arrays) and writes its own row of h; the shared expert and residual follow in phase 8 for all rows.
 void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {

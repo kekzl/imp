@@ -87,7 +87,7 @@ TEST(MtpLayoutDispatch, Qwen4ExpMapsAll3101Names) {
     EXPECT_NE(h.indexer_qk_proj.data, nullptr);
     EXPECT_TRUE(h.experts_up.empty()) << "FP8 experts must not reach the Nemotron upload vectors";
     EXPECT_EQ(h.hc_count, 4);
-    EXPECT_EQ(mtp_auto_k_cap(h), 1);
+    EXPECT_EQ(mtp_auto_k_cap(h), kMtpAutoDeclines);
 }
 
 TEST(MtpLayoutDispatch, Qwen4ExpMissingExpertScaleIsIncomplete) {

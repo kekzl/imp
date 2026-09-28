@@ -440,6 +440,9 @@ public:
     // device-read lengths: uniform hd=128, no learned sinks, no MLA, no
     // LongRoPE, fa2_fp16qk not disabled.
     bool chunk_capture_supported() const;
+    // Rows a captured verify chunk may carry when every MoE layer is host-resident NVFP4 served
+    // per row by the device expert cache (the captured decode path); 0 = not that layout.
+    int moe_host_rows_capture_max() const;
     // Persistent K/V scratch for the replayable chunked continuation
     // ([ctx_capacity,nkv,hd] FP16 each), replacing the per-layer
     // cudaMallocAsync whose size would bake the growing ctx_len into the

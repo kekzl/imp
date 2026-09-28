@@ -228,9 +228,12 @@ struct MtpHead {
     bool loaded = false;
 };
 
-// speculative.mtp_k=auto depth for this head: 1 on Qwen4Exp (every verify row beyond the first
-// reads its own 10 experts per layer through the host-expert cache), kMtpAutoK elsewhere (0 here).
-inline int mtp_auto_k_cap(const MtpHead& head) { return head.layout == MtpLayout::Qwen4Exp ? 1 : 0; }
+// speculative.mtp_k=auto depth for this head: 0 = kMtpAutoK, < 0 = auto declines the head.
+// Qwen4Exp declines: decode 61.46 vs 61.94 tok/s spec off (k=1, 4 prompts x 3), head holds 2400 MiB VRAM.
+inline constexpr int kMtpAutoDeclines = -1;
+inline int mtp_auto_k_cap(const MtpHead& head) {
+    return head.layout == MtpLayout::Qwen4Exp ? kMtpAutoDeclines : 0;
+}
 
 // Maps a raw mtp.* tensor map (outer "model." already stripped) onto MtpHead fields.
 // Layout is keyed on the fusion projection name: eh_proj -> Nemotron, fc_embedding ->

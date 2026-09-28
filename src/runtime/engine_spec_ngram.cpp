@@ -36,6 +36,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
+#include "model/ngram_table.h"
 #include "runtime/engine.h"
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
@@ -53,6 +54,22 @@
 #include <vector>
 
 namespace imp {
+
+namespace {
+// Host work the verify forward must not contain (PLE rows, device expert cache take-over), as in the
+// decode step: keeps the per-forward D2H + sync out, so the chunk captures. True = PLE rows staged.
+bool verify_prep(GraphExecutor& ex, const Model& model, const Request& req, const int32_t* tokens, int rows,
+                 int p0, cudaStream_t stream) {
+    const int ple_ctx = ex.ple_context_len();
+    std::vector<int32_t>& ctx = ex.ngram_step_scratch();
+    ctx.assign(static_cast<size_t>(std::max(ple_ctx, 0)), 0);
+    const bool ctx_ok = ple_ctx > 0 && ple_ctx <= 8 &&
+                        ngram_context_at(req.input_tokens.data(), static_cast<int>(req.input_tokens.size()),
+                                         req.output_tokens.data(), static_cast<int>(req.output_tokens.size()),
+                                         p0, ple_ctx, model.config().ple_eos_token_id, ctx.data());
+    return ex.prepare_decode_step_host(tokens, rows, 1, ctx_ok ? ctx.data() : nullptr, stream);
+}
+}  // namespace
 
 // Burst-hybrid re-arm: a given-up request whose async-loop burst
 // (speculative.burst tokens) has completed gets a short probe window: two
@@ -504,9 +521,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
                                    (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
                                    !model_->config().is_mla() && !swa_sizing_active_;
-    const bool capture_on =
-        !swa_sizing_active_ && spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
-    const int chunk_pad = capture_on ? spec_capture_bucket_(chunk_len) : chunk_len;
+    const int bucket = spec_capture_bucket_(chunk_len);
+    const bool capture_on = !swa_sizing_active_ && spec_capture_ready_(p0 + bucket, bucket);
+    const int chunk_pad = capture_on ? bucket : chunk_len;
     const int ctx_len = p0 + chunk_pad;  // context including the full (padded) chunk
 
     const int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
@@ -806,6 +823,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             }
         }
     }
+
+    state.ple_host_ready = !mc_on && verify_prep(*executor_, *model_, *req, h_tokens, chunk_pad, p0, stream);
 
     Tensor logits_out;
     if (runtime_config().diagnostics.spec_capture_probe) {

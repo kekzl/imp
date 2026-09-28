@@ -98,6 +98,20 @@ TEST(MtpAuto, HeadAutoKCapClampsAutoOnly) {
               2);
 }
 
+// A head whose verify costs more than it emits (qwen4_exp) turns auto off; explicit settings pass.
+TEST(MtpAuto, HeadAutoDeclineTurnsAutoOff) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    ASSERT_GT(k, 0);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/-1);
+    EXPECT_EQ(cfg.speculative.mtp_k, 0);
+
+    RuntimeConfig pinned;
+    ASSERT_TRUE(pinned.apply_overrides({"speculative.mtp_k=1"}).empty());
+    tools::mtp_auto_finalize(pinned, 1, /*head_loaded=*/true, /*head_auto_k_cap=*/-1);
+    EXPECT_EQ(pinned.speculative.mtp_k, 1);
+}
+
 // The gated bench measures RAW decode: auto drafting with an MTP head would
 // redefine what tests/perf_baseline.json pins, silently.
 TEST(MtpAuto, BenchModePinsAutoOff) {

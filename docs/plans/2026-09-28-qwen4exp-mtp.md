@@ -119,7 +119,8 @@ Notation: `norm_g(x, w)` = RMSNorm with `(1 + w)` gain (T:170-177, V uses `Gemma
 - `diagnostics.mtp_prenorm_h` does not apply: the reference feeds the stream un-normed (V:302-308).
 - Verify with host-resident experts: rows 2..8 run the n == 1 host-expert path per row
   (`run_moe_decode_rows_host_`); n-gram and token recycling stay off there (`spec_drafter_state_`).
-- `speculative.mtp_k=auto` resolves to 1 on this head (`mtp_auto_k_cap`).
+- The verify chunk is graph-captured (#847 path): `chunk_capture_supported` admits host-resident MoE served per row by the device expert cache (`moe_host_rows_capture_max`, <= 8 rows); PLE rows are staged on the host before the forward; the PLE conv commits only the real rows and joins the row-0 snapshot. Uncaptured it cost 56.7 ms/verify, GPU idle 54 % of the decode window, 0 graph launches (nsys).
+- `speculative.mtp_k=auto` declines this head (`mtp_auto_k_cap` = `kMtpAutoDeclines`): with the captured verify, k=1 decodes 61.46 vs 61.94 tok/s spec off (4 prompts x 3), the head holds 2400 MiB VRAM. Host expert gathers scale per verify row, so only the dense part amortizes. `speculative.mtp_k=1` forces it.
 - `model-fp8-mtp-ple.safetensors` maps sparse when the head is requested: no `MAP_POPULATE`,
   129 PLE table tensors skipped, `MADV_WILLNEED` on the 3072 expert tensors only.
 
