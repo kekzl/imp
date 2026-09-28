@@ -322,7 +322,9 @@ def main():
     # the softmax top-k race needs the real kernel under launch contention (CUDA).
     # 1137 -> 1139: FP8GemmTest.DequantizeRowsRoundTripsTheSidecar (test-compute) and
     # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
-    PINNED = 1139
+    # 1139 -> 1142: ExpertCacheReinitTest x3 (test-moe-gdn): reinit_or_disable against a real
+    # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
+    PINNED = 1142
 
     text = CMAKE.read_text()
     mods = module_sources(text)

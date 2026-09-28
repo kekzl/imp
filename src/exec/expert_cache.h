@@ -202,6 +202,12 @@ struct ExpertLRUCache {
     [[nodiscard]] bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc, int n_layers,
                             int n_experts, bool debug_parity = false, bool nvfp4_slots = false);
 
+    // destroy() + init() at `grown_bytes`, else at `original_bytes`. Returns the budget that took,
+    // or 0 with the cache disabled (pool_ == nullptr, n_slots_ == 0): every consumer checks those.
+    [[nodiscard]] size_t reinit_or_disable(size_t max_expert_raw, size_t grown_bytes, size_t original_bytes,
+                                           VRAMAllocator* alloc, int n_layers, int n_experts,
+                                           bool debug_parity, bool nvfp4_slots);
+
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry within the layer's
     // pool if needed.

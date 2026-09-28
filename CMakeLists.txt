@@ -694,6 +694,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_lora_dims.cpp
+        tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp

@@ -38,15 +38,22 @@ void GraphExecutor::regrow_expert_cache_() {
         return;
     const auto& mcfg = model_->config();
     const int before = expert_cache_.slots_per_layer_;
-    expert_cache_.destroy();
     const size_t budget = expert_cache_budget_ + freed;
-    if (!expert_cache_.init(expert_cache_slot_raw_, budget, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
-                            dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_)) {
-        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB failed, retrying the original %.0f MiB",
+    const size_t got = expert_cache_.reinit_or_disable(
+        expert_cache_slot_raw_, budget, expert_cache_budget_, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
+        dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_);
+    if (got == 0) {
+        // Disabled cache: host experts take the staging path (GGUF) or
+        // verify_host_expert_placement() refuses the load (NVFP4).
+        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB and retry at the original %.0f MiB both "
+                      "failed, cache disabled (0 slots/layer, was %d)",
+                      budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0), before);
+        expert_cache_budget_ = 0;
+        return;
+    }
+    if (got != budget) {
+        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB failed, kept the original %.0f MiB",
                       budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0));
-        expert_cache_.init(expert_cache_slot_raw_, expert_cache_budget_, vram_alloc_, mcfg.n_layers,
-                           mcfg.n_experts, dispatch_policy().moe.expert_cache_debug_parity,
-                           expert_cache_nvfp4_slots_);
         return;
     }
     expert_cache_budget_ = budget;

@@ -151,8 +151,8 @@ prefill. Full data + the reusable findings live in the forge branch and in
 
 | File | Action |
 |---|---|
-| `src/compute/mmq_q4k_hmma.cu` | Create — the kernel |
-| `src/compute/mmq_q4k_hmma.h` | Create — public interface |
+| [`src/compute/mmq_q4k_hmma.cu`](https://github.com/kekzl/imp/blob/02f936324be811761a1b9489718643207dac8e27/src/compute/mmq_q4k_hmma.cu) | Create — the kernel |
+| [`src/compute/mmq_q4k_hmma.h`](https://github.com/kekzl/imp/blob/02f936324be811761a1b9489718643207dac8e27/src/compute/mmq_q4k_hmma.h) | Create — public interface |
 | `src/exec/gemm_kernel_q4k_mmq.cu` | Modify — dispatch handler |
 | `tests/test_mmq_q4k.cu` | Create — correctness vs dequant reference |
 | `CMakeLists.txt` | Modify — register new sources |

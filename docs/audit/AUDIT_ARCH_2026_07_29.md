@@ -1,7 +1,7 @@
 # imp — Full Architecture Audit — 2026-07-29
 
 Read-only structural audit of `imp` at `5474b6c2` (v0.20.2). Eight tracks, scored with evidence.
-Raw censuses in `docs/audit/arch_2026_07_29_evidence/`. **No GPU job was run** — the card was 100 % busy with the user's
+Raw censuses in [`docs/audit/arch_2026_07_29_evidence/`](https://github.com/kekzl/imp/tree/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence). **No GPU job was run** — the card was 100 % busy with the user's
 own workload all session; every number here is either **MEASURED (prior campaign, cited)** or
 **DERIVED** from source, and is marked as such.
 
@@ -80,7 +80,7 @@ disagree.
 the two decision functions that already exist.** It is half a day of work and it does four things
 at once — it makes kernel routing observable for the first time (Track B's ceiling), it converts
 `attention_dispatch_decision.h` and `moe_prefill_decision.h` from dead test-only mirrors into
-production code so their test stops being a fiction (Track G), it gives `docs/attention-dispatch.md`
+production code so their test stops being a fiction (Track G), it gives [`docs/attention-dispatch.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)
 a source of truth that cannot rot (§16), and it makes every future routing regression visible
 instead of silent. Nothing else on the roadmap has that fan-out per unit of effort.
 
@@ -99,7 +99,7 @@ nightly GPU lane, could prove a refactor did not change the answers.
 `CLAUDE.md` no GPU job was run. Where a prior *measured* campaign backs a cell it is cited.
 
 The dispatch's model list (6 models, 9 architectures) is stale. `src/model/model_arch.h:7` has
-**16** architecture enumerators and `docs/supported-models.md` lists ~30 validated checkpoints.
+**16** architecture enumerators and [`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md) lists ~30 validated checkpoints.
 The matrix below covers every *distinct routing combination*, not every checkpoint: adding
 Qwen3-8B next to Qwen3-4B produces an identical row.
 
@@ -108,7 +108,7 @@ Qwen3-8B next to Qwen3-4B produces an identical row.
 | Stage | Decision site |
 |---|---|
 | loader | `src/model/gguf_loader.cpp` / `src/model/safetensors_loader.cpp`, arch from `model.cpp:294-347` |
-| storage tier | `src/runtime/storage_planner.cpp:16`, `src/exec/weight_handle.cu:54` |
+| storage tier | [`src/runtime/storage_planner.cpp:16`](https://github.com/kekzl/imp/blob/de466c27a00f63959a36c05896dee42331f2b2d1/src/runtime/storage_planner.cpp), `src/exec/weight_handle.cu:54` |
 | prefill attention | `src/exec/executor_attention_prefill.cu:51-64` (per-layer gate), then `src/compute/attention_dispatch.cu:45-130` (FMHA chain) |
 | decode attention | `src/exec/executor_attention_decode.cu:162-273` (if/else on `cache->qtype()`) |
 | MoE prefill | `src/exec/executor_forward_moe.cu:577-597` (5-way chain) → `executor_forward_moe_cutlass.cu` (4 tiers) |
@@ -130,9 +130,9 @@ some stage, or the combination is unreachable/untested.
 | 4 | Qwen3.6-35B-A3B NVFP4 (GDN+MoE hybrid) | safetensors_loader | NVFP4 + FP8 SSM-proj sidecar (#949) | CUTLASS grouped + `executor_ssm_gdn.cu` | FA2 on attention layers; GDN layers bypass attention | FP16 paged | paged 16, FP16 + GDN recurrent state | GROUPED / DEVICE_ARGS | RMSNorm | STANDARD | yes (GDN is graph-safe, `engine_kv_cache_init.cpp:346` only excludes *pure* SSM) | yes | only with `speculative.hybrid` (`engine_spec_ngram.cpp:300`) | topk/topp | yes | n/a | **AMBER** — hybrid spec path is opt-in and has no CI coverage (GPU lane only) |
 | 5 | **Nemotron-3-Nano-30B-A3B NVFP4** (Mamba2+attn+MoE) | safetensors_loader | NVFP4 + FP8 SSM sidecar | CUTLASS grouped + `compute/ssm.cu` | FA2 (NOPE variant — no RoPE) | FP16 paged | paged 16, FP16 + Mamba2 state | GROUPED | RMSNorm | **NOPE** (`ModelProfile::AttnVariant::NOPE`) | **YES since 2026-08-12** — the `has_pure_ssm` demotion was removed after measuring it: decode 127 → 386 tok/s. This row previously read "NO … eager decode **by design**", which was the wrong diagnosis: nothing in the scan is capture-hostile, the demotion was an unverified `not yet` | yes | **NO** (`ssm_state_ && !speculative.hybrid` → false) | topk/topp | yes | n/a | **GREEN** — was AMBER at 148 tok/s while graphs were demoted |
 | 6 | **gpt-oss-20b MXFP4** (SafeTensors, learned sinks) | safetensors_loader | MXFP4 experts → NVFP4 at load | CUTLASS grouped (GPT_OSS_GLU) | **`fmha_sm120_prefill` FP16 WMMA only** — sinks pre-gate at `attention_dispatch.cu:45`; FA2/MXFP4/FP8 tiers are skipped entirely, throw on decline | FP16 paged + sink term | paged 16, FP16 | **GROUPED tier only** — arch-gated off DEVICE_ARGS *and* SMALL_M (`moe_prefill_decision.h:62,68`) | RMSNorm | GPTOSS_SWA | yes | yes | yes | topk/topp | yes | n/a | **AMBER** — correct and fast (391 tok/s) but structurally excluded from the two fastest MoE tiers and from every FA2 tier; a single-tier path with `throw` as its only fallback |
-| 7 | **Gemma-4-26B-A4B NVFP4** (dual head_dim 256/512) | safetensors_loader | NVFP4 | CUTLASS grouped | **per-layer split**: hd=256 SWA layers → FA2; hd=512 global layers → `attention_cublas_prefill`, overflowing to `attention_cublas_prefill_sliced` (#1036) then FMHA | FP16 paged | paged 16, FP16, SWA-aware sizing | GROUPED | RMSNorm + softcap | GEMMA4_SWA (local rope_theta) | conditionally — `gemma4.no_graphs` escape hatch (`engine_init_resolver.cpp:581`) | yes | yes | topk/topp | yes | separate BF16 mmproj | **RED** — the hd=512 half of every layer stack rides the *legacy materialised cuBLAS S-matrix path* by design. It is faster there than the fused hd=512 kernel and is documented, but it is the one advertised model where the "legacy path is 0.0 % of prefill" claim in `docs/attention-dispatch.md:9` is false |
+| 7 | **Gemma-4-26B-A4B NVFP4** (dual head_dim 256/512) | safetensors_loader | NVFP4 | CUTLASS grouped | **per-layer split**: hd=256 SWA layers → FA2; hd=512 global layers → `attention_cublas_prefill`, overflowing to `attention_cublas_prefill_sliced` (#1036) then FMHA | FP16 paged | paged 16, FP16, SWA-aware sizing | GROUPED | RMSNorm + softcap | GEMMA4_SWA (local rope_theta) | conditionally — `gemma4.no_graphs` escape hatch (`engine_init_resolver.cpp:581`) | yes | yes | topk/topp | yes | separate BF16 mmproj | **RED** — the hd=512 half of every layer stack rides the *legacy materialised cuBLAS S-matrix path* by design. It is faster there than the fused hd=512 kernel and is documented, but it is the one advertised model where the "legacy path is 0.0 % of prefill" claim in [`docs/attention-dispatch.md:9`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md) is false |
 | 8 | Gemma-3-12B Q8_0 (GGUF, hd=256, vision) | gguf_loader | Q8_0 + NVFP4 decode cache | dp4a GEMV | FA2 hd=256 (since #932, `attention.fa2_hd256`) | FP16 paged | paged 16, FP16 (FP8 hint gate excludes Gemma) | n/a | RMSNorm + softcap | STANDARD + `sliding_window_pattern` | yes | yes | yes | topk/topp | yes | SigLIP `vision_encoder.cu` | **AMBER** — hd=256 FA2 is enabled by a flag read from **two different sources** (see F-1); vision tower has its own cuBLAS handle and graph gate |
-| 9 | **DeepSeek-V2-Lite bf16** (MLA) | safetensors_loader | bf16, experts host-offloaded | cuBLAS dense + `mla_kv_assemble.cu` | FA2 after latent assembly | FP16 paged | paged 16, FP16, MLA latent | LEGACY (host-offload) | RMSNorm | **MLA** variant | **NO** — `experts_on_host_` forces graphs off (`engine_weight_upload.cpp:248-277`) | yes | not exercised | topk/topp | yes | n/a | **RED** — eager + LEGACY MoE + host offload. ~30 tok/s. Known-failing `LongGenerationStability`. Advertised in `docs/supported-models.md:26` |
+| 9 | **DeepSeek-V2-Lite bf16** (MLA) | safetensors_loader | bf16, experts host-offloaded | cuBLAS dense + `mla_kv_assemble.cu` | FA2 after latent assembly | FP16 paged | paged 16, FP16, MLA latent | LEGACY (host-offload) | RMSNorm | **MLA** variant | **NO** — `experts_on_host_` forces graphs off (`engine_weight_upload.cpp:248-277`) | yes | not exercised | topk/topp | yes | n/a | **RED** — eager + LEGACY MoE + host offload. ~30 tok/s. Known-failing `LongGenerationStability`. Advertised in [`docs/supported-models.md:26`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md) |
 | 10 | Qwen3-VL-4B BF16 (SafeTensors, vision) | safetensors_loader | BF16 | cuBLAS | FA2 | FP16 paged | paged 16, FP16 | n/a | RMSNorm | 3-axis M-RoPE + DeepStack | yes (unless `runtime.no_vision_graph`) | yes | yes | topk/topp | yes | `qwen3vl_encoder.cu` — **own cuBLAS handle, own kernels, 0 post-launch checks** | **RED** — `src/vision/qwen3vl_encoder_kernels.cu` is the only file in `src/` with kernel launches and *zero* `IMP_CUDA_CHECK_LAUNCH()` (9/9 unchecked, F-4). A launch-config failure in the tower produces silently wrong image embeddings |
 | 11 | Phi-4-reasoning-plus NVFP4 (fused QKV) | safetensors_loader | NVFP4, fused projections | `nvfp4_gemv_dense.cu` | FA2 | FP16 paged | paged 16, FP16 | n/a | RMSNorm | STANDARD | yes | yes | yes | topk/topp | yes | n/a | **GREEN** |
 | 12 | nomic-embed-text-v1.5 Q8_0 (encoder-only) | gguf_loader | Q8_0 | dp4a | `compute/encoder_forward.cu` — **entirely separate forward**, bidirectional, no KV | n/a | **none** | n/a | post-LN + bias | none | n/a | n/a | n/a | **none** (mean-pool) | n/a | n/a | **AMBER** — a second, private forward path (`is_encoder`) that shares almost nothing with the decoder loop; correctness proven only by an HF cosine oracle (≥0.999) |
@@ -143,7 +143,7 @@ some stage, or the combination is unreachable/untested.
 | Arch enum | Reachable? | Tested? | Grade |
 |---|---|---|---|
 | `LLAMA`, `MISTRAL` | yes — validated GGUF checkpoints | yes | GREEN |
-| `MIXTRAL` | yes | no checkpoint in `docs/supported-models.md` | **AMBER — advertised in the enum, no validated checkpoint** |
+| `MIXTRAL` | yes | no checkpoint in [`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md) | **AMBER — advertised in the enum, no validated checkpoint** |
 | `LLAMA4` | yes — parse entries at `model.cpp:338-339` | no checkpoint listed | **AMBER — same** |
 | `QWEN35` (dense) | yes | Qwen3.5-4B/9B/27B GGUF listed | GREEN |
 | `QWEN36_MOE` | yes | Qwable-3.6-27B, Qwen3.6-35B-A3B | GREEN |
@@ -155,9 +155,9 @@ some stage, or the combination is unreachable/untested.
 |---|---:|---|
 | Nominal cross-product | 16 arch × 2 formats × 12 `QType` × 2 phases × 2 graph × 2 batch × 2 spec = **36 864** | enum sizes |
 | (a) **Reachable** | ~**340** | 16 archs, but each arch admits only the quants its checkpoints ship (median 2), and graph/spec/batch are resolved *per model* not per request — 16 × 2 × 2 × 2.7 ≈ 340 distinct resolved configurations |
-| (b) **Tested** (any automated test, incl. GPU lane) | ~**30** | `docs/supported-models.md` = 30 checkpoints, each pinned by at most an E2E smoke |
+| (b) **Tested** (any automated test, incl. GPU lane) | ~**30** | [`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md) = 30 checkpoints, each pinned by at most an E2E smoke |
 | (b′) **Tested in CI** | **0** model rows | CI executes `ctest -L unit` only (`CMakeLists.txt:857-865`); the `gpu` label never runs because no runner is registered — the job itself exists and is dormant (`ci.yml:379-435`, §12.1) |
-| (c) **Documented as supported** | **30** | `docs/supported-models.md` |
+| (c) **Documented as supported** | **30** | [`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md) |
 
 **The risk surface is (a) − (b) ≈ 310 resolved configurations that no test ever visits**, and the
 gap between (b) and (b′) is total: *every* model-level correctness signal in this project is
@@ -215,7 +215,7 @@ can an operator tell from the default log stream which branch was taken.
 | 13 | **Prefill attention path** | **per layer, per request** | `hd`, `attn_sinks`, `shapes_uniform`, `attention.fa2_hd256`, `fa2_fp16qk`, S-matrix fit | FA2 | **NO** | **YES** — all six tiers decline by returning `false` with no log; only the terminal exhaustion throws |
 | 14 | FMHA chain tier | per call | per-kernel accept + 3 config gates | FA2 | **NO** | **YES** (same) |
 | 15 | Decode attention kernel | per step | `cache->qtype()` | FP16 | **NO** | no — it is an exhaustive if/else; the `else` is FP16 |
-| 16 | NVFP4 decode TC vs non-TC | per step | shape support | TC | **NO** | **YES** — `attention_paged_nvfp4_tc` "falls back to non-TC for unsupported shapes" (`docs/attention-dispatch.md:71`) |
+| 16 | NVFP4 decode TC vs non-TC | per step | shape support | TC | **NO** | **YES** — `attention_paged_nvfp4_tc` "falls back to non-TC for unsupported shapes" ([`docs/attention-dispatch.md:71`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)) |
 | 17 | **MoE prefill path (5-way)** | per layer, per request | ~30 conjunct workspace/qtype predicates | fp16-batch | partly — the winner logs at layer 0 | **YES** — 9 bare `return false` at `executor_forward_moe_cutlass.cu:53-74` |
 | 18 | MoE CUTLASS tier (4-way) | per layer | `moe.no_cutlass3x`, `nvfp4_device_args`, `nvfp4_smallM`, arch==GPT_OSS | DEVICE_ARGS | partly | yes |
 | 19 | GEMM kernel per weight | per call | `gemm_kernel_registry.cu` table | table | opt-in (`diagnostics.log_gemm_algo`) | no — registry is a table |
@@ -250,7 +250,7 @@ attention.fa2_hd256
   └── src/compute/attention_fmha_sm120.cu:1900       process_diag_fa2_hd256()               ← PROCESS-GLOBAL
 ```
 
-`ProcessDiag` is a function-local `static` (`src/runtime/process_diag.cpp:57-60`) populated by
+`ProcessDiag` is a function-local `static` ([`src/runtime/process_diag.cpp:57-60`](https://github.com/kekzl/imp/blob/de466c27a00f63959a36c05896dee42331f2b2d1/src/runtime/process_diag.cpp)) populated by
 `process_diag_install()` (`:64-105`) with **28 kernel- and dispatch-affecting flags**. It is called
 from exactly two places, both tool entry points (`tools/imp-cli/main.cpp:134`,
 `tools/imp-server/main.cpp:64`). `Engine::init` knows this and promotes **one** of the 28
@@ -334,14 +334,14 @@ turns the two mirrors from dead test-only code into the production dump, which a
 drift problem in §12. Effort **S** (~half a day).
 ## 6. Duplication census
 
-Method: own token-based clone detector (`docs/audit/arch_2026_07_29_evidence/clones.py`, 60-token windows, identifiers
+Method: own token-based clone detector ([`docs/audit/arch_2026_07_29_evidence/clones.py`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/clones.py), 60-token windows, identifiers
 and literals normalised away, stride 10) over `src/` + `tools/`, then adjudicated by hand. Raw
-output in `docs/audit/arch_2026_07_29_evidence/clone_pairs.txt`. Candidates that survived reading are below; candidates
+output in [`docs/audit/arch_2026_07_29_evidence/clone_pairs.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/clone_pairs.txt). Candidates that survived reading are below; candidates
 that did not are recorded as D6 (§15) or dropped.
 
 | ID | Class | Concept | Site A | Site B | Canonical | Other reachable in a default build? | Sev |
 |---|---|---|---|---|---|---|---|
-| A-1 | **D3** | **Where a config flag lives** — per-engine `RuntimeConfig` vs process-global `ProcessDiag` | `src/runtime/config.h` (170 keys) | `src/runtime/process_diag.cpp:8-55` (28 mirrored) | `RuntimeConfig` | **yes — the kernels read the mirror** | **CRITICAL** |
+| A-1 | **D3** | **Where a config flag lives** — per-engine `RuntimeConfig` vs process-global `ProcessDiag` | `src/runtime/config.h` (170 keys) | [`src/runtime/process_diag.cpp:8-55`](https://github.com/kekzl/imp/blob/de466c27a00f63959a36c05896dee42331f2b2d1/src/runtime/process_diag.cpp) (28 mirrored) | `RuntimeConfig` | **yes — the kernels read the mirror** | **CRITICAL** |
 | A-2 | **D5** | Attention-prefill routing rules | `src/compute/attention_dispatch.cu:45-130` (real) | `src/compute/attention_dispatch_decision.h:57-95` (mirror) | the `.cu` | mirror is test-only, never called | **HIGH** |
 | A-3 | **D5** | MoE-prefill routing rules | `src/exec/executor_forward_moe_cutlass.cu` + `executor_forward_moe.cu:577-597` | `src/exec/moe_prefill_decision.h:49-77` (mirror) | the `.cu` | mirror is test-only; **and it models only the 4 CUTLASS tiers, not the outer 5-way chain** | **HIGH** |
 | A-4 | **D3** | cuBLAS handle ownership | 6 module-static handles: `gemm.cu:59,71`, `attention_cublas.cu:45`, `attention_mxfp4_prefill.cu:338`, `gemm_grouped.cu:28`, `vision_encoder.cu:24`, `qwen3vl_encoder.cu:27` | — | none | all six | MEDIUM |
@@ -370,7 +370,7 @@ lock-step: `attention_dispatch.cu:33` only *mentions* `select_attn_prefill_path`
 A reorder in the `.cu` therefore leaves the test green. §5.4 gives the one-change fix that converts
 both mirrors into production code and closes A-2, A-3 and the observability gap at once.
 
-**A-11: `VRAMAllocator` is not dead.** `docs/MEMORY_ARCHITECTURE.md` describes a three-layer design
+**A-11: `VRAMAllocator` is not dead.** [`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) describes a three-layer design
 (backend / tier allocators / typed handles) and lists `vram_allocator.cu` under "Still live from
 before". 84 references across 20 files including `executor.h` and `kv_cache.h` is not a residue —
 it is a sixth allocator concept coexisting with the five the design doc blesses. This is the single
@@ -441,7 +441,7 @@ this: the hot path reads `prof.is_gemma4` / `prof.attn_variant`, never `cfg.arch
 
 **Conditional:** `model_profile.cpp` (only if the arch needs a new `AttnVariant` or boolean),
 `safetensors_loader.cpp`/`weight_upload.cu` (only for genuine layout quirks),
-`docs/supported-models.md`.
+[`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md).
 
 **Verdict: 6 files, and by the dispatch's own >4 rule that is a D2 finding — but a weak one.**
 Five of the six are *data* edits into three tables (`model.cpp`'s registry, the parse map, the
@@ -461,7 +461,7 @@ green build and a green test suite. This is D5 contract drift with a two-line fi
 every `Tensor`, so most references are `t.qtype == QType::F16` type checks, not dispatch.
 
 Actual *implementation-selecting* dispatch sites — a `switch` or if-chain over a qtype/tier that
-picks between kernels — are **30** (`docs/audit/arch_2026_07_29_evidence/qtype_switches.txt`). Grouped:
+picks between kernels — are **30** ([`docs/audit/arch_2026_07_29_evidence/qtype_switches.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/qtype_switches.txt)). Grouped:
 
 | Group | Sites | Files |
 |---|---:|---|
@@ -500,7 +500,7 @@ fixing A-2/A-3.
 
 **Provenance is mixed and is marked per row.**
 - **MEASURED (prior)** — from the `MemAccount` campaign recorded in
-  `docs/MEMORY_ARCHITECTURE.md:106-160` (harness `src/memory/mem_account.{h,cu}` gated by
+  [`docs/MEMORY_ARCHITECTURE.md:106-160`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) (harness `src/memory/mem_account.{h,cu}` gated by
   `diagnostics.vram_audit`, driver `tools/analysis/vram_audit_load.py`, 2 rounds × N concurrent
   streaming completions, 0 errors, clocks 2857-2932 MHz SM verified healthy). **Not re-measured
   this session** — the GPU was 100 % busy (29 207/32 607 MiB, `mmm-comfy`) for the whole audit.
@@ -537,7 +537,7 @@ fixing A-2/A-3.
 **The number that matters is the residual: 20 % of steady-state VRAM (4 738 MiB) is unattributed**
 on the reference config, 30 % on the vision config and 39 % on the dense config. The project's own
 acceptance criterion is ≥95 % accounted; it is at 61-80 %. That is recorded honestly in
-`docs/MEMORY_ARCHITECTURE.md:158-160` and it is the single biggest gap in Track C.
+[`docs/MEMORY_ARCHITECTURE.md:158-160`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) and it is the single biggest gap in Track C.
 
 ### 8.1 Allocation strategy
 
@@ -555,7 +555,7 @@ acceptance criterion is ≥95 % accounted; it is at 61-80 %. That is recorded ho
 
 Classic `cudaMalloc` (not `cudaMallocAsync`) is the backend primitive. The pool's release
 threshold is `UINT64_MAX` — i.e. **it never returns memory to the driver**, which is deliberate:
-`docs/MEMORY_ARCHITECTURE.md` and MEMORY both record that WSL2/WDDM never returns a process's peak
+[`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) and MEMORY both record that WSL2/WDDM never returns a process's peak
 commitment anyway, so returning it buys nothing and re-acquiring it can fail.
 
 **Invariant I1 is a ratchet, not an invariant.** `tools/check_alloc_sites.py` is a blocking CI job
@@ -666,7 +666,7 @@ Clean where it is applied. `cuda_raii.h` is textbook: deleted copy, `noexcept` m
 ### 9.2 Two-phase init — 21 classes
 
 `init()`/`setup()`/`create()` after construction, i.e. state machines the type system cannot
-enforce (`docs/audit/arch_2026_07_29_evidence/ownership.txt`): `Engine` (`engine.h:145`), `GraphExecutor`
+enforce ([`docs/audit/arch_2026_07_29_evidence/ownership.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/ownership.txt)): `Engine` (`engine.h:145`), `GraphExecutor`
 (`executor.h:75`), `Workspace` (`workspace.h:40`), `SSMState`, `ExpertLRUCache`, `LayerOffload`,
 `VRAMAllocator`, `GreenCtx`, `RecurrentSnapshotStore`, `VisionEncoder`, `VisionPipeline`,
 `Qwen3vlEncoder`, `Qwen3vlPipeline`, `ChatTemplate`, `CudaGraphConditionalRunner` (`cuda_graph.h:225`),
@@ -767,7 +767,7 @@ usable in `.cu` — but the split is not documented anywhere.
 
 Method: for every `.cu` in `src/`, count `<<<` lines against
 `IMP_CUDA_CHECK_LAUNCH()` / `cudaGetLastError` occurrences
-(`docs/audit/arch_2026_07_29_evidence/launch_check_census.txt`).
+([`docs/audit/arch_2026_07_29_evidence/launch_check_census.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/launch_check_census.txt)).
 
 | | count |
 |---|---:|
@@ -916,7 +916,7 @@ compiles on every build and would JIT.
 - `__launch_bounds__` is used (e.g. `executor.cu:37`), not universally.
 - Shared memory: the 99 KB sm_120 opt-in limit is treated as a first-class constraint —
   `flash_attention_blackwell` declines hd=256 *because* it needs ~176 KB at Br=64
-  (`docs/attention-dispatch.md:52`), and that decline is the documented reason the chain has a
+  ([`docs/attention-dispatch.md:52`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)), and that decline is the documented reason the chain has a
   final `throw` rather than a silent fallback.
 - Accumulation: FP16/BF16 → FP32 is the default; the exception is explicit and per-arch —
   `gemm.cublas_fp16_acc` resolved to ON except Gemma-3/4 and gpt-oss
@@ -936,7 +936,7 @@ pinned baseline (`.github/workflows/roofline.yml:35`), which is the right mechan
 "the tool stopped finding the kernel". NVTX ranges: present but not systematically audited here.
 ## 11. Layering & dependency graph
 
-Derived from `#include` edges over `src/` (`docs/audit/arch_2026_07_29_evidence/layering.txt`, `layering_tally.txt`).
+Derived from `#include` edges over `src/` ([`docs/audit/arch_2026_07_29_evidence/layering.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/layering.txt), `layering_tally.txt`).
 
 ```mermaid
 graph TD
@@ -1136,7 +1136,7 @@ inline-documented tolerance"). 48 of 91 `.cu` tests declare a tolerance.
   greedy output across runs and across fresh processes, gated by `[runtime] deterministic`
   (`DetEvalE2ETest`, PR #542).
 - **Per-arch × per-quant matrix**: **none.** `MODEL_VALIDATION_SUMMARY.csv` and
-  `docs/supported-models.md` record human validation runs; there is no automated per-combination
+  [`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md) record human validation runs; there is no automated per-combination
   quality check. This is the (a)−(b) gap quantified in §4.4.
 
 ### 12.5 Quant correctness
@@ -1230,7 +1230,7 @@ blast = files touched by the fix; confidence in the finding itself.
 **F-1 — `ProcessDiag` makes 27 kernel flags unreachable for every non-tool consumer, and dual-sources one of them** — ✅ FIXED in #1205
 `CRITICAL` · effort `M` · blast ~8 files · confidence **HIGH**
 
-*Evidence:* `src/runtime/process_diag.cpp:57-60` is a function-local `static`;
+*Evidence:* [`src/runtime/process_diag.cpp:57-60`](https://github.com/kekzl/imp/blob/de466c27a00f63959a36c05896dee42331f2b2d1/src/runtime/process_diag.cpp) is a function-local `static`;
 `process_diag_install()` (`:64-105`) mirrors **28** kernel- and dispatch-affecting flags out of
 `RuntimeConfig`; the only two callers are `tools/imp-cli/main.cpp:134` and
 `tools/imp-server/main.cpp:64`. `src/runtime/engine.cpp:783-790` promotes exactly one
@@ -1385,7 +1385,7 @@ allocators; it cannot validate numerics.
 **F-6 — 20-39 % of steady-state VRAM is unattributed** — ✅ RESOLVED: reporting FIXED in #1211, and the attribution itself re-measured 2026-08-03 across four config families at **99.9-100.0 % accounted** (residual 0-16 MiB) against the ≥95 % criterion
 `HIGH` · effort `M` · blast `memory/` · confidence **HIGH** (project's own measurement)
 
-*Evidence:* `docs/MEMORY_ARCHITECTURE.md:150-160` — tracked total 19 311 of 23 872 MiB on the
+*Evidence:* [`docs/MEMORY_ARCHITECTURE.md:150-160`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) — tracked total 19 311 of 23 872 MiB on the
 reference config (untracked 4 738 MiB = 20 %); 39 % on dense, 30 % on vision. Stated acceptance
 criterion is ≥95 %.
 
@@ -1425,7 +1425,7 @@ comment; the assert gets the guarantee without the dependency.
 `MEDIUM` · effort `S` · blast 1 file · confidence **HIGH**
 
 *Evidence:* reachable via `kv_cache.dtype = mxfp4` and the `--kv-mxfp4` flag in **both** binaries
-(`docs/audit/arch_2026_07_29_evidence/args_dup.txt`); dispatched at `src/exec/executor_attention_decode.cu:243-251`.
+([`docs/audit/arch_2026_07_29_evidence/args_dup.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/args_dup.txt)); dispatched at `src/exec/executor_attention_decode.cu:243-251`.
 `grep -rl "paged_attention_decode_mxfp4_kv" tests/` → empty, while every sibling dtype appears in
 `test_attention_paged_oracle.cu`.
 
@@ -1463,7 +1463,7 @@ is right.
 **F-10 — `runtime/config.h` (1124 LOC) is included by 22 files in `src/exec/`** — ✅ FIXED in #1227
 `MEDIUM` · effort `L` · blast wide · confidence **HIGH**
 
-*Evidence:* `docs/audit/arch_2026_07_29_evidence/layering_tally.txt` — `exec → runtime` 27 files, 22 of them `config.h`;
+*Evidence:* [`docs/audit/arch_2026_07_29_evidence/layering_tally.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/layering_tally.txt) — `exec → runtime` 27 files, 22 of them `config.h`;
 `compute → runtime` 21. `ARCHMAP.md:43` describes these as "for diagnostics/PDL only
 (instrumentation, not algorithmic coupling)", which is doc drift: `config.h` in `exec/` is
 algorithmic.
@@ -1505,7 +1505,7 @@ attention/GEMM/vision paths is a change with its own risk.
 
 *Evidence:* `src/memory/vram_allocator.{h,cu}`; 84 references across 20 files including
 `exec/executor.h`, `memory/kv_cache.h`, `runtime/batch.cpp`, `exec/expert_cache.cu`,
-`vision/*_pipeline.h`. `docs/MEMORY_ARCHITECTURE.md` lists it under "Still live from before".
+`vision/*_pipeline.h`. [`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) lists it under "Still live from before".
 
 *Impact:* the tier design (`Backend` / `Arena` / `BlockPool` / `ScratchStack` / `GraphSlotPool`)
 coexists with the thing it replaced.
@@ -1559,7 +1559,7 @@ capture-safety implications, not a cleanup.
 `MEDIUM` · effort `S` · blast 3 files · confidence **HIGH**
 
 *Evidence:* `tools/imp-cli/args.cpp` (252 LOC) and `tools/imp-server/args.cpp` (161 LOC) share 27
-identical flags (`docs/audit/arch_2026_07_29_evidence/args_dup.txt`); the clone detector puts them at 17 shared windows.
+identical flags ([`docs/audit/arch_2026_07_29_evidence/args_dup.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/args_dup.txt)); the clone detector puts them at 17 shared windows.
 
 *Impact:* a flag fixed in one binary and not the other. Both write into the same `RuntimeConfig`.
 
@@ -1578,7 +1578,7 @@ per-layer cost is DERIVED, not measured)
 *Evidence:* `src/exec/executor_attention_prefill.cu:417-430` — hd=512 global layers take
 `attention_cublas_prefill`, overflowing to `attention_cublas_prefill_sliced`;
 `src/compute/attention_cublas.cu:103` contains a `cudaDeviceSynchronize()`.
-`docs/attention-dispatch.md:9` states the legacy path is "0.0 % of prefill time".
+[`docs/attention-dispatch.md:9`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md) states the legacy path is "0.0 % of prefill time".
 
 *Impact:* the "legacy path is dead" claim is false for an advertised model, and its S-matrix
 workspace (default 384 MiB) is retained for it. The routing choice itself is deliberate and
@@ -1586,7 +1586,7 @@ measured (`docs/audit/gemma4_attn_routing_2026_07_16/`) — the finding is the *
 
 *Incremental fix:* confirm whether the `cudaDeviceSynchronize` at `attention_cublas.cu:103` is on
 the per-layer path or a one-time warmup, and if the former, replace with a stream sync. Then update
-`docs/attention-dispatch.md`.
+[`docs/attention-dispatch.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md).
 
 *Rejected alternative:* forcing Gemma-4's hd=512 onto the fused kernel. Measured slower.
 
@@ -1618,7 +1618,7 @@ scatter is a *different* kernel (`moe_routing_permute.cu:260`); this is the CUTL
 
 *Evidence:* `d_token_allow_` declared in `grammar_constrain.h`, `json_constrain.h`,
 `regex_constrain.h`, `schema_constrain.h`; `d_allowed_mask_` and `d_token_categories_` in two each
-(`docs/audit/arch_2026_07_29_evidence/alloc_census.txt`). `constrain_common.h` (204 LOC) exists but does not own them.
+([`docs/audit/arch_2026_07_29_evidence/alloc_census.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/alloc_census.txt)). `constrain_common.h` (204 LOC) exists but does not own them.
 
 *Impact:* four buffer lifetimes to get right instead of one, and four allocation sites on the I1
 allowlist. #1197 (the `char`-is-signed category-mask bug) was in exactly this family.
@@ -1684,7 +1684,7 @@ the C ABI.
 **F-22 — 21 classes use two-phase init; 10 of them without `[[nodiscard]]`** — ✅ FIXED in #1206
 `LOW` · effort `S` · blast 10 files · confidence **HIGH**
 
-*Evidence:* `docs/audit/arch_2026_07_29_evidence/ownership.txt`. `Engine::init` (`engine.h:145`), `GraphExecutor::init`
+*Evidence:* [`docs/audit/arch_2026_07_29_evidence/ownership.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/ownership.txt). `Engine::init` (`engine.h:145`), `GraphExecutor::init`
 (`executor.h:75`) and `VisionPipeline::init` are `[[nodiscard]]`; `Workspace::init`
 (`workspace.h:40`) and `RecurrentSnapshotStore::init` return `void`; the four constrainers,
 `SSMState`, `ExpertLRUCache`, `LayerOffload`, `GreenCtx`, `VRAMAllocator`, `ChatTemplate`,
@@ -1770,7 +1770,7 @@ Prometheus scrape setup in `monitoring/`.
 
 **1 — REFUTED, with one exception.** The materialised cuBLAS path is not ~18 % of prefill; the
 measured figure is **0.0 %** at pp512-pp4096 on hd=128 models
-(`docs/archive/roofline_2026_06_07.md`, quoted at `docs/attention-dispatch.md:7-14`), and since #932
+(`docs/archive/roofline_2026_06_07.md`, quoted at [`docs/attention-dispatch.md:7-14`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)), and since #932
 hd=256 rides FA2 too. The engine has *six* prefill tiers, not two, ordered by an explicit
 short-circuit chain that terminates in `throw` rather than a silent fallback
 (`attention_dispatch.cu:130`, #654). **The exception is Gemma-4's hd=512 global layers**, which take
@@ -1795,7 +1795,7 @@ branches"*. Arch #17 costs **6 files**, five of which are data edits into three 
 D2 that remains is the *unbound* duplicate C-API enum (F-7), not the dispatch.
 
 **4 — REFUTED as stated.** `QType::` appears in ~100 files but only **30** are
-implementation-selecting dispatch sites (`docs/audit/arch_2026_07_29_evidence/qtype_switches.txt`), and GEMM/GEMV — the
+implementation-selecting dispatch sites ([`docs/audit/arch_2026_07_29_evidence/qtype_switches.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/qtype_switches.txt)), and GEMM/GEMV — the
 biggest of the five concerns — is **one table** (`gemm_kernel_registry.cu`, 85 LOC, pinned by a
 1214-LOC / 40-test contract suite). A new quant format on the GEMM path costs **2 files**.
 **CONFIRMED narrowly:** a new *KV* dtype costs 5+ sites that must agree, enforced by a `std::abort()`
@@ -1967,11 +1967,11 @@ and 11 came back REFUTED.
 
 ### Scratch directory
 
-`docs/audit/arch_2026_07_29_evidence/` holds the raw censuses this report cites — clone-pair output,
+[`docs/audit/arch_2026_07_29_evidence/`](https://github.com/kekzl/imp/tree/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence) holds the raw censuses this report cites — clone-pair output,
 the launch/sync/alloc censuses, layering tallies, the enum and dispatch-site dumps — plus the clone
 detector itself (`clones.py`) and the run log (`progress.md`). 40 files, ~200 KB.
 
-It is committed for one reason: the twenty `docs/audit/arch_2026_07_29_evidence/...` citations in
+It is committed for one reason: the twenty [`docs/audit/arch_2026_07_29_evidence/...`](https://github.com/kekzl/imp/tree/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence) citations in
 this report are only checkable if the evidence is where the reader is. A report whose evidence lives
 in one person's working tree is an assertion. Regenerating it needs the commands in §19 and a tree
 at `144d18b3`, which is a worse deal than 200 KB of text.
@@ -1983,24 +1983,24 @@ Ordered by how likely the drift is to mislead someone into a wrong change.
 |---|---|---|---|---|
 | 1 | *"a few `compute/quant/memory → runtime` includes exist for diagnostics/PDL only (instrumentation, not algorithmic coupling)"* | `docs/audit/ARCHMAP.md:43` | **27 files in `src/exec/` include `runtime/`, 22 of them `config.h`** — `RuntimeConfig` drives dispatch in `exec/`. The claim understates the coupling by roughly an order of magnitude, and the coupling it hides is the root cause of F-1 | **HIGH** |
 | 2 | *"`backend.{h,cpp}` is the **only** code that talks to the driver about memory (invariant I1)"* | `ARCHMAP.md:20-22` | I1 is a **ratchet**: `tools/alloc_allowlist.txt` grandfathers **74 files / 492 sites**. The file's own header is accurate ("THIS LIST ONLY SHRINKS"); the ARCHMAP summary is not | **HIGH** |
-| 3 | The prefill gate code block, quoting `force_cublas_attn`, `s_matrix_fits`, `prefer_fmha` at *"~line 338"* | `docs/attention-dispatch.md:16-35` | **`force_cublas_attn` does not exist** — `grep` returns nothing. The gate is now per-layer (`executor_attention_prefill.cu:51-64`) so Gemma-4's hd=256 SWA layers take FA2 while its hd=512 layers do not; the doc says heterogeneous shapes force cuBLAS wholesale | **HIGH** |
-| 4 | *"the legacy materialized cuBLAS+softmax path is **0.0 % of prefill time**"* | `docs/attention-dispatch.md:9` | True for hd=128/256. **False for Gemma-4**, whose hd=512 global layers take `attention_cublas_prefill` by design and by measurement (F-16). An advertised model's default prefill path is the one the doc calls dead | **HIGH** |
-| 5 | The hd=512 sliced-cuBLAS tier (#1036) and MLA are absent | `docs/attention-dispatch.md` | `attention_cublas_prefill_sliced` (`executor_attention_prefill.cu:427`) and `ModelProfile::AttnVariant::MLA` exist; neither appears in the canonical attention-routing doc | MED |
-| 6 | *"~100k LOC (src/ + include/)"* | `CLAUDE.md` | **134 878** LOC in `src/` + `include/` (`docs/audit/arch_2026_07_29_evidence/largest_files.txt`); 220k with `tests/`. The dispatch's "~161k" is also stale in the other direction | MED |
+| 3 | The prefill gate code block, quoting `force_cublas_attn`, `s_matrix_fits`, `prefer_fmha` at *"~line 338"* | [`docs/attention-dispatch.md:16-35`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md) | **`force_cublas_attn` does not exist** — `grep` returns nothing. The gate is now per-layer (`executor_attention_prefill.cu:51-64`) so Gemma-4's hd=256 SWA layers take FA2 while its hd=512 layers do not; the doc says heterogeneous shapes force cuBLAS wholesale | **HIGH** |
+| 4 | *"the legacy materialized cuBLAS+softmax path is **0.0 % of prefill time**"* | [`docs/attention-dispatch.md:9`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md) | True for hd=128/256. **False for Gemma-4**, whose hd=512 global layers take `attention_cublas_prefill` by design and by measurement (F-16). An advertised model's default prefill path is the one the doc calls dead | **HIGH** |
+| 5 | The hd=512 sliced-cuBLAS tier (#1036) and MLA are absent | [`docs/attention-dispatch.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md) | `attention_cublas_prefill_sliced` (`executor_attention_prefill.cu:427`) and `ModelProfile::AttnVariant::MLA` exist; neither appears in the canonical attention-routing doc | MED |
+| 6 | *"~100k LOC (src/ + include/)"* | `CLAUDE.md` | **134 878** LOC in `src/` + `include/` ([`docs/audit/arch_2026_07_29_evidence/largest_files.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/largest_files.txt)); 220k with `tests/`. The dispatch's "~161k" is also stale in the other direction | MED |
 | 7 | *"The only env vars still seeded are `IMP_DETERMINISTIC` and `IMP_FMHA_FA2`; don't reintroduce ad-hoc env reads"* | `CLAUDE.md` | Four more are read: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_CONFIG` (F-23) | MED |
-| 8 | *"`src/{core,compute,memory,model,quant,graph,runtime,vision,api}`"* | the dispatch itself | There is no `src/graph/` — it was renamed to `src/exec/` (git history still shows `src/graph/executor_forward.cu` in the 6-month churn list). `src/lora/` exists and is unlisted | MED |
-| 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints (`docs/supported-models.md`), **C++23** (`docs/archive/cpp23_migration_2026_07_08.md`) | MED |
+| 8 | *"`src/{core,compute,memory,model,quant,graph,runtime,vision,api}`"* | the dispatch itself | There is no [`src/graph/`](https://github.com/kekzl/imp/tree/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph) — it was renamed to `src/exec/` (git history still shows [`src/graph/executor_forward.cu`](https://github.com/kekzl/imp/blob/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph/executor_forward.cu) in the 6-month churn list). `src/lora/` exists and is unlisted | MED |
+| 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints ([`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md)), **C++23** (`docs/archive/cpp23_migration_2026_07_08.md`) | MED |
 | 10 | *"no p50/p99 histograms"*, *"synthetic `/v1/messages` streaming (TTFT = full latency)"* | the dispatch itself | Prometheus histograms exist with `_bucket{le=…}` for `imp_request_duration_seconds`, `imp_ttft_seconds`, `imp_inter_token_seconds` (`handlers_misc.cpp:186-224`). `/v1/messages` has a real handler (`handlers_messages.cpp`, 497 LOC) plus the shared `stream_driver` | MED |
 | 11 | `ProcessDiag` is documented as *"snapshotted from RuntimeConfig once at startup (tool main calls `process_diag_install()`)"* | `runtime/process_diag.h:3-4` | **Accurate — and that is the problem.** The header honestly states the limitation; nothing states the *consequence* for C-API consumers, and `engine.cpp:783-790` patches exactly one of 28 flags without noting the other 27 (F-1) | MED |
 | 12 | *"`check-release.sh` runs in CI"* (prior state, per MEMORY) | — | **Now true** — `.github/workflows/ci.yml` job `Release hygiene` at `:352-356`. Recorded here as drift *repaired*, so nobody re-fixes it | — |
-| 13 | `docs/MEMORY_ARCHITECTURE.md` vision-config substitution | `:130-136` | **Not drift — exemplary.** The doc states plainly that the dispatch asked for Gemma-3-12B + mmproj, that no 12B mmproj exists on this host, that gemma-3-4b was substituted, and why the finding's shape is unaffected. This is how a substitution should be reported | — |
+| 13 | [`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md) vision-config substitution | `:130-136` | **Not drift — exemplary.** The doc states plainly that the dispatch asked for Gemma-3-12B + mmproj, that no 12B mmproj exists on this host, that gemma-3-4b was substituted, and why the finding's shape is unaffected. This is how a substitution should be reported | — |
 
 ### The pattern
 
-Drift here is **not** in the narrative docs — `docs/architecture.md`, `docs/MEMORY_ARCHITECTURE.md`
+Drift here is **not** in the narrative docs — [`docs/architecture.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/architecture.md), [`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md)
 and `docs/determinism.md` all track the code closely. It is concentrated in exactly two places:
 
-- **`docs/attention-dispatch.md`** (items 3-5), which is the one doc that quotes *code* rather than
+- **[`docs/attention-dispatch.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)** (items 3-5), which is the one doc that quotes *code* rather than
   describing behaviour. Quoted code rots; described behaviour does not. The doc even says "If this
   doc and the code disagree, the code wins" — which is honest, and also an admission that nothing
   keeps them from disagreeing.
@@ -2023,7 +2023,7 @@ value/effort. Every item is independently landable and reversible; none is a rew
 | **R-3** | **CI gate: post-launch checks** — fail when a `src/**.cu` has more `<<<` lines than `IMP_CUDA_CHECK_LAUNCH`/`cudaGetLastError`, baseline = today's census; fix the 3 deficits first | **E** | F-4 | **S** | 4 | — |
 | **R-4** | **Measure F-A9** — run `DetEvalE2ETest` on an NVFP4-MoE checkpoint with `[runtime] deterministic=true` and record whether greedy output is bit-identical | E, G | F-17 | **S** (one GPU run) | 0 | free GPU |
 | **R-5** | **`static_assert`/round-trip tests for the two duplicated enums** — `ModelArch`↔`IMP_ARCH_*`, `QType`↔`ImpDType` | A, F | F-7, F-21 | **S** | 2 | — |
-| **R-6** | **Doc-drift sweep** — rewrite `docs/attention-dispatch.md` to describe behaviour instead of quoting a code block that no longer exists; correct the two `ARCHMAP.md` absolutes to cite their numbers; fix the LOC and env-var lines in `CLAUDE.md` | — | §16 items 1-8, F-23 | **S** | 4 docs | R-2 (the dump gives the doc its source of truth) |
+| **R-6** | **Doc-drift sweep** — rewrite [`docs/attention-dispatch.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md) to describe behaviour instead of quoting a code block that no longer exists; correct the two `ARCHMAP.md` absolutes to cite their numbers; fix the LOC and env-var lines in `CLAUDE.md` | — | §16 items 1-8, F-23 | **S** | 4 docs | R-2 (the dump gives the doc its source of truth) |
 | **R-7** | **Add `MXFP4_KV` to `test_attention_paged_oracle.cu`** | **G** | F-8 | **S** | 1 | free GPU |
 | **R-8** | **Tag the unattributed VRAM** — give the 676 MiB prewarm block and the cuBLAS/CUTLASS workspaces real `RegionTag`s | **C** | F-6 | **M** | ~8 | — |
 | **R-9** | **Shared CLI arg table** — one `tools/common/args_common.cpp` for the 27 duplicated flags | **A** | F-15 | **S** | 3 | — |
@@ -2127,7 +2127,7 @@ Things this audit could not resolve from source, ordered by how much the answer 
    be overridable — needs input from whoever owns the consumer. An honest UNRESOLVED.
 
 8. **Are `MIXTRAL` and `LLAMA4` supported or aspirational?** Both have full registry rows, parse-map
-   entries and C-API ids; neither has a checkpoint in `docs/supported-models.md`. The enum advertises
+   entries and C-API ids; neither has a checkpoint in [`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md). The enum advertises
    more than the docs validate, and nothing distinguishes the two states.
 
 9. **Does the `compute_120f` PTX fallback work?** It is built by default (`CMakeLists.txt:47-53`)
@@ -2143,8 +2143,8 @@ Things this audit could not resolve from source, ordered by how much the answer 
 
 | Step | Tool | Output |
 |---|---|---|
-| LOC / largest files | `find` + `wc` | `docs/audit/arch_2026_07_29_evidence/largest_files.txt` |
-| Clone detection | **own** token-based detector, 60-token windows, identifiers+literals normalised, stride 10 | `docs/audit/arch_2026_07_29_evidence/clones.py`, `clone_pairs.txt` |
+| LOC / largest files | `find` + `wc` | [`docs/audit/arch_2026_07_29_evidence/largest_files.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/largest_files.txt) |
+| Clone detection | **own** token-based detector, 60-token windows, identifiers+literals normalised, stride 10 | [`docs/audit/arch_2026_07_29_evidence/clones.py`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/clones.py), `clone_pairs.txt` |
 | Arch dispatch census | `grep ModelArch::` per file | `arch_dispatch_sites.txt`, `arch10.txt` |
 | Quant dispatch census | `grep QType::` + `switch` census | `quant_dispatch_sites.txt`, `qtype_switches.txt` |
 | Legacy/suffix hunt | `_v2/_new/_old/legacy/fallback/ref/naive`, `#if 0` | `legacy_hunt.txt` |
@@ -2156,7 +2156,7 @@ Things this audit could not resolve from source, ordered by how much the answer 
 | Ownership / RAII | `cudaStreamCreate`/`EventCreate`/`cublasCreate` outside `cuda_raii.h`; copy/move on device-pointer types; `init()`/`setup()` census | `raii.txt`, `ownership.txt` |
 | Config / API / test / security surface | targeted greps | `config.txt`, `server.txt`, `tests.txt`, `security.txt`, `errors.txt` |
 
-Everything cited in this report is reproducible from `docs/audit/arch_2026_07_29_evidence/`.
+Everything cited in this report is reproducible from [`docs/audit/arch_2026_07_29_evidence/`](https://github.com/kekzl/imp/tree/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence).
 
 ### What was NOT run, and why
 
@@ -2198,12 +2198,12 @@ nothing was.
   `executor_attention_prefill.cu:417-430`; whether `attention_cublas.cu:103` executes per layer is
   open (§18 item 4).
 - **Several dispatch priors were stale and are recorded as such in §16** — 9 vs 16 architectures,
-  C++20 vs C++23, `src/graph/` vs `src/exec/`, missing histograms that exist, synthetic
+  C++20 vs C++23, [`src/graph/`](https://github.com/kekzl/imp/tree/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph) vs `src/exec/`, missing histograms that exist, synthetic
   `/v1/messages` streaming that is no longer synthetic. Where the dispatch and the repo disagreed,
   the repo won, per the dispatch's own instruction.
 
 ### Repository state
 
 Read-only with respect to source. `git status` shows only the new report and the untracked
-`docs/audit/arch_2026_07_29_evidence/` directory. No file under `src/`, `tools/`, `tests/`, `docs/` or any config was
+[`docs/audit/arch_2026_07_29_evidence/`](https://github.com/kekzl/imp/tree/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence) directory. No file under `src/`, `tools/`, `tests/`, `docs/` or any config was
 modified.

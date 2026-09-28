@@ -687,6 +687,20 @@ void ExpertLRUCache::invalidate_host_state() {
     ++host_generation_;
 }
 
+size_t ExpertLRUCache::reinit_or_disable(size_t max_expert_raw, size_t grown_bytes,
+                                         size_t original_bytes, VRAMAllocator* alloc, int n_layers,
+                                         int n_experts, bool debug_parity, bool nvfp4_slots) {
+    destroy();
+    if (init(max_expert_raw, grown_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots))
+        return grown_bytes;
+    destroy();
+    if (init(max_expert_raw, original_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots))
+        return original_bytes;
+    // A failed init can leave n_slots_ = 1 with pool_ == nullptr (the n_slots_ < 2 exit).
+    destroy();
+    return 0;
+}
+
 void ExpertLRUCache::destroy() {
     if (pool_) {
         int64_t total = hits_ + misses_;

@@ -51,7 +51,7 @@ Columns: prose % = non-blank lines outside tables, lists, headings, code and com
 | `docs/BENCHMARKS.md` | L1 | 882 | 66 % | 36 | 3 sent. (`README.md`) | 13 (`docs/GOAL.md`) | 11 edits since verified, 10 refs to v0.1x-v0.3x, 1 filler/history words |
 | `docs/LIMITATIONS.md` | L1 | 792 | 74 % | 45 | 1 sent. (`docs/audit/AUDIT_arch_2026.md`) | 18 (`docs/PERF.md`) | 8 edits since verified, 1 filler/history words |
 | `docs/quantization.md` | L1 | 552 | 58 % | 28 | - | 8 (`docs/BENCHMARKS.md`) | 6 edits since verified, 1 filler/history words |
-| `docs/usage.md` | L1 | 487 | 58 % | 3 | - | 2 (`docs/quantization.md`) | 5 edits since verified |
+| [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | L1 | 487 | 58 % | 3 | - | 2 (`docs/quantization.md`) | 5 edits since verified |
 | `docs/API.md` | L1 | 473 | 66 % | 17 | 2 sent. (`docs/TROUBLESHOOTING.md`) | - | 7 edits since verified, 1 refs to v0.1x-v0.3x |
 | `docs/determinism.md` | L1 | 295 | 74 % | 10 | - | 3 (`docs/LIMITATIONS.md`) | 4 edits since verified |
 | `docs/DEPLOYMENT.md` | L1 | 254 | 61 % | 3 | - | - | 4 edits since verified |

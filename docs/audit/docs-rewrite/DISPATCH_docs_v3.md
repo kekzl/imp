@@ -13,9 +13,9 @@ Every section removed, moved or corrected in the prose cleanup. Base `9cbb8004`.
 
 | file | deleted or moved section | fact preserved where |
 |---|---|---|
-| `docs/usage.md` | whole file | `docs/CONFIG.md` (CLI, `imp.conf`, C API), `CONTRIBUTING.md` (requirements, build) |
-| `docs/architecture.dot`, `.svg`, `.png` | whole files, unreferenced after the Mermaid diagram | `docs/internals/ARCHITECTURE.md` |
-| `AUDIT.md` B25 | citation `docs/usage.md` | `docs/CONFIG.md` (`vram.kv_fraction` row) |
+| [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | whole file | `docs/CONFIG.md` (CLI, `imp.conf`, C API), `CONTRIBUTING.md` (requirements, build) |
+| [`docs/architecture.dot`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/architecture.dot), `.svg`, `.png` | whole files, unreferenced after the Mermaid diagram | `docs/internals/ARCHITECTURE.md` |
+| `AUDIT.md` B25 | citation [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | `docs/CONFIG.md` (`vram.kv_fraction` row) |
 | `docs/README.md` | layer prose, "Contracts" list | index tables; `usage.md` row -> `CONFIG.md`, `API_FEATURES.md` row added |
 | 61 paragraphs > 2 sentences (15 files) | prose form | same file, bullets or tables; tokens checked by `fc.sh` |
 | `docs/internals/MEMORY.md` | A2-A6, invariant compliance, open questions (23 tokens absent from the rewrite: `Owned<T, Tier::ModelResident>`, `BlockPool<Stride>`, `+256.00 MiB`, #1939, #1940, ...) | verbatim in `docs/archive/memory_census_2026.md` "Design draft A2-A6" |
@@ -331,7 +331,7 @@ generic pointer to that file. Flagging for the orchestrator in case another agen
 | docs/archive/quantization_awq_findings.md | new, 299 lines | n/a (record, no lint) | 1 (fixed a truncation bug in my own first draft: the Roles-full-precision section had been cut one line short mid-sentence, restored) |
 
 Nothing for the orchestrator to fix in other agents' files from my side: I did not touch or add
-links into `docs/usage.md`/`docs/API.md`/the not-yet-created `docs/CONFIG.md`/`docs/API_FEATURES.md`.
+links into [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md)/`docs/API.md`/the not-yet-created `docs/CONFIG.md`/`docs/API_FEATURES.md`.
 My files link to `docs/MODELS.md`, `docs/PERF.md`, `docs/BENCHMARKS.md`, `docs/roadmap.md`,
 `docs/LIMITATIONS.md`, `docs/QUICKSTART.md`, `../README.md`, `internals/ARCHITECTURE.md`,
 `internals/BENCHMARKING.md`, `archive/performance_2026_05.md` (pre-existing), and the two new
@@ -370,7 +370,7 @@ fc.sh baseline: 9cbb8004. Final missing-token counts (full DST set): MEMORY.md 9
 | KERNELS.md | FA2 kernel template parameter list `<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, …>` and "dispatcher bands the tile config by grid-fill" | dropped; section 2's tiling spec (Bq/Bkv/HD/`__launch_bounds__`) and the kernel table's file/role already state the shape this summarized |
 | PROFILING.md | Mission, Phase 0-5, Deliverables, Constraints (the whole phase-plan narrative) | moved verbatim to `docs/plans/2026-06-profiling-campaign.md` (one-line header comment added, no lint there) |
 | ARCHITECTURE.md | inline attention-dispatcher decision snippet and vars (`attention-dispatch.md` display text, `attention.fa2_hd256_bkv=32`, `hd ∉ {128, 256}`, `0.53`) | removed: duplicate of owner `ATTENTION_DISPATCH.md`, which already states (its own text) that this exact inline snippet was wrong for six weeks - see corrected-facts table |
-| ARCHITECTURE.md | "Re-rendering the diagram" docker+dot recipe (`architecture.dot`, `architecture.svg`, `d/architecture.dot`, `d/architecture.png`, `d/architecture.svg`) | removed: the file now carries an inline Mermaid diagram per the target spec, no build step needed. `docs/architecture.dot/.svg/.png` become unreferenced assets - **flag for orchestrator**: decide whether to delete them or move the recipe to `CONTRIBUTING.md` (not in this agent's file set; grep confirms no other `.md` references them) |
+| ARCHITECTURE.md | "Re-rendering the diagram" docker+dot recipe (`architecture.dot`, `architecture.svg`, `d/architecture.dot`, `d/architecture.png`, `d/architecture.svg`) | removed: the file now carries an inline Mermaid diagram per the target spec, no build step needed. [`docs/architecture.dot/.svg/.png`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/architecture.dot) become unreferenced assets - **flag for orchestrator**: decide whether to delete them or move the recipe to `CONTRIBUTING.md` (not in this agent's file set; grep confirms no other `.md` references them) |
 | ARCHITECTURE.md | Phase-2 engine-init granular private-method table (`RuntimeConfig::load()`, `init_resolve_*`, `init_resolve_kv_dtype_policy_`, `init_resolve_ssm_dtype_`, `init_resolve_fp8_prefill_`, `init_resolve_quant_flags_`, `init_compute_max_seq_len_`, `engine_arena_open`, `graph_slot_pool_open_for`, `exec_t2_demand()`, `warmup()`, `prewarm_spec_scratch_`, `upload_expert_weights`, `570` LOC) | removed by design: target spec asks for "Mermaid + component table", not the old 9-row init-step table. The Mermaid pipeline diagram + the component table's "Engine init orchestrator" row cover the same ground at component grain |
 | ARCHITECTURE.md | Vision subsystem deep mechanics (`<\|image_pad\|>`, `deepstack_inject.cu`, `smart_resize`, `patchify`, `mmproj.gguf`, `model/mrope_positions.cpp`, `compute/rope.cu`, `model/image_placeholders.cpp`) | condensed to one component-table row (`src/vision/`, SigLIP/gemma4v vs Qwen3-VL one-liner); no other file in this campaign owns vision internals, so this is a real reduction, not a dedup - flagged here rather than silently dropped |
 | ARCHITECTURE.md | "Known limitations" section content (S-matrix workspace cap, `process_diag` process-wide snapshot) | kept in ARCHITECTURE.md (2-row table) **and** flagged as duplicate of owner `docs/LIMITATIONS.md` per `TARGET_STRUCTURE.md`'s fact-owner table - `docs/LIMITATIONS.md` does not yet contain either fact (checked); kept rather than deleted so the fact survives regardless of ordering between parallel agents. Orchestrator should dedupe once `LIMITATIONS.md` is rewritten |
@@ -419,7 +419,7 @@ None. Every fact removed from these 8 files in this pass was either condensed-fo
 | `docs/TROUBLESHOOTING.md` | 234 | 48 |
 | `docs/determinism.md` | 295 | 73 |
 | `docs/quantization.md` | 552 | 200 |
-| `docs/usage.md` | 487 | 0 |
+| [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | 487 | 0 |
 | `docs/CONFIG.md` | 0 | 258 |
 | `docs/API_FEATURES.md` | 0 | 208 |
 | `docs/internals/ARCHITECTURE.md` | 154 | 106 |
@@ -436,7 +436,7 @@ None. Every fact removed from these 8 files in this pass was either condensed-fo
 
 | item | count |
 |---|---|
-| files deleted | 4: `docs/usage.md`, `docs/architecture.dot`, `.svg`, `.png` |
+| files deleted | 4: [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md), [`docs/architecture.dot`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/architecture.dot), `.svg`, `.png` |
 | files new (L1) | 2: `docs/CONFIG.md`, `docs/API_FEATURES.md` |
 | records new | 6: 5 in `docs/archive/`, `docs/plans/2026-06-profiling-campaign.md` |
 | facts corrected | 39 (36 agent rows + 3 orchestrator) |

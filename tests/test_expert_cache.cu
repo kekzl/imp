@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "exec/executor.h"
+#include "memory/vram_allocator.h"
 #include <cuda_runtime.h>
 #include <cstring>
 #include <cstdint>
@@ -287,6 +288,53 @@ TEST_F(ExpertCachePhase4Test, PrefetchHonorsPerLayerIsolation) {
     // ring is empty).
     load(0, ExpertProj::Gate, 0);
     EXPECT_EQ(cache_.prefetch_layer(1, /*top_k=*/4, kSlotBytes), 0);
+}
+
+// =========================================================================
+// reinit_or_disable: grown budget, else original, else a disabled cache
+// =========================================================================
+
+class ExpertCacheReinitTest : public ::testing::Test {
+   protected:
+    static constexpr size_t kSlot = 1 << 20;  // 1 MiB, 1 layer: 2 slots need 2 MiB
+    void SetUp() override {
+        ASSERT_TRUE(alloc_.init());
+        ASSERT_TRUE(cache_.init(kSlot, 2 * kSlot, &alloc_, /*n_layers=*/1, kNExperts));
+    }
+    void TearDown() override { cache_.destroy(); }
+    // Above total VRAM: VRAMAllocator rejects it before cudaMalloc.
+    size_t unallocatable() const { return 4 * alloc_.total_vram(); }
+    static constexpr int kNExperts = 8;
+    VRAMAllocator alloc_;
+    ExpertLRUCache cache_;
+};
+
+TEST_F(ExpertCacheReinitTest, GrownBudgetTakes) {
+    EXPECT_EQ(cache_.reinit_or_disable(kSlot, 4 * kSlot, 2 * kSlot, &alloc_, 1, kNExperts, false, false),
+              4 * kSlot);
+    EXPECT_EQ(cache_.slots_per_layer_, 4);
+    EXPECT_NE(cache_.pool_, nullptr);
+}
+
+TEST_F(ExpertCacheReinitTest, GrownFailsFallsBackToOriginal) {
+    EXPECT_EQ(cache_.reinit_or_disable(kSlot, unallocatable(), 2 * kSlot, &alloc_, 1, kNExperts, false,
+                                       false),
+              2 * kSlot);
+    EXPECT_EQ(cache_.slots_per_layer_, 2);
+    EXPECT_NE(cache_.pool_, nullptr);
+}
+
+TEST_F(ExpertCacheReinitTest, BothFailLeavesCacheDisabled) {
+    // Original = 1 slot total: init's n_slots_ < 2 exit, which alone leaves n_slots_ = 1.
+    EXPECT_EQ(cache_.reinit_or_disable(kSlot, unallocatable(), kSlot, &alloc_, 1, kNExperts, false,
+                                       /*nvfp4_slots=*/true),
+              0u);
+    EXPECT_EQ(cache_.pool_, nullptr);
+    EXPECT_EQ(cache_.n_slots_, 0);
+    EXPECT_EQ(cache_.slots_per_layer_, 0);
+    EXPECT_FALSE(cache_.nvfp4_slots_);
+    EXPECT_EQ(cache_.layer_slot_scales(0), nullptr);
+    EXPECT_EQ(alloc_.allocated(), 0u);
 }
 
 }  // namespace

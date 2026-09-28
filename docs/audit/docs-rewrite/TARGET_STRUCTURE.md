@@ -70,7 +70,7 @@ Phase 1 of the docs cleanup. Input: [`DOCS_INVENTORY.md`](DOCS_INVENTORY.md). St
 | `docs/internals/BENCHMARKING.md` | L2 | 141 | same | protocol as numbered commands |
 | `docs/internals/CPP23.md` | L2 | 72 | same | rules table |
 | `docs/internals/vision_gemma4v_spec.md` | L2 | 66 | same | unchanged |
-| `docs/usage.md` | - | - | - | deleted after split (`CONFIG.md`, `CONTRIBUTING.md`) |
+| [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | - | - | - | deleted after split (`CONFIG.md`, `CONTRIBUTING.md`) |
 | L3 `CLAUDE.md` tree, `AGENTS.md`, `tests/README.md`, `fuzz/README.md`, `tools/**/README.md` | L2/L3 | as now | same | filler and paragraph lint only |
 
 Net: 1 file deleted (`usage.md`), 2 L1 files new (`API_FEATURES.md`, `CONFIG.md`), 3 archive records new.
