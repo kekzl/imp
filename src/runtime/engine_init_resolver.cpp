@@ -20,6 +20,7 @@
 #include "memory/kv_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
+#include "runtime/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/scheduler.h"
 
@@ -515,6 +516,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
                     fit /= 2;
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
+        }
+        const int host_layers =
+            estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now);
+        if (auto_batch_for_host_experts(auto_batch, host_layers) != auto_batch) {
+            IMP_LOG_INFO("max_batch_size: auto → 1 (expert cache budget: %d MoE layer(s) host-resident; "
+                         "VRAM-derived value was %d, set runtime.max_batch_size to override)",
+                         host_layers, auto_batch);
+            auto_batch = 1;
         }
         config_.max_batch_size = auto_batch;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
