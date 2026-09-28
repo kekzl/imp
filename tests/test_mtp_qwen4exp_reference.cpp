@@ -1,5 +1,5 @@
 // Qwen4Exp (Qwen3.8-Flash-Next) MTP draft step against the numpy reference of the vLLM math
-// (tools/analysis/mtp_qwen4exp_reference.py -> tests/data/mtp_qwen4exp_ref.txt): two chained steps,
+// (tools/analysis/mtp_qwen4exp_reference.py -> tests/fixtures/mtp_qwen4exp_ref.txt): two chained steps,
 // positions 0 and 1, from a fixed hc-stream input. Loads only the head, embed rows and lm_head.
 //
 // Band per logit: 4 x the reference's own FP16-storage noise (its FP16 arm vs FP64) + 2^-7, the
@@ -170,7 +170,7 @@ std::vector<float> d2h_f16(const void* d, size_t n) {
 TEST(MtpQwen4ExpReference, TwoDraftStepsMatchVllmMath) {
     const char* env = std::getenv("IMP_TEST_MODEL_MTP_QWEN4EXP");
     const std::string dir = (env && *env) ? env : "/models/Qwen3.8-Flash-Next-NVFP4";
-    const std::string ref_path = std::string(IMP_TEST_DATA_DIR) + "/mtp_qwen4exp_ref.txt";
+    const std::string ref_path = std::string(IMP_TEST_FIXTURES_DIR) + "/mtp_qwen4exp_ref.txt";
     if (!fs::exists(dir + "/model-fp8-mtp-ple.safetensors"))
         GTEST_SKIP() << "Qwen3.8-Flash-Next checkpoint not present at " << dir;
     std::vector<RefStep> ref;

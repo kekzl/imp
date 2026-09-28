@@ -926,6 +926,8 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
             out_proj = tok_emb;
             IMP_LOG_INFO("Output projection shares GPU data with token embedding (weight tying)");
         } else {
+            // Own release-on-free pool: gemm.nvfp4_lm_head=fp8 frees this source after load.
+            ReleasePoolScope head_scope(ReleasePool::LmHead);
             const bool raw_ok = (out_proj.qtype == QType::Q6_K || out_proj.qtype == QType::Q8_0 ||
                                  out_proj.qtype == QType::Q4_0);
             if (!upload_unquantized_weight(out_proj, out_proj.qtype, ctx.compute_dtype, ctx.stream,

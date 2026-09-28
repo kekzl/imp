@@ -240,22 +240,17 @@ constexpr int kMtpFeedRows = 256;
 // out_topk_ids[0]==*out_token_id (Stage 0 tree-ceiling measurement).
 // lm_head_nvfp4 (optional): NVFP4 decode-cache view of main_lm_head, ~4x less HBM read;
 // draft-only precision; verification stays lossless.
+// lm_head_fp8/_scales (optional): FP8 per-row head (gemm.nvfp4_lm_head=fp8), taken first.
 // d_prev_token/d_out_token: device-chain I/O, no H2D/D2H/sync per step; with top_w>0 the
 // fast top-W kernel fills ws.d_topk and rank 0 lands in d_out_token. Caller drains the
 // whole chain with one D2H+sync at the end.
 // Returns false on any precondition violation (mtp not loaded, null buffers).
-bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
-                    const MtpHead& mtp,
-                    const Tensor& main_tok_emb,
-                    const Tensor& main_lm_head,
-                    MtpDraftWorkspace& ws,
-                    int hidden_dim, int vocab_size,
-                    int* out_token_id,
-                    cudaStream_t stream,
-                    int* out_topk_ids = nullptr, int top_w = 0,
-                    const NvFP4QuantResult* lm_head_nvfp4 = nullptr,
-                    const int32_t* d_prev_token = nullptr,
-                    int32_t* d_out_token = nullptr);
+bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
+                    const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
+                    int* out_token_id, cudaStream_t stream, int* out_topk_ids = nullptr, int top_w = 0,
+                    const NvFP4QuantResult* lm_head_nvfp4 = nullptr, const int32_t* d_prev_token = nullptr,
+                    int32_t* d_out_token = nullptr, const void* lm_head_fp8 = nullptr,
+                    const float* lm_head_fp8_scales = nullptr);
 
 // Batched prefill feed: append n_rows (token,hidden) pairs to the MTP KV cache in one
 // M=n_rows pass (embedding/norm/fc/attention/MLP batched, causal attention per query row

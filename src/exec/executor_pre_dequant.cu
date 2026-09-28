@@ -33,7 +33,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 // packs. It is still empty here (the device tables and the first request come later), so it
 // is re-created with those bytes on top: everything allocated after sees the same free VRAM.
 void GraphExecutor::regrow_expert_cache_() {
-    const size_t freed = wcache_.dropped_gdn_released_bytes;
+    const size_t freed = wcache_.dropped_gdn_released_bytes + wcache_.lm_head_released_bytes;
     if (freed == 0 || expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
         return;
     const auto& mcfg = model_->config();
@@ -57,8 +57,11 @@ void GraphExecutor::regrow_expert_cache_() {
         return;
     }
     expert_cache_budget_ = budget;
-    IMP_LOG_INFO("Expert LRU cache: %d -> %d slots/layer with the %.1f MiB of freed GDN weights",
-                 before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0));
+    IMP_LOG_INFO(
+        "Expert LRU cache: %d -> %d slots/layer with %.1f MiB of freed weights (GDN %.1f, LM head %.1f)",
+        before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0),
+        wcache_.dropped_gdn_released_bytes / (1024.0 * 1024.0),
+        wcache_.lm_head_released_bytes / (1024.0 * 1024.0));
 }
 
 void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAllocator& alloc,
@@ -132,6 +135,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 2b: FP8 decode sidecar for native-precision GDN/SSM
     // projections (gemm.fp8_ssm_proj) ---
     pre_dequant_phase2b_fp8_ssm_sidecar_(cfg, stream);
+
+    // --- Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8) ---
+    fp8_lm_head_cache_(stream);
 
     // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);

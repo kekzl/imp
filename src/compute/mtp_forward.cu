@@ -847,7 +847,8 @@ void mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
 // Logits of ws.d_h_final, then argmax / top-W into the caller's slot (see mtp_draft_step).
 bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
                     int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
-                    const NvFP4QuantResult* lm_head_nvfp4, int32_t* d_out_token) {
+                    const NvFP4QuantResult* lm_head_nvfp4, int32_t* d_out_token, const void* lm_head_fp8,
+                    const float* lm_head_fp8_scales) {
     // Feed-only step (prefill / verify catch-up): the KV append above is the
     // whole point — skip the lm_head GEMV, argmax and stream sync.
     if (out_token_id == nullptr && d_out_token == nullptr)
@@ -856,8 +857,13 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     // logits = lm_head @ h_final. Prefer the NVFP4 decode-cache view of lm_head when
     // available: full-vocab weight read dominates per-draft cost (~2.5 GB FP16 on Qwen3.6's
     // 248k vocab); NVFP4 reads ~4x less. Draft-only precision; verification stays lossless.
-    const bool nvfp4_lm = (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
-    if (nvfp4_lm) {
+    // FP8 head (gemm.nvfp4_lm_head=fp8) first: its source head may be freed after load.
+    const bool fp8_lm = lm_head_fp8 != nullptr && lm_head_fp8_scales != nullptr && ws.d_logits_f32 != nullptr;
+    const bool f32_lm = fp8_lm || (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
+    if (fp8_lm) {
+        gemv_fp8_rowscale_fp32(lm_head_fp8, lm_head_fp8_scales, static_cast<const half*>(ws.d_h_final),
+                               static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, 1, stream);
+    } else if (f32_lm) {
         gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
                              static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim,
                              stream);
@@ -875,15 +881,15 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     if (d_out_token != nullptr) {
         if (top_w > 0) {
             const int w = std::min(top_w, kMtpMaxTopW);
-            const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
-            if (!mtp_topw_fast(lg, nvfp4_lm, vocab_size, w, ws, stream))
+            const void* lg = f32_lm ? ws.d_logits_f32 : ws.d_logits;
+            if (!mtp_topw_fast(lg, f32_lm, vocab_size, w, ws, stream))
                 return false;
             if (cudaMemcpyAsync(d_out_token, ws.d_topk, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
                 cudaSuccess)
                 return false;
             return true;
         }
-        if (nvfp4_lm) {
+        if (f32_lm) {
             mtp_argmax_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
             IMP_CUDA_CHECK_LAUNCH();
@@ -905,8 +911,8 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
             IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
             return false;
         }
-        const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
-        if (!mtp_topw_reference(lg, nvfp4_lm, vocab_size, w, ws, stream))
+        const void* lg = f32_lm ? ws.d_logits_f32 : ws.d_logits;
+        if (!mtp_topw_reference(lg, f32_lm, vocab_size, w, ws, stream))
             return false;
         if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess)
@@ -927,7 +933,7 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
         }
         owned_idx = true;
     }
-    if (nvfp4_lm) {
+    if (f32_lm) {
         mtp_argmax_kernel<<<1, 256, 0, stream>>>(
             static_cast<const float*>(ws.d_logits_f32), vocab_size, d_idx);
         IMP_CUDA_CHECK_LAUNCH();
@@ -946,18 +952,11 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     return true;
 }
 
-bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
-                    const MtpHead& mtp,
-                    const Tensor& main_tok_emb,
-                    const Tensor& main_lm_head,
-                    MtpDraftWorkspace& ws,
-                    int hidden_dim, int vocab_size,
-                    int* out_token_id,
-                    cudaStream_t stream,
-                    int* out_topk_ids, int top_w,
-                    const NvFP4QuantResult* lm_head_nvfp4,
-                    const int32_t* d_prev_token,
-                    int32_t* d_out_token) {
+bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
+                    const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
+                    int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
+                    const NvFP4QuantResult* lm_head_nvfp4, const int32_t* d_prev_token, int32_t* d_out_token,
+                    const void* lm_head_fp8, const float* lm_head_fp8_scales) {
     if (!mtp.loaded) {
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;
@@ -1008,7 +1007,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         if (!mtp_qwen4exp_layer(d_h_prev, mtp, ws, hidden_dim, stream))
             return false;
         return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, out_topk_ids,
-                              top_w, lm_head_nvfp4, d_out_token);
+                              top_w, lm_head_nvfp4, d_out_token, lm_head_fp8, lm_head_fp8_scales);
     }
 
     // emb_norm = RMSNorm(emb, pre_fc_norm_embedding). imp::rmsnorm reads shape[0]=rows,
@@ -1319,7 +1318,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     }
 
     return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, out_topk_ids, top_w,
-                          lm_head_nvfp4, d_out_token);
+                          lm_head_nvfp4, d_out_token, lm_head_fp8, lm_head_fp8_scales);
 }
 
 // Batched prefill feed (dense heads): same math as mtp_draft_step at M=n_rows instead of

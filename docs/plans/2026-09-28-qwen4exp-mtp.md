@@ -138,5 +138,5 @@ VF = `vllm/model_executor/layers/quantization/utils/fp8_utils.py`.
 
 `tools/analysis/mtp_qwen4exp_reference.py` computes two chained draft steps (tokens 9707, 1234;
 positions 0, 1; h_prev = hash k / 1024) in FP64 numpy from the checkpoint and writes
-`tests/data/mtp_qwen4exp_ref.txt`; `tests/test_mtp_qwen4exp_reference.cpp` runs imp's draft step
+`tests/fixtures/mtp_qwen4exp_ref.txt`; `tests/test_mtp_qwen4exp_reference.cpp` runs imp's draft step
 on the same input. Band per logit: 4 x the script's FP16-storage noise + 2^-7.

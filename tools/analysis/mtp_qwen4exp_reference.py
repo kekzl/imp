@@ -10,7 +10,7 @@ gap between the two arms is the FP16 storage noise the test band is derived from
 
 Run (numpy only, no torch):
   docker run --rm -v ~/models/Qwen3.8-Flash-Next-NVFP4:/m:ro -v $PWD:/src -w /src python:3.12-slim \
-    sh -c 'pip -q install numpy && python tools/analysis/mtp_qwen4exp_reference.py /m tests/data/mtp_qwen4exp_ref.txt'
+    sh -c 'pip -q install numpy && python tools/analysis/mtp_qwen4exp_reference.py /m tests/fixtures/mtp_qwen4exp_ref.txt'
 """
 import json
 import struct

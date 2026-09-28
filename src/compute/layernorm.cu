@@ -352,15 +352,14 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
                         static_cast<float*>(out.data), d_model, eps, weight_offset);
             break;
         case QType::F16:
-            // Batched decode (2..64 rows): row-block kernel is register-resident, single DRAM pass.
-            // Warp kernel reads each row twice and only fields 4 CTAs at rows=32.
-            if (rows >= 2 && rows <= 64 && (d_model & 7) == 0 && (d_model >> 3) <= 1024) {
+            // Kernel choice depends on d_model only, never on rows: a row's output must not
+            // change with the chunk it is prefilled in (#2152). d_model >= 2048: register-
+            // resident row-block kernel; narrower rows (QK-norm heads): warp-per-row (#602).
+            if ((d_model & 7) == 0 && (d_model >> 3) >= 256 && (d_model >> 3) <= 1024) {
                 rmsnorm_fp16_rowblock(x, weight, out, rows, d_model, eps, stream, weight_offset);
                 break;
             }
-            // Batch prefill (#602): warp-per-row, no barriers/smem.
-            // Block-per-row kernel here is latency-bound, not bandwidth-bound.
-            if (rows >= 16 && (d_model & 7) == 0) {
+            if ((d_model & 7) == 0) {
                 const int warps_per_block = 8;
                 const int grid = (rows + warps_per_block - 1) / warps_per_block;
                 pdl::launch(rmsnorm_fp16_warp_kernel, dim3(grid), dim3(warps_per_block * 32), 0,

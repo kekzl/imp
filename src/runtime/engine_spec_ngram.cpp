@@ -211,6 +211,8 @@ bool Engine::spec_ngram_model_capable_uncached_() const {
     // Host-resident experts: verify rows 2..8 take the per-row decode path (run_moe_ffn, device cache
     // or host LRU); the staged path it replaces took 1.9 s per 6 tokens (2026-09-20). Only the MTP
     // source drafts there (step_spec_verify_). NVFP4-only: GGUF-MoE is refused above.
+    if (experts_on_host_ && runtime_config_.speculative.mtp_k <= 0)
+        return false;
     if (!supports_chunked_prefill_())
         return false;
     return true;

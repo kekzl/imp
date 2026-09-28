@@ -2,6 +2,7 @@
 // Q.K^T (~2x FP16 TC throughput), cuBLAS FP16 GEMM for P.V. Pipeline: quantize K (once/KV
 // head, reused for GQA) and Q -> CUTLASS GEMM -> scale+softcap+causal+softmax -> cuBLAS GEMM.
 
+#include "compute/cublas_gemm_algo.h"
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/cuda_static_reset.h"
@@ -32,7 +33,6 @@ static constexpr int kAtomSize = kAtomRows * kAtomKGroups;       // 512
 // Maximum S matrix size per head. Beyond this, fall back to flash attention.
 static constexpr size_t kMaxSBytesPerHead = 256ULL * 1024 * 1024;  // 256 MiB
 
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 // =============================================================================
 // Device helpers (self-contained — no cross-TU __device__ linkage)
@@ -474,7 +474,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
                              seq_q,   // N
                              seq_kv,  // K
                              &one, V_head, CUDA_R_16F, kv_row_stride, S, CUDA_R_16F, seq_kv, &zero, O_head,
-                             CUDA_R_16F, q_row_stride, CUBLAS_COMPUTE_32F, kGemmAlgo);
+                             CUDA_R_16F, q_row_stride, CUBLAS_COMPUTE_32F, cublas_gemm_algo());
             }
         }
     }

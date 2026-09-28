@@ -1606,6 +1606,9 @@ void GraphExecutor::free_buffers() {
             IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_ssm_sidecar_row_scales));
             wcache_.fp8_ssm_sidecar_row_scales = nullptr;
         }
+        vram_free(vram_alloc_, wcache_.lm_head_fp8_bulk);
+        wcache_.lm_head_fp8_bulk = nullptr;
+        wcache_.lm_head_fp8 = FP8CacheEntry{};
     }
 
     qscratch_.free(vram_alloc_);

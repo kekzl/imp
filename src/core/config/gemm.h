@@ -35,6 +35,7 @@ struct GEMM {
     // |"off", legacy bool accepted). GDN/SSM-hybrid models also get it while
     // nvfp4_lm_head_gdn = true (default, below). auto = ON for native BF16/F16
     // heads and small dense GGUF heads (d_model<=4096); off for larger/MoE GGUF heads.
+    // "fp8" = per-row FP8 E4M3 head instead of NVFP4 (F16 or GGUF source, GDN included, #2156).
     std::string nvfp4_lm_head = "auto";
     // FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F): sm_120 runs
     // FP32-accumulate FP16 tensor cores at 1/4 rate, so 16F reaches full rate.

@@ -10,7 +10,7 @@ set -uo pipefail
 
 # Repo root from this script's own location, not git: the Actions container runs as a
 # different user than owns the checkout, so git rev-parse dies with "dubious ownership".
-cd "$(dirname "$(readlink -f "$0")")/.."
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 FAIL=0
 run() {  # run <label> <cmd...>
     local label="$1"; shift
@@ -58,6 +58,14 @@ fi
 if want entrypoint; then
     echo "== Entrypoint =="
     run "docker-entrypoint.sh env -> argv"      bash tests/test_entrypoint.sh
+fi
+
+# GPU lock + per-worktree image tag used by the hooks and make GPU targets. No Docker, no GPU,
+# ~3 s (one 1.5 s TTL wait).
+if want gpulock; then
+    echo "== GPU lock / image tag =="
+    run "gpu_lock.sh acquire/release/stale/run"  bash tests/test_gpu_lock.sh
+    run "image_tag.sh tag/tree/check"            bash tests/test_image_tag.sh
 fi
 
 # Nothing throws across the C ABI: every `ImpError imp_*()` body in src/api/

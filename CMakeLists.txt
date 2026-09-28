@@ -90,6 +90,10 @@ if(IMP_ALLOC_INTERPOSE)
     set(IMP_WRAP_LINK_FLAGS
         "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
     message(STATUS "Allocation interposition ENABLED (measurement build)")
+    # Canary for uninitialized reads (#2168): fill every new device allocation with this byte.
+    set(IMP_ALLOC_POISON_BYTE "-1" CACHE STRING "Fill byte for new device allocations, -1 = off")
+    set_source_files_properties(src/memory/alloc_interpose.cpp PROPERTIES
+        COMPILE_DEFINITIONS "IMP_ALLOC_POISON_BYTE=${IMP_ALLOC_POISON_BYTE}")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 # libFuzzer binaries per fuzz/ target (#1620); needs clang, g++ has no -fsanitize=fuzzer.
@@ -274,6 +278,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan_chunkpar_pass.cu
     src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
+    src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cu
     src/compute/mmq_q8_imma_q4k.cu
@@ -415,6 +420,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase0_nvfp4_loader.cu
     src/exec/pre_dequant_phase1_fp16_cache.cu
     src/exec/pre_dequant_phase2_fp8_cache.cu
+    src/exec/pre_dequant_fp8_lm_head.cu
     src/exec/pre_dequant_phase3_nvfp4_decode.cu
     src/exec/pre_dequant_phase3c_mxfp4.cu
     src/exec/pre_dequant_phase4_tensor_registry.cu
@@ -422,6 +428,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_lm_head_fp8.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
     src/quant/gpt_oss_mxfp4_convert.cu
@@ -709,6 +716,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_silent_drops.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
+        tests/test_fp8_lm_head.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
@@ -747,6 +755,8 @@ if(IMP_BUILD_TESTS)
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
         tests/test_prefill_pacing.cpp
+        # Minimum prompt chunk (#2152): chunk-split and prefix-reuse caps, header-only.
+        tests/test_prompt_tail.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
@@ -1150,12 +1160,11 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
-    # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/data fixture). Reads
+    # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/fixtures). Reads
     # safetensors headers with nlohmann, which only the server build fetches.
     if(TARGET nlohmann_json::nlohmann_json)
         target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
         target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
-        target_compile_definitions(test-e2e PRIVATE IMP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
     endif()
 
     set(IMP_TEST_BINARIES

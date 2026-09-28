@@ -5,17 +5,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
+- Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k`, auto 1): hc-stream draft layer, FP8 block-scale experts on device (2560 MiB head), verify rows 2..8 per row on host-resident experts. Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
+- `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
 
 ### Changed
 - Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
 - Host-resident MoE experts: auto max_batch_size resolves to 1 (expert cache budget; Flash-Next c=8 at batch 32: 5.6 vs 7.2 out tok/s at batch 1). An explicit runtime.max_batch_size / --max-batch is kept and warned with the cache GiB and slots/layer it leaves.
+- Hooks and make GPU targets: a linked worktree builds `imp:test-<dir>-<hash8>` (main checkout keeps `imp:test`), runners refuse an image whose `imp.tree` is not this tree, and `scripts/gpu_lock.sh` lets one session hold the card; other worktrees' hooks and targets refuse instead of starting.
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).
 - GDN input packs come from a release-on-free mempool, so freeing them returns all 2896.9 MiB instead of 1760.0 on Qwen3.8-Flash-Next: expert cache 263 -> 290 slots/layer, hit rate 78.9 -> 80.7 %, tg512 prose 63.66 -> 66.22 tok/s (medians, 3 pairs).
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- `runtime.deterministic`: cuBLAS `cublasGemm*Ex` calls used `CUBLAS_GEMM_AUTOTUNE`, which times algorithms once per process, so Gemma-4 NVFP4 answered in one of two ways per server (2 of 6 vs 4 of 6). Deterministic mode now takes `CUBLAS_GEMM_DEFAULT`: 12 of 12 processes identical.
 - Expert cache regrow after GDN pack release: if both the grown and the original re-init failed, the cache stayed half-destroyed and the second failure went unlogged. It is now disabled (0 slots, pool freed) with an ERROR naming both budgets; the NVFP4 placement gate then refuses the load.
+- Prefix-cache resends on dense models: a prompt row no longer changes with its chunk (RMSNorm, QK-norm, IMMA split-K picked by row count; 1-row tails ran decode kernels). Qwen3-8B-Q8_0, FP16 KV: first-token logprob delta chunk 336 vs 0: 0.021 -> 0; resend probe 1/2 -> 0/2 FAIL.
 - Softmax MoE routing (Qwen3-30B-A3B, Qwen3.8-Flash-Next and every softmax-routed MoE): a warp could read another warp's partial sum as the softmax max, and top-k picked wrong experts (354 of 204800 routings in the new test). PPL is bit-identical across processes now: Qwen3-30B-A3B 13.0332 x3, Flash-Next 4.6353 x2.
 - Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.
 - Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.
