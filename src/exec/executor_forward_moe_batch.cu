@@ -652,6 +652,12 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
                            static_cast<const half*>(router_in.data),
                            static_cast<float*>(gate_logits_f32.data), ne, d, stream);
+        } else if (compute_dtype_ == QType::F16 && ly.moe_gate.qtype == QType::F16 && (d & 1) == 0 &&
+                   router_in.stride[0] == d) {
+            // Row-invariant router: a prompt token routes the same in every chunk (#2167).
+            gemm_gate_fp32_rows(static_cast<const half*>(ly.moe_gate.data),
+                                static_cast<const half*>(router_in.data),
+                                static_cast<float*>(gate_logits_f32.data), n, ne, d, stream);
         } else {
             int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
             Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);

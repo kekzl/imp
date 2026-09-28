@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <mma.h>
 
 namespace imp {
 
@@ -274,6 +275,74 @@ void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, in
     gemv_gate_fp32_fp32input_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
     IMP_CUDA_CHECK_LAUNCH();
 }
+
+// Router logits for n tokens: Y[n,M] = X[n,K] @ W[M,K]^T, FP32 out. WMMA f16 -> f32, K walked
+// in order from 0, no split-K: a token's logits never depend on the other rows in its batch
+// (#2167: cuBLAS picks its kernel by n). Tile 32 tokens x 128 experts x 32 K, 8 warps.
+namespace {
+namespace wmma = nvcuda::wmma;
+constexpr int kGateBT = 32, kGateBE = 128, kGateBK = 32;
+}
+
+__global__ void __launch_bounds__(256) gemm_gate_fp32_rows_kernel(const half* __restrict__ W,
+                                                                 const half* __restrict__ X,
+                                                                 float* __restrict__ Y, int n, int M, int K) {
+    __shared__ __align__(32) half Xs[kGateBT * kGateBK];
+    __shared__ __align__(32) half Ws[kGateBE * kGateBK];
+    __shared__ __align__(32) float Ys[kGateBT * kGateBE];
+    const int t0 = blockIdx.x * kGateBT;
+    const int e0 = blockIdx.y * kGateBE;
+    const int warp = threadIdx.x / 32;
+    const int tm = warp % 2;  // 16-token sub-tile
+    const int te = warp / 2;  // 32-expert sub-tile
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2];
+    wmma::fill_fragment(acc[0], 0.0f);
+    wmma::fill_fragment(acc[1], 0.0f);
+    for (int k0 = 0; k0 < K; k0 += kGateBK) {
+        for (int i = threadIdx.x; i < kGateBT * kGateBK; i += blockDim.x) {
+            const int r = i / kGateBK, c = i % kGateBK;
+            const bool ok = t0 + r < n && k0 + c < K;
+            Xs[i] = ok ? X[(size_t)(t0 + r) * K + k0 + c] : __float2half(0.0f);
+        }
+        for (int i = threadIdx.x; i < kGateBE * kGateBK; i += blockDim.x) {
+            const int r = i / kGateBK, c = i % kGateBK;
+            const bool ok = e0 + r < M && k0 + c < K;
+            Ws[i] = ok ? W[(size_t)(e0 + r) * K + k0 + c] : __float2half(0.0f);
+        }
+        __syncthreads();
+#pragma unroll
+        for (int kk = 0; kk < kGateBK; kk += 16) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a;
+            wmma::load_matrix_sync(a, Xs + tm * 16 * kGateBK + kk, kGateBK);
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b;
+                wmma::load_matrix_sync(b, Ws + (te * 32 + j * 16) * kGateBK + kk, kGateBK);
+                wmma::mma_sync(acc[j], a, b, acc[j]);
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j)
+        wmma::store_matrix_sync(Ys + tm * 16 * kGateBE + te * 32 + j * 16, acc[j], kGateBE, wmma::mem_row_major);
+    __syncthreads();
+    for (int i = threadIdx.x; i < kGateBT * kGateBE; i += blockDim.x) {
+        const int r = i / kGateBE, c = i % kGateBE;
+        if (t0 + r < n && e0 + c < M)
+            Y[(size_t)(t0 + r) * M + e0 + c] = Ys[i];
+    }
+}
+
+void gemm_gate_fp32_rows(const half* W, const half* X, float* Y, int n, int M, int K, cudaStream_t stream) {
+    if (n <= 0 || M <= 0)
+        return;
+    const dim3 grid(static_cast<unsigned>((n + kGateBT - 1) / kGateBT),
+                    static_cast<unsigned>((M + kGateBE - 1) / kGateBE));
+    gemm_gate_fp32_rows_kernel<<<grid, 256, 0, stream>>>(W, X, Y, n, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 
 // ---------------------------------------------------------------------------
 // Fused gate+up MoE GEMV (scalar FP16 variants — NOT dp4a, kept as-is)
