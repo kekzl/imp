@@ -9,6 +9,7 @@
 #include "model/sentencepiece_loader.h"
 #include "model/tokenizer.h"
 #include "model/json_util.h"
+#include "model/awq_load.h"
 #include "quant/dequant_gptq.h"
 #include "core/logging.h"
 
@@ -1191,19 +1192,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // AWQ: no dequant kernel yet, so the load is refused (#2196). #2205 flips this to supported.
-    HFConfigLoader::AWQConfig awq_cfg;
-    if (HFConfigLoader::load_awq_config(model_dir, awq_cfg)) {
-        cfg.is_awq_prequant = true;
-        cfg.awq_group_size = awq_cfg.group_size;
-        IMP_LOG_ERROR(
-            "AWQ SafeTensors detected (bits=%d group_size=%d zero_point=%s version=%s): AWQ is "
-            "not supported yet (no dequant kernel, tracked in #2205). Loading it as wire dtype "
-            "would give wrong output. Use a GPTQ or NVFP4 export instead.",
-            awq_cfg.bits, awq_cfg.group_size, awq_cfg.zero_point ? "true" : "false",
-            awq_cfg.version.empty() ? "unspecified" : awq_cfg.version.c_str());
+    if (awq_refuses(*model, cfg, tensor_map, model_dir))
         return nullptr;
-    }
 
     HFConfigLoader::NvFP4Config nvfp4_cfg;
     bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
