@@ -43,6 +43,9 @@ target_compile_options(imp_warnings INTERFACE
 target_compile_options(imp_warnings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-result>
     $<$<COMPILE_LANGUAGE:CUDA>:--diag-error=2809>)
+# #2315: -Wunused-* is 0 across all first-party host TUs; errors keep it there.
+target_compile_options(imp_warnings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-parameter;-Werror=unused-variable;-Werror=unused-but-set-variable;-Werror=unused-but-set-parameter;-Werror=unused-function;-Werror=unused-local-typedefs;-Werror=unused-value;-Werror=unused-label>)
 
 # --- CUDA Toolkit ---
 find_package(CUDAToolkit 13.2 REQUIRED)

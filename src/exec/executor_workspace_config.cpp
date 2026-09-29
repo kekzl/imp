@@ -189,7 +189,7 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
 // Dual workspace for concurrent prefill/decode overlap
 // ---------------------------------------------------------------------------
 
-bool Workspace::allocate_decode_workspace(cudaStream_t stream, int max_batch) {
+bool Workspace::allocate_decode_workspace(cudaStream_t /*stream*/, int max_batch) {
     if (decode_workspace_)
         return true;  // already allocated
     if (max_batch <= 0)
