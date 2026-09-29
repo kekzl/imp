@@ -273,6 +273,12 @@ struct Request {
     // picture. Zero is refused the cache entirely, so a missed plumbing site degrades to "no
     // reuse" rather than "wrong picture".
     size_t vision_content_hash = 0;
+    // Prefix reuse skips the reused rows' forward: refused for an image without a content hash
+    // and for embeddings, which mean-pool every input row (#2245).
+    bool prefix_reuse_ok() const {
+        const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        return (!has_image || vision_content_hash != 0) && !embedding_request;
+    }
     // The LoRA adapter this request asks for (engine id, 0 = base). The
     // adapter is engine-global, so the batching worker switches to it before
     // admission and only once nothing else is in flight (AUDIT_arch_2026 E-1).

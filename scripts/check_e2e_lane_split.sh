@@ -55,6 +55,7 @@ SchedulerTest.ChunkedPrefillRescheduling
 SchedulerTest.DecodeBatchSizeLimit
 SchedulerTest.EmptyBatch
 SchedulerTest.EmptyScheduler
+SchedulerTest.EmbeddingRequestSkipsPrefixReuse
 SchedulerTest.FullLifecycle
 SchedulerTest.HandlesCancel
 SchedulerTest.MaxBatchSize
