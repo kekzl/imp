@@ -124,6 +124,7 @@ struct MxPagedKVArgs {
 // copy); V dequantized to FP16 for WMMA. Cache scales carry no attention-scale fold; Q uses RAW
 // absmax/6, `scale` applied post-MMA. Current-chunk K/V (fresh FP16) force-promoted and read
 // exact; only the past reads FP4 from cache.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false, bool Promote = false,
           bool PagedKV = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
@@ -887,7 +888,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 // 4-issue path: store 4 ci's, scales already HW-applied
 #define STORE_CI(d_a, d_b, d_c, d_d, ci_off)                                                             \
     do {                                                                                                 \
-        int base_col_x = (ci_meta_base + ci_off) * MX_MMA_N;                                             \
+        int base_col_x = (ci_meta_base + (ci_off)) * MX_MMA_N;                                           \
         int gk0_x = kv_start + base_col_x + c0;                                                          \
         int gk1_x = kv_start + base_col_x + c0 + 1;                                                      \
         FUSED_STORE(d_a, lq0, gq0, gk0_x, pg_qs, 1.0f, (base_row + r0) * Bkv + base_col_x + c0);         \
@@ -1230,6 +1231,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // =============================================================================
 // Shared memory computation
@@ -1641,7 +1643,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                                                     static_cast<int>(smem));                               \
         if (attr_err != cudaSuccess) {                                                                     \
             IMP_LOG_WARN("FMHA MXFP4: cudaFuncSetAttribute failed Bq=%d HD=%d bs=%d smem=%zu: %s", BQ, HD, \
-                         (int)BS, smem, cudaGetErrorString(attr_err));                                     \
+                         (int)(BS), smem, cudaGetErrorString(attr_err));                                   \
             return false;                                                                                  \
         }                                                                                                  \
         cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV, PR>,                                  \

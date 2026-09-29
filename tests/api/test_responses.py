@@ -3,12 +3,11 @@ Tests for the /v1/responses endpoint (OpenAI Responses API — the Agents SDK /
 Codex dialect).
 
 What it tests:   Request/response shapes, output items, streaming event
-                 sequence, stateful-field rejection.
+                 sequence. Store / previous_response_id: test_responses_store.py.
 What it does NOT test: model quality; transform internals (covered by
                  tests/test_responses_transform.cpp).
-External state:  Running imp-server (skipped against the mock server, which
-                 does not implement /v1/responses — same policy as
-                 /v1/messages).
+External state:  Running imp-server (skipped against the mock server, whose
+                 /v1/responses serves only the store contract).
 """
 
 import json
@@ -22,7 +21,7 @@ import conftest
 @pytest.fixture(autouse=True)
 def _skip_on_mock(is_mock):
     if is_mock:
-        pytest.skip("mock server does not implement /v1/responses")
+        pytest.skip("mock /v1/responses serves only the store contract")
 
 
 class TestResponsesNonStream:
@@ -68,19 +67,6 @@ class TestResponsesNonStream:
         assert fc["call_id"]
         args = json.loads(fc["arguments"])
         assert isinstance(args, dict)
-
-    # Validation runs before model resolution, so this holds model-less (#1600).
-    @pytest.mark.nomodel
-    def test_stateful_fields_rejected(self, model):
-        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
-            r = c.post("/v1/responses", json={
-                "model": model, "input": "x", "previous_response_id": "resp_123",
-            })
-            assert r.status_code == 400
-            r = c.post("/v1/responses", json={
-                "model": model, "input": "x", "store": True,
-            })
-            assert r.status_code == 400
 
     # The transform used to write nothing for a field it could not map, so the
     # chat parser's own 400 never saw it and the reply came back at 200 with the

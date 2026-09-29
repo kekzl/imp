@@ -4,10 +4,9 @@
 
 namespace imp {
 
-// Resolves a model id to a local path (as-is, or the HF cache's
-// models--org--name/snapshots/<latest>). Does not fetch: clean-host policy keeps Python
-// tooling off the host; stage models via git clone or a copied cache dir. `revision` is
-// accepted but only the most recent cached snapshot is returned.
+// Resolves a model id to a local path (as-is, or the HF cache's models--org--name/snapshots/
+// <latest>). Does not fetch; `--model hf://org/repo[:file]` does (hf_fetch.h, inside the
+// container, host stays clean). `revision` is accepted, the newest cached snapshot is returned.
 std::string resolve_model_path(const std::string& model_id, const std::string& revision = "");
 
 // HF hub cache root this resolver reads (HUGGINGFACE_HUB_CACHE, HF_HOME/hub,

@@ -1,31 +1,43 @@
 #include "core/qtype.h"
+#include "core/enum_table.h"
+
+#include <array>
 
 namespace imp {
 
-size_t qtype_elem_bytes(QType q) {
-    switch (q) {
-        case QType::F32:
-            return 4;
-        case QType::F16:
-            return 2;
-        case QType::BF16:
-            return 2;
-        case QType::FP8_E4M3:
-            return 1;
-        case QType::FP8_E5M2:
-            return 1;
-        case QType::INT8:
-            return 1;
-        case QType::INT4:
-            return 1;  // 2 elems/byte (caller handles packing)
-        case QType::INT32:
-            return 4;
-        case QType::FP4_E2M1:
-            return 1;  // 2 elems/byte
-        default:
-            return 0;
-    }
-}
+namespace {
+
+struct QTypeInfo {
+    QType id;
+    const char* name;
+    size_t elem_bytes;  // 0 for block-quant types; INT4/FP4_E2M1 pack 2 elems/byte
+};
+
+// One row per QType enumerator; the single source for qtype_name and qtype_elem_bytes.
+constexpr auto kQTypeRows = std::to_array<QTypeInfo>({
+    {QType::F32, "F32", 4},           {QType::F16, "F16", 2},           {QType::Q4_0, "Q4_0", 0},
+    {QType::Q4_1, "Q4_1", 0},         {QType::Q5_0, "Q5_0", 0},         {QType::Q5_1, "Q5_1", 0},
+    {QType::Q8_0, "Q8_0", 0},         {QType::Q8_1, "Q8_1", 0},         {QType::Q2_K, "Q2_K", 0},
+    {QType::Q3_K, "Q3_K", 0},         {QType::Q4_K, "Q4_K", 0},         {QType::Q5_K, "Q5_K", 0},
+    {QType::Q6_K, "Q6_K", 0},         {QType::Q8_K, "Q8_K", 0},         {QType::IQ4_NL, "IQ4_NL", 0},
+    {QType::IQ4_XS, "IQ4_XS", 0},     {QType::BF16, "BF16", 2},         {QType::MXFP4, "MXFP4", 0},
+    {QType::NONE, "NONE", 0},         {QType::FP8_E4M3, "FP8_E4M3", 1}, {QType::FP8_E5M2, "FP8_E5M2", 1},
+    {QType::INT8, "INT8", 1},         {QType::INT4, "INT4", 1},         {QType::INT32, "INT32", 4},
+    {QType::FP4_E2M1, "FP4_E2M1", 1}, {QType::NVFP4, "NVFP4", 0},       {QType::MXFP4_KV, "MXFP4_KV", 0},
+});
+
+constexpr QTypeInfo kUnknownQType{QType::NONE, "UNKNOWN", 0};
+static_assert(enum_table::rows_cover_enumerators<QType, 256>(kQTypeRows),
+              "kQTypeRows must have exactly one row per QType enumerator");
+
+// Gaps and values past the last row resolve to kUnknownQType.
+constexpr auto kQTypeIndex = enum_table::index_rows<enum_table::index_size(kQTypeRows)>(kQTypeRows);
+
+const QTypeInfo& qtype_info(QType q) { return enum_table::lookup(kQTypeIndex, q, kUnknownQType); }
+
+}  // namespace
+
+size_t qtype_elem_bytes(QType q) { return qtype_info(q).elem_bytes; }
 
 size_t qtype_row_bytes(QType q, int64_t cols) {
     switch (q) {
@@ -80,64 +92,6 @@ size_t qtype_row_bytes(QType q, int64_t cols) {
     }
 }
 
-const char* qtype_name(QType q) {
-    switch (q) {
-        case QType::F32:
-            return "F32";
-        case QType::F16:
-            return "F16";
-        case QType::Q4_0:
-            return "Q4_0";
-        case QType::Q4_1:
-            return "Q4_1";
-        case QType::Q5_0:
-            return "Q5_0";
-        case QType::Q5_1:
-            return "Q5_1";
-        case QType::Q8_0:
-            return "Q8_0";
-        case QType::Q8_1:
-            return "Q8_1";
-        case QType::Q2_K:
-            return "Q2_K";
-        case QType::Q3_K:
-            return "Q3_K";
-        case QType::Q4_K:
-            return "Q4_K";
-        case QType::Q5_K:
-            return "Q5_K";
-        case QType::Q6_K:
-            return "Q6_K";
-        case QType::Q8_K:
-            return "Q8_K";
-        case QType::IQ4_NL:
-            return "IQ4_NL";
-        case QType::IQ4_XS:
-            return "IQ4_XS";
-        case QType::BF16:
-            return "BF16";
-        case QType::MXFP4:
-            return "MXFP4";
-        case QType::NONE:
-            return "NONE";
-        case QType::FP8_E4M3:
-            return "FP8_E4M3";
-        case QType::FP8_E5M2:
-            return "FP8_E5M2";
-        case QType::INT8:
-            return "INT8";
-        case QType::INT4:
-            return "INT4";
-        case QType::INT32:
-            return "INT32";
-        case QType::FP4_E2M1:
-            return "FP4_E2M1";
-        case QType::NVFP4:
-            return "NVFP4";
-        case QType::MXFP4_KV:
-            return "MXFP4_KV";
-    }
-    return "UNKNOWN";
-}
+const char* qtype_name(QType q) { return qtype_info(q).name; }
 
 }  // namespace imp

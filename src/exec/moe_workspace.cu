@@ -66,9 +66,15 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
     // Phase 3c-full Step 3 per-layer caches.
     for (auto& c : per_layer_da_cache) {
         auto cfree = [](void* p) { if (p) IMP_CUDA_CHECK_LOG(cudaFree(p)); };
-        cfree(c.d_gate_B_ptrs);   cfree(c.d_gate_SFB_ptrs);   cfree(c.d_gate_alpha);
-        cfree(c.d_up_B_ptrs);     cfree(c.d_up_SFB_ptrs);     cfree(c.d_up_alpha);
-        cfree(c.d_down_B_ptrs);   cfree(c.d_down_SFB_ptrs);   cfree(c.d_down_alpha);
+        cfree(static_cast<void*>(c.d_gate_B_ptrs));
+        cfree(static_cast<void*>(c.d_gate_SFB_ptrs));
+        cfree(c.d_gate_alpha);
+        cfree(static_cast<void*>(c.d_up_B_ptrs));
+        cfree(static_cast<void*>(c.d_up_SFB_ptrs));
+        cfree(c.d_up_alpha);
+        cfree(static_cast<void*>(c.d_down_B_ptrs));
+        cfree(static_cast<void*>(c.d_down_SFB_ptrs));
+        cfree(c.d_down_alpha);
         c = {};
     }
     per_layer_da_cache.clear();

@@ -483,9 +483,9 @@ if (mx_native > 0) {
             // this fallback up front, so reaching here means the model genuinely does not fit.
             throw std::runtime_error(
                 "MXFP4 FP16 decode fallback would oversubscribe VRAM (need " +
-                std::to_string(fp16_total / (1024 * 1024)) + " MiB + " +
-                std::to_string(kRuntimeHeadroom / (1024 * 1024)) + " MiB runtime headroom, " +
-                std::to_string(free_mem / (1024 * 1024)) +
+                std::to_string(fp16_total / (static_cast<int64_t>(1024) * 1024)) + " MiB + " +
+                std::to_string(kRuntimeHeadroom / (static_cast<int64_t>(1024) * 1024)) +
+                " MiB runtime headroom, " + std::to_string(free_mem / (static_cast<int64_t>(1024) * 1024)) +
                 " MiB free). This model needs the FP16 decode cache (native MXFP4 GEMV is "
                 "unavailable on its weights) and does not fit on this GPU at the requested "
                 "context length. Reduce --min-kv-tokens / max context, or use a smaller model.");

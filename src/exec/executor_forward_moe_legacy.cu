@@ -439,7 +439,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     nw.micro_scales = b.scales;
                     nw.tensor_scale = b.tensor_scale;
                     nw.N = static_cast<int>(b.shape[0]);
-                    nw.K = static_cast<int>(b.shape[1]) * 2;  // packed → logical
+                    nw.K = static_cast<int64_t>(static_cast<int>(b.shape[1])) * 2;  // packed → logical
                     if (a.shape[0] == 1) {
                         gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
                                         static_cast<half*>(c.data), static_cast<int>(nw.N),

@@ -40,6 +40,7 @@ static bool use_multirow(int n_groups, int mr_blocks) {
 // Process 8 packed bytes (16 nibbles = 16 FP4 values) via prmt register LUT.
 // Returns UNSCALED dot product: sum(dequant(nibble) * activation).
 // Identical to NVFP4 dot_micro_block — same E2M1 encoding, same prmt LUT.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb, const half* __restrict__ x,
                                                  int elem_base) {
     constexpr uint32_t kLutLo = 0x3E3C3800u;
@@ -70,10 +71,12 @@ __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb,
     }
     return acc;
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Core row accumulation: iterate over MXFP4 scale groups.
 // Each group = 16 packed bytes (32 FP4) + 1 UE8M0 scale.
 // Uses uint4 (128-bit) vectorized data loads + 2 micro-blocks per group.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float gemv_mxfp4_row(const uint8_t* __restrict__ row_packed,
                                                 const uint8_t* __restrict__ row_scales,
                                                 const half* __restrict__ x, int n_groups, int tid) {
@@ -90,8 +93,10 @@ __device__ __forceinline__ float gemv_mxfp4_row(const uint8_t* __restrict__ row_
     }
     return acc;
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Warp-level row accumulation for multi-row kernels.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <typename DotFn>
 __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_packed,
                                              const uint8_t* __restrict__ row_scales, int n_groups, int lane,
@@ -105,6 +110,7 @@ __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_pac
     }
     return acc;
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Warp-level reduction: shuffle-down within 32 threads.
 __device__ __forceinline__ float warp_reduce(float acc) {
@@ -329,6 +335,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_gate_up_kernel(
 // ---------------------------------------------------------------------------
 // Fused SwiGLU + GEMV + residual
 // ---------------------------------------------------------------------------
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restrict__ pb,
                                                         const half* __restrict__ gate,
                                                         const half* __restrict__ up, int elem_base,
@@ -347,6 +354,7 @@ __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restric
     }
     return acc;
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __device__ __forceinline__ void init_lut(float* s_lut, int tid) {
     if (tid < 16) {
@@ -355,6 +363,7 @@ __device__ __forceinline__ void init_lut(float* s_lut, int tid) {
     }
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_swiglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ linear_scales,
     const half* __restrict__ gate, const half* __restrict__ up, half* __restrict__ y,
@@ -386,10 +395,12 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_swiglu_residual_k
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Fused GeGLU + GEMV + residual
 // ---------------------------------------------------------------------------
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict__ pb,
                                                        const half* __restrict__ gate,
                                                        const half* __restrict__ up, int elem_base,
@@ -410,7 +421,9 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
     }
     return acc;
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ linear_scales,
     const half* __restrict__ gate, const half* __restrict__ up, half* __restrict__ y,
@@ -442,6 +455,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers
@@ -449,7 +463,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
 
 void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N, int K, cudaStream_t stream) {
     static int kpar_dbg = 0;
-    if (++kpar_dbg <= 200 && (K != 5120 || kpar_dbg <= 3))
+    ++kpar_dbg;
+    if (kpar_dbg <= 200 && (K != 5120 || kpar_dbg <= 3))
         IMP_LOG_DEBUG("[GEMV_DBG] N=%d K=%d W.N=%lld W.K=%lld data=%p scales=%p x=%p y=%p", N, K,
                       (long long)W.N, (long long)W.K, W.data, W.linear_scales, x, y);
     int n_groups = K / kMxGroupSize;

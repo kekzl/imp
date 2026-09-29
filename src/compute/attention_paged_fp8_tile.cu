@@ -34,6 +34,8 @@ __device__ __forceinline__ half2 fp8x2_to_half2(uint32_t two_bytes) {
     uint32_t r;
     asm("{ .reg .b16 lo; cvt.u16.u32 lo, %1; cvt.rn.f16x2.e4m3x2 %0, lo; }" : "=r"(r) : "r"(two_bytes));
     half2 h;
+    // 4-byte register punning; half2 is bitwise-copyable on device (#2210)
+    // NOLINTNEXTLINE(bugprone-undefined-memory-manipulation)
     memcpy(&h, &r, 4);
     return h;
 }
@@ -41,6 +43,7 @@ __device__ __forceinline__ half2 fp8x2_to_half2(uint32_t two_bytes) {
 // Bulk cp.async of one 16-token KV chunk (K+V) into a warp's tile buffers: 16 rows x 128B/tile,
 // each lane copies four 16B pieces. All 16 slots always loaded (chunks never straddle a page);
 // invalid tokens are masked in compute.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void tile_load(uint8_t* k_tile, uint8_t* v_tile, const uint8_t* k_src,
                                           const uint8_t* v_src, int kv_slot_stride, int lane) {
 #pragma unroll
@@ -52,9 +55,11 @@ __device__ __forceinline__ void tile_load(uint8_t* k_tile, uint8_t* v_tile, cons
         cp_async_ca_16(v_tile + row * kTileRowStride + col, v_src + row * kv_slot_stride + col);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Block-cooperative variant of tile_load for the GQA kernel: all blockDim.x
 // threads split the 256 16 B pieces (128 K + 128 V) of one chunk.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void tile_load_block(uint8_t* k_tile, uint8_t* v_tile, const uint8_t* k_src,
                                                 const uint8_t* v_src, int kv_slot_stride, int tid,
                                                 int nthreads) {
@@ -68,9 +73,11 @@ __device__ __forceinline__ void tile_load_block(uint8_t* k_tile, uint8_t* v_tile
             cp_async_ca_16(v_tile + row * kTileRowStride + col, v_src + row * kv_slot_stride + col);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_tile_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -135,6 +142,8 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 16; i++) {
             uint4 v = q4[i];
+            // 16-byte register punning; half2 is bitwise-copyable on device (#2210)
+            // NOLINTNEXTLINE(bugprone-undefined-memory-manipulation)
             memcpy(&q_reg[i * 4], &v, 16);
         }
     }
@@ -266,6 +275,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // GQA-batched variant: grid.y = n_kv_heads, one block computes all G = n_heads/n_kv_heads Q
 // heads (warp w = Q head w), sharing each KV tile in block-local smem instead of reading it G
@@ -273,6 +283,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
 // pipeline); blocks advance chunks block-serially, parallelism recovered via a higher split
 // count. Each warp holds a complete split result for its head, so no cross-warp reduce - warps
 // write (m,l,O_unnormalized) partials directly, matching paged_attention_reduce_kernel's format.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -349,6 +360,8 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 16; i++) {
             uint4 v = q4[i];
+            // 16-byte register punning; half2 is bitwise-copyable on device (#2210)
+            // NOLINTNEXTLINE(bugprone-undefined-memory-manipulation)
             memcpy(&q_reg[i * 4], &v, 16);
         }
     }
@@ -482,6 +495,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     for (int i = 0; i < ELEMS; i++)
         out[2 + lane_id * ELEMS + i] = o_reg[i];
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size) {
     return head_dim == kTileHeadDim && block_size >= kTileTokens && block_size % kTileTokens == 0;

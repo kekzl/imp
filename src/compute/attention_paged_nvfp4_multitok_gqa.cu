@@ -53,6 +53,7 @@ struct GqaState {
 
 // Tokens [first_tok, n_tok) of one block for this warp, TOK at a time, for
 // HPC heads. K/V nibbles and scales are loaded and converted once per token.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK, int HPC>
 __device__ __forceinline__ void nvfp4_block_multitok_gqa(
     const uint8_t* __restrict__ K_block, const uint8_t* __restrict__ V_block,
@@ -158,6 +159,7 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int HEAD_DIM, int HPC>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_multitok_gqa_kernel(
@@ -323,7 +325,8 @@ void launch_gqa(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, c
                 const int* context_lens, int batch_size, int n_heads, int n_kv_heads, int n_q_per_kv,
                 int block_size, float scale, int max_num_blocks, int num_splits, int sliding_window,
                 float softcap, const half* attn_sinks, cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * HEAD_DIM * sizeof(float);
+    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
+                              static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
     dim3 block(BLOCK_THREADS);
     const int groups = n_kv_heads * (n_q_per_kv / HPC);
     if (num_splits > 1) {

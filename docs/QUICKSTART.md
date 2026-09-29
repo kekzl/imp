@@ -48,7 +48,9 @@ The same script takes a BF16 or FP8 repo and converts it. Qwen3.8-27B needs this
 scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
 ```
 
-28.8 GiB down, ~25 minutes on the card, 18.8 GiB out. The script needs only `curl`, `jq` and Docker: `git clone` needs git-lfs and `huggingface-cli` needs Python, neither installed by the clean-host policy, and imp itself never fetches (`src/model/hf_hub.h`).
+28.8 GiB down, ~25 minutes on the card, 18.8 GiB out. The script needs only `curl`, `jq` and Docker: `git clone` needs git-lfs and `huggingface-cli` needs Python, neither installed by the clean-host policy.
+
+A checkpoint that loads without conversion needs no script: `--model hf://<org>/<repo>` downloads it inside the container ([`CONFIG.md`](CONFIG.md#fetching-from-hugging-face)).
 
 Before converting it forecasts the output size and whether it fits the card: a checkpoint that would miss the card costs seconds instead of 25 minutes. Prefer an FP8 source where one exists: for Qwen3.8-27B 28.8 GiB against 51.8 GiB for BF16, costing 0.24 % perplexity (4.6262 against 4.6151 on `ppl_corpus_45k.txt`).
 
