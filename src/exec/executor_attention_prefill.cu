@@ -270,6 +270,12 @@
                                        q_offset, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
+            } else if (hd == 512 && hd512_fixed_order_prefill(dispatch_policy()) &&
+                       hd512_row_invariant_prefill(qv, k_full_t, v_full_t, ao, n, ctx_len, nh, nkv, scale,
+                                                   layer_sliding_window, cfg.attn_logit_softcap, q_offset,
+                                                   stream, attn_sinks)) {
+                // Same kernel as the single-shot prefill: a row matches in every chunk (#2167).
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
             } else if (smatrix_fits && !prefer_fmha) {
                 // cuBLAS: below-threshold reference for uniform models, sinks FA2 declined, and
                 // hd=512 Gemma-4 global layers whenever their S-matrix fits (faster than
@@ -352,6 +358,11 @@
                                    /*d_kv_len=*/nullptr, attn_sinks)) {
             // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
+        } else if (hd == 512 && hd512_fixed_order_prefill(dispatch_policy()) &&
+                   hd512_row_invariant_prefill(qv, kk, vv, ao, n, n, nh, nkv, scale, layer_sliding_window,
+                                               cfg.attn_logit_softcap, /*q_offset=*/0, stream, attn_sinks)) {
+            // Deterministic mode: cuBLAS picks its algorithm by n, so a row changed with its chunk (#2167).
+            dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
         } else if (s_matrix_fits && !prefer_fmha) {
             // Materialized cuBLAS: below-threshold reference for uniform models FA2
             // declines, and the hd=512 Gemma-4 global layers whenever the

@@ -11,6 +11,7 @@
 #include "compute/attention_fmha_sm120.h"
 #include "core/tensor.h"
 #include "core/dispatch_policy.h"
+#include "core/process_diag.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -56,6 +57,28 @@ static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, 
     Tensor o4 = o.reshape(4, q4s);
     return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
                                   q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
+}
+
+// attention.hd512_prefill: "fmha" always, "cublas" never, "auto" under runtime.deterministic.
+static bool hd512_fixed_order_prefill(const DispatchPolicy& rcfg) {
+    const std::string& mode = rcfg.attention.hd512_prefill;
+    return mode == "fmha" || (mode == "auto" && process_diag_deterministic_gemm());
+}
+
+// hd=512 prefill whose rows do not depend on n or q_offset (#2167): the WMMA FMHA with a forward
+// KV scan, used by the single-shot and the chunk-continuation path alike. False = declined.
+static bool hd512_row_invariant_prefill(const Tensor& q, const Tensor& k, const Tensor& v, Tensor& o, int n,
+                                        int kv_len, int nh, int nkv, float scale, int sliding_window,
+                                        float softcap, int q_offset, cudaStream_t stream, const void* sinks) {
+    constexpr int hd = 512;
+    int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+    int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
+    Tensor q4 = q.reshape(4, q4s);
+    Tensor k4 = k.reshape(4, kv4s);
+    Tensor v4 = v.reshape(4, kv4s);
+    Tensor o4 = o.reshape(4, q4s);
+    return fmha_sm120_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
+                              q_offset, static_cast<const half*>(sinks), /*fixed_kv_order=*/true);
 }
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).

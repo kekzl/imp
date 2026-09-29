@@ -75,4 +75,4 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 | Micro-scale search | REFUTED (#1083): 30.10 -> 29.88 PPL for ~6x cost; the FP4 grid is the error, AWQ moves it |
 | NVFP4 lm_head | `gemm.nvfp4_lm_head`, `_gdn` default on: +2.2% PPL for +8-16% decode, owner-accepted; `--lm-head` off = +0.99% PPL for -10.4% decode on the measured case. Qwen3-8B-Q8_0: +3.3 % PPL (11.1108 vs 10.7541) and a flipped first-token argmax vs HF fp32 and llama.cpp (#2166) |
 | FP8 E4M3 KV error | the 3-bit mantissa: V round-trip rel error 0.0265 with shared or separate K/V scale; no scale layout fixes it |
-| MoE NVFP4 activation tensor scale | per-expert batch absmax: a token's quantized values depend on its chunk mates, so a prompt row changes with the prefill chunk (#2167) |
+| MoE row invariance | the default NVFP4 MoE act quantize is row-local (micro scales only); the opt-in smallM native quantize used a per-expert batch absmax until #2167, now a fixed tensor scale 1.0. Router logits: `gemm_gate_fp32_rows`, fixed per-row order |

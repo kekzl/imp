@@ -44,7 +44,7 @@ template <int Bq, int HD>
 __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap, int q_offset, const half* __restrict__ sinks) {
+    int sliding_window, float softcap, int q_offset, const half* __restrict__ sinks, bool fixed_kv_order) {
     // KV tile columns: hd=512 (Gemma-4 global / Qwen3.5-27B) uses a narrow Bkv so Q/KV/O_acc fits
     // the 99KB smem opt-in (Bq=16,Bkv=32,HD=512 needs ~82KB). Bkv=32 halves KV-tile iterations and
     // engages 2 warps in the QK WMMA vs Bkv=16, at acceptable FP16-class accuracy cost. This is the
@@ -153,7 +153,8 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     // ================================================================
     // Main loop over KV tiles (Sawtooth: alternate scan direction per Q tile for L2 locality)
     // ================================================================
-    const bool sawtooth_reverse = (blockIdx.x % 2 == 1);
+    // fixed_kv_order: every row scans KV tiles 0..n, so its bits do not depend on its Q tile (#2167).
+    const bool sawtooth_reverse = !fixed_kv_order && (blockIdx.x % 2 == 1);
     const int n_kv_iters = num_kv_tiles - first_kv_tile;
     for (int iter = 0; iter < n_kv_iters; iter++) {
         const int j = sawtooth_reverse ? (num_kv_tiles - 1 - iter) : (first_kv_tile + iter);
@@ -265,8 +266,11 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                 row_l[r] = l_new;
             }
 
-            // Step 5: Rescale O_acc
+            // Step 5: Rescale O_acc. A tile fully masked for this row is an exact no-op (the
+            // approximate division gives l/l != 1), so a row's bits do not depend on its Q tile.
             float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
+            if (partial_sum == 0.0f && m_new == m_old)
+                rescale = 1.0f;
             if (row_valid) {
                 for (int d = sm_lane; d < head_dim; d += TPR) {
                     O_acc[r * head_dim + d] *= rescale;
@@ -385,7 +389,7 @@ static size_t compute_smem_sm120(int Bq, int Bkv, int head_dim) {
 
 bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                         bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
-                        const half* sinks) {
+                        const half* sinks, bool fixed_kv_order) {
     if (Q.qtype != QType::F16)
         return false;
 
@@ -474,7 +478,8 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
         fmha_sm120_kernel<BQ, HD><<<grid, block, smem, stream>>>(                                        \
             reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),                \
             reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q,   \
-            seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset, sinks);       \
+            seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset, sinks,        \
+            fixed_kv_order);                                                                             \
         IMP_CUDA_CHECK_LAUNCH();                                                                         \
     } while (0)
 

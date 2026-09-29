@@ -330,7 +330,9 @@ def main():
     # per-sequence bitwise, neighbour isolation, chunk vs token steps (kernels need a card).
     # 1146 -> 1147: LayerNormTest.RMSNormNvfp4RefusesNullWeight (test-compute): the fused norm +
     # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
-    PINNED = 1147
+    # 1147 -> 1151: PrefillRowInvariance x4 (test-quant): router logits, MoE act quantize (default
+    # and smallM), hd=512 FMHA, same row in different batches or chunk offsets bit-equal (#2167).
+    PINNED = 1151
 
     text = CMAKE.read_text()
     mods = module_sources(text)
