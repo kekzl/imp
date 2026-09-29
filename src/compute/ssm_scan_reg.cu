@@ -27,6 +27,7 @@ struct TokenIn {
 };
 
 // Offsets are 32-bit: the launcher refuses n_tokens * row > INT_MAX.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int SPT, bool FUSE_GATE>
 __device__ __forceinline__ void load_token(TokenIn<SPT>& in, const half* __restrict__ b_base,
                                            const half* __restrict__ c_base, const half* __restrict__ x_base,
@@ -43,6 +44,7 @@ __device__ __forceinline__ void load_token(TokenIn<SPT>& in, const half* __restr
     if constexpr (FUSE_GATE)
         in.z = z_base[t * inner_size];
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __device__ __forceinline__ float half_at(const uint4* v, int i) {
     return __half2float(reinterpret_cast<const half*>(v)[i]);
@@ -50,6 +52,7 @@ __device__ __forceinline__ float half_at(const uint4* v, int i) {
 
 // Grid (n_heads, head_dim / (kThreads / S_TILES)); lanes s_tid = tid % S_TILES of one d share a
 // warp segment, so the legacy smem tree (a[s] += a[s + stride]) becomes shfl_down, same order.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool H_FP16, bool FUSE_GATE, int S_TILES, int SPT>
 __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __restrict__ B_in,
                                     const half* __restrict__ C_in, const half* __restrict__ dt_raw,
@@ -204,6 +207,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int S_TILES, int SPT>
 void launch(const SsmScanArgs& a, bool fp16, bool fused) {

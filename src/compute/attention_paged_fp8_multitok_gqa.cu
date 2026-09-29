@@ -156,6 +156,7 @@ __device__ __forceinline__ bool cursor_advance(Cursor& c, const WalkGeom& g) {
 // The min-blocks term pins the two CTAs per SM the HPC=5 instance sits on
 // at exactly 128 registers; measured neutral against the bare bound (55.1 vs
 // 54.7 us at HPC 5, 56.0 vs 56.2 at HPC 4, 2026-09-08), no spill.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int LPR, int TOK, int HPC>
 __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_gqa_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -377,13 +378,15 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
                                        n_heads, head0 + h, attn_sinks);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int LPR, int TOK, int HPC>
 void launch_gqa(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, half* O, const int* block_tables,
                 const int* context_lens, int batch_size, int n_heads, int n_kv_heads, int n_q_per_kv,
                 int block_size, float scale, float kv_scale, int max_num_blocks, int sliding_window,
                 float softcap, const half* attn_sinks, cudaStream_t stream) {
-    const size_t smem_bytes = (2 * NUM_WARPS + 2 * NUM_WARPS * HD) * sizeof(float) + HPC * HD * sizeof(half);
+    const size_t smem_bytes = (2 * NUM_WARPS + 2 * NUM_WARPS * HD) * sizeof(float) +
+                              static_cast<int64_t>(HPC) * HD * sizeof(half);
     dim3 grid(batch_size, n_kv_heads * (n_q_per_kv / HPC));
     dim3 block(BLOCK_THREADS);
     paged_attention_decode_fp8_gqa_kernel<LPR, TOK, HPC>

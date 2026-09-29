@@ -34,6 +34,7 @@ struct LaneVec<8> {
     using type = uint4;
 };
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int ELEMS>
 __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>::type& v, float* out) {
     const half2* h2 = reinterpret_cast<const half2*>(&v);
@@ -44,6 +45,7 @@ __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>:
         out[2 * i + 1] = f.y;
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Per-warp softmax state for HPC heads.
 template <int HEAD_DIM, int HPC>
@@ -79,6 +81,7 @@ struct HeadState {
 
 // One KV block for one warp: rows [first_tok, n_tok) in groups of TOK, each K
 // row loaded as one lane vector, converted once and dotted against HPC heads.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK, int HPC>
 __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_block,
                                                    const half* __restrict__ V_block, int first_tok, int n_tok,
@@ -165,6 +168,7 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int HEAD_DIM, int HPC>
 __device__ __forceinline__ void load_q_heads(const half* __restrict__ Q, int batch_idx, int n_heads,
@@ -180,6 +184,7 @@ __device__ __forceinline__ void load_q_heads(const half* __restrict__ Q, int bat
     }
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK, int HPC>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_multitok_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
@@ -244,10 +249,12 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
                                              attn_sinks);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Split-K instance: grid (batch, n_kv_heads x groups, num_splits); each CTA
 // walks its share of the blocks for HPC heads and writes one partial per head
 // in the layout the shared reduce kernel expects.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK, int HPC>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_multitok_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
@@ -326,13 +333,15 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
                                           head0 + h, num_splits, split_idx);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int HEAD_DIM, int HPC>
 void launch_f16_multitok(const half* Q, const half* K_cache, const half* V_cache, half* O,
                          const int* block_tables, const int* context_lens, int batch_size, int n_heads,
                          int n_kv_heads, int n_q_per_kv, int block_size, float scale, int max_num_blocks,
                          int sliding_window, float softcap, const half* attn_sinks, cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * HEAD_DIM * sizeof(float);
+    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
+                              static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
     dim3 grid(batch_size, n_kv_heads * (n_q_per_kv / HPC));
     dim3 block(BLOCK_THREADS);
     paged_attention_decode_f16_multitok_kernel<HEAD_DIM, 4, HPC>
@@ -348,7 +357,8 @@ void launch_f16_splitk_multitok(const half* Q, const half* K_cache, const half* 
                                 int n_kv_heads, int n_q_per_kv, int block_size, float scale,
                                 int max_num_blocks, int num_splits, int sliding_window, float softcap,
                                 cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * HEAD_DIM * sizeof(float);
+    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
+                              static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
     dim3 grid(batch_size, n_kv_heads * (n_q_per_kv / HPC), num_splits);
     dim3 block(BLOCK_THREADS);
     paged_attention_splitk_f16_multitok_kernel<HEAD_DIM, 4, HPC>

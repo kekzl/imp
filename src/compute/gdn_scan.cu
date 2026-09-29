@@ -1,9 +1,6 @@
 #include "compute/gdn_internal.cuh"
 #include "core/logging.h"
 
-#include <stdexcept>
-#include <string>
-
 namespace imp {
 
 // Phase 1b.1 chunkwise SSD scan prototype (Mamba2 SSD adapted to the GDN delta rule). Same
@@ -12,6 +9,7 @@ namespace imp {
 // matmul (Yang et al. 2024).
 // Shared memory: s_k[CHUNK*SS], s_q[CHUNK*SS], s_reduce[HD]; at HD=SS=128, CHUNK=64 = 65 KiB,
 // needs the dynamic-shared-memory opt-in. Grid (n_heads), block (HD).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK, typename YOut>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -155,6 +153,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
             H_col[s * HD] = H_reg[s];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 2a WY-rep parallel delta-rule scan (Yang et al. 2024). Per L-token chunk:
 //   1. Cache K~,Q~ in shared memory (post L2 norm)
@@ -166,6 +165,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
 //   6. H_L = D[0..L] H_0 + sum_t D[t+1..L] k~_t u_t^T
 // Cumulative decay D[a..b] = prod_{i=a..b-1} g_i in log-space (avoids underflow; g capped e^-20).
 // CHUNK=32: L^2 + L*HD scratch must fit the 100 KiB sm_120 opt-in cap (HD=SS=128 -> ~92 KiB).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -385,6 +385,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
             H_col[s * HD] = H_reg[s];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers
@@ -454,8 +455,9 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
     int t = 0;
     while (t < n_tokens) {
         const int this_chunk = (t + chunk_size <= n_tokens) ? chunk_size : (n_tokens - t);
-        fused(conv_f32 + static_cast<size_t>(t) * conv_channels, alpha + t * n_heads, beta + t * n_heads,
-              h_state, y + static_cast<size_t>(t) * inner, this_chunk, nullptr);
+        fused(conv_f32 + static_cast<size_t>(t) * conv_channels, alpha + static_cast<ptrdiff_t>(t) * n_heads,
+              beta + static_cast<ptrdiff_t>(t) * n_heads, h_state, y + static_cast<size_t>(t) * inner,
+              this_chunk, nullptr);
         t += this_chunk;
     }
 }
@@ -465,11 +467,14 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                             cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
                             float* h_snap, const int* d_snap_n) {
-    // Same single-chunk contract as gdn_scan_chunkwise_fp32out below.
-    const bool single_chunk = (chunk_size <= 0 || n_tokens <= chunk_size);
-    if (h_snap && !single_chunk)
-        throw std::runtime_error("gdn_scan_chunkwise_f32: h_snap needs a single chunk (n_tokens=" +
-                                 std::to_string(n_tokens) + ", chunk_size=" + std::to_string(chunk_size) + ")");
+    // Snapshot row d_snap_n is in whole-range coordinates and the chunkwise kernel has no snapshot
+    // write: a snapshot request runs the whole range as one fused scan (#2214).
+    if (h_snap) {
+        gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
+                           n_heads, head_dim_ssm, state_size, n_groups, stream, grouped_layout, d_real_n,
+                           h_snap, d_snap_n);
+        return;
+    }
     gdn_scan_chunkwise_dispatch<half>(
         conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, head_dim_ssm,
         state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
@@ -488,15 +493,13 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
                                 int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                                 cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
                                 float* h_snap, const int* d_snap_n) {
-    // Snapshot row is in whole-range coordinates, so it only travels when the range is one
-    // chunk. A verify chunk (a few rows vs a 64-row chunk size) always qualifies; anything else
-    // is refused, since a silently unwritten slab is adopted as garbage state.
-    const bool single_chunk = (chunk_size <= 0 || n_tokens <= chunk_size);
-    if (h_snap && !single_chunk)
-        throw std::runtime_error("gdn_scan_chunkwise_fp32out: h_snap needs a single chunk (n_tokens=" +
-                                 std::to_string(n_tokens) + ", chunk_size=" + std::to_string(chunk_size) + ")");
-    float* const snap = h_snap;
-    const int* const snap_n = d_snap_n;
+    // Same whole-range fused route for a snapshot request as gdn_scan_chunkwise_f32 (#2214).
+    if (h_snap) {
+        gdn_scan_fused_fp32out(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32,
+                               n_tokens, n_heads, head_dim_ssm, state_size, n_groups, stream, grouped_layout,
+                               d_real_n, h_snap, d_snap_n);
+        return;
+    }
     gdn_scan_chunkwise_dispatch<float>(
         conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens, n_heads,
         head_dim_ssm, state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
@@ -504,7 +507,7 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
             int n_tok_chunk, const int* d_real_n_chunk) {
             gdn_scan_fused_fp32out(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
                                    n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
-                                   grouped_layout, d_real_n_chunk, snap, snap_n);
+                                   grouped_layout, d_real_n_chunk);
         });
 }
 

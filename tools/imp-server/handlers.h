@@ -19,6 +19,7 @@
 #include <fstream>
 #include <memory>
 #include "rate_limit.h"
+#include "responses_store.h"
 
 #include <mutex>
 #include <set>
@@ -218,9 +219,16 @@ struct ServerState {
     // OTLP span exporter (server.otlp_endpoint); one span set per request.
     Tracer tracer;
     ImpContext ctx = nullptr;
-    // LoRA adapters loaded at startup (--lora NAME=PATH): name -> C-API id. Per-request "lora" field
-    // selects; empty/absent = base. Swap recaptures decode graphs; adapter is engine-global (single-user).
-    std::map<std::string, int32_t> lora_ids;
+    // LoRA adapters (--lora NAME=PATH or POST /admin/lora/load): name -> entry. Per-request "lora"
+    // selects by name. `id` is the server's, stable across suspend/resume; `engine_id` is the
+    // context's (0 while suspended). Guarded by mtx.
+    struct LoraEntry {
+        int32_t id = 0;
+        int32_t engine_id = 0;
+        std::string path;
+    };
+    std::map<std::string, LoraEntry> loras;
+    int32_t next_lora_id = 1;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
@@ -269,6 +277,17 @@ struct ServerState {
     // suspended: true while /admin/suspend has torn down model+engine (VRAM freed, weights in host
     // snapshot); inference endpoints answer 503. Atomic so /health reads it lock-free; writes hold state.mtx.
     std::atomic<bool> suspended{false};
+    // --idle-unload-seconds (#2199): 0 = off. idle_suspended marks a suspend the idle timer made;
+    // only that kind resumes on the next request. last_activity_ms: steady_clock ms.
+    std::atomic<int> idle_unload_seconds{0};
+    std::atomic<bool> idle_suspended{false};
+    std::atomic<int64_t> last_activity_ms{0};
+    void touch_activity() {
+        last_activity_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count(),
+                               std::memory_order_relaxed);
+    }
     // True while load_model_into_state() runs (startup load, auto-load, swap):
     // the old engine is gone and the new one is not up. GET /ready reads it
     // without the mutex, which the swap holds for the whole load.
@@ -299,6 +318,9 @@ struct ServerState {
 
     // Per-request JSONL logger (opt-in via --log-requests).
     RequestLogger request_logger;
+
+    // Responses API store (#2206): store=true / previous_response_id. Own mutex, never state.mtx.
+    imp_server::responses::ResponseStore response_store;
 
     bool model_loaded() const { return ctx != nullptr; }
 
@@ -364,6 +386,8 @@ void handle_props(const httplib::Request& req, httplib::Response& res, ServerSta
 void handle_info(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// POST /infill: llama.cpp fill-in-the-middle over the /v1/completions path (#2201).
+void handle_infill(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic-compatible Messages API. Non-streaming requests are a thin shim
 // over handle_chat_completions; streaming requests drive the real per-token
 // batching-engine loop and emit native Anthropic SSE events incrementally.
@@ -372,6 +396,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
 // POST /v1/responses — OpenAI Responses API (Agents SDK / Codex dialect);
 // reuses the chat-completions path via the transform shim (responses.h).
 void handle_responses(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// GET / DELETE /v1/responses/{id} (#2206).
+void handle_responses_get(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_responses_delete(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic /v1/messages/count_tokens: same body transform + tokenize chain as
 // handle_messages, but never submits to the engine; returns {"input_tokens":N}.
 void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state);
@@ -389,8 +416,29 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
 // in one forward. Requires a reranker model to be loaded; see handlers_rerank.cpp.
 void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
+// POST /v1/decide (SemIf letter scoring) and POST /v1/score (caller-given candidate tokens), #2198.
+// One prefill per item, softmax over candidate logits at the last position; handlers_decide.cpp.
+void handle_decide(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_score(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
 // POST /admin/suspend: snapshot weights to host RAM, tear down model/engine, free VRAM.
 // POST /admin/resume: reload with the snapshot armed (warm restore). Both idempotent; standard
 // api-key auth applies.
 void handle_suspend(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_resume(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// Suspend/resume bodies without the HTTP wrapper. Caller holds state.mtx; returns the HTTP
+// status (200 = done) and fills `body` (response or error envelope).
+int suspend_locked(ServerState& state, json& body);
+int resume_locked(ServerState& state, json& body);
+// Resumes an idle (not an operator) suspend; caller holds state.mtx. False = 503 already in res.
+bool resume_if_idle_locked(ServerState& state, httplib::Response& res);
+
+// --idle-unload-seconds timer tick (#2199): suspends when no request arrived for N s and the
+// engine is empty. Never blocks on state.mtx. Returns true when it suspended.
+bool idle_unload_tick(ServerState& state);
+
+// POST /admin/lora/load {"path", "name"?} -> {"id", "name", "path"};
+// POST /admin/lora/unload {"id"} or {"name"}. Both drain in-flight work first (#2199).
+void handle_lora_load(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_lora_unload(const httplib::Request& req, httplib::Response& res, ServerState& state);

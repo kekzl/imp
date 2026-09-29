@@ -22,14 +22,20 @@ GPU_DOCKER = $(GPU_LOCKED) docker run --rm --gpus all
 # symlinks into $(HOME)/models, which dangle inside the container. Every path
 # under $(PWD)/models therefore misses, and a missing model is a skip, so the
 # whole model suite went silently green. test-vision already mounts $(HOME).
-DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models $(DOCKER_IMG)
+# Test runs keep ~/.cache/imp (warm weight cache, library reserve) in a named volume across --rm;
+# not the compose imp-cache. bench/test-perf stay on BENCH_DOCKER_RUN (no volume): KV block
+# counts differ by library-reserve state (docs/internals/BENCHMARKING.md, 716 blocks on Qwen3-8B).
+IMP_TEST_CACHE_VOL ?= imp-test-cache
+DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models \
+             -v $(IMP_TEST_CACHE_VOL):/home/imp/.cache/imp $(DOCKER_IMG)
+BENCH_DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # Dependency pins live once in cmake/imp-deps.cmake; inject them into the Docker
 # build so the tags are not duplicated (bump that file only). Extraction is in a
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -72,7 +78,8 @@ build: check-deps
 # the right gate before a PR and the wrong tool for iterating.
 #
 # `make dev` mounts the working tree into the toolchain image and runs ninja
-# against a PERSISTENT build dir, so only what changed recompiles. Codegen is
+# against a PERSISTENT build dir, so only what changed recompiles. After `make dev-clean`
+# the ccache volume rebuilds all 673 steps in 7 s (645/645 hits) vs 334 s cold. Codegen is
 # identical to the image build (both -march=x86-64-v3, same toolchain layers),
 # so a dev binary is a valid thing to run tests against.
 #
@@ -87,9 +94,16 @@ build: check-deps
 # target, never `sudo` on the host.
 DEV_IMG ?= imp:toolchain
 DEV_DIR ?= build-dev
-DEV_RUN = docker run --rm -v $(PWD):/src -w /src $(DEV_IMG)
+# ccache in a named volume, shared by all worktrees: content-addressed like the image's
+# imp-ccache mount, so a hit is the object a fresh compile emits. build-dev/ stays uncached.
+DEV_CCACHE_VOL ?= imp-dev-ccache
+DEV_CCACHE_SIZE ?= 2G
+DEV_RUN = docker run --rm -v $(PWD):/src -w /src -v $(DEV_CCACHE_VOL):/ccache \
+          -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=$(DEV_CCACHE_SIZE) $(DEV_IMG)
 DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOOLS=ON \
                  -DIMP_BUILD_SERVER=ON \
+                 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                 -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
                  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
                  -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
                  -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
@@ -306,10 +320,10 @@ bench: build check-gpu
 	@echo "=== imp benchmark suite (RTX 5090) ==="
 	@echo ""
 	@echo "--- Qwen3-4B Q8_0 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-4B-Instruct-2507-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-4B-Instruct-2507-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
 	@echo "--- Qwen3-8B Q8_0 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
 	@# GDN coverage moved from Qwen3.5-4B-Q8_0 to the mxfp4 checkpoint: the Q8_0
 	@# one is not on this host, and it is the mxfp4 that the E2E battery already
@@ -318,7 +332,7 @@ bench: build check-gpu
 	@# than hidden: the Qwen3.5-4B/9B Q8_0 rows in docs/performance.md were
 	@# measured on checkpoints this target can no longer reproduce.
 	@echo "--- Qwen3.5-4B GDN MXFP4 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@# Dropped: Qwen3.5-9B GDN Q8_0 (no 9B checkpoint of any quant on this host)
 	@# and Qwen3-4B MXFP4 (qwen3-4b-instruct-2507-mxfp4.gguf is not here either).
 	@# Both were dead paths, and each recipe line aborts the target, so `make
@@ -326,7 +340,7 @@ bench: build check-gpu
 
 # Single model benchmark (quick check)
 test-perf: build check-gpu
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 
 # Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
 # harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript
@@ -351,6 +365,19 @@ bench-agentic: build check-gpu
 	python3 tools/agent_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --concurrency 1,4,16; \
 	echo "--- multi-turn replay ---"; \
 	python3 tools/agent_replay_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --turns 16
+
+# Server-level serving benchmark (#2202): imp-server in Docker, streaming concurrency sweep,
+# results/bench_serve_<sha>_<model>.json + table. Usage:
+#   make bench-serve MODEL=Qwen3-8B-Q8_0.gguf CONC="1 8 32" [PROMPT_LEN=128 OUT_LEN=128 N=64]
+# bench-serve-mock runs the same harness against tests/api/mock_server.py (no GPU, no image).
+bench-serve: build check-gpu
+	@test -n "$(MODEL)" || { echo "bench-serve: MODEL=<file under ~/models> required"; exit 2; }
+	$(GPU_LOCKED) env IMG=$(DOCKER_IMG) MODEL="$(MODEL)" CONC="$(CONC)" PROMPT_LEN="$(PROMPT_LEN)" \
+		OUT_LEN="$(OUT_LEN)" N="$(N)" bash scripts/bench_serve.sh
+
+bench-serve-mock:
+	CONC="$(or $(CONC),1 4)" PROMPT_LEN="$(PROMPT_LEN)" OUT_LEN="$(OUT_LEN)" N="$(N)" \
+		bash scripts/bench_serve.sh --mock
 
 # Agent-harness E2E battery (#1007): boots a real imp-server and drives the
 # wire patterns real agent harnesses generate — multi-turn tool loops in the
@@ -472,9 +499,11 @@ AB_BASE_REF ?= origin/main
 ab-base-image:
 	@bash scripts/ab_base_image.sh $(AB_BASE_REF)
 
-verify-ab: build check-gpu ab-base-image
-	@$(IMG_CHECK) && IMG_A=imp:ab-$$(git rev-parse --short=8 $(AB_BASE_REF)) IMG_B=$(DOCKER_IMG) \
-	 $(GPU_LOCKED) bash scripts/verify_ab.sh
+# AB_BASE_REF is resolved once, inside ab_base_image.sh; IMG_A is the tag it printed.
+# A second rev-parse here races a concurrent `git fetch` in another worktree.
+verify-ab: build check-gpu
+	@$(IMG_CHECK) && AB_TAG=$$(bash scripts/ab_base_image.sh $(AB_BASE_REF)) && \
+	 IMG_A=$$AB_TAG IMG_B=$(DOCKER_IMG) $(GPU_LOCKED) bash scripts/verify_ab.sh
 
 # Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
 # 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
@@ -613,14 +642,19 @@ check-alloc-pairs:
 
 # Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
 # BUILT artifact, so this needs no GPU and no special build flags - but it does
-# need the CUDA toolkit, which only the builder image has. Uses build-dev
+# need the CUDA toolkit: local cuobjdump when on PATH (dev toolchain image, no
+# docker CLI), else docker run imp:builder (#2238). Uses build-dev
 # (make dev) when present, build (make build) otherwise.
 KERNEL_RES_LIB = $$(test -f build/libimp.a && echo build/libimp.a || echo build-dev/libimp.a)
 kernel-resources-dump:
 	@test -f build/libimp.a -o -f build-dev/libimp.a || { \
 	  echo "kernel-resources: no libimp.a - run 'make dev' or 'make build' first" >&2; exit 2; }
-	@docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
-	  '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'
+	@if command -v cuobjdump >/dev/null 2>&1; then \
+	  cuobjdump -res-usage "$(KERNEL_RES_LIB)" 2>/dev/null; \
+	else \
+	  docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
+	    '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'; \
+	fi
 
 kernel-resources: 
 	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py -
@@ -666,11 +700,12 @@ format:
 format-check:
 	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
 
-# clang-tidy over host C++ TUs (advisory — findings surface, do not fail). Runs in
-# the CUDA builder image so the CUDA headers our .cpp files include are present;
-# clang-tidy is apt-installed on the fly. .cu files are out of scope (need full
-# nvcc flags). Configures first so build/compile_commands.json exists.
+# clang-tidy over host C++ TUs and the host side of src/ .cu TUs (advisory: findings
+# surface, do not fail). Runs in the CUDA builder image so the CUDA headers are present;
+# clang-tidy is apt-installed on the fly. .cu entries are rewritten to clang host-only
+# commands by tools/tidy_cu_db.py (#2210). Configures first so build/compile_commands.json exists.
 CLANG_TIDY_FILES = $$(find src tools -name '*.cpp')
+CLANG_TIDY_CU_FILES = $$(grep -o "\"file\": \"[^\"]*/src/[^\"]*\"" build/tidy-cu/compile_commands.json | cut -d\" -f4)
 tidy:
 	@docker run --rm -v $(PWD):/work -w /work imp:builder bash -c '\
 	  apt-get update -qq && apt-get install -y -qq clang-tidy >/dev/null 2>&1; \
@@ -679,4 +714,6 @@ tidy:
 	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
 	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
 	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
-	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true'
+	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true; \
+	  python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu && \
+	  clang-tidy -p build/tidy-cu --warnings-as-errors= $(CLANG_TIDY_CU_FILES) || true'

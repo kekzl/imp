@@ -409,10 +409,12 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 err = cudaMalloc(&d_B,   ne * sizeof(const void*)); if (err != cudaSuccess) return false;
                 err = cudaMalloc(&d_SFB, ne * sizeof(const void*)); if (err != cudaSuccess) return false;
                 err = cudaMalloc(&d_alpha, ne * sizeof(float));     if (err != cudaSuccess) return false;
-                cudaMemcpy(const_cast<void**>(d_B),   h_B_ptrs.data(),
-                           ne * sizeof(const void*), cudaMemcpyHostToDevice);
-                cudaMemcpy(const_cast<void**>(d_SFB), h_SFB_ptrs.data(),
-                           ne * sizeof(const void*), cudaMemcpyHostToDevice);
+                cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)),
+                           static_cast<const void*>(h_B_ptrs.data()), ne * sizeof(const void*),
+                           cudaMemcpyHostToDevice);
+                cudaMemcpy(static_cast<void*>(const_cast<void**>(d_SFB)),
+                           static_cast<const void*>(h_SFB_ptrs.data()), ne * sizeof(const void*),
+                           cudaMemcpyHostToDevice);
                 cudaMemcpy(d_alpha, h_alpha.data(),
                            ne * sizeof(float),       cudaMemcpyHostToDevice);
                 return true;

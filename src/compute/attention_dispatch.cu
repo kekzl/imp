@@ -63,17 +63,21 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Learned attention sinks (#547/#992): fp16-qk FA2 and the FP16 WMMA FMHA fold them into online
     // softmax. Route only there; fail loudly on decline instead of a sink-blind fallback.
     if (has_sinks) {
-        if (rcfg.attention.fmha_fa2 == "on" && rcfg.attention.fa2_fp16qk != "never" &&
-            (sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                      stream, q_offset, /*fp16_qk=*/true,
-                                                      /*d_kv_len=*/nullptr, attn_sinks))) {
+        if (rcfg.attention.fmha_fa2 == "on" && rcfg.attention.fa2_fp16qk != "never") {
+            sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                     stream, q_offset, /*fp16_qk=*/true,
+                                                     /*d_kv_len=*/nullptr, attn_sinks);
+        }
+        if (sup.fa2_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FA2);
             return;
         }
-        if (rcfg.attention.fmha_sm120 != "never" &&
-            (sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window,
-                                                         softcap, stream, q_offset, attn_sinks))) {
+        if (rcfg.attention.fmha_sm120 != "never") {
+            sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                        stream, q_offset, attn_sinks);
+        }
+        if (sup.fmha_sm120_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
             return;
@@ -91,9 +95,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // ksmooth/pv_fp4 (#846) read from process_diag inside the launcher.
     sup.mxfp4_available = attention_mxfp4_available();
     if (sup.mxfp4_available) {
-        if ((sup.mxfp4_accepts = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window,
-                                                          softcap, stream,
-                                                          process_diag_mxfp4_blockscale(), q_offset))) {
+        sup.mxfp4_accepts = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                     stream, process_diag_mxfp4_blockscale(), q_offset);
+        if (sup.mxfp4_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::MXFP4);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::MXFP4);
             return;
@@ -108,9 +112,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     const bool fa2_fp8_optin = rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
     const bool fa2_opted_out = rcfg.attention.fa2_fp16qk == "never" && !fa2_fp8_optin;
     if (rcfg.attention.fmha_fa2 == "on" && !fa2_opted_out) {
-        if ((sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                     stream, q_offset,
-                                                     /*fp16_qk=*/!fa2_fp8_optin))) {
+        sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                                 q_offset, /*fp16_qk=*/!fa2_fp8_optin);
+        if (sup.fa2_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FA2);
             IMP_LOG_DEBUG("FMHA dispatch: using FA2 register-resident kernel (hd=%d)",
@@ -137,8 +141,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Fallback when FP8 is disabled or unsupported config.
     const bool use_fmha_sm120 = rcfg.attention.fmha_sm120 != "never";
     if (use_fmha_sm120) {
-        if ((sup.fmha_sm120_accepts =
-                 fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset))) {
+        sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                    stream, q_offset);
+        if (sup.fmha_sm120_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
             return;
@@ -148,8 +153,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Final tier: WMMA 128x64 tiles for Blackwell. Declines (returns false)
     // for unsupported configs — hd ∉ {64,96,128,256} or smem over the device
     // opt-in (hd=256 at Br=64 needs ~176 KB vs 99 KB on sm_120).
-    if ((sup.blackwell_accepts = flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window,
-                                                           softcap, stream, q_offset))) {
+    sup.blackwell_accepts = flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                      stream, q_offset);
+    if (sup.blackwell_accepts) {
         dispatch_record::set_attn_prefill_tier(AttnPrefillPath::BLACKWELL);
         verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::BLACKWELL);
         return;

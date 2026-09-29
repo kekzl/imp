@@ -3,6 +3,7 @@
 #include "handlers.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
+#include "model/hf_fetch.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 #include "core/process_diag.h"
@@ -12,12 +13,15 @@
 #include <nlohmann/json.hpp>
 #include "request_field_types.h"
 
+#include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <exception>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <thread>
 #include <utility>
 
 using json = nlohmann::json;
@@ -26,9 +30,9 @@ using json = nlohmann::json;
 // /v1/embeddings were once omitted, silently bypassing it (non-stream /v1/messages calls
 // handle_chat_completions() directly, without re-entering pre-routing).
 static bool is_inference_endpoint(const std::string& path) {
-    return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses" ||
-           path == "/v1/messages" || path == "/v1/embeddings" || path == "/v1/rerank" ||
-           path == "/rerank";
+    return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/infill" ||
+           path == "/v1/responses" || path == "/v1/messages" || path == "/v1/embeddings" ||
+           path == "/v1/rerank" || path == "/rerank" || path == "/v1/decide" || path == "/v1/score";
 }
 
 // Set by the pre-routing hook when it entered the in-flight gate for this
@@ -79,6 +83,15 @@ int main(int argc, char** argv) {
         // unresolvable name is 503, never a silent success. Lets CI run the shipping binary GPU-less (#1302).
         ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
         std::string resolved_model;
+        if (imp::hf::is_hf_uri(args.model_path)) {
+            // hf://org/repo[:file]: download into the HF cache (container side), then load from disk.
+            const std::string fetched = imp::hf::fetch_model(args.model_path, args.revision);
+            if (fetched.empty()) {
+                fprintf(stderr, "Failed to fetch model: %s\n", args.model_path.c_str());
+                return 1;
+            }
+            args.model_path = fetched;
+        }
         if (!args.model_path.empty()) {
             resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
             if (resolved_model.empty()) {
@@ -146,8 +159,9 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Failed to load LoRA adapter '%s' from %s\n", name.c_str(), path.c_str());
             return 1;
         }
-        state.lora_ids[name] = id;
-        printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), id, path.c_str());
+        const int32_t server_id = state.next_lora_id++;
+        state.loras[name] = ServerState::LoraEntry{server_id, id, path};
+        printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), server_id, path.c_str());
     }
 
     // (svr was created + bound to the port above, before the model load.)
@@ -181,6 +195,8 @@ int main(int argc, char** argv) {
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
     state.rate_limiter.limit = args.rate_limit;
+    state.idle_unload_seconds.store(args.idle_unload_seconds);
+    state.touch_activity();
 
     // --max-input-tokens <n>: reject prompts whose tokenized length exceeds
     // <n> with HTTP 400 before prefill (0 = disabled).
@@ -189,6 +205,13 @@ int main(int argc, char** argv) {
     state.max_batch_items = args.max_batch_items;
     state.max_logit_bias = args.max_logit_bias;
     state.max_images = args.max_images;
+    {
+        imp_server::responses::ResponseStoreLimits lim;
+        lim.ttl_seconds = args.responses_store_ttl;
+        lim.max_entries = static_cast<size_t>(args.responses_store_max_entries);
+        lim.max_bytes = static_cast<size_t>(args.responses_store_max_mib) << 20;
+        state.response_store.set_limits(lim);
+    }
 
     // --trusted-proxy a,b,c
     {
@@ -255,8 +278,9 @@ int main(int argc, char** argv) {
         // until the thread pool was gone (AUDIT_arch_2026 F2-3). A lock timeout means "engine busy", 503.
         if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
             // A swap or suspend holds `mtx` for its whole duration and says so in an atomic, so
-            // the one case worth shedding for is readable without touching the lock.
-            if (state.swapping.load() || state.suspended.load()) {
+            // the one case worth shedding for is readable without touching the lock. An idle
+            // suspend is let through: the handler resumes it (#2199).
+            if (state.swapping.load() || (state.suspended.load() && !state.idle_suspended.load())) {
                 send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
                                    "Server busy (model swap or suspend in progress), retry shortly");
                 return httplib::Server::HandlerResponse::Handled;
@@ -302,6 +326,10 @@ int main(int argc, char** argv) {
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
+
+        // Idle clock (#2199): every admitted POST except /admin/* counts as activity.
+        if (req.method == "POST" && req.path.rfind("/admin/", 0) != 0)
+            state.touch_activity();
 
         return httplib::Server::HandlerResponse::Unhandled;
     });
@@ -349,9 +377,19 @@ int main(int argc, char** argv) {
     svr.Post("/v1/responses", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_responses(req, res, state);
     });
+    svr.Get(R"(/v1/responses/([^/]+))", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_responses_get(req, res, state);
+    });
+    svr.Delete(R"(/v1/responses/([^/]+))", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_responses_delete(req, res, state);
+    });
 
     svr.Post("/v1/completions", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_completions(req, res, state);
+    });
+    // llama.cpp fill-in-the-middle; /v1/completions takes `suffix` for the same prompt (#2201).
+    svr.Post("/infill", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_infill(req, res, state);
     });
 
     // Anthropic-compatible Messages API. Supports both non-streaming and
@@ -373,6 +411,12 @@ int main(int argc, char** argv) {
     svr.Post("/rerank", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_rerank(req, res, state);
     });
+    svr.Post("/v1/decide", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_decide(req, res, state);
+    });
+    svr.Post("/v1/score", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_score(req, res, state);
+    });
     svr.Post("/v1/embeddings", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_embeddings(req, res, state);
     });
@@ -391,6 +435,14 @@ int main(int argc, char** argv) {
 
     svr.Post("/admin/resume", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_resume(req, res, state);
+    });
+
+    svr.Post("/admin/lora/load", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_lora_load(req, res, state);
+    });
+
+    svr.Post("/admin/lora/unload", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_lora_unload(req, res, state);
     });
 
     svr.Get("/metrics", [&state](const httplib::Request& req, httplib::Response& res) {
@@ -479,7 +531,32 @@ int main(int argc, char** argv) {
         printf("Rate limit: %d req/min per peer\n", state.rate_limiter.limit);
     if (state.max_input_tokens > 0)
         printf("Max input tokens: %d\n", state.max_input_tokens);
+    if (state.idle_unload_seconds.load() > 0)
+        printf("Idle unload: suspend after %d s idle, resume on next request\n",
+               state.idle_unload_seconds.load());
 
+    // Idle timer (#2199): 1 s poll, so the suspend starts at most 1 s past the TTL.
+    std::atomic<bool> idle_stop{false};
+    std::thread idle_thread;
+    if (state.idle_unload_seconds.load() > 0) {
+        idle_thread = std::thread([&state, &idle_stop] {
+            while (!idle_stop.load(std::memory_order_relaxed)) {
+                for (int i = 0; i < 10 && !idle_stop.load(std::memory_order_relaxed); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!idle_stop.load(std::memory_order_relaxed))
+                    idle_unload_tick(state);
+            }
+        });
+    }
+
+    {
+        const auto lim = state.response_store.limits();
+        if (lim.enabled())
+            printf("Responses store: ttl %llds, max %zu entries, %zu MiB (LRU)\n",
+                   static_cast<long long>(lim.ttl_seconds), lim.max_entries, lim.max_bytes >> 20);
+        else
+            printf("Responses store: off (explicit store=true answers 400)\n");
+    }
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
     printf("  GET    /                    web UI — open this in a browser\n");
@@ -489,15 +566,21 @@ int main(int argc, char** argv) {
     printf("  GET    /info                TGI-compatible context probe (max_total_tokens)\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)\n");
-    printf("  POST   /v1/completions\n");
+    printf("  GET    /v1/responses/{id}     stored response (store=true); DELETE removes it\n");
+    printf("  POST   /v1/completions       `suffix` = fill-in-the-middle\n");
+    printf("  POST   /infill               llama.cpp fill-in-the-middle\n");
     printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
     printf("  POST   /v1/messages/count_tokens\n");
     printf("  POST   /v1/embeddings\n");
     printf("  POST   /v1/rerank            (also /rerank) cross-encoder reranking\n");
+    printf("  POST   /v1/decide            closed-choice letter scoring, no decoding\n");
+    printf("  POST   /v1/score             softmax over candidate tokens at the last position\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
     printf("  POST   /admin/suspend       Park weights in host RAM, free the GPU\n");
     printf("  POST   /admin/resume        Restore weights, serve again\n");
+    printf("  POST   /admin/lora/load     Load a PEFT LoRA adapter {path, name?}\n");
+    printf("  POST   /admin/lora/unload   Unload a LoRA adapter {id} or {name}\n");
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
@@ -516,6 +599,9 @@ int main(int argc, char** argv) {
 
     g_server.store(nullptr, std::memory_order_relaxed);
     g_draining.store(true, std::memory_order_relaxed);
+    idle_stop.store(true, std::memory_order_relaxed);
+    if (idle_thread.joinable())
+        idle_thread.join();
     if (state.batching) {
         // Drains in-flight generations before engine teardown (stop() would cancel them) - same
         // contract/budget as a model swap. A drain that exhausts its budget falls through to cancel
