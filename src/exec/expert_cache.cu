@@ -79,7 +79,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
 
     per_layer_lru_.assign(n_layers_, PerLayerLRU{});
     for (auto& plru : per_layer_lru_)
-        plru.lookup.reserve(slots_per_layer_ * 2);
+        plru.lookup.reserve(static_cast<int64_t>(slots_per_layer_) * 2);
 
     // Phase 4: per-layer access history ring. Capacity = slots_per_layer ×
     // kExpertProjCount × 2 - a heuristic giving ~2 tokens worth of memory
@@ -502,7 +502,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
     int scanned = 0;
     int pos = (ring.head - 1 + history_capacity_) % history_capacity_;
     std::vector<std::pair<int, int>> considered;
-    considered.reserve(top_k * 2);
+    considered.reserve(static_cast<int64_t>(top_k) * 2);
 
     while (issued < top_k && scanned < ring.filled) {
         auto [proj, expert] = ring.entries[pos];
@@ -654,8 +654,8 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
 
     for (size_t i = 0; i < cells; ++i) {
         if (host[i] != dev[i]) {
-            int layer = static_cast<int>(i / (kExpertProjCount * n_experts_));
-            int rest = static_cast<int>(i % (kExpertProjCount * n_experts_));
+            int layer = static_cast<int>(i / (static_cast<int64_t>(kExpertProjCount) * n_experts_));
+            int rest = static_cast<int>(i % (static_cast<int64_t>(kExpertProjCount) * n_experts_));
             int proj = rest / n_experts_;
             int expert = rest % n_experts_;
             IMP_LOG_FATAL(
@@ -685,6 +685,20 @@ void ExpertLRUCache::invalidate_host_state() {
         IMP_CUDA_CHECK_LOG(cudaMemset(d_lookup_, 0xFF, cells * sizeof(int)));
     }
     ++host_generation_;
+}
+
+size_t ExpertLRUCache::reinit_or_disable(size_t max_expert_raw, size_t grown_bytes,
+                                         size_t original_bytes, VRAMAllocator* alloc, int n_layers,
+                                         int n_experts, bool debug_parity, bool nvfp4_slots) {
+    destroy();
+    if (init(max_expert_raw, grown_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots))
+        return grown_bytes;
+    destroy();
+    if (init(max_expert_raw, original_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots))
+        return original_bytes;
+    // A failed init can leave n_slots_ = 1 with pool_ == nullptr (the n_slots_ < 2 exit).
+    destroy();
+    return 0;
 }
 
 void ExpertLRUCache::destroy() {

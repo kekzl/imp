@@ -48,7 +48,7 @@ against llama.cpp defaults, full offload, flash attention on.
        (`--set speculative.ngram=false`)]
 
 The spec-off column exists because `imp-cli --bench` builds a strictly-increasing synthetic
-prompt (`tools/imp-cli/mode_bench.cpp:19`) that the n-gram drafter's own generation can loop
+prompt (`tools/imp-cli/mode_bench.cpp:31 tokens[i] = i % vocab_size`) that the n-gram drafter's own generation can loop
 into: a decode A/B that leaves speculation on can measure whether a checkpoint happens to loop,
 not only the verify path. Reproduce with `make bench-competitive` (competitor image pinned by
 digest in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh), not by tag); two

@@ -9,12 +9,17 @@
 #include "runtime/request.h"
 #include "compute/sampling.h"
 #include "model/tokenizer.h"
+#include "model/ngram_table.h"  // ngram_context_at
+#include "model/model.h"
+#include "runtime/batch.h"
 #include "exec/executor.h"
 #include "core/logging.h"
 
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <vector>
 
 namespace imp::engine_internal {
 
@@ -75,6 +80,39 @@ inline void ensure_prefill_workspace(GraphExecutor* executor) {
 inline size_t library_reserve_charge(int library_reserve_mb) {
     return library_reserve_mb < 0 ? kMeasuredLibraryReserveBytes
                                   : (static_cast<size_t>(library_reserve_mb) << 20);
+}
+
+// PLE n-gram context of each decode-step sequence: its tokens at pos0-2, pos0-1 (pos0 = its
+// first row), into `out` [n_seq][ctx_len]. nullptr without PLE or when rows do not split evenly.
+inline const int32_t* ple_step_context(int ctx_len, int32_t eos,
+                                       const std::vector<std::shared_ptr<Request>>& rows,
+                                       const std::vector<int32_t>& positions, int total_tokens,
+                                       std::vector<int32_t>& out) {
+    const int n_seq = static_cast<int>(rows.size());
+    if (ctx_len <= 0 || n_seq <= 0 || total_tokens % n_seq != 0 ||
+        positions.size() < static_cast<size_t>(total_tokens))
+        return nullptr;
+    const int per_seq = total_tokens / n_seq;
+    out.assign(static_cast<size_t>(n_seq) * ctx_len, 0);
+    for (int s = 0; s < n_seq; s++) {
+        const Request& r = *rows[static_cast<size_t>(s)];
+        ngram_context_at(r.input_tokens.data(), static_cast<int>(r.input_tokens.size()),
+                         r.output_tokens.data(), static_cast<int>(r.output_tokens.size()),
+                         positions[static_cast<size_t>(s) * per_seq], ctx_len, eos,
+                         out.data() + static_cast<size_t>(s) * ctx_len);
+    }
+    return out.data();
+}
+
+// The decode step's host work (GraphExecutor::prepare_decode_step_host) with each row's PLE
+// context. True = PLE rows staged for this step (InferenceState::ple_host_ready).
+inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
+                                     const std::vector<std::shared_ptr<Request>>& rows, const Batch& batch,
+                                     cudaStream_t stream) {
+    const int32_t* ctx = ple_step_context(ex.ple_context_len(), model.config().ple_eos_token_id, rows,
+                                          batch.positions, batch.total_tokens, ex.ngram_step_scratch());
+    return ex.prepare_decode_step_host(batch.token_ids.data(), batch.total_tokens,
+                                       static_cast<int>(rows.size()), ctx, stream);
 }
 
 }  // namespace imp::engine_internal

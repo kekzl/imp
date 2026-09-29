@@ -92,6 +92,7 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
 // quantizing post-rounding, since the separate quantize kernel reads the stored FP16 row).
 // Kills one quantize launch + one [M,K] FP16 re-read per consumer group (q/kv, gate/up, GDN
 // in/z). Caller guarantees d_model%256==0 (whole-warp pair activity per slice).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int kVecs>
 __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                                                    const __half* __restrict__ weight,
@@ -187,6 +188,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Launcher for the plain row-block kernel, called from rmsnorm()'s batched-decode branch
 // (layernorm.cu). Caller checked the envelope (F16, rows 2..64, d%8==0, d_vec<=1024).
@@ -212,7 +214,8 @@ bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* 
                    uint8_t* xq_scales, float eps, cudaStream_t stream, float weight_offset) {
     const int rows = static_cast<int>(x.shape[0]);
     const int d_model = static_cast<int>(x.shape[1]);
-    if (x.qtype != QType::F16 || rows < 2 || rows > 64 || (d_model & 255) != 0 ||
+    // Null weight (Qwen4Exp final norm, rows >= 2): refuse, rmsnorm() applies the identity.
+    if (weight.data == nullptr || x.qtype != QType::F16 || rows < 2 || rows > 64 || (d_model & 255) != 0 ||
         (d_model >> 3) > 1024)
         return false;
     if ((d_model >> 3) <= 512) {

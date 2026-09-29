@@ -71,15 +71,98 @@ inline constexpr const char* kRspDeltaMid = ",\"delta\":\"";
 // Which output item is currently open in the stream.
 enum class RspItem { NONE, REASONING, MESSAGE, FUNCTION_CALL };
 
+// Per-request store state (#2206). input_items is the full conversation the model saw; only
+// read when `store` is set.
+struct RspStoreCtx {
+    bool store = false;
+    std::string previous_response_id;
+    json input_items;
+};
+
+void annotate_store_fields(json& response, const RspStoreCtx& sc) {
+    response["store"] = sc.store;
+    response["previous_response_id"] =
+        sc.previous_response_id.empty() ? json(nullptr) : json(sc.previous_response_id);
+}
+
 // Skeleton `response` object used by response.created/in_progress/completed.
 json response_skeleton(const std::string& response_id, const std::string& model,
-                       const char* status) {
-    return {{"id", response_id},        {"object", "response"},
-            {"created_at", static_cast<int64_t>(time(nullptr))},
-            {"model", model},           {"status", status},
-            {"error", nullptr},         {"incomplete_details", nullptr},
-            {"output", json::array()},  {"parallel_tool_calls", true},
-            {"tool_choice", "auto"},    {"tools", json::array()}};
+                       const char* status, const RspStoreCtx& sc) {
+    json r = {{"id", response_id},        {"object", "response"},
+              {"created_at", static_cast<int64_t>(time(nullptr))},
+              {"model", model},           {"status", status},
+              {"error", nullptr},         {"incomplete_details", nullptr},
+              {"output", json::array()},  {"parallel_tool_calls", true},
+              {"tool_choice", "auto"},    {"tools", json::array()}};
+    annotate_store_fields(r, sc);
+    return r;
+}
+
+// Keeps a finished response for previous_response_id / GET. Called after the last byte went out.
+void store_response(ServerState& state, const std::string& response_id, const RspStoreCtx& sc,
+                    const json& response, const std::string& model) {
+    if (!sc.store)
+        return;
+    rsp::StoredResponse e;
+    e.input_items = sc.input_items;
+    e.output_items = response.value("output", json::array());
+    e.response = response;
+    e.model = model;
+    e.created_at = response.value("created_at", static_cast<int64_t>(0));
+    if (!state.response_store.put(response_id, std::move(e)))
+        fprintf(stderr, "[responses] %s not stored: larger than --responses-store-max-mib\n",
+                response_id.c_str());
+}
+
+void send_response_not_found(httplib::Response& res, const std::string& id, const char* what,
+                             const char* param) {
+    send_json_error(res, 404, "invalid_request_error",
+                    std::string(what) + " with id '" + sanitize_for_echo(id, 128) + "' not found.",
+                    param, "response_not_found");
+}
+
+// Resolves `store` and `previous_response_id` in place, before the transform and before any model
+// lookup (a model-less server answers the same). False: `res` holds the 400/404.
+bool resolve_store_fields(json& body, ServerState& state, httplib::Response& res, RspStoreCtx& sc) {
+    // Absent `store` means true (OpenAI default); on a disabled store it means stateless.
+    const bool enabled = state.response_store.enabled();
+    sc.store = enabled;
+    if (body.contains("store")) {
+        if (!body["store"].is_boolean()) {
+            send_json_error(res, 400, "invalid_request_error", "\"store\" must be a boolean", "store");
+            return false;
+        }
+        sc.store = body["store"].get<bool>();
+        body.erase("store");
+    }
+    if (sc.store && !enabled) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "store=true is disabled on this server (a --responses-store-* limit is 0); "
+                        "use store=false and resend the transcript in `input`",
+                        "store");
+        return false;
+    }
+    if (body.contains("previous_response_id")) {
+        const json& p = body["previous_response_id"];
+        if (!p.is_string() || p.get<std::string>().empty()) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"previous_response_id\" must be a non-empty string", "previous_response_id");
+            return false;
+        }
+        sc.previous_response_id = p.get<std::string>();
+        auto prev = state.response_store.get(sc.previous_response_id);
+        if (!prev) {
+            send_response_not_found(res, sc.previous_response_id, "Previous response",
+                                    "previous_response_id");
+            return false;
+        }
+        body["input"] = rsp::continue_conversation(prev->input_items, prev->output_items,
+                                                   body.contains("input") ? body["input"] : json());
+        body.erase("previous_response_id");
+    }
+    if (sc.store)
+        sc.input_items = rsp::normalize_input_items(body.contains("input") ? body["input"] : json());
+    return true;
 }
 
 }  // anonymous namespace
@@ -90,7 +173,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                                   ServerState& state,
                                   const std::shared_ptr<ServerRequest>& server_req,
                                   const std::string& req_model,
-                                  const std::string& response_id) {
+                                  const std::string& response_id, const RspStoreCtx& store_ctx) {
     ResponsesSSE out{sink};
     auto active_req = server_req->request;
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
@@ -99,10 +182,10 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
 
     // ---- response.created / response.in_progress ---------------------------
     if (!out.emit("response.created",
-                  json{{"response", response_skeleton(response_id, model_name, "in_progress")}}))
+                  json{{"response", response_skeleton(response_id, model_name, "in_progress", store_ctx)}}))
         return false;
     if (!out.emit("response.in_progress",
-                  json{{"response", response_skeleton(response_id, model_name, "in_progress")}}))
+                  json{{"response", response_skeleton(response_id, model_name, "in_progress", store_ctx)}}))
         return false;
 
     int output_index = -1;
@@ -303,7 +386,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     const bool incomplete =
         (strcmp(lres.finish, "length") == 0 || strcmp(lres.finish, "cancelled") == 0);
     json response = response_skeleton(response_id, model_name,
-                                      incomplete ? "incomplete" : "completed");
+                                      incomplete ? "incomplete" : "completed", store_ctx);
     response["output"] = std::move(final_output);
     if (incomplete)
         response["incomplete_details"] = {{"reason", "max_output_tokens"}};
@@ -317,9 +400,12 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                          {"total_tokens", n_prompt_tokens + lres.n_output_tokens},
                          {"input_tokens_details", std::move(in_details)},
                          {"output_tokens_details", {{"reasoning_tokens", lres.n_reasoning_tokens}}}};
-    out.emit(incomplete ? "response.incomplete" : "response.completed",
-             json{{"response", std::move(response)}});
+    const bool emitted = out.emit(incomplete ? "response.incomplete" : "response.completed",
+                                  json{{"response", store_ctx.store ? json(response)
+                                                                   : json(std::move(response))}});
     sink.done();
+    if (emitted)
+        store_response(state, response_id, store_ctx, response, model_name);
 
     finish_stream_accounting_(state, ctx, active_req, lres, response_id, "responses stream: ");
     return true;
@@ -352,6 +438,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         send_json_error(res, 400, "invalid_request_error", "Request body must be a JSON object");
         return;
     }
+
+    RspStoreCtx store_ctx;
+    if (!resolve_store_fields(body, state, res, store_ctx))
+        return;
 
     const std::string req_model = body.value("model", "");
     const bool want_stream = body.value("stream", false);
@@ -413,10 +503,11 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         res.set_header("Connection", "keep-alive");
         res.set_chunked_content_provider(
             "text/event-stream",
-            [stream_ctx = std::move(ctx), &state, server_req, req_model, response_id](
+            [stream_ctx = std::move(ctx), &state, server_req, req_model, response_id,
+             store_ctx = std::move(store_ctx)](
                 size_t /*offset*/, httplib::DataSink& sink) mutable -> bool {
                 return run_responses_stream_(sink, stream_ctx, state, server_req, req_model,
-                                             response_id);
+                                             response_id, store_ctx);
             });
         return;
     }
@@ -450,6 +541,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     }
 
     json response = rsp::openai_to_responses_response(oai_response, req_model, response_id);
+    annotate_store_fields(response, store_ctx);
 
     {
         auto t_end = std::chrono::system_clock::now();
@@ -481,4 +573,29 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
 
     res.status = 200;
     res.set_content(dump_safe(response), "application/json");
+    store_response(state, response_id, store_ctx, response, req_model);
+}
+
+// GET /v1/responses/{id}: the stored response object, 404 response_not_found when unknown/expired.
+void handle_responses_get(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    const std::string id = req.matches[1];
+    auto e = state.response_store.get(id);
+    if (!e) {
+        send_response_not_found(res, id, "Response", nullptr);
+        return;
+    }
+    res.status = 200;
+    res.set_content(dump_safe(e->response), "application/json");
+}
+
+// DELETE /v1/responses/{id}: OpenAI shape {id, object: "response.deleted", deleted: true}.
+void handle_responses_delete(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    const std::string id = req.matches[1];
+    if (!state.response_store.erase(id)) {
+        send_response_not_found(res, id, "Response", nullptr);
+        return;
+    }
+    res.status = 200;
+    res.set_content(dump_safe(json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}),
+                    "application/json");
 }

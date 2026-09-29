@@ -98,6 +98,9 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
     // the transcript snapshot keys the drained state with its final token).
     if (ssm_state_ && !runtime_config_.runtime.decode_pipeline_hybrid)
         return false;
+    // PLE: step N+1 needs step N's token on the host for its n-gram rows.
+    if (model_->ngram_table() != nullptr)
+        return false;
     if (swa_sizing_active_ || config_.streaming_kv_enabled)
         return false;
     if (kv_manager_ && kv_manager_->residual_enabled())

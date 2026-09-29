@@ -137,8 +137,9 @@ struct Attention {
     // qsa_force: run the selected path on every prefill row (correctness A/B vs dense).
     // Default off: at 4503 tokens it loses on every axis measured (decode 50.6 vs 54.1 tok/s,
     // pp 650 vs 912 tok/s, PPL 4.7558 vs 4.6978) and the paged-vs-FA2 re-rounding flips MoE
-    // routing on short prompts (degen_suite 48/50 on, 50/50 off). Turn on above ~8k context,
-    // where the dense KV read is the larger cost.
+    // routing on short prompts (degen_suite 48/50 on, 50/50 off). "Turn on above ~8k" withdrawn
+    // (0.44.0: 11283 ctx 18.14 -> 15.88 tok/s). 0.45.0, 13863-token prompt: tg512 62.28-63.84 on
+    // vs 55.99-57.10 tok/s dense (CHANGELOG 0.44.0 Added, 0.45.0 Changed).
     bool qsa = false;
     bool qsa_force = false;
     int qsa_rows = 16;  // query rows per selection pass (scratch K/V = rows x 2051 tokens x KV row)

@@ -1,6 +1,7 @@
 // Engine prefill execution: step_prefill driver, per-request chunked prefill
 // (step_prefill_one), KV-block allocation and metadata upload.
 
+#include "runtime/prompt_tail.h"
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/prefill_pacing.h"
@@ -199,17 +200,17 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // An image request participates only through its content hash (cache is
     // addressed by TOKEN IDS, every image token shares one id): a request with
     // an image but no hash is excluded outright, degrading to "no reuse", never to "the previous picture".
-    const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb ||
-                           req->n_vision_tokens > 0;
-    const bool cacheable = !has_image || req->vision_content_hash != 0;
+    const bool cacheable = req->prefix_reuse_allowed();
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
         // Hybrid models cap reuse at the recurrent-snapshot boundary, same as
         // the scheduler's admission path (scheduler.cpp): reuse past the last
         // snapshot would decode from a zeroed GDN state. Unreachable today
-        // (scheduler pre-allocates every admitted request) but must stay guarded for a caller that skips admission.
-        const int max_reuse =
-            (recurrent_snapshots_ && ssm_state_) ? hybrid_prefix_reuse_limit_(*req) : -1;
+        // (scheduler pre-allocates every admitted request) but must stay guarded for a caller that skips
+        // admission. Attention-only: keep >= kMinPromptChunkRows rows to re-prefill (prompt_tail.h).
+        const int max_reuse = (recurrent_snapshots_ && ssm_state_)
+                                  ? hybrid_prefix_reuse_limit_(*req)
+                                  : prompt_reuse_cap_blocks(total_input, kv_bs);
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, max_reuse,
                                                                  req->prefix_salt);
         if (prefix_reused < 0) {
@@ -454,7 +455,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int chunk_len = total_input - offset;
     bool is_last_chunk = true;
     if (chunk_len > effective_chunk) {
-        chunk_len = effective_chunk;
+        chunk_len = keep_prompt_tail(effective_chunk, total_input - offset);
         is_last_chunk = false;
     }
 
@@ -462,7 +463,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // the largest block-aligned prompt position so state there can be
     // captured (only full blocks are cacheable). Extra tail chunk is at most
     // block_size-1 tokens; prompts under server.snapshot_min_prompt_tokens skip the boundary (snapshot_boundary.h).
-    const int snap_end = snapshot_end_(*req);
+    const int snap_end = snapshot_end_(*req, offset);
     if (snap_end > offset && snap_end < offset + chunk_len) {
         chunk_len = snap_end - offset;
         is_last_chunk = false;
@@ -728,6 +729,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         // Embedding pooling for this chunk (#1005): hidden_ still holds it.
         if (req->embedding_request)
@@ -890,6 +892,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         req->output_tokens.push_back(next_token);
         track_think_state(*req, next_token);

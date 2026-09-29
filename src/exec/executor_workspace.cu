@@ -464,8 +464,8 @@ size_t Workspace::workspace_estimate(bool include_attn_scores) const {
     // partials) + MMVQ scratch + split-K scratch
     int nh_est = cfg.n_heads;
     int hd_est = cfg.head_dim > 0 ? cfg.head_dim : (d / nh_est);
-    auxiliary += 128 * 1024;  // sampling (covers SAMPLE_SCRATCH_BYTES)
-    auxiliary += 256 * 1024;  // MMVQ scratch (conservative)
+    auxiliary += static_cast<int64_t>(128) * 1024;  // sampling (covers SAMPLE_SCRATCH_BYTES)
+    auxiliary += static_cast<int64_t>(256) * 1024;  // MMVQ scratch (conservative)
     auxiliary += static_cast<size_t>(*max_logit_tokens_) * nh_est * 32 * (2 + hd_est) *
                  sizeof(float);  // split-K
 

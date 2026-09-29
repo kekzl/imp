@@ -48,7 +48,7 @@ bool gemm_lt_capture_allowed() {
 
 // warp_reduce_sum / kGemvThreads / kGemvWarps / gemv_blocks live in
 // gemm_internal.cuh (shared with gemm_gemv_dtype.cu + gemm_moe_gemv.cu).
-// kGemmAlgo moved to gemm_batched.cu (its only remaining user).
+// cublasGemm*Ex algorithm: cublas_gemm_algo() (compute/cublas_gemm_algo.h, #2168).
 
 // ---------------------------------------------------------------------------
 // cuBLAS / cuBLASLt handles (lazily initialized)
@@ -379,11 +379,11 @@ static bool keep_pin_chosen_at_other_m(GemmCacheEntry& entry, int64_t M, int64_t
 // Set per-call FP8 scale pointers on a matmul descriptor.
 static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const float* aScale,
                                            const float* bScale) {
-    if (aScale) {
-        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &aScale, sizeof(aScale));
-    }
-    if (bScale) {
-        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bScale, sizeof(bScale));
+    // The attribute value is the device pointer itself, so its address is passed.
+    for (auto [attr, p] : {std::pair{CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &aScale},
+                           std::pair{CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bScale}}) {
+        if (*p)
+            cublasLtMatmulDescSetAttribute(opDesc, attr, static_cast<const void*>(p), sizeof(*p));
     }
 }
 

@@ -4,13 +4,30 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `/v1/completions` prompt logprobs (#2207): vLLM `prompt_logprobs: N` (0..20) and OpenAI `echo` + `logprobs`, gathered on device per prefill row; only rows x (2 + 2N) values reach the host (168 KiB scratch per 1k rows at N = 20). `stream: true` with either is a 400. Such requests skip prefix reuse and ragged prefill.
+- `--model hf://<org>/<repo>[:<file>.gguf]` (imp-server, imp-cli) downloads inside the container via libcurl into the HF cache (`HF_HOME=/models/huggingface` in the image): Range resume, LFS sha256 check, `HF_TOKEN`; a second start makes 0 requests (#2200).
+- `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
+- Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
+
 ### Changed
+- `check_doc_citations.py`: a moved anchor is a `DRIFT` warning (exit 0), `--fix` rewrites the line numbers; only a gone or ambiguous anchor fails (25-line window). Line drift broke main 3x on 2026-09-29 (#2231).
+- `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).
+- Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
+- Host-resident MoE experts: auto max_batch_size resolves to 1 (expert cache budget; Flash-Next c=8 at batch 32: 5.6 vs 7.2 out tok/s at batch 1). An explicit runtime.max_batch_size / --max-batch is kept and warned with the cache GiB and slots/layer it leaves.
+- Hooks and make GPU targets: a linked worktree builds `imp:test-<dir>-<hash8>` (main checkout keeps `imp:test`), runners refuse an image whose `imp.tree` is not this tree, and `scripts/gpu_lock.sh` lets one session hold the card; other worktrees' hooks and targets refuse instead of starting.
 - F16 GDN hybrids free the F16 GDN input packs after load: only M=1 decode read them, through their FP8 sidecar. Qwen3.8-Flash-Next hands the 1760 MiB the pool returns to the expert cache: 221 -> 263 slots/layer, hit rate 76.7 -> 79.9 %, tg512 prose 61.35 -> 65.02 tok/s (medians, 3 pairs).
 - GDN input packs come from a release-on-free mempool, so freeing them returns all 2896.9 MiB instead of 1760.0 on Qwen3.8-Flash-Next: expert cache 263 -> 290 slots/layer, hit rate 78.9 -> 80.7 %, tg512 prose 63.66 -> 66.22 tok/s (medians, 3 pairs).
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
 - Tokenizer parity with HF `tokenizers` (`tools/tokenizer_parity/run.sh`, 1196 strings): Unicode classes in the regex pre-tokenizers, full NFC, Gemma-4 tokenizer.json as gemma4 BPE, added-token lstrip/rstrip. Mismatches: Gemma-4 NVFP4 1196 -> 0, Qwen3 544 -> 0, DeepSeek-V2 400 -> 0, Phi-4 142 -> 0, gpt-oss 123 -> 0.
+- Qwen3 dense GGUF: `kv_cache.dtype=auto` resolves to FP16 again; FP8 KV turned greedy output into "The capital of France is not Paris". Decode after 16k context 208.5 -> 182.6 tok/s (Qwen3-8B-Q8_0); `kv_cache.dtype=fp8` restores it (#2208).
+- `gemm.nvfp4_lm_head=auto` builds the FP8 head only from a 16-bit head; an 8-bit GGUF head (Q8_0) stays at checkpoint precision. Qwen3-8B-Q8_0 first token: This -0.674 (FP8) -> The -0.646, HF fp32 The -0.644 (#2224).
+- GDN hybrids with `gdn.state_bf16 = false` (FP32 state): a recurrent snapshot over a 65+ row scan threw `h_snap needs a single chunk`, and at exactly 64 rows the slab stayed unwritten. Snapshot scans now run the fused kernel over the whole range (#2214).
+- `runtime.deterministic`: cuBLAS `cublasGemm*Ex` calls used `CUBLAS_GEMM_AUTOTUNE`, which times algorithms once per process, so Gemma-4 NVFP4 answered in one of two ways per server (2 of 6 vs 4 of 6). Deterministic mode now takes `CUBLAS_GEMM_DEFAULT`: 12 of 12 processes identical.
+- Expert cache regrow after GDN pack release: if both the grown and the original re-init failed, the cache stayed half-destroyed and the second failure went unlogged. It is now disabled (0 slots, pool freed) with an ERROR naming both budgets; the NVFP4 placement gate then refuses the load.
+- Prefix-cache resends on dense models: a prompt row no longer changes with its chunk (RMSNorm, QK-norm, IMMA split-K picked by row count; 1-row tails ran decode kernels). Qwen3-8B-Q8_0, FP16 KV: first-token logprob delta chunk 336 vs 0: 0.021 -> 0; resend probe 1/2 -> 0/2 FAIL.
 - Softmax MoE routing (Qwen3-30B-A3B, Qwen3.8-Flash-Next and every softmax-routed MoE): a warp could read another warp's partial sum as the softmax max, and top-k picked wrong experts (354 of 204800 routings in the new test). PPL is bit-identical across processes now: Qwen3-30B-A3B 13.0332 x3, Flash-Next 4.6353 x2.
 - Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.
 - Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.
@@ -366,7 +383,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   instead of a replicated 16 ([AUDIT_arch_2026 B-7](docs/audit/AUDIT_arch_2026.md))
 - `kv_cache.growable` defaults to on, the pool grows before the prefix cache is reclaimed, and
   every growth is capped at free VRAM above the allocator headroom. Qwen3.8-27B-NVFP4, 8 sessions x
-  3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/roadmap.md#lever-ledger))
+  3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/archive/roadmap_ledger_2026_09_28.md#lever-ledger))
 - The per-request upload family (ragged prefill, graph-loop block tables, constrained pipeline, banned
   tokens, M-RoPE positions) is one pool sized at init; `make check-alloc-interpose` runs two phases and
   its serving-allocation pin drops 19 -> 1 (+3 once-per-process constrainer tables in the new phase) (#1939)
@@ -432,7 +449,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_arch_2026 F1-3, F1-8, F1-9, F1-10](docs/audit/AUDIT_arch_2026.md))
 - Hybrid prefix caching: a recurrent-state snapshot was dropped silently whenever every device
   slab was held by an in-flight restore; it now lands in the host tier. Qwen3.8-27B, 8 sessions x 3
-  turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/roadmap.md#lever-ledger))
+  turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/archive/roadmap_ledger_2026_09_28.md#lever-ledger))
 
 ## [0.38.0] - 2026-09-07
 

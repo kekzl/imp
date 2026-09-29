@@ -47,7 +47,7 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 
 ## Judging quantization quality
 
-- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens); the 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19%; +1.0% vs -0.03% on FP8 SSM).
+- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, rebuild with `tools/analysis/make_ppl_corpus.sh`); the 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19%; +1.0% vs -0.03% on FP8 SSM).
 - `--set runtime.deterministic=true` both arms (implies `runtime.deterministic_gemm`; 0.35% run-to-run otherwise); `--set speculative.mtp_k=0` (`--perplexity` otherwise loads the MTP head, +0.79 GiB, floors the 35B KV pool).
 - Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels (routing flips): >1% = broken, below = no verdict. Numerics judge: Qwen3.8-27B-NVFP4-vllm (deterministic, fused GDN 4.6283).
 - 35B recipe when model + caches fill 30 GB: corpus in ~1k-token slices (3200 chars), `--max-seq-len 1280`, both arms per slice, token-weighted NLL; warm-cache mount (`/root/.cache/imp/warm`) makes runs ~7 s; do NOT mount the library-reserve measurement (4399 MiB whole-init worsens the plan).
@@ -73,4 +73,6 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 | Fused layers share one tensor scale | `q/k/v`, `gate/up`, GDN `in_proj_qkv`+`in_proj_z`, `in_proj_b`+`in_proj_a` (vLLM `packed_modules_mapping`); per-tensor scales dequantize siblings against the wrong scale (amax spread 3.7x). Refuted: `absmax/(6*448)` scaling (31.05, worse than `absmax/6`) |
 | `imp-quantize` | BF16/FP16 and block-scaled FP8 (`weight_scale_inv`) SafeTensors -> NVFP4, EXPERIMENTAL (RTN ~+18-22% PPL vs BF16); `--calib <file>` from `imp-cli --calibrate` (AWQ; `--calib-groups BD` on wide-GQA models, full `ABCD` hurts at n_rep >= 5), `--keep-attn-gate`, `--dry-run` (size + VRAM budget via HTTP-range header read), `--format vllm` writes compressed-tensors (loads in vLLM 0.27.1; `kekzle/Qwen3.8-27B-NVFP4-vllm` runs in both). 2-D per-expert HF MoE supported (DeepSeek-V2-Lite); 3-D stacked experts, MLA latent projections, MoE router REFUSED. Sharded sources need a rebuilt `model.safetensors.index.json` or the resolver says "No .gguf file found". One-shot download + quantize: `scripts/stage-model.sh` |
 | Micro-scale search | REFUTED (#1083): 30.10 -> 29.88 PPL for ~6x cost; the FP4 grid is the error, AWQ moves it |
-| NVFP4 lm_head | `gemm.nvfp4_lm_head`, `_gdn` default on: +2.2% PPL for +8-16% decode, owner-accepted; `--lm-head` off = +0.99% PPL for -10.4% decode on the measured case |
+| LM head | `gemm.nvfp4_lm_head=auto` = per-row FP8 since #2166 (PPL Qwen3-8B 11.1108 -> 10.7623, tg128 -4.7 %); `on` = NVFP4, `_gdn` applies to the NVFP4 head: +2.2% PPL for +8-16% decode, owner-accepted; `--lm-head` off = +0.99% PPL for -10.4% decode on the measured case. Qwen3-8B-Q8_0: +3.3 % PPL (11.1108 vs 10.7541) and a flipped first-token argmax vs HF fp32 and llama.cpp (#2166) |
+| FP8 E4M3 KV error | the 3-bit mantissa: V round-trip rel error 0.0265 with shared or separate K/V scale; no scale layout fixes it |
+| MoE NVFP4 activation tensor scale | per-expert batch absmax: a token's quantized values depend on its chunk mates, so a prompt row changes with the prefill chunk (#2167) |

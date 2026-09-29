@@ -44,6 +44,10 @@ target_compile_options(imp_warnings INTERFACE
 find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 
+# hf:// model fetch (src/model/hf_fetch.cpp): HTTPS via libcurl, sha256 via libcrypto.
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 # Target sm_120a (RTX 5090/PRO 6000, GB202): FP8 f8f6f4 MMA, NVFP4 block MMA, TMA-WS GEMM.
 # Fallback PTX compute_120f JIT-compiles for GB203, loses TMA-WS grouped GEMM (NVFP4 degraded).
 # IMP_DISABLE_120F_FALLBACK=ON strips it. CMake<3.31 can't parse a/f suffix; gencode passed direct.
@@ -90,6 +94,10 @@ if(IMP_ALLOC_INTERPOSE)
     set(IMP_WRAP_LINK_FLAGS
         "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
     message(STATUS "Allocation interposition ENABLED (measurement build)")
+    # Canary for uninitialized reads (#2168): fill every new device allocation with this byte.
+    set(IMP_ALLOC_POISON_BYTE "-1" CACHE STRING "Fill byte for new device allocations, -1 = off")
+    set_source_files_properties(src/memory/alloc_interpose.cpp PROPERTIES
+        COMPILE_DEFINITIONS "IMP_ALLOC_POISON_BYTE=${IMP_ALLOC_POISON_BYTE}")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 # libFuzzer binaries per fuzz/ target (#1620); needs clang, g++ has no -fsanitize=fuzzer.
@@ -178,6 +186,7 @@ set(IMP_MODEL_SOURCES
     src/model/gguf_parse.cpp
     src/model/gguf_tensor_assign.cpp
     src/model/safetensors_loader.cpp
+    src/model/mtp_head.cpp
     src/model/safetensors_writer.cpp
     src/model/safetensors_raw.cpp
     src/model/llm_compressor_loader.cpp
@@ -187,9 +196,12 @@ set(IMP_MODEL_SOURCES
     src/model/mrope_positions.cpp
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
+    src/model/hf_fetch.cpp
+    src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
+    src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
     src/model/tokenizer_pretok.cpp
     src/model/unicode_class.cpp
@@ -276,6 +288,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan_chunkpar_pass.cu
     src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
+    src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cu
     src/compute/mmq_q8_imma_q4k.cu
@@ -359,6 +372,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
@@ -415,6 +429,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase0_nvfp4_loader.cu
     src/exec/pre_dequant_phase1_fp16_cache.cu
     src/exec/pre_dequant_phase2_fp8_cache.cu
+    src/exec/pre_dequant_fp8_lm_head.cu
     src/exec/pre_dequant_phase3_nvfp4_decode.cu
     src/exec/pre_dequant_phase3c_mxfp4.cu
     src/exec/pre_dequant_phase4_tensor_registry.cu
@@ -422,6 +437,8 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_prompt_logprobs.cu
+    src/exec/executor_lm_head_fp8.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
     src/quant/gpt_oss_mxfp4_convert.cu
@@ -504,6 +521,8 @@ target_link_libraries(imp
     PRIVATE
         pthread
         imp_warnings
+        CURL::libcurl
+        OpenSSL::Crypto
 )
 
 if(IMP_USE_CUTLASS)
@@ -612,15 +631,19 @@ if(IMP_BUILD_SERVER)
     tools/common/mtp_auto.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp
+        tools/imp-server/responses_store.cpp
         tools/imp-server/handlers.cpp
         tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
+        tools/imp-server/handlers_completions.cpp
+        tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_params.cpp
         tools/imp-server/image_fetch.cpp
@@ -631,6 +654,8 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_misc.cpp
         tools/imp-server/metrics_memory.cpp
         tools/imp-server/handlers_rerank.cpp
+        tools/imp-server/handlers_decide.cpp
+        tools/imp-server/candidate_tokens.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
         tools/imp-server/tracing.cpp
@@ -697,9 +722,12 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_lora_dims.cpp
+        tests/test_fim.cpp
+        tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
+        tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
         tests/test_kv_cache.cpp
         tests/test_kv_accounting.cpp
@@ -708,6 +736,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_silent_drops.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
+        tests/test_fp8_lm_head.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
@@ -746,6 +775,8 @@ if(IMP_BUILD_TESTS)
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
         tests/test_prefill_pacing.cpp
+        # Minimum prompt chunk (#2152): chunk-split and prefix-reuse caps, header-only.
+        tests/test_prompt_tail.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
@@ -785,6 +816,10 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
+        # PLE n-gram context from the token history (header-only, model/ngram_table.h).
+        tests/test_ngram_context.cpp
+        # Host-resident experts: auto max_batch_size 1, explicit batch warned (header-only).
+        tests/test_expert_batch_policy.cpp
         # The KV-pool sizing arithmetic (#1251). Pure integers, so it belongs in
         # the lane CI runs — it used to be inline in engine_kv_cache_init.cpp,
         # unreachable without a GPU and a 22 GB checkpoint.
@@ -808,6 +843,8 @@ if(IMP_BUILD_TESTS)
         tests/test_image_placeholders.cpp
         tests/test_ngram_draft.cpp
     tests/test_mtp_presence.cpp
+        # dispatch_mtp_head layout detection on synthetic name lists (Qwen4Exp 3101 names).
+        tests/test_mtp_layout_dispatch.cpp
         tests/test_spec_gates.cpp
         # The per-request speculation contract (depth + decline reason), the
         # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
@@ -861,6 +898,8 @@ if(IMP_BUILD_TESTS)
         # chunk clamp must answer 'can this head_dim skip the S-matrix' the
         # same way, or nothing bounds the chunk and cuBLAS aborts.
         tests/test_attention_dispatch_rules.cpp
+        # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
+        tests/test_fmha_fp8_tile_select.cpp
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
@@ -872,6 +911,7 @@ if(IMP_BUILD_TESTS)
         target_sources(test-core PRIVATE
             tools/imp-server/anthropic.cpp
             tools/imp-server/responses.cpp
+            tools/imp-server/responses_store.cpp
             tools/imp-server/utils.cpp
             tools/imp-server/tool_call.cpp
             tools/imp-server/tool_call_gemma.cpp
@@ -879,9 +919,12 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
+            tests/test_responses_store.cpp
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
+            tools/imp-server/prompt_logprobs.cpp
+            tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
@@ -907,6 +950,8 @@ if(IMP_BUILD_TESTS)
             # the only lane CI runs.
             tools/imp-server/image_fetch.cpp
             tests/test_image_fetch.cpp
+            # hf:// fetcher (#2200) against an in-process httplib mock hub on 127.0.0.1.
+            tests/test_hf_fetch.cpp
             # json_object grammar FSM battery: CPU lane, FSM is CUDA-free without init().
             # Listed unconditionally (not inside the IMP_BUILD_SERVER block) so -DIMP_BUILD_SERVER=OFF
             # (make asan) still compiles test-core, even though both files use nlohmann as oracle.
@@ -1073,6 +1118,7 @@ if(IMP_BUILD_TESTS)
         tests/test_expert_cache.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
         tests/test_mtp_feed_batch.cu
         tests/test_mtp_topw.cu
@@ -1093,9 +1139,15 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
+        tests/test_scheduler_embedding_prefix.cpp
+        tests/test_scheduler_prefix_bypass.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
+        # /v1/decide + /v1/score boundary guard on a real tokenizer.json (no GPU, model file).
+        tests/test_candidate_tokens.cpp
+        tools/imp-server/candidate_tokens.cpp
+        tests/test_fim_tokenizer.cpp
         tests/test_real_checkpoints.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
@@ -1142,6 +1194,9 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+
+    # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
+    imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention

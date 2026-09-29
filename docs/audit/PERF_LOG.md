@@ -545,7 +545,7 @@ one-line follow-up: clear it at the fallback site.
 ## 2026-07-17 · Post-launch error checks (399 sites) + KV prefix-hash double-free fix — decode neutral
 
 Hardening WI-1/WI-2 (branch hardening/launch-checks-and-kv-churn, baseline
-`docs/archive/DISPATCH_BASELINE_2026_07_17.md`):
+[`docs/archive/DISPATCH_BASELINE_2026_07_17.md`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/archive/DISPATCH_BASELINE_2026_07_17.md)):
 `IMP_CUDA_CHECK_LAUNCH()` (cudaPeekAtLastError — logs at the launch site, does
 NOT clear, downstream propagation unchanged) after 399 previously-unchecked
 kernel launches in 82 .cu files, plus the KVCacheManager stale-prefix-hash

@@ -6,7 +6,86 @@
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
+
+# Link deps of test-attention outside the src/compute name pattern: nm closure of its objects over
+# src/compute + src/exec (build-dev, 7687c3ce). Regenerate when a new one appears.
+ATTN_LINK_TUS=(src/compute/dispatch_paths.cpp src/compute/gemm_cutlass_mxfp4_sm120.cu
+               src/exec/executor_kv_write_kernels.cu src/exec/sparse_attn_select.cu)
+
+# test-attention trigger set: its test TUs + attention-named src files + ATTN_LINK_TUS,
+# closed over quoted #includes, kept to src/compute and src/exec. Printed one per line.
+attention_paths() {
+    local queue=() seen=" " f inc c base
+    mapfile -t queue < <(
+        awk '/imp_add_test_module\(test-attention/{p=1} p{for(i=1;i<=NF;i++) if($i ~ /^tests\//) print $i} p&&/\)/{exit}' "$ROOT/CMakeLists.txt"
+        find src/compute -type f \( -name '*attention*' -o -name '*attn*' -o -name '*fmha*' -o -name '*flash*' -o -name '*qsa*' \)
+        printf '%s\n' "${ATTN_LINK_TUS[@]}")
+    while [ ${#queue[@]} -gt 0 ]; do
+        f="${queue[0]}"; queue=("${queue[@]:1}")
+        case "$seen" in *" $f "*) continue ;; esac
+        seen="$seen$f "
+        while read -r inc; do
+            for base in src tests "$(dirname "$f")"; do
+                c="$(realpath -m --relative-to=. "$base/$inc")"
+                if [ -f "$c" ]; then queue+=("$c"); break; fi
+            done
+        done < <(sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*"\([^"]*\)".*/\1/p' "$f" 2>/dev/null)
+    done
+    tr ' ' '\n' <<<"$seen" | grep -E '^src/(compute|exec)/' | sort
+}
+ATTN_PATHS=""
+is_attention_path() {
+    case "$ATTN_PATHS" in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# Maps the staged diff to reachable test modules: the full suite (imp-tests, ~4min after
+# build) runs when the diff touches what every module links (core, include, the build itself)
+# or IMP_PRECOMMIT_FULL=1; else only the touched subsystem's modules run.
+# A tests/ file maps to the module its CMakeLists.txt lists it under.
+modules_for() {
+    case "$1" in
+        include/*|src/core/*|src/api/*|CMakeLists.txt|cmake/*|*.cmake) echo ALL ;;
+        tests/*) awk -v f="$1" '/imp_add_test_module\(/{m=$1; sub(/.*\(/,"",m)} index($0,f){print m; exit}' \
+                     "$ROOT/CMakeLists.txt" ;;
+        src/memory/*|src/runtime/*) echo "test-core test-kv test-e2e" ;;
+        src/compute/*) echo "test-compute test-quant test-kv test-moe-gdn"
+                       is_attention_path "$1" && echo test-attention ;;
+        src/exec/*) echo "test-e2e test-moe-gdn test-compute"
+                    is_attention_path "$1" && echo test-attention ;;
+        src/model/*|src/quant/*) echo "test-quant test-text test-e2e test-core" ;;
+        src/vision/*|src/lora/*|src/sampling/*) echo "test-e2e test-compute" ;;
+        tools/imp-server/batching_engine.*) echo "test-core test-e2e" ;;
+        tools/*) echo "test-core" ;;
+        *) echo ALL ;;
+    esac
+    return 0
+}
+# Union of modules_for over the given paths, space separated, sorted.
+select_modules() {
+    local f m mods=""
+    if printf '%s\n' "$@" | grep -qE '^src/(compute|exec)/'; then
+        ATTN_PATHS=" $(attention_paths | tr '\n' ' ')"
+    fi
+    for f in "$@"; do
+        m="$(modules_for "$f")"
+        [ -z "$m" ] && m=ALL
+        mods="$mods $m"
+    done
+    echo "$mods" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+}
+
+# Dry run, no build/GPU: scripts/pre-commit.hook --select <path>... prints the module set.
+if [ "${1:-}" = "--select" ]; then
+    shift
+    select_modules "$@"; echo
+    exit 0
+fi
+if [ "${1:-}" = "--attention-paths" ]; then
+    attention_paths
+    exit 0
+fi
 
 # Cheap static gates run FIRST, before any early exit: an allowlist-pin drift or dead doc
 # citation used to surface only at push time or in CI, after the full build+suite already ran.
@@ -45,42 +124,29 @@ fi
 if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-commit (Stage 1 / GPU)" || exit 1
 fi
+# Hold the GPU lock (holder = this hook's pid) until exit; refused if another worktree holds it.
+if [ -f "$ROOT/scripts/gpu_lock.sh" ]; then
+    bash "$ROOT/scripts/gpu_lock.sh" acquire --pid $$ "pre-commit" >/dev/null || exit 1
+    trap 'bash "$ROOT/scripts/gpu_lock.sh" release --pid $$ >/dev/null' EXIT
+fi
+IMG="$(bash "$ROOT/scripts/image_tag.sh")"
 
-# Maps the staged diff to reachable test modules: the full suite (imp-tests, ~4min after
-# build) runs when the diff touches what every module links (core, include, the build itself)
-# or IMP_PRECOMMIT_FULL=1; else only the touched subsystem's modules run.
-# A tests/ file maps to the module its CMakeLists.txt lists it under.
-modules_for() {
-    case "$1" in
-        include/*|src/core/*|src/api/*|CMakeLists.txt|cmake/*|*.cmake) echo ALL ;;
-        tests/*) awk -v f="$1" '/imp_add_test_module\(/{m=$1; sub(/.*\(/,"",m)} index($0,f){print m; exit}' \
-                     "$ROOT/CMakeLists.txt" ;;
-        src/memory/*|src/runtime/*) echo "test-core test-kv test-e2e" ;;
-        src/compute/*) echo "test-compute test-attention test-quant test-kv test-moe-gdn" ;;
-        src/exec/*) echo "test-e2e test-moe-gdn test-compute test-attention" ;;
-        src/model/*|src/quant/*) echo "test-quant test-text test-e2e test-core" ;;
-        src/vision/*|src/lora/*|src/sampling/*) echo "test-e2e test-compute" ;;
-        tools/imp-server/batching_engine.*) echo "test-core test-e2e" ;;
-        tools/*) echo "test-core" ;;
-        *) echo ALL ;;
-    esac
-}
-MODULES=""
-for f in $CHANGED; do
-    m="$(modules_for "$f")"
-    [ -z "$m" ] && m=ALL
-    MODULES="$MODULES $m"
-done
-MODULES="$(echo "$MODULES" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')"
+# shellcheck disable=SC2086 # CHANGED is a newline list of repo paths without spaces.
+MODULES="$(select_modules $CHANGED)"
 if [ "${IMP_PRECOMMIT_FULL:-0}" = "1" ] || echo " $MODULES" | grep -q " ALL"; then
     echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu (full suite)"
-    exec make -s test-gpu
+    make -s test-gpu
+    exit $?
 fi
 echo "pre-commit (Stage 1 / GPU): staged source changes → make build + modules: $MODULES(IMP_PRECOMMIT_FULL=1 runs the full suite)"
 make -s build || exit 1
+bash "$ROOT/scripts/image_tag.sh" check "$IMG" || exit 1
 for mod in $MODULES; do
     echo "pre-commit: $mod"
     # Absolute path: gtest threadsafe death tests re-exec argv[0] with execv
     # (no PATH search); a bare "test-e2e" fails DeviceFaultSignalTest.
-    docker run --rm --gpus all -v "$HOME/models:/models" imp:test "/usr/local/bin/$mod" || exit 1
+    # Cache volume = Makefile DOCKER_RUN's: warm weight cache survives --rm. Not the server's
+    # imp-cache (compose): library_reserve measured under a test must not size its KV pool.
+    docker run --rm --gpus all -v "$HOME/models:/models" \
+        -v "${IMP_TEST_CACHE_VOL:-imp-test-cache}:/home/imp/.cache/imp" "$IMG" "/usr/local/bin/$mod" || exit 1
 done

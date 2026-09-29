@@ -49,6 +49,10 @@ bool name_is_mtp(const std::string& in);
 // sharded checkpoints. keep_mtp mirrors the caller's load_mtp_head, keep_vision the tower.
 bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp);
 
+// Qwen4Exp PLE n-gram table tensor: NGramTable reads it host-side from its own mapping (51 GiB),
+// so the standard loader must never map it into the tensor map or fault it in.
+bool name_is_ple_host_table(const std::string& in);
+
 // Emit one INFO log summarizing what translate_name() did across a shard.
 // Call once at the end of the enumerate-tensors loop in load_shard().
 void log_summary(const TranslationCounters& counters);

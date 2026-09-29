@@ -62,6 +62,8 @@ Open <http://localhost:8080> for the built-in chat UI, or `curl` `/v1/chat/compl
        cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
        cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
 
+A GGUF or SafeTensors repo that loads as-is needs no staging: `--model hf://<org>/<repo>[:<file>.gguf]` downloads it inside the container into the mounted `/models` (HF cache layout, sha256-checked, resumable, `HF_TOKEN` for gated repos) and a restart loads it with no network request: [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face).
+
 Full walkthrough (screenshot, other model formats, bringing your own BF16/FP8 checkpoint, the MTP head): [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Quantizing it yourself, quality numbers: [`docs/quantization.md`](docs/quantization.md).
 
 ## What works today
@@ -84,13 +86,13 @@ Every push measures this on one pinned model (Qwen3-8B Q8_0); the regression gat
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
 |---|---|---|
-| decode tg128 | **299.53 tok/s** | 8 % |
-| prefill pp128 | 6169.2 tok/s | 8 % |
-| prefill pp512 | **14068.06 tok/s** | 8 % |
-| prefill pp4096 | 16341.96 tok/s | 8 % |
-| peak VRAM (own) | 20644 MiB | 10 % |
+| decode tg128 | **282.97 tok/s** | 8 % |
+| prefill pp128 | 6132.05 tok/s | 8 % |
+| prefill pp512 | **14053.01 tok/s** | 8 % |
+| prefill pp4096 | 16197.82 tok/s | 8 % |
+| peak VRAM (own) | 20264 MiB | 10 % |
 
-[PROV: commit=824140bd date=2026-09-23 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+[PROV: commit=702a9cd3 date=2026-09-28 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 

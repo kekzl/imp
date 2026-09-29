@@ -26,6 +26,7 @@ static constexpr int FUSED_WARPS_PER_CTA = 4;
 static constexpr int FUSED_BLOCK_SIZE = FUSED_WARPS_PER_CTA * 32;  // 128 threads
 static constexpr int TILE_M = 32;                                  // tokens per shared memory tile
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_t* __restrict__ packed_weight,
                                                                     const block_q8_1* __restrict__ q8_base,
                                                                     const float* __restrict__ d8_base,
@@ -190,6 +191,7 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
         __syncthreads();  // protect smem for next TILE_M iteration
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Host launcher
 void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, const float* d8_base,
@@ -210,7 +212,7 @@ void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, co
 
     // Request extended shared memory if needed
     static bool smem_configured = false;
-    if (!smem_configured && smem_bytes > 48 * 1024) {
+    if (!smem_configured && smem_bytes > static_cast<int64_t>(48) * 1024) {
         cudaFuncSetAttribute(gemm_q6k_moe_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              static_cast<int>(smem_bytes));
         smem_configured = true;

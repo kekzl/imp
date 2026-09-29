@@ -37,7 +37,8 @@ public:
     [[nodiscard]] bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel,
                             int n_heads, int head_dim_ssm, int state_size, QType h_dtype = QType::F32,
                             VRAMAllocator* alloc = nullptr, int n_reserved = 0,
-                            Backend* lazy_backend = nullptr, int n_reserved_lazy = 0);
+                            Backend* lazy_backend = nullptr, int n_reserved_lazy = 0,
+                            size_t extra_bytes_per_slot = 0);
 
     // Get pointers into the state pool for a given sequence and SSM layer index.
     void* conv_state(int seq_id, int ssm_layer_idx);
@@ -54,6 +55,13 @@ public:
         return static_cast<char*>(pool_) + static_cast<size_t>(seq_id) * slot_stride_bytes_;
     }
     size_t per_seq_bytes() const { return per_seq_bytes_; }
+    // Per-slot tail after the layers (init's extra_bytes_per_slot): reset, snapshots and
+    // spec rollback move it with the slab. nullptr when init reserved none.
+    void* extra_state(int seq_id) {
+        return extra_bytes_ ? static_cast<char*>(seq_base(seq_id)) + per_layer_bytes_ * n_ssm_layers_
+                            : nullptr;
+    }
+    size_t extra_bytes() const { return extra_bytes_; }
     // Slot-to-slot stride in the pool. Equal to per_seq_bytes() on a fixed
     // pool; padded to the commit granule on a lazy one. The batched kernels
     // step by THIS, copies move per_seq_bytes().
@@ -114,7 +122,8 @@ private:
     size_t conv_bytes_ = 0;       // per (seq, layer) conv state
     size_t h_bytes_ = 0;          // per (seq, layer) h state
     size_t per_layer_bytes_ = 0;  // conv_bytes_ + h_bytes_
-    size_t per_seq_bytes_ = 0;    // per_layer_bytes_ * n_ssm_layers_
+    size_t per_seq_bytes_ = 0;    // per_layer_bytes_ * n_ssm_layers_ + align256(extra_bytes_)
+    size_t extra_bytes_ = 0;      // per-slot tail after the layers
     size_t slot_stride_bytes_ = 0;
     size_t total_bytes_ = 0;
 

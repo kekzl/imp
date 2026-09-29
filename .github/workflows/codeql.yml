@@ -1,0 +1,69 @@
+name: CodeQL
+
+# Code scanning, free on this public repo. build-mode none: no CUDA toolchain on the runner;
+# C/C++ none mode is public preview and may miss alerts; .cu kernels are not the target.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [c-cpp, python, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config: |
+            paths:
+              - src
+              - include
+              - tools
+              - scripts
+              - .github/workflows
+            paths-ignore:
+              - tools/imp-server/webui
+
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}
+          upload: never
+          output: sarif-results
+
+      # third_party/ is vendored upstream (stb == nothings/stb master byte for byte), not patched here.
+      # paths/paths-ignore do not drop C/C++ results in headers #included from src/, so filter the SARIF.
+      - name: Drop results in vendored third_party/
+        run: |
+          for f in sarif-results/*.sarif; do
+            jq '.runs[].results |= map(select((.locations[0].physicalLocation.artifactLocation.uri // "") | startswith("third_party/") | not))' \
+              "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+          done
+
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: sarif-results
+          category: /language:${{ matrix.language }}

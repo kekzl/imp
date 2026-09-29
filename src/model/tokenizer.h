@@ -125,6 +125,15 @@ public:
         return id >= 0 && id < static_cast<int>(added_token_ids_.size()) && added_token_ids_[id];
     }
 
+    // FIM token ids declared in GGUF metadata (tokenizer.ggml.fim_*_token_id), -1 = not declared.
+    // Index by FimRole (model/fim.h); fim.cpp falls back to a vocab text lookup.
+    void set_fim_meta_id(int role, int32_t id) {
+        if (role >= 0 && role < kFimRoles)
+            fim_meta_ids_[role] = id;
+    }
+    int32_t fim_meta_id(int role) const { return role >= 0 && role < kFimRoles ? fim_meta_ids_[role] : -1; }
+    static constexpr int kFimRoles = 6;
+
     // Defensive overlay: marks a token CONTROL even when the source tokenizer didn't tag it.
     // Used to cross-check special_tokens_map.json against tokenizer.json's special-flag column.
     // No-op on an invalid id; allocates the type vector lazily if empty.
@@ -201,6 +210,7 @@ private:
     // Per-id `lstrip` (bit 0) / `rstrip` (bit 1) of tokenizer.json added_tokens: the match
     // swallows adjacent whitespace (Phi-4 <|im_end|>). Empty when none sets them.
     std::vector<uint8_t> strip_flags_;
+    int32_t fim_meta_ids_[kFimRoles] = {-1, -1, -1, -1, -1, -1};
 
     // Cached special-token strings (CONTROL type) sorted by length descending, so encode_*
     // pre-splits input on these literals and multi-character markers (e.g. <|tool_call>)

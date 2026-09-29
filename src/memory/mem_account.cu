@@ -427,7 +427,8 @@ cudaMemPool_t make_release_on_free_pool() {
 }  // namespace
 
 cudaMemPool_t release_on_free_pool(ReleasePool which) {
-    static cudaMemPool_t pools[2] = {make_release_on_free_pool(), make_release_on_free_pool()};
+    static cudaMemPool_t pools[3] = {make_release_on_free_pool(), make_release_on_free_pool(),
+                                     make_release_on_free_pool()};
     return pools[static_cast<int>(which)];
 }
 

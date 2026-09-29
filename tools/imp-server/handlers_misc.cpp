@@ -59,6 +59,8 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     int snap_max_seq_len = 0;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!resume_if_idle_locked(state, res))
+            return;
         snap_model = state.model;
         snap_max_seq_len = state.max_seq_len;
     }
@@ -128,6 +130,8 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     ImpModel snap_model;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!resume_if_idle_locked(state, res))
+            return;
         snap_model = state.model;
     }
     if (!snap_model) {
@@ -215,6 +219,23 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_last_request_duration_ms Duration of last request in milliseconds\n";
     out += "# TYPE imp_last_request_duration_ms gauge\n";
     out += "imp_last_request_duration_ms " + std::to_string(m.last_request_duration_ms.load()) + "\n";
+    {
+        auto& rs = state.response_store;  // own mutex; independent of the model (#2206)
+        rs.purge_expired();
+        out += "# HELP imp_responses_store_entries Responses stored for previous_response_id\n";
+        out += "# TYPE imp_responses_store_entries gauge\n";
+        out += "imp_responses_store_entries " + std::to_string(rs.size()) + "\n";
+        out += "# HELP imp_responses_store_bytes Approximate bytes held by the responses store\n";
+        out += "# TYPE imp_responses_store_bytes gauge\n";
+        out += "imp_responses_store_bytes " + std::to_string(rs.bytes()) + "\n";
+        out += "# HELP imp_responses_store_evictions_total Stored responses dropped by the entry or "
+               "byte cap\n";
+        out += "# TYPE imp_responses_store_evictions_total counter\n";
+        out += "imp_responses_store_evictions_total " + std::to_string(rs.evictions()) + "\n";
+        out += "# HELP imp_responses_store_expired_total Stored responses dropped by the TTL\n";
+        out += "# TYPE imp_responses_store_expired_total counter\n";
+        out += "imp_responses_store_expired_total " + std::to_string(rs.expirations()) + "\n";
+    }
     out += "# HELP imp_model_loads_total Total model loads\n";
     out += "# TYPE imp_model_loads_total counter\n";
     out += "imp_model_loads_total " + std::to_string(m.model_loads_total.load()) + "\n";

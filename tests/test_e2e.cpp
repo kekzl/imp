@@ -3,6 +3,8 @@
 #include "api/imp_internal.h"
 #include "gguf_stub.h"
 #include "test_models.h"
+#include "memory/weight_cache_file.h"
+#include "runtime/config.h"
 #include "runtime/engine.h"
 #include "runtime/think_stop_logic.h"
 #include "model/model.h"
@@ -12,6 +14,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -97,6 +100,25 @@ TEST(EndToEndTest, NullArguments) {
     // decode_step with null context
     int32_t tok;
     EXPECT_EQ(imp_decode_step(nullptr, &params, &tok), IMP_ERROR_INVALID_ARG);
+}
+
+// #2192: a stub's warm cache must resolve inside the stub's own dir and die with it.
+TEST(EndToEndTest, StubWarmCacheStaysInStubDir) {
+    const std::string stub = imp::test::generate_gguf_stub("llama");
+    ASSERT_FALSE(stub.empty());
+    const std::string dir = stub.substr(0, stub.rfind('/'));
+    EXPECT_EQ(dir.rfind("/tmp/imp_stub_", 0), 0u) << dir;
+
+    imp::test::arm_stub_warm_cache(stub);
+    const imp::RuntimeConfig rc = imp::take_pending_runtime_config();
+    EXPECT_TRUE(rc.warm_cache.enabled);
+    EXPECT_EQ(rc.warm_cache.dir, dir + "/warm");
+
+    const std::string cache_file = imp::weight_cache_path_for(stub, rc.warm_cache.dir);
+    EXPECT_EQ(cache_file.rfind(dir + "/warm/", 0), 0u) << cache_file;
+
+    imp::test::remove_gguf_stub(stub);
+    EXPECT_FALSE(std::filesystem::exists(dir)) << dir << " survived remove_gguf_stub";
 }
 
 // --- Model-dependent tests (require IMP_TEST_MODEL env var) ---
@@ -319,7 +341,7 @@ protected:
 
     void TearDown() override {
         if (!stub_path_.empty())
-            unlink(stub_path_.c_str());
+            imp::test::remove_gguf_stub(stub_path_);
         stub_path_.clear();
     }
 
@@ -366,6 +388,7 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
     config.enable_pdl = 0;
 
     ImpContext ctx = nullptr;
+    imp::test::arm_stub_warm_cache(stub_path_);
     ImpError err = imp_context_create(model, &config, &ctx);
     // Context creation involves GPU weight upload; this may fail if CUDA is not
     // available or if the tiny model trips some validation. Either outcome is
@@ -432,6 +455,7 @@ TEST_F(StubModelTest, PrefillDecodeStub) {
     config.enable_pdl = 0;
 
     ImpContext ctx = nullptr;
+    imp::test::arm_stub_warm_cache(stub_path_);
     ImpError err = imp_context_create(model, &config, &ctx);
     if (err != IMP_SUCCESS) {
         imp_model_free(model);
@@ -481,6 +505,7 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
     config.enable_pdl = 0;
 
     ImpContext ctx = nullptr;
+    imp::test::arm_stub_warm_cache(stub_path_);
     ImpError err = imp_context_create(model, &config, &ctx);
     if (err != IMP_SUCCESS) {
         imp_model_free(model);

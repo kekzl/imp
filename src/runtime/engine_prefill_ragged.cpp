@@ -13,6 +13,7 @@
 // Mamba2/MLA models, MTP, perplexity capture, SWA sizing, residual KV and
 // the fp32_scan/ref_kernel GDN routes disable the path entirely.
 
+#include "runtime/prompt_tail.h"
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
@@ -35,6 +36,9 @@ bool Engine::prefill_ragged_enabled_() {
         return false;
     // The CLI's engine-global image has no per-request owner — serial only.
     if (vision_.has_input())
+        return false;
+    // PLE: the n-gram context and conv rows are staged for one sequence per prefill.
+    if (model_->ngram_table() != nullptr)
         return false;
     if (prefill_ragged_model_ok_ < 0) {
         bool ok = !model_->config_.is_mla();
@@ -66,7 +70,7 @@ bool Engine::prefill_ragged_req_ok_(const Request& req) const {
                                    !req.tool_constraint_tools.empty() || !req.regex_pattern.empty() ||
                                    !req.grammar.empty();
     return !has_vision && !req.embedding_request && req.score_token_ids.empty() && !req.logprobs &&
-           !wants_constraints;
+           req.prompt_logprobs < 0 && !wants_constraints;
 }
 
 bool Engine::mixed_rider_ok_(const Request& r) const {
@@ -188,16 +192,16 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         int chunk_len = total_input - offset;
         bool is_last = true;
         if (chunk_len > eff) {
-            chunk_len = eff;
+            chunk_len = keep_prompt_tail(eff, total_input - offset);
             is_last = false;
         }
-        const int snap_end = snapshot_end_(*req);
+        const int snap_end = snapshot_end_(*req, offset);
         if (snap_end > offset && snap_end < offset + chunk_len) {
             chunk_len = snap_end - offset;
             is_last = false;
         }
         if (chunk_len > rows_left) {
-            chunk_len = rows_left;
+            chunk_len = keep_prompt_tail(rows_left, total_input - offset);
             is_last = false;
         }
         int ctx_len = offset + chunk_len;
@@ -209,7 +213,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         // A prefix-cache hit advanced offset and recomputed chunk_len — the
         // row budget still binds.
         if (chunk_len > rows_left) {
-            chunk_len = rows_left;
+            chunk_len = keep_prompt_tail(rows_left, total_input - offset);
             is_last = false;
             ctx_len = offset + chunk_len;
         }

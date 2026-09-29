@@ -16,10 +16,12 @@
 #include "core/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "core/config/lm_head_mode.h"
 #include "memory/vram_query.h"
 #include "memory/kv_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
+#include "runtime/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/scheduler.h"
 
@@ -482,7 +484,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
                                             ssm_heads,
                                             mcfg.ssm_inner_size / ssm_heads,
                                             mcfg.ssm_state_size,
-                                            QType::F32};
+                                            QType::F32,
+                                            model_->ple_state_bytes()};
                 per_slot_state = ssm_bytes_per_slot(geom);
             }
             size_t per_slot = per_tok_kv * static_cast<size_t>(kRefCtxTokens) + per_slot_state;
@@ -515,6 +518,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }
+        const int host_layers =
+            estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now);
+        if (auto_batch_for_host_experts(auto_batch, host_layers) != auto_batch) {
+            IMP_LOG_INFO("max_batch_size: auto → 1 (expert cache budget: %d MoE layer(s) host-resident; "
+                         "VRAM-derived value was %d, set runtime.max_batch_size to override)",
+                         host_layers, auto_batch);
+            auto_batch = 1;
+        }
         config_.max_batch_size = auto_batch;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
                      "tier-floor=%d, VRAM-aware)",
@@ -524,14 +535,12 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
 
-    // A PLE model (Qwen4Exp) keeps ONE n-gram context on the host, so a decode step with
-    // several sequences feeds every one of them the same context. executor_ple.cu logged
-    // that the output was wrong and carried on; the step then ran past the single-sequence
-    // buffers and took the process down with an illegal access. Serve one sequence instead.
-    if (model_ && model_->ngram_table() != nullptr && config_.max_batch_size > 1) {
+    // Qwen4Exp QSA keeps ONE sequence's indexer keys (executor_qsa.cu): with attention.qsa a
+    // second sequence would select blocks from the first one's keys. PLE state is per slot.
+    if (model_ && model_->ngram_table() != nullptr && runtime_config_.attention.qsa &&
+        config_.max_batch_size > 1) {
         IMP_LOG_WARN(
-            "max_batch_size %d -> 1: this model's PLE block holds one n-gram context, so "
-            "batched decode would answer every sequence from the first one's context. "
+            "max_batch_size %d -> 1: attention.qsa holds one sequence's indexer keys. "
             "Concurrent requests are served one decode step at a time.",
             config_.max_batch_size);
         config_.max_batch_size = 1;
@@ -657,6 +666,9 @@ void Engine::init_resolve_quant_flags_() {
 
     // NVFP4 decode mode
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
+    const LmHeadMode head_mode = lm_head_mode(runtime_config_.gemm.nvfp4_lm_head);
+    config_.fp8_lm_head = lm_head_mode_fp8(head_mode, model_->output_proj().qtype);
+    config_.lm_head_source_only = lm_head_auto_keeps_source(head_mode, model_->output_proj().qtype);
 
     if (config_.use_nvfp4_decode < 0) {
         const auto wq_qtype = model_->layer(0).wq.qtype;

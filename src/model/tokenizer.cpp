@@ -424,6 +424,54 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
     return result;
 }
 
+namespace {
+
+bool jnum_true(const JValue* v) { return v && v->type == JType::NUMBER && v->num_val != 0.0; }
+
+// tokenizer.json added_tokens `lstrip` (bit 0) / `rstrip` (bit 1).
+uint8_t added_token_strip(const JValue& tok) {
+    return static_cast<uint8_t>((jnum_true(jobj_find(tok, "lstrip")) ? 1 : 0) |
+                                (jnum_true(jobj_find(tok, "rstrip")) ? 2 : 0));
+}
+
+// A Split step's pattern.Regex, "" when it has none.
+std::string split_regex(const JValue& pt) {
+    std::string rx;
+    const JValue* pat = jobj_find(pt, "pattern");
+    if (pat && pat->type == JType::OBJECT)
+        jobj_get_string(*pat, "Regex", rx);
+    return rx;
+}
+
+// A pre-tokenizer Split step as a scanner step: "re:<regex>" for an Isolated, non-inverted regex
+// split, "!" for any other (not expressible).
+std::string split_step(const JValue& pt) {
+    std::string behavior;
+    jobj_get_string(pt, "behavior", behavior);
+    const JValue* pat = jobj_find(pt, "pattern");
+    std::string rx;
+    const bool regex = pat && pat->type == JType::OBJECT && jobj_get_string(*pat, "Regex", rx);
+    return regex && behavior == "Isolated" && !jnum_true(jobj_find(pt, "invert")) ? "re:" + rx : "!";
+}
+
+// Family named by a Split step's regex (tokenizer_pretok.cpp), "" when none matches (gpt2, #657).
+// Case classes: o200k (contractions) or Nemotron-H (none, single digits); else digit triples:
+// cl100k; [\p{L}\p{M}]+ letter runs: Qwen3.5+; plain contraction list: qwen2.
+std::string pretok_family(const std::string& rx) {
+    const bool contractions = rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos;
+    if (rx.find("\\p{Lu}") != std::string::npos)
+        return contractions ? "o200k" : "nemotron";
+    if (!contractions)
+        return "";
+    if (rx.find("\\p{N}{1,3}") != std::string::npos)
+        return "cl100k";
+    if (rx.find("[\\p{L}\\p{M}]+") != std::string::npos)
+        return "qwen35";
+    return "qwen2";
+}
+
+}  // namespace
+
 // ---- Load vocabulary ----
 
 bool Tokenizer::load(const std::string& path) {
@@ -573,11 +621,7 @@ bool Tokenizer::load(const std::string& path) {
             vocab_[id] = content;
             token_to_id_[content] = id;
             added_token_ids_[id] = true;
-            const JValue* lstrip_v = jobj_find(tok, "lstrip");
-            const JValue* rstrip_v = jobj_find(tok, "rstrip");
-            const uint8_t strip =
-                (lstrip_v && lstrip_v->type == JType::NUMBER && lstrip_v->num_val != 0.0 ? 1 : 0) |
-                (rstrip_v && rstrip_v->type == JType::NUMBER && rstrip_v->num_val != 0.0 ? 2 : 0);
+            const uint8_t strip = added_token_strip(tok);
             if (strip) {
                 if (id >= static_cast<int>(strip_flags_.size()))
                     strip_flags_.resize(id + 1, 0);
@@ -654,40 +698,15 @@ bool Tokenizer::load(const std::string& path) {
                     std::string inner_type;
                     jobj_get_string(pt, "type", inner_type);
                     if (inner_type == "Digits") {
-                        const JValue* ind = jobj_find(pt, "individual_digits");
-                        split_steps.push_back(ind && ind->type == JType::NUMBER && ind->num_val != 0.0
-                                                  ? "digits:1"
-                                                  : "digits:0");
+                        split_steps.push_back(jnum_true(jobj_find(pt, "individual_digits")) ? "digits:1"
+                                                                                            : "digits:0");
                         continue;
                     }
                     if (inner_type == "Split") {
-                        std::string behavior, rx_step;
-                        jobj_get_string(pt, "behavior", behavior);
-                        const JValue* inv = jobj_find(pt, "invert");
-                        const JValue* pat = jobj_find(pt, "pattern");
-                        if (pat && pat->type == JType::OBJECT && jobj_get_string(*pat, "Regex", rx_step) &&
-                            behavior == "Isolated" &&
-                            !(inv && inv->type == JType::NUMBER && inv->num_val != 0.0))
-                            split_steps.push_back("re:" + rx_step);
-                        else
-                            split_steps.push_back("!");
-                        // The Split step's regex names the family (tokenizer_pretok.cpp); an unmatched
-                        // regex falls to gpt2_pre_tokenize (#657). Case classes: o200k (contractions)
-                        // or Nemotron-H (none, single digits); else digit triples: cl100k; [\p{L}\p{M}]+
-                        // letter runs: Qwen3.5+; plain contraction list: qwen2.
-                        const JValue* pattern = jobj_find(pt, "pattern");
-                        std::string rx;
-                        if (pattern && pattern->type == JType::OBJECT)
-                            jobj_get_string(*pattern, "Regex", rx);
-                        const bool contractions = rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos;
-                        if (rx.find("\\p{Lu}") != std::string::npos)
-                            pre_tokenizer_ = contractions ? "o200k" : "nemotron";
-                        else if (contractions && rx.find("\\p{N}{1,3}") != std::string::npos)
-                            pre_tokenizer_ = "cl100k";
-                        else if (contractions && rx.find("[\\p{L}\\p{M}]+") != std::string::npos)
-                            pre_tokenizer_ = "qwen35";
-                        else if (contractions)
-                            pre_tokenizer_ = "qwen2";
+                        split_steps.push_back(split_step(pt));
+                        const std::string family = pretok_family(split_regex(pt));
+                        if (!family.empty())
+                            pre_tokenizer_ = family;
                         continue;
                     }
                     if (inner_type == "ByteLevel") {

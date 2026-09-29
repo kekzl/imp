@@ -33,25 +33,35 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 // packs. It is still empty here (the device tables and the first request come later), so it
 // is re-created with those bytes on top: everything allocated after sees the same free VRAM.
 void GraphExecutor::regrow_expert_cache_() {
-    const size_t freed = wcache_.dropped_gdn_released_bytes;
+    const size_t freed = wcache_.dropped_gdn_released_bytes + wcache_.lm_head_released_bytes;
     if (freed == 0 || expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
         return;
     const auto& mcfg = model_->config();
     const int before = expert_cache_.slots_per_layer_;
-    expert_cache_.destroy();
     const size_t budget = expert_cache_budget_ + freed;
-    if (!expert_cache_.init(expert_cache_slot_raw_, budget, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
-                            dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_)) {
-        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB failed, retrying the original %.0f MiB",
+    const size_t got = expert_cache_.reinit_or_disable(
+        expert_cache_slot_raw_, budget, expert_cache_budget_, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
+        dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_);
+    if (got == 0) {
+        // Disabled cache: host experts take the staging path (GGUF) or
+        // verify_host_expert_placement() refuses the load (NVFP4).
+        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB and retry at the original %.0f MiB both "
+                      "failed, cache disabled (0 slots/layer, was %d)",
+                      budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0), before);
+        expert_cache_budget_ = 0;
+        return;
+    }
+    if (got != budget) {
+        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB failed, kept the original %.0f MiB",
                       budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0));
-        expert_cache_.init(expert_cache_slot_raw_, expert_cache_budget_, vram_alloc_, mcfg.n_layers,
-                           mcfg.n_experts, dispatch_policy().moe.expert_cache_debug_parity,
-                           expert_cache_nvfp4_slots_);
         return;
     }
     expert_cache_budget_ = budget;
-    IMP_LOG_INFO("Expert LRU cache: %d -> %d slots/layer with the %.1f MiB of freed GDN weights",
-                 before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0));
+    IMP_LOG_INFO(
+        "Expert LRU cache: %d -> %d slots/layer with %.1f MiB of freed weights (GDN %.1f, LM head %.1f)",
+        before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0),
+        wcache_.dropped_gdn_released_bytes / (1024.0 * 1024.0),
+        wcache_.lm_head_released_bytes / (1024.0 * 1024.0));
 }
 
 void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAllocator& alloc,
@@ -125,6 +135,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 2b: FP8 decode sidecar for native-precision GDN/SSM
     // projections (gemm.fp8_ssm_proj) ---
     pre_dequant_phase2b_fp8_ssm_sidecar_(cfg, stream);
+
+    // --- Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8) ---
+    fp8_lm_head_cache_(stream);
 
     // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
@@ -212,8 +225,10 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // it to an NVFP4 decode cache. This plan site serves only NATIVE (BF16/F16)
     // heads; quantized GGUF heads route through the phase-3 collector's
     // size/arch-gated auto rule. GDN/SSM hybrids keep FP16 unless nvfp4_lm_head_gdn.
-    if (pre_dequant_internal::nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false,
-                                                    model_->profile().is_dense, cfg.d_model)) {
+    if (pre_dequant_internal::nvfp4_lm_head_enabled(
+            dispatch_policy(), /*quantized_source=*/false, model_->output_proj().qtype,
+            model_->profile().is_dense, cfg.d_model,
+            /*is_gdn_hybrid=*/false, pre_dequant_internal::fp8_lm_head_wanted(dispatch_policy(), *model_))) {
         bool is_gdn = false;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);

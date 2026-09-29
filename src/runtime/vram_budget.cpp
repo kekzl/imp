@@ -179,7 +179,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                                         n_heads,
                                         (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
                                         mcfg.ssm_state_size,
-                                        config.ssm_state_dtype};
+                                        config.ssm_state_dtype,
+                                        model.ple_state_bytes()};
             ssm_footprint = ssm_pool_bytes(geom, config.max_batch_size, ssm_reserved_slots);
         }
     }
@@ -329,7 +330,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         nvfp4_elems += static_cast<size_t>(w.shape[0]) * w.shape[1];
     };
 
-    count_nvfp4(model.output_proj(), model.out_proj_.qtype);
+    // gemm.nvfp4_lm_head=fp8/auto: the head gets an FP8 per-row copy (V*K + 4V bytes), no NVFP4 entry.
+    size_t fp8_head_bytes = 0;
+    if (config.fp8_lm_head && model.output_proj().data && model.output_proj().ndim == 2)
+        fp8_head_bytes = static_cast<size_t>(model.output_proj().shape[0]) *
+                         (static_cast<size_t>(model.output_proj().shape[1]) + sizeof(float));
+    else if (!config.lm_head_source_only)
+        count_nvfp4(model.output_proj(), model.out_proj_.qtype);
     for (int i = 0; i < mcfg.n_layers; i++) {
         const auto& L = model.layer(i);
         count_nvfp4(L.wq, L.wq.qtype);
@@ -346,7 +353,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         count_nvfp4(L.w_down_shared, L.w_down_shared.qtype);
     }
 
-    size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;
+    size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16 + fp8_head_bytes;
     size_t cutlass_sf_estimate = nvfp4_elems / 16;
 
     // Cross-check heuristic estimate against StoragePlanner's projected total (source-qtype-aware):

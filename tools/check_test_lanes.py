@@ -322,7 +322,23 @@ def main():
     # the softmax top-k race needs the real kernel under launch contention (CUDA).
     # 1137 -> 1139: FP8GemmTest.DequantizeRowsRoundTripsTheSidecar (test-compute) and
     # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
-    PINNED = 1139
+    # 1139 -> 1142: ExpertCacheReinitTest x3 (test-moe-gdn): reinit_or_disable against a real
+    # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
+    # 1142 -> 1143: FP8GemmTest.RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant (test-compute):
+    # FP8 LM-head GEMV (gemm.nvfp4_lm_head=fp8) vs fp64, bits equal for n_rows 1/3/11 (cudaMalloc).
+    # 1143 -> 1146: PLEBatched x3 (test-moe-gdn): per-sequence PLE conv rows, batched decode vs
+    # per-sequence bitwise, neighbour isolation, chunk vs token steps (kernels need a card).
+    # 1146 -> 1147: LayerNormTest.RMSNormNvfp4RefusesNullWeight (test-compute): the fused norm +
+    # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
+    # 1147 -> 1151: GdnVerifySnapshotTest x4 (test-moe-gdn): chunkwise f32/fp32out snapshot at 65 and
+    # 64 rows (#2214); GDN scan kernels need a card.
+    # 1151 -> 1152: FmhaFP8Test.DISABLED_BenchHD64VsFp16 (test-attention): HD64 FP8 vs FP16 FMHA
+    # timing for #2195; needs a card.
+    # 1152 -> 1154: FimRealTokenizer x2 (test-e2e): FIM ids + PSM prompt from real tokenizer files
+    # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
+    # 1154 -> 1162: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
+    # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
+    PINNED = 1162
 
     text = CMAKE.read_text()
     mods = module_sources(text)

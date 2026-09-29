@@ -1,3 +1,4 @@
+#include "compute/cublas_gemm_algo.h"
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
 
@@ -12,7 +13,6 @@ namespace imp {
 
 // Bridge the file-local cuBLAS internals (defined in gemm.cu) to the original
 // symbol names so the moved function bodies stay byte-identical.
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 static inline cublasHandle_t get_cublas_handle() { return gemm_internal_cublas_handle(); }
 static inline cublasLtHandle_t get_cublaslt_handle() { return gemm_internal_cublaslt_handle(); }
@@ -68,7 +68,7 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
                                                    &beta, k_out.data, dt, N,  // C (output), ldc=N
                                                    output_stride,             // strideC: offset to v_out
                                                    2,                         // batch_count = 2 (K and V)
-                                                   CUBLAS_COMPUTE_32F, kGemmAlgo);
+                                                   CUBLAS_COMPUTE_32F, cublas_gemm_algo());
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_ERROR("imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)", (int)st);
@@ -95,7 +95,7 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
     cublasStatus_t st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha,
                                                    weight_fused.data, dt, K, weight_stride, input.data, dt, K,
                                                    0, &beta, out1.data, dt, N, output_stride, 2,
-                                                   CUBLAS_COMPUTE_32F, kGemmAlgo);
+                                                   CUBLAS_COMPUTE_32F, cublas_gemm_algo());
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_ERROR("imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)", (int)st);
@@ -106,7 +106,7 @@ bool gemm_cublaslt_fp8_probe() {
     // Test at M=15 (non-power-of-2, common short-prompt length after chat
     // template wrapping) because cuBLAS 13.4 FP8 on sm_120 returns
     // NOT_SUPPORTED for certain M values even when M=16/32/64 work.
-    constexpr int M = 15, K = 4096, N = 12288;
+    constexpr size_t M = 15, K = 4096, N = 12288;
     void *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
     float *d_sa = nullptr, *d_sb = nullptr;
     if (cudaMalloc(&d_a, M * K) != cudaSuccess) return false;
@@ -126,8 +126,10 @@ bool gemm_cublaslt_fp8_probe() {
     cublasOperation_t transA = CUBLAS_OP_T, transB = CUBLAS_OP_N;
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_sa, sizeof(d_sa));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_sb, sizeof(d_sb));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                   static_cast<const void*>(&d_sa), sizeof(d_sa));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                   static_cast<const void*>(&d_sb), sizeof(d_sb));
 
     cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
     cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8F_E4M3, K, N, K);

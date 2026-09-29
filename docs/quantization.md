@@ -44,7 +44,7 @@ neither packed nor in the declared `ignore` list, or a packed Linear with no
 both refuse to load; Modelopt checkpoints are exempt (no `ignore` list to check against), full
 mechanics: [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md#loader-enforcement-nvfp4-checkpoints).
 `lm_head` sits in `ignore` on most exports; imp re-quantizes it anyway (`gemm.nvfp4_lm_head`,
-default `auto`), see below; `--set gemm.nvfp4_lm_head=false` serves it at checkpoint precision.
+default `auto` = per-row FP8), see below; `--set gemm.nvfp4_lm_head=false` serves it at checkpoint precision.
 
 **W4A16 on disk, W4A4 from M >= 2.** These checkpoints declare `input_activations: null`
 (W4A16), which imp does not read: at `n == 1` decode the activations stay FP16 (the NVFP4 GEMV
@@ -103,8 +103,8 @@ multiplier directly, one convention's number under the other's name scales every
 | MTP draft head | 810 MiB | quantized: draft acceptance 81% -> 0 (#1428) | refused |
 | `lm_head` | 2 425 MiB | nothing extra (see below) | `--lm-head` |
 
-`lm_head` is the exception: a native BF16 head becomes an NVFP4 decode cache at load anyway
-(`gemm.nvfp4_lm_head`, default `auto` -> on; weights 17 920 -> 16 192 MiB, checkpoint
+`lm_head` is the exception: a native BF16 head is re-quantized at load anyway (default `auto` = FP8
+since #2166; the table below is the older NVFP4 default, `gemm.nvfp4_lm_head=on`; weights 17 920 -> 16 192 MiB, checkpoint
 19.15 -> 17.44 GiB, perplexity 4.6158 either way, greedy output byte-identical over four
 prompts). Trade against a real BF16 head (`--set gemm.nvfp4_lm_head=off`, tracked in #982),
 Qwen3.8-27B, 248 320-token vocabulary:
@@ -117,12 +117,21 @@ Qwen3.8-27B, 248 320-token vocabulary:
 | `gemm.nvfp4_lm_head` | perplexity | decode, 128 tokens greedy | ITL @4 | ITL @16 |
 |---|---:|---:|---:|---:|
 | `off` (BF16 head) | **4.5707** | 78.56 tok/s | 53.1ms | 206.2ms |
-| `on` (default here) | 4.6158 (+0.99%) | **86.70 tok/s (+10.4%)** | **39.7ms** | **190.1ms** |
+| `on` (NVFP4, default until #2166) | 4.6158 (+0.99%) | **86.70 tok/s (+10.4%)** | **39.7ms** | **190.1ms** |
 
 Not amortised away by concurrency (head read whole once per token, ~11% of the batch-1 step,
 2.43 GiB of 17.9 GiB weights): shrinks +25% at 4 streams -> +8% at 16 but never inverts. vLLM's
 `ParallelLMHead` accepts no scales (`no module or parameter named lm_head.weight_global_scale`);
 Modelopt / llm-compressor put `lm_head` in `ignore` for W4A4, no other engine has this option.
+
+`auto` serves the head as per-row FP8 E4M3 (#2156, default since #2166; `on` keeps NVFP4): 1.78x the
+NVFP4 head bytes, FP16 activations on every row count (decode, batch, `--perplexity`), numbers from #2176:
+
+| Model | PPL 45k NVFP4 | PPL 45k FP8 | tg128 |
+|---|---:|---:|---:|
+| Qwen3-8B-Q8_0 | 11.1108 | 10.7623 | -4.7 % |
+| Qwen3-30B-A3B-NVFP4 | 11.8443 | 11.3476 | -3.0 % |
+| Qwen3.8-Flash-Next-NVFP4 | 4.6493 | 4.4873 | host-expert bound |
 
 ### Roles that must stay full precision
 
@@ -139,7 +148,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 
 ### Quality, `--calib` vs round-to-nearest
 
-`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, **not**
+`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, rebuilt by `tools/analysis/make_ppl_corpus.sh`, **not**
 `ppl_corpus.txt`, whose 199 tokens invert the model-size trend); reproducible with
 `tools/analysis/awq_ppl_ab.sh`.
 
@@ -173,7 +182,7 @@ dtype = "auto"  # auto (default) | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4
 
 | Dtype | Default behaviour | Notes |
 |---|---|---|
-| `auto` | FP16, upgrades to FP8 E4M3 for models declaring `kv_cache_quant_algo=FP8` on an allowlisted arch family (Qwen3 dense + Qwen3 MoE) | ~768 MiB KV VRAM saved on a 3.9k-token context: Qwen3-14B PPL 13.95 -> 14.10 (+1.07%), Qwen3-30B-A3B ~16.20 -> ~15.99 (neutral), both coherent |
+| `auto` | FP16, upgrades to FP8 E4M3 for models declaring `kv_cache_quant_algo=FP8` on an allowlisted arch family (Qwen3 dense + Qwen3 MoE); hint-less checkpoints (every GGUF): Qwen3 MoE only, Qwen3 dense stays FP16 (#2208: FP8 KV flipped Qwen3-8B-Q8_0 greedy output) | ~768 MiB KV VRAM saved on a 3.9k-token context: Qwen3-14B PPL 13.95 -> 14.10 (+1.07%), Qwen3-30B-A3B ~16.20 -> ~15.99 (neutral), both coherent |
 | `fp16` | forced FP16 (`dtype = "fp16"`), opts out of the `auto` FP8 upgrade | |
 | `fp8` | forced FP8 E4M3 | default flipped to FP16 in PR #51 (FP8 silently broke Llama, Mistral, DeepSeek at first decode); verified coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2 (warmup-calibration bug fixed in PR #89), Gemma-4 (dual-head_dim carve-out removed in PR #91); opt-in beyond the `auto` allowlist |
 | `int8` / `int4` | forced INT8 (dp4a attention) / INT4 | `int4` is VRAM pressure only: coherent, ~22% decode regression at 20K context |

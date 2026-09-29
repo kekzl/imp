@@ -80,6 +80,7 @@ docker run --rm --gpus all -v $HOME/models:/models \
 - Graphs: `--set runtime.cuda_graphs=never` vs default, greedy, `--seed 42`, `--max-tokens 64`. Pass = identical; first ~16 tokens identical is the strong signal.
 - Ragged prefill: `runtime.prefill_batch` ON vs OFF (serial fallback anyway for vision, constraints, logprobs, embeddings, rerank).
 - Chunk-parallel scan: `gdn.chunkpar_scan` ON vs OFF; PPL on Qwen3.8-27B-NVFP4-vllm with `runtime.deterministic=true` (fused reference 4.6283); unit-test state diff vs fused ~1e-6; `tools/analysis/layer_ab_diff.py` on `diagnostics.dump_hidden_dir` dumps: the GDN blocks' ADDED divergence (rel@out - rel@in) must be ~0 (fused -> chunkpar median -0.0003).
+- Prefix-cache resend / chunk split (#2152): `python3 tools/analysis/prefix_resend/prefix_resend_probe.py --url http://localhost:8080 --sends 3` (from #2171, branch `fix/chunk-split-numerics` until merged); every send prefills a different tail, exit 0 = greedy output identical. Greedy-text equality amplifies near-ties: pair it with a first-token logprob grid over chunk sizes (numerics-bisect).
 - Sparse attention: the `sparse decode attention ACTIVE` line in the sparse arm only, budget in tokens equal to the configured value (double = old image, #1819).
 - Byte A/Bs never diff CLI stdout (log lines interleave): diff the server JSON `content`. Qwen3.6-27B (proven on/off identical, #933) and Qwen3.8-27B are byte-deterministic at temp=0 with `runtime.deterministic=true` (implies `runtime.deterministic_gemm`); Qwen3.6-35B is not.
 
@@ -105,7 +106,7 @@ Pick the first probe whose family matches the change; two probes after shared-co
 
 ## Perplexity
 
-- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens). The 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19% real).
+- Corpus `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens, rebuild with `tools/analysis/make_ppl_corpus.sh`). The 199-token `tools/analysis/ppl_corpus.txt` inverts verdicts (+42%/+57% vs +25%/+19% real).
 - `--set runtime.deterministic=true` both arms (0.35% run-to-run otherwise); `--set speculative.mtp_k=0` (auto loads the head, +0.79 GiB); `gdn.state_bf16` pinned equal (+0.21% by design).
 - Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels (routing flips): >1% = broken, below that no verdict. Judge on Qwen3.8-27B-NVFP4-vllm.
 - PPL runs prefill; it cannot see decode-only paths or a degenerate low-PPL model. Pair it with the suite in section 0.

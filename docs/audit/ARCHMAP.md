@@ -1,7 +1,7 @@
 # ARCHMAP.md — code-derived architecture, ownership & hot-path map
 
 Derived from source on 2026-06-24 (audit pass 2), not from prose. Where docs and
-code disagreed it is noted. Companion to `docs/architecture.md` (narrative);
+code disagreed it is noted. Companion to [`docs/architecture.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/architecture.md) (narrative);
 this file is the ownership/lifetime/hot-path slice an auditor needs.
 
 ## Layer order (`src/`)
@@ -29,7 +29,7 @@ its pin, or a stale pin.
 
 - **core** — `Buffer`, `Tensor`, `cuda_raii.h` (`CudaStream`/`CudaEvent`, move-only),
   logging + `IMP_CUDA_CHECK*` macros, `ModelProfile` (centralized arch facts).
-- **memory** — three layers since #1106 (design doc: `docs/MEMORY_ARCHITECTURE.md`,
+- **memory** — three layers since #1106 (design doc: [`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md),
   findings log: root `AUDIT.md`). `backend.{h,cpp}` is the code that *should* be the
   only thing talking to the driver about memory (invariant I1). In practice I1 is
   a **ratchet, not an absolute**: `tools/check_alloc_sites.py` gates against

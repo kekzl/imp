@@ -11,6 +11,7 @@ What the HTTP surface actually accepts.
 
 - Status legend from [`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no test.
 - Constrained decoding, tool calling, thinking/reasoning and images: [`API_FEATURES.md`](API_FEATURES.md).
+- Closed-choice scoring (`/v1/decide`, `/v1/score`): [`API_SCORING.md`](API_SCORING.md).
 
 **Two dialects, both native.** `/v1/messages` is implemented against the
 Anthropic wire format directly, no shim in either direction. All three
@@ -22,16 +23,21 @@ all of them at once.
 | endpoint | status | notes |
 |---|---|---|
 | `POST /v1/chat/completions` | ✅ | the main one. Text and image content parts |
-| `POST /v1/completions` | ✅ | legacy text completion. `prompt`: a string, a token-id list, or a one-element list of either; a batch of prompts is a 400, like `n > 1` |
+| `POST /v1/completions` | ✅ | legacy text completion. `prompt`: a string, a token-id list, or a one-element list of either; a batch of prompts is a 400, like `n > 1`. `suffix` = fill-in-the-middle, see [FIM](API_FEATURES.md#fill-in-the-middle) |
+| `POST /infill` | ✅ | llama.cpp fill-in-the-middle (`input_prefix`, `input_suffix`, `input_extra`, `prompt`), see [FIM](API_FEATURES.md#fill-in-the-middle) |
 | `POST /v1/messages` | ✅ | Anthropic. Real per-token SSE, `ping` keepalives |
 | `POST /v1/messages/count_tokens` | ✅ | |
-| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default; stateless, so use `store: false` and resend the transcript in `input` |
+| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default. `store: true` + `previous_response_id` continue server-side, see [Responses store](API_FEATURES.md#responses-store) |
+| `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | ✅ | stored responses only, see [Responses store](API_FEATURES.md#responses-store) |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
+| `POST /v1/decide` | 🟡 | closed-choice letter scoring, no decoding; see [`API_SCORING.md`](API_SCORING.md). GPU acceptance: `scripts/accept_2198.sh` |
+| `POST /v1/score` | 🟡 | softmax over caller-given candidate tokens at the last prompt position |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
 | `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`) |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
-| `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md) |
+| `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md). `--idle-unload-seconds N` (default 0 = off) suspends after N s without a request and resumes on the next one, see [Admin](#admin-idle-unload-and-lora) |
+| `POST /admin/lora/load`, `/admin/lora/unload` | 🟡 | load or free a PEFT adapter at runtime, see [Admin](#admin-idle-unload-and-lora). Validation is gated in the API contract lanes; the device path runs only in `scripts/accept_2199.sh` (GPU) |
 | `GET /` | ✅ | built-in chat UI |
 
 ## Sampling and generation fields
@@ -48,11 +54,12 @@ all of them at once.
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
 | `logprobs` | ✅ | **of the processed distribution**: the row the sampler drew from, after penalties, `logit_bias`, banned tokens, a constraint mask, `min_p` and `typical_p` (vLLM's `processed_logprobs`; a masked token reads as probability 0, and at temperature 0 the emitted token is always `top_logprobs[0]`). `tests/test_server_logprobs.py` in `make test-server` pins that with a `logit_bias` case, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
+| `prompt_logprobs`, `echo` + `logprobs` | ✅ | `/v1/completions` only (#2207). **Raw model distribution** (log-softmax of the logits), not the processed one `logprobs` reports. `prompt_logprobs: N` (vLLM, integer 0..20): `choices[0].prompt_logprobs`, one entry per prompt token, entry 0 `null`, each `{"<id>": {logprob, rank, decoded_token}}` = the prompt token plus the top N. `echo: true` + `logprobs: N`: prompt tokens precede completion tokens in `choices[0].logprobs`; `token_logprobs[0]` and `top_logprobs[0]` are `null`, `text_offset` indexes prompt + completion text. Either form with `stream: true` is a 400. Such a request skips prefix-cache reuse and ragged prefill batching (`engine_prefill_ragged.cpp` `prefill_ragged_req_ok_`): it prefills alone and forwards every prompt row, the LM head runs over all of them in batches of `max(max_batch_size, 8)` rows. Device scratch: rows x (12 + 8N) bytes per prefill chunk (168 KiB per 1k rows at N = 20). Cost on a 2k prompt: `scripts/accept_2207.sh` C5. `tests/test_prompt_logprobs.cpp`, `tests/api/test_prompt_logprobs.py` |
 | `ignore_eos` | ✅ | vLLM-compatible extension on chat and completions: EOS and stop tokens are counted as output tokens without text, the think-model implicit `\nHuman` stop is not injected, user `stop` strings still apply, the request ends at `max_tokens` with `finish_reason: "length"`; for benchmark clients that need equal token counts across arms (`tools/analysis/burst_stream_client.py` with `IGNORE_EOS=1`). `tests/test_server_ignore_eos.py` in `make test-server` |
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | `logit_bias`: token-id keys, values in [-100, 100], ids inside the vocabulary; anything else is a 400 |
 | `"speculative": true/false/{"mtp_k": N}` | ✅ | per-request override, carried by all three dialects (chat, `/v1/messages`, `/v1/responses`). The boolean form switches every drafter on or off; `false` reaches **all three** (n-gram, MTP head, token recycling) since #1639. The object form addresses the trained MTP head alone and is orthogonal to the boolean: `{"mtp_k": 0}` turns the head off for this request and leaves the matcher running, `{"mtp_k": 2}` asks for a depth-2 chain. `N` outside `0..<armed depth>` is a 400 naming the range (the bound is the device chain cap, 16, when no head is armed). Neither form can conjure a head the checkpoint lacks or the process did not upload. When a verify step ran, or the request asked for MTP and did not get it, `usage.completion_tokens_details` carries `imp_spec_drafted`, `imp_spec_accepted`, `imp_spec_emitted`, `imp_spec_verify_steps` and, on a decline, `imp_spec_declined` + `imp_spec_declined_detail`. All six travel on every dialect from one shared table (`tools/imp-server/spec_usage_keys.h`): Anthropic lifts them into top-level `usage`, Responses into `usage.output_tokens_details`. The request span carries the counters as `imp.spec_*` attributes. Decline reasons: `no_mtp_head`, `mtp_head_not_loaded` (the concurrency decline - `speculative.mtp_k=auto` refuses the head on a server taking concurrent requests), `mtp_head_not_armed`, `mtp_depth_clamped` |
-| `"lora": "name"` | ✅ | PEFT adapter selected per request, every quant path. One adapter is active at a time: a request naming a different one waits until the in-flight requests finished, then the worker switches (decode graphs re-capture); it is never batched with them. The prefix cache is keyed by adapter, so a shared system prompt is prefilled once per adapter. Adapter shapes are checked against the model at load |
+| `"lora": "name"` | ✅ | PEFT adapter selected per request, every quant path. One adapter is active at a time: a request naming a different one waits until the in-flight requests finished, then the worker switches (decode graphs re-capture); it is never batched with them. The prefix cache is keyed by adapter, so a shared system prompt is prefilled once per adapter. Adapter shapes are checked against the model at load. A name that is not loaded answers 400 `code: lora_not_loaded` |
 | `"priority": int` | ✅ | vLLM-compatible admission priority, **lower value schedules earlier**, default 0. Strictly dominates the scheduler's shortest-first-with-aging order; a caller that sets priorities owns starvation across classes. Accepted on all three dialects |
 | `"cache_prompt": true` | ✅ | pins the prompt's full KV blocks against eviction (the OpenAI-route spelling of Anthropic `cache_control`). Prefix reuse runs regardless: `false` does **not** disable it, unlike llama.cpp (`usage.prompt_tokens_details.cached_tokens` reports the reuse either way) |
 
@@ -72,15 +79,15 @@ identical request returns different output than against the OpenAI API.
 Two of these do not switch off the way the field name suggests:
 
 - **`top_k: 0` is not "off", it is 50.** Every sampling site spells
-`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:191`, `:290`, `src/runtime/engine_decode_pipeline.cpp:74`).
+`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:210 state.top_k > 0`, `:289/340`, `src/runtime/engine_decode_pipeline.cpp:74 r.top_k > 0`).
 
 - Zero and "unset" both land on 50, a *tighter* truncation than the 40 default.
 - Disabling top-k needs a value at or above the vocabulary size.
-- The dispatcher clamps to the full vocabulary (`engine_decode_pipeline.cpp:75`).
+- The dispatcher clamps to the full vocabulary (`engine_decode_pipeline.cpp:75 eff_top_k`).
 - **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant
   client cannot switch it off. Sending the non-OpenAI field with value `1.0`
   disables it: the engine skips the penalty pass when all three penalties are
-  neutral (`src/runtime/engine_sampling_stop.cpp:178`).
+  neutral (`src/runtime/engine_sampling_stop.cpp:202 needs_penalties = (req.repetition_penalty != 1.0f`).
 
 ### Metrics for what the server decided
 
@@ -164,6 +171,50 @@ Every response echoes back the `X-Request-Id` header, refusals and unmatched rou
 - Service name: `server.otlp_service_name` (default `imp-server`).
 - Verified against Jaeger v2.20 (OTLP/HTTP receiver, GenAI view) with an OpenTelemetry-SDK client: the hop lands under the client's span with `queue` / `prefill` / `decode` children on its timeline.
 
+## Admin: idle unload and LoRA
+
+Both sit behind the same `--api-key` and `--rate-limit` as every other non-probe route. Set `--api-key` on any server reachable by others: `/admin/lora/load` reads a path on the server host.
+
+**`--idle-unload-seconds N`** (default 0 = off, #2199)
+
+| item | behaviour |
+|---|---|
+| trigger | N s since the last admitted POST outside `/admin/*`, engine queue empty; checked once per second |
+| action | the `POST /admin/suspend` teardown: weights to host RAM, GPU freed |
+| next request | resumed from the host snapshot inside that request, then served; its latency includes the resume |
+| `/health` | `idle_unload_seconds`, `idle_suspended` |
+| `/ready` | 200 while idle-suspended |
+| operator suspend | `POST /admin/suspend` stays sticky: 503 until `POST /admin/resume` |
+| model refused by suspend (501) | idle unload disables itself, logged `[idle-unload] disabled` |
+| WSL2/WDDM | what `nvidia-smi` reads after the suspend is measured by `scripts/accept_2199.sh`, see [`LIMITATIONS.md`](LIMITATIONS.md) |
+
+**`POST /admin/lora/load`** `{"path": "<PEFT dir or .safetensors>", "name": "<optional>"}`
+
+| status | when |
+|---|---|
+| 200 `{"id", "name", "path", "loaded": true}` | loaded; `name` defaults to the path's last component without extension |
+| 400 `lora_load_failed` | missing path, not a PEFT adapter, or shapes do not match the model |
+| 400 | `path` missing or not a non-empty string, `name` empty |
+| 409 `lora_already_loaded` | the name is taken |
+| 409 | no model loaded, or operator-suspended |
+
+**`POST /admin/lora/unload`** `{"id": N}` or `{"name": "..."}`
+
+| status | when |
+|---|---|
+| 200 `{"id", "name", "unloaded": true}` | device memory freed |
+| 404 `lora_not_found` | no such adapter |
+| 400 | neither an integer `id` nor a string `name` |
+
+- Both drain in-flight requests first (`server.model_swap_drain_ms`), never cancel them; 503 if the drain times out.
+- `id` is stable across suspend/resume; ids are never reused.
+- Adapters survive an idle or operator suspend: resume re-loads them from their paths.
+- A model swap (`server.model_swap`) drops every adapter: device memory freed with the old context, one log line each (`[model-swap] dropped LoRA adapter '<name>' (id=N, path=...): model swapped`). A request naming one then answers 400 `lora_not_loaded`, unload answers 404 `lora_not_found`. Nothing is re-loaded onto the new model, also not when a failed swap restores the previous one: `POST /admin/lora/load` again.
+
+## Responses store
+
+`store: true`, `previous_response_id`, `GET`/`DELETE /v1/responses/{id}`, the `--responses-store-*` limits and metrics: [`API_FEATURES.md`](API_FEATURES.md#responses-store) (#2206).
+
 ## Errors
 
 Every error is a JSON envelope, never a bare status with an empty body, and
@@ -196,7 +247,7 @@ request would be taken right now; otherwise 503 with a stable `code`:
 |---|---|
 | `no_model` | started model-less and nothing loaded yet |
 | `engine_faulted` | a device fault poisoned the CUDA context; a swap does not clear it, restart the process |
-| `suspended` | `/admin/suspend` parked the weights; `POST /admin/resume` |
+| `suspended` | `/admin/suspend` parked the weights; `POST /admin/resume`. An idle suspend (`--idle-unload-seconds`) stays 200 with `idle_suspended: true`: the next request resumes it |
 | `swapping` | a model load or swap is in progress |
 | `draining` | the process received SIGTERM and is finishing in-flight work |
 

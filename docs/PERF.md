@@ -52,13 +52,13 @@ because CI has no GPU runner.
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
 |---|---|---|
-| decode tg128 | **299.53 tok/s** | 8 % |
-| prefill pp128 | 6169.2 tok/s | 8 % |
-| prefill pp512 | **14068.06 tok/s** | 8 % |
-| prefill pp4096 | 16341.96 tok/s | 8 % |
-| peak VRAM (own) | 20644 MiB | 10 % |
+| decode tg128 | **282.97 tok/s** | 8 % |
+| prefill pp128 | 6132.05 tok/s | 8 % |
+| prefill pp512 | **14053.01 tok/s** | 8 % |
+| prefill pp4096 | 16197.82 tok/s | 8 % |
+| peak VRAM (own) | 20264 MiB | 10 % |
 
-[PROV: commit=824140bd date=2026-09-23 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+[PROV: commit=702a9cd3 date=2026-09-28 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
@@ -220,7 +220,7 @@ Only relevant when a MoE model's experts do not fit in VRAM; both GGUF and
 NVFP4 experts have a working host path. NVFP4 was refused at load in #1403;
 the refusal was replaced by an implementation
 (`src/exec/executor_forward_moe_nvfp4_host.cu`, doc corrected in #1670;
-`LIMITATIONS.md:64` carries the measurement, 23.3 tok/s against 384.0
+`LIMITATIONS.md:63 23.3 tok/s against 384.0 resident` carries the measurement, 23.3 tok/s against 384.0
 resident); a placement the expert cache cannot hold at all is still refused,
 that part of #1403 stands.
 

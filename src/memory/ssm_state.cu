@@ -31,7 +31,7 @@ SSMState::~SSMState() {
 
 bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel, int n_heads,
                     int head_dim_ssm, int state_size, QType h_dtype, VRAMAllocator* alloc, int n_reserved,
-                    Backend* lazy_backend, int n_reserved_lazy) {
+                    Backend* lazy_backend, int n_reserved_lazy, size_t extra_bytes_per_slot) {
     n_ssm_layers_ = n_ssm_layers;
     max_sequences_ = max_sequences;
     n_reserved_ = std::max(0, n_reserved);
@@ -42,7 +42,8 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
     // Geometry and byte counts: memory/ssm_state_size.h, the ONE formula. The
     // plan charges the same header, so what is charged is what is taken.
     const SsmStateGeometry geom{n_ssm_layers_, conv_channels, conv_kernel,
-                                n_heads,       head_dim_ssm, state_size, h_dtype_};
+                                n_heads,       head_dim_ssm, state_size, h_dtype_, extra_bytes_per_slot};
+    extra_bytes_ = extra_bytes_per_slot;
     conv_bytes_ = ssm_conv_bytes_per_layer(geom);
     h_bytes_ = ssm_h_bytes_per_layer(geom);
     per_layer_bytes_ = ssm_bytes_per_layer(geom);

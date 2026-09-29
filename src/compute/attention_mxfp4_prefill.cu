@@ -2,6 +2,7 @@
 // Q.K^T (~2x FP16 TC throughput), cuBLAS FP16 GEMM for P.V. Pipeline: quantize K (once/KV
 // head, reused for GQA) and Q -> CUTLASS GEMM -> scale+softcap+causal+softmax -> cuBLAS GEMM.
 
+#include "compute/cublas_gemm_algo.h"
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/cuda_static_reset.h"
@@ -32,7 +33,6 @@ static constexpr int kAtomSize = kAtomRows * kAtomKGroups;       // 512
 // Maximum S matrix size per head. Beyond this, fall back to flash attention.
 static constexpr size_t kMaxSBytesPerHead = 256ULL * 1024 * 1024;  // 256 MiB
 
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 // =============================================================================
 // Device helpers (self-contained — no cross-TU __device__ linkage)
@@ -104,6 +104,7 @@ __device__ __forceinline__ int mxfp4_sfatom_offset(int row, int k_group, int n_k
 // Strided MXFP4 quantization: reads FP16 with arbitrary row stride (per-head access in
 // [seq,n_heads*hd] layout), outputs contiguous MXFP4 packed + SfAtom. One thread per 32-elem group.
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ input,
                                                    int input_row_stride,  // in half elements, not bytes
                                                    uint8_t* __restrict__ packed_out,  // [M, K/2] contiguous
@@ -150,6 +151,7 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
         packed_out[packed_base + i / 2] = mxfp4_pack_pair_hw(s0, s1);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fused scale + softcap + causal mask + softmax, in-place on FP16 S. One block per query row,
 // 3-pass online softmax (max, exp+sum, normalize).
@@ -431,7 +433,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
 
         for (int g = 0; g < n_kv; g++) {
             // ---- Quantize K for this KV head ----
-            const half* K_head = K_b + g * hd;
+            const half* K_head = K_b + static_cast<ptrdiff_t>(g) * hd;
 
             IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.k_sf, 0, k_sf_bytes, stream));
             quantize_fp16_mxfp4_strided_kernel<<<k_blocks, 256, 0, stream>>>(
@@ -444,7 +446,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
                 int h = g * gqa_ratio + h_local;
 
                 // Quantize Q for this head
-                const half* Q_head = Q_b + h * hd;
+                const half* Q_head = Q_b + static_cast<ptrdiff_t>(h) * hd;
                 IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.q_sf, 0, q_sf_bytes, stream));
                 quantize_fp16_mxfp4_strided_kernel<<<q_blocks, 256, 0, stream>>>(
                     Q_head, q_row_stride, static_cast<uint8_t*>(s_ws.q_packed),
@@ -466,15 +468,15 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
 
                 // P.V via cuBLAS (D = A@B, column-major): A = V^T [hd,seq_kv] ld=kv_row_stride, B = S^T
                 // [seq_kv,seq_q] ld=seq_kv, D = O^T [hd,seq_q] ld=q_row_stride.
-                const half* V_head = V_b + g * hd;
-                half* O_head = O_b + h * hd;
+                const half* V_head = V_b + static_cast<ptrdiff_t>(g) * hd;
+                half* O_head = O_b + static_cast<ptrdiff_t>(h) * hd;
 
                 cublasGemmEx(cublas, CUBLAS_OP_N, CUBLAS_OP_N,
                              hd,      // M
                              seq_q,   // N
                              seq_kv,  // K
                              &one, V_head, CUDA_R_16F, kv_row_stride, S, CUDA_R_16F, seq_kv, &zero, O_head,
-                             CUDA_R_16F, q_row_stride, CUBLAS_COMPUTE_32F, kGemmAlgo);
+                             CUDA_R_16F, q_row_stride, CUBLAS_COMPUTE_32F, cublas_gemm_algo());
             }
         }
     }

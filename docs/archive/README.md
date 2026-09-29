@@ -29,6 +29,7 @@ full text of each is in git history; the recipe for reading one is below.
 | `limitations_detail_2026.md` | MTP speculative-decoding investigation series | `docs/LIMITATIONS.md` |
 | `quantization_awq_findings.md` | AWQ findings, refuted quantization experiments | `docs/quantization.md` |
 | `kernels_refuted_2026.md` | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
+| `roadmap_ledger_2026_09_28.md` | `docs/roadmap.md` closed rows, Closed, 2026 bar, lever ledger, batch=1, MoE offload, quantizer, competitive records, known limitations, shelved | `docs/roadmap.md` |
 
 Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
 you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in
@@ -115,7 +116,7 @@ imp vs llama.cpp vs vLLM snapshot. Superseded by `BENCHMARKS.md` (SHA-anchored) 
 `MASTER_REPORT` + phase1 inventory / phase2 perf / phase3 maint / phase4 ext /
 phase5 synthesis (Cartographer / PERFHAWK / CODEREAPER / INTEGRATOR). A full
 architecture review; its actionable findings fed the refactor program. Superseded
-by `docs/audit/structural_debt_2026_06_08.md` / `..._2026_06_09.md`.
+by [`docs/audit/structural_debt_2026_06_08.md`](https://github.com/kekzl/imp/blob/57d1f8ff6d3faf3d4a604a6e8a6a6e25b52b3031/docs/audit/structural_debt_2026_06_08.md) / `..._2026_06_09.md`.
 
 ## `plans-2026-05/` and `plans-closed/` — closed design memos
 
@@ -183,7 +184,7 @@ root audit ledger, itself since removed — git history; *not* today's root `AUD
 
 **Superseded toolchain snapshot:**
 - `ptx-status-2026-05-29-cuda132-sm120a.md` — CUDA 13.2 PTX-acceptance survey. (Its successor
-  `docs/ptx-status-2026-05-29-cuda133-sm120a.md` was also archived on 2026-06-29 — see below.)
+  [`docs/ptx-status-2026-05-29-cuda133-sm120a.md`](https://github.com/kekzl/imp/blob/52a895a1c63dd26cc61f29d23edac32e3b5155c6/docs/ptx-status-2026-05-29-cuda133-sm120a.md) was also archived on 2026-06-29 — see below.)
 
 **Completed design specs + plans (`superpowers/`) — work shipped, refactor program closed (#404):**
 The component rationale now lives in the headers themselves (`quant_pipeline.h`, `workspace.h`,
@@ -236,7 +237,7 @@ PRs. Originals removed; full text in git history.
   machine-generated snapshot; the filename said `cuda133` but the captured toolkit header was
   `V13.2.78` (compute_120f). Re-run the survey on the real 13.3 toolchain if a fresh PTX-acceptance
   matrix is needed.
-- `TEST_AUDIT.md` (was `docs/TEST_AUDIT.md`) — Test-Trustworthiness Phase-1 gap analysis (2026-06-04).
+- `TEST_AUDIT.md` (was [`docs/TEST_AUDIT.md`](https://github.com/kekzl/imp/blob/52a895a1c63dd26cc61f29d23edac32e3b5155c6/docs/TEST_AUDIT.md)) — Test-Trustworthiness Phase-1 gap analysis (2026-06-04).
   Superseded by the 2026-06-06 re-audit (`tests/TEST_AUDIT.md`) and the coverage-hardening work
   (PR #717, server-test stage, CTest unit/gpu split). The newer `tests/TEST_AUDIT.md` re-audit was itself retired 2026-07-10 (see below).
 
@@ -262,14 +263,14 @@ outright (point-in-time reports, superseded; full text in git history):
 - `tests/TEST_AUDIT.md` — 2026-06-06 test-suite re-audit / refactor plan. Implemented:
   R1–R9 closed (#585–#589), coverage hardening (#717), server-test stage. Test-file
   docstrings citing "TEST_AUDIT.md §7/§8" refer to this document's tiering decisions.
-- `docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md` — design-only memo for
+- [`docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`](https://github.com/kekzl/imp/blob/8a1d0396c989d9e57db9b7dfe7b1c4d6ef33f689/docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md) — design-only memo for
   a model that remains blocked (OOM, no GGUF); the pre-dequant machinery that shipped
   took a different shape.
-- `docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md` was **moved** to
+- [`docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md`](https://github.com/kekzl/imp/blob/8a1d0396c989d9e57db9b7dfe7b1c4d6ef33f689/docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md) was **moved** to
   `docs/plans/` (still referenced as refutation evidence by `docs/roadmap.md`), and the
-  empty `docs/superpowers/` tree removed.
-- `tools/prompt-test.sh`, `tools/benchmark.sh`, `tools/chat.sh`,
-  `tools/download-models.sh` — March-era one-off shell tools (curl smoke prompts,
+  empty [`docs/superpowers/`](https://github.com/kekzl/imp/tree/8a1d0396c989d9e57db9b7dfe7b1c4d6ef33f689/docs/superpowers) tree removed.
+- [`tools/prompt-test.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/prompt-test.sh), [`tools/benchmark.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/benchmark.sh), [`tools/chat.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/chat.sh),
+  [`tools/download-models.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/download-models.sh) — March-era one-off shell tools (curl smoke prompts,
   pre-`--bench` timing loop, interactive chat wrapper, HF download helper).
   Zero references; superseded by `imp-cli --bench`, `bench/`, `scripts/verify.sh`,
   the server batteries, and manual model staging (the `imp-pull` pipeline was

@@ -7,6 +7,7 @@
 #include "memory/library_reserve_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
+#include "runtime/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
@@ -379,6 +380,11 @@ bool Engine::init_kv_cache() {
     executor_->verify_host_expert_placement();
     if (!executor_->init_device_expert_cache() && experts_on_host_)
         demote_graphs_(GraphDemotionReason::ExpertsOnHost);
+    if (const std::string w = host_expert_batch_warning(config_.max_batch_size, experts_on_host_,
+                                                        executor_->expert_cache_bytes(),
+                                                        executor_->expert_cache_slots_per_layer());
+        !w.empty())
+        IMP_LOG_WARN("%s", w.c_str());
 
     // KV takes the MEASURED residual, not a predicted one: this can only shrink
     // the pool relative to the budget's projection, never grow it, so it cannot
@@ -745,13 +751,12 @@ bool Engine::init_kv_cache() {
             // Lazy: reserve every slot, commit one per admitted sequence
             // (scheduler admission gate below). The plan above charged the
             // whole slab either way.
-            const bool ssm_pool_ok = ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch,
-                                                      mcfg.ssm_conv_kernel, n_heads, hd, mcfg.ssm_state_size,
-                                                      config_.ssm_state_dtype, &vram_alloc_,
-                                                      ssm_reserved_slots,
-                                                      runtime_config_.vram.lazy_commit ? vmm_backend()
-                                                                                       : nullptr,
-                                                      batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size));
+            const bool ssm_pool_ok = ssm_state_->init(
+                n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
+                mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_, ssm_reserved_slots,
+                runtime_config_.vram.lazy_commit ? vmm_backend() : nullptr,
+                batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
+                model_->ple_state_bytes());
             if (ssm_pool_ok && ssm_state_->lazy() && scheduler_)
                 scheduler_->set_admission_gate([this] { return recurrent_slot_admissible_(); });
             if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
@@ -786,6 +791,11 @@ bool Engine::init_kv_cache() {
             }
         }
 
+        // PLE conv rows live in the SSM slab tail (executor_ple.cu): no slab, no PLE state.
+        if (const size_t ple = model_->ple_state_bytes();
+            ple > 0 && (!ssm_state_ || ssm_state_->extra_bytes() < ple))
+            throw std::runtime_error("PLE model without the per-slot conv rows in the SSM/GDN state slab");
+
         // Recurrent-state snapshots: KV block reuse alone cannot skip prefill
         // for a recurrent model (state at the skip boundary would be zero), so
         // hybrid prefix caching needs the snapshot store, or it must turn back off.
@@ -793,11 +803,10 @@ bool Engine::init_kv_cache() {
             int budget_mb = runtime_config_.server.recurrent_snapshot_mb;
             if (ssm_state_ && budget_mb > 0) {
                 recurrent_snapshots_ = std::make_unique<RecurrentSnapshotStore>();
-                                recurrent_snapshots_->init(
+                recurrent_snapshots_->init(
                     ssm_state_->per_seq_bytes(), static_cast<size_t>(budget_mb) << 20,
                     static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_host_mb, 0))
-                        << 20,
-                    executor_->ple_state_bytes());
+                        << 20);
                 if (recurrent_snapshots_->enabled()) {
                     scheduler_->set_prefix_reuse_limit(
                         [this](Request& r) { return hybrid_prefix_reuse_limit_(r); });
@@ -865,7 +874,7 @@ bool Engine::init_kv_cache() {
     // all-or-nothing (mirrors executor_forward_moe.cu nvfp4_covers_layer). One
     // uncovered layer falls to host-args legacy, which throws under graph capture.
     if (mcfg.is_nvfp4_prequant && mcfg.n_experts > 0) {
-        int moe_layers = 0, covered = 0;
+        int moe_layers = 0, covered = 0, uncovered_on_device = 0;
         for (int i = 0; i < mcfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             bool has_experts = L.expert_up_packed.data != nullptr ||
@@ -878,7 +887,12 @@ bool Engine::init_kv_cache() {
                 ok = L.nvfp4_moe_gate_ptr != nullptr;
             if (ok)
                 covered++;
+            else if (!L.expert_w_up.empty() && L.expert_w_up[0].on_device)
+                uncovered_on_device++;  // host-resident layers go to the device expert cache instead
         }
+        // #2180: an uncovered device-resident layer decodes on the legacy path, whose replay faulted.
+        if (uncovered_on_device > 0)
+            demote_graphs_(GraphDemotionReason::MoeDecodeCacheIncomplete);
         if (moe_layers > 0 && covered == moe_layers) {
             IMP_LOG_INFO("NVFP4 decode caches: FULL (%d/%d MoE layers) — decode graph "
                          "capture eligible",

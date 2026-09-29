@@ -302,9 +302,10 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                       const char* finish_reason, const json& logprobs = nullptr,
                       const char* finish_detail = nullptr);
 
+// llama_content: also top-level `content` + `stop` (llama.cpp /infill shape, #2201).
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
                                  const std::string& text, const char* finish_reason,
-                                 const json& logprobs = nullptr);
+                                 const json& logprobs = nullptr, bool llama_content = false);
 
 // Pre-formatted SSE chunk writer. Builds envelope templates once per request;
 // hot-path write_content/write_reasoning only JSON-escape the token text and

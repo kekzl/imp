@@ -7,7 +7,7 @@ commit: 9cbb8004
 
 # C++23 in imp
 
-The build targets C++23 since 2026-07-08 (`CMakeLists.txt:4-16`, migration record in [`../archive/cpp23_migration_2026_07_08.md`](../archive/cpp23_migration_2026_07_08.md)).
+The build targets C++23 since 2026-07-08 (`CMakeLists.txt:12/20 _STANDARD 23`, migration record in [`../archive/cpp23_migration_2026_07_08.md`](../archive/cpp23_migration_2026_07_08.md)).
 
 - This file says which of the language the tree actually uses and where the line runs between host and device code.
 - The 2026-07-29 architecture audit called it "C++17 with C++23 spelling ... nvcc constrains what is usable in `.cu`"; the first half was accurate, the second half was never measured and is false.

@@ -12,6 +12,8 @@
 #include "model/model.h"
 #include "model/model_config.h"
 #include "core/dispatch_policy.h"
+#include "core/config/lm_head_mode.h"
+#include "quant/dequant_gpu.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -21,20 +23,38 @@
 
 namespace imp::pre_dequant_internal {
 
-// #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off,
-// legacy bool accepted). QUANTIZED (GGUF) heads: auto -> ON iff dense && d_model <= 4096
+// The per-row FP8 head (pre_dequant_fp8_lm_head.cu) can serve this head: F16 or GPU-dequantable
+// source on device, F16 final norm (F16 hidden rows), d_model a multiple of 256.
+inline bool fp8_lm_head_eligible(const Model& m) {
+    const Tensor& lm = m.output_proj();
+    const bool src_ok = lm.qtype == QType::F16 || dequant_gpu_supported(lm.qtype);
+    const bool f16_compute = !m.output_norm().data || m.output_norm().qtype == QType::F16;
+    return lm.data && lm.on_device && lm.ndim == 2 && src_ok && f16_compute && (lm.shape[1] % 256) == 0;
+}
+
+// This load builds the FP8 head: fp8, or auto with a 16-bit source (#2224), and the head is eligible.
+inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
+    return lm_head_mode_fp8(lm_head_mode(rc.gemm.nvfp4_lm_head), m.output_proj().qtype) &&
+           fp8_lm_head_eligible(m);
+}
+
+// #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off/fp8,
+// legacy bool accepted). auto with an FP8-eligible head (fp8_head) -> no NVFP4 head (#2166).
+// 8-bit quantized heads (Q8_0, FP8): auto -> OFF, checkpoint precision (#2224).
+// Narrower QUANTIZED (GGUF) heads: auto -> ON iff dense && d_model <= 4096
 // (net-positive only on small dense models; net-negative at larger sizes).
 // EXCEPTION: GDN/SSM hybrids are owned by gemm.nvfp4_lm_head_gdn (GOAL-listed, default
 // ON) instead; the dense/MoE net rule's is_dense=false arm silently voided that flag on
 // quantized hybrids, so auto defers to nvfp4_lm_head_gdn via is_gdn_hybrid.
 // NATIVE (F16/BF16) heads: auto -> ON unconditionally (cuBLAS GEMV alternative, NVFP4
 // cache wins on bytes; GOAL-listed).
-inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, bool is_dense, int d_model,
-                                  bool is_gdn_hybrid = false) {
-    const std::string& v = rc.gemm.nvfp4_lm_head;
-    if (v == "on" || v == "true" || v == "1")
+inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, QType head_qtype,
+                                  bool is_dense, int d_model, bool is_gdn_hybrid, bool fp8_head) {
+    const LmHeadMode mode = lm_head_mode(rc.gemm.nvfp4_lm_head);
+    if (mode == LmHeadMode::Nvfp4)
         return true;
-    if (v == "off" || v == "false" || v == "0")
+    if (mode == LmHeadMode::Source || mode == LmHeadMode::Fp8 || fp8_head ||
+        lm_head_auto_keeps_source(mode, head_qtype))
         return false;
     if (!quantized_source)
         return true;

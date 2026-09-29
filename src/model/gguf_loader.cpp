@@ -8,6 +8,7 @@
 #include "core/fp_bits.h"
 #include "model/loader_assign.h"
 #include "model/model_arch.h"
+#include "model/fim.h"
 #include "model/tensor_kind_matcher.h"
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
@@ -57,6 +58,25 @@ std::string gguf_name_family(const std::string& name) {
 // Format tables, BinaryReader/GGUFValue, metadata decoding, tensor-info parsing, and bounds
 // checks live in gguf_parse.cpp. Tensor -> weight-slot assignment in gguf_tensor_assign.cpp.
 // Shared declarations in gguf_loader_internal.h. This TU: top-level load orchestration only.
+
+// FIM ids (#2201): current keys, then the older prefix/suffix/middle names; out-of-vocab ids dropped.
+static void load_fim_meta_ids(const std::unordered_map<std::string, GGUFValue>& metadata, Tokenizer& tok,
+                              int64_t n_vocab) {
+    const std::pair<int, const char*> fim_keys[] = {
+        {kFimPre, "tokenizer.ggml.fim_pre_token_id"}, {kFimSuf, "tokenizer.ggml.fim_suf_token_id"},
+        {kFimMid, "tokenizer.ggml.fim_mid_token_id"}, {kFimPad, "tokenizer.ggml.fim_pad_token_id"},
+        {kFimRep, "tokenizer.ggml.fim_rep_token_id"}, {kFimSep, "tokenizer.ggml.fim_sep_token_id"},
+        {kFimPre, "tokenizer.ggml.prefix_token_id"},  {kFimSuf, "tokenizer.ggml.suffix_token_id"},
+        {kFimMid, "tokenizer.ggml.middle_token_id"}};
+    for (const auto& [role, key] : fim_keys) {
+        auto it = metadata.find(key);
+        if (it == metadata.end() || tok.fim_meta_id(role) >= 0)
+            continue;
+        const auto id = static_cast<int64_t>(val_uint(it->second));
+        if (id >= 0 && id < n_vocab)
+            tok.set_fim_meta_id(role, static_cast<int32_t>(id));
+    }
+}
 
 // ---- Main GGUF loader ----
 
@@ -1157,6 +1177,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 }
             }
         }
+
+        load_fim_meta_ids(metadata, *tokenizer, n_vocab);
 
         IMP_LOG_INFO("Tokenizer: type=%s, %d tokens, bos=%d, eos=%d (%zu total), add_bos=%d",
                      tok_type.c_str(), tokenizer->vocab_size(), bos_id, eos_id, tokenizer->eos_ids().size(),

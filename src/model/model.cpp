@@ -230,11 +230,11 @@ bool kv_fp8_hint_default_safe(ModelArch arch) {
 
 // Arch families verified safe for default FP8 KV even with no checkpoint hint (GGUF never
 // declares the hint; FP16 KV at 16k context costs ~-40% decode). Stricter bar than the
-// hint list (author didn't opt in): QWEN3, QWEN3_MOE only. QWEN36_MOE and LLAMA measured
-// but excluded: NVFP4 compounds with FP8 KV / baseline PPL is broken-high.
+// hint list (author didn't opt in): QWEN3_MOE only. QWEN3 (dense) out: FP8 KV decode turned
+// Qwen3-8B-Q8_0 greedy into "The capital of France is not Paris" (#2208). QWEN36_MOE and
+// LLAMA measured but excluded: NVFP4 compounds with FP8 KV / baseline PPL is broken-high.
 bool kv_fp8_no_hint_default_safe(ModelArch arch) {
     switch (arch) {
-        case ModelArch::QWEN3:
         case ModelArch::QWEN3_MOE:
             return true;
         default:
@@ -418,6 +418,21 @@ void apply_arch_defaults(ModelConfig& cfg) {
     // class defaults; applying RoPE scrambles positional binding into a bag-of-words reading.
     if (cfg.arch == ModelArch::NEMOTRON_H_MOE)
         cfg.rope_attn_disabled = true;
+}
+
+size_t Model::ple_state_bytes() const {
+    if (!ngram_table_)
+        return 0;
+    const size_t channels = static_cast<size_t>(config_.hc_count) * static_cast<size_t>(config_.d_model);
+    for (const auto& ly : layers_) {
+        if (ly.ple_key_proj.data == nullptr || channels == 0)
+            continue;
+        const size_t kernel = static_cast<size_t>(ly.ple_conv1d.numel()) / channels;
+        if (kernel == 0)
+            return 0;
+        return (kernel - 1) * static_cast<size_t>(ngram_table_->ngram_size()) * channels * 2;
+    }
+    return 0;
 }
 
 }  // namespace imp

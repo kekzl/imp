@@ -28,6 +28,18 @@ struct TokenLogprobInfo {
     std::vector<TokenLogprob> top;  // top_logprobs alternatives
 };
 
+inline constexpr int kMaxPromptLogprobs = 20;
+
+// Teacher-forced prompt logprobs, row p = log p(input_tokens[p+1] | input_tokens[0..p]).
+struct PromptLogprobs {
+    int top_n = 0;
+    int rows = 0;                  // rows written so far
+    std::vector<float> token_lp;   // [n_prompt-1]
+    std::vector<int32_t> rank;     // [n_prompt-1], 1-based rank of the prompt token
+    std::vector<int32_t> top_ids;  // [(n_prompt-1) * top_n], best first
+    std::vector<float> top_lp;     // [(n_prompt-1) * top_n]
+};
+
 enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 
 // Why a CANCELLED request was cancelled. Most cancellations are indistinguishable to a
@@ -156,6 +168,11 @@ struct Request {
     int32_t pipe_inflight_force = -1;
     int prefill_offset = 0;  // Chunked prefill: tokens processed so far
     int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
+    // Skip prefix-cache reuse at admission: full prefill, cached_tokens stays 0 (#2198 direct).
+    bool bypass_prefix_cache = false;
+    // Extra recurrent-snapshot boundary (block floor of this many tokens) during prefill: the
+    // prefix shared with sibling requests, e.g. /v1/decide serial evidence (#2198). 0 = none.
+    int snapshot_hint_tokens = 0;
     // When the scheduler moved this request into its first prefill batch
     // (epoch = never). The server's queue histogram measures up to here:
     // the wait behind max_batch_size and KV admission, not the batching
@@ -190,6 +207,11 @@ struct Request {
     bool logprobs = false;                          // Return logprobs for sampled tokens
     int top_logprobs = 0;                           // 0-20, number of top alternatives
     std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
+
+    // Prompt logprobs (#2207): -1 off, else top-N (0..kMaxPromptLogprobs) per prompt token.
+    // Row p scores input_tokens[p+1]; filled per prefill chunk, rows == n_prompt-1 when complete.
+    int prompt_logprobs = -1;
+    PromptLogprobs prompt_lp;
 
     // Embedding request (#1005): prefill-only. Hidden states are mean-pooled across ALL prefill
     // chunks (device partial sums, host accumulation) into `embedding_out`; finishes without
@@ -297,6 +319,14 @@ struct Request {
     std::shared_ptr<Buffer> mrope_delta_dev;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
+    // Prefix-cache reuse allowed: an image joins only via its content hash (every image token
+    // shares one id); direct mode (#2198) never reuses; embeddings mean-pool (#2245) and prompt
+    // logprobs (#2207) score every input row.
+    bool prefix_reuse_allowed() const {
+        const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request &&
+               prompt_logprobs < 0;
+    }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so
     // inserting into the middle shifts every following field for a value only read on error

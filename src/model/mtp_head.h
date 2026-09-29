@@ -61,6 +61,19 @@
 // Two structural differences the forward pass has to honour, not just the
 // names: the experts are NON-GATED (no `gate_proj` — squared-ReLU, like the
 // main Nemotron FFN) and there is no sigmoid `shared_expert_gate`.
+//
+// Third layout (Qwen4Exp, Qwen3.8-Flash-Next, 3101 tensors). Spec:
+// docs/plans/2026-09-28-qwen4exp-mtp.md. Hyper-connection head, hc_count=4:
+//
+//     mtp.fc_embedding / fc_hidden          [2560, 2560]  split fc, fc_hidden per hc stream
+//     mtp.pre_fc_norm_hidden                [10240]       norm over the 4x2560 hc stream
+//     mtp.hyper_connection_mixer.*          final mixer, no block_inject_weight
+//     mtp.layers.0.{attn,mlp}_hyper_connection.*          hc read/inject
+//     mtp.layers.0.self_attn.indexer.*      QSA indexer
+//     mtp.layers.0.mlp.experts.{e}.{gate,up,down}_proj    512 experts, F8_E4M3
+//         .weight_scale_inv                 BF16 128x128 block scales
+//
+// Loaded and mapped only: no forward, speculative.mtp_k is forced to 0.
 // =============================================================================
 
 #include "core/tensor.h"
@@ -68,6 +81,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace imp {
@@ -84,12 +98,16 @@ inline bool name_is_mtp_tensor(std::string_view name) {
 // two spellings, shared as constants so probe and dispatch cannot drift apart.
 inline constexpr const char* kMtpHeadKeyEhProj = "mtp.layers.0.eh_proj.weight";
 inline constexpr const char* kMtpHeadKeyFc = "mtp.fc.weight";
+inline constexpr const char* kMtpHeadKeyFcEmbedding = "mtp.fc_embedding.weight";
 
 inline bool name_is_mtp_head_key(std::string_view name) {
     if (name.rfind("model.", 0) == 0)
         name.remove_prefix(6);
-    return name == kMtpHeadKeyEhProj || name == kMtpHeadKeyFc;
+    return name == kMtpHeadKeyEhProj || name == kMtpHeadKeyFc || name == kMtpHeadKeyFcEmbedding;
 }
+
+// Checkpoint layouts dispatch_mtp_head() recognises, keyed on the fusion projection name.
+enum class MtpLayout { None, Qwen, Nemotron, Qwen4Exp };
 
 // True when `model_dir` ships an MTP head, decided from tensor NAMES only: the
 // sidecar file, the shard index, or the single-file header. Reads no weight
@@ -102,6 +120,27 @@ struct MtpHeadInfo {
     std::string path;
     size_t      file_bytes = 0;
     int         n_tensors  = 0;
+    int         n_mapped   = 0;  // tensors dispatch_mtp_head() assigned to a field
+};
+
+// One hyper-connection module (GatedResidual): hc_norm [hc*d], input_mix_weight_down
+// [lowrank, hc*d], input_mix_weight_up [hc*d, lowrank], block_inject_weight [hc, hc*d].
+// block_inject is null on the final mixer (use_combine=False).
+struct MtpHyperConnection {
+    Tensor norm;
+    Tensor mix_down;
+    Tensor mix_up;
+    Tensor block_inject;
+};
+
+// Qwen4Exp routed expert: F8_E4M3 weights, BF16 weight_scale_inv per 128x128 block.
+struct MtpFp8Expert {
+    Tensor gate_proj;  // [d_ff_e, hidden]
+    Tensor up_proj;    // [d_ff_e, hidden]
+    Tensor down_proj;  // [hidden, d_ff_e]
+    Tensor gate_scale_inv;
+    Tensor up_scale_inv;
+    Tensor down_scale_inv;
 };
 
 // Full MTP head storage. Populated by safetensors_loader when
@@ -161,9 +200,38 @@ struct MtpHead {
     bool attn_output_gate = true;
     bool attn_rope = true;
 
+    // Qwen4Exp layout only (MtpLayout::Qwen4Exp); empty on the other two. fc stays null:
+    // the fusion is fc_embedding(norm(emb)) + fc_hidden applied per hc stream.
+    Tensor fc_embedding;  // [hidden, hidden]
+    Tensor fc_hidden;     // [hidden, hidden], shared across the hc_count streams
+    MtpHyperConnection attn_hc;
+    MtpHyperConnection mlp_hc;
+    MtpHyperConnection final_mixer;  // hyper_connection_mixer, replaces final_norm
+    Tensor indexer_qk_proj;          // QSA indexer
+    Tensor indexer_q_norm;
+    Tensor indexer_k_norm;
+    // Not uploaded: no FP8 block-scale MoE path yet (upload/dequant is a later step).
+    std::vector<MtpFp8Expert> experts_fp8;
+
+    MtpLayout layout = MtpLayout::None;
+
     // Status flag set true when ALL of the above tensors are populated.
     bool loaded = false;
 };
+
+// False for a layout whose weights load but whose draft forward does not exist yet
+// (Qwen4Exp). Such a head must never upload or arm speculative.mtp_k.
+inline bool mtp_forward_implemented(const MtpHead& head) { return head.layout != MtpLayout::Qwen4Exp; }
+
+// Log line shared by every site that forces speculative.mtp_k to 0 for such a head.
+inline constexpr const char* kMtpForwardMissingLog =
+    "MTP head loaded, forward not implemented (layout qwen4_exp): speculative.mtp_k forced 0";
+
+// Maps a raw mtp.* tensor map (outer "model." already stripped) onto MtpHead fields.
+// Layout is keyed on the fusion projection name: eh_proj -> Nemotron, fc_embedding ->
+// Qwen4Exp, else Qwen. `bytes` is the head's on-disk size, `src` is for logging.
+MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, const std::string& src,
+                          size_t bytes);
 
 // Device VRAM the head's upload needs at its peak, in bytes.
 //

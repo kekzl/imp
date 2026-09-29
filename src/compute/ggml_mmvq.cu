@@ -120,6 +120,8 @@ static __device__ __forceinline__ float vec_dot_q5_1_q8_1_impl(const int* vl, co
     const float d5d8 = tmp.x;
     const float m5s8 = tmp.y;
 
+    // QI5_1 / vdr is an exact int ratio (4 / 1|2), ggml reference (#2210)
+    // NOLINTNEXTLINE(bugprone-integer-division)
     return sumi * d5d8 + m5s8 / (QI5_1 / vdr);
 }
 
@@ -177,6 +179,7 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
     return dm4f.x * sumf_d - dm4f.y * sumf_m;
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict__ vbq,
                                                           const ggml_block_q8_1* __restrict__ bq8_1,
                                                           const int& kbx, const int& iqs) {
@@ -219,11 +222,13 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
 
     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, dm, d8);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // Q8_1 quantization kernel (ggml-compatible)
 // -------------------------------------------------------------------------
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict__ x,
                                                          ggml_block_q8_1* __restrict__ y, int K) {
     const int block_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -257,7 +262,7 @@ static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict_
     yb->d = __float2half(d);
     yb->s = __float2half(d * sum);
 }
-
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // Q5_K: 256 elements per block, 176 bytes
@@ -319,6 +324,7 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1_impl_vmmq(
     return dm5f.x * sumf_d - dm5f.y * sumf_m;
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict__ vbq,
                                                           const ggml_block_q8_1* __restrict__ bq8_1,
                                                           const int& kbx, const int& iqs) {
@@ -363,6 +369,7 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict
     const half2 dm = make_half2(bq5_K->d, bq5_K->dmin);
     return vec_dot_q5_K_q8_1_impl_vmmq(vl, vh, u, sc, m_ptr, dm, d8);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // vec_dot_q8_0_q8_1 — ported from ggml vecdotq.cuh
@@ -401,6 +408,7 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(const void* __restrict
 // File-local template tag for dispatch (distinct from imp::QType).
 enum class MMVQTag { Q4_K, Q5_1, Q5_K, Q8_0 };
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <MMVQTag qtype>
 static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_q8_1* __restrict__ x_q8,
                                    half* __restrict__ y, int N, int K) {
@@ -474,6 +482,7 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
         y[col * N + row] = __float2half(tmp);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // Public API
