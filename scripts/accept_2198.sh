@@ -113,9 +113,9 @@ echo "  info: argmax equals the true option on $(jq '[.items[] | select(.argmax_
 ev_tokens="$(jq -c '{content: .evidence}' "$WORK/set.json" | post /tokenize | jq '.tokens | length')"
 min_cached="$(jq '[.items[1:][] | .cached_tokens] | min' "$WORK/serial.json")"
 if [ -n "$ev_tokens" ] && [ -n "$min_cached" ] && [ "$min_cached" != null ] && [ "$min_cached" -ge "$ev_tokens" ]; then
-    pass "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached >= evidence tokens $h_ev"
+    pass "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached >= evidence tokens $ev_tokens"
 else
-    fail "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached, evidence tokens $h_ev"
+    fail "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached, evidence tokens $ev_tokens"
 fi
 
 # Check 4: direct reports cached_tokens == 0 on every item, with the evidence already cached.
