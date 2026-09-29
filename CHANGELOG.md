@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
+- Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 
 ### Changed
 - `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).

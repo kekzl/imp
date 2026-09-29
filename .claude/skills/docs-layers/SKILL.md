@@ -16,7 +16,7 @@ Docs are organised by READER, not topic; `scripts/docs_lint.py` gates it.
 | 3 | A claim needs a code path; a number needs provenance. Unbacked = deleted, not softened ("experimental", "planned" are not rescue words). |
 | 3b | A number also needs something that FAILS when it drifts: gate thresholds (8%/8%/10%, `verify.sh`), hardware constants (32 GB, 1792 GB/s), dated measurements (findings, true of the afternoon named). File/LOC/test counts and build/test runtimes qualify for none: write the COMMAND that prints the number (`python3 tools/check_test_lanes.py --report`) or the magnitude ("seconds" vs "minutes"). A restated gated number does not inherit the gate (`tests/CLAUDE.md` lost this twice, #1673; bulk-applied #1827). |
 | 4 | Records are not documentation: `CHANGELOG.md`, `docs/MISSION_JOURNAL.md`, `docs/vram_audit.md`, root `AUDIT.md`, `docs/roadmap.md`, prefixes `docs/archive/`, `docs/audit/`, `docs/plans/` are lint-excluded, append-only. `docs/BENCHMARKS.md` IS linted (PROV-header allowlist); `docs/roadmap.md` is drift-gated by `check_doc_citations.py` (#1772). |
-| 5 | `file:line` citations in every living doc are gated (#1783): `scripts/check_doc_citations.py .` over 33 living docs (`docs/*.md`, `docs/internals/*.md`, root README/CONTRIBUTING/AGENTS/AUDIT); cite a path, not a bare basename (an ambiguous basename passes as `AMBIGUOUS`); it is the `citations` selection in `ci_static_gates.sh`, NOT the `docs` selection, and it checks the line EXISTS, not what it says. |
+| 5 | `file:line` citations in every living doc are gated (#1783): `scripts/check_doc_citations.py .` over 33 living docs (`docs/*.md`, `docs/internals/*.md`, root README/CONTRIBUTING/AGENTS/AUDIT); format `path:N anchor` (N, N-M, N,M, N/M): the anchor text must be on line N, no anchor = DEAD (#2185); cite a path, not a bare basename (a basename the anchor cannot resolve passes as `AMBIGUOUS`); it is the `citations` selection in `ci_static_gates.sh`, NOT the `docs` selection. |
 
 ## The layers
 
@@ -65,7 +65,7 @@ L0/L1 throughput figures carry `[PROV: commit=<sha7> date=<YYYY-MM-DD> hw=RTX509
 
 ## Before you push
 
-`bash scripts/ci_static_gates.sh docs citations` (~2 s; the hooks run it). The `Docs` job runs `docs`; `Build` runs everything unfiltered, so a docs failure shows as `Build` red. Lint checks: forbidden tokens, unprovenanced numbers, header, generated drift, dead links, size budgets (README <= 400 lines, root `CLAUDE.md` <= 2000 tokens, per-directory <= 800), staleness > 180 days (warning -> `docs/audit/docs-rewrite/STALE.md`), refs-generator listing (`tests/refs/gen_*.py` rows in `tests/refs/README.md`, #1730). `.gitignore` respected (#1698). `STALE.md` is regenerated on every local run and blocks `git pull` until committed or `git checkout -- docs/audit/docs-rewrite/STALE.md`.
+`bash scripts/ci_static_gates.sh docs citations` (~2 s; the hooks run it). The `Docs` job runs `docs`; `Build` runs everything unfiltered, so a docs failure shows as `Build` red. Lint checks: forbidden tokens, unprovenanced numbers, header, generated drift, dead links, size budgets (README <= 400 lines, root `CLAUDE.md` <= 2000 tokens, per-directory <= 800), staleness > 180 days (warning -> `docs/audit/docs-rewrite/STALE.md`), refs-generator listing (`tests/refs/gen_*.py` rows in `tests/refs/README.md`, #1730). `.gitignore` respected (#1698). `STALE.md` is written only by `python3 scripts/docs_lint.py --write-stale`; hooks and CI leave it untouched (#2194).
 
 ## Adding a doc
 

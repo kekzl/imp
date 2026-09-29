@@ -78,6 +78,27 @@ TEST(MtpAuto, ExplicitNgramSurvivesTheAutoPair) {
     EXPECT_TRUE(cfg.speculative.ngram) << "auto must not overrule a key the operator set";
 }
 
+// A head that loads without a draft forward (qwen4_exp) forces 0, explicit settings included.
+TEST(MtpAuto, HeadWithoutForwardForcesOff) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_forward=*/false);
+    EXPECT_EQ(cfg.speculative.mtp_k, 0);
+    EXPECT_TRUE(cfg.speculative.ngram) << "the auto pair must not turn the matcher off";
+
+    RuntimeConfig pinned;
+    ASSERT_TRUE(pinned.apply_overrides({"speculative.mtp_k=2"}).empty());
+    tools::mtp_auto_finalize(pinned, 2, /*head_loaded=*/true, /*head_forward=*/false);
+    EXPECT_EQ(pinned.speculative.mtp_k, 0);
+
+    RuntimeConfig flag;
+    EXPECT_EQ(tools::mtp_auto_after_load(flag, 2, /*head_loaded=*/true, /*explicit_flag=*/2,
+                                         /*head_forward=*/false),
+              0);
+    EXPECT_EQ(flag.speculative.mtp_k, 0);
+    EXPECT_EQ(take_pending_runtime_config().speculative.mtp_k, 0) << "the engine takes the forced value";
+}
+
 // The gated bench measures RAW decode: auto drafting with an MTP head would
 // redefine what tests/perf_baseline.json pins, silently.
 TEST(MtpAuto, BenchModePinsAutoOff) {

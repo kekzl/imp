@@ -56,7 +56,7 @@ EOF
         if [ -z "$2" ]; then
             [ "$rc" = "0" ] && { st_pass=$((st_pass+1)); return; }
             printf 'SELFTEST FAIL  %s: expected a pass, got:\n%s\n' "$1" "$(printf '%s' "$out" | grep '^FAIL' | head -2)"
-        elif [ "$rc" != "0" ] && printf '%s' "$out" | grep -qF "$2"; then
+        elif [ "$rc" != "0" ] && grep -qF "$2" <<< "$out"; then
             st_pass=$((st_pass+1)); return
         else
             printf 'SELFTEST FAIL  %s: no FAIL naming %s (rc=%s)\n' "$1" "$2" "$rc"
@@ -295,9 +295,11 @@ for f in "${DOCKERFILES[@]}" "${WORKFLOWS[@]}"; do
                     bad "$(basename "$f"):$line fetches raw content at '$ref' - a branch or tag is a mutable ref, use a 40-hex commit"
                 ;;
         esac
+        # Here-strings, not `| grep -q`: grep exits at the first match and pipefail
+        # turns the producer's SIGPIPE into a miss (#2186, #1499).
         if [ -z "$dest" ]; then
             bad "$(basename "$f"):$line downloads $url with no -o/-O target the checksum could name"
-        elif ! logical_lines "$f" | grep -qE "[0-9a-f]{64}[[:space:]]+${dest//\//\\/}'[[:space:]]*\|[[:space:]]*sha256sum[[:space:]]+(-c|--check)"; then
+        elif ! grep -qE "[0-9a-f]{64}[[:space:]]+${dest//\//\\/}'[[:space:]]*\|[[:space:]]*sha256sum[[:space:]]+(-c|--check)" <<< "$(logical_lines "$f")"; then
             bad "$(basename "$f"):$line downloads $url into $dest with no 'echo <sha256>  $dest | sha256sum -c -' in the same file"
         fi
     done < <(logical_lines "$f" | grep -E '(curl|wget)[[:space:]]' | grep -E 'https?://' | grep -vE '^[0-9]+:[[:space:]]*#')
@@ -337,7 +339,7 @@ for entry in "${!SEEN_LOCK[@]}"; do
     n_req=0
     while IFS='|' read -r req n_hash; do
         n_req=$((n_req + 1))
-        printf '%s' "$req" | grep -qE '==' || bad "$lock: '$req' is not an exact pin"
+        grep -qE '==' <<< "$req" || bad "$lock: '$req' is not an exact pin"
         [ "$n_hash" = "0" ] && bad "$lock: '$req' carries no --hash=sha256: line"
     done < <(awk '/^[A-Za-z0-9]/ { if (name != "") print name "|" h
                                    name = $1; sub(/[[:space:]]*\\$/, "", name); h = 0; next }
