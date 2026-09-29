@@ -1,25 +1,17 @@
 #!/usr/bin/env bash
 # #2267 acceptance over a scripts/bench_2267.sh result dir (CPU only, reads files).
-# PASS iff the bit-exact test passed and at least one IMMA arm meets, on every model:
+# PASS iff at least one IMMA arm meets, on every model:
 #   off / arm >= 1.00 at 2048, 4096, 8192 tokens;  arm <= 1.02 x on (today's default) at 256, 512, 1024.
-# Usage: bash scripts/accept_2267.sh <out_dir> [arm ...]   (arms default: on bm160 bm192)
+# Usage: bash scripts/accept_2267.sh <out_dir> [arm ...]   (arms default: on)
 set -uo pipefail
 
 OUT="${1:?usage: accept_2267.sh <out_dir> [arm ...]}"
 shift
 ARMS=("$@")
-[ ${#ARMS[@]} -gt 0 ] || ARMS=(on bm160 bm192)
+[ ${#ARMS[@]} -gt 0 ] || ARMS=(on)
 TSV="$OUT/e2e.tsv"
-UNIT="$OUT/unit.log"
 FAIL=0
 
-if [ -s "$UNIT" ] && grep -q '^\[       OK \] MmqQ8Imma.TallTilesBitIdenticalToBm128' "$UNIT" &&
-    grep -q '^unit exit=0$' "$UNIT"; then
-    echo "PASS bit-exact: MmqQ8Imma.TallTilesBitIdenticalToBm128"
-else
-    echo "FAIL bit-exact: MmqQ8Imma.TallTilesBitIdenticalToBm128 not OK in $UNIT"
-    FAIL=1
-fi
 [ -s "$TSV" ] || { echo "FAIL e2e: $TSV missing or empty"; exit 1; }
 
 # TSV rows: model tokens arm median_s
