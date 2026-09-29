@@ -33,7 +33,6 @@ constexpr int SMEM_TOTAL = B_SIZE + A_SIZE + PREFIX_SIZE;     // 51216
 // TC_TILE_M x TC_TILE_N output block, eliminating M-loop imbalance (every CTA does exactly
 // one tile/iteration; heavy experts spread across many CTAs). Tile mapping: flat_idx ->
 // (n_tile, m_tile_flat) -> binary-search expert_id.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel(
     const uint8_t* __restrict__ packed_weights, const half* __restrict__ activations,
     half* __restrict__ output, const int32_t* __restrict__ offsets,
@@ -227,7 +226,6 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launcher

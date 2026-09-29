@@ -26,7 +26,6 @@ static constexpr int WMMA_K = kWmmaTileK;
 
 // ---- kernel (templated on Br) -----------------------------------------------
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int Br, int HD>
 __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                                  const half* __restrict__ V, half* __restrict__ O,
@@ -342,7 +341,6 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Compute shared memory for a given Br and head_dim
 static size_t compute_smem(int Br, int head_dim) {

@@ -16,7 +16,6 @@ namespace wmma = nvcuda::wmma;
 // rest ~1 KiB. Fits the 96 KiB opt-in.
 // WMMA operands: KK = K~(row_major) x K~(col_major); QK = Q~(row_major) x K~(col_major);
 // KH = K~(row_major) x H_0(row_major); QH = Q~(row_major) x H_0(row_major).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -46,7 +45,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+            H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
     extern __shared__ float smem[];
@@ -235,7 +234,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
                 const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
                 y += coef * s_u_fp32[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + h * HD + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h * HD) + d] = __float2half(y * scale);
         }
 
         // ---------------- STEP 7: H_L = D[0..L] H_0 + Σ_t (D[0..L]/D[0..t+1]) k̃_t u_t^T ----------------
@@ -257,7 +256,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         }
         for (int t_loc = 0; t_loc < L; t_loc++) {
             const float coef = s_g[t_loc] * s_u_fp32[t_loc * HD + d];
-            const half* k_row = s_k_fp16 + t_loc * SS;
+            const half* k_row = s_k_fp16 + static_cast<ptrdiff_t>(t_loc * SS);
 #pragma unroll
             for (int s = 0; s < SS; s++) {
                 H_reg[s] += coef * __half2float(k_row[s]);
@@ -273,10 +272,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
+            H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 2c: fully-tuned WY-rep + TC-MMA including the H_L update. Builds on Phase 2b:
 // CHUNK=32 (half the per-chunk setup/sync/decay-precompute overhead); drops the
@@ -290,7 +288,6 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
 // Fits the 96 KiB opt-in.
 // Numerics: FP16 storage of K~/Q~/H_0/u_scaled drops ~3-4 mantissa bits; WMMA FP32
 // accumulate preserves per-matmul precision. Expected output ~= Phase 2b (max_diff_y ~1e-5).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -321,7 +318,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+            H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
     extern __shared__ float smem[];
@@ -528,7 +525,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                 const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
                 y += coef * s_u_fp32[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + h * HD + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h * HD) + d] = __float2half(y * scale);
         }
         __syncthreads();
 
@@ -593,10 +590,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
+            H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers

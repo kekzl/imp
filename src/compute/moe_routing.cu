@@ -414,7 +414,6 @@ __global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* _
 // Strategy: thread 0 scans, then walks flat_idx ascending, appending to each expert's
 // bucket -> stable slot assignment. n_experts/total small enough for single-thread scatter.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     const int32_t* __restrict__ expert_indices, int n_tokens, int top_k, int n_experts,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ sorted_flat_idx,
@@ -487,7 +486,6 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ============================================================================
 // Helper to set up a Tensor descriptor

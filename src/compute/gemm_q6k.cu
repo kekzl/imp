@@ -26,7 +26,6 @@ static constexpr int FUSED_WARPS_PER_CTA = 4;
 static constexpr int FUSED_BLOCK_SIZE = FUSED_WARPS_PER_CTA * 32;  // 128 threads
 static constexpr int TILE_M = 32;                                  // tokens per shared memory tile
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_t* __restrict__ packed_weight,
                                                                     const block_q8_1* __restrict__ q8_base,
                                                                     const float* __restrict__ d8_base,
@@ -134,7 +133,7 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
             // M-loop: process each token using Q8_1 from shared memory
             for (int mi = 0; mi < m_count; mi++) {
                 // Read Q8_1 from shared memory (no L2 traffic!)
-                const int8_t* qs_ptr = smem_qs + (mi * q8_per_row + q8_idx) * 32;
+                const int8_t* qs_ptr = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
                 int xqs[8];
                 const int4* qs_v = reinterpret_cast<const int4*>(qs_ptr);
                 int4 v0 = qs_v[0];
@@ -191,7 +190,6 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
         __syncthreads();  // protect smem for next TILE_M iteration
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Host launcher
 void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, const float* d8_base,

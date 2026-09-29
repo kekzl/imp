@@ -124,7 +124,6 @@ struct MxPagedKVArgs {
 // copy); V dequantized to FP16 for WMMA. Cache scales carry no attention-scale fold; Q uses RAW
 // absmax/6, `scale` applied post-MMA. Current-chunk K/V (fresh FP16) force-promoted and read
 // exact; only the past reads FP4 from cache.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false, bool Promote = false,
           bool PagedKV = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
@@ -186,14 +185,14 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     extern __shared__ char smem[];
 
     uint8_t* Q_fp4 = reinterpret_cast<uint8_t*>(smem);
-    float* q_scales = reinterpret_cast<float*>(Q_fp4 + Bq * hd_half_padded);
+    float* q_scales = reinterpret_cast<float*>(Q_fp4 + static_cast<ptrdiff_t>(Bq * hd_half_padded));
     // KV_buf is aligned to 16 bytes for vectorized loads
     char* KV_raw = reinterpret_cast<char*>(q_scales + Bq);
     // Align KV_raw to 16 bytes
     KV_raw = reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(KV_raw) + 15) & ~15ULL);
     uint8_t* KV_fp4 = reinterpret_cast<uint8_t*>(KV_raw);  // K as FP4
     half* KV_fp16 = reinterpret_cast<half*>(KV_raw);       // V as FP16 (same slot)
-    float* k_scales = reinterpret_cast<float*>(KV_raw + Bkv * head_dim * sizeof(half));
+    float* k_scales = reinterpret_cast<float*>(KV_raw + static_cast<size_t>(Bkv * head_dim) * sizeof(half));
     float* S_tile = k_scales + Bkv;
     float* O_acc = S_tile + Bq * Bkv;
     float* row_m = O_acc + Bq * head_dim;
@@ -683,11 +682,11 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         const int slot = gk % pkv.block_size;
                         const uint8_t* krow = pkv.k_data +
                                               ((size_t)blk * pkv.block_size + slot) *
-                                                  (n_kv_heads * hd_half) +
+                                                  static_cast<size_t>(n_kv_heads * hd_half) +
                                               (size_t)kv_head * hd_half;
                         const uint8_t* ksc = pkv.k_scales +
                                              ((size_t)blk * pkv.block_size + slot) *
-                                                 (n_kv_heads * n_k_groups) +
+                                                 static_cast<size_t>(n_kv_heads * n_k_groups) +
                                              (size_t)kv_head * n_k_groups;
                         for (int d = 0; d < head_dim; d += 2) {
                             const half2 kh = unpack_fp4_pair(krow[d / 2]);
@@ -938,11 +937,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     const int blk = pkv.block_table[pos / pkv.block_size];
                     const int slot = pos % pkv.block_size;
                     const uint8_t* vrow = pkv.v_data +
-                                          ((size_t)blk * pkv.block_size + slot) * (n_kv_heads * hd_half) +
+                                          ((size_t)blk * pkv.block_size + slot) *
+                                              static_cast<size_t>(n_kv_heads * hd_half) +
                                           (size_t)kv_head * hd_half;
                     const uint8_t* vsc = pkv.v_scales +
                                          ((size_t)blk * pkv.block_size + slot) *
-                                             (n_kv_heads * n_k_groups) +
+                                             static_cast<size_t>(n_kv_heads * n_k_groups) +
                                          (size_t)kv_head * n_k_groups;
                     const half2 hh = unpack_fp4_pair(vrow[b]);
                     const float sc = fp8_e4m3_to_float_fast(vsc[(2 * b) / 16]);
@@ -1231,7 +1231,6 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // =============================================================================
 // Shared memory computation

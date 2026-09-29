@@ -104,7 +104,6 @@ __device__ __forceinline__ int mxfp4_sfatom_offset(int row, int k_group, int n_k
 // Strided MXFP4 quantization: reads FP16 with arbitrary row stride (per-head access in
 // [seq,n_heads*hd] layout), outputs contiguous MXFP4 packed + SfAtom. One thread per 32-elem group.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ input,
                                                    int input_row_stride,  // in half elements, not bytes
                                                    uint8_t* __restrict__ packed_out,  // [M, K/2] contiguous
@@ -151,7 +150,6 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
         packed_out[packed_base + i / 2] = mxfp4_pack_pair_hw(s0, s1);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fused scale + softcap + causal mask + softmax, in-place on FP16 S. One block per query row,
 // 3-pass online softmax (max, exp+sum, normalize).

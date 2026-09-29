@@ -156,7 +156,6 @@ __device__ __forceinline__ bool cursor_advance(Cursor& c, const WalkGeom& g) {
 // The min-blocks term pins the two CTAs per SM the HPC=5 instance sits on
 // at exactly 128 registers; measured neutral against the bare bound (55.1 vs
 // 54.7 us at HPC 5, 56.0 vs 56.2 at HPC 4, 2026-09-08), no spill.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int LPR, int TOK, int HPC>
 __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_gqa_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -257,7 +256,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
 #pragma unroll
         for (int h = 0; h < HPC; h++) {
             half2 qh[NH2];
-            lds_q_slice<NH2>(q_saddr + h * HD * sizeof(half), qh);
+            lds_q_slice<NH2>(q_saddr + static_cast<size_t>(h * HD) * sizeof(half), qh);
 #pragma unroll
             for (int j = 0; j < TOK; j++)
                 s[h][j] = dot_slice<NH2>(qh, kh[j]);
@@ -378,7 +377,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
                                        n_heads, head0 + h, attn_sinks);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int LPR, int TOK, int HPC>
 void launch_gqa(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, half* O, const int* block_tables,

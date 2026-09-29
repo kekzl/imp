@@ -128,7 +128,6 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 // Everything from barrier init through the epilogue is identical to the shipped
 // single-tensor kernel. OutT: half (activations) or float (batched LM head logits, read as
 // float by samplers; single-stripe shapes only).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int kStages, typename OutT>
 __device__ __forceinline__ void smallm_v2_cta_body(
     const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
@@ -160,7 +159,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     const int kt1 = min(k_tiles, kt0 + per_stripe);
     const int iters = kt1 - kt0;
 
-    auto stage_base = [&](int s) { return smem + s * kStageBytes; };
+    auto stage_base = [&](int s) { return smem + static_cast<ptrdiff_t>(s * kStageBytes); };
 
     // Per-lane chunk assignments are fixed; only the K offset advances:
     //   w nibbles: 64 rows x 8 16B-chunks = 512 -> 16/lane
@@ -343,7 +342,6 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         __stcs(&plane[static_cast<int64_t>(m) * N_out + n_base + n], s_out[i]);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // grid = (N/kNR, stripes). Each CTA walks a contiguous stripe of K-tiles for
 // its n-tile and writes one FP32 partial plane per stripe (stripe-exclusive

@@ -9,7 +9,6 @@ namespace imp {
 // matmul (Yang et al. 2024).
 // Shared memory: s_k[CHUNK*SS], s_q[CHUNK*SS], s_reduce[HD]; at HD=SS=128, CHUNK=64 = 65 KiB,
 // needs the dynamic-shared-memory opt-in. Grid (n_heads), block (HD).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK, typename YOut>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -39,7 +38,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+            H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
     extern __shared__ float smem[];
@@ -66,8 +65,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         // Phase 2: L2-normalise K,Q per chunk token (sequential across tokens, parallel across SS).
         // Uses rsqrt(max(sum_sq,1e-12)), same formula as gdn_scan_fused_kernel, for bit-equivalent numerics.
         for (int t_local = 0; t_local < L; t_local++) {
-            float* k_row = s_k + t_local * SS;
-            float* q_row = s_q + t_local * SS;
+            float* k_row = s_k + static_cast<ptrdiff_t>(t_local * SS);
+            float* q_row = s_q + static_cast<ptrdiff_t>(t_local * SS);
 
             float k_sq = 0.0f, q_sq = 0.0f;
             for (int i = d; i < SS; i += HD) {
@@ -104,11 +103,11 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         for (int t_local = 0; t_local < L; t_local++) {
             const int t_global = t_chunk_start + t_local;
             const float* row = conv_f32 + static_cast<size_t>(t_global) * conv_channels;
-            const float* V_base = row + 2 * BC_size;
+            const float* V_base = row + static_cast<ptrdiff_t>(2 * BC_size);
             const float v_d = V_base[h * HD + d];
 
-            const float* k_row = s_k + t_local * SS;
-            const float* q_row = s_q + t_local * SS;
+            const float* k_row = s_k + static_cast<ptrdiff_t>(t_local * SS);
+            const float* q_row = s_q + static_cast<ptrdiff_t>(t_local * SS);
 
             float alpha_h = __half2float(alpha_all[t_global * n_heads + h]);
             float dt_val = alpha_h + dtb_h;
@@ -150,10 +149,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
+            H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 2a WY-rep parallel delta-rule scan (Yang et al. 2024). Per L-token chunk:
 //   1. Cache K~,Q~ in shared memory (post L2 norm)
@@ -165,7 +163,6 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
 //   6. H_L = D[0..L] H_0 + sum_t D[t+1..L] k~_t u_t^T
 // Cumulative decay D[a..b] = prod_{i=a..b-1} g_i in log-space (avoids underflow; g capped e^-20).
 // CHUNK=32: L^2 + L*HD scratch must fit the 100 KiB sm_120 opt-in cap (HD=SS=128 -> ~92 KiB).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -190,7 +187,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+            H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
     // Shared memory layout (sized for CHUNK, SS, HD; opt-in dynamic smem).
@@ -346,7 +343,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
                 const float logD_j1t1 = s_logD[t_loc + 1] - s_logD[j + 1];
                 y += expf(logD_j1t1) * s_qk[t_loc * L + j] * s_u[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + h * HD + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h * HD) + d] = __float2half(y * scale);
         }
 
         // Step 6: H_L = D[0..L]*H_0 + sum_t D[t+1..L] k~_t u_t^T. D[t+1..L] hoisted out of the (s,t)
@@ -365,7 +362,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
             }
             for (int t_loc = 0; t_loc < L; t_loc++) {
                 const float coef = s_g[t_loc] * s_u[t_loc * HD + d];
-                const float* k_row = s_k + t_loc * SS;
+                const float* k_row = s_k + static_cast<ptrdiff_t>(t_loc * SS);
 #pragma unroll
                 for (int s = 0; s < SS; s++) {
                     H_reg[s] += coef * k_row[s];
@@ -382,10 +379,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
+            H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers

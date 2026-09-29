@@ -198,7 +198,6 @@ __global__ void smallM_kernel_v1_software_ref(
 // SMEM @ TILE=128, 3 stages: A 3x8=24 KiB, B 3x8=24 KiB, SFA/SFB 3x1=3 KiB each, mbar ~64B;
 // total ~54 KiB (under the 99 KiB sm_120 cap).
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int TILE_M, int TILE_N, int TILE_K, int N_STAGES>
 __global__ void smallM_kernel_v1(
     const void* const* __restrict__ d_A,
@@ -248,18 +247,18 @@ __global__ void smallM_kernel_v1(
     // SFB[N_STAGES][TILE_N][SFB_BYTES_ROW], mbar[N_STAGES] (8B each, padded to 16B).
     extern __shared__ __align__(128) uint8_t smem_raw[];
     uint8_t* smem_A   = smem_raw;
-    uint8_t* smem_B   = smem_A   + N_STAGES * A_TILE_BYTES;
-    uint8_t* smem_SFA = smem_B   + N_STAGES * B_TILE_BYTES;
-    uint8_t* smem_SFB = smem_SFA + N_STAGES * SFA_TILE_BYTES;
+    uint8_t* smem_B = smem_A + static_cast<ptrdiff_t>(N_STAGES * A_TILE_BYTES);
+    uint8_t* smem_SFA = smem_B + static_cast<ptrdiff_t>(N_STAGES * B_TILE_BYTES);
+    uint8_t* smem_SFB = smem_SFA + static_cast<ptrdiff_t>(N_STAGES * SFA_TILE_BYTES);
     // 16-byte align mbarriers.
     uintptr_t mbar_base = reinterpret_cast<uintptr_t>(smem_SFB + N_STAGES * SFB_TILE_BYTES);
     mbar_base = (mbar_base + 15) & ~uintptr_t(15);
     uint64_t* smem_mbar = reinterpret_cast<uint64_t*>(mbar_base);
 
-    auto stage_A   = [&](int s) -> uint8_t* { return smem_A   + s * A_TILE_BYTES;   };
-    auto stage_B   = [&](int s) -> uint8_t* { return smem_B   + s * B_TILE_BYTES;   };
-    auto stage_SFA = [&](int s) -> uint8_t* { return smem_SFA + s * SFA_TILE_BYTES; };
-    auto stage_SFB = [&](int s) -> uint8_t* { return smem_SFB + s * SFB_TILE_BYTES; };
+    auto stage_A = [&](int s) -> uint8_t* { return smem_A + static_cast<ptrdiff_t>(s * A_TILE_BYTES); };
+    auto stage_B = [&](int s) -> uint8_t* { return smem_B + static_cast<ptrdiff_t>(s * B_TILE_BYTES); };
+    auto stage_SFA = [&](int s) -> uint8_t* { return smem_SFA + static_cast<ptrdiff_t>(s * SFA_TILE_BYTES); };
+    auto stage_SFB = [&](int s) -> uint8_t* { return smem_SFB + static_cast<ptrdiff_t>(s * SFB_TILE_BYTES); };
 
     const int tid = threadIdx.x;
     const int n_threads = blockDim.x;
@@ -517,7 +516,6 @@ __global__ void smallM_kernel_v1(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // anonymous namespace
 

@@ -33,7 +33,6 @@ namespace imp {
 // warps_per_q is a runtime parameter: 4 for ratio<=8, 2 for ratio>8
 static constexpr int MAX_Q_PER_KV = 16;
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
@@ -234,11 +233,9 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fallback for non-GQA models (n_heads == n_kv_heads): per-head kernel
 // Templated on HEAD_DIM with contiguous lane mapping and half2 vectorized loads.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const half* __restrict__ K_cache,
                                               const half* __restrict__ V_cache, half* __restrict__ O,
@@ -399,12 +396,10 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Generic non-templated fallback for arbitrary head_dim (e.g. tests, head_dim=8): strided lane
 // mapping with bounds checks, no vectorization. v_head_dim!=head_dim: read only v_head_dim
 // elements from V (slots are head_dim-sized); output O is [batch,n_heads,v_head_dim].
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void paged_attention_decode_kernel_generic(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
@@ -552,13 +547,11 @@ __global__ void paged_attention_decode_kernel_generic(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Split-K Phase 1: each block processes a KV-block subset, writing partial softmax state
 // (max, log_sum_exp, O_acc) to scratch. Phase 2 reduces partials into the final output.
 // Grid:(batch,n_heads,num_splits) raises SM utilization from n_heads blocks to n_heads*num_splits.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
@@ -761,13 +754,11 @@ __global__ void paged_attention_splitk_kernel(
                                       lane_offset, partial_out, batch_idx, n_heads, head_idx, num_splits,
                                       split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Pipelined Split-K: overlaps V[t]+K[t+1] loads with K[t]'s dot product via cp.async. Per-warp
 // smem: k_buf[2][HD]+v_buf[HD] = 3*HD halfs. Pipeline: cp.async V[t] and K[t+1] -> wait_group<1>
 // for K[t] -> dot while V[t]/K[t+1] in flight -> softmax update -> wait_group<0>, O += weight*V.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_pipeline_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
@@ -836,7 +827,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     half* my_smem = reinterpret_cast<half*>(smem_pipe) + warp_id * WARP_SMEM;
     half* k_buf0 = my_smem;
     half* k_buf1 = my_smem + HEAD_DIM;
-    half* v_buf = my_smem + 2 * HEAD_DIM;
+    half* v_buf = my_smem + static_cast<ptrdiff_t>(2 * HEAD_DIM);
 
     // ---- Per-warp running softmax state ----
     float m_w = -FLT_MAX;
@@ -966,12 +957,10 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                                       lane_offset, partial_out, batch_idx, n_heads, head_idx, num_splits,
                                       split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Split-K Phase 2: reduces num_splits partial results into the final output. Grid:(batch,
 // n_heads), Block: 128 threads; each block merges one (batch,head) pair's partials.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void paged_attention_reduce_kernel(
     const float* __restrict__ partial_out,  // [batch, n_heads, num_splits, (2+head_dim)]
     half* __restrict__ O,                   // [batch, 1, n_heads, head_dim]
@@ -1058,7 +1047,6 @@ __global__ void paged_attention_reduce_kernel(
         stcs_half(&O[out_idx], __float2half(o_val));
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Scratch buffer management for split-K

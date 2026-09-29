@@ -27,24 +27,22 @@ struct TokenIn {
 };
 
 // Offsets are 32-bit: the launcher refuses n_tokens * row > INT_MAX.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int SPT, bool FUSE_GATE>
 __device__ __forceinline__ void load_token(TokenIn<SPT>& in, const half* __restrict__ b_base,
                                            const half* __restrict__ c_base, const half* __restrict__ x_base,
                                            const half* __restrict__ z_base, int t, int bc_size,
                                            int inner_size) {
-    const uint4* b = reinterpret_cast<const uint4*>(b_base + t * bc_size);
-    const uint4* c = reinterpret_cast<const uint4*>(c_base + t * bc_size);
+    const uint4* b = reinterpret_cast<const uint4*>(b_base + static_cast<ptrdiff_t>(t * bc_size));
+    const uint4* c = reinterpret_cast<const uint4*>(c_base + static_cast<ptrdiff_t>(t * bc_size));
 #pragma unroll
     for (int v = 0; v < SPT / 8; ++v) {
         in.b[v] = __ldg(b + v);
         in.c[v] = __ldg(c + v);
     }
-    in.x = x_base[t * inner_size];
+    in.x = x_base[static_cast<ptrdiff_t>(t * inner_size)];
     if constexpr (FUSE_GATE)
-        in.z = z_base[t * inner_size];
+        in.z = z_base[static_cast<ptrdiff_t>(t * inner_size)];
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __device__ __forceinline__ float half_at(const uint4* v, int i) {
     return __half2float(reinterpret_cast<const half*>(v)[i]);
@@ -52,7 +50,6 @@ __device__ __forceinline__ float half_at(const uint4* v, int i) {
 
 // Grid (n_heads, head_dim / (kThreads / S_TILES)); lanes s_tid = tid % S_TILES of one d share a
 // warp segment, so the legacy smem tree (a[s] += a[s + stride]) becomes shfl_down, same order.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool H_FP16, bool FUSE_GATE, int S_TILES, int SPT>
 __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __restrict__ B_in,
                                     const half* __restrict__ C_in, const half* __restrict__ dt_raw,
@@ -155,7 +152,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
             y_val *= z_val;
         }
         if (s_tid == 0)
-            y_base[t * inner_size] = __float2half(y_val);
+            y_base[static_cast<ptrdiff_t>(t * inner_size)] = __float2half(y_val);
     };
 
     // Ring slot j holds token t0 + j; it is consumed first and refilled with t0 + j + kPrefetch
@@ -207,7 +204,6 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int S_TILES, int SPT>
 void launch(const SsmScanArgs& a, bool fp16, bool fused) {

@@ -32,7 +32,6 @@ __device__ __forceinline__ void fp8x4_to_half2x2(uint32_t packed, half2& lo, hal
     hi = half2(r1);
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_multitok_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -179,7 +178,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8_mt), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

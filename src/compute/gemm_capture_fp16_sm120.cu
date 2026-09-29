@@ -70,7 +70,6 @@ __device__ __forceinline__ void cp_async_wait_group() {
 // Issues all cp.async loads for one (A,B) tile. Templated on BM so the chunk-loop trip
 // counts are compile-time constants and ptxas straightlines the cp.async issues (8 for
 // BM=128, 6 for BM=64) into a back-to-back pipeline-friendly sequence.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, const __half* A,
                                                 const __half* B, int block_m, int block_n,
@@ -109,9 +108,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
         cp_async_cg16_zero(dst, src, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, int STAGES>
 __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     void gemm_fp16_kernel(const __half* __restrict__ A, const __half* __restrict__ B,
@@ -129,8 +126,8 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     __half* B_stage[STAGES];
 #pragma unroll
     for (int s = 0; s < STAGES; ++s) {
-        A_stage[s] = smem_base + s * STAGE_HALVES;
-        B_stage[s] = smem_base + s * STAGE_HALVES + A_HALVES_PER_STAGE;
+        A_stage[s] = smem_base + static_cast<ptrdiff_t>(s * STAGE_HALVES);
+        B_stage[s] = smem_base + static_cast<ptrdiff_t>(s * STAGE_HALVES) + A_HALVES_PER_STAGE;
     }
 
     int block_m = blockIdx.y * BM;
@@ -208,7 +205,7 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     // keeps concurrent warp writes race-free without an extra __syncthreads
     // around wmma::store_matrix_sync.
     __shared__ float frag_smem[WARPS_PER_BLOCK * WMMA_M * WMMA_N];
-    float* warp_frag = frag_smem + warp * (WMMA_M * WMMA_N);
+    float* warp_frag = frag_smem + static_cast<ptrdiff_t>(warp * (WMMA_M * WMMA_N));
 
     int warp_base_m = block_m + wm * WARP_M;
     int warp_base_n = block_n + wn * WARP_N;
@@ -241,7 +238,6 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // BM=64 wins when SM saturation matters more than per-block compute amortization
 // (small total block count); BM=128 wins when the grid already saturates the SM array

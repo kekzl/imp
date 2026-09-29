@@ -39,7 +39,6 @@ namespace {
 // kChunk+4); region3 beta, logD. Phase A: float4 row loads, Gram matrices as 3xTF32 mma.
 // Phase B: blockwise forward substitution (16-row diagonal blocks in registers,
 // off-diagonal as 3xTF32 mma). Phase C: P@W and P@U_A as 3xTF32 mma.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS>
 __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -417,7 +416,6 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

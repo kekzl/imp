@@ -25,7 +25,6 @@ using nvfp4_mt::ue4m3_scale_to_float;
 
 // Walk the tokens [first_tok, n_tok) of one block for this warp, TOK at a time.
 // Updates the unnormalised (m_w, l_w, o_reg).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK>
 __device__ __forceinline__ void nvfp4_block_multitok(
     const uint8_t* __restrict__ K_block, const uint8_t* __restrict__ V_block,
@@ -106,7 +105,6 @@ __device__ __forceinline__ void nvfp4_block_multitok(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int HEAD_DIM>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_multitok_kernel(

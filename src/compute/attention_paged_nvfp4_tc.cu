@@ -42,7 +42,6 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 // No __launch_bounds__: with dots/weights moved to shared mem (warp-shfl reduction), the
 // register spill is gone (cuobjdump STACK:0 across HD in {64,128,256,512}); the compiler picks
 // the best occupancy/register tradeoff automatically.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_nvfp4_tc_kernel(
     const half* __restrict__ Q,
@@ -428,7 +427,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     if (t < tile_count) {
                         int slot = (slot_base + tile_first + t) % residual_n_tokens;
                         sK_r[i] = K_res_ptr[(int64_t)slot * slot_stride_res +
-                                            kv_head * kv_head_stride_res + hd_global];
+                                            (kv_head * kv_head_stride_res + hd_global)];
                     } else {
                         sK_r[i] = __float2half(0.0f);
                     }
@@ -520,7 +519,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     if (t < tile_count) {
                         int slot = (slot_base + tile_first + t) % residual_n_tokens;
                         sK_r[i] = V_res_ptr[(int64_t)slot * slot_stride_res +
-                                            kv_head * kv_head_stride_res + hd_global];
+                                            (kv_head * kv_head_stride_res + hd_global)];
                     } else {
                         sK_r[i] = __float2half(0.0f);
                     }
@@ -548,17 +547,15 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     // crosswarp reduce smem starts AFTER the per-warp TC scratch region
     // (NUM_WARPS * WARP_TC_HALVES halves = NUM_WARPS * 1024 bytes).
-    char* crosswarp_smem = tc_smem_raw + NUM_WARPS * WARP_TC_HALVES * sizeof(__half);
+    char* crosswarp_smem = tc_smem_raw + static_cast<size_t>(NUM_WARPS * WARP_TC_HALVES) * sizeof(__half);
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(crosswarp_smem), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_nvfp4_tc_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -700,7 +697,6 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 3b residual + reduce kernel, replacing paged_attention_reduce_kernel for the residual
 // path. Reads per-split paged partials from partial_out, processes the FP16 residual ring
@@ -717,7 +713,6 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
 //     / l_global
 // One block per (batch,head); NUM_WARPS warps process residual tokens round-robin, thread 0
 // reduces paged partials.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_residual_reduce_kernel(
     const float* __restrict__ partial_out,           // [b, h, num_paged_splits, 2+HD]
@@ -960,7 +955,6 @@ __global__ void paged_attention_residual_reduce_kernel(
         O[out_idx] = __float2half(final_o);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // A pipelined split-K variant (double-buffered K+V via smem) regressed this kernel: once the
 // inner loop is HW-FP4-cvt-bound, there is no longer enough work to hide K[t+1]'s prefetch

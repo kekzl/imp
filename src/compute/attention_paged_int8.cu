@@ -13,7 +13,6 @@ namespace imp {
 // scales from the INT8 KV write kernel handle dequant. Grid:(batch,n_heads,num_splits),
 // Block: 256 (8 warps).
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_int8_kernel(
     const half* __restrict__ Q, const int8_t* __restrict__ K_cache, const int8_t* __restrict__ V_cache,
@@ -160,7 +159,7 @@ __global__ void paged_attention_splitk_int8_kernel(
                         if (i == DP4A_CALLS - 1) {
                             // Last chunk may be partial — load byte-by-byte and pack
                             uint32_t p = 0;
-                            const int8_t* K_rem = K_tok + lane_offset + i * 4;
+                            const int8_t* K_rem = K_tok + (lane_offset + i * 4);
 #pragma unroll
                             for (int j = 0; j < DP4A_REM; j++)
                                 p |= (static_cast<uint32_t>(static_cast<uint8_t>(K_rem[j])) << (j * 8));
@@ -202,8 +201,8 @@ __global__ void paged_attention_splitk_int8_kernel(
                         if (i == DP4A_CALLS - 1) {
                             // Partial last chunk
                             packed = 0;
-                            const uint8_t* V_rem = reinterpret_cast<const uint8_t*>(V_tok + lane_offset +
-                                                                                    i * 4);
+                            const uint8_t* V_rem = reinterpret_cast<const uint8_t*>(V_tok +
+                                                                                    (lane_offset + i * 4));
 #pragma unroll
                             for (int j = 0; j < DP4A_REM; j++)
                                 packed |= (static_cast<uint32_t>(V_rem[j]) << (j * 8));
@@ -247,13 +246,11 @@ __global__ void paged_attention_splitk_int8_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ===========================================================================
 // INT8 dp4a Paged Attention — Non-Split-K fallback kernel (templated)
 // ===========================================================================
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_int8_kernel(
     const half* __restrict__ Q, const int8_t* __restrict__ K_cache, const int8_t* __restrict__ V_cache,
@@ -381,7 +378,7 @@ __global__ void paged_attention_decode_int8_kernel(
                     if constexpr (DP4A_REM > 0) {
                         if (i == DP4A_CALLS - 1) {
                             uint32_t p = 0;
-                            const int8_t* K_rem = K_tok + lane_offset + i * 4;
+                            const int8_t* K_rem = K_tok + (lane_offset + i * 4);
 #pragma unroll
                             for (int j = 0; j < DP4A_REM; j++)
                                 p |= (static_cast<uint32_t>(static_cast<uint8_t>(K_rem[j])) << (j * 8));
@@ -418,8 +415,8 @@ __global__ void paged_attention_decode_int8_kernel(
                     if constexpr (DP4A_REM > 0) {
                         if (i == DP4A_CALLS - 1) {
                             packed = 0;
-                            const uint8_t* V_rem = reinterpret_cast<const uint8_t*>(V_tok + lane_offset +
-                                                                                    i * 4);
+                            const uint8_t* V_rem = reinterpret_cast<const uint8_t*>(V_tok +
+                                                                                    (lane_offset + i * 4));
 #pragma unroll
                             for (int j = 0; j < DP4A_REM; j++)
                                 packed |= (static_cast<uint32_t>(V_rem[j]) << (j * 8));
@@ -458,7 +455,6 @@ __global__ void paged_attention_decode_int8_kernel(
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_int8), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ===========================================================================
 // INT8 dp4a Paged Attention — Host launcher

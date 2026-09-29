@@ -24,7 +24,6 @@ __device__ __forceinline__ uint32_t q51_spread4(uint32_t bits) {
     return (((bits & 1u) | ((bits & 2u) << 7) | ((bits & 4u) << 14) | ((bits & 8u) << 21)) << 4);
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc,
@@ -59,11 +58,9 @@ __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict
         cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads)
     mmq_imma_q51_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
@@ -236,7 +233,6 @@ __global__ void __launch_bounds__(kThreads)
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q51_raw_kernel<32, false>(const int8_t*, const __half*,

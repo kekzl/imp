@@ -292,7 +292,6 @@ __device__ __forceinline__ uint8_t pack_fp4_pair_hw(float v0, float v1) {
 // store leaves kernels at stack=0 for one float compare.
 __device__ unsigned int g_nvfp4_scale_clipped = 0;
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float vals[kSFVecSize],
                                                                      float local_absmax,
                                                                      uint8_t* packed_out_row, int k_group,
@@ -315,7 +314,7 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float
 
     *sfa_target = ue4m3;
 
-    uint8_t* packed_at = packed_out_row + k_group * (kSFVecSize / 2);
+    uint8_t* packed_at = packed_out_row + static_cast<ptrdiff_t>(k_group * (kSFVecSize / 2));
 #pragma unroll
     for (int i = 0; i < kSFVecSize; i += 2) {
         float s0 = vals[i] * inv_scale;
@@ -323,10 +322,8 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float
         packed_at[i / 2] = pack_fp4_pair_hw(s0, s1);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Direct FP16 quantize: load 16 FP16 values, pass to the above helper.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row_base, int k_group,
                                                            uint8_t* packed_out_row, uint8_t* sfa_target) {
     float vals[kSFVecSize];
@@ -341,7 +338,6 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row
     }
     quantize_micro_block_nvfp4_from_vals(vals, local_absmax, packed_out_row, k_group, sfa_target);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Single-tensor quantize: row numbering is direct, SFA is a single linear buffer
 // with SfAtom layout over (row, k_group).
@@ -592,7 +588,6 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
 // intermediate (never materialized in HBM).
 
 // Compile-time activation tag: keeps the inner branch a no-op in PTX.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int kAct>
 __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     const half* __restrict__ gate,           // [expanded, K] or nullptr when kAct == RELU_SQR
@@ -617,7 +612,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     // Compute 16 activation values + their absmax in registers.
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
-    const int64_t row_off = static_cast<int64_t>(row) * K + k_group * kSFVecSize;
+    const int64_t row_off = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group * kSFVecSize);
     const half2* up_h2 = reinterpret_cast<const half2*>(up + row_off);
     const half2* gate_h2 = (gate != nullptr) ? reinterpret_cast<const half2*>(gate + row_off) : nullptr;
 
@@ -660,7 +655,6 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
         packed_out + static_cast<int64_t>(row) * (K / 2), k_group,
         sfa + sfatom_offset(local_row, k_group, n_k_tiles));
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
                                                   void* dst_packed, uint8_t* const* d_sfa_bases,

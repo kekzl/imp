@@ -26,7 +26,6 @@ __device__ __forceinline__ void q5k_scale_min(int j, const uint8_t* q, uint32_t&
     }
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc, const float* __restrict__ Ars,
@@ -69,7 +68,6 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
         cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Four 5-bit weights of one u32 lane group as s8 (q - 16): nibbles at `shift`, fifth bit at `hbit`.
 __device__ __forceinline__ uint32_t q5k_s8x4(uint32_t qs, uint32_t qh, uint32_t shift, uint32_t hbit) {
@@ -80,7 +78,6 @@ __device__ __forceinline__ uint32_t q5k_s8x4(uint32_t qs, uint32_t qh, uint32_t 
 
 }  // namespace
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum,
@@ -261,7 +258,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q5k_raw_kernel<32, false>(const int8_t*, const __half*, const float*,

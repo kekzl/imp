@@ -294,7 +294,6 @@ static void dispatch_gated_activation(const Tensor& gate, const Tensor& up, Tens
 // Fused SwiGLU + NVFP4 quantize (batched-decode producer fusion for down-proj input).
 // One thread per 16-value micro-block: silu(gate)*up rounded to FP16 (bit-identical to
 // swiglu_fp16_kernel), packed to NVFP4 nibbles + FP8 micro-scale, tensor_scale 1.0.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
                                          __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
                                          uint8_t* __restrict__ xq_scales, int64_t total_mb) {
@@ -347,7 +346,6 @@ __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const 
         pb[k] = nvfp4_pack_pair_hw(vals[k * 2] * inv, vals[k * 2 + 1] * inv);
     *reinterpret_cast<uint2*>(xq_packed + mb * 8) = pk;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // --------------------------------------------------------------------------
 // Host dispatch: swiglu

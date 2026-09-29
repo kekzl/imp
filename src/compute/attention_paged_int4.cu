@@ -23,7 +23,6 @@ __device__ __forceinline__ int unpack_int4_hi(uint8_t packed) {
     return (val >= 8) ? (val - 16) : val;
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_int4_kernel(
     const half* __restrict__ Q,
@@ -160,13 +159,11 @@ __global__ void paged_attention_decode_int4_kernel(
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_int4), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Pipelined split-K INT4 variant (cp.async prefetch, sm_90+): prefetches next KV block into
 // smem while processing current. INT4 packing: ELEMS/2 bytes/lane. Double-buffered K, single
 // V buffer. Scale loads stay in registers (half->float, 1 value/token).
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_int4_pipeline_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -238,7 +235,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
     uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_int4) + warp_id * WARP_SMEM_BYTES;
     uint8_t* k_buf0 = my_smem;
     uint8_t* k_buf1 = my_smem + (HEAD_DIM / 2);
-    uint8_t* v_buf = my_smem + 2 * (HEAD_DIM / 2);
+    uint8_t* v_buf = my_smem + static_cast<ptrdiff_t>(2 * (HEAD_DIM / 2));
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
@@ -357,7 +354,6 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launcher -- INT4 variant (with Split-K support)

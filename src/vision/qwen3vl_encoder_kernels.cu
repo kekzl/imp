@@ -104,7 +104,6 @@ __global__ void gelu_erf_kernel(half* __restrict__ x, int64_t n) {
 
 // One block per (head, token). Reads the fused row once, writes q/k/v into the
 // per-head layout the batched attention GEMMs want, and rotates q/k on the way.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void split_qkv_rope_kernel(const half* __restrict__ qkv, const int32_t* __restrict__ row_id,
                                       const int32_t* __restrict__ col_id, half* __restrict__ q,
                                       half* __restrict__ k, half* __restrict__ v, int tokens, int heads,
@@ -143,7 +142,6 @@ __global__ void split_qkv_rope_kernel(const half* __restrict__ qkv, const int32_
         k[dst + j + half_rot] = __float2half(k1 * cs + k0 * sn);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void softmax_rows_kernel(half* __restrict__ scores, int cols) {
     extern __shared__ float smem[];

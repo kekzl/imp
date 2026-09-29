@@ -40,7 +40,6 @@ static bool use_multirow(int n_groups, int mr_blocks) {
 // Process 8 packed bytes (16 nibbles = 16 FP4 values) via prmt register LUT.
 // Returns UNSCALED dot product: sum(dequant(nibble) * activation).
 // Identical to NVFP4 dot_micro_block — same E2M1 encoding, same prmt LUT.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb, const half* __restrict__ x,
                                                  int elem_base) {
     constexpr uint32_t kLutLo = 0x3E3C3800u;
@@ -50,7 +49,7 @@ __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb,
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         uint32_t byte_val = pb[b];
-        const half2 xh = *reinterpret_cast<const half2*>(x + elem_base + b * 2);
+        const half2 xh = *reinterpret_cast<const half2*>(x + elem_base + static_cast<ptrdiff_t>(b * 2));
         const float2 xf = __half22float2(xh);
 
         uint32_t lo_mag = byte_val & 0x07u;
@@ -71,12 +70,10 @@ __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb,
     }
     return acc;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Core row accumulation: iterate over MXFP4 scale groups.
 // Each group = 16 packed bytes (32 FP4) + 1 UE8M0 scale.
 // Uses uint4 (128-bit) vectorized data loads + 2 micro-blocks per group.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float gemv_mxfp4_row(const uint8_t* __restrict__ row_packed,
                                                 const uint8_t* __restrict__ row_scales,
                                                 const half* __restrict__ x, int n_groups, int tid) {
@@ -93,10 +90,8 @@ __device__ __forceinline__ float gemv_mxfp4_row(const uint8_t* __restrict__ row_
     }
     return acc;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Warp-level row accumulation for multi-row kernels.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <typename DotFn>
 __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_packed,
                                              const uint8_t* __restrict__ row_scales, int n_groups, int lane,
@@ -110,7 +105,6 @@ __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_pac
     }
     return acc;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Warp-level reduction: shuffle-down within 32 threads.
 __device__ __forceinline__ float warp_reduce(float acc) {
@@ -335,7 +329,6 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_gate_up_kernel(
 // ---------------------------------------------------------------------------
 // Fused SwiGLU + GEMV + residual
 // ---------------------------------------------------------------------------
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restrict__ pb,
                                                         const half* __restrict__ gate,
                                                         const half* __restrict__ up, int elem_base,
@@ -343,8 +336,8 @@ __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restric
     float acc = 0.0f;
 #pragma unroll
     for (int b = 0; b < 8; b++) {
-        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + b * 2);
-        const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + b * 2);
+        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + static_cast<ptrdiff_t>(b * 2));
+        const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + static_cast<ptrdiff_t>(b * 2));
         const float2 gf = __half22float2(gh);
         const float2 uf = __half22float2(uh);
         float s0 = gf.x / (1.0f + expf(-gf.x)) * uf.x;
@@ -354,7 +347,6 @@ __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restric
     }
     return acc;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __device__ __forceinline__ void init_lut(float* s_lut, int tid) {
     if (tid < 16) {
@@ -363,7 +355,6 @@ __device__ __forceinline__ void init_lut(float* s_lut, int tid) {
     }
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_swiglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ linear_scales,
     const half* __restrict__ gate, const half* __restrict__ up, half* __restrict__ y,
@@ -395,12 +386,10 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_swiglu_residual_k
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Fused GeGLU + GEMV + residual
 // ---------------------------------------------------------------------------
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict__ pb,
                                                        const half* __restrict__ gate,
                                                        const half* __restrict__ up, int elem_base,
@@ -410,8 +399,8 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
     float acc = 0.0f;
 #pragma unroll
     for (int b = 0; b < 8; b++) {
-        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + b * 2);
-        const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + b * 2);
+        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + static_cast<ptrdiff_t>(b * 2));
+        const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + static_cast<ptrdiff_t>(b * 2));
         const float2 gf = __half22float2(gh);
         const float2 uf = __half22float2(uh);
         float g0 = gf.x * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.x + COEFF * gf.x * gf.x * gf.x)));
@@ -421,9 +410,7 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
     }
     return acc;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ linear_scales,
     const half* __restrict__ gate, const half* __restrict__ up, half* __restrict__ y,
@@ -455,7 +442,6 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers

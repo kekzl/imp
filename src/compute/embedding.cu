@@ -86,7 +86,6 @@ template __global__ void embedding_lookup_vec_kernel<uint16_t>(const uint16_t*, 
 // --------------------------------------------------------------------------
 
 // Q8_0 block format: 34 bytes per 32 elements (2 fp16 scale + 32 int8)
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __device__ __forceinline__ half dequant_q8_0_element(const uint8_t* __restrict__ row_ptr, int i) {
     int blk = i / 32;
     int q_idx = i % 32;
@@ -95,10 +94,8 @@ static __device__ __forceinline__ half dequant_q8_0_element(const uint8_t* __res
     int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[q_idx];
     return __float2half(__half2float(d_val) * static_cast<float>(q));
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Q6_K block format: 210 bytes per 256 elements (GGML interleaved layout)
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __device__ __forceinline__ half dequant_q6k_element(const uint8_t* __restrict__ row_ptr, int idx) {
     int blk = idx / 256;
     int i = idx % 256;
@@ -125,7 +122,6 @@ static __device__ __forceinline__ half dequant_q6k_element(const uint8_t* __rest
     float val = __half2float(d_val) * static_cast<float>(scales[i >> 4]) * static_cast<float>(q6);
     return __float2half(val);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Q8_0 embedding lookup: dequantizes only the needed rows on the fly. Grid:(n_tokens), Block:256.
 __global__ void embedding_lookup_q8_0_kernel(const uint8_t* __restrict__ table_raw,

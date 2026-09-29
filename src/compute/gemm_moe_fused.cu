@@ -20,7 +20,6 @@ constexpr int FUSED_WARPS = 8;
 constexpr int FUSED_BLOCK = FUSED_WARPS * 32;
 constexpr int FUSED_M_TILE = 8;
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel(
     const uint8_t* __restrict__ packed_weights, const half* __restrict__ activations,
     half* __restrict__ output, const int32_t* __restrict__ offsets, int N, int K, size_t expert_stride_bytes,
@@ -72,7 +71,7 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
 
         // Walk K dimension in Q6_K blocks of 256 elements
         for (int blk = 0; blk < blocks_per_row; blk++) {
-            const uint8_t* bp = W_row + blk * 210;
+            const uint8_t* bp = W_row + static_cast<ptrdiff_t>(blk * 210);
 
             // Load block-level and per-group scales
             float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
@@ -140,7 +139,6 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launcher

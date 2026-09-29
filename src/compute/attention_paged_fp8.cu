@@ -45,7 +45,6 @@ __device__ __forceinline__ void fp8_kv_stage_lane(uint8_t* smem_dst, const uint8
     }
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -114,7 +113,7 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_fp8) + warp_id * WARP_SMEM_BYTES;
     uint8_t* k_buf0 = my_smem;
     uint8_t* k_buf1 = my_smem + HEAD_DIM;
-    uint8_t* v_buf = my_smem + 2 * HEAD_DIM;
+    uint8_t* v_buf = my_smem + static_cast<ptrdiff_t>(2 * HEAD_DIM);
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
@@ -235,9 +234,7 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
                                                   const uint8_t* __restrict__ K_cache,  // FP8 E4M3 raw bytes
@@ -384,7 +381,6 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launcher -- FP8 E4M3 variant (with Split-K support)

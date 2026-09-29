@@ -572,7 +572,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
 
 // Fused K+V FP8 write: combines K and V quantize+write into one kernel launch.
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, __nv_fp8_e4m3* __restrict__ k_cache_base,
@@ -626,7 +625,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
         dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Q-only RoPE for decode (n=1): applies RoPE to Q in-place.
 // Grid: (1, n_heads), Block: rope_pairs.

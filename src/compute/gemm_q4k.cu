@@ -57,7 +57,6 @@ __device__ __forceinline__ void get_scale_min_q4k(const uint8_t* sc, int j,
 // (qs[i]>>4)&0xF if is_high else qs[i]&0xF. Q5_K additionally: qh bit at (2*chunk+is_high)
 // gives the 5th bit.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <QKType BT>
 __global__ void __launch_bounds__(CTA_THREADS, 1)
 gemm_qk_dp4a_moe_fused_kernel(
@@ -179,7 +178,7 @@ gemm_qk_dp4a_moe_fused_kernel(
 
             // M-loop
             for (int mi = 0; mi < m_count; mi++) {
-                const int8_t* qs_act = smem_qs + (mi * q8_per_row + q8_idx) * 32;
+                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
                 int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
                 int4 v0 = qs_v[0];
                 int4 v1 = qs_v[1];
@@ -222,14 +221,12 @@ gemm_qk_dp4a_moe_fused_kernel(
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Dense (non-MoE) dp4a kernel: no expert offsets, grid over (N,1). sm_120 caps shared memory
 // at 99 KiB (101376 B), so TILE_M is smaller than the MoE kernel to fit the Q8_1 tile in budget.
 
 static constexpr int DENSE_TILE_M = 16;
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <QKType BT>
 __global__ void __launch_bounds__(CTA_THREADS, 1)
 gemm_qk_dp4a_dense_kernel(
@@ -333,7 +330,7 @@ gemm_qk_dp4a_dense_kernel(
             }
 
             for (int mi = 0; mi < m_count; mi++) {
-                const int8_t* qs_act = smem_qs + (mi * q8_per_row + q8_idx) * 32;
+                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
                 int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
                 int4 v0 = qs_v[0];
                 int4 v1 = qs_v[1];
@@ -374,7 +371,6 @@ gemm_qk_dp4a_dense_kernel(
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers — dense dp4a

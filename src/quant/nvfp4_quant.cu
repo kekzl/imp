@@ -112,7 +112,6 @@ __constant__ float kFP4E2M1Dequant[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0
 // Quantizes one micro-block (16 FP16 values) to NVFP4: loads 16 values from input+base,
 // computes the micro-scale via two-level scaling, writes packed FP4 nibbles + FP8
 // micro-scale. Shared by quantize_nvfp4_kernel and quantize_nvfp4_from_absmax_kernel.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restrict__ input,
                                                            uint8_t* __restrict__ packed_out,
                                                            uint8_t* __restrict__ micro_scales,
@@ -152,7 +151,6 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
         packed_out[packed_base + i / 2] = nvfp4_pack_pair_hw(s0, s1);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Absmax reduction over the entire tensor (FP16 input): grid-stride loop, block-level
 // reduction to shared memory, then atomicMax on a global counter via integer atomicMax on

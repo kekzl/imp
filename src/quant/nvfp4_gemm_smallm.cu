@@ -52,7 +52,6 @@ constexpr int kSplitK = 3;      // grid.y: K-range splits. 160 blocks starved
 // traced to L2 (every block re-reads the 327 KiB x tile and the GDN scan evicts it, 45.8 us
 // real-step vs 23.9 isolated); packed x is ~92 KiB, small enough to survive without an
 // access-policy window.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool kAQuant>
 __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -229,7 +228,6 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     }
     (void)s_out;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Reduce the kSplitK partial planes into the FP16 output. kAcc adds onto
 // the existing y (the o_proj/down residual-add call sites use beta=1).

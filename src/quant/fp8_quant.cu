@@ -351,7 +351,6 @@ __global__ void quantize_fp8_rows_kernel(const half* __restrict__ in, uint8_t* _
 }
 
 // Inverse of quantize_fp8_rows_kernel: out[row][i] = q[row][i] * scale[row], 8 bytes per thread step.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void dequantize_fp8_rows_kernel(const uint8_t* __restrict__ in, const float* __restrict__ d_row_scales,
                                            half* __restrict__ out, int K) {
     const int row = blockIdx.x;
@@ -368,10 +367,9 @@ __global__ void dequantize_fp8_rows_kernel(const uint8_t* __restrict__ in, const
             *reinterpret_cast<uint8_t*>(&q) = b[j];
             h[j] = __float2half(static_cast<float>(q) * s);
         }
-        *reinterpret_cast<uint4*>(o + 8 * i) = *reinterpret_cast<const uint4*>(h);
+        *reinterpret_cast<uint4*>(o + static_cast<ptrdiff_t>(8 * i)) = *reinterpret_cast<const uint4*>(h);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void dequantize_fp8_rows_async(const void* input_fp8, const float* d_row_scales, void* output_fp16, int rows,
                                int K, cudaStream_t stream) {
