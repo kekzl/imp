@@ -7,7 +7,7 @@ commit: 9cbb8004
 
 # API features
 
-Constrained decoding, tool calling, thinking/reasoning and images. Endpoints, sampling fields, metrics, prompt caching, request tracing, errors: [`API.md`](API.md).
+Constrained decoding, tool calling, thinking/reasoning, images and fill-in-the-middle. Endpoints, sampling fields, metrics, prompt caching, request tracing, errors: [`API.md`](API.md).
 
 ## Constrained decoding
 
@@ -207,3 +207,44 @@ Refusal rules:
 - Model with unreadable vision tower: loads text-only, image request gets `400 vision_unavailable`.
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
+
+## Fill-in-the-middle
+
+Two entry points, one generation path (#2201):
+
+| Entry | Fields | Response |
+|---|---|---|
+| `POST /infill` | `input_prefix`, `input_suffix`, `input_extra` `[{filename, text}]`, `prompt` (appended to the prefix), `n_predict` (alias of `max_tokens`), `model` optional; every `/v1/completions` sampling field | `text_completion`, plus top-level `content` and `stop` (llama.cpp clients read these), streaming too |
+| `POST /v1/completions` | `suffix`: non-empty string = FIM with `prompt` as the prefix; `""` or absent = plain completion | `text_completion` |
+
+- FIM token ids come from the tokenizer: GGUF `tokenizer.ggml.fim_{pre,suf,mid,pad,rep,sep}_token_id` (or the older `prefix/suffix/middle_token_id`), else the vocab's special or added tokens `<|fim_prefix|>` (Qwen2.5/3-Coder), `<fim_prefix>` (StarCoder), `<PRE>` (CodeLlama), `<｜fim▁begin｜>` (DeepSeek-Coder), `<|code_prefix|>` (GLM-4) and their suffix/middle partners.
+- Prompt order is PSM: `[BOS] PRE prefix SUF suffix MID`, BOS only when the tokenizer asks for it.
+- `input_extra` non-empty: the llama.cpp repo layout goes in front, `<|repo_name|>myproject\n` then `<|file_sep|>{filename}\n{text}` per chunk and `<|file_sep|>filename\n`; without a file separator token each chunk is preceded by `\n\n--- snippet ---\n\n`.
+- The FIM marker texts are added as stop strings, so the model stops at `<|file_sep|>` or `<|fim_pad|>`.
+- Model without FIM prefix, suffix and middle tokens: `400`, `code: "fim_not_supported"` (`param: "suffix"` on `/v1/completions`). A `suffix` with a token-id prompt, or a non-string field: `400`.
+- The GPU acceptance run is `scripts/accept_2201.sh` (Qwen3-Coder-30B-A3B-Instruct-FP4, a Gemma-4 model for the 400).
+
+## Responses store
+
+`POST /v1/responses` with `store: true` keeps the response in process memory; a later request names it in `previous_response_id` instead of resending the transcript (#2206).
+
+| item | behaviour |
+|---|---|
+| stored | the conversation input as the model saw it (earlier turns flattened), the output items (reasoning, message, function_call), the response object |
+| `previous_response_id` | stored input + stored output + the new `input`, then the normal transform: the same prompt a client resending the transcript with `store: false` builds. Reasoning items are skipped on replay, as in a stateless resend |
+| not carried over | `instructions`, `tools`, sampling fields: send them on every turn (OpenAI does not carry `instructions` either) |
+| `store` absent | stored, same as `store: true` (OpenAI default), so Agents SDK clients can use `previous_response_id` without setting it. On a disabled store: stateless, no error |
+| `store: false` | stateless, as before; `previous_response_id` still works against a stored predecessor |
+| lifetime | `--responses-store-ttl` s from insertion (default 3600); a hit refreshes LRU order, not the TTL |
+| caps | `--responses-store-max-entries` (default 1000) and `--responses-store-max-mib` (default 256); the least recently used entry goes first. An entry larger than the byte cap alone is not stored (logged) |
+| off | any `--responses-store-*` flag at 0 (e.g. `--responses-store-max-entries 0`): nothing is stored, explicit `store: true` answers 400 (`param: "store"`) |
+| unknown or expired id | 404, `code: "response_not_found"`, `param: "previous_response_id"` |
+| `GET /v1/responses/{id}` | the stored response object; 404 `response_not_found` otherwise |
+| `DELETE /v1/responses/{id}` | `{"id", "object": "response.deleted", "deleted": true}`; 404 otherwise |
+| `GET /v1/responses/{id}/input_items` | not implemented: input items carry no ids to page by |
+| ids | `resp_imp<counter><64 random bits>`: GET serves stored content, so ids are not enumerable |
+| scope | one process, no persistence: a restart or a second replica does not see the entry. Auth is the server's `--api-key`; there is no per-key isolation |
+| `/metrics` | `imp_responses_store_entries`, `imp_responses_store_bytes` (gauges), `imp_responses_store_evictions_total` (caps), `imp_responses_store_expired_total` (TTL) |
+
+- Streaming responses are stored when `response.completed` / `response.incomplete` was written; a client that disconnects earlier stores nothing.
+- Token identity of a two-turn continuation against the stateless resend on a real model: `scripts/accept_2206.sh` (GPU).

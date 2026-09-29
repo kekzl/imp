@@ -332,7 +332,11 @@ def main():
     # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
     # 1147 -> 1151: GdnVerifySnapshotTest x4 (test-moe-gdn): chunkwise f32/fp32out snapshot at 65 and
     # 64 rows (#2214); GDN scan kernels need a card.
-    PINNED = 1151
+    # 1151 -> 1152: FmhaFP8Test.DISABLED_BenchHD64VsFp16 (test-attention): HD64 FP8 vs FP16 FMHA
+    # timing for #2195; needs a card.
+    # 1152 -> 1154: FimRealTokenizer x2 (test-e2e): FIM ids + PSM prompt from real tokenizer files
+    # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
+    PINNED = 1154
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -94,10 +94,10 @@ grep '^TOK ' "$WORK/ppl.err" | awk '{print $3}' | jq -sc . >"$WORK/corpus_ids.js
 N_CORPUS=$(jq length "$WORK/corpus_ids.json")
 echo "imp-cli --perplexity: PPL=$PPL_TOOL over $N_CORPUS tokens"
 
-# ---- phase 2: imp-server; prefix cache on so C6 can prove prompt logprobs bypass it ----
+# ---- phase 2: imp-server; prefix cache on (default, pinned) so C6 can prove prompt logprobs bypass it ----
 docker rm -f "$CTR" >/dev/null 2>&1 || true
 docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models:ro -p "$PORT":"$PORT" "$IMG" \
-    imp-server --model "/models/$GGUF" --host 0.0.0.0 --port "$PORT" --max-batch 1 --prefix-cache >/dev/null ||
+    imp-server --model "/models/$GGUF" --host 0.0.0.0 --port "$PORT" --max-batch 1 --set server.prefix_cache=true >/dev/null ||
     { echo "FAIL setup: docker run imp-server"; exit 1; }
 for _ in $(seq 1 180); do
     curl -s "$BASE/health" 2>/dev/null | grep -q '"model_loaded":true' && break

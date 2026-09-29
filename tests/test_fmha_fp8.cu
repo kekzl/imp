@@ -7,9 +7,11 @@
 
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
+#include "compute/fmha_fp8_tile_select.h"
 #include "core/tensor.h"
 #include "core/process_diag.h"
 
+#include <cstdio>
 #include <cstring>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -129,7 +131,10 @@ protected:
             cudaFree(d_k);
             cudaFree(d_v);
             cudaFree(d_o);
-            GTEST_SKIP() << "fmha_sm120_fp8_prefill returned false";
+            // Only a head_dim without an instance may decline; a supported one returning false is #2195.
+            if (!fp8_fmha_supports_head_dim(HD))
+                GTEST_SKIP() << "no fmha_sm120_fp8_kernel instance for head_dim " << HD;
+            FAIL() << "fmha_sm120_fp8_prefill returned false for supported head_dim " << HD;
         }
         cudaStreamSynchronize(stream_);
         cudaError_t err = cudaGetLastError();
@@ -139,7 +144,7 @@ protected:
         cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
 
         // FP8 QK^T has lower precision than FP16 — use relaxed tolerance
-        float max_err = 0.0f;
+        float max_err = 0.0f, max_abs = 0.0f;
         int nan_count = 0, ref_nan_count = 0;
         for (size_t i = 0; i < q_elems; i++) {
             float got = __half2float(O_h[i]);
@@ -155,11 +160,14 @@ protected:
             float err = std::abs(got - ref);
             float denom = std::max(1.0f, std::abs(ref));
             max_err = std::max(max_err, err / denom);
+            max_abs = std::max(max_abs, err);
         }
         EXPECT_EQ(ref_nan_count, 0) << "CPU reference is NaN/inf — test data is broken";
         EXPECT_EQ(nan_count, 0) << "NaN values in FP8 FMHA output";
         // FP8 E4M3 has ~0.1% precision loss in scores, allow 5% relative error
         EXPECT_LT(max_err, 0.05f) << "Max relative error too high: " << max_err;
+        printf("[fp8-fmha] HD=%d Sq=%d Skv=%d max_abs=%.6f max_rel=%.6f tol_rel=0.05\n", HD, Sq, Skv, max_abs,
+               max_err);
 
         cudaFree(d_q);
         cudaFree(d_k);
@@ -185,6 +193,61 @@ TEST_F(FmhaFP8Test, Softcap) { run_test(1, 32, 32, 4, 4, 128, true, 0, 50.0f); }
 TEST_F(FmhaFP8Test, HD64) { run_test(1, 32, 32, 4, 4, 64, true); }
 
 TEST_F(FmhaFP8Test, HD256) { run_test(1, 32, 32, 4, 4, 256, true); }
+
+// #2195 microbench: HD64 FP8 FMHA vs FP16 FMHA (fmha_sm120_prefill), Sq=Skv=2048, 32/8 heads, causal.
+TEST_F(FmhaFP8Test, DISABLED_BenchHD64VsFp16) {
+    const int Sq = 2048, NH = 32, NKV = 8, HD = 64, reps = 20;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+    const size_t q_elems = (size_t)Sq * NH * HD, kv_elems = (size_t)Sq * NKV * HD;
+    std::vector<half> Q_h(q_elems), K_h(kv_elems);
+    for (size_t i = 0; i < q_elems; i++)
+        Q_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6));
+    for (size_t i = 0; i < kv_elems; i++)
+        K_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6));
+    void *d_q, *d_k, *d_v, *d_o;
+    cudaMalloc(&d_q, q_elems * sizeof(half));
+    cudaMalloc(&d_k, kv_elems * sizeof(half));
+    cudaMalloc(&d_v, kv_elems * sizeof(half));
+    cudaMalloc(&d_o, q_elems * sizeof(half));
+    cudaMemcpy(d_q, Q_h.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_k, K_h.data(), kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, K_h.data(), kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+    int64_t q_shape[] = {1, Sq, NH, HD};
+    int64_t kv_shape[] = {1, Sq, NKV, HD};
+    Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+    Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+    Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+    Tensor Ot(d_o, QType::F16, 4, q_shape, true);
+
+    auto time_ms = [&](bool fp8) {
+        auto run = [&] {
+            return fp8 ? fmha_sm120_fp8_prefill(Qt, Kt, Vt, Ot, scale, true, 0, 0.0f, stream_)
+                       : fmha_sm120_prefill(Qt, Kt, Vt, Ot, scale, true, 0, 0.0f, stream_);
+        };
+        EXPECT_TRUE(run()) << (fp8 ? "fp8" : "fp16") << " declined HD64";
+        cudaEvent_t a, b;
+        cudaEventCreate(&a);
+        cudaEventCreate(&b);
+        cudaEventRecord(a, stream_);
+        for (int i = 0; i < reps; i++)
+            run();
+        cudaEventRecord(b, stream_);
+        cudaEventSynchronize(b);
+        float ms = 0.0f;
+        cudaEventElapsedTime(&ms, a, b);
+        cudaEventDestroy(a);
+        cudaEventDestroy(b);
+        return ms / reps;
+    };
+    const float fp16_ms = time_ms(false), fp8_ms = time_ms(true);
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+    printf("[fp8-fmha-bench] HD=64 Sq=Skv=%d NH=%d NKV=%d causal fp8=%.4f ms fp16=%.4f ms fp8/fp16=%.3f\n", Sq, NH,
+           NKV, fp8_ms, fp16_ms, fp8_ms / fp16_ms);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
+}
 
 // #566 residue: gemma-3-12b (hd=256) prefill routes through THIS kernel once n crosses the
 // FMHA threshold (a head_dim%32 gate, not the assumed FP16 WMMA); the pre-#569 catastrophic

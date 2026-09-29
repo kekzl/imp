@@ -20,6 +20,8 @@ Usage:
 """
 
 import argparse
+import collections
+import hashlib
 import json
 import os
 import random
@@ -40,6 +42,8 @@ MOCK_VOCAB = [
 
 MOCK_MODEL_ID = "mock-model-v1"
 MOCK_MAX_SEQ_LEN = 32768  # mirrors the server's context-length probes
+FIM_NOT_SUPPORTED = ("fill-in-the-middle is not supported by this model: its tokenizer has no FIM "
+                     "prefix/suffix/middle tokens")
 
 _server_instance = None
 _shutdown_event = threading.Event()
@@ -78,8 +82,12 @@ metrics = MockMetrics()
 
 class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
-    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0):
+    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0, fim=True,
+                 responses_store_ttl=3600.0, responses_store_max_entries=1000,
+                 responses_store_max_bytes=256 << 20):
         self.latency_ms = latency_ms
+        # Loaded model has FIM tokens (#2201); False = /infill and `suffix` answer 400 fim_not_supported.
+        self.fim = fim
         self.fail_rate = fail_rate
         self.oom_mode = oom
         # --idle-unload-seconds (#2199): reported on /health; the mock never suspends.
@@ -88,6 +96,15 @@ class MockConfig:
         self.loras = {}
         self.next_lora_id = 1
         self.lora_lock = threading.Lock()
+        # Responses store (#2206), same limits as --responses-store-*; TTL may be fractional here.
+        self.rs_ttl = responses_store_ttl
+        self.rs_max_entries = responses_store_max_entries
+        self.rs_max_bytes = responses_store_max_bytes
+        self.rs_items = collections.OrderedDict()  # id -> (expires, bytes, entry); end = most recent
+        self.rs_bytes = 0
+        self.rs_evictions = 0
+        self.rs_expired = 0
+        self.rs_lock = threading.Lock()
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -119,7 +136,8 @@ class MockHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_error(self, status: int, message: str, error_type: str = "invalid_request_error"):
+    def _send_error(self, status: int, message: str, error_type: str = "invalid_request_error",
+                    param: str | None = None, code: str | None = None):
         # Anthropic clients read `type` at the top level; imp-server switches
         # envelope by path (main.cpp pre-routing + error handler), so the mock
         # has to as well or the two disagree on every /v1/messages error.
@@ -129,7 +147,12 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send_json(status, {"type": "error",
                                      "error": {"type": error_type, "message": message}})
             return
-        self._send_json(status, {"error": {"message": message, "type": error_type}})
+        err = {"message": message, "type": error_type}
+        if param is not None:
+            err["param"] = param
+        if code is not None:
+            err["code"] = code
+        self._send_json(status, {"error": err})
 
     def _check_model(self, model: str) -> bool:
         if model != MOCK_MODEL_ID:
@@ -188,8 +211,14 @@ class MockHandler(BaseHTTPRequestHandler):
                 "max_total_tokens": MOCK_MAX_SEQ_LEN,
                 "max_input_tokens": MOCK_MAX_SEQ_LEN - 1,
             })
+        elif path.startswith("/v1/responses/") and "/" not in path[len("/v1/responses/"):]:
+            self._handle_responses_get(path[len("/v1/responses/"):])
         elif path == "/metrics":
             uptime = time.monotonic() - metrics.start_time
+            with self.config.rs_lock:
+                self._rs_purge_locked()
+                rs = (len(self.config.rs_items), self.config.rs_bytes,
+                      self.config.rs_evictions, self.config.rs_expired)
             body = (
                 f"# HELP imp_uptime_seconds Server uptime\n"
                 f"# TYPE imp_uptime_seconds gauge\n"
@@ -242,6 +271,14 @@ class MockHandler(BaseHTTPRequestHandler):
                 f"# HELP imp_prefix_cache_evictions_total Cached prefix blocks reclaimed\n"
                 f"# TYPE imp_prefix_cache_evictions_total counter\n"
                 f"imp_prefix_cache_evictions_total 0\n"
+                f"# TYPE imp_responses_store_entries gauge\n"
+                f"imp_responses_store_entries {rs[0]}\n"
+                f"# TYPE imp_responses_store_bytes gauge\n"
+                f"imp_responses_store_bytes {rs[1]}\n"
+                f"# TYPE imp_responses_store_evictions_total counter\n"
+                f"imp_responses_store_evictions_total {rs[2]}\n"
+                f"# TYPE imp_responses_store_expired_total counter\n"
+                f"imp_responses_store_expired_total {rs[3]}\n"
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -263,6 +300,10 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_chat_completions(raw_body)
         elif path == "/v1/completions":
             self._handle_completions(raw_body)
+        elif path == "/infill":
+            self._handle_infill(raw_body)
+        elif path == "/v1/responses":
+            self._handle_responses(raw_body)
         elif path == "/tokenize":
             self._handle_tokenize(raw_body)
         elif path == "/detokenize":
@@ -763,6 +804,19 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send_error(400, '"prompt" is required')
             return
 
+        # `suffix` = fill-in-the-middle (#2201), same checks as fim_request.cpp.
+        suffix = body.get("suffix")
+        if suffix is not None and not isinstance(suffix, str):
+            self._send_error(400, '"suffix" must be a string', param="suffix")
+            return
+        if suffix:
+            if isinstance(prompt, list) and not (len(prompt) == 1 and isinstance(prompt[0], str)):
+                self._send_error(400, '"suffix" needs a text prompt', param="suffix")
+                return
+            if not self.config.fim:
+                self._send_error(400, FIM_NOT_SUPPORTED, param="suffix", code="fim_not_supported")
+                return
+
         if self.config.oom_mode:
             self.send_response(503)
             self.send_header("Content-Type", "application/json")
@@ -807,6 +861,207 @@ class MockHandler(BaseHTTPRequestHandler):
                 "prompt_tokens_details": {"cached_tokens": 0},
             },
         })
+
+    def _handle_infill(self, raw: bytes):
+        """POST /infill (llama.cpp shape, #2201): OpenAI text_completion + top-level content/stop."""
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        if not self._validate_sampling(body):
+            return
+        for key in ("input_prefix", "input_suffix", "prompt"):
+            if key in body and body[key] is not None and not isinstance(body[key], str):
+                self._send_error(400, f'"{key}" must be a string')
+                return
+        extra = body.get("input_extra")
+        if extra is not None:
+            ok = isinstance(extra, list) and all(
+                isinstance(c, dict) and isinstance(c.get("text"), str)
+                and isinstance(c.get("filename", ""), (str, type(None))) for c in extra)
+            if not ok:
+                self._send_error(400, "each \"input_extra\" entry must be {\"filename\": string, \"text\": string}")
+                return
+        model = body.get("model") or MOCK_MODEL_ID  # llama.cpp clients send no model
+        if not self._check_model(model):
+            return
+        if not self.config.fim:
+            self._send_error(400, FIM_NOT_SUPPORTED, code="fim_not_supported")
+            return
+
+        metrics.inc_request()
+        n_predict = body.get("n_predict")
+        max_tokens = body.get("max_tokens") or (n_predict if isinstance(n_predict, int) and n_predict > 0 else 16)
+        tokens = self._generate_tokens(body.get("seed", 42), max_tokens)
+        finish = "stop" if len(tokens) < max_tokens else "length"
+        req_id = f"mock-{int(time.time())}"
+        created = int(time.time())
+
+        def frame(text, finish_reason):
+            return {"id": req_id, "object": "text_completion", "created": created, "model": model,
+                    "choices": [{"index": 0, "text": text, "logprobs": None, "finish_reason": finish_reason}],
+                    "content": text, "stop": finish_reason is not None}
+
+        if not body.get("stream", False):
+            resp = frame("".join(tokens), finish)
+            resp["usage"] = {"prompt_tokens": 8, "completion_tokens": len(tokens),
+                             "total_tokens": 8 + len(tokens)}
+            self._send_json(200, resp)
+            return
+
+        parts = [f"data: {json.dumps(frame(t, None))}\n\n" for t in tokens]
+        parts.append(f"data: {json.dumps(frame('', finish))}\n\n")
+        parts.append("data: [DONE]\n\n")
+        out = "".join(parts).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        try:
+            self.wfile.write(out)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    # ---- /v1/responses with store (#2206), mirrors handlers_responses.cpp ----
+    # Output is a digest of the flattened conversation, so equal replies mean equal transcripts.
+
+    def _rs_error(self, status: int, message: str, param: str | None, code: str | None = None):
+        err = {"message": message, "type": "invalid_request_error"}
+        if param:
+            err["param"] = param
+        if code:
+            err["code"] = code
+        self._send_json(status, {"error": err})
+
+    def _rs_purge_locked(self):
+        now = time.monotonic()
+        cfg = self.config
+        for rid in [k for k, v in cfg.rs_items.items() if v[0] <= now]:
+            cfg.rs_bytes -= cfg.rs_items.pop(rid)[1]
+            cfg.rs_expired += 1
+
+    def _rs_get(self, rid: str):
+        with self.config.rs_lock:
+            self._rs_purge_locked()
+            slot = self.config.rs_items.get(rid)
+            if slot is None:
+                return None
+            self.config.rs_items.move_to_end(rid)
+            return slot[2]
+
+    def _rs_put(self, rid: str, entry: dict):
+        cfg = self.config
+        size = len(rid) + len(json.dumps(entry))
+        with cfg.rs_lock:
+            if size > cfg.rs_max_bytes:
+                return
+            self._rs_purge_locked()
+            cfg.rs_items[rid] = (time.monotonic() + cfg.rs_ttl, size, entry)
+            cfg.rs_bytes += size
+            while len(cfg.rs_items) > cfg.rs_max_entries or cfg.rs_bytes > cfg.rs_max_bytes:
+                cfg.rs_bytes -= cfg.rs_items.popitem(last=False)[1][1]
+                cfg.rs_evictions += 1
+
+    @staticmethod
+    def _rs_flatten(items: list) -> list:
+        """Chat messages the transform (responses.cpp) builds; reasoning items are skipped."""
+        out = []
+        for it in items:
+            t = it.get("type", "message" if "role" in it else "")
+            if t == "message":
+                c = it.get("content", "")
+                if isinstance(c, list):
+                    c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+                out.append([it.get("role", "user"), c])
+            elif t == "function_call":
+                out.append(["assistant_call", it.get("name", ""), it.get("arguments", "{}")])
+            elif t == "function_call_output":
+                out.append(["tool", it.get("call_id", ""), str(it.get("output", ""))])
+        return out
+
+    def _handle_responses(self, raw: bytes):
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        store = body.get("store")
+        if store is not None and not isinstance(store, bool):
+            self._rs_error(400, '"store" must be a boolean', "store")
+            return
+        cfg = self.config
+        enabled = cfg.rs_ttl > 0 and cfg.rs_max_entries > 0 and cfg.rs_max_bytes > 0
+        # Absent means true (OpenAI default); on a disabled store it means stateless.
+        store = enabled if store is None else store
+        if store and not enabled:
+            self._rs_error(400, "store=true is disabled on this server", "store")
+            return
+        new_input = body.get("input")
+        items = [{"role": "user", "content": new_input}] if isinstance(new_input, str) else list(new_input or [])
+        prev_id = body.get("previous_response_id")
+        if prev_id is not None:
+            if not isinstance(prev_id, str) or not prev_id:
+                self._rs_error(400, '"previous_response_id" must be a non-empty string', "previous_response_id")
+                return
+            prev = self._rs_get(prev_id)
+            if prev is None:
+                self._rs_error(404, f"Previous response with id '{prev_id[:128]}' not found.",
+                               "previous_response_id", "response_not_found")
+                return
+            items = prev["input_items"] + prev["output_items"] + items
+        model = body.get("model", MOCK_MODEL_ID)
+        if not self._check_model(model):
+            return
+        if body.get("stream"):
+            self._rs_error(400, "the mock does not stream /v1/responses", "stream")
+            return
+
+        metrics.inc_request()
+        convo = self._rs_flatten(items)
+        if body.get("instructions"):
+            convo.insert(0, ["system", body["instructions"]])
+        digest = hashlib.sha256(json.dumps(convo).encode()).hexdigest()[:16]
+        text = f"mock reply {digest} after {len(convo)} messages"
+        in_tok = max(1, len(json.dumps(convo)) // 4)
+        out_tok = len(text.split())
+        metrics.add_tokens(in_tok, out_tok)
+        rid = f"resp_mock{random.getrandbits(64):016x}"
+        output = [{"type": "message", "id": "msg_mock0", "status": "completed", "role": "assistant",
+                   "content": [{"type": "output_text", "text": text, "annotations": []}]}]
+        response = {
+            "id": rid, "object": "response", "created_at": int(time.time()), "model": model,
+            "status": "completed", "error": None, "incomplete_details": None, "output": output,
+            "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+            "store": store, "previous_response_id": prev_id,
+            "usage": {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": in_tok + out_tok,
+                      "input_tokens_details": {"cached_tokens": 0},
+                      "output_tokens_details": {"reasoning_tokens": 0}},
+        }
+        self._send_json(200, response)
+        if store:
+            self._rs_put(rid, {"input_items": items, "output_items": output, "response": response})
+
+    def _handle_responses_get(self, rid: str):
+        entry = self._rs_get(rid)
+        if entry is None:
+            self._rs_error(404, f"Response with id '{rid[:128]}' not found.", None, "response_not_found")
+            return
+        self._send_json(200, entry["response"])
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if not path.startswith("/v1/responses/"):
+            self._send_error(404, f"Unknown endpoint: {path}")
+            return
+        rid = path[len("/v1/responses/"):]
+        with self.config.rs_lock:
+            self._rs_purge_locked()
+            slot = self.config.rs_items.pop(rid, None)
+            if slot is not None:
+                self.config.rs_bytes -= slot[1]
+        if slot is None:
+            self._rs_error(404, f"Response with id '{rid[:128]}' not found.", None, "response_not_found")
+            return
+        self._send_json(200, {"id": rid, "object": "response.deleted", "deleted": True})
 
     def _handle_tokenize(self, raw: bytes):
         body = self._parse_json_body(raw)
@@ -861,9 +1116,11 @@ def make_handler_class(config: MockConfig):
 
 
 def run_server(port: int = 9090, latency_ms: int = 5,
-               fail_rate: float = 0.0, oom: bool = False) -> ThreadedHTTPServer:
-    """Start the mock server and return the server instance."""
-    config = MockConfig(latency_ms=latency_ms, fail_rate=fail_rate, oom=oom)
+               fail_rate: float = 0.0, oom: bool = False, fim: bool = True,
+               **store_limits) -> ThreadedHTTPServer:
+    """Start the mock server and return the server instance. port=0 picks a free port
+    (read it from server.server_address); store_limits are MockConfig responses_store_* kwargs."""
+    config = MockConfig(latency_ms=latency_ms, fail_rate=fail_rate, oom=oom, fim=fim, **store_limits)
     handler_class = make_handler_class(config)
 
     server = ThreadedHTTPServer(("127.0.0.1", port), handler_class)
@@ -879,6 +1136,8 @@ def main():
     parser.add_argument("--fail-rate", type=float, default=0.0)
     parser.add_argument("--oom", action="store_true")
     parser.add_argument("--idle-unload-seconds", type=str, default="0")
+    for flag in ("--responses-store-ttl", "--responses-store-max-entries", "--responses-store-max-mib"):
+        parser.add_argument(flag, type=str, default=None)
     args = parser.parse_args()
 
     # Same contract as tools/imp-server/args.cpp: integer >= 0, else exit 1.
@@ -891,8 +1150,26 @@ def main():
               file=sys.stderr, flush=True)
         sys.exit(1)
 
+    store = {"responses_store_ttl": 3600, "responses_store_max_entries": 1000,
+             "responses_store_max_mib": 256}
+    for key in store:
+        raw = getattr(args, key)
+        if raw is None:
+            continue
+        try:
+            store[key] = int(raw)
+        except ValueError:
+            store[key] = -1
+        if store[key] < 0:
+            flag = "--" + key.replace("_", "-")
+            print(f"{flag} expects an integer >= 0, got '{raw}'", file=sys.stderr, flush=True)
+            sys.exit(1)
+
     config = MockConfig(latency_ms=args.latency_ms, fail_rate=args.fail_rate, oom=args.oom,
-                        idle_unload_seconds=idle)
+                        idle_unload_seconds=idle,
+                        responses_store_ttl=store["responses_store_ttl"],
+                        responses_store_max_entries=store["responses_store_max_entries"],
+                        responses_store_max_bytes=store["responses_store_max_mib"] << 20)
     handler_class = make_handler_class(config)
     server = ThreadedHTTPServer(("127.0.0.1", args.port), handler_class)
 

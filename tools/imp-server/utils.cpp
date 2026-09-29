@@ -901,7 +901,8 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
 }
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
-                                 const std::string& text, const char* finish_reason, const json& logprobs) {
+                                 const std::string& text, const char* finish_reason, const json& logprobs,
+                                 bool llama_content) {
     json choice = {{"index", 0},
                    {"text", text},
                    {"logprobs", logprobs},
@@ -912,6 +913,10 @@ std::string sse_completion_chunk(const std::string& id, int64_t created, const s
                 {"model", model},
                 {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
+    if (llama_content) {
+        obj["content"] = text;
+        obj["stop"] = finish_reason != nullptr;
+    }
     return "data: " + dump_safe(obj) + "\n\n";
 }
 
