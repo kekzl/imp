@@ -11,6 +11,7 @@ What the HTTP surface actually accepts.
 
 - Status legend from [`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no test.
 - Constrained decoding, tool calling, thinking/reasoning and images: [`API_FEATURES.md`](API_FEATURES.md).
+- Closed-choice scoring (`/v1/decide`, `/v1/score`): [`API_SCORING.md`](API_SCORING.md).
 
 **Two dialects, both native.** `/v1/messages` is implemented against the
 Anthropic wire format directly, no shim in either direction. All three
@@ -30,6 +31,8 @@ all of them at once.
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | ✅ | stored responses only, see [Responses store](API_FEATURES.md#responses-store) |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
+| `POST /v1/decide` | 🟡 | closed-choice letter scoring, no decoding; see [`API_SCORING.md`](API_SCORING.md). GPU acceptance: `scripts/accept_2198.sh` |
+| `POST /v1/score` | 🟡 | softmax over caller-given candidate tokens at the last prompt position |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
 | `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`) |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |

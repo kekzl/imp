@@ -336,7 +336,9 @@ def main():
     # timing for #2195; needs a card.
     # 1152 -> 1154: FimRealTokenizer x2 (test-e2e): FIM ids + PSM prompt from real tokenizer files
     # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
-    PINNED = 1154
+    # 1154 -> 1162: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
+    # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
+    PINNED = 1162
 
     text = CMAKE.read_text()
     mods = module_sources(text)

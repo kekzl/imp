@@ -416,6 +416,11 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
 // in one forward. Requires a reranker model to be loaded; see handlers_rerank.cpp.
 void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
+// POST /v1/decide (SemIf letter scoring) and POST /v1/score (caller-given candidate tokens), #2198.
+// One prefill per item, softmax over candidate logits at the last position; handlers_decide.cpp.
+void handle_decide(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_score(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
 // POST /admin/suspend: snapshot weights to host RAM, tear down model/engine, free VRAM.
 // POST /admin/resume: reload with the snapshot armed (warm restore). Both idempotent; standard
 // api-key auth applies.
