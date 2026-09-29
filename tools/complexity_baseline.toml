@@ -10,6 +10,9 @@
 # function_size_thresholds.toml. Lines below [baseline] are generated.
 #
 # Pin changes (newest first):
+#   #2159 (HF tokenizer parity, written before the ratchet): Tokenizer::load 99 -> 116 (NFC normalizer,
+#   Split-sequence steps, added-token strip; 139 before helpers split out), encode_gpt2 41 -> 44,
+#   load_gguf 244 -> 245, new parse_class 27 (tokenizer_pretok.cpp regex class parser)
 #   #2177 (Qwen3.8-Flash-Next MTP draft forward, written before the ratchet): new mtp_emit_token 27,
 #   mtp_workspace_allocate 36; grew run_moe_ffn +1, ple_run_ +3, chunk_capture_supported +1,
 #   dispatch_mtp_head +4, engine_scheduler step +1, engine_spec_mtp +8/+1, engine_spec_ngram +3
@@ -140,7 +143,7 @@ skip_dirs = []
 "src/memory/weight_cache_file.cpp::std::unique_ptr<WeightSnapshot> weight_cache_load(const std::string& cache_path, const Model& model)" = 27
 "src/model/chat_template.cpp::bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str)" = 54
 "src/model/chat_template.cpp::static jinja::Value json_string_to_value(const std::string& json_str)" = 68
-"src/model/gguf_loader.cpp::std::unique_ptr<Model> load_gguf(const std::string& path)" = 244
+"src/model/gguf_loader.cpp::std::unique_ptr<Model> load_gguf(const std::string& path)" = 245
 "src/model/gguf_tensor_assign.cpp::bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype)" = 91
 "src/model/hf_config_loader.cpp::bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg, std::unique_ptr<VisionModel>* out_vision_tower)" = 189
 "src/model/hf_config_loader.cpp::bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg)" = 32
@@ -165,14 +168,13 @@ skip_dirs = []
 "src/model/sentencepiece_loader.cpp::bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel* out, std::string* err)" = 34
 "src/model/tensor_kind_matcher.cpp::TensorKind match_tensor_kind(std::string_view name)" = 79
 "src/model/tensor_kind_name.cpp::const char* tensor_kind_name(TensorKind k)" = 48
-"src/model/tokenizer.cpp::bool Tokenizer::load(const std::string& path)" = 99
+"src/model/tokenizer.cpp::bool Tokenizer::load(const std::string& path)" = 116
 "src/model/tokenizer.cpp::static std::vector<std::string> gpt2_pre_tokenize(const std::string& text)" = 28
 "src/model/tokenizer.cpp::static std::vector<std::string> llama3_pre_tokenize(const std::string& text)" = 42
-"src/model/tokenizer.cpp::static std::vector<std::string> qwen2_like_pre_tokenize(const std::string& text, int max_digit_run)" = 53
 "src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const" = 42
-"src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const" = 41
+"src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const" = 44
 "src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_prefix) const" = 37
-"src/model/tokenizer.cpp::std::vector<std::string> o200k_pre_tokenize(const std::string& text)" = 58
+"src/model/tokenizer_pretok.cpp::bool parse_class(const std::string& rx, size_t& i, std::vector<std::pair<uint32_t, uint32_t>>& out)" = 27
 "src/model/weight_map.cpp::bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors)" = 405
 "src/model/weight_map.cpp::std::string WeightMap::map_name(const std::string& name) const" = 126
 "src/model/weight_upload.cu::bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes, bool warm_cache, const std::string& warm_cache_dir)" = 112

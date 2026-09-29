@@ -1075,13 +1075,16 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // Pre-tokenizer type (e.g. "default", "llama3", "deepseek-llm", "qwen2")
     auto it_pre = metadata.find("tokenizer.ggml.pre");
-    if (it_pre != metadata.end() && !it_pre->second.str_val.empty()) {
+    const bool has_pre = it_pre != metadata.end() && !it_pre->second.str_val.empty();
+    if (has_pre) {
         tokenizer->set_pre_tokenizer(it_pre->second.str_val);
         IMP_LOG_INFO("Tokenizer pre-tokenizer: %s", it_pre->second.str_val.c_str());
-        // GGUF drops tokenizer.json's normalizer; of the HF sources only Qwen's declares NFC.
-        if (tok_type != "bert")
-            tokenizer->set_nfc(it_pre->second.str_val == "qwen2" || it_pre->second.str_val == "qwen35");
     }
+    // GGUF drops tokenizer.json's normalizer; of the HF sources only Qwen's declares NFC. No pre key
+    // (Gemma-4) is not Qwen: NFC there composed "e" + U+0301 that HF keeps apart.
+    if (tok_type != "bert")
+        tokenizer->set_nfc(has_pre &&
+                           (it_pre->second.str_val == "qwen2" || it_pre->second.str_val == "qwen35"));
 
     // add_bos_token flag (Qwen3: 0, LLaMA: 1)
     auto it_add_bos = metadata.find("tokenizer.ggml.add_bos_token");

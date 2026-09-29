@@ -207,6 +207,9 @@ set(IMP_MODEL_SOURCES
     src/model/tokenizer.cpp
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
+    src/model/tokenizer_pretok.cpp
+    src/model/unicode_class.cpp
+    src/model/unicode_nfc_data.cpp
     src/model/tensor_kind_name.cpp
     src/model/tensor_kind_table.cu
     src/model/tensor_kind_matcher.cpp
