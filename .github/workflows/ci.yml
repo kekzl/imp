@@ -455,6 +455,17 @@ jobs:
           echo "clang-tidy linted ${#cpp[@]} .cpp + ${#cu[@]} .cu file(s): $ran run, $bad with nonzero exit"
           [ "$ran" -eq $(( ${#cpp[@]} + ${#cu[@]} )) ] && [ "$bad" -eq 0 ]
 
+      # Hard: a .cu that does not parse yields no findings (#2219's first run: 89 of 89,
+      # response-file includes lost). Findings stay advisory, parse errors do not.
+      - name: clang-tidy parsed every .cu (hard)
+        if: steps.files.outputs.count != '0'
+        run: |
+          shopt -s nullglob
+          logs=("$RUNNER_TEMP"/tidy/*.cu.log)
+          broken=$( { grep -l 'clang-diagnostic-error' "${logs[@]}" /dev/null || true; } | wc -l)
+          echo "${#logs[@]} .cu log(s), $broken with a clang error"
+          [ "$broken" -eq 0 ]
+
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
   # the in-process mock_server.py — no GPU, no model, no CUDA toolchain. It was

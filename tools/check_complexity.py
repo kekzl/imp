@@ -50,9 +50,23 @@ PP_ELSE = re.compile(r"^\s*#\s*(?:else|elif)\b")
 PP_ENDIF = re.compile(r"^\s*#\s*endif\b")
 ACCESS = re.compile(r"^\s*(?:(?:public|private|protected)\s*:(?!:)\s*)+")
 TYPE_KW = re.compile(r"\b(?:class|struct|union|namespace|extern)\b")
-# What may follow a function's parameter list before its `{`.
-TAIL_OK = re.compile(r"^(?:\s+|const\b|volatile\b|noexcept\b|override\b|final\b|mutable\b|"
-                     r"&&|&|->[^{;=]*|\[\[[^\]]*\]\]|try\b|requires\b[^{;]*)*$")
+TAIL_WORD = re.compile(r"(?:const|volatile|noexcept|override|final|mutable|try)\b|&&|&")
+
+
+def tail_ok(t):
+    """True if `t` may follow a function's parameter list before its `{` (linear scan)."""
+    t = t.strip()
+    while t:
+        m = TAIL_WORD.match(t)
+        if m:
+            t = t[m.end():].lstrip()
+        elif t.startswith("->") or re.match(r"requires\b", t):
+            return not re.search(r"[;=]", t)
+        elif t.startswith("[[") and "]]" in t:
+            t = t[t.index("]]") + 2:].lstrip()
+        else:
+            return False
+    return True
 CTOR_INIT = re.compile(r"\)\s*(?:noexcept\s*)?:(?!:)")
 
 
@@ -161,7 +175,7 @@ def classify(header):
                 last_close = i
     if depth != 0 or last_close < 0:
         return "opaque"
-    return "func" if TAIL_OK.match(h[last_close + 1:]) else "opaque"
+    return "func" if tail_ok(h[last_close + 1:]) else "opaque"
 
 
 def signature(header):
@@ -177,8 +191,8 @@ def signature(header):
     return h
 
 
-def functions(text, frag_ccn=lambda rel: 0):
-    """[(signature, line, ccn)] for every function body in one file's text."""
+def functions(text, frag_decisions=lambda rel: 0):
+    """[(signature, line, complexity)] for every function body in one file's text."""
     code, frags = preprocess(text)
     out, stack, hstart = [], [], 0   # stack of (kind, open_pos, header, header_pos)
     for m in re.finditer(r"[{};]", code):
@@ -214,7 +228,7 @@ def functions(text, frag_ccn=lambda rel: 0):
             end_line = code.count("\n", 0, pos) + 1
             body = code[open_pos + 1:pos]
             c = 1 + len(DECISION.findall(body))
-            c += sum(frag_ccn(rel) for ln, rel in frags if line <= ln <= end_line)
+            c += sum(frag_decisions(rel) for ln, rel in frags if line <= ln <= end_line)
             out.append((signature(header), line, c))
         if kind not in ("inner", "init") and not any(k in ("func", "opaque", "init")
                                                       for k, *_ in stack):
@@ -237,7 +251,7 @@ def scan(roots, skip_dirs):
                 included.add(os.path.normpath(os.path.join(REPO_ROOT, "src", m.group(1))))
     cache = {}
 
-    def frag_ccn(rel):  # a body fragment has no function of its own: count its decisions
+    def frag_decisions(rel):  # a body fragment has no function of its own: count its decisions
         if rel not in cache:
             full = os.path.normpath(os.path.join(REPO_ROOT, "src", rel))
             cache[rel] = len(DECISION.findall(preprocess(texts.get(full, ""))[0]))
@@ -248,8 +262,8 @@ def scan(roots, skip_dirs):
         if os.path.normpath(full) in included:
             continue
         rel = os.path.relpath(full, REPO_ROOT)
-        for sig, line, c in functions(text, frag_ccn):
-            rows.append({"key": f"{rel}::{sig}", "path": rel, "line": line, "ccn": c})
+        for sig, line, c in functions(text, frag_decisions):
+            rows.append({"key": f"{rel}::{sig}", "path": rel, "line": line, "cyclomatic": c})
     return rows, len(files)
 
 
@@ -257,12 +271,12 @@ def by_key(rows):
     """key -> max CCN; two definitions with one signature text share a pin."""
     out = {}
     for r in rows:
-        out[r["key"]] = max(out.get(r["key"], 0), r["ccn"])
+        out[r["key"]] = max(out.get(r["key"], 0), r["cyclomatic"])
     return out
 
 
 def evaluate(measured, baseline, limit):
-    """(new, grown, notes) for key->ccn maps."""
+    """(new, grown, notes) for key->complexity maps."""
     new = sorted((k, c) for k, c in measured.items() if c > limit and k not in baseline)
     grown = sorted((k, baseline[k], c) for k, c in measured.items()
                    if k in baseline and c > baseline[k])
@@ -359,7 +373,7 @@ def main():
 
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
-    limit = cfg["thresholds"]["ccn"]
+    limit = cfg["thresholds"]["cyclomatic"]
     baseline = cfg.get("baseline", {})
     bad = [k for k, v in baseline.items() if not isinstance(v, int) or v <= limit]
     if bad:
@@ -370,7 +384,7 @@ def main():
 
     rows, n_files = scan(cfg["scan"]["roots"], set(cfg["scan"].get("skip_dirs", [])))
     measured = by_key(rows)
-    over = sorted((r for r in rows if r["ccn"] > limit), key=lambda r: -r["ccn"])
+    over = sorted((r for r in rows if r["cyclomatic"] > limit), key=lambda r: -r["cyclomatic"])
 
     if args.update:
         write_baseline(args.config, measured, limit)
@@ -378,7 +392,7 @@ def main():
         return 0
     if args.list:
         for r in over:
-            print(f"  {r['ccn']:>4}  {r['path']}:{r['line']}  {r['key'].split('::', 1)[1][:90]}")
+            print(f"  {r['cyclomatic']:>4}  {r['path']}:{r['line']}  {r['key'].split('::', 1)[1][:90]}")
 
     new, grown, notes = evaluate(measured, baseline, limit)
     print(f"scanned {len(rows)} functions in {n_files} files | CCN > {limit}: {len(over)} "

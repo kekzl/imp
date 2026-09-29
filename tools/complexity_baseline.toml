@@ -10,7 +10,7 @@
 # function_size_thresholds.toml. Lines below [baseline] are generated.
 
 [thresholds]
-ccn = 25
+cyclomatic = 25
 
 [scan]
 roots = ["src"]

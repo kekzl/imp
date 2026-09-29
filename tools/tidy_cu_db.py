@@ -35,6 +35,24 @@ __device__ void __stcs(float* p, float v);
 """
 
 
+def expand_rsp(args, directory):
+    """Inline `--options-file F` / `-optf F` / `@F`: the Makefiles generator puts -I there."""
+    out, i = [], 0
+    while i < len(args):
+        a, path = args[i], None
+        if a in ("--options-file", "-optf") and i + 1 < len(args):
+            path, i = args[i + 1], i + 2
+        elif a.startswith("@"):
+            path, i = a[1:], i + 1
+        else:
+            out.append(a)
+            i += 1
+            continue
+        with open(os.path.join(directory, path), encoding="utf-8") as f:
+            out += expand_rsp(shlex.split(f.read()), directory)
+    return out
+
+
 def host_flags(args):
     out, i = [], 0
     while i < len(args):
@@ -54,7 +72,8 @@ def convert(entries, stub_dir):
     for e in entries:
         if not e["file"].endswith(".cu"):
             continue
-        args = e["arguments"] if "arguments" in e else shlex.split(e["command"])
+        args = expand_rsp(e["arguments"] if "arguments" in e else shlex.split(e["command"]),
+                          e["directory"])
         out.append({"directory": e["directory"], "file": e["file"],
                     "arguments": CLANG_CUDA + ["-isystem", stub_dir, "-include",
                                                os.path.join(stub_dir, "tidy_nvcc_compat.h")]
@@ -71,6 +90,11 @@ def main():
         cu = convert(json.load(f), stub_dir)
     if not cu:
         sys.stderr.write(f"no .cu entry in {sys.argv[1]}\n")
+        return 1
+    # Every imp TU has project -I paths; none means an unexpanded response file.
+    bare = [e["file"] for e in cu if not any(a.startswith("-I") for a in e["arguments"])]
+    if bare:
+        sys.stderr.write(f"{len(bare)} .cu entries without an -I path, e.g. {bare[0]}\n")
         return 1
     os.makedirs(stub_dir, exist_ok=True)
     for name, text in (("texture_fetch_functions.h", TEXTURE_STUB), ("tidy_nvcc_compat.h", COMPAT)):
