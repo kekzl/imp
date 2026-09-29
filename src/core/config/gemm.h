@@ -19,6 +19,9 @@ struct GEMM {
     // (s8.s8.s32, full rate unlike the quartered f32-accumulate paths),
     // replacing dequant-to-FP16 -> cuBLAS for Q8_0 prefill (M>=64). Default on.
     bool q8_imma_enabled = true;
+    // Q8_0 IMMA tile rows where BM=128 runs: 160 / 192 = 10 / 12 warps per CTA, bit-identical (#2267).
+    // BM=128 is 172 regs x 256 threads = 1 CTA, 8 warps per SM. Other values = 128.
+    int q8_imma_bm = 128;
     // Q4_K dense prefill via the IMMA kernel for weights with no FP16 cache (dequant + cuBLAS
     // otherwise). gemma-3-12b Q4_K_M kernel time pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805.
     bool q4k_imma_prefill = true;

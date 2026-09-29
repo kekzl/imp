@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `gemm.q8_imma_bm` (default 128): Q8_0 IMMA prefill on 160- or 192-row tiles, 10 / 12 warps per CTA instead of 8 (BM=128: 172 regs, 1 CTA per SM). Outputs bit-identical to BM=128 (`MmqQ8Imma.TallTilesBitIdenticalToBm128`); timing pending `scripts/bench_2267.sh` (#2267).
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 - AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
 - C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).

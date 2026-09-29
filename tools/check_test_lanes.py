@@ -350,7 +350,9 @@ def main():
     # reference; PromptLogprobsE2ETest x1 (test-e2e, IMP_TEST_MODEL): chunk logits released (#2257).
     # 1171 -> 1172: MtpQwen4ExpReference.TwoDraftStepsMatchVllmMath (test-e2e): Qwen4Exp draft step
     # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
-    PINNED = 1172
+    # 1172 -> 1173: MmqQ8Imma.TallTilesBitIdenticalToBm128 (test-quant): Q8_0 IMMA BM=160/192 vs 128
+    # bit-exact (#2267); needs a card.
+    PINNED = 1173
 
     text = CMAKE.read_text()
     mods = module_sources(text)

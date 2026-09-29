@@ -15,6 +15,7 @@ namespace imp {
 // A benchmark that measured nothing must be visible to a CI job or shell script as a failure.
 bool bench_gemm();
 bool bench_gemm_nvfp4_cutlass();
+bool bench_q8_imma();
 bool bench_attention();
 bool bench_paged_attention();
 bool bench_e2e();
@@ -25,6 +26,7 @@ static void print_usage(const char* prog) {
     printf("Available benchmarks:\n");
     printf("  gemm        GEMM micro-benchmark\n");
     printf("  nvfp4       Production CUTLASS sm_120 NVFP4 dense GEMM (isolated, ncu target)\n");
+    printf("  q8imma      Q8_0 prefill GEMM: dequant + cuBLAS vs IMMA BM 128/160/192 (#2267)\n");
     printf("  attention   Flash Attention prefill benchmark\n");
     printf("  decode-attn Paged Attention decode benchmark\n");
     printf("  e2e         End-to-end tok/s benchmark\n");
@@ -55,6 +57,7 @@ int main(int argc, char** argv) {
 
     bool run_gemm = false;
     bool run_gemm_nvfp4 = false;
+    bool run_q8_imma = false;
     bool run_attention = false;
     bool run_decode_attn = false;
     bool run_e2e = false;
@@ -112,6 +115,8 @@ int main(int argc, char** argv) {
         run_e2e = true;
     } else if (strcmp(benchmark, "gemm") == 0) {
         run_gemm = true;
+    } else if (strcmp(benchmark, "q8imma") == 0) {
+        run_q8_imma = true;
     } else if (strcmp(benchmark, "nvfp4") == 0) {
         run_gemm_nvfp4 = true;
     } else if (strcmp(benchmark, "attention") == 0) {
@@ -163,6 +168,7 @@ int main(int argc, char** argv) {
 
     run_one(run_gemm, "gemm", imp::bench_gemm);
     run_one(run_gemm_nvfp4, "nvfp4", imp::bench_gemm_nvfp4_cutlass);
+    run_one(run_q8_imma, "q8imma", imp::bench_q8_imma);
     run_one(run_attention, "attention", imp::bench_attention);
     run_one(run_decode_attn, "decode-attn", imp::bench_paged_attention);
     run_one(run_e2e, "e2e", imp::bench_e2e);

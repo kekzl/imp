@@ -10,6 +10,8 @@
 # function_size_thresholds.toml. Lines below [baseline] are generated.
 #
 # Pin changes (newest first):
+#   #2267 (Q8_0 IMMA tall tiles): re-keyed, CCN unchanged: mmq_imma_kernel (launch bounds per BM) 34,
+#   gemm_common (+ q8_bm parameter) 39
 #   #2159 (HF tokenizer parity, written before the ratchet): Tokenizer::load 99 -> 116 (NFC normalizer,
 #   Split-sequence steps, added-token strip; 139 before helpers split out), encode_gpt2 41 -> 44,
 #   load_gguf 244 -> 245, new parse_class 27 (tokenizer_pretok.cpp regex class parser)
@@ -68,8 +70,8 @@ skip_dirs = []
 "src/compute/json_schema.cpp::bool RegexNfa::parse_repeat(Frag& out)" = 32
 "src/compute/json_schema.cpp::std::unique_ptr<SchemaNode> parse_schema_object()" = 71
 "src/compute/json_schema.cpp::void skip_value()" = 27
-"src/compute/mmq_q8_imma.cu::__global__ void __launch_bounds__(kThreads) mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8, const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N, int K, const int32_t* __restrict__ expert_offsets, size_t w_stride, size_t wsc_stride, float* __restrict__ split_out = nullptr, int ks_per_split = 0)" = 34
-"src/compute/mmq_q8_imma.cu::bool gemm_common(const void* w_blocks, int qkind , const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta, const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0, bool allow_splitk = true)" = 39
+"src/compute/mmq_q8_imma.cu::__global__ void __launch_bounds__(imma_threads(BM)) mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8, const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N, int K, const int32_t* __restrict__ expert_offsets, size_t w_stride, size_t wsc_stride, float* __restrict__ split_out = nullptr, int ks_per_split = 0)" = 34
+"src/compute/mmq_q8_imma.cu::bool gemm_common(const void* w_blocks, int qkind , const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta, const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0, bool allow_splitk = true, int q8_bm = 128)" = 39
 "src/compute/moe_routing.cu::__global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate, const half* __restrict__ x, int n_experts, int d_model, int top_k, int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights, bool use_sigmoid, bool normalize_weights, const half* __restrict__ score_bias)" = 38
 "src/compute/moe_routing.cu::__global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k, int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights, bool use_sigmoid, bool normalize_weights, const half* __restrict__ score_bias)" = 34
 "src/compute/mtp_forward.cu::bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb, const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w, const NvFP4QuantResult* lm_head_nvfp4, const int32_t* d_prev_token, int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales)" = 51

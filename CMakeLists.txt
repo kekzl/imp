@@ -594,6 +594,7 @@ if(IMP_BUILD_TOOLS)
         add_executable(imp-bench
             tools/imp-bench/main.cpp
             tools/imp-bench/bench_gemm.cu
+            tools/imp-bench/bench_q8_imma.cu
             tools/imp-bench/bench_attention.cu
             tools/imp-bench/bench_e2e.cpp
         )
@@ -1103,6 +1104,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
+        tests/test_mmq_q8_imma_tall.cu
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q6k.cu
         tests/test_weight_dispatch.cu
