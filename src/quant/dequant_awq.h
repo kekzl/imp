@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <string>
 
+#include "quant/dequant_gptq.h"
+
 #if defined(__CUDACC__)
 #define IMP_AWQ_HD __host__ __device__
 #else
@@ -50,8 +52,9 @@ namespace imp {
 void dequant_awq4(half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales, int N, int K,
                   int group_size, cudaStream_t stream = nullptr);
 
-// Shared GPTQ/AWQ upload path: dequant_awq4 when awq_gemm, else dequant_gptq4 (g_idx GPTQ only).
+// Shared GPTQ/AWQ upload path: dequant_awq4 when awq_gemm, else dequant_gptq4 (g_idx, gptq_fmt GPTQ only).
 void dequant_packed4(bool awq_gemm, half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales,
-                     const int32_t* g_idx, int N, int K, int group_size, cudaStream_t stream);
+                     const int32_t* g_idx, int N, int K, int group_size, gptq::ZeroFormat gptq_fmt,
+                     cudaStream_t stream);
 
 }  // namespace imp

@@ -388,6 +388,7 @@ struct TransformerLayer {
         int group_size = 128;
         bool desc_act = false;  // config-declared activation reordering
         bool awq_gemm = false;  // AWQ GEMM layout (qweight [K, N/8]), dequant via dequant_awq4
+        int zero_offset = -1;   // gptq::ZeroFormat: 1 = gptq v1, 0 = gptq_v2, -1 = unchecked (refused)
     };
     GPTQWeight gptq_q, gptq_k, gptq_v, gptq_o;
     GPTQWeight gptq_gate, gptq_up, gptq_down;

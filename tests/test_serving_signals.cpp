@@ -156,15 +156,15 @@ TEST(ServingSignalsTest, ARequestInsideItsPromiseNeverArmsTheValve) {
     be.stop();
 }
 
-// Roadmap open 3: the >90 % valve armed on F16 pools only, and the resolver's default for every
-// Qwen3 checkpoint is FP8 KV, so a quantised pool under pressure cancelled the request instead.
+// Roadmap open 3: the >90 % valve armed on F16 pools only, so a quantised pool under pressure
+// cancelled the request instead. FP8 is pinned: Qwen3 dense "auto" resolves to FP16 since #2208.
 // A 24-block pool (384 tokens) with a 128-token streaming window: the valve arms on the FP8 pool,
 // eviction keeps the sequence inside the pool, and 600 generated tokens finish "length".
 TEST(ServingSignalsTest, QuantizedKvPressureArmsTheValveAndTheRequestFinishes) {
     if (!model_exists())
         GTEST_SKIP() << "Model not found: " << model_path();
     Loaded m;
-    ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/24, /*streaming_kv_auto=*/true, "auto",
+    ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/24, /*streaming_kv_auto=*/true, "fp8",
                        /*streaming_window=*/128));
     auto* engine = m.ctx->engine.get();
     ASSERT_NE(engine->kv_cache()->qtype(), imp::QType::F16)

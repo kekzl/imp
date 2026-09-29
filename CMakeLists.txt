@@ -170,6 +170,8 @@ set(IMP_MEMORY_SOURCES
     src/memory/mem_account.cu
     src/memory/kv_cache.cu
     src/memory/kv_cache_manager.cpp
+    src/memory/kv_cache_manager_spill.cpp
+    src/memory/kv_host_spill.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
@@ -193,6 +195,8 @@ set(IMP_MODEL_SOURCES
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
+    src/model/hf_gptq_config.cpp
+    src/model/awq_load.cpp
     src/model/mrope_positions.cpp
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
@@ -234,6 +238,7 @@ set(IMP_QUANT_SOURCES
     src/quant/dequant_gptq.cu
     src/quant/dequant_awq.cu
     src/quant/dequant_awq_host.cpp
+    src/quant/dequant_gptq_host.cpp
 )
 
 set(IMP_COMPUTE_SOURCES
@@ -371,6 +376,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
@@ -435,6 +441,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_prompt_logprobs.cu
     src/exec/executor_lm_head_fp8.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
@@ -628,6 +635,7 @@ if(IMP_BUILD_SERVER)
     tools/common/mtp_auto.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
         tools/imp-server/tool_call.cpp
@@ -739,6 +747,7 @@ if(IMP_BUILD_TESTS)
         tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
         tests/test_dequant_awq.cpp
+        tests/test_dequant_gptq.cpp
         tests/test_safetensors_writer.cpp
         tests/test_awq_calibration.cpp
         tests/test_vision_loader_check.cpp
@@ -897,6 +906,8 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_dispatch_rules.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         tests/test_fmha_fp8_tile_select.cpp
+        # KV host spill tier slot bookkeeping (#2203); the byte round trip is in test-kv.
+        tests/test_kv_host_spill.cpp
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
@@ -920,6 +931,8 @@ if(IMP_BUILD_TESTS)
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
+            tools/imp-server/prompt_logprobs.cpp
+            tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
@@ -1034,6 +1047,7 @@ if(IMP_BUILD_TESTS)
         tests/test_quant.cu
         tests/test_quant_integration.cu
         tests/test_dequant_awq_gpu.cu
+        tests/test_dequant_gptq_gpu.cu
         tests/test_gguf_dequant_ref.cu
         tests/test_gpt_oss_mxfp4_convert_ref.cu
         tests/test_nvfp4_quant.cu
@@ -1098,6 +1112,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
         tests/test_kv_block_copy.cu
+        tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu
@@ -1135,6 +1150,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
+        tests/test_scheduler_embedding_prefix.cpp
         tests/test_scheduler_prefix_bypass.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp

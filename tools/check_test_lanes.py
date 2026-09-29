@@ -338,9 +338,13 @@ def main():
     # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
     # 1154 -> 1162: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
     # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
-    # 1162 -> 1163: DequantAwqGpu.KernelBitEqualToHostReference (test-quant): dequant_awq4 kernel vs
+    # 1162 -> 1164: KVHostSpillGpuTest x2 TEST_P (test-kv): host spill tier round trip and its no-tier
+    # control on a device KVCache (#2203).
+    # 1164 -> 1165: DequantGptqGpu.KernelBitEqualToHostReference (test-quant): dequant_gptq4 kernel vs
+    # host reference (#2249); needs a card.
+    # 1165 -> 1166: DequantAwqGpu.KernelBitEqualToHostReference (test-quant): dequant_awq4 kernel vs
     # host reference (#2205); needs a card.
-    PINNED = 1163
+    PINNED = 1166
 
     text = CMAKE.read_text()
     mods = module_sources(text)

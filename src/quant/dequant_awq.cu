@@ -1,5 +1,4 @@
 #include "quant/dequant_awq.h"
-#include "quant/dequant_gptq.h"
 #include "core/logging.h"
 
 namespace imp {
@@ -24,11 +23,12 @@ void dequant_awq4(half* out, const int32_t* qweight, const int32_t* qzeros, cons
 }
 
 void dequant_packed4(bool awq_gemm, half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales,
-                     const int32_t* g_idx, int N, int K, int group_size, cudaStream_t stream) {
+                     const int32_t* g_idx, int N, int K, int group_size, gptq::ZeroFormat gptq_fmt,
+                     cudaStream_t stream) {
     if (awq_gemm)
         dequant_awq4(out, qweight, qzeros, scales, N, K, group_size, stream);
     else
-        dequant_gptq4(out, qweight, qzeros, scales, g_idx, N, K, group_size, stream);
+        dequant_gptq4(out, qweight, qzeros, scales, g_idx, N, K, group_size, gptq_fmt, stream);
 }
 
 }  // namespace imp
