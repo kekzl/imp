@@ -430,6 +430,8 @@ jobs:
               -DIMP_BUILD_TOOLS=ON -DIMP_BUILD_BENCH=OFF -DIMP_DISABLE_120F_FALLBACK=ON \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
           fi
+          # Generated header (imp-server main.cpp): a configure-only build/ lacks it, #2285.
+          cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake
           # nvcc entries -> clang host-only entries; a changed .cu absent from it would lint nothing.
           if [ ${#cu[@]} -gt 0 ]; then
             python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu
