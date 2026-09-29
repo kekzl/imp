@@ -27,7 +27,7 @@ void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w);
 
 // Unpack native MXFP4 GGUF blocks (17 bytes each: 16 data + 1 scale)
 // into separate data and SfAtom scale arrays for CUTLASS GEMM.
-bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4Weight& dst,
+[[nodiscard]] bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4Weight& dst,
                        cudaStream_t stream);
 
 // Quantizes FP16 activation [M,K] to MXFP4 CUTLASS block-scaled format: absmax per 32
@@ -40,7 +40,7 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 // Runs CUTLASS sm_120 block-scaled MXFP4xMXFP4 GEMM: D = alpha*A@B^T. A (activation)
 // [M,K] MXFP4 RowMajor + SFA UE8M0; B (weight) [N,K] MXFP4 RowMajor + SFB UE8M0; D
 // [M,N] FP16 RowMajor.
-bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP4Weight& b, void* d_fp16,
+[[nodiscard]] bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP4Weight& b, void* d_fp16,
                               int M, int N, int K, void* workspace, size_t workspace_size,
                               cudaStream_t stream);
 
@@ -52,6 +52,6 @@ size_t gemm_mxfp4_cutlass_sm120_workspace(int M, int N, int K);
 void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, void* dst_fp16,
                            cudaStream_t stream);
 
-bool cutlass_sm120_mxfp4_available();
+[[nodiscard]] bool cutlass_sm120_mxfp4_available();
 
 }  // namespace imp

@@ -433,7 +433,7 @@ struct RuntimeConfig {
 
     // Load from disk; returns true on success. On parse error, the struct
     // is left at its default state and an error is logged.
-    bool load_from_file(const std::string& path);
+    [[nodiscard]] bool load_from_file(const std::string& path);
 
     // Apply key=value strings (e.g. "kv_cache.dtype=fp8") via dotted-section
     // lookup. Returns entries that bound to nothing: a `--set` naming an

@@ -238,7 +238,7 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     cfg_20.library_reserve_mb = 0;
 
     size_t total_vram = 0;
-    vram_budget_mem_get_info(nullptr, &total_vram);
+    ASSERT_TRUE(vram_budget_mem_get_info(nullptr, &total_vram));
     ASSERT_GT(total_vram, 0u);
 
     VRAMBudget b10 = compute_vram_budget(m, cfg_10, 32, 128, 8 * GiB);
@@ -633,7 +633,7 @@ TEST(VramBudgetReserve, ReserveNeverUndercutsTheAllocatorHeadroom) {
     SKIP_IF_NO_CUDA();
 
     size_t total_vram = 0;
-    vram_budget_mem_get_info(nullptr, &total_vram);
+    ASSERT_TRUE(vram_budget_mem_get_info(nullptr, &total_vram));
     ASSERT_GT(total_vram, 0u);
     const size_t hard_floor = vram_allocator_headroom(total_vram);
 

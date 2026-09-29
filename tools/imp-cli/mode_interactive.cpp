@@ -124,7 +124,11 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             }
 
             // Reset context for fresh KV cache
-            imp_context_reset(ctx);
+            if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+                fprintf(stderr, "Context reset error: %s\n", imp_error_string(reset_err));
+                history.pop_back();
+                continue;
+            }
 
             // Prefill with templated tokens (params apply to first sample)
             err = imp_prefill_with_params(ctx, tokens.data(), static_cast<int>(tokens.size()), &params);
@@ -259,7 +263,10 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             history.push_back({"assistant", response});
         } else {
             // Raw mode: no history, just generate
-            imp_context_reset(ctx);
+            if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+                fprintf(stderr, "Context reset error: %s\n", imp_error_string(reset_err));
+                continue;
+            }
             char output[8192];
             size_t output_len = 0;
             err = imp_generate(ctx, input.c_str(), &params, output, sizeof(output), &output_len);

@@ -17,7 +17,7 @@ class KVCache;
 // One KV block across every layer as host bytes: per layer K, V, then K/V scales when the dtype
 // has them. False when the cache cannot round-trip a block: an SWA layer (separate id space) or the
 // key min/max pool (not copied, same limit as KVCacheManager::clone_held_block).
-bool kv_host_spill_supported(KVCache& cache);
+[[nodiscard]] bool kv_host_spill_supported(KVCache& cache);
 size_t kv_host_block_bytes(KVCache& cache);
 // Async on stream; the caller synchronizes before the block or the host bytes are reused.
 // False: a copy failed to enqueue (the rest were still enqueued).
@@ -53,7 +53,7 @@ public:
 
     // Slot buffer holding hash, nullptr on a miss. Marks it most recently used.
     const void* find(size_t hash);
-    bool contains(size_t hash) const { return index_.count(hash) != 0; }
+    [[nodiscard]] bool contains(size_t hash) const { return index_.count(hash) != 0; }
     void erase(size_t hash);
     void clear();
     int size() const { return static_cast<int>(index_.size()); }

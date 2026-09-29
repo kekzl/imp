@@ -105,12 +105,12 @@ float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* 
 // mandated). NVFP4/MXFP4 cross-misroutes or corrupt checkpoints could arrive as U8/I8
 // (UE8M0) or other dtypes; rejected at promote time so the slow dequant->cuBLAS fallback
 // runs instead of the FP8 decoder silently producing wrong output.
-bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err);
+[[nodiscard]] bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err);
 
 // Verifies weight_scale's inner dim matches weight_packed's at the spec's group_size=16:
 // weight_packed is [N,K/2] (packed halves), weight_scale must be [N,K/16] =
 // [N, weight_packed_K/8]. Mismatch on outer dim or inner-dim ratio rejects promotion.
-bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer_dim, int64_t packed_inner_dim,
+[[nodiscard]] bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer_dim, int64_t packed_inner_dim,
                                         int64_t scale_outer_dim, int64_t scale_inner_dim,
                                         std::string* err);
 

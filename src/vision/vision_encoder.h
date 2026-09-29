@@ -24,7 +24,7 @@ public:
     // Encode a preprocessed image.
     // d_pixels: [3, image_size, image_size] FP16 on device
     // d_output: [num_image_tokens, lm_d_model] FP16 on device (caller-allocated)
-    bool encode(const half* d_pixels, half* d_output, cudaStream_t stream);
+    [[nodiscard]] bool encode(const half* d_pixels, half* d_output, cudaStream_t stream);
 
 private:
     size_t taken_bytes_ = 0;
@@ -53,8 +53,8 @@ private:
     const half* graph_d_pixels_ = nullptr;
     half* graph_d_output_ = nullptr;
 
-    bool encode_impl(const half* d_pixels, half* d_output, cudaStream_t stream);
-    bool encode_impl_gemma4v(const half* d_pixels, half* d_output, cudaStream_t stream);
+    [[nodiscard]] bool encode_impl(const half* d_pixels, half* d_output, cudaStream_t stream);
+    [[nodiscard]] bool encode_impl_gemma4v(const half* d_pixels, half* d_output, cudaStream_t stream);
 
     void free_buffers();
 };

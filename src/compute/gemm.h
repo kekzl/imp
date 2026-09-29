@@ -21,7 +21,7 @@ void gemm_init();
 // sm_120; the verify capturer warms every shape eagerly first and toggles this around
 // its capture.
 void gemm_set_lt_capture_allowed(bool allowed);
-bool gemm_lt_capture_allowed();
+[[nodiscard]] bool gemm_lt_capture_allowed();
 
 // Destroy cached cuBLASLt descriptors. Call at shutdown (e.g. Engine destructor).
 void gemm_cleanup();
@@ -39,7 +39,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.
 
 // Probe whether cuBLASLt supports FP8 E4M3 GEMM on this GPU/driver.
 // Runs a tiny 8×64×8 FP8 matmul and returns true if cublasLtMatmul succeeds.
-bool gemm_cublaslt_fp8_probe();
+[[nodiscard]] bool gemm_cublaslt_fp8_probe();
 
 // Small batch GEMV for batch_size 1-4
 void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream = nullptr);
@@ -52,7 +52,7 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
                        cudaStream_t stream = nullptr);
 // FP32-output variant for the FP8 LM head: W [M,K] E4M3, x [n_rows,K] FP16, y [n_rows,M] FP32.
 // Tensor-core (mma m16n8k16), one weight pass per 32 rows; row bits independent of n_rows. K % 256 == 0.
-bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,
+[[nodiscard]] bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,
                             int n_rows, cudaStream_t stream = nullptr);
 
 // Fused quantized GEMV: dequant + dot product in one pass (no intermediate FP16 buffer).

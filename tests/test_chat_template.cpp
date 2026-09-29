@@ -83,7 +83,7 @@ static Tokenizer make_chat_tokenizer() {
     scores.push_back(0.0f);  // 278
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("spm");
     tok.set_add_bos(true);
     tok.set_add_space_prefix(false);
@@ -304,7 +304,7 @@ TEST(ChatTemplateInitTest, ChatMLMissingTokensFallsBack) {
     Tokenizer tok;
     std::vector<std::string> v = {"<unk>", "<s>", "</s>"};
     std::vector<float> s = {0, 0, 0};
-    tok.load_vocab(v, s, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(v, s, 1, 2));
     tok.set_type("spm");
 
     ChatTemplate tpl;

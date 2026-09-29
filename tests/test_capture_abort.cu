@@ -39,7 +39,7 @@ TEST(CaptureAbort, ThrowDuringCaptureLeavesStreamUsable) {
 
     // The throw mid-capture must be handled inside execute(): abort the
     // capture, fall back to eager, run the fn for real.
-    EXPECT_NO_THROW(runner.execute(stream));
+    EXPECT_NO_THROW(EXPECT_TRUE(runner.execute(stream)));
 
     // Stream must not be left capturing.
     cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
@@ -57,7 +57,7 @@ TEST(CaptureAbort, ThrowDuringCaptureLeavesStreamUsable) {
     EXPECT_EQ(h, 42);
 
     // Runner keeps serving eagerly (capture permanently disabled for it).
-    EXPECT_NO_THROW(runner.execute(stream));
+    EXPECT_NO_THROW(EXPECT_TRUE(runner.execute(stream)));
     EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 

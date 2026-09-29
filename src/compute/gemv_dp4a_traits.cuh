@@ -573,7 +573,7 @@ static inline int kpar_n_sms() {
 // Q6_K/Q4_K/Q5_K, where warp-cooperative K-splitting outweighs smem bandwidth); false favors
 // row-par on ties (bandwidth-bound types Q8_0/Q4_0, where smem Q8_1 caching wins).
 template <bool PREFER_KPAR>
-static inline bool kpar_is_better(int M, int rpar_blocks) {
+[[nodiscard]] static inline bool kpar_is_better(int M, int rpar_blocks) {
     const int n = kpar_n_sms();
     if (n < 1)
         return false;

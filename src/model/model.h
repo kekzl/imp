@@ -67,11 +67,11 @@ public:
     // Uploads mmap'd weights to GPU, dequantizing per dtype (Q4_0 unpacks to nibbles+scales on
     // GPU, Q8_0 dequants to FP16, F16/BF16 direct, F32 converts to compute_dtype). warm_cache
     // consults/writes the on-disk cache; skipped when a suspend-to-RAM snapshot is armed.
-    bool upload_weights_gpu(QType compute_dtype = QType::F16, cudaStream_t stream = nullptr,
+    [[nodiscard]] bool upload_weights_gpu(QType compute_dtype = QType::F16, cudaStream_t stream = nullptr,
                             size_t expert_reserve_bytes = 1ULL << 30, bool warm_cache = false,
                             const std::string& warm_cache_dir = {});
 
-    bool gpu_weights_ready() const { return gpu_weights_ready_; }
+    [[nodiscard]] bool gpu_weights_ready() const { return gpu_weights_ready_; }
 
     // True once pre-dequant consumed source weights unrecoverably: freed via
     // release_gpu_allocation() (dangling .data) or destructively transformed in place
@@ -79,14 +79,14 @@ public:
     // memory (#830); reload for a fresh engine. Intact sources (e.g. dense Q8_0) support
     // create/free/create.
     void mark_sources_consumed() { sources_consumed_ = true; }
-    bool sources_consumed() const { return sources_consumed_; }
+    [[nodiscard]] bool sources_consumed() const { return sources_consumed_; }
 
     // True once device weight buffers were transformed in place after upload (MXFP4
     // compaction, native-MXFP4 GGUF unpack, Gemma-4 fused expert split). WeightSnapshot::capture
     // refuses these (suspend unsupported, v1). Distinct from sources_consumed_: a dropped
     // source only evicts its log record, it doesn't poison the rest of the snapshot.
     void mark_device_sources_mutated() { device_sources_mutated_ = true; }
-    bool device_sources_mutated() const { return device_sources_mutated_; }
+    [[nodiscard]] bool device_sources_mutated() const { return device_sources_mutated_; }
 
     // Path the loader was invoked with; empty for synthetic models.
     const std::string& source_path() const { return source_path_; }
@@ -179,7 +179,7 @@ public:
 
 // Uploads an MTP head that belongs to no Model (tests/test_mtp_qwen4exp_reference.cpp) through the
 // same path Model::upload_weights_gpu takes. Allocations land in gpu_allocs; the caller frees them.
-bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset, cudaStream_t stream,
+[[nodiscard]] bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset, cudaStream_t stream,
                      std::vector<void*>& gpu_allocs);
 
 }  // namespace imp

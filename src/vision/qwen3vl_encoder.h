@@ -42,13 +42,13 @@ public:
     // d_patches: [grid.tokens,features] FP16 device, patchifier's merge-block token order.
     // d_out: [merged_tokens,out_hidden_size] FP16 device, caller-allocated. d_deepstack_out:
     // one buffer per config.deepstack_indexes, same shape as d_out; empty skips the taps.
-    bool encode(const half* d_patches, const QwenVisionGrid& grid, half* d_out,
+    [[nodiscard]] bool encode(const half* d_patches, const QwenVisionGrid& grid, half* d_out,
                 const std::vector<half*>& d_deepstack_out, cudaStream_t stream);
 
 private:
-    bool run_merger(const VisionMergerWeights& m, const half* d_hidden, int tokens, half* d_out,
+    [[nodiscard]] bool run_merger(const VisionMergerWeights& m, const half* d_hidden, int tokens, half* d_out,
                     cudaStream_t stream);
-    bool attention(int tokens, cudaStream_t stream);
+    [[nodiscard]] bool attention(int tokens, cudaStream_t stream);
 
     const VisionModel* model_ = nullptr;
     int max_tokens_ = 0;

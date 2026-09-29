@@ -65,12 +65,12 @@ public:
     // Largest image, in pixels, this pipeline's patch budget allows.
     int64_t max_pixels() const;
 
-    bool encode_file(const std::string& path, Qwen3VLImage& out, cudaStream_t stream);
+    [[nodiscard]] bool encode_file(const std::string& path, Qwen3VLImage& out, cudaStream_t stream);
 
     // Per-request path (the server): CPU only, decode+resize+patchify. Safe off the batch
     // worker (an HTTP handler thread); tells the caller how many image tokens the prompt must
     // reserve, BEFORE any GPU work happens.
-    bool preprocess(std::span<const uint8_t> data, QwenPatches& out) const;
+    [[nodiscard]] bool preprocess(std::span<const uint8_t> data, QwenPatches& out) const;
     // Image tokens a patchified image becomes.
     int merged_tokens_of(const QwenPatches& p) const;
     // Bytes one request's embedding buffer needs (same for each DeepStack tap).
@@ -84,16 +84,16 @@ public:
     // copies out: the encoder's workspaces are sized once and shared, a per-request output
     // would force re-sizing per image. Serialized: caller must be the sole GPU driver (the
     // batch worker).
-    bool encode_patches_to(const QwenPatches& patches, half* d_out, const std::vector<half*>& d_deepstack,
+    [[nodiscard]] bool encode_patches_to(const QwenPatches& patches, half* d_out, const std::vector<half*>& d_deepstack,
                            Qwen3VLImage& shape_out, cudaStream_t stream);
 
 private:
-    bool encode_rgb(const uint8_t* rgb, int width, int height, Qwen3VLImage& out, cudaStream_t stream);
-    bool encode_patches(const QwenPatches& patches, Qwen3VLImage& out, cudaStream_t stream);
+    [[nodiscard]] bool encode_rgb(const uint8_t* rgb, int width, int height, Qwen3VLImage& out, cudaStream_t stream);
+    [[nodiscard]] bool encode_patches(const QwenPatches& patches, Qwen3VLImage& out, cudaStream_t stream);
     QwenPatchifyConfig patchify_config() const;
     void free_buffers();
-    bool build_();
-    bool ensure_ready_();
+    [[nodiscard]] bool build_();
+    [[nodiscard]] bool ensure_ready_();
 
     VisionModel* tower_ = nullptr;
     size_t taken_bytes_ = 0;

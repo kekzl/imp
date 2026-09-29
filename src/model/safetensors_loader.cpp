@@ -927,6 +927,18 @@ static bool gptq_refuses(Model& model, const std::unordered_map<std::string, Ten
     return false;
 }
 
+// generation_config.json (optional): sampling/EOS defaults; its EOS ids join the tokenizer's stop list.
+static void apply_generation_config(Model& model, const std::string& model_dir) {
+    if (model_dir.empty())
+        return;
+    // Optional file: absent or unparsable keeps the defaults.
+    (void)HFConfigLoader::load_generation_config(model_dir, model.generation_config_);
+    if (!model.tokenizer_)
+        return;
+    for (int32_t eid : model.generation_config_.eos_token_ids)
+        model.tokenizer_->add_eos_id(eid);
+}
+
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
@@ -1151,7 +1163,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
 
     // 6. Assign tensors via WeightMap
     WeightMap wmap(cfg.arch);
-    wmap.apply_weights(*model, tensor_map);
+    if (!wmap.apply_weights(*model, tensor_map))
+        return nullptr;  // logged by apply_weights
     // 6a. Qwen4Exp PLE: the layer's projections came through the weight map, its n-gram table
     // (F8 shards + I64 hash buffers) is opened host-side. Missing table = unservable, refuse.
     for (size_t i = 0; i < model->layers_.size(); i++) {
@@ -1278,7 +1291,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             if (!spm.empty()) {
                 auto tok = std::make_unique<Tokenizer>();
                 tok->set_type("spm");
-                tok->load_vocab(spm.pieces, spm.scores, spm.bos_id, spm.eos_id);
+                // spm.pieces is non-empty and load_vocab refuses only an empty vocab: cannot fail.
+                (void)tok->load_vocab(spm.pieces, spm.scores, spm.bos_id, spm.eos_id);
                 tok->load_token_types(spm.types);
                 if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty()) {
                     tok->set_chat_template_str(model->tokenizer_->chat_template_str());
@@ -1358,14 +1372,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // generation_config.json: sampling/EOS defaults shipped by the model author, loaded into
     // model->generation_config_ for engine + CLI consumers. EOS IDs are additionally pushed
     // onto the tokenizer's eos list so the existing stop-condition path picks them up.
-    if (!model_dir.empty()) {
-        HFConfigLoader::load_generation_config(model_dir, model->generation_config_);
-        if (model->tokenizer_) {
-            for (int32_t eid : model->generation_config_.eos_token_ids) {
-                model->tokenizer_->add_eos_id(eid);
-            }
-        }
-    }
+    apply_generation_config(*model, model_dir);
 
     // Cross-checks special_tokens_map.json against the loaded tokenizer's special-flag column.
     // The model author's list is authoritative: a string in additional_special_tokens that

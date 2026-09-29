@@ -22,7 +22,7 @@ namespace imp {
 // INVARIANT: with ksmooth active, promoted tiles must subtract the same K mean, or mixed
 // shifted/unshifted columns corrupt the softmax row.
 // q_offset: global position of Q row 0 (chunked-prefill continuation); masks use q_offset+row.
-bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+[[nodiscard]] bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
                               bool use_blockscale = false, int q_offset = 0);
 
@@ -30,7 +30,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 // cache (current chunk must already be appended before calling). promote_budget>0 promotes PAST
 // tiles to exact FP32 dots over dequantized cache K; the CURRENT chunk is always exact FP16
 // (quantizing the recency window is where quality damage lives). Requires batch=1, hd=128, Q FP16.
-bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh,
+[[nodiscard]] bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh,
                                     const half* v_fresh, const uint8_t* k_data,
                                     const uint8_t* k_scales, const uint8_t* v_data,
                                     const uint8_t* v_scales, const int* block_table, int block_size,

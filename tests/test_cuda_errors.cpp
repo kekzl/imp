@@ -39,5 +39,17 @@ TEST(CudaErrorsTest, SyncFailureThrowsNamingClassAndSite) {
     }
 }
 
+// #2211: a failed sampler readback sync fails the request; it never yields a token.
+TEST(CudaErrorsTest, SyncedTokenIsReadOnlyAfterSuccessfulSync) {
+    const int32_t h_token = 1234;
+    EXPECT_EQ(synced_token_or_throw(cudaSuccess, &h_token, "forward sampler readback"), 1234);
+    try {
+        const int32_t tok = synced_token_or_throw(cudaErrorLaunchFailure, &h_token, "forward sampler readback");
+        FAIL() << "a failed sync returned token " << tok;
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("forward sampler readback"), std::string::npos) << e.what();
+    }
+}
+
 }  // namespace
 }  // namespace imp

@@ -64,7 +64,7 @@ struct InferenceState {
     // prepare_decode_step_host() staged this step's PLE rows. Per state, not per executor:
     // a graph replay skips host code, so an executor flag outlived the step (#2150).
     bool ple_host_ready = false;
-    bool ssm_grouped_chunk() const {
+    [[nodiscard]] bool ssm_grouped_chunk() const {
         return is_prefill && ssm_seq_slots != nullptr && ssm_n_seq > 1 && ssm_seq_tokens > 0;
     }
     // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md): a grouped
@@ -134,7 +134,7 @@ struct InferenceState {
     const int* h_seq_offsets = nullptr;    // HOST [n_sequences+1] row prefix sums
     const int* h_seq_q_offsets = nullptr;  // HOST [n_sequences] per-seq prefill_offset
     const int* h_ssm_slots = nullptr;      // HOST [n_sequences] recurrent-state slots
-    bool ragged_prefill() const { return is_prefill && n_sequences > 1 && h_seq_offsets != nullptr; }
+    [[nodiscard]] bool ragged_prefill() const { return is_prefill && n_sequences > 1 && h_seq_offsets != nullptr; }
     // Mixed prefill+decode step (runtime.prefill_mixed_decode): the LAST n_riders sequences
     // of a ragged prefill state are decoding requests with one row each; run_attention gives
     // them one batched paged-decode launch per layer instead of the per-member prefill

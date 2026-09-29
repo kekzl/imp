@@ -69,7 +69,7 @@ inline size_t ssm_pool_bytes(const SsmStateGeometry& g, int slots, int reserved_
 // layers whose state slab is missing does not degrade: every GDN layer reads a null
 // pointer and the output is garbage for every request, while the only signal used to be
 // one WARN at startup. A dense model has no such layers and is unaffected.
-inline bool must_refuse_without_ssm_state(int n_ssm_layers, bool pool_init_ok) {
+[[nodiscard]] inline bool must_refuse_without_ssm_state(int n_ssm_layers, bool pool_init_ok) {
     return n_ssm_layers > 0 && !pool_init_ok;
 }
 

@@ -373,7 +373,7 @@ TEST(TextThink, MarkerSurvivesWindowEviction) {
     // most recent, so the window still contains the full "</think>".
     TextThinkState s;
     s.in_think_block = true;
-    s.feed_piece(std::string(40, 'x'));  // window now full of filler
+    (void)s.feed_piece(std::string(40, 'x'));  // window now full of filler
     EXPECT_FALSE(s.feed_piece("</th"));
     EXPECT_TRUE(s.feed_piece("ink>"));
     EXPECT_FALSE(s.in_think_block);

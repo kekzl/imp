@@ -14,7 +14,7 @@ static constexpr int MAX_TOP_K = 128;
 
 // Readback sync of the synchronous samplers; false = the host copy is not valid, the sampler
 // returns token 0 (its existing failure value) and the error stays in cudaGetLastError.
-inline bool sampler_sync_ok(cudaStream_t stream, const char* who) {
+[[nodiscard]] inline bool sampler_sync_ok(cudaStream_t stream, const char* who) {
     const cudaError_t err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
         IMP_LOG_ERROR("%s: readback sync failed: %s", who, cudaGetErrorString(err));

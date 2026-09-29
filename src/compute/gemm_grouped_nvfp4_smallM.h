@@ -15,7 +15,7 @@ namespace imp {
 //   D_i [M_i,N] FP16 RowMajor; alpha_i per-expert tensor_scale as GEMM alpha
 // dev_alpha is a DEVICE pointer to [n_experts] floats; caller keeps it live until the stream
 // consumes the kernel. K and N must be identical across experts; M_i varies.
-bool gemm_grouped_nvfp4_smallM(
+[[nodiscard]] bool gemm_grouped_nvfp4_smallM(
     int n_experts,
     const int* host_M,                // [n_experts] M_i per expert
     int N, int K,
@@ -27,7 +27,7 @@ bool gemm_grouped_nvfp4_smallM(
     const float* dev_alpha,           // [n_experts] per-expert tensor_scale (DEVICE ptr)
     cudaStream_t stream);
 
-bool gemm_grouped_nvfp4_smallM_available();
+[[nodiscard]] bool gemm_grouped_nvfp4_smallM_available();
 
 namespace detail {
 

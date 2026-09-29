@@ -897,7 +897,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
     const void* lm_fp8 = nullptr;
     const float* lm_fp8_scales = nullptr;
     if (executor_)
-        executor_->lm_head_fp8_view(lm_fp8, lm_fp8_scales);
+        (void)executor_->lm_head_fp8_view(lm_fp8, lm_fp8_scales);  // false: no FP8 head, pointers stay null
     return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_, model_->tok_emb_, model_->out_proj_,
                                *ws, hidden_dim, vocab_size, out_token_id, decode_stream(), out_topk_ids,
                                top_w, lm_nvfp4_p, d_prev_token, d_out_token, lm_fp8, lm_fp8_scales);

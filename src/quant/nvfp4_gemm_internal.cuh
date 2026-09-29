@@ -38,7 +38,7 @@ static constexpr int kMinBlocksPerSM = 6;
 // include runtime/config.h. NOT cached in a function-local static like nvfp4_n_sms(): read
 // once per GEMM launch on the host costs nothing, and caching would make the knob
 // impossible to toggle in a test.
-static bool nvfp4_verify_row_parity() { return imp::process_diag_verify_row_parity(); }
+[[nodiscard]] static bool nvfp4_verify_row_parity() { return imp::process_diag_verify_row_parity(); }
 
 static int nvfp4_n_sms() {
     static int n_sms = 0;

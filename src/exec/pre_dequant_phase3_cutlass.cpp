@@ -41,7 +41,8 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     if (wcache_->nvfp4_decode_mode == 2) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         size_t free_mem = 0, total_mem = 0;
-        vram_budget_mem_get_info(&free_mem, &total_mem);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
         // Intentionally NOT using dctx.safety_reserve here: populating cutlass_nvfp4 in mode 2
         // destabilised CUDA-graph capture on some models. The dense in-loop safety relaxation
         // already delivers its decode win; the CUTLASS path stays conservative until the
@@ -467,7 +468,8 @@ if (mx_native > 0) {
         // workspace (status 14 INVALID_VALUE) followed by a confusing downstream illegal memory
         // access. Refuse the alloc instead of paging, to keep the failure mode legible.
         size_t free_mem = 0, total_mem = 0;
-        vram_budget_mem_get_info(&free_mem, &total_mem);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
         constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
         bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                               fp16_total + kRuntimeHeadroom > free_mem);

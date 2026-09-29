@@ -37,11 +37,11 @@ void dequantize_mxfp8_cutlass_to_fp16(const CutlassMxFP8Weight& w, void* dst_fp1
 
 // D[M,N] FP16 = A[M,K] (MXFP8 RowMajor + SFA) x B[N,K]^T (MXFP8 + SFB). False when CUTLASS
 // declines the shape or the workspace is too small (the caller falls back).
-bool gemm_mxfp8_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP8Weight& b, void* d_fp16,
+[[nodiscard]] bool gemm_mxfp8_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP8Weight& b, void* d_fp16,
                               int M, int N, int K, void* workspace, size_t workspace_size,
                               cudaStream_t stream);
 size_t gemm_mxfp8_cutlass_sm120_workspace(int M, int N, int K);
 
-bool cutlass_sm120_mxfp8_available();
+[[nodiscard]] bool cutlass_sm120_mxfp8_available();
 
 }  // namespace imp

@@ -439,7 +439,7 @@ std::string split_regex(const JValue& pt) {
     std::string rx;
     const JValue* pat = jobj_find(pt, "pattern");
     if (pat && pat->type == JType::OBJECT)
-        jobj_get_string(*pat, "Regex", rx);
+        jobj_opt_string(*pat, "Regex", rx);
     return rx;
 }
 
@@ -447,7 +447,7 @@ std::string split_regex(const JValue& pt) {
 // split, "!" for any other (not expressible).
 std::string split_step(const JValue& pt) {
     std::string behavior;
-    jobj_get_string(pt, "behavior", behavior);
+    jobj_opt_string(pt, "behavior", behavior);
     const JValue* pat = jobj_find(pt, "pattern");
     std::string rx;
     const bool regex = pat && pat->type == JType::OBJECT && jobj_get_string(*pat, "Regex", rx);
@@ -507,7 +507,7 @@ bool Tokenizer::load(const std::string& path) {
 
     // Model type
     std::string model_type;
-    jobj_get_string(*model, "type", model_type);
+    jobj_opt_string(*model, "type", model_type);
 
     // Extract vocabulary from model.vocab
     const JValue* vocab = jobj_find(*model, "vocab");
@@ -655,7 +655,7 @@ bool Tokenizer::load(const std::string& path) {
     nfc_ = false;
     if (const JValue* norm = jobj_find(root, "normalizer"); norm && norm->type == JType::OBJECT) {
         std::string nt;
-        jobj_get_string(*norm, "type", nt);
+        jobj_opt_string(*norm, "type", nt);
         nfc_ = nt == "NFC";
         const JValue* seq = nt == "Sequence" ? jobj_find(*norm, "normalizers") : nullptr;
         if (seq && seq->type == JType::ARRAY) {
@@ -671,7 +671,7 @@ bool Tokenizer::load(const std::string& path) {
     const JValue* pre_tok = jobj_find(root, "pre_tokenizer");
     if (pre_tok && pre_tok->type == JType::OBJECT) {
         std::string pt_type;
-        jobj_get_string(*pre_tok, "type", pt_type);
+        jobj_opt_string(*pre_tok, "type", pt_type);
 
         if (pt_type == "ByteLevel") {
             type_ = "gpt2";
@@ -696,7 +696,7 @@ bool Tokenizer::load(const std::string& path) {
                     if (pt.type != JType::OBJECT)
                         continue;
                     std::string inner_type;
-                    jobj_get_string(pt, "type", inner_type);
+                    jobj_opt_string(pt, "type", inner_type);
                     if (inner_type == "Digits") {
                         split_steps.push_back(jnum_true(jobj_find(pt, "individual_digits")) ? "digits:1"
                                                                                             : "digits:0");
@@ -755,8 +755,8 @@ bool Tokenizer::load(const std::string& path) {
         if (norm && norm->type == JType::OBJECT && jobj_get_string(*norm, "type", nt) && nt == "Replace") {
             const JValue* pat = jobj_find(*norm, "pattern");
             if (pat && pat->type == JType::OBJECT)
-                jobj_get_string(*pat, "String", from);
-            jobj_get_string(*norm, "content", to);
+                jobj_opt_string(*pat, "String", from);
+            jobj_opt_string(*norm, "content", to);
         }
         if (from == " " && to == "\xe2\x96\x81") {
             type_ = "gemma4";

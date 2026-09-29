@@ -79,7 +79,7 @@ private:
     char peek() const;
     char advance();
     void skip_ws();
-    bool expect(char c);
+    [[nodiscard]] bool expect(char c);
     static int hex_digit(char c);
     uint32_t parse_u4();
     static void append_codepoint_utf8(std::string& s, uint32_t cp);
@@ -100,7 +100,7 @@ const JValue* jobj_find(const JValue& obj, const std::string& key);
 // Typed field accessors. Return false (and leave `out` untouched) on missing
 // key or wrong type.
 template <typename T>
-bool jobj_get_int(const JValue& obj, const std::string& key, T& out) {
+[[nodiscard]] bool jobj_get_int(const JValue& obj, const std::string& key, T& out) {
     const JValue* v = jobj_find(obj, key);
     if (!v || v->type != JType::NUMBER)
         return false;
@@ -108,14 +108,26 @@ bool jobj_get_int(const JValue& obj, const std::string& key, T& out) {
     return true;
 }
 
-bool jobj_get_float(const JValue& obj, const std::string& key, float& out);
-bool jobj_get_string(const JValue& obj, const std::string& key, std::string& out);
+[[nodiscard]] bool jobj_get_float(const JValue& obj, const std::string& key, float& out);
+[[nodiscard]] bool jobj_get_string(const JValue& obj, const std::string& key, std::string& out);
+
+// Optional keys: `out` keeps its default when the key is absent or not the named type.
+template <typename T>
+void jobj_opt_int(const JValue& obj, const std::string& key, T& out) {
+    (void)jobj_get_int(obj, key, out);
+}
+inline void jobj_opt_float(const JValue& obj, const std::string& key, float& out) {
+    (void)jobj_get_float(obj, key, out);
+}
+inline void jobj_opt_string(const JValue& obj, const std::string& key, std::string& out) {
+    (void)jobj_get_string(obj, key, out);
+}
 
 // Slurp a file into a string. Empty string on error.
 std::string read_file(const std::string& path);
 
 // Parse a JSON file into a JValue. Returns false on I/O or parse error, or if
 // the root is not an object.
-bool parse_json_file(const std::string& path, JValue& out);
+[[nodiscard]] bool parse_json_file(const std::string& path, JValue& out);
 
 }  // namespace imp

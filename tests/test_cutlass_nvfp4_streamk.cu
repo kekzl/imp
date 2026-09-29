@@ -212,7 +212,8 @@ TEST_F(CutlassNvfp4StreamKTest, BenchPp512Shapes) {
             float ms = 0.0f;
             while (ms < 1000.0f) {
                 for (int i = 0; i < 50; ++i)
-                    gemm_nvfp4_cutlass_sm120(ops[i % ring].act_data, ops[i % ring].act_sf, ops[i % ring].cw,
+                    // timing loop: the launch status is not under test
+                    (void)gemm_nvfp4_cutlass_sm120(ops[i % ring].act_data, ops[i % ring].act_sf, ops[i % ring].cw,
                                              y, s.M, s.N, s.K, ws, ws_bytes, stream_);
                 cudaEventRecord(w1, stream_);
                 cudaEventSynchronize(w1);
@@ -222,19 +223,23 @@ TEST_F(CutlassNvfp4StreamKTest, BenchPp512Shapes) {
             cudaEventDestroy(w1);
         }
         float dp = time_us([&](int r) {
-            gemm_nvfp4_cutlass_sm120(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
+            // timing loop: the launch status is not under test
+            (void)gemm_nvfp4_cutlass_sm120(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
                                      ws_bytes, stream_);
         });
         float sk_h = time_us([&](int r) {
-            gemm_nvfp4_cutlass_sm120_streamk(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
+            // timing loop: the launch status is not under test
+            (void)gemm_nvfp4_cutlass_sm120_streamk(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
                                              ws_bytes, stream_, false);
         });
         float sk_f = time_us([&](int r) {
-            gemm_nvfp4_cutlass_sm120_streamk(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
+            // timing loop: the launch status is not under test
+            (void)gemm_nvfp4_cutlass_sm120_streamk(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
                                              ws_bytes, stream_, true);
         });
         float pp = time_us([&](int r) {
-            gemm_nvfp4_cutlass_sm120_smalln(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
+            // timing loop: the launch status is not under test
+            (void)gemm_nvfp4_cutlass_sm120_smalln(ops[r].act_data, ops[r].act_sf, ops[r].cw, y, s.M, s.N, s.K, ws,
                                             ws_bytes, stream_);
         });
         ASSERT_EQ(cudaGetLastError(), cudaSuccess);

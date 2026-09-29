@@ -848,6 +848,31 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
     return true;
 }
 
+// lm_head GEMV of ws.d_h_final: FP8 -> d_logits_f32, NVFP4 -> d_logits_f32, else FP16 -> d_logits.
+// False (ERROR logged) when the FP8 GEMV refuses its shape: the logits were never written.
+static bool mtp_lm_head_logits(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
+                               cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4, const void* lm_head_fp8,
+                               const float* lm_head_fp8_scales, bool fp8_lm, bool f32_lm) {
+    if (fp8_lm) {
+        if (gemv_fp8_rowscale_fp32(lm_head_fp8, lm_head_fp8_scales, static_cast<const half*>(ws.d_h_final),
+                                   static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, 1, stream))
+            return true;
+        IMP_LOG_ERROR("mtp: FP8 lm_head GEMV refused its shape (vocab=%d hidden=%d)", vocab_size, hidden_dim);
+        return false;
+    }
+    if (f32_lm) {
+        gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
+                             static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, stream);
+        return true;
+    }
+    int64_t h_final_shape[2] = {1, hidden_dim};
+    int64_t logits_shape[2] = {1, vocab_size};
+    Tensor h_final_view(ws.d_h_final, QType::F16, 2, h_final_shape, true);
+    Tensor logits_view(ws.d_logits, QType::F16, 2, logits_shape, true);
+    imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
+    return true;
+}
+
 // Logits of ws.d_h_final, then argmax / top-W into the caller's slot (see mtp_draft_step).
 bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
                     int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
@@ -864,20 +889,9 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     // FP8 head (gemm.nvfp4_lm_head=fp8) first: its source head may be freed after load.
     const bool fp8_lm = lm_head_fp8 != nullptr && lm_head_fp8_scales != nullptr && ws.d_logits_f32 != nullptr;
     const bool f32_lm = fp8_lm || (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
-    if (fp8_lm) {
-        gemv_fp8_rowscale_fp32(lm_head_fp8, lm_head_fp8_scales, static_cast<const half*>(ws.d_h_final),
-                               static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, 1, stream);
-    } else if (f32_lm) {
-        gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
-                             static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim,
-                             stream);
-    } else {
-        int64_t h_final_shape[2] = {1, hidden_dim};
-        int64_t logits_shape[2]  = {1, vocab_size};
-        Tensor h_final_view(ws.d_h_final, QType::F16, 2, h_final_shape, true);
-        Tensor logits_view (ws.d_logits,  QType::F16, 2, logits_shape,  true);
-        imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
-    }
+    if (!mtp_lm_head_logits(ws, main_lm_head, hidden_dim, vocab_size, stream, lm_head_nvfp4, lm_head_fp8,
+                            lm_head_fp8_scales, fp8_lm, f32_lm))
+        return false;
 
     // argmax straight into caller's device slot: no D2H, no sync (caller drains in one copy).
     // top_w>0: fast top-W kernel fills ws.d_topk instead, rank 0 lands in caller's slot.

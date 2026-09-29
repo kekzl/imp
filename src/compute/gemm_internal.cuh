@@ -41,9 +41,9 @@ size_t gemm_internal_workspace_size();
 
 // gemm() fast paths defined in gemm_gemv_dtype.cu (co-located with gemv). Both
 // return true if they handled the call. Called from gemm() in gemm.cu.
-bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
+[[nodiscard]] bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                    cudaStream_t stream);
-bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
+[[nodiscard]] bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                     cudaStream_t stream);
 
 }  // namespace imp

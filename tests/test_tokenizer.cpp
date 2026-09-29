@@ -80,7 +80,7 @@ static Tokenizer make_spm_tokenizer() {
     }
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("spm");
     tok.set_add_bos(true);
     tok.set_add_space_prefix(true);
@@ -179,7 +179,7 @@ static Tokenizer make_gpt2_tokenizer() {
     scores.push_back(0.0f);
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("gpt2");
     tok.set_add_bos(false);
 
@@ -437,7 +437,7 @@ static Tokenizer make_byte_bpe(const std::vector<std::string>& extra, const std:
     for (const auto& e : extra)
         tokens.push_back(e);
     Tokenizer tok;
-    tok.load_vocab(tokens, std::vector<float>(tokens.size(), 0.0f), 0, 0);
+    EXPECT_TRUE(tok.load_vocab(tokens, std::vector<float>(tokens.size(), 0.0f), 0, 0));
     tok.set_type("gpt2");
     tok.set_add_bos(false);
     tok.load_merges(merges);
@@ -537,7 +537,7 @@ static Tokenizer make_gemma4_tokenizer() {
     }
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("gemma4");
     tok.set_add_bos(false);
     tok.set_add_space_prefix(false);  // Gemma handles ▁ internally

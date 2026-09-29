@@ -22,10 +22,10 @@ public:
     ~Tokenizer() = default;
 
     // Load from standalone tokenizer file (SentencePiece .model or HuggingFace .json)
-    bool load(const std::string& path);
+    [[nodiscard]] bool load(const std::string& path);
 
     // Load vocabulary extracted from GGUF metadata
-    bool load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores, int bos_id,
+    [[nodiscard]] bool load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores, int bos_id,
                     int eos_id);
 
     // Load BPE merge rules (for GPT2-style tokenizers)
@@ -34,12 +34,12 @@ public:
     // Set tokenizer type: "spm" (SentencePiece) or "gpt2" (byte-level BPE)
     void set_type(const std::string& type) { type_ = type; }
     const std::string& type() const { return type_; }
-    bool nfc() const { return nfc_; }
+    [[nodiscard]] bool nfc() const { return nfc_; }
     void set_nfc(bool v) { nfc_ = v; }
 
     // Control BOS token prepending
     void set_add_bos(bool add) { add_bos_ = add; }
-    bool add_bos() const { return add_bos_; }
+    [[nodiscard]] bool add_bos() const { return add_bos_; }
 
     // Override the BOS token ID (default 1). Called by model loaders when the
     // model's BOS token is not in the hardcoded detection list (e.g. DeepSeek's
@@ -48,7 +48,7 @@ public:
 
     // Control SentencePiece leading-space prefix (▁)
     void set_add_space_prefix(bool add) { add_space_prefix_ = add; }
-    bool add_space_prefix() const { return add_space_prefix_; }
+    [[nodiscard]] bool add_space_prefix() const { return add_space_prefix_; }
 
     // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm").
     // "deepseek-r1-qwen": tokenizer.json regex and NFC equal Qwen2's, stored as "qwen2" (#2270).

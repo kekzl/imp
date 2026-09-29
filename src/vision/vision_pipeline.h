@@ -79,7 +79,7 @@ private:
     int32_t eoi_id_ = -1;
 
     // Internal: upload pixels and encode
-    bool encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream);
+    [[nodiscard]] bool encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream);
 };
 
 // Arena demand for the mmproj vision path, answerable before the file is loaded.

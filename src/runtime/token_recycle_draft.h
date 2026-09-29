@@ -45,7 +45,7 @@ public:
     std::vector<std::vector<int32_t>> draft_candidates(int32_t t0, int width, int depth) const;
 
     // True when `token` has at least one recorded successor.
-    bool has(int32_t token) const;
+    [[nodiscard]] bool has(int32_t token) const;
 
     // Successor id in `slot` (0 = most recent / best), -1 when empty or
     // out of range. Exposed for tests and the tree drafter.
@@ -53,7 +53,7 @@ public:
 
 private:
     bool valid_(int32_t tok) const { return tok >= 0 && tok < vocab_; }
-    bool promote_(int32_t prev, int32_t next);
+    [[nodiscard]] bool promote_(int32_t prev, int32_t next);
     int32_t* row_(int32_t tok) { return succ_.data() + static_cast<size_t>(tok) * slots_; }
     const int32_t* row_(int32_t tok) const {
         return succ_.data() + static_cast<size_t>(tok) * slots_;

@@ -48,12 +48,12 @@ size_t vram_own_peak_bytes();
 
 // cudaMemGetInfo with the budget view applied. Either out pointer may be
 // null. Returns false (zeros) if the raw query fails.
-bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);
+[[nodiscard]] bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);
 // The same view with the lazy pools' pending charge left in `free`, for an accounting
 // reader that wants what the device holds rather than what a planner may take. One read,
 // so it cannot race a slot commit the way separately reading adjusted-free then adding
 // the ledger back would.
-bool vram_budget_mem_get_info_ex(size_t* free_bytes, size_t* total_bytes, bool exclude_pending);
+[[nodiscard]] bool vram_budget_mem_get_info_ex(size_t* free_bytes, size_t* total_bytes, bool exclude_pending);
 
 // Bytes the planner charged that no pool has committed yet: a lazy slab's reservation
 // minus what it has mapped so far. Free VRAM shows them as free, and they are not:
@@ -101,7 +101,7 @@ inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
 // while the load reports success (MEMORY.md B8). Consuming LESS than the file is
 // ordinary (host-resident experts, dropped sources), so this check is one-sided by
 // construction. on_disk_bytes == 0 means "could not size the checkpoint", not a fault.
-inline bool upload_exceeds_checkpoint(size_t consumed_bytes, size_t on_disk_bytes) {
+[[nodiscard]] inline bool upload_exceeds_checkpoint(size_t consumed_bytes, size_t on_disk_bytes) {
     if (on_disk_bytes == 0)
         return false;
     return consumed_bytes > on_disk_bytes + on_disk_bytes / 4;

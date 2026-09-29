@@ -54,12 +54,27 @@ The two absences are libstdc++ 15.2 gaps, not language ones.
 | `std::optional<T>` | absence that is not an error | `log_level_from_string` returns `nullopt` for an unknown word: a value the caller does not have, not a failure it reports |
 | `std::span<T>` | host buffers | any host-side (pointer, length) pair in a C++ signature is a span; removes a callable state - `ngram_draft(nullptr, 6, ...)` and `SuffixDraftIndex::append(nullptr, 5)` were real call shapes needing a defensive null check, both tests exercising them are gone because the state is now unrepresentable |
 | raw `const half*` + extent, NOT `std::span` | device pointers | a `std::span` says "you may index and iterate this"; on a device pointer that is a silent host segfault at the first `s[0]`. The one place the C++17 shape is correct - not a defect to fix wholesale |
-| `std::string_view` | strings a function only reads | except where the callee needs a null-terminated `c_str()` for a C API, where `const std::string&` stays and says so. Rule for new/touched code only: the 591 existing `const std::string&` parameters have NOT been swept |
+| `std::string_view` | strings a function only reads | except where the callee needs a null-terminated `c_str()` for a C API, where `const std::string&` stays and says so. Rule for new/touched code only: the 548 existing `const std::string&` parameters in `src/` (`rg -o 'const std::string&\s*\w*\s*[,)=]' src \| wc -l`) have NOT been swept |
 | `std::format`, not `snprintf` into a fixed buffer | building a string | the memory-plan failure report was seven `snprintf` calls into one `char buf[256]` whose truncation only a user with a refused engine would see |
-| printf-style, NOT `std::format` | logging | `IMP_LOG_*` is a variadic macro over `log_message(..., const char* fmt, ...)` with `__attribute__((format(printf)))`, across 1431 call sites; format-string checking is already compile-time, `std::format` would buy type safety at the cost of touching every site. Deliberately not converted |
+| printf-style, NOT `std::format` | logging | `IMP_LOG_*` is a variadic macro over `log_message(..., const char* fmt, ...)` with `__attribute__((format(printf)))`, across 1788 call sites (`rg -o 'IMP_LOG_[A-Z]+\s*\(' src tools include \| wc -l`); format-string checking is already compile-time, `std::format` would buy type safety at the cost of touching every site. Deliberately not converted |
 | `std::bit_cast` | bit patterns | constexpr, so a conversion can be checked by `static_assert` instead of a test run (`src/core/fp_bits.h` does exactly that) |
 | exceptions, unchanged | internal error propagation | out of scope here: internal code throws, `src/api/imp_api.cpp` translates to `ImpError` at the C ABI boundary; `expected` is for the layers below that boundary that returned a bool |
 | NOT `std::unreachable()` / `[[assume]]` | the two branches commented "statically unreachable" (`engine_decode_pipeline.cpp`, split out of `engine_scheduler.cpp` 2026-08-26) | both carry a safe fallback (log and abandon the half-enqueued step, or re-run the row through the legacy collect path); replacing a fallback with undefined behaviour is a bet that the comment is right |
+
+## Failure style per layer
+
+One declared way to fail per layer (#2211). Gates: `tools/check_nodiscard_status.py`, `tools/check_cuda_discards.py`.
+
+| Layer | Style | Rule |
+|---|---|---|
+| all of `src/` headers | `[[nodiscard]]` on every non-predicate `bool` | a dropped status is a build error (`-Werror=unused-result`, nvcc `--diag-error=2809`); an intended discard is `(void)` + a one-line reason |
+| `src/compute`, `src/exec` | `IMP_CUDA_CHECK_*` for launch status; `cuda_sync_or_throw` / throw when a readback is unwritten | an unwritten host buffer never becomes a value (no fake token, no zero routing) |
+| `src/runtime` | throw into `BatchingEngine::step()`'s catch; `[[nodiscard]] bool` for init and setup | a failure fails the request, never the process; no new abort in a serving path |
+| `src/model`, `src/vision`, `src/lora`, `src/quant` (loaders, upload) | `std::expected<T, E>` in new code; `[[nodiscard]] bool` + `IMP_LOG_ERROR` in existing code | a refused or partial load is never served |
+| `src/memory` | `cudaError_t` or `[[nodiscard]] bool` returned to the caller | an allocation failure propagates to the owner that can refuse |
+| destructors, teardown (`src/core/cuda_raii.h`) | `IMP_CUDA_CHECK_LOG` | log, never throw |
+| `src/api` (C ABI) | `ImpError` via `api_guard`; `IMP_NODISCARD` on a status the caller must check | no exception crosses the ABI |
+| `tools/` | check every `ImpError`: server answers 5xx; cli prints to stderr and skips the turn (interactive) or exits non-zero | no request continues on a failed reset or prefill |
 
 ## What stays C ABI
 
@@ -77,7 +92,7 @@ Spans replaced the host (pointer, length) pairs in the drafters (`ngram_draft`, 
 Not converted, each for a reason:
 
 - kernel launch wrappers: a span over a device pointer is a lie;
-- `IMP_LOG_*`: the printf attribute already checks it, the change is 1431 call sites wide;
+- `IMP_LOG_*`: the printf attribute already checks it, the change is 1788 call sites wide;
 - tensor views: libstdc++ 15.2 has no `std::mdspan`;
 - the *reads inside* `BinaryReader` and the SafeTensors header parse stay `std::memcpy`: no `std::start_lifetime_as` to give a POD a lifetime inside a mapped byte buffer (the constructors now take spans);
 - `GGUFValue` (a tag plus seven always-present payload fields `std::variant` would express as one): a data-structure change with its own blast radius, not a signature change.

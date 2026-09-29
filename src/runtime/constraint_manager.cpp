@@ -357,10 +357,13 @@ bool ConstraintManager::prepare_grammar(const std::string& gbnf, Tokenizer* toke
 }
 
 void ConstraintManager::update(int32_t token) {
+    // false = the sampled token is outside the language (apply_mask should prevent it).
     if (active_grammar_ && grammar_constrainer_) {
-        grammar_constrainer_->update(token);
+        if (!grammar_constrainer_->update(token))
+            IMP_LOG_WARN("ConstraintManager: sampled token %d is outside the grammar", token);
     } else if (active_regex_ && regex_constrainer_) {
-        regex_constrainer_->update(token);
+        if (!regex_constrainer_->update(token))
+            IMP_LOG_WARN("ConstraintManager: sampled token %d is outside the regex language", token);
     } else if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->update(token);
     } else if (active_json_ && json_constrainer_) {

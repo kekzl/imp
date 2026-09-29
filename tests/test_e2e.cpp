@@ -524,7 +524,7 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
             int32_t tok;
             imp_decode_step(ctx, &p, &tok);
         }
-        imp_context_reset(ctx);
+        EXPECT_EQ(imp_context_reset(ctx), IMP_SUCCESS);
     }
 
     // Measure VRAM baseline after warm-up

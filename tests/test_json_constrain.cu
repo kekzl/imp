@@ -309,7 +309,7 @@ TEST(PreambleGateTest, BudgetExhaustionForcesTransition) {
 TEST(PreambleGateTest, ResetReactivatesGate) {
     PreambleGate g;
     g.configure(TOK_THINK_CLOSE, 8192);
-    g.absorb(TOK_THINK_CLOSE, "</think>");
+    (void)g.absorb(TOK_THINK_CLOSE, "</think>");  // drives the gate; its state is asserted below
     EXPECT_FALSE(g.active());
 
     g.reset();
@@ -369,8 +369,8 @@ TEST(PreambleGateTest, ToolCloseTokenTransitionsToTerminalOff) {
     PreambleGate g;
     g.configure_with_tools(TOK_THINK_CLOSE, 64,
                            {TOK_TOOL_OPEN}, {TOK_TOOL_CLOSE}, "", "");
-    g.absorb(TOK_TOOL_OPEN, "<tool_call>");
-    g.absorb(TOK_TEXT, "{...}");
+    (void)g.absorb(TOK_TOOL_OPEN, "<tool_call>");  // drives the gate; its state is asserted below
+    (void)g.absorb(TOK_TEXT, "{...}");  // drives the gate; its state is asserted below
 
     // Close token: absorbed, terminal OFF.
     EXPECT_TRUE(g.absorb(TOK_TOOL_CLOSE, "</tool_call>"));
@@ -411,9 +411,9 @@ TEST(PreambleGateTest, ToolModeParallelCallsStayTerminalOff) {
     PreambleGate g;
     g.configure_with_tools(TOK_THINK_CLOSE, 64,
                            {TOK_TOOL_OPEN}, {TOK_TOOL_CLOSE}, "", "");
-    g.absorb(TOK_TOOL_OPEN, "<tool_call>");
-    g.absorb(TOK_TEXT, "{a}");
-    g.absorb(TOK_TOOL_CLOSE, "</tool_call>");
+    (void)g.absorb(TOK_TOOL_OPEN, "<tool_call>");  // drives the gate; its state is asserted below
+    (void)g.absorb(TOK_TEXT, "{a}");  // drives the gate; its state is asserted below
+    (void)g.absorb(TOK_TOOL_CLOSE, "</tool_call>");  // drives the gate; its state is asserted below
     EXPECT_TRUE(g.active());
 
     // Second tool call — opener and body both absorbed in TERMINAL_OFF.
@@ -427,8 +427,8 @@ TEST(PreambleGateTest, ToolModeResetReturnsToActive) {
     PreambleGate g;
     g.configure_with_tools(TOK_THINK_CLOSE, 64,
                            {TOK_TOOL_OPEN}, {TOK_TOOL_CLOSE}, "", "");
-    g.absorb(TOK_TOOL_OPEN, "<tool_call>");
-    g.absorb(TOK_TOOL_CLOSE, "</tool_call>");
+    (void)g.absorb(TOK_TOOL_OPEN, "<tool_call>");  // drives the gate; its state is asserted below
+    (void)g.absorb(TOK_TOOL_CLOSE, "</tool_call>");  // drives the gate; its state is asserted below
     EXPECT_TRUE(g.active());  // TERMINAL_OFF → active()=true
 
     g.reset();
@@ -580,7 +580,7 @@ TEST(JsonConstrainTest, RawControlCharInStringMasked) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "\"\n", "\"ok"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     JsonConstrainer jc;
     ASSERT_TRUE(jc.init(tok));
@@ -607,7 +607,7 @@ TEST(JsonConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "}", "0"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     JsonConstrainer jc;
     ASSERT_TRUE(jc.init(tok));
@@ -645,7 +645,7 @@ TEST(JsonConstrainTest, InitReservesTheAllowListSoApplyMaskNeverAllocates) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "}", "0"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     JsonConstrainer jc;
     ASSERT_TRUE(jc.init(tok));

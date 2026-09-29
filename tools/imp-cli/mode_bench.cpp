@@ -46,7 +46,10 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     fprintf(stderr, "Warmup...\n");
     {
         NvtxRange r("bench:warmup");
-        imp_context_reset(ctx);
+        if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+            fprintf(stderr, "Context reset error in warmup: %s\n", imp_error_string(reset_err));
+            return 1;
+        }
         imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
         for (int s = 0; s < tg_tokens; s++) {
             int32_t tok = 0;
@@ -57,7 +60,10 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     // PP benchmark
     double pp_total_ms = 0;
     for (int rep = 0; rep < args.bench_reps; rep++) {
-        imp_context_reset(ctx);
+        if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+            fprintf(stderr, "Context reset error on rep %d: %s\n", rep, imp_error_string(reset_err));
+            return 1;
+        }
         auto t0 = std::chrono::high_resolution_clock::now();
         {
             NvtxRange r("bench:pp");
@@ -74,7 +80,10 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     // TG benchmark
     double tg_total_ms = 0;
     for (int rep = 0; rep < args.bench_reps; rep++) {
-        imp_context_reset(ctx);
+        if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+            fprintf(stderr, "Context reset error on tg rep %d: %s\n", rep, imp_error_string(reset_err));
+            return 1;
+        }
         err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
         if (err != IMP_SUCCESS) {
             fprintf(stderr, "Prefill error on tg rep %d: %s\n", rep, imp_error_string(err));

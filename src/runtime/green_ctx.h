@@ -22,7 +22,7 @@ public:
     void destroy();
 
     // Reconfigure SM split at runtime (requires destroy + reinit under the hood)
-    bool reconfigure(float new_prefill_sm_ratio);
+    [[nodiscard]] bool reconfigure(float new_prefill_sm_ratio);
 
     // Streams bound to SM partitions
     cudaStream_t prefill_stream() const { return prefill_stream_; }

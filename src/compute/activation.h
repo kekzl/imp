@@ -12,7 +12,7 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stre
 // Batched-decode producer fusion: swiglu + NVFP4 quantize in one kernel. Writes FP16 `out`
 // bit-identical to swiglu(), plus packed nibbles [n/2 B] and FP8 micro-scales [n/16].
 // Returns false outside the fused envelope (all F16, numel%16==0); falls back to swiglu().
-bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
+[[nodiscard]] bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
                            uint8_t* xq_scales, cudaStream_t stream = nullptr);
 
 // Fused GeGLU: out = gelu_tanh(gate) * up  (Gemma-3)

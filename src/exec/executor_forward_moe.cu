@@ -551,11 +551,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 }
                 if (can_fp16_batch_nosync) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP16_BATCH);
-                    try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded, non_gated_experts,
+                    // Always true: failures throw (moe_host_args_ok_or_throw).
+                    (void)try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded, non_gated_experts,
                                                    up_qtype, routing);
                 } else if (can_fp8_batch) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP8_BATCH);
-                    try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
+                    // Always true: failures throw (moe_host_args_ok_or_throw).
+                    (void)try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
                                                   non_gated_experts, up_qtype, routing);
 
                     // Falls through to scatter (step 7)

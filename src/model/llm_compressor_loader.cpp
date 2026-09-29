@@ -398,10 +398,10 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
                 continue;
             int num_bits = 0, gs = 0;
             std::string type, strategy;
-            jobj_get_int(*w, "num_bits", num_bits);
-            jobj_get_int(*w, "group_size", gs);
-            jobj_get_string(*w, "type", type);
-            jobj_get_string(*w, "strategy", strategy);
+            jobj_opt_int(*w, "num_bits", num_bits);
+            jobj_opt_int(*w, "group_size", gs);
+            jobj_opt_string(*w, "type", type);
+            jobj_opt_string(*w, "strategy", strategy);
             if (num_bits == 4 && type == "float" && gs == 16 && strategy == "tensor_group") {
                 found_nvfp4 = true;
                 group_size = gs;
@@ -416,7 +416,7 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
         // not silent - an unsupported compressed-tensors scheme otherwise arrives as "some
         // unquantized model".
         std::string fmt;
-        jobj_get_string(*qc, "format", fmt);
+        jobj_opt_string(*qc, "format", fmt);
         IMP_LOG_WARN(
             "config.json declares compressed-tensors (format=%s, weights=%s) but no NVFP4 group "
             "(4-bit float, group_size 16, tensor_group). Falling back to the on-wire dtype.",

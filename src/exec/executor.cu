@@ -11,6 +11,7 @@
 #include "compute/schema_constrain.h"
 #include "compute/regex_constrain.h"
 #include "compute/grammar_constrain.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "exec/executor_sampling_internal.h"
 
@@ -87,13 +88,9 @@ void apply_stop_mask(const InferenceState& state, float* lp, int vocab, cudaStre
                              state.d_stop_mask_active, stream);
 }
 
-// Pinned readback of a device sampler: token 0 (the samplers' failure value) + ERROR on a failed sync.
-int32_t pinned_token_or_0(const int32_t* h_pinned, cudaStream_t stream) {
-    const cudaError_t err = cudaStreamSynchronize(stream);
-    if (err == cudaSuccess)
-        return *h_pinned;
-    IMP_LOG_ERROR("forward: sampler readback sync failed: %s", cudaGetErrorString(err));
-    return 0;
+// Pinned readback of a device sampler; a failed sync throws into BatchingEngine::step()'s catch.
+int32_t pinned_token_or_throw(const int32_t* h_pinned, cudaStream_t stream) {
+    return synced_token_or_throw(cudaStreamSynchronize(stream), h_pinned, "forward sampler readback");
 }
 }  // namespace
 
@@ -208,7 +205,7 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         if (state.temperature <= 0.0f || state.top_k == 1) {
             if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
                 sample_greedy_device(last_logits, d_sample_result_, h_sample_pinned_.as<int32_t>(), stream);
-                token = pinned_token_or_0(h_sample_pinned_.as<int32_t>(), stream);
+                token = pinned_token_or_throw(h_sample_pinned_.as<int32_t>(), stream);
             } else if (d_sample_result_) {
                 token = sample_greedy(last_logits, d_sample_result_, stream);
             } else {
@@ -221,7 +218,7 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
             if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
                 sample_topk_topp_device(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
                                         h_sample_pinned_.as<int32_t>(), stream);
-                token = pinned_token_or_0(h_sample_pinned_.as<int32_t>(), stream);
+                token = pinned_token_or_throw(h_sample_pinned_.as<int32_t>(), stream);
             } else if (d_sample_result_) {
                 token = sample_topk_topp(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
                                          stream);
