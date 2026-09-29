@@ -165,7 +165,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb ||
                                        req->n_vision_tokens > 0;
                 const bool cacheable = !has_image || req->vision_content_hash != 0;
-                if (kv_manager_->prefix_caching_enabled() && cacheable) {
+                if (kv_manager_->prefix_caching_enabled() && cacheable && !req->bypass_prefix_cache) {
                     // Hybrid models cap reuse at the recurrent-snapshot
                     // boundary (and attach the snapshot to the request).
                     int max_reuse = prefix_reuse_limit_ ? prefix_reuse_limit_(*req) : -1;

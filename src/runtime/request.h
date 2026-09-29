@@ -156,6 +156,8 @@ struct Request {
     int32_t pipe_inflight_force = -1;
     int prefill_offset = 0;  // Chunked prefill: tokens processed so far
     int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
+    // Skip prefix-cache reuse at admission: full prefill, cached_tokens stays 0 (#2198 direct).
+    bool bypass_prefix_cache = false;
     // When the scheduler moved this request into its first prefill batch
     // (epoch = never). The server's queue histogram measures up to here:
     // the wait behind max_batch_size and KV admission, not the batching

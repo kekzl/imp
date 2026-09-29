@@ -332,7 +332,9 @@ def main():
     # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
     # 1147 -> 1151: GdnVerifySnapshotTest x4 (test-moe-gdn): chunkwise f32/fp32out snapshot at 65 and
     # 64 rows (#2214); GDN scan kernels need a card.
-    PINNED = 1151
+    # 1151 -> 1159: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
+    # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
+    PINNED = 1159
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -636,6 +636,8 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_misc.cpp
         tools/imp-server/metrics_memory.cpp
         tools/imp-server/handlers_rerank.cpp
+        tools/imp-server/handlers_decide.cpp
+        tools/imp-server/candidate_tokens.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
         tools/imp-server/tracing.cpp
@@ -1112,6 +1114,9 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
+        # /v1/decide + /v1/score boundary guard on a real tokenizer.json (no GPU, model file).
+        tests/test_candidate_tokens.cpp
+        tools/imp-server/candidate_tokens.cpp
         tests/test_real_checkpoints.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp

@@ -1085,5 +1085,43 @@ TEST(SchedulerTest, AnAgedRequestHoldsTheQueueUntilItsBlocksAreFree) {
     EXPECT_TRUE(sched.has_pending()) << "the short is still queued behind it";
 }
 
+// #2198 direct mode: bypass_prefix_cache admits with a full prefill even when the prompt's
+// blocks are cached; the same prompt without the flag reuses them (control arm).
+TEST(SchedulerTest, BypassPrefixCacheSkipsReuse) {
+    auto cache = KVCache::for_accounting(
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/64);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+    mgr->set_prefix_caching_enabled(true);
+
+    std::vector<int32_t> prompt(128);
+    for (int i = 0; i < 128; i++)
+        prompt[static_cast<size_t>(i)] = 1000 + i;
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(/*seq_id=*/0, prompt), 0);
+    mgr->register_block_hashes(0, prompt);
+    mgr->free_sequence(0);
+    ASSERT_GT(mgr->num_cached_blocks(), 0);
+
+    Scheduler sched(8);
+    sched.set_kv_manager(mgr.get());
+    auto cached = std::make_shared<Request>();
+    cached->id = 1;
+    cached->input_tokens = prompt;
+    cached->max_tokens = 1;
+    auto direct = std::make_shared<Request>();
+    direct->id = 2;
+    direct->input_tokens = prompt;
+    direct->max_tokens = 1;
+    direct->bypass_prefix_cache = true;
+    sched.add_request(cached);
+    sched.add_request(direct);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 2u);
+    EXPECT_GT(cached->cached_tokens, 0) << "control: without the flag the cached prefix is reused";
+    EXPECT_EQ(direct->cached_tokens, 0);
+    EXPECT_EQ(direct->prefill_offset, 0);
+}
+
 }  // namespace
 }  // namespace imp
