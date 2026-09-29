@@ -7,7 +7,7 @@
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
-#include "quant/dequant_gptq.h"
+#include "quant/dequant_awq.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -1055,7 +1055,7 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     return ok;
 }
 
-// upload_gptq_weight: dequantizes a GPTQ-packed weight to FP16 on GPU. Uploads
+// upload_gptq_weight: dequantizes a GPTQ- or AWQ-packed (awq_gemm) weight to FP16 on GPU. Uploads
 // qweight/qzeros/scales/g_idx to temporary GPU buffers, runs the dequant kernel, frees the
 // temporaries, and sets the output tensor to the resulting FP16 GPU weight.
 static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor& output, cudaStream_t stream,
@@ -1068,14 +1068,13 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
         return false;
     }
 
-    // qweight shape: [K/8, N] for 4-bit (8 values packed per INT32)
-    int pack_factor = 32 / gptq.bits;  // 8 for 4-bit
-    int K_packed = static_cast<int>(gptq.qweight.shape[0]);
-    int N = static_cast<int>(gptq.qweight.shape[1]);
-    int K = K_packed * pack_factor;
+    // qweight: GPTQ [K/8, N], AWQ GEMM [K, N/8] (shapes checked at load); 8 nibbles per INT32.
+    const int64_t d0 = gptq.qweight.shape[0], d1 = gptq.qweight.shape[1];
+    const int K = static_cast<int>(gptq.awq_gemm ? d0 : d0 * 8);
+    const int N = static_cast<int>(gptq.awq_gemm ? d1 * 8 : d1);
 
     // 1. Upload qweight to GPU
-    size_t qw_bytes = static_cast<size_t>(K_packed) * N * sizeof(int32_t);
+    size_t qw_bytes = static_cast<size_t>(d0) * d1 * sizeof(int32_t);
     int32_t* d_qweight = nullptr;
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qweight), qw_bytes, stream) != cudaSuccess || !d_qweight) {
         IMP_LOG_ERROR("GPTQ: failed to allocate qweight (%zu bytes)", qw_bytes);
@@ -1136,8 +1135,8 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     }
 
     // 6. Run dequantization kernel
-    dequant_gptq4(d_out, d_qweight, d_qzeros, d_scales, d_g_idx, N, K, gptq.group_size,
-                  static_cast<gptq::ZeroFormat>(gptq.zero_offset), stream);
+    dequant_packed4(gptq.awq_gemm, d_out, d_qweight, d_qzeros, d_scales, d_g_idx, N, K, gptq.group_size,
+                    static_cast<gptq::ZeroFormat>(gptq.zero_offset), stream);
 
     // 7. Sync and free temporary GPU buffers
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));

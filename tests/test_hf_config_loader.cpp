@@ -415,7 +415,7 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
 
 // AWQ detection (audit gap #16). Both nested-under-quantization_config
 // (HF standard) and standalone quant_config.json (older AutoAWQ) are
-// recognised. Detection-only — no kernel exists yet.
+// recognised. Parsing only; the variant rule lives in load_safetensors (#2205).
 TEST_F(RopeScalingConfigTest, AwqQuantConfigDetection) {
     write_config(R"({
         "architectures": ["LlamaForCausalLM"],

@@ -76,7 +76,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Prefill graph capture is disabled per model when one NVFP4 weight exceeds the dequant-workspace cap | affected NVFP4 checkpoints | decode graphs unaffected | - |
 | No video input | video prompts | images work; video needs a decoder this tree does not vendor | - |
 | No vision architecture registry | InternVL, Pixtral | tower allowlist covers Qwen3-VL-shaped encoders and Gemma; each needs a port | - |
-| **AWQ** SafeTensors checkpoints (`quant_method: awq`) have no dequant kernel | AWQ SafeTensors loader | refused at load with the detected bits/group_size/zero_point/version; use a GPTQ or NVFP4 export | #2196, #2205 |
+| **AWQ** SafeTensors checkpoints (`quant_method: awq`) load only as 4-bit GEMM with zero points, and not in 4-bit | AWQ SafeTensors loader | `bits=4 zero_point=true version=gemm` dequantizes to FP16 at upload (`src/quant/dequant_awq.cu`), so VRAM holds FP16 weights (4x the checkpoint); GEMV, Marlin, `bits != 4` or `zero_point=false` are refused at load with the detected bits/group_size/zero_point/version; use a GPTQ export (#2249), or an NVFP4 export for 4-bit weights in VRAM | #2196, #2205 |
 
 ## Model-specific blockers
 

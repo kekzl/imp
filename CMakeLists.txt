@@ -196,6 +196,7 @@ set(IMP_MODEL_SOURCES
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
     src/model/hf_gptq_config.cpp
+    src/model/awq_load.cpp
     src/model/mrope_positions.cpp
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
@@ -235,6 +236,8 @@ set(IMP_QUANT_SOURCES
     src/quant/mxfp4_gemm.cu
     # src/quant/turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/quant/dequant_gptq.cu
+    src/quant/dequant_awq.cu
+    src/quant/dequant_awq_host.cpp
     src/quant/dequant_gptq_host.cpp
 )
 
@@ -744,6 +747,7 @@ if(IMP_BUILD_TESTS)
         tests/test_hf_config_loader.cpp
         tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
+        tests/test_dequant_awq.cpp
         tests/test_dequant_gptq.cpp
         tests/test_safetensors_writer.cpp
         tests/test_awq_calibration.cpp
@@ -1045,6 +1049,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-quant SOURCES
         tests/test_quant.cu
         tests/test_quant_integration.cu
+        tests/test_dequant_awq_gpu.cu
         tests/test_dequant_gptq_gpu.cu
         tests/test_gguf_dequant_ref.cu
         tests/test_gpt_oss_mxfp4_convert_ref.cu
