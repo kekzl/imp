@@ -639,8 +639,9 @@ no_mmvq_q8_0         = false
 # Qwen3-30B-A3B 10.9451 -> 11.3011 (+3.25 %). pp512 -10 % unless --decode-nvfp4 (mode 1) keeps FP16 prefill.
 nvfp4_decode_all     = false
 # LM head format: "auto" | "fp8" | "on" | "off" (#2166).
-# auto = per-row FP8 E4M3 head (#2156) when the head allows it (F16 or GGUF source,
-# F16 final norm, d_model a multiple of 256), else the #982 NVFP4 net rule.
+# auto = per-row FP8 E4M3 head (#2156) from an F16/BF16/F32 head (F16 final norm, d_model a
+# multiple of 256); an 8-bit head (Q8_0, FP8) stays at checkpoint precision (#2224: E4M3 flipped
+# Qwen3-8B-Q8_0's first-token top-1 vs HF fp32); other GGUF heads take the #982 NVFP4 net rule.
 # FP8 vs NVFP4, PPL 45k: Qwen3-8B-Q8_0 11.1108 -> 10.7623, Qwen3-30B-A3B-NVFP4
 # 11.8443 -> 11.3476, Flash-Next-NVFP4 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 %.
 # 1.78x NVFP4 head bytes (Qwen3-8B 594.1 vs 333.8 MiB); the source head is freed after load.

@@ -106,7 +106,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--bench` / `--bench-pp <n>` / `--bench-reps <n>` | off / `512` / `3` | synthetic benchmark mode (matches llama-bench methodology) |
 | `--perplexity <file>` / `--calibrate <out>` | - | teacher-forced perplexity over a text file (deterministic eval harness, PR #481); `--calibrate` also writes activation-calibration stats (input for `imp-quantize --calib`) |
 
-KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:792 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
+KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:794 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
 
 `--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card.
 

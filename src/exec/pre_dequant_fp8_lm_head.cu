@@ -19,10 +19,14 @@ namespace imp {
 
 void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     const LmHeadMode mode = lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head);
-    if (!lm_head_mode_fp8(mode))
-        return;
     const Tensor& lm = model_->output_proj();
     const QType q = lm.qtype;
+    if (!lm_head_mode_fp8(mode, q)) {
+        if (lm_head_auto_keeps_source(mode, q))
+            IMP_LOG_INFO("FP8 LM head: auto keeps the %s head at checkpoint precision (#2224)",
+                         qtype_name(q));
+        return;
+    }
     // F16 quantizes in place; GGUF sources dequant in row slabs through the shared scratch.
     const bool f16_src = q == QType::F16;
     if (!pre_dequant_internal::fp8_lm_head_eligible(*model_) || (!f16_src && qscratch_->dequant == nullptr)) {
