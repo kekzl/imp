@@ -25,7 +25,8 @@ protected:
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
         const std::string p(path);
         const bool gguf = p.size() >= 5 && p.substr(p.size() - 5) == ".gguf";
-        ASSERT_EQ(imp_model_load(path, gguf ? IMP_FORMAT_GGUF : IMP_FORMAT_SAFETENSORS, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(path, gguf ? IMP_FORMAT_GGUF : IMP_FORMAT_SAFETENSORS, &model_),
+                  IMP_SUCCESS);
         ImpConfig cfg = imp_config_default();
         cfg.max_seq_len = 2048;
         cfg.max_batch_size = 1;

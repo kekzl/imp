@@ -65,7 +65,8 @@ void Engine::prompt_logprobs_chunk_(Request& req, int offset, int chunk_len, cud
     // no VRAM held between passes. Failed allocation = per-batch driver.
     const int vocab = model_->config().vocab_size;
     const int want = prompt_lp_chunk_rows(rows, vocab, vram_alloc_.available());
-    VramOwned<float> logits(vram_alloc_, static_cast<size_t>(want) * static_cast<size_t>(vocab), "prompt_lp_logits");
+    VramOwned<float> logits(vram_alloc_, static_cast<size_t>(want) * static_cast<size_t>(vocab),
+                            "prompt_lp_logits");
     const int logit_rows = logits ? want : 0;
 
     const size_t nrows = static_cast<size_t>(rows);
