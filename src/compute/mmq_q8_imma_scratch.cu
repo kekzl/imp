@@ -154,7 +154,7 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
         return false;
     if (cudaMalloc(&w.qs, static_cast<size_t>(N) * K) != cudaSuccess) return false;
     if (cudaMalloc(&w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half)) != cudaSuccess) {
-        cudaFree(w.qs);
+        IMP_CUDA_CHECK_LOG(cudaFree(w.qs));
         return false;
     }
     g_imma_plane_used += need;

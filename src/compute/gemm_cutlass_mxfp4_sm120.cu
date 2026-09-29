@@ -262,9 +262,9 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
     if (cudaMalloc(&d_sf, sf_bytes) != cudaSuccess ||
         cudaMalloc(&d_linear_sf, linear_sf_bytes) != cudaSuccess) {
         if (d_sf)
-            cudaFree(d_sf);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_sf));
         if (d_linear_sf)
-            cudaFree(d_linear_sf);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_linear_sf));
         return false;
     }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));

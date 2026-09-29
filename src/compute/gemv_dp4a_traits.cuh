@@ -560,7 +560,8 @@ static inline int kpar_n_sms() {
     static int n_sms = 0;
     if (__builtin_expect(n_sms == 0, 0)) {
         cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
+        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess)
+            return 0;  // not cached; kpar_is_better() -> row-parallel
         n_sms = prop.multiProcessorCount;
     }
     return n_sms;
@@ -1143,8 +1144,11 @@ static void launch_gemv_dp4a_fp32_batched(const uint8_t* W, const block_q8_1* q8
     static int s_max_smem = 0;
     if (s_max_smem == 0) {
         int dev = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&s_max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&s_max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) {
+            IMP_LOG_WARN("gemv_dp4a batched: smem opt-in query failed, using the 48 KiB floor");
+            s_max_smem = 0;
+        }
         if (s_max_smem <= 0)
             s_max_smem = 48 * 1024;
     }
@@ -1160,9 +1164,9 @@ static void launch_gemv_dp4a_fp32_batched(const uint8_t* W, const block_q8_1* q8
     auto run = [&](auto mr_tag, int r0, int rn) {
         constexpr int MR = decltype(mr_tag)::value;
         const size_t smem = per_row * MR;
-        if (smem > 48 * 1024)
-            cudaFuncSetAttribute(gemv_dp4a_fp32_batched_kernel<QT, MR>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+        if (smem > 48 * 1024)  // failure: pdl::launch below fails and reports it
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemv_dp4a_fp32_batched_kernel<QT, MR>,
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         pdl::launch(gemv_dp4a_fp32_batched_kernel<QT, MR>, dim3(blocks), dim3(threads_per_block), smem,
                     stream, W, q8_1 + (size_t)r0 * act_stride_blocks, d8 + (size_t)r0 * act_stride_blocks,
                     y + (size_t)r0 * M, M, K, rn, act_stride_blocks);

@@ -402,9 +402,9 @@ static void launch_dense_dp4a(const void* packed_weight, const block_q8_1* q8_ba
     static size_t smem_max_configured = 0;
     if (smem_bytes > smem_max_configured) {
         if (smem_bytes > static_cast<int64_t>(48) * 1024) {
-            cudaFuncSetAttribute(gemm_qk_dp4a_dense_kernel<BT>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(smem_bytes));
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_qk_dp4a_dense_kernel<BT>,
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                    static_cast<int>(smem_bytes)));
         }
         smem_max_configured = smem_bytes;
     }
@@ -437,9 +437,9 @@ static void launch_dp4a(const void* packed_weight, const block_q8_1* q8_base, co
 
     static bool smem_configured = false;
     if (!smem_configured && smem_bytes > static_cast<int64_t>(48) * 1024) {
-        cudaFuncSetAttribute(gemm_qk_dp4a_moe_fused_kernel<BT>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(smem_bytes));
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_qk_dp4a_moe_fused_kernel<BT>,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                static_cast<int>(smem_bytes)));
         smem_configured = true;
     }
 

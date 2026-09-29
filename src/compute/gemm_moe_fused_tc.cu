@@ -259,16 +259,17 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         return;
 
     if (!s_configured) {
-        cudaFuncSetAttribute(gemm_q6k_fused_moe_prefill_tc_kernel,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
+        // Failure: the launch below fails too and IMP_CUDA_CHECK_LAUNCH reports it.
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_q6k_fused_moe_prefill_tc_kernel,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL));
 
         // Query optimal grid size: CTAs/SM × num_SMs
-        int max_blocks_per_sm = 0;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm,
-                                                      gemm_q6k_fused_moe_prefill_tc_kernel, TC_BLOCK,
-                                                      SMEM_TOTAL);
+        int max_blocks_per_sm = 0;  // failure: 1 CTA/SM, the tile counter still covers every tile
+        IMP_CUDA_CHECK_LOG(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &max_blocks_per_sm, gemm_q6k_fused_moe_prefill_tc_kernel, TC_BLOCK, SMEM_TOTAL));
         int num_sms = 0;
-        cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+        // Failure: stay unconfigured (grid 0 would stick), as on the tile-counter failure below.
+        IMP_CUDA_CHECK_VOID(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0));
         s_grid_size = num_sms * max(max_blocks_per_sm, 1);
 
         // T2 (engine-persistent): a 4-byte counter allocated once under the `s_configured` guard, the
@@ -287,7 +288,8 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         s_configured = true;
     }
 
-    cudaMemsetAsync(s_tile_counter, 0, sizeof(int), stream);
+    // A stale counter makes the kernel skip tiles: no launch, error stays in cudaGetLastError.
+    IMP_CUDA_CHECK_VOID(cudaMemsetAsync(s_tile_counter, 0, sizeof(int), stream));
 
     gemm_q6k_fused_moe_prefill_tc_kernel<<<s_grid_size, TC_BLOCK, SMEM_TOTAL, stream>>>(
         static_cast<const uint8_t*>(packed_weights), static_cast<const half*>(activations),

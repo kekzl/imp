@@ -20,6 +20,35 @@ namespace imp {
 
 namespace {
 
+// Dynamic-smem opt-in; false = the launch would fail, gemm_common reports false (caller falls back).
+template <typename Kernel>
+bool set_max_dyn_smem(Kernel kernel, size_t bytes) {
+    const cudaError_t err =
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(bytes));
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("mmq imma: smem opt-in %zu B failed: %s", bytes, cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
+// Opt-in for the three raw-kernel variants, once per flag.
+template <typename Kernel>
+bool ensure_raw_smem(bool& done, Kernel k32, Kernel k128b, Kernel k128, size_t smem32, size_t smem128) {
+    if (!done)
+        done = set_max_dyn_smem(k32, smem32) && set_max_dyn_smem(k128b, smem128) &&
+               set_max_dyn_smem(k128, smem128);
+    return done;
+}
+
+// SM count of the current device; 0 on a query error (dense small-grid path off, same output).
+int current_sm_count() {
+    int dev = 0, v = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess &&
+        cudaDeviceGetAttribute(&v, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess)
+        return v;
+    IMP_LOG_WARN("mmq imma: SM count query failed, dense small-grid path off");
+    return 0;
+}
+
 // One K-step tile load, all 256 threads cooperating, loops unrolled for both BM variants:
 //   A[BM][kBK] s8, M-tail zero-filled; B[kBN][kBK] s8, weight rows always full (N % kBN == 0)
 //   Asc[BM][2] half / Ars[BM][2] float: activation scale/rowsum, d-plane cols (kb0, kb0+1)
@@ -333,15 +362,8 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
             smem32 = q5k_smem_bytes(32);
             smem128 = q5k_smem_bytes(128);
             static bool smem_set5 = false;
-            if (!smem_set5) {
-                smem_set5 = true;
-                cudaFuncSetAttribute(k32, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     static_cast<int>(smem32));
-                cudaFuncSetAttribute(k128b, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     static_cast<int>(smem128));
-                cudaFuncSetAttribute(k128, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     static_cast<int>(smem128));
-            }
+            if (!ensure_raw_smem(smem_set5, k32, k128b, k128, smem32, smem128))
+                return false;
         }
         RawImmaKernel k = small_m ? k32 : (beta == 1.0f ? k128b : k128);
         k<<<grid, kThreads, small_m ? smem32 : smem128, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
@@ -362,15 +384,8 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         const Q6Kernel k128b = mmq_imma_q6k_raw_kernel<128, true>;
         const Q6Kernel k128 = mmq_imma_q6k_raw_kernel<128, false>;
         static bool smem_set6 = false;
-        if (!smem_set6) {
-            smem_set6 = true;
-            cudaFuncSetAttribute(k32, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(q6k_smem_bytes(32)));
-            cudaFuncSetAttribute(k128b, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(q6k_smem_bytes(128)));
-            cudaFuncSetAttribute(k128, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(q6k_smem_bytes(128)));
-        }
+        if (!ensure_raw_smem(smem_set6, k32, k128b, k128, q6k_smem_bytes(32), q6k_smem_bytes(128)))
+            return false;
         const Q6Kernel k = small_m ? k32 : (beta == 1.0f ? k128b : k128);
         k<<<grid, kThreads, q6k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
                                                                           w6, out_f16, M, N, K, d_offsets,
@@ -415,12 +430,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
 
     // Dense grid whose BM=32 version still fits one wave (k/v projections: 32 -> 128 CTAs at M=512,
     // N=1024); 64-68 CTA grids lose to the 1.5-wave tail. Each output keeps its k order: bit-identical.
-    static const int n_sms = [] {
-        int dev = 0, v = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&v, cudaDevAttrMultiProcessorCount, dev);
-        return v;
-    }();
+    static const int n_sms = current_sm_count();
     const bool dense_small_grid =
         d_offsets == nullptr && beta == 0.0f && static_cast<int>(grid.x * grid.y) * 4 <= n_sms;
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
@@ -504,8 +514,8 @@ void mmq_q8_imma_release_all() {
     // frees every entry, order-independent (#2210)
     // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (auto& [_, w] : g_imma_weights) {
-        cudaFree(w.qs);
-        cudaFree(w.sc);
+        IMP_CUDA_CHECK_LOG(cudaFree(w.qs));
+        IMP_CUDA_CHECK_LOG(cudaFree(w.sc));
     }
     g_imma_weights.clear();
     g_imma_act = ActScratch{};

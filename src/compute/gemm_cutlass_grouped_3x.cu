@@ -93,7 +93,11 @@ bool cutlass_grouped_3x_nvfp4_available() {
     if (s_grp3x_available >= 0)
         return s_grp3x_available;
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    const cudaError_t err = cudaGetDeviceProperties(&prop, 0);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("cutlass_grouped_3x: cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
+        return false;  // not cached: the next call queries again
+    }
     s_grp3x_available = (prop.major * 10 + prop.minor >= 120) ? 1 : 0;
     return s_grp3x_available;
 }

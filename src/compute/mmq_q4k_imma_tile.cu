@@ -342,12 +342,12 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
     const int subs = K / 32;
     if (cudaMalloc(&c.w_sym_s8, static_cast<size_t>(N) * K) != cudaSuccess) return false;
     if (cudaMalloc(&c.eff_alpha, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
-        cudaFree(c.w_sym_s8);
+        IMP_CUDA_CHECK_LOG(cudaFree(c.w_sym_s8));
         return false;
     }
     if (cudaMalloc(&c.eff_beta, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
-        cudaFree(c.w_sym_s8);
-        cudaFree(c.eff_alpha);
+        IMP_CUDA_CHECK_LOG(cudaFree(c.w_sym_s8));
+        IMP_CUDA_CHECK_LOG(cudaFree(c.eff_alpha));
         return false;
     }
     mmq_q4k_imma_reorder(W_q4k_blocks, N, K, c.w_sym_s8, c.eff_alpha, c.eff_beta, stream);

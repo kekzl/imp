@@ -520,6 +520,52 @@ __global__ void smallM_kernel_v1(
     }
 }
 
+// Device copies of host tables (#2211): upload() runs every cudaMallocAsync, then every H2D copy, in
+// add() order; false on the first error. Every allocation is freed on the stream at scope exit.
+class StreamScratch {
+public:
+    explicit StreamScratch(cudaStream_t s) : stream_(s) {}
+    StreamScratch(const StreamScratch&) = delete;
+    StreamScratch& operator=(const StreamScratch&) = delete;
+    ~StreamScratch() {
+        for (int i = 0; i < n_; ++i)
+            if (e_[i].dev) IMP_CUDA_CHECK_LOG(cudaFreeAsync(e_[i].dev, stream_));
+    }
+    template <typename T, typename S>
+    void add(T** dst, const S* src, size_t bytes) {
+        if (n_ < kMax) e_[n_++] = {reinterpret_cast<void**>(dst), static_cast<const void*>(src), bytes, nullptr};
+        else full_ = true;
+    }
+    bool upload() {
+        cudaError_t err = full_ ? cudaErrorInvalidValue : cudaSuccess;
+        for (int i = 0; i < n_ && err == cudaSuccess; ++i)
+            if ((err = cudaMallocAsync(&e_[i].dev, e_[i].bytes, stream_)) == cudaSuccess) *e_[i].dst = e_[i].dev;
+            else e_[i].dev = nullptr;
+        for (int i = 0; i < n_ && err == cudaSuccess; ++i)
+            err = cudaMemcpyAsync(e_[i].dev, e_[i].src, e_[i].bytes, cudaMemcpyHostToDevice, stream_);
+        if (err != cudaSuccess) IMP_LOG_ERROR("[smallM] table upload failed: %s", cudaGetErrorString(err));
+        return err == cudaSuccess;
+    }
+
+private:
+    struct Entry { void** dst; const void* src; size_t bytes; void* dev; };
+    static constexpr int kMax = 8;
+    cudaStream_t stream_;
+    Entry e_[kMax] = {};
+    int n_ = 0;
+    bool full_ = false;
+};
+
+// Dynamic-smem opt-in once per flag; false = the launch would fail, so the caller reports false.
+bool ensure_smem_optin(int& done, const void* kernel, int bytes) {
+    if (done) return true;
+    const cudaError_t err = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("[smallM] smem opt-in %d B failed: %s", bytes, cudaGetErrorString(err));
+    done = err == cudaSuccess ? 1 : 0;
+    return done != 0;
+}
+
 }  // anonymous namespace
 
 #ifdef SMALLM_SOFTWARE_REF
@@ -544,18 +590,12 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
     void** d_B = nullptr;   void** d_SFB = nullptr;
     void** d_D = nullptr;
     int*   d_M = nullptr;
-    cudaMallocAsync(&d_A,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFA, sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_B,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFB, sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_D,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_M,   sizeof(int)   * n_experts, stream);
-    cudaMemcpyAsync(d_A,   host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFA, host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_B,   host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFB, host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_D,   host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_M,   host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
+    const size_t ptr_bytes = sizeof(void*) * n_experts;
+    StreamScratch scratch(stream);
+    scratch.add(&d_A, host_ptr_A, ptr_bytes);     scratch.add(&d_SFA, host_ptr_SFA, ptr_bytes);
+    scratch.add(&d_B, host_ptr_B, ptr_bytes);     scratch.add(&d_SFB, host_ptr_SFB, ptr_bytes);
+    scratch.add(&d_D, host_ptr_D, ptr_bytes);     scratch.add(&d_M, host_M, sizeof(int) * n_experts);
+    if (!scratch.upload()) return false;
 
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
@@ -564,11 +604,6 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
         (const void* const*)d_B, (const void* const*)d_SFB,
         d_D, dev_alpha, d_M, N, K);
     IMP_CUDA_CHECK_LAUNCH();
-
-    cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
-    cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
-    cudaFreeAsync(d_D, stream);
-    cudaFreeAsync(d_M, stream);
     return true;
 }
 #endif  // SMALLM_SOFTWARE_REF
@@ -678,7 +713,11 @@ static int s_smallM_available = -1;
 bool gemm_grouped_nvfp4_smallM_available() {
     if (s_smallM_available >= 0) return s_smallM_available;
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    const cudaError_t err = cudaGetDeviceProperties(&prop, 0);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("[smallM] cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
+        return false;  // not cached: the next call queries again
+    }
     s_smallM_available = (prop.major * 10 + prop.minor >= 120) ? 1 : 0;
     return s_smallM_available;
 }
@@ -701,6 +740,54 @@ void gemm_grouped_nvfp4_smallM_reset_static_cuda_state() {
 namespace {
 IMP_REGISTER_CUDA_STATIC_RESET(gemm_grouped_nvfp4_smallM_reset_static_cuda_state);
 }  // namespace
+
+// Lazily zeroed 256-B buffer; false (not armed) on a CUDA error.
+static bool ensure_dummy_buffer() {
+    if (s_dummy_ready) return true;
+    cudaError_t err = cudaMalloc(&s_dummy, 256);
+    if (err != cudaSuccess) s_dummy = nullptr;
+    else err = cudaMemset(s_dummy, 0, 256);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("[smallM] dummy TMA buffer: %s", cudaGetErrorString(err));
+        gemm_grouped_nvfp4_smallM_reset_static_cuda_state();
+        return false;
+    }
+    s_dummy_ready = 1;
+    return true;
+}
+
+// Two descriptors [A,B] per expert into descs; false if an active expert's encode fails.
+static bool encode_expert_descs(CUtensorMap* descs, int n_experts, const int* host_M, int N, int K,
+                                const void* const* host_ptr_A, const void* const* host_ptr_B,
+                                int TILE_M_rt, int TILE_N, int TILE_K_rt) {
+    for (int e = 0; e < n_experts; ++e) {
+        const int M_e = host_M[e];
+        if (M_e <= 0) {
+            // Dummy descriptor — won't be used.
+            build_tma_2d_u8(&descs[2 * e + 0], s_dummy, 16, 16, TILE_M_rt, TILE_K_rt / 2);
+            build_tma_2d_u8(&descs[2 * e + 1], s_dummy, 16, 16, TILE_N, TILE_K_rt / 2);
+            continue;
+        }
+        // A: rows = max(M_e, TILE_M) (pad rows out-of-bounds, OOB filled by TMA)
+        // We pass actual M_e — TMA's OOB handling fills with zeros for rows past M_e.
+        // gmem_cols = K/2, box_cols = TILE_K/2.
+        if (!build_tma_2d_u8(&descs[2 * e + 0],
+                              const_cast<void*>(host_ptr_A[e]),
+                              /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
+                              /*box_rows=*/TILE_M_rt, /*box_cols=*/TILE_K_rt / 2)) {
+            IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)", e, M_e, K);
+            return false;
+        }
+        if (!build_tma_2d_u8(&descs[2 * e + 1],
+                              const_cast<void*>(host_ptr_B[e]),
+                              /*gmem_rows=*/N, /*gmem_cols=*/K / 2,
+                              /*box_rows=*/TILE_N, /*box_cols=*/TILE_K_rt / 2)) {
+            IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(B) failed (e=%d N=%d K=%d)", e, N, K);
+            return false;
+        }
+    }
+    return true;
+}
 
 bool gemm_grouped_nvfp4_smallM(
     int n_experts, const int* host_M, int N, int K,
@@ -750,37 +837,10 @@ bool gemm_grouped_nvfp4_smallM(
     // experts get a dummy descriptor (1x16 buffer) since the kernel early-exits on M_e<=0.
     // Box geometry: A gmem (M_e,K/2) box (TILE_M,TILE_K/2); B gmem (N,K/2) box (TILE_N,TILE_K/2).
     std::vector<CUtensorMap> h_descs(static_cast<int64_t>(2) * n_experts);
-    if (!s_dummy_ready) {
-        cudaMalloc(&s_dummy, 256);
-        cudaMemset(s_dummy, 0, 256);
-        s_dummy_ready = 1;
-    }
-    for (int e = 0; e < n_experts; ++e) {
-        const int M_e = host_M[e];
-        if (M_e <= 0) {
-            // Dummy descriptor — won't be used.
-            build_tma_2d_u8(&h_descs[2 * e + 0], s_dummy, 16, 16, TILE_M_rt, TILE_K_rt / 2);
-            build_tma_2d_u8(&h_descs[2 * e + 1], s_dummy, 16, 16, TILE_N, TILE_K_rt / 2);
-            continue;
-        }
-        // A: rows = max(M_e, TILE_M) (pad rows out-of-bounds, OOB filled by TMA)
-        // We pass actual M_e — TMA's OOB handling fills with zeros for rows past M_e.
-        // gmem_cols = K/2, box_cols = TILE_K/2.
-        if (!build_tma_2d_u8(&h_descs[2 * e + 0],
-                              const_cast<void*>(host_ptr_A[e]),
-                              /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_M_rt, /*box_cols=*/TILE_K_rt / 2)) {
-            IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)", e, M_e, K);
-            return false;
-        }
-        if (!build_tma_2d_u8(&h_descs[2 * e + 1],
-                              const_cast<void*>(host_ptr_B[e]),
-                              /*gmem_rows=*/N, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_N, /*box_cols=*/TILE_K_rt / 2)) {
-            IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(B) failed (e=%d N=%d K=%d)", e, N, K);
-            return false;
-        }
-    }
+    if (!ensure_dummy_buffer() ||
+        !encode_expert_descs(h_descs.data(), n_experts, host_M, N, K, host_ptr_A, host_ptr_B, TILE_M_rt,
+                             TILE_N, TILE_K_rt))
+        return false;
 
     // Upload pointer arrays + M + descriptors to device.
     void** d_A = nullptr;   void** d_SFA = nullptr;
@@ -788,28 +848,13 @@ bool gemm_grouped_nvfp4_smallM(
     void** d_D = nullptr;
     int*   d_M = nullptr;
     CUtensorMap* d_descs = nullptr;
-    cudaMallocAsync(&d_A,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFA, sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_B,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFB, sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_D,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_M,   sizeof(int)   * n_experts, stream);
-    cudaMallocAsync(&d_descs, sizeof(CUtensorMap) * 2 * n_experts, stream);
-
-    cudaMemcpyAsync(static_cast<void*>(d_A), static_cast<const void*>(host_ptr_A), sizeof(void*) * n_experts,
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(static_cast<void*>(d_SFA), static_cast<const void*>(host_ptr_SFA),
-                    sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(static_cast<void*>(d_B), static_cast<const void*>(host_ptr_B), sizeof(void*) * n_experts,
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(static_cast<void*>(d_SFB), static_cast<const void*>(host_ptr_SFB),
-                    sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(static_cast<void*>(d_D), static_cast<const void*>(host_ptr_D), sizeof(void*) * n_experts,
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_M,   host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_descs, h_descs.data(),
-                    sizeof(CUtensorMap) * 2 * n_experts,
-                    cudaMemcpyHostToDevice, stream);
+    const size_t ptr_bytes = sizeof(void*) * n_experts;
+    StreamScratch scratch(stream);  // freed on every return below
+    scratch.add(&d_A, host_ptr_A, ptr_bytes);     scratch.add(&d_SFA, host_ptr_SFA, ptr_bytes);
+    scratch.add(&d_B, host_ptr_B, ptr_bytes);     scratch.add(&d_SFB, host_ptr_SFB, ptr_bytes);
+    scratch.add(&d_D, host_ptr_D, ptr_bytes);     scratch.add(&d_M, host_M, sizeof(int) * n_experts);
+    scratch.add(&d_descs, h_descs.data(), sizeof(CUtensorMap) * 2 * n_experts);
+    if (!scratch.upload()) return false;
 
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
@@ -839,18 +884,15 @@ bool gemm_grouped_nvfp4_smallM(
         const int SMEM_BYTES = smem_bytes_for(TM, TK, NS);
         const int tk_slot = (TK == 256) ? 1 : 0;
         const int tm_slot = tm_idx(TM);
-        if (!s_smem_attr_set[tk_slot][tm_slot]) {
-            cudaFuncSetAttribute(
-                (const void*)smallM_kernel_v1<TM, TILE_N, TK, NS>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                SMEM_BYTES);
-            s_smem_attr_set[tk_slot][tm_slot] = 1;
-        }
+        if (!ensure_smem_optin(s_smem_attr_set[tk_slot][tm_slot],
+                               (const void*)smallM_kernel_v1<TM, TILE_N, TK, NS>, SMEM_BYTES))
+            return false;
         smallM_kernel_v1<TM, TILE_N, TK, NS><<<grid, block, SMEM_BYTES, stream>>>(
             (const void* const*)d_A, (const void* const*)d_SFA,
             (const void* const*)d_B, (const void* const*)d_SFB,
             d_D, dev_alpha, d_M, d_descs, N, K);
         IMP_CUDA_CHECK_LAUNCH();
+        return true;
     };
 
     using IC2  = std::integral_constant<int, 2>;
@@ -864,29 +906,19 @@ bool gemm_grouped_nvfp4_smallM(
 
     if (use_tilek_256) {
         switch (TILE_M_rt) {
-            case 16:  launch_for(TM16{},  IC256{}, IC2{}); break;
-            case 32:  launch_for(TM32{},  IC256{}, IC2{}); break;
-            case 64:  launch_for(TM64{},  IC256{}, IC2{}); break;
-            default:  launch_for(TM128{}, IC256{}, IC2{}); break;
+            case 16:  return launch_for(TM16{},  IC256{}, IC2{});
+            case 32:  return launch_for(TM32{},  IC256{}, IC2{});
+            case 64:  return launch_for(TM64{},  IC256{}, IC2{});
+            default:  return launch_for(TM128{}, IC256{}, IC2{});
         }
     } else {
         switch (TILE_M_rt) {
-            case 16:  launch_for(TM16{},  IC128{}, IC3{}); break;
-            case 32:  launch_for(TM32{},  IC128{}, IC3{}); break;
-            case 64:  launch_for(TM64{},  IC128{}, IC3{}); break;
-            default:  launch_for(TM128{}, IC128{}, IC3{}); break;
+            case 16:  return launch_for(TM16{},  IC128{}, IC3{});
+            case 32:  return launch_for(TM32{},  IC128{}, IC3{});
+            case 64:  return launch_for(TM64{},  IC128{}, IC3{});
+            default:  return launch_for(TM128{}, IC128{}, IC3{});
         }
     }
-
-    // cudaFreeAsync takes the pointer-array allocations as void* (#2210)
-    // NOLINTBEGIN(bugprone-multi-level-implicit-pointer-conversion)
-    cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
-    cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
-    cudaFreeAsync(d_D, stream);
-    // NOLINTEND(bugprone-multi-level-implicit-pointer-conversion)
-    cudaFreeAsync(d_M, stream);
-    cudaFreeAsync(d_descs, stream);
-    return true;
 }
 
 }  // namespace imp

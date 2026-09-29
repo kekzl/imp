@@ -214,8 +214,9 @@ void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, co
     // Request extended shared memory if needed
     static bool smem_configured = false;
     if (!smem_configured && smem_bytes > static_cast<int64_t>(48) * 1024) {
-        cudaFuncSetAttribute(gemm_q6k_moe_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(smem_bytes));
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_q6k_moe_fused_kernel,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                static_cast<int>(smem_bytes)));
         smem_configured = true;
     }
 

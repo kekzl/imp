@@ -109,16 +109,29 @@ bool gemm_cublaslt_fp8_probe() {
     constexpr size_t M = 15, K = 4096, N = 12288;
     void *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
     float *d_sa = nullptr, *d_sb = nullptr;
-    if (cudaMalloc(&d_a, M * K) != cudaSuccess) return false;
-    if (cudaMalloc(&d_b, N * K) != cudaSuccess) { cudaFree(d_a); return false; }
-    if (cudaMalloc(&d_c, M * N * 2) != cudaSuccess) { cudaFree(d_a); cudaFree(d_b); return false; }
-    cudaMalloc(&d_sa, sizeof(float));
-    cudaMalloc(&d_sb, sizeof(float));
-    float one = 1.0f;
-    cudaMemcpy(d_sa, &one, sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_sb, &one, sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemset(d_a, 0, M * K);
-    cudaMemset(d_b, 0, N * K);
+    auto dalloc = [](auto** p, size_t bytes) {
+        if (cudaMalloc(p, bytes) == cudaSuccess) return true;
+        *p = nullptr;
+        return false;
+    };
+    auto release = [&] {
+        for (void* p : {d_a, d_b, d_c, static_cast<void*>(d_sa), static_cast<void*>(d_sb)})
+            if (p) IMP_CUDA_CHECK_LOG(cudaFree(p));
+    };
+    const float one = 1.0f;
+    // Setup failure = probe false (FP8 path off), same as a failed first cudaMalloc before.
+    const bool setup_ok = dalloc(&d_a, M * K) && dalloc(&d_b, N * K) && dalloc(&d_c, M * N * 2) &&
+                          dalloc(&d_sa, sizeof(float)) && dalloc(&d_sb, sizeof(float)) &&
+                          cudaMemcpy(d_sa, &one, sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess &&
+                          cudaMemcpy(d_sb, &one, sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess &&
+                          cudaMemset(d_a, 0, M * K) == cudaSuccess &&
+                          cudaMemset(d_b, 0, N * K) == cudaSuccess;
+    if (!setup_ok) {
+        IMP_LOG_WARN("gemm_cublaslt_fp8_probe: device setup failed: %s",
+                     cudaGetErrorString(cudaPeekAtLastError()));
+        release();
+        return false;
+    }
 
     cublasLtHandle_t lt = get_cublaslt_handle();
     cublasLtMatmulDesc_t opDesc;
@@ -145,8 +158,7 @@ bool gemm_cublaslt_fp8_probe() {
     cublasLtMatrixLayoutDestroy(Bdesc);
     cublasLtMatrixLayoutDestroy(Cdesc);
     cublasLtMatmulDescDestroy(opDesc);
-    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
-    cudaFree(d_sa); cudaFree(d_sb);
+    release();
     cudaGetLastError();
     return st == CUBLAS_STATUS_SUCCESS;
 }
