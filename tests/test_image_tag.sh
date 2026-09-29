@@ -97,6 +97,16 @@ check "IMP_ALLOW_FOREIGN_IMAGE=1 overrides" '(cd "$T/imp" && IMP_ALLOW_FOREIGN_I
 echo y > "$T/imp-wt-one/a.txt"
 out=$(cd "$T/imp-wt-one" && bash "$TAG_SH" check "$t_one" 2>&1); rc=$?
 check "same worktree edited after build: refused (exit $rc)" '[ "$rc" = 1 ]'
+# #2287: same-size edit in the index's own second, stat otherwise identical (trustctime off
+# pins ctime out). Only git's racy check catches it, and only if the scratch index keeps its mtime.
+R="$T/racy"; X=1700000000
+g init -q "$R" && git -C "$R" config core.trustctime false && echo a > "$R/a.txt"
+touch -d "@$X" "$R/a.txt" && g -C "$R" add a.txt && g -C "$R" commit -qm init
+touch -d "@$X" "$R/.git/index"
+printf 'imp.tree=%s\n' "$(cd "$R" && bash "$TAG_SH" tree)" > "$STUB/imp_racy.labels"
+echo y > "$R/a.txt" && touch -d "@$X" "$R/a.txt"
+out=$(cd "$R" && bash "$TAG_SH" check imp:racy 2>&1); rc=$?
+check "edit in the index's own second (racy entry): refused (exit $rc)" '[ "$rc" = 1 ]'
 out=$(cd "$T/imp" && bash "$TAG_SH" check imp:none 2>&1); rc=$?
 check "missing image: refused (exit $rc)" '[ "$rc" = 1 ] && grep -q "does not exist" <<<"$out"'
 
