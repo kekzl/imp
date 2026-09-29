@@ -236,7 +236,7 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
         // Use pre-allocated device memory: [A..., B..., C...]
         d_A_ptrs = d_work_ptrs;
         d_B_ptrs = d_work_ptrs + n_experts;
-        d_C_ptrs = d_work_ptrs + 2 * n_experts;
+        d_C_ptrs = d_work_ptrs + static_cast<ptrdiff_t>(2) * n_experts;
     } else {
         // Allocate once for all groups (not per-group)
         size_t ptr_bytes = n_active * sizeof(void*);
@@ -248,9 +248,12 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
 
     // Single upload of all pointer arrays
     size_t active_bytes = n_active * sizeof(void*);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_A_ptrs, h_A.data(), active_bytes, cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_B_ptrs, h_B.data(), active_bytes, cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_C_ptrs, h_C.data(), active_bytes, cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_A_ptrs), static_cast<const void*>(h_A.data()),
+                                       active_bytes, cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_B_ptrs), static_cast<const void*>(h_B.data()),
+                                       active_bytes, cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_C_ptrs), static_cast<const void*>(h_C.data()),
+                                       active_bytes, cudaMemcpyHostToDevice, stream));
 
     // Use cublasGemmGroupedBatchedEx: single cuBLAS call for ALL groups.
     // This eliminates per-group launch overhead (critical for 61+ groups with 128 experts).
@@ -305,9 +308,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     }
 
     if (owns_ptrs) {
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_A_ptrs, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_B_ptrs, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_C_ptrs, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_A_ptrs), stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_B_ptrs), stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_C_ptrs), stream));
     }
 }
 

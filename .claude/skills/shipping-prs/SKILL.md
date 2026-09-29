@@ -38,7 +38,7 @@ git log -1 --stat origin/main                      # after merge
 
 - `git push | tail` swallows the gate block (it prints BEFORE the git lines); read the full output.
 - A push while your own `verify-fast` runs collides on the GPU (the hook runs the perf gate on `CMakeLists.txt`/kernel diffs).
-- `docs_lint.py` regenerates `docs/audit/docs-rewrite/STALE.md` on every local run; commit it as an `.md`-only follow-up BEFORE `gh pr create` (hook skips `.md`), or it blocks `git pull` until `git checkout -- docs/audit/docs-rewrite/STALE.md`.
+- `docs_lint.py` writes `docs/audit/docs-rewrite/STALE.md` only with `--write-stale`; hooks and CI never touch it (#2194).
 - Roofline history pushes (`.json`) trigger the full hook: push docs+history with `--no-verify`.
 - Moving text from `docs/roadmap.md` to `docs/plans/` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); the hooks run no `hygiene`, CI `Release hygiene` catches it. Local: `docker run --rm -v $PWD:/src -w /src -e HOME=/tmp imp:toolchain bash -c 'git config --global --add safe.directory /src; bash scripts/ci_static_gates.sh hygiene docs citations'`.
 - PR monitors: `pgrep -f "<string>"` matches the monitor's own shell; stop an old monitor before starting a second on the same PR.
@@ -76,7 +76,7 @@ gh pr view <PR> --json mergeStateStatus,statusCheckRollup,reviewDecision
 | `reviewDecision` not APPROVED / unresolved thread | review action needed | |
 | `gh pr checks` prints NOTHING and `mergeStateStatus=DIRTY` | conflict with `main`; GitHub runs no workflow on an unbuildable merge ref, so no CI, no auto-merge, no arming | rebase onto `origin/main`; force-push is gated, so push a fresh branch and reopen |
 | `mergeStateStatus=UNKNOWN` | not computed yet | query again; never build a mechanism on it (#1516 cost an hour) |
-| `Build` red on a refactor that moved lines | `citations` gate: dead `file:line` in a living doc (#1783; #1782 paid a CI roundtrip) | `python3 scripts/check_doc_citations.py .` |
+| `Build` red on a refactor that deleted or renamed cited code | `citations` gate: anchor of a `file:line` gone or ambiguous in a living doc (#1783; line drift alone only warns since #2231) | `python3 scripts/check_doc_citations.py .`; drift: `--fix` |
 | `File size` / `Test lanes` red after adding a GPU test | unlaned-test pin | raise `PINNED` in `tools/check_test_lanes.py` with a reason; an allowlisted file past its pin ceiling (next multiple of 25): `python3 tools/check_filesize.py --update` |
 
 ## Cutting a tagged release

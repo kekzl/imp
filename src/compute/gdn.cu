@@ -29,6 +29,7 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // CSPLIT: CTAs per head along HD (blockIdx.z), each owning HD/CSPLIT state columns. The delta rule
 // is column-independent; K/Q normalisation is recomputed per CTA. Not with fac_in/fac_out (one
 // per-head buffer, read at start and written at end by different CTAs).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float, int CSPLIT = 1>
 __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -317,6 +318,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     }
     pdl_trigger();  // state committed inside the loop; nothing global remains
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Gated-norm family (FP16/FP32 variants) lives in gdn_gated_norm.cu.
 
@@ -493,13 +495,14 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                                      std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
         int inner = n_heads * head_dim_ssm;
         int BC_size = n_groups * state_size;
-        size_t smem_old = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+        size_t smem_old = static_cast<int64_t>(2) * state_size * sizeof(float) + 2 * sizeof(float);
         for (int t = 0; t < n_tokens; t++) {
             const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
             gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
-                row + 2 * BC_size, row + BC_size, row, alpha + t * n_heads, beta + t * n_heads, A_log,
-                dt_bias, h_state, y + t * inner, nullptr, n_heads, head_dim_ssm, state_size, n_groups,
-                grouped_layout);
+                row + static_cast<ptrdiff_t>(2) * BC_size, row + BC_size, row,
+                alpha + static_cast<ptrdiff_t>(t) * n_heads, beta + static_cast<ptrdiff_t>(t) * n_heads,
+                A_log, dt_bias, h_state, y + static_cast<ptrdiff_t>(t) * inner, nullptr, n_heads,
+                head_dim_ssm, state_size, n_groups, grouped_layout);
             IMP_CUDA_CHECK_LAUNCH();
         }
     }
@@ -574,6 +577,7 @@ void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const
 // head_dim_v; state kept in SHARED memory (not registers) for the token loop, written back at
 // the end. Math is identical to the fused kernel - if outputs differ, the fused kernel has a
 // correctness bug (register lifetime, sync, or dataflow).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gdn_scan_reference_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
@@ -707,6 +711,7 @@ __global__ void gdn_scan_reference_kernel(
         __syncthreads();  // before next token overwrites s_k/s_q/s_v
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -735,6 +740,7 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
 // ---------------------------------------------------------------------------
 
 // Old per-token decode kernel (still available for reference)
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float* __restrict__ B_in,
                                        const float* __restrict__ C_in, const half* __restrict__ alpha_raw,
                                        const half* __restrict__ beta_raw, const float* __restrict__ A_log,
@@ -799,12 +805,13 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
     }
     y[h * head_dim_ssm + d] = __float2half(y_partial * scale);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
                          int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                          int grouped_layout) {
-    size_t smem = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+    size_t smem = static_cast<int64_t>(2) * state_size * sizeof(float) + 2 * sizeof(float);
     gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x, B, C, alpha, beta, A_log, dt_bias,
                                                                     h_state, y, z, n_heads, head_dim_ssm,
                                                                     state_size, n_groups, grouped_layout);
@@ -817,14 +824,14 @@ void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const 
                           cudaStream_t stream, int grouped_layout) {
     int inner = n_heads * head_dim_ssm;
     int BC_size = n_groups * state_size;
-    size_t smem = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+    size_t smem = static_cast<int64_t>(2) * state_size * sizeof(float) + 2 * sizeof(float);
     for (int t = 0; t < n_tokens; t++) {
-        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x + t * inner, B + t * BC_size,
-                                                                        C + t * BC_size, alpha + t * n_heads,
-                                                                        beta + t * n_heads, A_log, dt_bias,
-                                                                        h_state, y + t * inner, nullptr,
-                                                                        n_heads, head_dim_ssm, state_size,
-                                                                        n_groups, grouped_layout);
+        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(
+            x + static_cast<ptrdiff_t>(t) * inner, B + static_cast<ptrdiff_t>(t) * BC_size,
+            C + static_cast<ptrdiff_t>(t) * BC_size, alpha + static_cast<ptrdiff_t>(t) * n_heads,
+            beta + static_cast<ptrdiff_t>(t) * n_heads, A_log, dt_bias, h_state,
+            y + static_cast<ptrdiff_t>(t) * inner, nullptr, n_heads, head_dim_ssm, state_size, n_groups,
+            grouped_layout);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }

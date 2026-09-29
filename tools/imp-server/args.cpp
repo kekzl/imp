@@ -11,6 +11,8 @@ void print_server_usage(const char* prog) {
             "\n"
             "Options:\n"
             "  --model <path>        Path to model file or HuggingFace repo ID (optional)\n"
+            "                        or hf://<org>/<repo>[:<file>.gguf]: download into the HF\n"
+            "                        cache first (HF_TOKEN for gated repos, cached runs offline)\n"
             "  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)\n"
             "  --config <path>       imp.conf path (default: ./imp.conf, ~/.config/imp/imp.conf)\n"
             "  --set <sec.key=val>   Override one imp.conf key (repeatable)\n"
@@ -61,6 +63,11 @@ void print_server_usage(const char* prog) {
             "  --http-write-timeout <s>    Socket write timeout (default 600)\n"
             "  --http-keep-alive-max <n>   Requests per connection (default 100)\n"
             "  --log-requests <path> Append per-request JSONL with prompt + response content\n"
+            "  --idle-unload-seconds <s> Suspend (free the GPU) after s idle seconds; the next\n"
+            "                        request resumes it (default 0 = off)\n"
+            "  --responses-store-ttl <s>          Responses store=true lifetime (default 3600, 0=store off)\n"
+            "  --responses-store-max-entries <n>  Responses store entry cap, LRU (default 1000)\n"
+            "  --responses-store-max-mib <n>      Responses store byte cap in MiB, LRU (default 256)\n"
             "  --help                Show this help message\n",
             prog);
 }
@@ -130,6 +137,34 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.keep_alive_max = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefix-cache") == 0 && i + 1 < argc) {
             args.prefix_cache_path = argv[++i];
+        } else if (std::strcmp(arg, "--idle-unload-seconds") == 0 && i + 1 < argc) {
+            // Strict: a typo must not silently mean "off".
+            const char* v = argv[++i];
+            char* end = nullptr;
+            const long n = std::strtol(v, &end, 10);
+            if (end == v || *end != '\0' || n < 0 || n > 86400 * 365) {
+                fprintf(stderr, "--idle-unload-seconds expects an integer >= 0, got '%s'\n", v);
+                std::exit(1);
+            }
+            args.idle_unload_seconds = static_cast<int>(n);
+        } else if ((std::strcmp(arg, "--responses-store-ttl") == 0 ||
+                    std::strcmp(arg, "--responses-store-max-entries") == 0 ||
+                    std::strcmp(arg, "--responses-store-max-mib") == 0) &&
+                   i + 1 < argc) {
+            // Strict like --idle-unload-seconds: a typo must not silently disable the store.
+            const char* v = argv[++i];
+            char* end = nullptr;
+            const long n = std::strtol(v, &end, 10);
+            if (end == v || *end != '\0' || n < 0 || n > 1000000000L) {
+                fprintf(stderr, "%s expects an integer >= 0, got '%s'\n", arg, v);
+                std::exit(1);
+            }
+            if (std::strcmp(arg, "--responses-store-ttl") == 0)
+                args.responses_store_ttl = static_cast<int>(n);
+            else if (std::strcmp(arg, "--responses-store-max-entries") == 0)
+                args.responses_store_max_entries = static_cast<int>(n);
+            else
+                args.responses_store_max_mib = static_cast<int>(n);
         } else if (std::strcmp(arg, "--log-requests") == 0 && i + 1 < argc) {
             args.log_requests_path = argv[++i];
         } else {

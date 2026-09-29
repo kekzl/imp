@@ -2,6 +2,7 @@
 #include "spec_usage_keys.h"
 
 #include <cstdio>
+#include <random>
 #include <stdexcept>
 
 namespace imp_server::responses {
@@ -36,8 +37,12 @@ std::string content_to_text(const json& content) {
 }  // namespace
 
 std::string make_response_id(uint64_t counter) {
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "resp_imp%012llx", static_cast<unsigned long long>(counter));
+    // random_device (getrandom on Linux), not a seeded PRNG whose state other ids would reveal.
+    std::random_device rd;
+    const uint64_t rnd = (static_cast<uint64_t>(rd()) << 32) ^ rd();
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "resp_imp%012llx%016llx", static_cast<unsigned long long>(counter),
+                  static_cast<unsigned long long>(rnd));
     return buf;
 }
 
@@ -49,17 +54,10 @@ std::string make_item_id(const char* prefix, uint64_t counter) {
 }
 
 json responses_to_openai_body(const json& rsp) {
-    // Statelessness guard: imp keeps no response store, so previous_response_id / store=true cannot
-    // be honored (rejected). Agentic clients (Codex CLI, Agents SDK) run store=false and resend the
-    // full transcript each turn, which this server supports.
+    // `store` is the handler's (responses_store.h). previous_response_id must already be resolved
+    // into `input` by continue_conversation(); reaching here unresolved is a handler bug.
     if (rsp.contains("previous_response_id") && !rsp["previous_response_id"].is_null())
-        throw std::invalid_argument(
-            "previous_response_id is not supported (imp-server is stateless — send the "
-            "full transcript in `input`, e.g. store=false clients like Codex do)");
-    if (rsp.value("store", false))
-        throw std::invalid_argument(
-            "store=true is not supported (imp-server keeps no response store); use "
-            "store=false and resend the transcript in `input`");
+        throw std::invalid_argument("previous_response_id was not resolved against the response store");
 
     json oai;
     if (rsp.contains("model"))
@@ -215,6 +213,24 @@ json responses_to_openai_body(const json& rsp) {
     if (rsp.contains("stream"))
         oai["stream"] = rsp["stream"];
     return oai;
+}
+
+json normalize_input_items(const json& input) {
+    if (input.is_string())
+        return json::array({{{"role", "user"}, {"content", input}}});
+    if (input.is_array())
+        return input;
+    return json::array();
+}
+
+json continue_conversation(const json& prev_input_items, const json& prev_output_items,
+                           const json& new_input) {
+    json items = prev_input_items.is_array() ? prev_input_items : json::array();
+    if (prev_output_items.is_array())
+        items.insert(items.end(), prev_output_items.begin(), prev_output_items.end());
+    json tail = normalize_input_items(new_input);
+    items.insert(items.end(), tail.begin(), tail.end());
+    return items;
 }
 
 json openai_to_responses_response(const json& oai, const std::string& req_model,

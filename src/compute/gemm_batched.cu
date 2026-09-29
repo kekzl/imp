@@ -106,7 +106,7 @@ bool gemm_cublaslt_fp8_probe() {
     // Test at M=15 (non-power-of-2, common short-prompt length after chat
     // template wrapping) because cuBLAS 13.4 FP8 on sm_120 returns
     // NOT_SUPPORTED for certain M values even when M=16/32/64 work.
-    constexpr int M = 15, K = 4096, N = 12288;
+    constexpr size_t M = 15, K = 4096, N = 12288;
     void *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
     float *d_sa = nullptr, *d_sb = nullptr;
     if (cudaMalloc(&d_a, M * K) != cudaSuccess) return false;
@@ -126,8 +126,10 @@ bool gemm_cublaslt_fp8_probe() {
     cublasOperation_t transA = CUBLAS_OP_T, transB = CUBLAS_OP_N;
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_sa, sizeof(d_sa));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_sb, sizeof(d_sb));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                   static_cast<const void*>(&d_sa), sizeof(d_sa));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                   static_cast<const void*>(&d_sb), sizeof(d_sb));
 
     cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
     cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8F_E4M3, K, N, K);

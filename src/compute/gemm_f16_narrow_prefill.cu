@@ -74,6 +74,7 @@ struct Smem {
 };
 
 // Stage (A rows of this row tile, W rows 0..n_total) for k-tile kt into stage buffer `s`.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int NPAD>
 __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args, int row0, int kt) {
     half* As = stage;
@@ -98,7 +99,9 @@ __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args,
         cp_async_cg16_zero(Ws + r * kBK + kc, src, valid);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int NPAD>
 __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(PrefillArgs args) {
     constexpr int NF = NPAD / 16;
@@ -189,6 +192,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
         ws[(static_cast<size_t>(ks) * M + m) * nt + c] = tile[(warp * 16 + r) * NPAD + c];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Four columns per thread, every split's partial in flight before the first add. N0 % 8 == 0
 // keeps a float4 inside one pair.

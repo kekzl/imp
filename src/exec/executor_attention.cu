@@ -648,7 +648,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                         ? *wo_h.payload.nvfp4.tensor_scale
                                         : 1.0f;
             wo_nvfp4.N = static_cast<int>(wo_h.shape[0]);
-            wo_nvfp4.K = static_cast<int>(wo_h.shape[1]) * 2;  // packed → logical K
+            wo_nvfp4.K = static_cast<int64_t>(static_cast<int>(wo_h.shape[1])) * 2;  // packed → logical K
         }
         int M_o = wo_nvfp4.N;
         int K_o = wo_nvfp4.K;
@@ -722,7 +722,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 debug_tensor_rows("pre_fp32accum_h_rows", view_tokens(h, n), stream);
                 // Dump FP32 accumulator state
                 {
-                    std::vector<float> fp32_tmp(n * model_->config().d_model);
+                    std::vector<float> fp32_tmp(static_cast<int64_t>(n) * model_->config().d_model);
                     cudaMemcpy(fp32_tmp.data(), fp32_h.data, fp32_tmp.size() * sizeof(float),
                                cudaMemcpyDeviceToHost);
                     double fs = 0, fss = 0;

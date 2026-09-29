@@ -406,8 +406,9 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
 void GraphExecutor::flush_pending_penalty_rows_(cudaStream_t stream) {
     if (n_pending_pen_rows_ <= 0)
         return;
-    PenaltyRowArgs* h_base = h_pen_args_.as<PenaltyRowArgs>() + sample_parity_ * sample_slots_;
-    PenaltyRowArgs* d_base = d_pen_args_ + sample_parity_ * sample_slots_;
+    PenaltyRowArgs* h_base = h_pen_args_.as<PenaltyRowArgs>() +
+                             static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
+    PenaltyRowArgs* d_base = d_pen_args_ + static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(PenaltyRowArgs) * n_pending_pen_rows_,
                                        cudaMemcpyHostToDevice, stream));
     launch_penalties_rows(d_base, n_pending_pen_rows_, pending_sample_vocab_, stream);
@@ -420,8 +421,9 @@ void GraphExecutor::flush_pending_penalty_rows_(cudaStream_t stream) {
 void GraphExecutor::flush_pending_greedy_rows_(cudaStream_t stream) {
     if (n_pending_greedy_rows_ <= 0)
         return;
-    GreedyRowArgs* h_base = h_greedy_args_.as<GreedyRowArgs>() + sample_parity_ * sample_slots_;
-    GreedyRowArgs* d_base = d_greedy_args_ + sample_parity_ * sample_slots_;
+    GreedyRowArgs* h_base = h_greedy_args_.as<GreedyRowArgs>() +
+                            static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
+    GreedyRowArgs* d_base = d_greedy_args_ + static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(GreedyRowArgs) * n_pending_greedy_rows_,
                                        cudaMemcpyHostToDevice, stream));
     launch_greedy_rows(d_base, n_pending_greedy_rows_, pending_sample_vocab_, stream);
@@ -433,8 +435,9 @@ void GraphExecutor::flush_pending_greedy_rows_(cudaStream_t stream) {
 void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
     if (n_pending_topk_rows_ <= 0)
         return;
-    TopkRowArgs* h_base = h_row_args_.as<TopkRowArgs>() + sample_parity_ * sample_slots_;
-    TopkRowArgs* d_base = d_row_args_ + sample_parity_ * sample_slots_;
+    TopkRowArgs* h_base = h_row_args_.as<TopkRowArgs>() +
+                          static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
+    TopkRowArgs* d_base = d_row_args_ + static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(TopkRowArgs) * n_pending_topk_rows_,
                                        cudaMemcpyHostToDevice, stream));
     launch_topk_topp_rows(d_base, n_pending_topk_rows_, pending_topk_max_k_, pending_topk_vocab_,

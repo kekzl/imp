@@ -15,6 +15,7 @@ namespace imp {
 
 // Assembles K[pe|nope] and V from kv_b + k_rope. Grid (n_heads,n_tokens), block 64 threads
 // (sufficient for all practical head dims <= 192).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ static void mla_assemble_kv_kernel(
         const __half* __restrict__ kv_b,    // [n, n_heads*(nope+v)]
         const __half* __restrict__ k_rope,  // [n, rope_dim]
@@ -46,9 +47,11 @@ __global__ static void mla_assemble_kv_kernel(
     for (int j = threadIdx.x; j < v_dst_hd; j += blockDim.x)
         v_dst[j] = (j < v_head_dim) ? kv_b_h[nope_dim + j] : __float2half(0.0f);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Reorders Q per-head from [nope|pe] to [pe|nope] in-place. Grid (n_heads,n_tokens), block
 // 64 threads, smem head_dim halfs.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ static void mla_reorder_q_kernel(
         __half* __restrict__ q_data,
         int n_heads, int nope_dim, int rope_dim)
@@ -70,6 +73,7 @@ __global__ static void mla_reorder_q_kernel(
     for (int j = threadIdx.x; j < nope_dim; j += blockDim.x)
         q_head[rope_dim + j] = smem[j];
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Compacts attention output [n,n_heads,head_dim] -> [n,n_heads,v_hd]. Grid (n_heads,n_tokens),
 // block up to 256 threads. Reads the first v_hd dims of each head's head_dim-strided slot;

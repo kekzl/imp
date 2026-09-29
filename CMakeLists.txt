@@ -44,6 +44,10 @@ target_compile_options(imp_warnings INTERFACE
 find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 
+# hf:// model fetch (src/model/hf_fetch.cpp): HTTPS via libcurl, sha256 via libcrypto.
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 # Target sm_120a (RTX 5090/PRO 6000, GB202): FP8 f8f6f4 MMA, NVFP4 block MMA, TMA-WS GEMM.
 # Fallback PTX compute_120f JIT-compiles for GB203, loses TMA-WS grouped GEMM (NVFP4 degraded).
 # IMP_DISABLE_120F_FALLBACK=ON strips it. CMake<3.31 can't parse a/f suffix; gencode passed direct.
@@ -192,9 +196,12 @@ set(IMP_MODEL_SOURCES
     src/model/mrope_positions.cpp
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
+    src/model/hf_fetch.cpp
+    src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
+    src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
     src/model/tensor_kind_name.cpp
     src/model/tensor_kind_table.cu
@@ -511,6 +518,8 @@ target_link_libraries(imp
     PRIVATE
         pthread
         imp_warnings
+        CURL::libcurl
+        OpenSSL::Crypto
 )
 
 if(IMP_USE_CUTLASS)
@@ -625,9 +634,12 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp
+        tools/imp-server/responses_store.cpp
         tools/imp-server/handlers.cpp
         tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
+        tools/imp-server/handlers_completions.cpp
+        tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_params.cpp
         tools/imp-server/image_fetch.cpp
@@ -638,6 +650,8 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_misc.cpp
         tools/imp-server/metrics_memory.cpp
         tools/imp-server/handlers_rerank.cpp
+        tools/imp-server/handlers_decide.cpp
+        tools/imp-server/candidate_tokens.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
         tools/imp-server/tracing.cpp
@@ -704,10 +718,12 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_lora_dims.cpp
+        tests/test_fim.cpp
         tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
+        tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
         tests/test_kv_cache.cpp
         tests/test_kv_accounting.cpp
@@ -878,6 +894,8 @@ if(IMP_BUILD_TESTS)
         # chunk clamp must answer 'can this head_dim skip the S-matrix' the
         # same way, or nothing bounds the chunk and cuBLAS aborts.
         tests/test_attention_dispatch_rules.cpp
+        # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
+        tests/test_fmha_fp8_tile_select.cpp
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
@@ -889,6 +907,7 @@ if(IMP_BUILD_TESTS)
         target_sources(test-core PRIVATE
             tools/imp-server/anthropic.cpp
             tools/imp-server/responses.cpp
+            tools/imp-server/responses_store.cpp
             tools/imp-server/utils.cpp
             tools/imp-server/tool_call.cpp
             tools/imp-server/tool_call_gemma.cpp
@@ -896,6 +915,7 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
+            tests/test_responses_store.cpp
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
@@ -924,6 +944,8 @@ if(IMP_BUILD_TESTS)
             # the only lane CI runs.
             tools/imp-server/image_fetch.cpp
             tests/test_image_fetch.cpp
+            # hf:// fetcher (#2200) against an in-process httplib mock hub on 127.0.0.1.
+            tests/test_hf_fetch.cpp
             # json_object grammar FSM battery: CPU lane, FSM is CUDA-free without init().
             # Listed unconditionally (not inside the IMP_BUILD_SERVER block) so -DIMP_BUILD_SERVER=OFF
             # (make asan) still compiles test-core, even though both files use nlohmann as oracle.
@@ -1111,9 +1133,15 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
+        tests/test_scheduler_embedding_prefix.cpp
+        tests/test_scheduler_prefix_bypass.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
+        # /v1/decide + /v1/score boundary guard on a real tokenizer.json (no GPU, model file).
+        tests/test_candidate_tokens.cpp
+        tools/imp-server/candidate_tokens.cpp
+        tests/test_fim_tokenizer.cpp
         tests/test_real_checkpoints.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
@@ -1166,6 +1194,9 @@ if(IMP_BUILD_TESTS)
         target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
         target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
     endif()
+
+    # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
+    imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention

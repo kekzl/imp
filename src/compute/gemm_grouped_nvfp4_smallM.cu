@@ -198,6 +198,7 @@ __global__ void smallM_kernel_v1_software_ref(
 // SMEM @ TILE=128, 3 stages: A 3x8=24 KiB, B 3x8=24 KiB, SFA/SFB 3x1=3 KiB each, mbar ~64B;
 // total ~54 KiB (under the 99 KiB sm_120 cap).
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int TILE_M, int TILE_N, int TILE_K, int N_STAGES>
 __global__ void smallM_kernel_v1(
     const void* const* __restrict__ d_A,
@@ -516,6 +517,7 @@ __global__ void smallM_kernel_v1(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // anonymous namespace
 
@@ -746,7 +748,7 @@ bool gemm_grouped_nvfp4_smallM(
     // Builds per-expert CUtensorMap descriptors on host: 2 per active expert [A,B]. Inactive
     // experts get a dummy descriptor (1x16 buffer) since the kernel early-exits on M_e<=0.
     // Box geometry: A gmem (M_e,K/2) box (TILE_M,TILE_K/2); B gmem (N,K/2) box (TILE_N,TILE_K/2).
-    std::vector<CUtensorMap> h_descs(2 * n_experts);
+    std::vector<CUtensorMap> h_descs(static_cast<int64_t>(2) * n_experts);
     if (!s_dummy_ready) {
         cudaMalloc(&s_dummy, 256);
         cudaMemset(s_dummy, 0, 256);
@@ -793,11 +795,16 @@ bool gemm_grouped_nvfp4_smallM(
     cudaMallocAsync(&d_M,   sizeof(int)   * n_experts, stream);
     cudaMallocAsync(&d_descs, sizeof(CUtensorMap) * 2 * n_experts, stream);
 
-    cudaMemcpyAsync(d_A,   host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFA, host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_B,   host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFB, host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_D,   host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(static_cast<void*>(d_A), static_cast<const void*>(host_ptr_A), sizeof(void*) * n_experts,
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(static_cast<void*>(d_SFA), static_cast<const void*>(host_ptr_SFA),
+                    sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(static_cast<void*>(d_B), static_cast<const void*>(host_ptr_B), sizeof(void*) * n_experts,
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(static_cast<void*>(d_SFB), static_cast<const void*>(host_ptr_SFB),
+                    sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(static_cast<void*>(d_D), static_cast<const void*>(host_ptr_D), sizeof(void*) * n_experts,
+                    cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_M,   host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_descs, h_descs.data(),
                     sizeof(CUtensorMap) * 2 * n_experts,
@@ -870,9 +877,12 @@ bool gemm_grouped_nvfp4_smallM(
         }
     }
 
+    // cudaFreeAsync takes the pointer-array allocations as void* (#2210)
+    // NOLINTBEGIN(bugprone-multi-level-implicit-pointer-conversion)
     cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
     cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
     cudaFreeAsync(d_D, stream);
+    // NOLINTEND(bugprone-multi-level-implicit-pointer-conversion)
     cudaFreeAsync(d_M, stream);
     cudaFreeAsync(d_descs, stream);
     return true;
