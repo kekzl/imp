@@ -829,7 +829,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     imp_req->status = imp::RequestStatus::PENDING;
 
     auto server_req = std::make_shared<ServerRequest>();
-    server_req->request = imp_req;
+    server_req->request = std::move(imp_req);
 
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);

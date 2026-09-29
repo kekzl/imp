@@ -99,7 +99,7 @@ std::shared_ptr<ServerRequest> make_score_request(const ScoreJob& job, bool dire
     r->snapshot_hint_tokens = direct ? 0 : job.shared_prefix;
     r->status = imp::RequestStatus::PENDING;
     auto sr = std::make_shared<ServerRequest>();
-    sr->request = r;
+    sr->request = std::move(r);
     return sr;
 }
 

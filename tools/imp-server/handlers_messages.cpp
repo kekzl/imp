@@ -476,7 +476,7 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
                                           /*stream=*/true);
 
         auto server_req = std::make_shared<ServerRequest>();
-        server_req->request = imp_req;
+        server_req->request = std::move(imp_req);
         {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
             if (!state.batching || !state.batching->is_running()) {

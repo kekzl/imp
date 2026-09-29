@@ -471,13 +471,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Attention scale: standard archs 1/sqrt(head_dim); Gemma 4 = 1.0 (Q/K-norm
     // absorb the per-element scaling, per llama.cpp f_attn_scale); MLA
     // multiplies by YaRN mscale_adj^2, mscale_adj = 0.1*mscale_all_dim*ln(yarn_factor)+1.0.
-    float scale = (prof.is_gemma4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
+    float scale = prof.is_gemma4 ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
     if (cfg.is_mla()) scale *= mla_attention_scale_multiplier(cfg);
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the
     // FP16 paged decode kernel understand them; prefill forces cuBLAS when sinks are present.
-    const void* attn_sinks = (prof.is_gpt_oss) ? ly.attn_sinks.data : nullptr;
+    const void* attn_sinks = prof.is_gpt_oss ? ly.attn_sinks.data : nullptr;
 
     // MLA absorbed-decode (opt-in): populates the per-layer latent cache with
     // this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH prefill

@@ -1027,7 +1027,7 @@ bool RegexNfa::parse_atom(Frag& out) {
         char esc = (*src_)[pos_++];
         std::vector<uint8_t> sc;
         if (make_shorthand(esc, sc)) {
-            cls = sc;
+            cls = std::move(sc);
         } else {
             // escaped literal (\. \\ \+ \{ etc.) — also map common control escapes
             unsigned char lit;

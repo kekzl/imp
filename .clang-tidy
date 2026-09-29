@@ -21,7 +21,24 @@
 # (Intentional empty catches — try-parse-with-default — are left flagged; the
 #  bugprone-empty-catch check stays on as a guard for genuinely-new swallows.)
 #
-# Last 7 entries: new in LLVM 23, fired on the bump sample (10 TUs), disabled, not fixed.
+# Entries after -readability-simplify-boolean-expr: new in LLVM 23, disabled. Unique findings
+# over all 355 tidy-lane TUs (176 .cpp + 179 .cu host side), rule: > 20 or judgment -> off.
+#   bugprone-signed-bitwise                         LLVM 23: 1584 findings
+#   readability-trailing-comma                      LLVM 23: 364 findings
+#   readability-inconsistent-ifelse-braces          LLVM 23: 99 findings
+#   readability-redundant-typename                  LLVM 23: 72 findings
+#   bugprone-unchecked-string-to-number-conversion  LLVM 23: 52 findings
+#   readability-redundant-nested-if                 LLVM 23: 44 findings
+#   readability-redundant-lambda-parameter-list     LLVM 23: 32 findings
+#   performance-prefer-single-char-overloads        LLVM 23: 30 findings
+#   bugprone-throwing-static-initialization         LLVM 23: 28 findings
+#   misc-explicit-constructor                       LLVM 23: 16 findings, CUDA RAII handles convert implicitly
+#   readability-trivial-switch                      LLVM 23: 5 findings, single-case enum switches are extension points
+#   bugprone-random-generator-seed                  LLVM 23: 2 findings, constant seeds keep benches reproducible
+#   clang-diagnostic-cuda-compat                    LLVM 23: 1 finding, inline on a header __global__ is ODR-needed
+#   performance-faster-string-find                  deprecated in LLVM 23, alias of prefer-single-char-overloads
+# New in LLVM 23 and on (findings fixed): misc-override-with-different-visibility (5),
+# performance-use-std-move (6), readability-redundant-parentheses (5), readability-redundant-qualified-alias (2).
 
 Checks: >
   bugprone-*,
@@ -62,7 +79,14 @@ Checks: >
   -misc-explicit-constructor,
   -performance-prefer-single-char-overloads,
   -readability-redundant-nested-if,
-  -readability-trailing-comma
+  -readability-trailing-comma,
+  -readability-inconsistent-ifelse-braces,
+  -readability-redundant-typename,
+  -readability-redundant-lambda-parameter-list,
+  -readability-trivial-switch,
+  -bugprone-random-generator-seed,
+  -clang-diagnostic-cuda-compat,
+  -performance-faster-string-find
 
 WarningsAsErrors: ''
 HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'

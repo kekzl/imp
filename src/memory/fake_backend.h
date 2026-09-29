@@ -34,11 +34,6 @@ public:
     explicit FakeBackend(size_t capacity_bytes = 0, bool growable = true);
     ~FakeBackend() override;
 
-    MemError do_commit(Region& region, size_t new_committed) override;
-    // A range commit is modelled as a prefix extension: committed becomes max(committed,
-    // offset + bytes). Interior gaps are not modelled, exact for a slab that commits its
-    // slots in order and conservative (over-counts) otherwise.
-    MemError do_commit_range(Region& region, size_t offset, size_t bytes) override;
     // 4 KiB rather than the VMM backend's 2 MiB, so a test can see stride
     // padding without allocating megabytes per slot.
     static constexpr size_t kGranularity = 4096;
@@ -70,6 +65,11 @@ public:
     static constexpr size_t kQuarantineDepth = 16;
 
 protected:
+    MemError do_commit(Region& region, size_t new_committed) override;
+    // A range commit is modelled as a prefix extension: committed becomes max(committed,
+    // offset + bytes). Interior gaps are not modelled, exact for a slab that commits its
+    // slots in order and conservative (over-counts) otherwise.
+    MemError do_commit_range(Region& region, size_t offset, size_t bytes) override;
     MemError do_acquire(size_t bytes, size_t alignment, RegionTag tag, void** out_base,
                         size_t* out_reserved) override;
     MemError do_acquire_growable(size_t reserve_bytes, size_t initial_commit, size_t alignment,

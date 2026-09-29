@@ -25,7 +25,7 @@
 #include <thread>
 #include <utility>
 
-using json = nlohmann::json;
+using nlohmann::json;
 
 // is_inference_endpoint: routes gated by --max-concurrent admission control. /v1/messages and
 // /v1/embeddings were once omitted, silently bypassing it (non-stream /v1/messages calls
