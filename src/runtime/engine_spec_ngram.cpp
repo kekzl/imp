@@ -36,6 +36,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
+#include "model/ngram_table.h"
 #include "runtime/engine.h"
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
@@ -53,6 +54,22 @@
 #include <vector>
 
 namespace imp {
+
+namespace {
+// Host work the verify forward must not contain (PLE rows, device expert cache take-over), as in the
+// decode step: keeps the per-forward D2H + sync out, so the chunk captures. True = PLE rows staged.
+bool verify_prep(GraphExecutor& ex, const Model& model, const Request& req, const int32_t* tokens, int rows,
+                 int p0, cudaStream_t stream) {
+    const int ple_ctx = ex.ple_context_len();
+    std::vector<int32_t>& ctx = ex.ngram_step_scratch();
+    ctx.assign(static_cast<size_t>(std::max(ple_ctx, 0)), 0);
+    const bool ctx_ok = ple_ctx > 0 && ple_ctx <= 8 &&
+                        ngram_context_at(req.input_tokens.data(), static_cast<int>(req.input_tokens.size()),
+                                         req.output_tokens.data(), static_cast<int>(req.output_tokens.size()),
+                                         p0, ple_ctx, model.config().ple_eos_token_id, ctx.data());
+    return ex.prepare_decode_step_host(tokens, rows, 1, ctx_ok ? ctx.data() : nullptr, stream);
+}
+}  // namespace
 
 // Burst-hybrid re-arm: a given-up request whose async-loop burst
 // (speculative.burst tokens) has completed gets a short probe window: two
@@ -208,10 +225,10 @@ bool Engine::spec_ngram_model_capable_uncached_() const {
     if (model_->profile().is_moe &&
         !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
         return false;
-    // Host-resident experts: a verify step (n = k + 1 rows) streams every expert the rows
-    // touch over PCIe, 1.9 s for 6 emitted tokens on Qwen3.8-Flash-Next against 15 ms per
-    // captured decode step (tg512 65.9 -> 40.6 tok/s with n-gram on, 2026-09-20).
-    if (experts_on_host_)
+    // Host-resident experts: verify rows 2..8 take the per-row decode path (run_moe_ffn, device cache
+    // or host LRU); the staged path it replaces took 1.9 s per 6 tokens (2026-09-20). Only the MTP
+    // source drafts there (step_spec_verify_). NVFP4-only: GGUF-MoE is refused above.
+    if (experts_on_host_ && runtime_config_.speculative.mtp_k <= 0)
         return false;
     if (!supports_chunked_prefill_())
         return false;
@@ -280,7 +297,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // flag alone. The step is entered whenever ANY drafter is enabled
     // (spec_any_drafter_enabled_), letting MTP and token recycling reach the
     // verify with `speculative.ngram=false` without dragging the matcher in.
-    const bool ngram_source_on = spec_ngram_enabled_(*req);
+    // Host-resident experts: MTP drafts only (k + 1 rows, spec_ngram_model_capable_uncached_).
+    const bool ngram_source_on = spec_ngram_enabled_(*req) && !experts_on_host_;
     if (!ngram_source_on) {
         // fall through to the MTP / recycling sources below
     } else if (scfg.suffix) {
@@ -366,7 +384,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // the decode-attn route (or its gates) is unavailable. Same
     // shallow-depth economics as above: at long context a depth-1 chain
     // does not pay for the verify.
-    if (runtime_config_.speculative.token_recycling && mc.empty()) {
+    if (runtime_config_.speculative.token_recycling && !experts_on_host_ && mc.empty()) {
         spec_recycle_feed_(*req);
         const bool penalties_active = req->repetition_penalty != 1.0f ||
                                       req->frequency_penalty != 0.0f ||
@@ -503,9 +521,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
                                    (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
                                    !model_->config().is_mla() && !swa_sizing_active_;
-    const bool capture_on =
-        !swa_sizing_active_ && spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
-    const int chunk_pad = capture_on ? spec_capture_bucket_(chunk_len) : chunk_len;
+    const int bucket = spec_capture_bucket_(chunk_len);
+    const bool capture_on = !swa_sizing_active_ && spec_capture_ready_(p0 + bucket, bucket);
+    const int chunk_pad = capture_on ? bucket : chunk_len;
     const int ctx_len = p0 + chunk_pad;  // context including the full (padded) chunk
 
     const int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
@@ -805,6 +823,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             }
         }
     }
+
+    state.ple_host_ready = !mc_on && verify_prep(*executor_, *model_, *req, h_tokens, chunk_pad, p0, stream);
 
     Tensor logits_out;
     if (runtime_config().diagnostics.spec_capture_probe) {

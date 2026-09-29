@@ -1842,6 +1842,8 @@ bool GraphExecutor::chunk_capture_supported() const {
     // moe.skip (debug) removes the MoE pass from eager and capture alike —
     // the recorded graph stays consistent, so it does not block capture.
     if (any_moe && !dispatch_policy().moe.skip) {
+        if (moe_host_rows_capture_max() > 0)
+            return true;  // per-row device expert cache path; the engine caps the chunk rows
         if (dispatch_policy().moe.no_cutlass3x || !dispatch_policy().moe.nvfp4_device_args)
             return false;
         if (!cutlass_grouped_3x_nvfp4_available())
