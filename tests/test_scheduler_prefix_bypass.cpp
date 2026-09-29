@@ -101,5 +101,23 @@ TEST(SchedulerTest, BypassPrefixCacheSkipsSnapshotReuseCallback) {
     EXPECT_EQ(direct->prefill_offset, 0);
 }
 
+// The one predicate both admission sites (scheduler, engine prefill fallback) read.
+TEST(RequestTest, PrefixReuseAllowed) {
+    Request plain;
+    EXPECT_TRUE(plain.prefix_reuse_allowed());
+    Request direct;
+    direct.bypass_prefix_cache = true;
+    EXPECT_FALSE(direct.prefix_reuse_allowed());
+    Request image_no_hash;
+    image_no_hash.n_vision_tokens = 4;
+    EXPECT_FALSE(image_no_hash.prefix_reuse_allowed()) << "an unhashed image would reuse another picture";
+    Request image_hashed;
+    image_hashed.n_vision_tokens = 4;
+    image_hashed.vision_content_hash = 0x1234;
+    EXPECT_TRUE(image_hashed.prefix_reuse_allowed());
+    image_hashed.bypass_prefix_cache = true;
+    EXPECT_FALSE(image_hashed.prefix_reuse_allowed());
+}
+
 }  // namespace
 }  // namespace imp

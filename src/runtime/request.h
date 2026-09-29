@@ -302,6 +302,12 @@ struct Request {
     std::shared_ptr<Buffer> mrope_delta_dev;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
+    // Prefix-cache reuse allowed: an image joins only via its content hash (every image token
+    // shares one id); direct mode (#2198) never reuses.
+    bool prefix_reuse_allowed() const {
+        const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache;
+    }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so
     // inserting into the middle shifts every following field for a value only read on error

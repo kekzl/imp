@@ -35,6 +35,7 @@ EndToEndTest.VersionString
 RequestTest.ContextLen
 RequestTest.DefaultState
 RequestTest.StatusTransitions
+RequestTest.PrefixReuseAllowed
 SchedulerTest.ACancelledQueueSchedulesNothing
 SchedulerTest.AddRemoveRapidly
 SchedulerTest.ActiveIdsSkipFinishedAndCancelled
