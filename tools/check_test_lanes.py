@@ -352,7 +352,9 @@ def main():
     # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
     # 1172 -> 1173 -> 1172: Q8_0 IMMA BM=160/192 bit-exact test (test-quant) added and removed with the
     # tall tiles (#2267, measured slower than BM=128).
-    PINNED = 1172
+    # 1172 -> 1174: SamplingTest.FailedRowLaunchReturnsStatus, StaleErrorDoesNotFailSampler (test-compute,
+    # GPU): sampler launch status, stale error cleared (#2310); needs a card.
+    PINNED = 1174
 
     text = CMAKE.read_text()
     mods = module_sources(text)

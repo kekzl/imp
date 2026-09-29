@@ -419,7 +419,7 @@ TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
     // Greedy async path, same slot mechanics.
     for (int i = 0; i < n_seq; i++) {
         auto* slot = reinterpret_cast<int32_t*>(d_slots + static_cast<size_t>(i) * SAMPLE_SCRATCH_BYTES);
-        sample_greedy_async(logits[i], slot, nullptr);
+        ASSERT_TRUE(sample_greedy_async(logits[i], slot, nullptr));
     }
     ASSERT_EQ(cudaMemcpy2DAsync(h_pinned, sizeof(int32_t), d_slots, SAMPLE_SCRATCH_BYTES, sizeof(int32_t),
                                 n_seq, cudaMemcpyDeviceToHost, nullptr),
@@ -606,7 +606,7 @@ TEST(SamplingTest, GreedyRowsMatchPerRowLaunch) {
     std::vector<GreedyRowArgs> h_rows(kRows);
     for (int r = 0; r < kRows; ++r) {
         auto* ref_slot = reinterpret_cast<int32_t*>(d_slots + (size_t)r * SAMPLE_SCRATCH_BYTES);
-        sample_greedy_async(logits[r], ref_slot, nullptr);
+        ASSERT_TRUE(sample_greedy_async(logits[r], ref_slot, nullptr));
         h_rows[r].logits = static_cast<const float*>(logits[r].data);
         h_rows[r].d_result =
             reinterpret_cast<int32_t*>(d_slots + (size_t)(kRows + r) * SAMPLE_SCRATCH_BYTES);
@@ -615,7 +615,7 @@ TEST(SamplingTest, GreedyRowsMatchPerRowLaunch) {
     ASSERT_EQ(cudaMalloc(&d_rows, kRows * sizeof(GreedyRowArgs)), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_rows, h_rows.data(), kRows * sizeof(GreedyRowArgs), cudaMemcpyHostToDevice),
               cudaSuccess);
-    launch_greedy_rows(d_rows, kRows, kVocab, nullptr);
+    ASSERT_EQ(launch_greedy_rows(d_rows, kRows, kVocab, nullptr), cudaSuccess);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     for (int r = 0; r < kRows; ++r) {
@@ -629,6 +629,41 @@ TEST(SamplingTest, GreedyRowsMatchPerRowLaunch) {
     cudaFree(d_rows);
     cudaFree(d_slots);
     for (auto& t : logits) free_gpu_tensor(t);
+}
+
+// #2310: a failed row-sampler launch (grid dim 0 = cudaErrorInvalidConfiguration, non-sticky) is
+// returned, not only logged, and consumed so the next sampler starts clean.
+TEST(SamplingTest, FailedRowLaunchReturnsStatus) {
+    char* d_rows = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_rows, sizeof(TopkRowArgs) + sizeof(GreedyRowArgs)), cudaSuccess);
+    EXPECT_EQ(launch_greedy_rows(reinterpret_cast<GreedyRowArgs*>(d_rows), 0, 1024, nullptr),
+              cudaErrorInvalidConfiguration);
+    EXPECT_EQ(cudaPeekAtLastError(), cudaSuccess);
+    EXPECT_EQ(launch_topk_topp_rows(reinterpret_cast<TopkRowArgs*>(d_rows), 0, 8, 1024, nullptr),
+              cudaErrorInvalidConfiguration);
+    EXPECT_EQ(cudaPeekAtLastError(), cudaSuccess);
+    cudaFree(d_rows);
+}
+
+// #2310: a stale unrelated error is cleared before the sampler launch, never reported as its failure.
+TEST(SamplingTest, StaleErrorDoesNotFailSampler) {
+    constexpr int kVocab = 4096;
+    std::vector<float> host(kVocab, 0.0f);
+    host[1234] = 9.0f;
+    Tensor logits = make_logits(host.data(), kVocab);
+    int32_t* d_slot = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_slot, SAMPLE_SCRATCH_BYTES), cudaSuccess);
+
+    void* huge = nullptr;
+    ASSERT_NE(cudaMalloc(&huge, size_t(1) << 50), cudaSuccess);
+    ASSERT_NE(cudaPeekAtLastError(), cudaSuccess);  // control: the stale error is set
+    ASSERT_TRUE(sample_greedy_async(logits, d_slot, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    int32_t tok = -1;
+    ASSERT_EQ(cudaMemcpy(&tok, d_slot, sizeof(int32_t), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(tok, 1234);
+    cudaFree(d_slot);
+    free_gpu_tensor(logits);
 }
 
 // Row-batched penalties (launch_penalties_rows) must leave every row's logits
