@@ -1062,8 +1062,9 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
                                std::vector<void*>& gpu_allocs) {
     if (!gptq.qweight.data || !gptq.scales.data)
         return false;
-    if (gptq.bits != 4) {
-        IMP_LOG_ERROR("GPTQ: only 4-bit supported (got %d)", gptq.bits);
+    if (gptq.bits != 4 || gptq.zero_offset < 0 || !gptq.qzeros.data) {
+        IMP_LOG_ERROR("GPTQ: projection not validated at load (bits=%d zero_offset=%d, qzeros required)",
+                      gptq.bits, gptq.zero_offset);
         return false;
     }
 
@@ -1082,17 +1083,16 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     }
     h2d_copy(d_qweight, gptq.qweight.data, qw_bytes, stream);
 
-    // 2. Upload qzeros to GPU
+    // 2. Upload qzeros to GPU (required, checked at load)
     int32_t* d_qzeros = nullptr;
-    if (gptq.qzeros.data) {
-        size_t qz_bytes = static_cast<size_t>(gptq.qzeros.shape[0]) * gptq.qzeros.shape[1] * sizeof(int32_t);
-        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes, stream) != cudaSuccess || !d_qzeros) {
-            IMP_LOG_ERROR("GPTQ: failed to allocate qzeros");
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-            return false;
-        }
-        h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream);
+    size_t qz_bytes = static_cast<size_t>(gptq.qzeros.shape[0]) * gptq.qzeros.shape[1] * sizeof(int32_t);
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes, stream) != cudaSuccess ||
+        !d_qzeros) {
+        IMP_LOG_ERROR("GPTQ: failed to allocate qzeros");
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
+        return false;
     }
+    h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream);
 
     // 3. Upload scales to GPU
     size_t sc_bytes = static_cast<size_t>(gptq.scales.shape[0]) * gptq.scales.shape[1] * sizeof(half);
@@ -1100,8 +1100,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_scales), sc_bytes, stream) != cudaSuccess || !d_scales) {
         IMP_LOG_ERROR("GPTQ: failed to allocate scales");
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-        if (d_qzeros)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
         return false;
     }
     h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream);
@@ -1136,8 +1135,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes, stream) != cudaSuccess || !d_out) {
         IMP_LOG_ERROR("GPTQ: failed to allocate output (%zu bytes)", out_bytes);
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-        if (d_qzeros)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
         if (d_g_idx)
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_g_idx, stream));
@@ -1145,13 +1143,13 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     }
 
     // 6. Run dequantization kernel
-    dequant_gptq4(d_out, d_qweight, d_qzeros, d_scales, d_g_idx, N, K, gptq.group_size, stream);
+    dequant_gptq4(d_out, d_qweight, d_qzeros, d_scales, d_g_idx, N, K, gptq.group_size,
+                  static_cast<gptq::ZeroFormat>(gptq.zero_offset), stream);
 
     // 7. Sync and free temporary GPU buffers
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-    if (d_qzeros)
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
     if (d_g_idx)
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_g_idx, stream));

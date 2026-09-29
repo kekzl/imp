@@ -1,0 +1,10 @@
+# CPU image for tools/analysis/gptq_ref_ppl.py (#2249). Target `hf` adds gptqmodel (--arm hf_gptq).
+FROM python:3.12-slim AS base
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.14.0 \
+ && pip install --no-cache-dir "transformers==4.57.6" safetensors numpy accelerate
+
+FROM base AS hf
+ENV BUILD_CUDA_EXT=0 CUDA_VISIBLE_DEVICES=""
+RUN apt-get update -qq && apt-get install -y -qq build-essential git >/dev/null \
+ && pip install --no-cache-dir setuptools wheel optimum==2.3.0 \
+ && pip install --no-cache-dir --no-build-isolation gptqmodel==7.5.0
