@@ -404,6 +404,8 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
 
 int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     req.recurrent_restore.reset();
+    if (req.bypass_prefix_cache)  // #2198 direct: no snapshot restore, no cached-block hold
+        return 0;
     if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
         return 0;
     // Restoring means starting prefill at offset > 0: a chunked continuation.
@@ -535,6 +537,8 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
 
 int Engine::swa_prefix_reuse_limit_(Request& req) {
     req.swa_restore.reset();
+    if (req.bypass_prefix_cache)  // #2198 direct: no SWA window restore
+        return 0;
     if (!swa_snapshots_ || !swa_snapshots_->enabled())
         return 0;
     // Restoring means starting prefill at offset > 0: a chunked continuation.

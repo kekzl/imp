@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # GPU acceptance for #2198 on Qwen3-8B: `bash scripts/accept_2198.sh`, PASS/FAIL per check, exit 0 iff all pass.
 # Runs make build (IMP_ACCEPT_SKIP_BUILD=1 skips), GPU busy check, then holds scripts/gpu_lock.sh.
-# Env: IMP_ACCEPT_MODEL (file in ~/models, default Qwen3-8B-Q8_0.gguf), IMP_ACCEPT_PORT (18198).
+# Env: IMP_ACCEPT_MODEL (default Qwen3-8B-Q8_0.gguf), IMP_ACCEPT_HYBRID (Qwen3.5-4B-mxfp4.gguf), IMP_ACCEPT_PORT.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
 MODEL="${IMP_ACCEPT_MODEL:-Qwen3-8B-Q8_0.gguf}"
+HYBRID="${IMP_ACCEPT_HYBRID:-Qwen3.5-4B-mxfp4.gguf}"
 PORT="${IMP_ACCEPT_PORT:-18198}"
 URL="http://127.0.0.1:${PORT}"
 NAME="imp-accept-2198"
@@ -22,7 +23,7 @@ gpu_free() {
 }
 
 if [ -z "${IMP_ACCEPT_LOCKED:-}" ]; then
-    [ -f "$HOME/models/$MODEL" ] || { echo "FAIL model: $HOME/models/$MODEL missing"; exit 1; }
+    for m in "$MODEL" "$HYBRID"; do [ -f "$HOME/models/$m" ] || { echo "FAIL model: $HOME/models/$m missing"; exit 1; }; done
     gpu_free || exit 1
     if [ "${IMP_ACCEPT_SKIP_BUILD:-0}" != 1 ]; then
         make build || { echo "FAIL build: make build"; exit 1; }
@@ -39,16 +40,19 @@ pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 post() { curl -s -m 600 -H 'Content-Type: application/json' -X POST "$URL$1" --data-binary @-; }
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+start_server() {  # start_server <model file in ~/models>; exits the script if it never gets healthy
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    docker run -d --name "$NAME" --gpus all -p "127.0.0.1:${PORT}:8080" -v "$HOME/models:/models:ro" "$IMG" \
+        imp-server --host 0.0.0.0 --port 8080 --model "/models/$1" >/dev/null || { echo "FAIL server $1: docker run"; exit 1; }
+    for _ in $(seq 1 180); do
+        [ "$(curl -s -m 5 "$URL/health" | jq -r '.model_loaded // false' 2>/dev/null)" = true ] && return 0
+        sleep 2
+    done
+    echo "FAIL server $1: not healthy after 360 s"; docker logs --tail 30 "$NAME"; exit 1
+}
+
 trap 'docker rm -f "$NAME" >/dev/null 2>&1' EXIT
-docker run -d --name "$NAME" --gpus all -p "127.0.0.1:${PORT}:8080" -v "$HOME/models:/models:ro" "$IMG" \
-    imp-server --host 0.0.0.0 --port 8080 --model "/models/$MODEL" >/dev/null || { echo "FAIL server: docker run"; exit 1; }
-for _ in $(seq 1 180); do
-    [ "$(curl -s -m 5 "$URL/health" | jq -r '.model_loaded // false' 2>/dev/null)" = true ] && break
-    sleep 2
-done
-[ "$(curl -s -m 5 "$URL/health" | jq -r '.model_loaded // false' 2>/dev/null)" = true ] ||
-    { echo "FAIL server: not healthy after 360 s"; docker logs --tail 30 "$NAME"; exit 1; }
+start_server "$MODEL"
 
 # 32 records; item k asks the color (even k) or city (odd k) of record k. Options: 4 to 8
 # consecutive entries of the pool, the true answer at position k % count.
@@ -134,6 +138,21 @@ for mode in direct serial; do
         fi
     done
 done
+
+# Check 6: hybrid model (recurrent-snapshot prefix path). Serial first: control (items 2..8 reuse > 0,
+# else the path is inactive and the direct check proves nothing) and it caches every prompt direct sends.
+start_server "$HYBRID"
+decide serial 8 "" > "$WORK/h_serial.json"
+h_ctl="$(jq '[.items[1:][] | .cached_tokens] | min' "$WORK/h_serial.json" 2>/dev/null)"
+decide direct 8 "" > "$WORK/h_direct.json"
+h_max="$(jq '[.items[] | .cached_tokens] | max' "$WORK/h_direct.json" 2>/dev/null)"
+if ! [[ "$h_ctl" =~ ^[0-9]+$ ]] || [ "$h_ctl" -le 0 ]; then
+    fail "hybrid-direct-uncached ($HYBRID): control inactive, serial items 2..8 min cached_tokens = $h_ctl"
+elif [ "$h_max" = 0 ]; then
+    pass "hybrid-direct-uncached ($HYBRID): direct max cached_tokens = 0 over 8 items; serial control min = $h_ctl"
+else
+    fail "hybrid-direct-uncached ($HYBRID): direct max cached_tokens = $h_max (serial control min = $h_ctl)"
+fi
 
 echo "checks failed: $FAILS"
 [ "$FAILS" -eq 0 ]

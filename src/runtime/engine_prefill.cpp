@@ -204,7 +204,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
                            req->n_vision_tokens > 0;
     const bool cacheable = !has_image || req->vision_content_hash != 0;
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
-        !req->embedding_request && cacheable) {
+        !req->bypass_prefix_cache && !req->embedding_request && cacheable) {
         // Hybrid models cap reuse at the recurrent-snapshot boundary, same as
         // the scheduler's admission path (scheduler.cpp): reuse past the last
         // snapshot would decode from a zeroed GDN state. Unreachable today
