@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <random>
 #include <type_traits>
 #include <vector>
@@ -19,6 +20,8 @@ namespace imp {
 namespace {
 
 constexpr int kHeads = 8, kHeadDim = 128, kStateSize = 128, kGroups = 8, kRows = 17;
+
+enum Variant { kFusedF32, kChunkwiseF32, kChunkwiseFp32Out };
 
 void fill(std::vector<float>& v, uint32_t seed, float lo = -1.0f, float hi = 1.0f) {
     std::mt19937 rng(seed);
@@ -36,14 +39,14 @@ protected:
     }
 };
 
-// The snapshot of a 17-row chunk at row 1 must equal a 1-row scan from the same state. The slab
-// starts as NaN, so an unwritten one fails on the finite check.
+// The snapshot of a `rows`-row scan at row `snap_row` must equal a `snap_row`-row fused scan from
+// the same state. The slab starts as NaN, so an unwritten one fails on the finite check.
 template <typename StateT>
-void check_snapshot_is_first_row_state(int variant) {
+void check_snapshot_is_row_state(int variant, int rows = kRows, int snap_row = 1) {
     const int conv_channels = 2 * kGroups * kStateSize + kHeads * kHeadDim;
     const size_t h_elems = static_cast<size_t>(kHeads) * kStateSize * kHeadDim;
-    std::vector<float> h_conv(static_cast<size_t>(kRows) * conv_channels), af(kRows * kHeads), bf(kRows * kHeads),
-        h_Alog(kHeads), h_dtb(kHeads), h0f(h_elems);
+    std::vector<float> h_conv(static_cast<size_t>(rows) * conv_channels), af(rows * kHeads),
+        bf(rows * kHeads), h_Alog(kHeads), h_dtb(kHeads), h0f(h_elems);
     fill(h_conv, 11);
     fill(af, 12, -2.0f, 2.0f);
     fill(bf, 13, -2.0f, 2.0f);
@@ -68,12 +71,11 @@ void check_snapshot_is_first_row_state(int variant) {
     ASSERT_EQ(cudaMalloc(&d_b, hb.size() * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_Alog, h_Alog.size() * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_dtb, h_dtb.size() * sizeof(float)), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(kRows) * kHeads * kHeadDim * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(rows) * kHeads * kHeadDim * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_chunk_h, h_elems * sizeof(StateT)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_one_h, h_elems * sizeof(StateT)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_snap, h_elems * sizeof(StateT)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_snap_n, sizeof(int)), cudaSuccess);
-    const int one = 1;
     cudaMemcpy(d_conv, h_conv.data(), h_conv.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_a, ha.data(), ha.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, hb.data(), hb.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -82,23 +84,28 @@ void check_snapshot_is_first_row_state(int variant) {
     cudaMemcpy(d_chunk_h, h0.data(), h_elems * sizeof(StateT), cudaMemcpyHostToDevice);
     cudaMemcpy(d_one_h, h0.data(), h_elems * sizeof(StateT), cudaMemcpyHostToDevice);
     cudaMemset(d_snap, 0xFF, h_elems * sizeof(StateT));
-    cudaMemcpy(d_snap_n, &one, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_snap_n, &snap_row, sizeof(int), cudaMemcpyHostToDevice);
 
-    auto scan = [&](StateT* h, int n, StateT* snap, const int* snap_n) {
+    half* const y16 = reinterpret_cast<half*>(d_y);
+    float* const y32 = reinterpret_cast<float*>(d_y);
+    auto scan = [&](int v, StateT* h, int n, StateT* snap, const int* snap_n) {
         if constexpr (std::is_same_v<StateT, float>) {
-            if (variant == 0)
-                gdn_scan_fused_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, d_y, n, kHeads, kHeadDim,
-                                   kStateSize, kGroups, 0, 0, nullptr, snap, snap_n);
+            if (v == kFusedF32)
+                gdn_scan_fused_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads,
+                                   kHeadDim, kStateSize, kGroups, 0, 0, nullptr, snap, snap_n);
+            else if (v == kChunkwiseF32)
+                gdn_scan_chunkwise_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads,
+                                       kHeadDim, kStateSize, kGroups, 0, 64, 0, nullptr, snap, snap_n);
             else
-                gdn_scan_chunkwise_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, d_y, n, kHeads, kHeadDim,
-                                       kStateSize, kGroups, 0, 64, 0, nullptr, snap, snap_n);
+                gdn_scan_chunkwise_fp32out(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y32, n, kHeads,
+                                           kHeadDim, kStateSize, kGroups, 0, 64, 0, nullptr, snap, snap_n);
         } else {
-            gdn_scan_fused_bf16(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, d_y, n, kHeads, kHeadDim,
+            gdn_scan_fused_bf16(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads, kHeadDim,
                                 kStateSize, kGroups, 0, 0, nullptr, snap, snap_n);
         }
     };
-    scan(d_chunk_h, kRows, d_snap, d_snap_n);
-    scan(d_one_h, 1, nullptr, nullptr);
+    scan(variant, d_chunk_h, rows, d_snap, d_snap_n);
+    scan(kFusedF32, d_one_h, snap_row, nullptr, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<StateT> snap(h_elems), one_row(h_elems);
@@ -114,7 +121,9 @@ void check_snapshot_is_first_row_state(int variant) {
             max_diff = std::max(max_diff, std::fabs(a - b));
     }
     EXPECT_EQ(non_finite, 0u) << "snapshot slab left unwritten";
-    EXPECT_LE(max_diff, 1e-6) << "snapshot is not the state after row 1";
+    EXPECT_LE(max_diff, 1e-6) << "snapshot is not the state after row " << snap_row;
+    std::printf("snapshot variant=%d rows=%d snap_row=%d max_abs_diff=%.3g\n", variant, rows, snap_row,
+                max_diff);
     for (void* p : {static_cast<void*>(d_conv), static_cast<void*>(d_a), static_cast<void*>(d_b),
                     static_cast<void*>(d_Alog), static_cast<void*>(d_dtb), static_cast<void*>(d_y),
                     static_cast<void*>(d_chunk_h), static_cast<void*>(d_one_h), static_cast<void*>(d_snap),
@@ -122,10 +131,29 @@ void check_snapshot_is_first_row_state(int variant) {
         cudaFree(p);
 }
 
-TEST_F(GdnVerifySnapshotTest, FusedF32WritesTheVerifySnapshot) { check_snapshot_is_first_row_state<float>(0); }
-TEST_F(GdnVerifySnapshotTest, ChunkwiseF32WritesTheVerifySnapshot) { check_snapshot_is_first_row_state<float>(1); }
+TEST_F(GdnVerifySnapshotTest, FusedF32WritesTheVerifySnapshot) {
+    check_snapshot_is_row_state<float>(kFusedF32);
+}
+TEST_F(GdnVerifySnapshotTest, ChunkwiseF32WritesTheVerifySnapshot) {
+    check_snapshot_is_row_state<float>(kChunkwiseF32);
+}
 TEST_F(GdnVerifySnapshotTest, FusedBf16WritesTheVerifySnapshot) {
-    check_snapshot_is_first_row_state<__nv_bfloat16>(0);
+    check_snapshot_is_row_state<__nv_bfloat16>(kFusedF32);
+}
+// #2214: 65 rows > chunk 64 threw; 64 rows took the chunkwise kernel, which has no snapshot write.
+TEST_F(GdnVerifySnapshotTest, ChunkwiseF32SnapshotPastOneChunk) {
+    check_snapshot_is_row_state<float>(kChunkwiseF32, 65, 1);
+    check_snapshot_is_row_state<float>(kChunkwiseF32, 65, 64);
+}
+TEST_F(GdnVerifySnapshotTest, ChunkwiseF32SnapshotOnAFullChunk) {
+    check_snapshot_is_row_state<float>(kChunkwiseF32, 64, 33);
+}
+TEST_F(GdnVerifySnapshotTest, ChunkwiseFp32OutSnapshotPastOneChunk) {
+    check_snapshot_is_row_state<float>(kChunkwiseFp32Out, 65, 1);
+    check_snapshot_is_row_state<float>(kChunkwiseFp32Out, 65, 64);
+}
+TEST_F(GdnVerifySnapshotTest, ChunkwiseFp32OutSnapshotOnAFullChunk) {
+    check_snapshot_is_row_state<float>(kChunkwiseFp32Out, 64, 33);
 }
 
 }  // namespace

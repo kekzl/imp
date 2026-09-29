@@ -63,7 +63,7 @@ Source: `src/core/qtype.h`.
 | `reasoning_effort` body field | ✅ | passed to the chat template verbatim; legal values are the template's, not ours. On Qwen3.8-27B the three it accepts render three different prompts (11 / 41 / 53 prompt tokens for medium / low / xhigh on the same message) |
 | auth (`--api-key`), `--metrics-require-auth` | ✅ | |
 | embedded web UI at `GET /` | ✅ | one file, no build step; surfaces the usage chunk (prompt / cached / reasoning tokens, context fill), the `/v1/models` picker (swap by request), `finish_reason: length`, per-turn tok/s and TTFT; GPU-less dev harness in `tools/imp-server/webui/dev/` |
-| logprobs | ✅ non-streaming | `tests/test_server_logprobs.py` (in `make test-server`, not in CI): at temperature 0 the emitted token IS `top_logprobs[0]` and shares its logprob. The streaming path emits none, #1588 |
+| logprobs | ✅ streaming and non-streaming | `tests/test_server_logprobs.py` (in `make test-server`, not in CI): at temperature 0 the emitted token IS `top_logprobs[0]` and shares its logprob. Streaming (`handlers_chat_stream.cpp` passes `lp_chunk` to `sse_chunk`, #1588) is pinned by `tests/api/test_streaming.py::test_stream_logprob_tokens_spell_the_content` (real engine only, skips on the CI mock) |
 | C library API, CLI | ✅ | |
 
 ## Engine

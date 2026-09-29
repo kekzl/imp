@@ -666,7 +666,7 @@ void Engine::init_resolve_quant_flags_() {
 
     // NVFP4 decode mode
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
-    config_.fp8_lm_head = lm_head_mode(runtime_config_.gemm.nvfp4_lm_head) == LmHeadMode::Fp8;
+    config_.fp8_lm_head = lm_head_mode_fp8(lm_head_mode(runtime_config_.gemm.nvfp4_lm_head));
 
     if (config_.use_nvfp4_decode < 0) {
         const auto wq_qtype = model_->layer(0).wq.qtype;

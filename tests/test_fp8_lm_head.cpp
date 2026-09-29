@@ -133,8 +133,13 @@ TEST(Fp8LmHead, PerRowRoundTripOnSyntheticHead) {
 
 TEST(Fp8LmHead, ConfigValueSelectsFp8AndKeepsTheOtherSpellings) {
     RuntimeConfig cfg;
-    EXPECT_EQ(cfg.gemm.nvfp4_lm_head, "auto") << "default stays NVFP4 auto";
+    EXPECT_EQ(cfg.gemm.nvfp4_lm_head, "auto");
     EXPECT_EQ(lm_head_mode(cfg.gemm.nvfp4_lm_head), LmHeadMode::Auto);
+    // #2166: auto builds the FP8 head (NVFP4 only as the fallback for an ineligible head); on = NVFP4.
+    EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Auto));
+    EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Fp8));
+    EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Nvfp4));
+    EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Source));
     ASSERT_TRUE(cfg.apply_overrides({"gemm.nvfp4_lm_head=fp8"}).empty());
     EXPECT_EQ(cfg.gemm.nvfp4_lm_head, "fp8");
     EXPECT_EQ(lm_head_mode(cfg.gemm.nvfp4_lm_head), LmHeadMode::Fp8);
