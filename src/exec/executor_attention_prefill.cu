@@ -160,10 +160,14 @@
                     v_full = chunk_eager_v_;
                     used_eager_scratch = true;
                 } else {
-                    cudaMallocAsync(&k_full, full_bytes, stream);
-                    cudaMallocAsync(&v_full, full_bytes, stream);
+                    // One allocation for K and V: a failure leaves nothing to free (#2288).
+                    half* kv = nullptr;
+                    const cudaError_t kv_err = cudaMallocAsync(&kv, chunk_kv_bytes(full_bytes), stream);
+                    chunk_kv_split(kv_err, kv, full_bytes, &k_full, &v_full);
                 }
             }
+            // The append below offsets k_full/v_full by q_offset rows; a null buffer is UB (#2288).
+            require_chunk_kv(k_full, v_full);
 
             // Gather past KV [0, q_offset) directly into k_full[0..q_offset], v_full[0..q_offset].
             if (kvt == QType::F16) {
@@ -308,8 +312,7 @@
             }
 
             if (!cap_replay && !used_eager_scratch) {
-                cudaFreeAsync(k_full, stream);
-                cudaFreeAsync(v_full, stream);
+                cudaFreeAsync(k_full, stream);  // v_full lives in the same allocation
             }
 
             // Persist current chunk's K/V (same as non-chunked path).

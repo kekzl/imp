@@ -952,6 +952,18 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     return true;
 }
 
+// Attention sub-block gate of mtp_draft_step; Qwen4Exp runs its own layer.
+static bool mtp_has_attention(const MtpHead& mtp, const MtpDraftWorkspace& ws) {
+    return mtp.layout != MtpLayout::Qwen4Exp && ws.num_heads > 0 && ws.head_dim > 0 &&
+           mtp.input_layernorm.data && mtp.q_proj.data && mtp.k_proj.data && mtp.v_proj.data &&
+           mtp.o_proj.data;
+}
+
+// mtp_attention_row offsets d_v_proj per KV head; num_kv_heads == 0 leaves it unallocated (#2288).
+static bool mtp_attention_v_missing(const MtpHead& mtp, const MtpDraftWorkspace& ws) {
+    return mtp_has_attention(mtp, ws) && (ws.num_kv_heads <= 0 || ws.d_v_proj == nullptr);
+}
+
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
                     const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                     int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
@@ -974,6 +986,11 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
     if (d_prev_token == nullptr && (prev_token_id < 0 || prev_token_id >= vocab_size)) {
         IMP_LOG_ERROR("mtp_draft_step: token_id %d out of range [0,%d)",
                       prev_token_id, vocab_size);
+        return false;
+    }
+    if (mtp_attention_v_missing(mtp, ws)) {
+        IMP_LOG_ERROR("mtp_draft_step: attention weights without a V projection buffer (num_kv_heads=%d)",
+                      ws.num_kv_heads);
         return false;
     }
 
@@ -1046,9 +1063,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
     // [num_heads,2*head_dim] split per-head into (q,gate); GQA attention -> out[h], then
     // out *= silu(gate) before o_proj. M=1 MVP (no MTP KV history): softmax over one token
     // is identity, so attn_out[h]=V[h//GQA_group] (broadcast); K computed but unused.
-    if (ws.num_heads > 0 && ws.head_dim > 0 &&
-        mtp.input_layernorm.data && mtp.q_proj.data && mtp.k_proj.data &&
-        mtp.v_proj.data && mtp.o_proj.data) {
+    if (mtp_has_attention(mtp, ws)) {
         const int hd  = hidden_dim;
 
         // 5.A.1 — input_layernorm(fc_out) → d_input_norm

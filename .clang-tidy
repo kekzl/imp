@@ -49,10 +49,10 @@
 #   clang-analyzer-core.UndefinedBinaryOperatorResult    LLVM 23: 5 findings, 4 device, 1 excluded by ngram_size >= 2 at load
 #   clang-analyzer-core.CallAndMessage                   LLVM 23: 5 findings, 2 device, 3 vmm driver() pointers gated by DriverApi::ok
 #   clang-analyzer-core.uninitialized.Assign             LLVM 23: 2 findings, 1 in cuda_fp16.hpp (system header), 1 on a fully initialized array
-#   clang-analyzer-core.NullPointerArithm                LLVM 23: 2 findings, judgment: device-buffer offsets on paths the analyzer assumes null
 #   clang-analyzer-core.NonNullParamChecker              LLVM 23: 2 findings, device (gate is non-null for every gated kAct)
 #   clang-analyzer-optin.core.EnumCastOutOfRange         LLVM 23: 1 finding, QType(255) is the "unset" sentinel
-# On (findings fixed): clang-analyzer-unix.Stream (2), clang-analyzer-core.NullDereference (1).
+# On (findings fixed): clang-analyzer-unix.Stream (2), clang-analyzer-core.NullDereference (1),
+#   clang-analyzer-core.NullPointerArithm (2).
 
 Checks: >
   clang-analyzer-*,
@@ -108,7 +108,6 @@ Checks: >
   -clang-analyzer-core.UndefinedBinaryOperatorResult,
   -clang-analyzer-core.CallAndMessage,
   -clang-analyzer-core.uninitialized.Assign,
-  -clang-analyzer-core.NullPointerArithm,
   -clang-analyzer-core.NonNullParamChecker,
   -clang-analyzer-optin.core.EnumCastOutOfRange
 
