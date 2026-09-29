@@ -39,7 +39,8 @@ tensor scale; imp registers it directly into the NVFP4 decode cache and CUTLASS 
 | a `.qweight` outside those seven projections, or a shape that is not `[K, N/8]` / `[K/g, N/8]` / `[K/g, N]` | refused at load |
 
 - VRAM holds FP16 weights: 4x the checkpoint's weight bytes. For 4-bit weights in VRAM use an NVFP4 export.
-- Checked: CPU reference bit-exact vs hand-packed tensors (`tests/test_dequant_awq.cpp`), kernel vs reference (`tests/test_dequant_awq_gpu.cu`), PPL and first token vs the FP16 original (`scripts/accept_2205.sh`).
+- Checked: CPU reference bit-exact vs hand-packed tensors (`tests/test_dequant_awq.cpp`), kernel vs reference (`tests/test_dequant_awq_gpu.cu`), host dequant byte-identical to an AutoAWQ-source dequant (`tools/analysis/awq_ref_ppl.py`) on all 168 / 252 projections of Qwen2.5-0.5B-Instruct-AWQ / Qwen3-4B-AWQ, PPL within 1 % of that reference and first token vs the original (`scripts/accept_2205.sh`).
+- Int4 cost, Qwen2.5-0.5B-Instruct-AWQ vs BF16 original, 45k corpus, transformers reference (FP32, FP8 head): PPL 26.1835 vs 21.0931, +24.1 %.
 
 ## GPTQ SafeTensors
 
