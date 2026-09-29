@@ -10,6 +10,8 @@
 # function_size_thresholds.toml. Lines below [baseline] are generated.
 #
 # Pin changes (newest first):
+#   #2212 item 3 (mtp_feed per-row body shared): mtp_feed_rows_multislot 50 -> 30, mtp_feed_batch 35 -> 15
+#   (below threshold, entry removed); new mtp_feed_dense_rows 9 is under the threshold
 #   #2267 (Q8_0 IMMA tall tiles): re-keyed, CCN unchanged: mmq_imma_kernel (launch bounds per BM) 34,
 #   gemm_common (+ q8_bm parameter) 39
 #   #2159 (HF tokenizer parity, written before the ratchet): Tokenizer::load 99 -> 116 (NFC normalizer,
@@ -76,8 +78,7 @@ skip_dirs = []
 "src/compute/moe_routing.cu::__global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k, int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights, bool use_sigmoid, bool normalize_weights, const half* __restrict__ score_bias)" = 34
 "src/compute/mtp_forward.cu::bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb, const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w, const NvFP4QuantResult* lm_head_nvfp4, const int32_t* d_prev_token, int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales)" = 51
 "src/compute/mtp_forward.cu::bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size, int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w, const NvFP4QuantResult* lm_head_nvfp4, int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales)" = 27
-"src/compute/mtp_forward.cu::bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows, const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream)" = 35
-"src/compute/mtp_forward.cu::bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows, int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream, const Tensor* post_norm, float post_norm_eps, float post_norm_offset)" = 50
+"src/compute/mtp_forward.cu::bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows, int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream, const Tensor* post_norm, float post_norm_eps, float post_norm_offset)" = 30
 "src/compute/mtp_forward.cu::bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int n_experts, int top_k, int expert_d_ff, int shared_d_ff, int num_heads, int num_kv_heads, int head_dim, int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank)" = 36
 "src/compute/sampling_filters.cu::__global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p, bool deterministic)" = 35
 "src/compute/sampling_internal.cuh::__device__ __forceinline__ void block_reduce_topk(float* local_vals, int* local_idxs, int local_count, int top_k, float* s_warp_vals, int* s_warp_idxs, float* out_val, int* out_idx)" = 27
