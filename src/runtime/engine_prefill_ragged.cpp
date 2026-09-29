@@ -63,15 +63,7 @@ bool Engine::prefill_ragged_enabled_() {
     return prefill_ragged_model_ok_ == 1;
 }
 
-bool Engine::prefill_ragged_req_ok_(const Request& req) const {
-    const bool has_vision = req.image || !req.qwen_patches.empty() || req.vision_emb ||
-                            req.n_vision_tokens > 0;
-    const bool wants_constraints = req.json_mode || !req.json_schema.empty() ||
-                                   !req.tool_constraint_tools.empty() || !req.regex_pattern.empty() ||
-                                   !req.grammar.empty();
-    return !has_vision && !req.embedding_request && req.score_token_ids.empty() && !req.logprobs &&
-           !wants_constraints;
-}
+bool Engine::prefill_ragged_req_ok_(const Request& req) const { return req.ragged_prefill_allowed(); }
 
 bool Engine::mixed_rider_ok_(const Request& r) const {
     if (r.status != RequestStatus::DECODING || r.output_tokens.empty() || !prefill_ragged_req_ok_(r))
@@ -128,6 +120,35 @@ void Engine::mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders
         if (!decode_prepare_kv_(r, kv_bs))
             continue;  // cancelled, exactly as step_decode would have
         riders.push_back(r);
+    }
+}
+
+void Engine::ragged_finish_row_(std::shared_ptr<Request>& req, const Tensor& row, cudaStream_t stream) {
+    // Score row (#2198 shared): candidate logits of its last position, no sampling.
+    if (!req->score_token_ids.empty()) {
+        score_capture_(*req, row, stream);
+        finish_request(req);
+        return;
+    }
+    InferenceState sst;
+    sst.is_prefill = true;
+    sst.n_sequences = 1;
+    fill_sampling_params(*req, sst);
+    upload_penalties(*req, sst, stream);
+    auto sampled = executor_->sample_from_logits(row, sst, stream);
+    const int32_t next_token = sampled[0];
+    if (req->mirostat == 2)
+        req->mirostat_mu = sst.mirostat_mu;
+
+    req->output_tokens.push_back(next_token);
+    track_think_state(*req, next_token);
+
+    if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+        finish_request(req);
+    } else {
+        req->status = RequestStatus::DECODING;
+        if (kv_manager_->prefix_caching_enabled())
+            kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
     }
 }
 
@@ -445,30 +466,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
             maybe_save_recurrent_snapshot_(*req, g.snap_end, stream);
             maybe_save_swa_snapshot_span_(req->id, req->input_tokens, stream, /*hard_sync=*/false);
         }
-        if (!g.is_last)
-            continue;
-
-        InferenceState sst;
-        sst.is_prefill = true;
-        sst.n_sequences = 1;
-        fill_sampling_params(*req, sst);
-        upload_penalties(*req, sst, stream);
-        Tensor row = logits_out.slice(s, s + 1);
-        auto sampled = executor_->sample_from_logits(row, sst, stream);
-        const int32_t next_token = sampled[0];
-        if (req->mirostat == 2)
-            req->mirostat_mu = sst.mirostat_mu;
-
-        req->output_tokens.push_back(next_token);
-        track_think_state(*req, next_token);
-
-        if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-            finish_request(req);
-        } else {
-            req->status = RequestStatus::DECODING;
-            if (kv_manager_->prefix_caching_enabled())
-                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
-        }
+        if (g.is_last)
+            ragged_finish_row_(req, logits_out.slice(s, s + 1), stream);
     }
 
     // Riders: each one's single row is its sequence's last row, so logits

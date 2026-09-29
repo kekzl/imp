@@ -18,7 +18,7 @@ One prefill per item, no sampling: the answer is a softmax over candidate-token 
 | `model` | string | optional, as on every route |
 | `evidence` | string | required; shared by every item |
 | `system` | string | optional; default `Answer only with the letter of the correct option.` |
-| `mode` | string | `auto` (= `serial`), `serial`, `direct`; `shared` is a 400 until implemented (#2198) |
+| `mode` | string | `auto` (= `serial`), `serial`, `direct`, `shared` |
 | `items[]` | array | required, non-empty, at most `--max-batch-items` |
 | `items[].id` | any | optional, echoed; default the item index |
 | `items[].criterion` | string | required |
@@ -43,6 +43,7 @@ Response (values illustrative):
 |---|---|
 | `serial` | item k+1 is submitted after item k finished: its evidence prefix is a prefix-cache hit (`cached_tokens` > 0 from item 2 on). Hybrid models: each item also saves a recurrent snapshot at the block floor of the prefix all items share (`Request::snapshot_hint_tokens`) |
 | `direct` | all items submitted at once, each bypassing the prefix cache (`cached_tokens` = 0). `cache_prompt: false` does not do this; it only controls pinning |
+| `shared` | item 1 alone; after it finished (its evidence blocks are published at finish), items 2..n are submitted at once, each reusing the evidence prefix, and run as rows of one ragged prefill (`runtime.prefill_batch`, row cap `prefill_chunk_size`, at most `max_batch_size` admitted per step). Hybrid models: each row restores the shared-prefix recurrent snapshot. Mamba2 and MLA models have no ragged prefill: rows prefill one by one, still reusing the prefix. `/v1/score` has one prompt: same as `serial` |
 
 `POST /v1/score` request: `model`, exactly one of `prompt` (raw string, tokenized like `/v1/completions`) or `messages` (`[{role, content}]`, chat template + generation prompt), `candidates` (2 to 256 token strings or integer token ids), `mode` as above. Response: `candidates[] {candidate, token_id, logit, prob}`, `argmax_index`, `prompt_tokens`, `cached_tokens`, `mode_used`, `usage`.
 

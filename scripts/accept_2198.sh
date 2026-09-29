@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # GPU acceptance for #2198 on Qwen3-8B: `bash scripts/accept_2198.sh`, PASS/FAIL per check, exit 0 iff all pass.
 # Runs make build (IMP_ACCEPT_SKIP_BUILD=1 skips), GPU busy check, then holds scripts/gpu_lock.sh.
-# Env: IMP_ACCEPT_MODEL (default Qwen3-8B-Q8_0.gguf), IMP_ACCEPT_HYBRID (Qwen3.5-4B-mxfp4.gguf), IMP_ACCEPT_PORT.
+# Env: IMP_ACCEPT_MODEL (default Qwen3-8B-Q8_0.gguf), IMP_ACCEPT_HYBRID (Qwen3.5-4B-mxfp4.gguf), IMP_ACCEPT_PORT,
+# IMP_ACCEPT_SHARED_TOL (max |p_shared - p_serial|, default 0.02).
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
@@ -12,6 +13,7 @@ URL="http://127.0.0.1:${PORT}"
 NAME="imp-accept-2198"
 SYS="Answer only with the letter of the correct option."
 N_ITEMS=32
+SHARED_TOL="${IMP_ACCEPT_SHARED_TOL:-0.02}"
 
 gpu_free() {
     local busy="$HOME/.claude/skills/gpu-stats/gpu-busy-check.sh"
@@ -40,15 +42,18 @@ pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 post() { curl -s -m 600 -H 'Content-Type: application/json' -X POST "$URL$1" --data-binary @-; }
 
-start_server() {  # start_server <model file in ~/models>; exits the script if it never gets healthy
+start_server() {  # start_server <model file in ~/models> [imp-server args]; exits if it never gets healthy
+    local model="$1"
+    shift
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" --gpus all -p "127.0.0.1:${PORT}:8080" -v "$HOME/models:/models:ro" "$IMG" \
-        imp-server --host 0.0.0.0 --port 8080 --model "/models/$1" >/dev/null || { echo "FAIL server $1: docker run"; exit 1; }
+        imp-server --host 0.0.0.0 --port 8080 --model "/models/$model" "$@" >/dev/null ||
+        { echo "FAIL server $model: docker run"; exit 1; }
     for _ in $(seq 1 180); do
         [ "$(curl -s -m 5 "$URL/health" | jq -r '.model_loaded // false' 2>/dev/null)" = true ] && return 0
         sleep 2
     done
-    echo "FAIL server $1: not healthy after 360 s"; docker logs --tail 30 "$NAME"; exit 1
+    echo "FAIL server $model: not healthy after 360 s"; docker logs --tail 30 "$NAME"; exit 1
 }
 
 trap 'docker rm -f "$NAME" >/dev/null 2>&1' EXIT
@@ -130,21 +135,86 @@ agree="$(jq -n --slurpfile s "$WORK/serial.json" --slurpfile d "$WORK/direct.jso
     '[range(0; $s[0].items | length) | select($s[0].items[.].argmax == $d[0].items[.].argmax)] | length')"
 echo "  info: direct and serial argmax agree on $agree/$N_ITEMS items"
 
-# Check 5: throughput, items/s. A fresh evidence prefix per run so serial starts cold.
-for mode in direct serial; do
+compare_shared() {  # compare_shared <label> <serial.json> <shared.json> <n> <evidence tokens>
+    local label="$1" s="$2" h="$3" n="$4" ev="$5" agree delta cmin
+    if ! jq -e --argjson n "$n" '.mode_used == "shared" and (.items | length == $n)' "$h" >/dev/null 2>&1; then
+        fail "shared-$label: bad response: $(head -c 300 "$h")"
+        return
+    fi
+    agree="$(jq -n --slurpfile s "$s" --slurpfile h "$h" \
+        '[range(0; $s[0].items | length) | select($s[0].items[.].argmax == $h[0].items[.].argmax)] | length')"
+    delta="$(jq -n --slurpfile s "$s" --slurpfile h "$h" '[range(0; $s[0].items | length) as $i |
+        $s[0].items[$i].probs | to_entries[] | (.value - $h[0].items[$i].probs[.key]) |
+        if . < 0 then -. else . end] | max')"
+    if [ "$agree" = "$n" ]; then pass "shared-argmax $label: $agree/$n equal to serial"
+    else fail "shared-argmax $label: $agree/$n equal to serial"; fi
+    if jq -e -n "$delta <= $SHARED_TOL" >/dev/null 2>&1; then pass "shared-probs $label: max |p_shared - p_serial| = $delta <= $SHARED_TOL"
+    else fail "shared-probs $label: max |p_shared - p_serial| = $delta > $SHARED_TOL"; fi
+    cmin="$(jq '[.items[1:][] | .cached_tokens] | min' "$h")"
+    if [[ "$cmin" =~ ^[0-9]+$ ]] && [[ "$ev" =~ ^[0-9]+$ ]] && [ "$cmin" -ge "$ev" ]; then
+        pass "shared-cached $label: items 2..$n min cached_tokens = $cmin >= evidence tokens $ev"
+    else
+        fail "shared-cached $label: items 2..$n min cached_tokens = $cmin, evidence tokens $ev"
+    fi
+}
+
+log_lines() { docker logs "$NAME" 2>&1 | wc -l; }
+ev_count() {  # ev_count <evidence prefix>: tokens of the evidence as decide sends it
+    jq -c --arg pre "$1" '{content: ($pre + .evidence)}' "$WORK/set.json" | post /tokenize | jq '.tokens | length'
+}
+
+# ragged_rows <label> <log line to start at>: debug-level server; the shared wave (items 2..n)
+# must appear as one ragged forward (Engine::step_prefill_ragged_ "Ragged prefill: N seqs").
+ragged_rows() {
+    local seqs
+    seqs="$(docker logs "$NAME" 2>&1 | tail -n "+$(($2 + 1))" | grep -oE 'Ragged prefill: [0-9]+ seqs' |
+        awk '{print $3}' | sort -n | tail -1)"
+    echo "  info: $1 ragged forwards of the shared request: $(docker logs "$NAME" 2>&1 | tail -n "+$(($2 + 1))" |
+        grep -oE 'Ragged prefill: [0-9]+ seqs, [0-9]+ rows' | sed 's/Ragged prefill: //' | paste -sd ';' -)"
+    if [[ "$seqs" =~ ^[0-9]+$ ]] && [ "$seqs" -ge 2 ]; then pass "shared-ragged $1: largest ragged forward = $seqs sequences"
+    else fail "shared-ragged $1: no ragged forward with >= 2 sequences in the server log (got '${seqs}')"; fi
+}
+
+# shared_vs_serial <label> <model> <n>: both cold on a fresh server each (a warm cache would
+# serve the other mode's suffix blocks), same prompts, shared at debug level for ragged_rows.
+shared_vs_serial() {
+    local label="$1" model="$2" n="$3" pre="Compare $RANDOM$RANDOM."$'\n' from ev
+    start_server "$model" --set diagnostics.log_level=debug
+    from="$(log_lines)"
+    decide shared "$n" "$pre" > "$WORK/cmp_shared_$label.json"
+    ragged_rows "$label" "$from"
+    ev="$(ev_count "$pre")"
+    start_server "$model"
+    decide serial "$n" "$pre" > "$WORK/cmp_serial_$label.json"
+    compare_shared "$label" "$WORK/cmp_serial_$label.json" "$WORK/cmp_shared_$label.json" "$n" "$ev"
+}
+
+# Check 5: throughput, items/s. A fresh evidence prefix per run so serial and shared start cold.
+declare -A TP_MS
+for mode in direct serial shared; do
     for n in 1 8 32; do
         t0="$(date +%s.%N)"
         decide "$mode" "$n" "Run $mode-$n-$RANDOM$RANDOM."$'\n' > "$WORK/tp.json"
         t1="$(date +%s.%N)"
+        TP_MS[$mode-$n]="$(jq -n "($t1 - $t0) * 1000 | round")"
         if jq -e ".items | length == $n" "$WORK/tp.json" >/dev/null 2>&1; then
-            pass "throughput $mode n=$n: $(jq -n "$n / ($t1 - $t0) * 100 | round / 100") items/s ($(jq -n "($t1 - $t0) * 1000 | round") ms)"
+            pass "throughput $mode n=$n: $(jq -n "$n / ($t1 - $t0) * 100 | round / 100") items/s (${TP_MS[$mode-$n]} ms)"
         else
             fail "throughput $mode n=$n: $(head -c 200 "$WORK/tp.json")"
         fi
     done
 done
+echo "  info: shared vs serial n=8: ${TP_MS[shared-8]} ms vs ${TP_MS[serial-8]} ms"
+if [ "${TP_MS[shared-32]}" -lt "${TP_MS[serial-32]}" ]; then
+    pass "shared-faster n=32: ${TP_MS[shared-32]} ms < serial ${TP_MS[serial-32]} ms"
+else
+    fail "shared-faster n=32: ${TP_MS[shared-32]} ms >= serial ${TP_MS[serial-32]} ms"
+fi
 
-# Check 6: hybrid model (recurrent-snapshot prefix path). Serial items 2..8 must restore the shared
+# Check 6: shared vs serial on the dense model: argmax, max prob delta, evidence reuse, ragged rows.
+shared_vs_serial dense "$MODEL" "$N_ITEMS"
+
+# Check 7: hybrid model (recurrent-snapshot prefix path). Serial items 2..8 must restore the shared
 # evidence prefix (snapshot saved at its block floor, #2198); it also caches every prompt direct sends.
 start_server "$HYBRID"
 decide serial 8 "" > "$WORK/h_serial.json"
@@ -165,6 +235,15 @@ elif [ "$h_max" = 0 ]; then
 else
     fail "hybrid-direct-uncached ($HYBRID): direct max cached_tokens = $h_max (serial control min = $h_ctl)"
 fi
+
+# Check 8: shared vs serial on the hybrid (one snapshot restore per row), cold n=32 timing as info.
+shared_vs_serial hybrid "$HYBRID" "$N_ITEMS"
+for mode in serial shared; do
+    t0="$(date +%s.%N)"
+    decide "$mode" "$N_ITEMS" "Run h-$mode-$RANDOM$RANDOM."$'\n' > "$WORK/tp.json"
+    t1="$(date +%s.%N)"
+    echo "  info: hybrid $mode n=$N_ITEMS: $(jq -n "($t1 - $t0) * 1000 | round") ms, $(jq '.items | length' "$WORK/tp.json" 2>/dev/null) items"
+done
 
 echo "checks failed: $FAILS"
 [ "$FAILS" -eq 0 ]

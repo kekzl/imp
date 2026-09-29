@@ -62,9 +62,13 @@ class TestDecideValidation:
         items = [{"criterion": "c", "options": ["a", 2]}]
         assert_400(client.post("/v1/decide", json=decide_body(model, items=items)), "only strings")
 
-    def test_mode_shared_not_implemented(self, client, model):
+    def test_mode_shared_accepted(self, client, model, has_model):
         r = client.post("/v1/decide", json=decide_body(model, mode="shared"))
-        assert_400(r, "not implemented yet, see #2198")
+        assert r.status_code == (200 if has_model else 503), r.text
+
+    def test_mode_shared_still_validates_items(self, client, model):
+        items = [{"criterion": "c", "options": [f"o{i}" for i in range(17)]}]
+        assert_400(client.post("/v1/decide", json=decide_body(model, mode="shared", items=items)), "maximum is 16")
 
     def test_unknown_mode(self, client, model):
         assert_400(client.post("/v1/decide", json=decide_body(model, mode="batch")), '"mode" must be one of')
@@ -105,8 +109,9 @@ class TestScoreValidation:
     def test_empty_candidate_string(self, client, model):
         assert_400(client.post("/v1/score", json=score_body(model, candidates=["A", ""])), "must not be empty")
 
-    def test_mode_shared_not_implemented(self, client, model):
-        assert_400(client.post("/v1/score", json=score_body(model, mode="shared")), "not implemented yet, see #2198")
+    def test_mode_shared_accepted(self, client, model, has_model):
+        r = client.post("/v1/score", json=score_body(model, mode="shared"))
+        assert r.status_code == (200 if has_model else 503), r.text
 
 
 # Tokenizer guards need a loaded vocabulary: mock (mock tokenizer rules) and real server only.
@@ -155,6 +160,18 @@ class TestDecideResponse:
         body = client.post("/v1/decide", json=decide_body(model, mode="direct")).json()
         assert body["mode_used"] == "direct"
         assert all(it["cached_tokens"] == 0 for it in body["items"])
+
+    def test_shared_shape_and_reuse(self, client, model):
+        r = client.post("/v1/decide", json=decide_body(model, mode="shared"))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["mode_used"] == "shared"
+        assert [it["id"] for it in body["items"]] == ["paid", "method"]
+        for it in body["items"]:
+            assert abs(sum(it["probs"].values()) - 1.0) <= 1e-5
+            assert it["argmax"] == "ABC"[it["argmax_index"]]
+        assert body["items"][1]["cached_tokens"] > 0
+        assert body["usage"]["cached_tokens"] == sum(it["cached_tokens"] for it in body["items"])
 
     def test_default_ids_are_indices(self, client, model):
         items = [{"criterion": "c", "options": ["x", "y"]}]
