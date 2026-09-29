@@ -181,6 +181,7 @@ public:
     // lora_load returns adapter id >= 1, or 0 on failure; id 0 = base model.
     int lora_load(const std::string& path);
     bool lora_set(int id);  // 0 deactivates
+    bool lora_unload(int id);  // frees it; slot stays empty, ids never reused (prefix salt = id)
     int active_lora() const { return active_lora_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent

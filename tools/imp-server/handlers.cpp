@@ -105,7 +105,10 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
                  {"queue_depth", queue},
                  // Suspended is HEALTHY (deliberate operator state, HTTP 200):
                  // the model is parked in host RAM, POST /admin/resume serves again.
-                 {"suspended", state.suspended.load()}};
+                 {"suspended", state.suspended.load()},
+                 // idle_suspended: the next request resumes it (#2199). 0 = idle unload off.
+                 {"idle_suspended", state.idle_suspended.load()},
+                 {"idle_unload_seconds", state.idle_unload_seconds.load()}};
     if (kv_blocks >= 0) {
         body["kv_blocks_total"] = kv_blocks;
         body["kv_block_size"] = kv_block_size;
@@ -160,13 +163,16 @@ void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, Serve
         code = "engine_faulted";  // process-wide CUDA context, a swap does not clear it
     else if (state.swapping.load())
         code = "swapping";
-    else if (state.suspended.load())
-        code = "suspended";
-    else if (!state.model_status_snapshot().loaded)
+    else if (state.suspended.load()) {
+        // An idle suspend is ready: the next request resumes it (#2199).
+        if (!state.idle_suspended.load())
+            code = "suspended";
+    } else if (!state.model_status_snapshot().loaded)
         code = "no_model";
     json body = {{"ready", code == nullptr},
                  {"model_loaded", state.model_status_snapshot().loaded},
-                 {"suspended", state.suspended.load()}};
+                 {"suspended", state.suspended.load()},
+                 {"idle_suspended", state.idle_suspended.load()}};
     if (code) {
         body["code"] = code;
         res.status = 503;
@@ -467,6 +473,9 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
 // in-flight generations before teardown and restores the prior model on a failed load. Unknown
 // names 404 without loading anything. Caller must hold state.mtx.
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res) {
+    // Idle suspend (--idle-unload-seconds): warm resume from the snapshot, then serve (#2199).
+    if (!resume_if_idle_locked(state, res))
+        return false;
     // Suspended (/admin/suspend): the GPU is deliberately free — do NOT
     // auto-load a cold copy. Inference waits for POST /admin/resume.
     if (state.suspended.load()) {

@@ -38,6 +38,18 @@ TEST(ServerArgs, DefaultsWhenNoFlags) {
     EXPECT_EQ(a.port, 8080);
 }
 
+// #2199: idle auto-unload is opt-in; 0 is off.
+TEST(ServerArgs, IdleUnloadSecondsDefaultsOffAndParses) {
+    EXPECT_EQ(parse({}).idle_unload_seconds, 0);
+    EXPECT_EQ(parse({"--idle-unload-seconds", "30"}).idle_unload_seconds, 30);
+    EXPECT_EQ(parse({"--idle-unload-seconds", "0"}).idle_unload_seconds, 0);
+}
+
+TEST(ServerArgsDeathTest, IdleUnloadSecondsRejectsGarbage) {
+    EXPECT_EXIT(parse({"--idle-unload-seconds", "-5"}), ::testing::ExitedWithCode(1), "integer >= 0");
+    EXPECT_EXIT(parse({"--idle-unload-seconds", "30s"}), ::testing::ExitedWithCode(1), "integer >= 0");
+}
+
 TEST(ServerArgs, VramBudgetParsed) {
     EXPECT_EQ(parse({"--vram-budget", "4096"}).vram_budget_mb, 4096);
     EXPECT_EQ(parse({"--vram-budget", "0"}).vram_budget_mb, 0);

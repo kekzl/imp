@@ -24,6 +24,12 @@ TEST(CApiContract, NullArgumentsAreInvalidArg) {
     EXPECT_EQ(imp_context_create(empty_model(), &cfg, nullptr), IMP_ERROR_INVALID_ARG);
 }
 
+// #2199: the unload entry point refuses a null context like its load/set siblings.
+TEST(CApiContract, LoraUnloadWithoutContextIsInvalidArg) {
+    EXPECT_EQ(imp_lora_unload(nullptr, 1), IMP_ERROR_INVALID_ARG);
+    EXPECT_EQ(imp_lora_unload(nullptr, 0), IMP_ERROR_INVALID_ARG);
+}
+
 // Five named ImpDType values are not KV cache dtypes, and the enum has holes
 // (9, 10) plus room above MXFP4_KV. All of them used to map to a QType the pool
 // was sized for and the FP16 paged kernel then read.

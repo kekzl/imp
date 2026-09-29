@@ -12,12 +12,15 @@
 #include <nlohmann/json.hpp>
 #include "request_field_types.h"
 
+#include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <exception>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <thread>
 #include <utility>
 
 using json = nlohmann::json;
@@ -146,8 +149,9 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Failed to load LoRA adapter '%s' from %s\n", name.c_str(), path.c_str());
             return 1;
         }
-        state.lora_ids[name] = id;
-        printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), id, path.c_str());
+        const int32_t server_id = state.next_lora_id++;
+        state.loras[name] = ServerState::LoraEntry{server_id, id, path};
+        printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), server_id, path.c_str());
     }
 
     // (svr was created + bound to the port above, before the model load.)
@@ -181,6 +185,8 @@ int main(int argc, char** argv) {
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
     state.rate_limiter.limit = args.rate_limit;
+    state.idle_unload_seconds.store(args.idle_unload_seconds);
+    state.touch_activity();
 
     // --max-input-tokens <n>: reject prompts whose tokenized length exceeds
     // <n> with HTTP 400 before prefill (0 = disabled).
@@ -255,8 +261,9 @@ int main(int argc, char** argv) {
         // until the thread pool was gone (AUDIT_arch_2026 F2-3). A lock timeout means "engine busy", 503.
         if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
             // A swap or suspend holds `mtx` for its whole duration and says so in an atomic, so
-            // the one case worth shedding for is readable without touching the lock.
-            if (state.swapping.load() || state.suspended.load()) {
+            // the one case worth shedding for is readable without touching the lock. An idle
+            // suspend is let through: the handler resumes it (#2199).
+            if (state.swapping.load() || (state.suspended.load() && !state.idle_suspended.load())) {
                 send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
                                    "Server busy (model swap or suspend in progress), retry shortly");
                 return httplib::Server::HandlerResponse::Handled;
@@ -302,6 +309,10 @@ int main(int argc, char** argv) {
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
+
+        // Idle clock (#2199): every admitted POST except /admin/* counts as activity.
+        if (req.method == "POST" && req.path.rfind("/admin/", 0) != 0)
+            state.touch_activity();
 
         return httplib::Server::HandlerResponse::Unhandled;
     });
@@ -393,6 +404,14 @@ int main(int argc, char** argv) {
         handle_resume(req, res, state);
     });
 
+    svr.Post("/admin/lora/load", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_lora_load(req, res, state);
+    });
+
+    svr.Post("/admin/lora/unload", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_lora_unload(req, res, state);
+    });
+
     svr.Get("/metrics", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_metrics(req, res, state);
     });
@@ -479,6 +498,23 @@ int main(int argc, char** argv) {
         printf("Rate limit: %d req/min per peer\n", state.rate_limiter.limit);
     if (state.max_input_tokens > 0)
         printf("Max input tokens: %d\n", state.max_input_tokens);
+    if (state.idle_unload_seconds.load() > 0)
+        printf("Idle unload: suspend after %d s idle, resume on next request\n",
+               state.idle_unload_seconds.load());
+
+    // Idle timer (#2199): 1 s poll, so the suspend starts at most 1 s past the TTL.
+    std::atomic<bool> idle_stop{false};
+    std::thread idle_thread;
+    if (state.idle_unload_seconds.load() > 0) {
+        idle_thread = std::thread([&state, &idle_stop] {
+            while (!idle_stop.load(std::memory_order_relaxed)) {
+                for (int i = 0; i < 10 && !idle_stop.load(std::memory_order_relaxed); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!idle_stop.load(std::memory_order_relaxed))
+                    idle_unload_tick(state);
+            }
+        });
+    }
 
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
@@ -498,6 +534,8 @@ int main(int argc, char** argv) {
     printf("  POST   /detokenize\n");
     printf("  POST   /admin/suspend       Park weights in host RAM, free the GPU\n");
     printf("  POST   /admin/resume        Restore weights, serve again\n");
+    printf("  POST   /admin/lora/load     Load a PEFT LoRA adapter {path, name?}\n");
+    printf("  POST   /admin/lora/unload   Unload a LoRA adapter {id} or {name}\n");
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
@@ -516,6 +554,9 @@ int main(int argc, char** argv) {
 
     g_server.store(nullptr, std::memory_order_relaxed);
     g_draining.store(true, std::memory_order_relaxed);
+    idle_stop.store(true, std::memory_order_relaxed);
+    if (idle_thread.joinable())
+        idle_thread.join();
     if (state.batching) {
         // Drains in-flight generations before engine teardown (stop() would cancel them) - same
         // contract/budget as a model swap. A drain that exhausts its budget falls through to cancel
