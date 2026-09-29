@@ -85,7 +85,6 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t str
 
 // Each thread handles one channel.
 // Shift the conv_state window left by 1, insert new value, compute dot product.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_decode_kernel(
     float* __restrict__ conv_state,   // [channels, kernel_size]
     const half* __restrict__ x_in,    // [channels]
@@ -97,7 +96,7 @@ __global__ void ssm_conv1d_decode_kernel(
     if (ch >= channels)
         return;
 
-    float* state = conv_state + ch * kernel_size;
+    float* state = conv_state + static_cast<int64_t>(ch) * kernel_size;
     float sum;
     if (kernel_size == 4) {
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
@@ -106,7 +105,7 @@ __global__ void ssm_conv1d_decode_kernel(
         float4 s = *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
-        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + ch * 4);
+        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
         const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
         const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
         sum = fmaf(s.w, __high2float(w23),
@@ -125,11 +124,9 @@ __global__ void ssm_conv1d_decode_kernel(
 
     x_out[ch] = __float2half(sum);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // FP32-output conv1d decode: reads FP16 input, produces FP32 output with fused SiLU.
 // Used by GDN layers for full FP32 pipeline (matching llama.cpp precision).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_decode_f32_silu_kernel(
     float* __restrict__ conv_state,   // [channels, kernel_size]
     const half* __restrict__ x_in,    // [channels] FP16
@@ -151,8 +148,8 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     float4 s_early{};
     uint2 w_early{};
     if (early) {
-        s_early = *reinterpret_cast<const float4*>(conv_state + ch * 4);
-        w_early = *reinterpret_cast<const uint2*>(weight + ch * 4);
+        s_early = *reinterpret_cast<const float4*>(conv_state + static_cast<int64_t>(ch) * 4);
+        w_early = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
     }
     pdl_wait();
     pdl_trigger();
@@ -162,7 +159,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     x_in += static_cast<size_t>(seq) * channels;
     x_out += static_cast<size_t>(seq) * channels;
 
-    float* state = conv_state + ch * kernel_size;
+    float* state = conv_state + static_cast<int64_t>(ch) * kernel_size;
     float sum;
     if (kernel_size == 4) {
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
@@ -171,7 +168,8 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
         float4 s = early ? s_early : *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
-        const uint2 wraw = early ? w_early : *reinterpret_cast<const uint2*>(weight + ch * 4);
+        const uint2 wraw = early ? w_early
+                                 : *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
         const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
         const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
         sum = fmaf(s.w, __high2float(w23),
@@ -191,7 +189,6 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     // Fused SiLU: x / (1 + exp(-x))
     x_out[ch] = sum / (1.0f + expf(-sum));
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Batched conv1d decode over N independent sequences. Same contract as the GDN
 // scan's batched form: sequences on blockIdx.y, slot table selects each one's
@@ -244,7 +241,6 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weigh
 
 // Grid: (n_tokens), Block: 256
 // Each block handles all channels for one token using a loop.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_prefill_kernel(
     float* __restrict__ conv_state,   // [channels, kernel_size] — updated with last K values
     const half* __restrict__ x_in,    // [n_tokens, channels]
@@ -271,7 +267,7 @@ __global__ void ssm_conv1d_prefill_kernel(
             int src_t = token - (kernel_size - 1) + k;
             float val;
             if (src_t >= 0) {
-                val = __half2float(x_in[src_t * channels + ch]);
+                val = __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch]);
             } else if (conv_state) {
                 // Chunked prefill: read trailing context from previous chunk's
                 // conv_state instead of zero-padding. conv_state[ch*K + s] holds
@@ -289,7 +285,7 @@ __global__ void ssm_conv1d_prefill_kernel(
         if (bias) {
             sum += __half2float(bias[ch]);
         }
-        x_out[token * channels + ch] = __float2half(sum);
+        x_out[static_cast<int64_t>(token) * channels + ch] = __float2half(sum);
 
         // The conv window commit for the last real row is ssm_conv1d_commit_kernel, launched
         // after this grid: rows 0..K-2 read the PREVIOUS window here, nothing inside one grid
@@ -298,17 +294,16 @@ __global__ void ssm_conv1d_prefill_kernel(
         // not the live one (the real-row commit may have already run on another block).
         // snap_n==real_n needs no second copy - the two commits coincide.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
-            float* snap = conv_snap + ch * kernel_size;
-            const float* prev = conv_prev + ch * kernel_size;
+            float* snap = conv_snap + static_cast<int64_t>(ch) * kernel_size;
+            const float* prev = conv_prev + static_cast<int64_t>(ch) * kernel_size;
             for (int k = 0; k < kernel_size; k++) {
                 int src_t = snap_n - kernel_size + k;
-                snap[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
+                snap[k] = (src_t >= 0) ? __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch])
                                        : prev[src_t + kernel_size];
             }
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Conv window commit, one launch after the prefill grid: window = last K real inputs; a
 // chunk shorter than K shifts missing leading values in from the previous window
@@ -317,7 +312,6 @@ __global__ void ssm_conv1d_prefill_kernel(
 // prefill grid alone cannot guarantee. grid.y indexes the sequence group (grouped form).
 // dst_slots (batched speculative verify): window read from seq_slots[seq], written to
 // dst_slots[seq]; nullptr = in place.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const half* __restrict__ x_in,
                                          int n_tokens, int channels, int kernel_size,
                                          const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
@@ -337,14 +331,14 @@ __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const h
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     if (real_n <= 0)
         return;
-    const float* src = conv_state + ch * kernel_size;
-    float* dst = dst_state + ch * kernel_size;
+    const float* src = conv_state + static_cast<int64_t>(ch) * kernel_size;
+    float* dst = dst_state + static_cast<int64_t>(ch) * kernel_size;
     for (int k = 0; k < kernel_size; k++) {
         const int src_t = real_n - kernel_size + k;
-        dst[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : src[src_t + kernel_size];
+        dst[k] = (src_t >= 0) ? __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch])
+                              : src[src_t + kernel_size];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 static void launch_conv1d_commit(void* conv_state, const half* x_in, int n_tokens, int channels,
                                  int kernel_size, const int* d_real_n, const int* seq_slots,
@@ -382,7 +376,6 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
 // of n_tokens, group z reads/commits the conv window of pool slot seq_slots[z] (stride in
 // floats); nullptr = single-sequence launch (gridDim.z==1). Snapshot written from group 0
 // only (every group's row 0 is the same token from the same committed window).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     float* __restrict__ conv_state, const half* __restrict__ x_in, const half* __restrict__ weight,
     const half* __restrict__ bias, float* __restrict__ x_out_f32, int n_tokens, int channels, int kernel_size,
@@ -418,7 +411,7 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
             int src_t = token - (kernel_size - 1) + k;
             float val;
             if (src_t >= 0) {
-                val = __half2float(x_in[src_t * channels + ch]);
+                val = __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch]);
             } else if (conv_state) {
                 // Chunked prefill: read trailing context from previous chunk's
                 // conv_state instead of zero-padding.  conv_state[ch*K + s]
@@ -435,7 +428,7 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
             sum += __half2float(bias[ch]);
 
         // Fused SiLU + FP32 output
-        x_out_f32[token * channels + ch] = sum / (1.0f + expf(-sum));
+        x_out_f32[static_cast<int64_t>(token) * channels + ch] = sum / (1.0f + expf(-sum));
 
         // Conv window commit is ssm_conv1d_commit_kernel, launched after this grid. Same window
         // at snap_n rows; its leading values come from the state BEFORE this chunk and must be
@@ -444,8 +437,8 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         // here silently picks up whichever block ran first, dropping draft acceptance with no
         // error anywhere.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
-            const float* src_state = conv_prev + ch * kernel_size;
-            float* snap = conv_snap + ch * kernel_size;
+            const float* src_state = conv_prev + static_cast<int64_t>(ch) * kernel_size;
+            float* snap = conv_snap + static_cast<int64_t>(ch) * kernel_size;
             for (int k = 0; k < kernel_size; k++) {
                 int src_t = snap_n - kernel_size + k;
                 snap[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
@@ -454,7 +447,6 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
                                  const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream,
@@ -522,7 +514,6 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
 // h_state[h,s,d]=a_bar*h_state[h,s,d]+dt_h*x[h*hd+d]*B[g*S+s];
 // y[h*hd+d]=sum_s(h_state[h,s,d]*C[g*S+s])+D[h]*x[h*hd+d]; if z: y*=SiLU(z[h*hd+d]).
 // Template: H_FP16 (h_state stored FP16, compute FP32); FUSE_GATE (fuse y*SiLU(z)).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool H_FP16, bool FUSE_GATE>
 __global__ void ssm_scan_kernel(
     const half* __restrict__ x,         // [n_tokens, inner_size]
@@ -572,18 +563,20 @@ __global__ void ssm_scan_kernel(
     int64_t h_base = static_cast<int64_t>(h) * state_size * head_dim_ssm;
 
     // Shared memory for y_acc reduction across s-tiles: [head_dim_ssm * s_tiles]
+    // #2218 bounded: smem d_tid * s_tiles < head_dim_ssm * s_tiles <= 1024 (s_tiles > 1 only; ssm.cu:655)
     extern __shared__ float smem[];
 
     for (int t = 0; t < n_tokens; t++) {
-        const half* B_g = B_in + t * BC_size + g * state_size;
-        const half* C_g = C_in + t * BC_size + g * state_size;
+        const half* B_g = B_in + static_cast<int64_t>(t) * BC_size + static_cast<int64_t>(g) * state_size;
+        const half* C_g = C_in + static_cast<int64_t>(t) * BC_size + static_cast<int64_t>(g) * state_size;
 
         // Compute dt for this token (shared across all threads in this head)
         float dt_val = __half2float(dt_raw[t * n_heads + h]) + dt_b;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         float a_bar = expf(dt_val * a_log_h);
 
-        float x_val = __half2float(x[t * inner_size + h * head_dim_ssm + d_tid]);
+        float x_val = __half2float(
+            x[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
 
         float y_partial = 0.0f;
         for (int s = s_start; s < s_end; s++) {
@@ -628,13 +621,15 @@ __global__ void ssm_scan_kernel(
             }
 
             if (s_tid == 0) {
-                float y_val = smem[d_tid * s_tiles] + d_val * x_val;
+                float y_val = smem[static_cast<ptrdiff_t>(d_tid * s_tiles)] + d_val * x_val;
                 if constexpr (FUSE_GATE) {
-                    float z_val = __half2float(z[t * inner_size + h * head_dim_ssm + d_tid]);
+                    float z_val = __half2float(z[static_cast<int64_t>(t) * inner_size +
+                                                 static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
                     z_val = z_val / (1.0f + expf(-z_val));
                     y_val *= z_val;
                 }
-                y[t * inner_size + h * head_dim_ssm + d_tid] = __float2half(y_val);
+                y[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid] =
+                    __float2half(y_val);
             }
             // Barrier before next token iteration (all threads must finish writing smem)
             if (n_tokens > 1)
@@ -643,15 +638,16 @@ __global__ void ssm_scan_kernel(
             // s_tiles == 1: no reduction needed
             float y_val = y_partial + d_val * x_val;
             if constexpr (FUSE_GATE) {
-                float z_val = __half2float(z[t * inner_size + h * head_dim_ssm + d_tid]);
+                float z_val = __half2float(
+                    z[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
                 z_val = z_val / (1.0f + expf(-z_val));
                 y_val *= z_val;
             }
-            y[t * inner_size + h * head_dim_ssm + d_tid] = __float2half(y_val);
+            y[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid] =
+                __float2half(y_val);
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Legacy kernel's s-tiling: largest power of 2 <= min(state_size, 1024 / head_dim).
 static int ssm_scan_s_tiles(int head_dim_ssm, int state_size) {

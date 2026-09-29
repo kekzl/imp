@@ -32,7 +32,6 @@ __device__ __forceinline__ void fp8x4_to_half2x2(uint32_t packed, half2& lo, hal
     hi = half2(r1);
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_multitok_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -84,10 +83,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
         const int phys_block = bt[blk];
         if (phys_block < 0)
             continue;  // StreamingLLM sentinel, same guard as the plain kernel
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride + kv_head * HEAD_DIM +
-                                 lane_offset;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride + kv_head * HEAD_DIM +
-                                 lane_offset;
+        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 128 (static_assert :41) = 2^19 (model_limits.h:24)
+        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride +
+                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
+        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride +
+                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
         const int tok_start = blk * block_size;
         int n_tok = block_size;
         if (tok_start + n_tok > ctx_len)
@@ -104,7 +104,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 #pragma unroll
             for (int i = 0; i < TOK; i++) {
                 const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-                kp[i] = __ldcs(reinterpret_cast<const uint32_t*>(K_block + ti * kv_slot_stride));
+                kp[i] = __ldcs(
+                    reinterpret_cast<const uint32_t*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
             }
             float dot[TOK];
 #pragma unroll
@@ -145,7 +146,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 #pragma unroll
             for (int i = 0; i < TOK; i++) {
                 const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-                vp[i] = __ldcs(reinterpret_cast<const uint32_t*>(V_block + ti * kv_slot_stride));
+                vp[i] = __ldcs(
+                    reinterpret_cast<const uint32_t*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
             }
 #pragma unroll
             for (int e = 0; e < ELEMS; e++)
@@ -179,7 +181,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8_mt), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

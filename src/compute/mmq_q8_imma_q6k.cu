@@ -88,7 +88,6 @@ __device__ __forceinline__ void fetch_b_q6k_unpacked(Q6kUnpackedB& rb, int tid, 
     }
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int T0>
 __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, int tid, uint8_t (*sQl)[kQlRow],
                                                       uint8_t (*sQh)[kQhRow], uint8_t (*sScd)[8]) {
@@ -100,13 +99,15 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
         const int row = t / kUnpParts;
         const int part = t % kUnpParts;
         const uint32_t s = (rb.shifts >> (8 * i)) & 0xFFu;
+        // #2218 bounded: part < 6 (branch below): part * 16 <= 48, (part - 4) * 16 <= 16
         if (part < 6) {
             uint4 v;
             v.x = __funnelshift_r(rb.w[i][0], rb.w[i][1], s);
             v.y = __funnelshift_r(rb.w[i][1], rb.w[i][2], s);
             v.z = __funnelshift_r(rb.w[i][2], rb.w[i][3], s);
             v.w = __funnelshift_r(rb.w[i][3], rb.w[i][4], s);
-            uint8_t* dst = part < 4 ? &sQl[row][part * 16] : &sQh[row][(part - 4) * 16];
+            uint8_t* dst = part < 4 ? &sQl[row][static_cast<ptrdiff_t>(part * 16)]
+                                    : &sQh[row][static_cast<ptrdiff_t>((part - 4) * 16)];
             *reinterpret_cast<uint4*>(dst) = v;
         } else {
             *reinterpret_cast<uint32_t*>(&sScd[row][0]) = __funnelshift_r(rb.w[i][0], rb.w[i][1], s);
@@ -114,11 +115,9 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const uint8_t* __restrict__ Wq6k,
@@ -159,6 +158,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
+    // #2218 bounded: kb < 2 (loop bound literal, mmq_q8_imma_q6k.cu:217): 2 * kb <= 2
 
     // dynamic smem (BM=128 + Q6 staging exceeds the 48-KB static limit);
     // offsets are COMPILE-TIME constants — no runtime pointer arrays (the
@@ -278,9 +278,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
                     memcpy(&d_hi_h, &sScd(stage)[ncol_lo + 1][4], 2);
                     const float dlo = __half2float(d_lo_h);
                     const float dhi = __half2float(d_hi_h);
-                    const float al1 = dlo * static_cast<float>(sc_lo[2 * kb]);
+                    const float al1 = dlo * static_cast<float>(sc_lo[static_cast<ptrdiff_t>(2 * kb)]);
                     const float al2 = dlo * static_cast<float>(sc_lo[2 * kb + 1]);
-                    const float ah1 = dhi * static_cast<float>(sc_hi[2 * kb]);
+                    const float ah1 = dhi * static_cast<float>(sc_hi[static_cast<ptrdiff_t>(2 * kb)]);
                     const float ah2 = dhi * static_cast<float>(sc_hi[2 * kb + 1]);
                     acc[mf][nf][0] += da_lo * fmaf(al1, static_cast<float>(p0),
                                                    al2 * static_cast<float>(q0));
@@ -327,7 +327,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q6k_raw_kernel<32, false>(const int8_t*, const __half*, const uint8_t*,

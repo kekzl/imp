@@ -33,7 +33,6 @@ namespace imp {
 // warps_per_q is a runtime parameter: 4 for ratio<=8, 2 for ratio>8
 static constexpr int MAX_Q_PER_KV = 16;
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
@@ -107,8 +106,12 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     // Prefetch first block into buffer 0
     if (first_block < num_ctx_blocks) {
         int phys_block = bt[first_block];
-        const half* K_block_base = K_cache + (int64_t)phys_block * kv_block_stride + kv_head * head_dim;
-        const half* V_block_base = V_cache + (int64_t)phys_block * kv_block_stride + kv_head * head_dim;
+        // #2218 bounded: kv_head * head_dim <= kMaxHeads * 12672 < 2^26 (model_limits.h:24; smem limit
+        // 101376 B >= kv_tile_bytes :1361); buf * 2 * tile_elems <= kv_tile_bytes / 4 <= 25344.
+        const half* K_block_base = K_cache + (int64_t)phys_block * kv_block_stride +
+                                   static_cast<ptrdiff_t>(kv_head * head_dim);
+        const half* V_block_base = V_cache + (int64_t)phys_block * kv_block_stride +
+                                   static_cast<ptrdiff_t>(kv_head * head_dim);
         half* s_k = s_kv_h;
         half* s_v = s_kv_h + tile_elems;
         for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {
@@ -123,7 +126,7 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
 
     for (int blk = first_block; blk < num_ctx_blocks; blk = next_valid_block(range, blk)) {
         // Current data is in buffer `buf`
-        const half* s_k_cur = s_kv_h + buf * 2 * tile_elems;
+        const half* s_k_cur = s_kv_h + static_cast<ptrdiff_t>(buf * 2 * tile_elems);
         const half* s_v_cur = s_k_cur + tile_elems;
 
         // Start loading next block into the other buffer (overlaps with compute).
@@ -132,9 +135,11 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
         int next_blk = next_valid_block(range, blk);
         if (next_blk < num_ctx_blocks) {
             int next_phys = bt[next_blk];
-            const half* K_next = K_cache + (int64_t)next_phys * kv_block_stride + kv_head * head_dim;
-            const half* V_next = V_cache + (int64_t)next_phys * kv_block_stride + kv_head * head_dim;
-            half* s_k_next = s_kv_h + next_buf * 2 * tile_elems;
+            const half* K_next = K_cache + (int64_t)next_phys * kv_block_stride +
+                                 static_cast<ptrdiff_t>(kv_head * head_dim);
+            const half* V_next = V_cache + (int64_t)next_phys * kv_block_stride +
+                                 static_cast<ptrdiff_t>(kv_head * head_dim);
+            half* s_k_next = s_kv_h + static_cast<ptrdiff_t>(next_buf * 2 * tile_elems);
             half* s_v_next = s_k_next + tile_elems;
             for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {
                 int slot = idx / head_dim;
@@ -234,11 +239,9 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fallback for non-GQA models (n_heads == n_kv_heads): per-head kernel
 // Templated on HEAD_DIM with contiguous lane mapping and half2 vectorized loads.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const half* __restrict__ K_cache,
                                               const half* __restrict__ V_cache, half* __restrict__ O,
@@ -316,15 +319,19 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                const auto* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                const auto* V_next = V_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (:1441) = 2^21 (model_limits.h:24).
+                const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                                     static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
+                const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                                     static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
                 if (lane_id == 0) {
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(K_next));
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(V_next));
                 }
             }
 
-            const half* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 
             // Vectorized Q.K dot product using half2 streaming loads
             float dot = 0.0f;
@@ -345,7 +352,8 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // Vectorized V accumulation using half2 streaming loads
-            const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
             {
                 const half2* V_tok2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
 #pragma unroll
@@ -399,12 +407,10 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Generic non-templated fallback for arbitrary head_dim (e.g. tests, head_dim=8): strided lane
 // mapping with bounds checks, no vectorization. v_head_dim!=head_dim: read only v_head_dim
 // elements from V (slots are head_dim-sized); output O is [batch,n_heads,v_head_dim].
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void paged_attention_decode_kernel_generic(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
@@ -474,15 +480,18 @@ __global__ void paged_attention_decode_kernel_generic(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                const auto* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * head_dim;
-                const auto* V_next = V_block + (t + 1) * kv_slot_stride + kv_head * head_dim;
+                const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                                     static_cast<int64_t>(kv_head) * head_dim;
+                const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                                     static_cast<int64_t>(kv_head) * head_dim;
                 if (lane_id == 0) {
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(K_next));
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(V_next));
                 }
             }
 
-            const half* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
+            const half* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<int64_t>(kv_head) * head_dim;
 
             float dot = 0.0f;
             for (int i = 0; i < elems_per_thread; i++) {
@@ -498,7 +507,8 @@ __global__ void paged_attention_decode_kernel_generic(
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // V slot is head_dim-wide; read only v_head_dim elements (MLA over-allocation)
-            const half* V_tok = V_block + t * kv_slot_stride + kv_head * head_dim;
+            const half* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<int64_t>(kv_head) * head_dim;
             for (int i = 0; i < v_elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
                 if (d < v_head_dim)
@@ -552,13 +562,11 @@ __global__ void paged_attention_decode_kernel_generic(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Split-K Phase 1: each block processes a KV-block subset, writing partial softmax state
 // (max, log_sum_exp, O_acc) to scratch. Phase 2 reduces partials into the final output.
 // Grid:(batch,n_heads,num_splits) raises SM utilization from n_heads blocks to n_heads*num_splits.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
@@ -658,15 +666,19 @@ __global__ void paged_attention_splitk_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                const auto* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                const auto* V_next = V_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (:1311) = 2^21 (model_limits.h:24).
+                const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                                     static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
+                const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                                     static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
                 if (lane_id == 0) {
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(K_next));
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(V_next));
                 }
             }
 
-            const half* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 
             // Vectorized Q.K dot product
             float dot = 0.0f;
@@ -714,7 +726,8 @@ __global__ void paged_attention_splitk_kernel(
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // Vectorized V accumulation
-            const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
             {
                 if constexpr (K_VEC8 > 0) {
                     const float4* V_v = reinterpret_cast<const float4*>(V_tok + lane_offset);
@@ -761,13 +774,11 @@ __global__ void paged_attention_splitk_kernel(
                                       lane_offset, partial_out, batch_idx, n_heads, head_idx, num_splits,
                                       split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Pipelined Split-K: overlaps V[t]+K[t+1] loads with K[t]'s dot product via cp.async. Per-warp
 // smem: k_buf[2][HD]+v_buf[HD] = 3*HD halfs. Pipeline: cp.async V[t] and K[t+1] -> wait_group<1>
 // for K[t] -> dot while V[t]/K[t+1] in flight -> softmax update -> wait_group<0>, O += weight*V.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_pipeline_kernel(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
@@ -833,10 +844,13 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     // Layout: [NUM_WARPS][3][HEAD_DIM] halfs = k_buf[0], k_buf[1], v_buf
     extern __shared__ char smem_pipe[];
     constexpr int WARP_SMEM = 3 * HEAD_DIM;  // halfs per warp
-    half* my_smem = reinterpret_cast<half*>(smem_pipe) + warp_id * WARP_SMEM;
+    // #2218 bounded: smem warp_id * WARP_SMEM < NUM_WARPS * 3 * 512 = 12288, 2 * HEAD_DIM <= 1024
+    // (NUM_WARPS = 8 attention_paged_common.cuh:13, max HEAD_DIM :1281);
+    // kv_head * HEAD_DIM <= kMaxHeads * 512 = 2^21 (model_limits.h:24).
+    half* my_smem = reinterpret_cast<half*>(smem_pipe) + static_cast<ptrdiff_t>(warp_id * WARP_SMEM);
     half* k_buf0 = my_smem;
     half* k_buf1 = my_smem + HEAD_DIM;
-    half* v_buf = my_smem + 2 * HEAD_DIM;
+    half* v_buf = my_smem + static_cast<ptrdiff_t>(2 * HEAD_DIM);
 
     // ---- Per-warp running softmax state ----
     float m_w = -FLT_MAX;
@@ -870,7 +884,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
 
         // Prime: async load K[first_tok] into k_buf0
         {
-            const half* K_tok = K_block + first_tok * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* K_tok = K_block + static_cast<int64_t>(first_tok) * kv_slot_stride +
+                                static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 // Each thread loads ELEMS halves. cp.async.ca.shared.global with
 // size=16 copies 16 bytes = 8 halves; size=8 copies 4 halves. For
 // ELEMS>8 (HEAD_DIM>256), issue multiple cp.async instructions.
@@ -895,11 +910,13 @@ __global__ void paged_attention_splitk_pipeline_kernel(
 
         for (int ti = 0; ti < n_toks; ti++) {
             int t = first_tok + ti;
-            const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 
             // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
             int t_next = min(t + 1, first_tok + n_toks - 1);
-            const half* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
+            const half* K_next = K_block + static_cast<int64_t>(t_next) * kv_slot_stride +
+                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 // Each thread loads ELEMS halves. cp_async_ca_16 copies 8 halves;
 // for ELEMS>8 (HEAD_DIM>256) issue multiple 16-byte copies.
 #pragma unroll
@@ -966,12 +983,10 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                                       lane_offset, partial_out, batch_idx, n_heads, head_idx, num_splits,
                                       split_idx);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Split-K Phase 2: reduces num_splits partial results into the final output. Grid:(batch,
 // n_heads), Block: 128 threads; each block merges one (batch,head) pair's partials.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void paged_attention_reduce_kernel(
     const float* __restrict__ partial_out,  // [batch, n_heads, num_splits, (2+head_dim)]
     half* __restrict__ O,                   // [batch, 1, n_heads, head_dim]
@@ -1000,7 +1015,7 @@ __global__ void paged_attention_reduce_kernel(
     const bool staged = (num_splits <= kMaxStagedSplits);
     if (staged) {
         for (int s = tid; s < num_splits; s += blockDim.x) {
-            s_m[s] = base[s * partial_stride];
+            s_m[s] = base[static_cast<int64_t>(s) * partial_stride];
             s_l[s] = base[s * partial_stride + 1];
         }
         __syncthreads();
@@ -1009,7 +1024,7 @@ __global__ void paged_attention_reduce_kernel(
     if (tid == 0) {
         float gmax = -FLT_MAX;
         for (int s = 0; s < num_splits; s++) {
-            float m = staged ? s_m[s] : base[s * partial_stride];
+            float m = staged ? s_m[s] : base[static_cast<int64_t>(s) * partial_stride];
             gmax = fmaxf(gmax, m);
         }
         // gpt-oss learned sink (#547): virtual extra softmax column — joins
@@ -1021,7 +1036,7 @@ __global__ void paged_attention_reduce_kernel(
         // Step 2: Compute global denominator
         float gl = 0.0f;
         for (int s = 0; s < num_splits; s++) {
-            float m = staged ? s_m[s] : base[s * partial_stride];
+            float m = staged ? s_m[s] : base[static_cast<int64_t>(s) * partial_stride];
             float l = staged ? s_l[s] : base[s * partial_stride + 1];
             gl += expf(m - gmax) * l;
         }
@@ -1048,7 +1063,7 @@ __global__ void paged_attention_reduce_kernel(
     for (int d = tid; d < head_dim; d += blockDim.x) {
         float o_val = 0.0f;
         for (int s = 0; s < num_splits; s++) {
-            float weight = staged ? s_w[s] : expf(base[s * partial_stride] - gmax);
+            float weight = staged ? s_w[s] : expf(base[static_cast<int64_t>(s) * partial_stride] - gmax);
             float o_s = base[s * partial_stride + 2 + d];
             o_val += weight * o_s;
         }
@@ -1058,7 +1073,6 @@ __global__ void paged_attention_reduce_kernel(
         stcs_half(&O[out_idx], __float2half(o_val));
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Scratch buffer management for split-K

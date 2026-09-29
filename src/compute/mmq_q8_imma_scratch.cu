@@ -40,7 +40,6 @@ __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restr
 // Activation quantizer: 8 warps per block, grid-stride over (m, sub) pairs
 // (the shared 32-thread-block version ran at ~150 GB/s). Emits s8 + half
 // scale + float rowsum (the rowsum couples to the Q4_K β term; ~free here).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, int K,
                                          int8_t* __restrict__ xs8, __half* __restrict__ xscale,
                                          float* __restrict__ xrowsum) {
@@ -52,7 +51,7 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
     for (int idx = warp; idx < total; idx += nwarps) {
         const int m = idx / subs;
         const int s = idx - m * subs;
-        const size_t off = static_cast<size_t>(m) * K + s * 32;
+        const size_t off = static_cast<size_t>(m) * K + static_cast<size_t>(s) * 32;
         const float v = __half2float(X[off + lane]);
         float amax = fabsf(v);
 #pragma unroll
@@ -71,7 +70,6 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

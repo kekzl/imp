@@ -15,7 +15,6 @@ namespace imp {
 
 // Assembles K[pe|nope] and V from kv_b + k_rope. Grid (n_heads,n_tokens), block 64 threads
 // (sufficient for all practical head dims <= 192).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ static void mla_assemble_kv_kernel(
         const __half* __restrict__ kv_b,    // [n, n_heads*(nope+v)]
         const __half* __restrict__ k_rope,  // [n, rope_dim]
@@ -29,10 +28,13 @@ __global__ static void mla_assemble_kv_kernel(
     const int h = blockIdx.x;   // head index
     const int t = blockIdx.y;   // token index
 
-    const __half* kv_b_h  = kv_b   + t * kv_stride + h * (nope_dim + v_head_dim);
-    const __half* rope_t  = k_rope + t * rope_dim;
-    __half* k_dst = K_out + t * n_heads * head_dim   + h * head_dim;
-    __half* v_dst = V_out + t * n_heads * v_dst_hd   + h * v_dst_hd;
+    const __half* kv_b_h = kv_b + static_cast<int64_t>(t) * kv_stride +
+                           static_cast<int64_t>(h) * (nope_dim + v_head_dim);
+    const __half* rope_t = k_rope + static_cast<int64_t>(t) * rope_dim;
+    __half* k_dst = K_out + static_cast<int64_t>(t) * n_heads * head_dim +
+                    static_cast<int64_t>(h) * head_dim;
+    __half* v_dst = V_out + static_cast<int64_t>(t) * n_heads * v_dst_hd +
+                    static_cast<int64_t>(h) * v_dst_hd;
 
     // pe (rope) first — approach (b)
     for (int j = threadIdx.x; j < rope_dim; j += blockDim.x)
@@ -47,11 +49,9 @@ __global__ static void mla_assemble_kv_kernel(
     for (int j = threadIdx.x; j < v_dst_hd; j += blockDim.x)
         v_dst[j] = (j < v_head_dim) ? kv_b_h[nope_dim + j] : __float2half(0.0f);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Reorders Q per-head from [nope|pe] to [pe|nope] in-place. Grid (n_heads,n_tokens), block
 // 64 threads, smem head_dim halfs.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ static void mla_reorder_q_kernel(
         __half* __restrict__ q_data,
         int n_heads, int nope_dim, int rope_dim)
@@ -60,7 +60,8 @@ __global__ static void mla_reorder_q_kernel(
     const int h = blockIdx.x;
     const int t = blockIdx.y;
 
-    __half* q_head = q_data + t * n_heads * head_dim + h * head_dim;
+    __half* q_head = q_data + static_cast<int64_t>(t) * n_heads * head_dim +
+                     static_cast<int64_t>(h) * head_dim;
 
     extern __shared__ __half smem[];
     for (int j = threadIdx.x; j < head_dim; j += blockDim.x)
@@ -73,7 +74,6 @@ __global__ static void mla_reorder_q_kernel(
     for (int j = threadIdx.x; j < nope_dim; j += blockDim.x)
         q_head[rope_dim + j] = smem[j];
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Compacts attention output [n,n_heads,head_dim] -> [n,n_heads,v_hd]. Grid (n_heads,n_tokens),
 // block up to 256 threads. Reads the first v_hd dims of each head's head_dim-strided slot;

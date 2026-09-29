@@ -35,7 +35,6 @@ __global__ void ssm_conv_tap_stash_kernel(half* __restrict__ tap_pool, const hal
 // Advance a window by the stashed tap: drop the oldest entry, append the tap.
 // Equivalent to ssm_conv1d_commit_kernel over a single row, which is what the
 // next step would have seen had the drafted row been committed at the time.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv_tap_apply_kernel(float* __restrict__ conv_pool, int64_t slot_stride,
                                           const half* __restrict__ tap_pool, int channels, int kernel_size,
                                           const int* __restrict__ slots) {
@@ -43,12 +42,12 @@ __global__ void ssm_conv_tap_apply_kernel(float* __restrict__ conv_pool, int64_t
     if (ch >= channels)
         return;
     const int slot = slots[blockIdx.y];
-    float* w = conv_pool + static_cast<size_t>(slot) * static_cast<size_t>(slot_stride) + ch * kernel_size;
+    float* w = conv_pool + static_cast<size_t>(slot) * static_cast<size_t>(slot_stride) +
+               static_cast<int64_t>(ch) * kernel_size;
     for (int k = 0; k + 1 < kernel_size; k++)
         w[k] = w[k + 1];
     w[kernel_size - 1] = __half2float(tap_pool[static_cast<size_t>(slot) * channels + ch]);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 constexpr int kTapThreads = 256;
 

@@ -179,7 +179,6 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
     return dm4f.x * sumf_d - dm4f.y * sumf_m;
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict__ vbq,
                                                           const ggml_block_q8_1* __restrict__ bq8_1,
                                                           const int& kbx, const int& iqs) {
@@ -190,8 +189,10 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
     float d8[QR4_K];
 
     const int bq8_offset = QR4_K * ((iqs / 2) / (QK8_1 / (4 * 2)));  // QI8_1 = 8, QI8_1/2 = 4
+    // #2218 bounded: iqs = kqs < qi = QI4_K = 32 (:446, :54): 16 * bq8_offset <= 96, 4 * ((iqs/2) % 4) <= 12
 
-    const int* q4 = (const int*)(bq4_K->qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
+    const int* q4 = (const int*)(bq4_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset) +
+                                 static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
     v[0] = q4[0];
     v[1] = q4[4];
 
@@ -222,13 +223,11 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
 
     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, dm, d8);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // Q8_1 quantization kernel (ggml-compatible)
 // -------------------------------------------------------------------------
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict__ x,
                                                          ggml_block_q8_1* __restrict__ y, int K) {
     const int block_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -236,7 +235,7 @@ static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict_
     if (block_id >= num_blocks)
         return;
 
-    const half* xb = x + block_id * QK8_1;
+    const half* xb = x + static_cast<int64_t>(block_id) * QK8_1;
     ggml_block_q8_1* yb = y + block_id;
 
     // Find max absolute value
@@ -262,7 +261,6 @@ static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict_
     yb->d = __float2half(d);
     yb->s = __float2half(d * sum);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // Q5_K: 256 elements per block, 176 bytes
@@ -324,7 +322,6 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1_impl_vmmq(
     return dm5f.x * sumf_d - dm5f.y * sumf_m;
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict__ vbq,
                                                           const ggml_block_q8_1* __restrict__ bq8_1,
                                                           const int& kbx, const int& iqs) {
@@ -336,8 +333,10 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict
     float d8[QR5_K];
 
     const int bq8_offset = QR5_K * ((iqs / 2) / (QI8_1 / 2));
-    const int* ql = (const int*)(bq5_K->qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
-    const int* qh = (const int*)(bq5_K->qh + 4 * ((iqs / 2) % 4));
+    // #2218 bounded: iqs = kqs < qi = QI5_K = 32 (:446, :286): 16 * bq8_offset <= 96, 4 * ((iqs/2) % 4) <= 12
+    const int* ql = (const int*)(bq5_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset) +
+                                 static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
+    const int* qh = (const int*)(bq5_K->qh + static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
 
     vl[0] = ql[0];
     vl[1] = ql[4];
@@ -369,7 +368,6 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict
     const half2 dm = make_half2(bq5_K->d, bq5_K->dmin);
     return vec_dot_q5_K_q8_1_impl_vmmq(vl, vh, u, sc, m_ptr, dm, d8);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // vec_dot_q8_0_q8_1 — ported from ggml vecdotq.cuh
@@ -408,7 +406,6 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(const void* __restrict
 // File-local template tag for dispatch (distinct from imp::QType).
 enum class MMVQTag { Q4_K, Q5_1, Q5_K, Q8_0 };
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <MMVQTag qtype>
 static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_q8_1* __restrict__ x_q8,
                                    half* __restrict__ y, int N, int K) {
@@ -440,7 +437,7 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
     const int blocks_per_row = K / qk;
 
     // Quantized input: offset to correct row
-    const ggml_block_q8_1* yq = x_q8 + col * (K / QK8_1);
+    const ggml_block_q8_1* yq = x_q8 + static_cast<int64_t>(col) * (K / QK8_1);
 
     float tmp = 0.0f;
 
@@ -482,7 +479,6 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
         y[col * N + row] = __float2half(tmp);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // -------------------------------------------------------------------------
 // Public API

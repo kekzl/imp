@@ -156,7 +156,6 @@ __device__ __forceinline__ bool cursor_advance(Cursor& c, const WalkGeom& g) {
 // The min-blocks term pins the two CTAs per SM the HPC=5 instance sits on
 // at exactly 128 registers; measured neutral against the bare bound (55.1 vs
 // 54.7 us at HPC 5, 56.0 vs 56.2 at HPC 4, 2026-09-08), no spill.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int LPR, int TOK, int HPC>
 __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_gqa_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -187,8 +186,12 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     // the CTA's HPC q heads (contiguous in Q) for the per-iteration slice reads.
     extern __shared__ char smem_fp8_gqa[];
     float* merge_smem = reinterpret_cast<float*>(smem_fp8_gqa);
-    float* relayout = merge_smem + 2 * NUM_WARPS + NUM_WARPS * HD;  // NUM_WARPS x HD
-    half2* q_smem = reinterpret_cast<half2*>(relayout + NUM_WARPS * HD);  // HPC x HD / 2
+    // #2218 bounded: smem 2 * NUM_WARPS, NUM_WARPS * HD, h * HD (h < HPC) <= 8 * 128 = 1024 (NUM_WARPS = 8
+    // attention_paged_common.cuh:13, constexpr HD = 128 :22, HPC <= 5 :441); also q_saddr h * HD at :265.
+    float* relayout = merge_smem + static_cast<ptrdiff_t>(2 * NUM_WARPS) +
+                      static_cast<ptrdiff_t>(NUM_WARPS * HD);  // NUM_WARPS x HD
+    half2* q_smem = reinterpret_cast<half2*>(relayout +
+                                             static_cast<ptrdiff_t>(NUM_WARPS * HD));  // HPC x HD / 2
     {
         const half2* q_src = reinterpret_cast<const half2*>(Q + ((int64_t)batch_idx * n_heads + head0) * HD);
         for (int i = threadIdx.x; i < HPC * HD / 2; i += BLOCK_THREADS)
@@ -227,8 +230,10 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
         for (int j = 0; j < TOK; j++) {
             const int r = c.t + j * RPW + row_slot;
             const int rc = (r < c.n_tok) ? r : (c.n_tok - 1);
-            kq[j] = __ldcs(reinterpret_cast<const Vec*>(c.K_block + rc * kv_slot_stride));
-            vq[j] = __ldcs(reinterpret_cast<const Vec*>(c.V_block + rc * kv_slot_stride));
+            kq[j] = __ldcs(
+                reinterpret_cast<const Vec*>(c.K_block + static_cast<int64_t>(rc) * kv_slot_stride));
+            vq[j] = __ldcs(
+                reinterpret_cast<const Vec*>(c.V_block + static_cast<int64_t>(rc) * kv_slot_stride));
         }
     };
 
@@ -257,7 +262,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
 #pragma unroll
         for (int h = 0; h < HPC; h++) {
             half2 qh[NH2];
-            lds_q_slice<NH2>(q_saddr + h * HD * sizeof(half), qh);
+            lds_q_slice<NH2>(q_saddr + static_cast<size_t>(h * HD) * sizeof(half), qh);
 #pragma unroll
             for (int j = 0; j < TOK; j++)
                 s[h][j] = dot_slice<NH2>(qh, kh[j]);
@@ -378,7 +383,6 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
                                        n_heads, head0 + h, attn_sinks);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int LPR, int TOK, int HPC>
 void launch_gqa(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, half* O, const int* block_tables,

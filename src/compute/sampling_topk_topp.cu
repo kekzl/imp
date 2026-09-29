@@ -33,7 +33,6 @@ namespace imp {
 // Phase 1: per-block max, sum, top_k logit candidates over a strided subset. Body shared
 // between the single-row kernel and the row-parallel batched wrapper (grid.y=row);
 // blockIdx.x/gridDim.x usage identical, so per-row results are bit-identical.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logits, int vocab_size,
                                                   int top_k, float inv_temperature,
                                                   float* __restrict__ block_max_out,
@@ -42,11 +41,13 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
                                                   int* __restrict__ cand_idx_out) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    // #2218 bounded: NUM_WARPS * top_k <= 8 * 128 = 1024 (BLOCK_SIZE 256, sampling_internal.cuh:9; top_k
+    // <= MAX_TOP_K: sampling_topk_topp.cu:655,725,748, executor_sampling.cu:382)
     float* s_reduce = reinterpret_cast<float*>(smem_raw);  // BLOCK_SIZE
     float* s_gmax = s_reduce + BLOCK_SIZE;                 // 1
     float* s_gsum = s_gmax + 1;                            // 1
     float* s_warp_vals = s_gsum + 1;                       // NUM_WARPS * top_k
-    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + static_cast<ptrdiff_t>(NUM_WARPS * top_k));
 
     const int tid = threadIdx.x;
     const int gstride = blockDim.x * gridDim.x;
@@ -134,7 +135,6 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
                       cand_val_out + static_cast<size_t>(blockIdx.x) * top_k,
                       cand_idx_out + static_cast<size_t>(blockIdx.x) * top_k);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
                                     float inv_temperature, float* __restrict__ block_max_out,
@@ -162,7 +162,6 @@ __global__ void topk_partial_rows_kernel(const TopkRowArgs* __restrict__ rows, i
 // block_reduce_topk over SAMPLE_NBLOCKS*top_k candidates read straight from global
 // (coalesced, no big smem staging); only the final top-p/sample is serial. Runs inside
 // graph capture.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float inv_temperature,
                                                    unsigned int seed, int n_blocks,
                                                    const float* __restrict__ block_max_in,
@@ -172,9 +171,12 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
                                                    int32_t* __restrict__ d_result) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    // #2218 bounded: NUM_WARPS * top_k <= 8 * 128 = 1024 (BLOCK_SIZE 256, sampling_internal.cuh:9; top_k
+    // <= MAX_TOP_K: sampling_topk_topp.cu:655,725,748, executor_sampling.cu:382)
     float* s_warp_vals = reinterpret_cast<float*>(smem_raw);  // NUM_WARPS * top_k
-    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
-    float* s_val = reinterpret_cast<float*>(s_warp_idxs + NUM_WARPS * top_k);  // top_k
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + static_cast<ptrdiff_t>(NUM_WARPS * top_k));
+    float* s_val = reinterpret_cast<float*>(s_warp_idxs +
+                                            static_cast<ptrdiff_t>(NUM_WARPS * top_k));  // top_k
     int* s_idx = reinterpret_cast<int*>(s_val + top_k);                        // top_k
 
     const int tid = threadIdx.x;
@@ -269,7 +271,6 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
     }
     d_result[0] = static_cast<int32_t>(chosen);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
                                      const int* __restrict__ d_seed_salt, int n_blocks,

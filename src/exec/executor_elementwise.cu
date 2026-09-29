@@ -116,7 +116,6 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
 // replacing 3 separate kernels in the post-norm FP32 accumulator path
 // (saves 2 launches + 2 DRAM round-trips). Same register-cached, warp-level reduction as
 // rmsnorm_quantize_q8_1.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     const half* __restrict__ input,   // [n, d_model] pre-norm data (e.g. GEMV output)
     const half* __restrict__ norm_w,  // [d_model] RMSNorm weights
@@ -185,7 +184,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         const half2* nw2 = reinterpret_cast<const half2*>(&nw4);
 
         // Read FP32 accumulator (2 float4s = 8 floats)
-        float4 acc_lo = accum_row4[i * 2];
+        float4 acc_lo = accum_row4[static_cast<int64_t>(i) * 2];
         float4 acc_hi = accum_row4[i * 2 + 1];
         float* acc_f = reinterpret_cast<float*>(&acc_lo);
         float* acc_f_hi = reinterpret_cast<float*>(&acc_hi);
@@ -208,7 +207,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         acc_f_hi[2] += f3.x * inv_rms * (w3.x + weight_offset);
         acc_f_hi[3] += f3.y * inv_rms * (w3.y + weight_offset);
 
-        accum_row4[i * 2] = acc_lo;
+        accum_row4[static_cast<int64_t>(i) * 2] = acc_lo;
         accum_row4[i * 2 + 1] = acc_hi;
 
         local_max = fmaxf(local_max, fmaxf(fmaxf(fabsf(acc_f[0]), fabsf(acc_f[1])),
@@ -238,7 +237,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
 
     // Phase 3: Scale FP32 accum → FP16 output (vectorized float4 reads, half2×4 writes).
     for (int i = tid; i < d_model_v; i += blockDim.x) {
-        float4 acc_lo = accum_row4[i * 2];
+        float4 acc_lo = accum_row4[static_cast<int64_t>(i) * 2];
         float4 acc_hi = accum_row4[i * 2 + 1];
         float* af = reinterpret_cast<float*>(&acc_lo);
         float* af_hi = reinterpret_cast<float*>(&acc_hi);
@@ -252,7 +251,6 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         out_row4[i] = out4;
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
 __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in,
