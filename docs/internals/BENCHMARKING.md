@@ -119,6 +119,32 @@ python3 tools/analysis/serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,3
     --max-tokens 300 --md-out kpi.md --json kpi.json
 ```
 
+### `make bench-serve` (#2202)
+
+Wraps `serving_kpi.py` (extended with `--seed`, `--brief`; not a second client) so the sweep
+runs from one command with the server in Docker.
+
+```
+make bench-serve MODEL=Qwen3-8B-Q8_0.gguf CONC="1 8 32" [PROMPT_LEN=128 OUT_LEN=128 N=64]
+make bench-serve-mock                      # same harness vs tests/api/mock_server.py, no GPU
+```
+
+| Step | Detail |
+|---|---|
+| server | `imp-server --host 0.0.0.0 --model /models/$MODEL` in the `make` image (`$(DOCKER_IMG)`), GPU under `scripts/gpu_lock.sh`; removed on exit |
+| ready | polls `/ready` until 200 (`READY_TIMEOUT_S`, default 300) |
+| client | `serving_kpi.py` in `python:3.12-slim` (`--network host`), streaming, `--ignore-eos` (equal token counts), `--seed 0` (prompt set identical across runs), warmup wave at the largest level |
+| output | `results/bench_serve_<sha>_<model>.json` (full `serving_kpi.py` JSON; `-dirty` suffix on a dirty tree) and a table |
+| table | per concurrency: TTFT, ITL, E2E p50 / p99, output tok/s, req/s, errors |
+| exit | 1 if any request errored |
+
+Env: `PORT` (8093), `SEED` (0), `SERVER_ARGS` (extra `imp-server` flags), `KPI_ARGS` (extra `serving_kpi.py` flags), `IMG`.
+
+- Agreement at c=1 (`scripts/accept_2202.sh`, GPU, tolerance 10 %): bench-serve decode rate (1000 / TPOT p50) against `imp-cli --bench --json` `decode_tps`, Qwen3-8B-Q8_0, prompt 512, 128 tokens, `speculative.ngram=false` on both.
+- `imp-bench e2e` is not the reference: synthetic 256-dim model, no `--model`.
+- The mock server writes each SSE body in one flush: its TTFT/ITL/tok/s are plumbing values, not latency.
+- Unit test of the metric math: `tests/api/test_bench_serve.py`.
+
 ## Cold start
 
 `scripts/bench_cold_start.sh` starts the imp-server container N times (`--repeats`, default 3) and prints per run, in ms:

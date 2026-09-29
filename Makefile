@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -366,6 +366,19 @@ bench-agentic: build check-gpu
 	echo "--- multi-turn replay ---"; \
 	python3 tools/agent_replay_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --turns 16
 
+# Server-level serving benchmark (#2202): imp-server in Docker, streaming concurrency sweep,
+# results/bench_serve_<sha>_<model>.json + table. Usage:
+#   make bench-serve MODEL=Qwen3-8B-Q8_0.gguf CONC="1 8 32" [PROMPT_LEN=128 OUT_LEN=128 N=64]
+# bench-serve-mock runs the same harness against tests/api/mock_server.py (no GPU, no image).
+bench-serve: build check-gpu
+	@test -n "$(MODEL)" || { echo "bench-serve: MODEL=<file under ~/models> required"; exit 2; }
+	$(GPU_LOCKED) env IMG=$(DOCKER_IMG) MODEL="$(MODEL)" CONC="$(CONC)" PROMPT_LEN="$(PROMPT_LEN)" \
+		OUT_LEN="$(OUT_LEN)" N="$(N)" bash scripts/bench_serve.sh
+
+bench-serve-mock:
+	CONC="$(or $(CONC),1 4)" PROMPT_LEN="$(PROMPT_LEN)" OUT_LEN="$(OUT_LEN)" N="$(N)" \
+		bash scripts/bench_serve.sh --mock
+
 # Agent-harness E2E battery (#1007): boots a real imp-server and drives the
 # wire patterns real agent harnesses generate — multi-turn tool loops in the
 # Anthropic (/v1/messages), OpenAI chat and /v1/responses dialects, with
@@ -629,14 +642,19 @@ check-alloc-pairs:
 
 # Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
 # BUILT artifact, so this needs no GPU and no special build flags - but it does
-# need the CUDA toolkit, which only the builder image has. Uses build-dev
+# need the CUDA toolkit: local cuobjdump when on PATH (dev toolchain image, no
+# docker CLI), else docker run imp:builder (#2238). Uses build-dev
 # (make dev) when present, build (make build) otherwise.
 KERNEL_RES_LIB = $$(test -f build/libimp.a && echo build/libimp.a || echo build-dev/libimp.a)
 kernel-resources-dump:
 	@test -f build/libimp.a -o -f build-dev/libimp.a || { \
 	  echo "kernel-resources: no libimp.a - run 'make dev' or 'make build' first" >&2; exit 2; }
-	@docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
-	  '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'
+	@if command -v cuobjdump >/dev/null 2>&1; then \
+	  cuobjdump -res-usage "$(KERNEL_RES_LIB)" 2>/dev/null; \
+	else \
+	  docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
+	    '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'; \
+	fi
 
 kernel-resources: 
 	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py -

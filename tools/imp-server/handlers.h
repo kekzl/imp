@@ -19,6 +19,7 @@
 #include <fstream>
 #include <memory>
 #include "rate_limit.h"
+#include "responses_store.h"
 
 #include <mutex>
 #include <set>
@@ -318,6 +319,9 @@ struct ServerState {
     // Per-request JSONL logger (opt-in via --log-requests).
     RequestLogger request_logger;
 
+    // Responses API store (#2206): store=true / previous_response_id. Own mutex, never state.mtx.
+    imp_server::responses::ResponseStore response_store;
+
     bool model_loaded() const { return ctx != nullptr; }
 
     // obs_mtx guards a {loaded, model_name} snapshot for observability endpoints, held only for a
@@ -392,6 +396,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
 // POST /v1/responses — OpenAI Responses API (Agents SDK / Codex dialect);
 // reuses the chat-completions path via the transform shim (responses.h).
 void handle_responses(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// GET / DELETE /v1/responses/{id} (#2206).
+void handle_responses_get(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_responses_delete(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic /v1/messages/count_tokens: same body transform + tokenize chain as
 // handle_messages, but never submits to the engine; returns {"input_tokens":N}.
 void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state);

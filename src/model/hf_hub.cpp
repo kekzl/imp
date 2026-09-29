@@ -77,13 +77,10 @@ std::string resolve_model_path(const std::string& model_id, const std::string& r
         }
     }
 
-    // 4. No fetcher: imp's host policy keeps Python tooling off the host and
-    //    container. If the model isn't cached, the user pre-stages it.
-    IMP_LOG_ERROR(
-        "Model %s not found locally and not in the HF cache (%s). Stage it manually, e.g.:",
-        model_id.c_str(), cache_dir.empty() ? "(no HF cache dir)" : cache_dir.c_str());
-    IMP_LOG_ERROR("  git clone https://huggingface.co/%s <local-dir>", model_id.c_str());
-    IMP_LOG_ERROR("  (or use the HF hub CLI on another machine and copy the cache)");
+    // 4. A bare id never fetches; hf://<id> does (hf_fetch.h).
+    IMP_LOG_ERROR("Model %s not found locally and not in the HF cache (%s). Fetch it with:",
+                  model_id.c_str(), cache_dir.empty() ? "(no HF cache dir)" : cache_dir.c_str());
+    IMP_LOG_ERROR("  --model hf://%s[:<file>.gguf]   (HF_TOKEN for gated repos)", model_id.c_str());
     return "";
 }
 
