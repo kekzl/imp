@@ -275,7 +275,8 @@ fi
 
 # Covers every living doc (roadmap.md, docs/*.md, docs/internals/*.md, root docs); archive/,
 # plans/, audit/ excluded (their line numbers describe the commit they document).
-# Gates a file:line citation past EOF and a renamed bare docs/*.md name. Same gate runs in the
+# Fails on a gone or ambiguous citation anchor and a renamed bare docs/*.md name; line drift
+# only warns (#2231). Same gate runs in the
 # pre-commit/pre-push hooks and the Build job (citations selection).
 section "roadmap citations"
 if python3 scripts/check_doc_citations.py . >/tmp/imp_check_citations.log 2>&1; then
