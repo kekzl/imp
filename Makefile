@@ -486,9 +486,11 @@ AB_BASE_REF ?= origin/main
 ab-base-image:
 	@bash scripts/ab_base_image.sh $(AB_BASE_REF)
 
-verify-ab: build check-gpu ab-base-image
-	@$(IMG_CHECK) && IMG_A=imp:ab-$$(git rev-parse --short=8 $(AB_BASE_REF)) IMG_B=$(DOCKER_IMG) \
-	 $(GPU_LOCKED) bash scripts/verify_ab.sh
+# AB_BASE_REF is resolved once, inside ab_base_image.sh; IMG_A is the tag it printed.
+# A second rev-parse here races a concurrent `git fetch` in another worktree.
+verify-ab: build check-gpu
+	@$(IMG_CHECK) && AB_TAG=$$(bash scripts/ab_base_image.sh $(AB_BASE_REF)) && \
+	 IMG_A=$$AB_TAG IMG_B=$(DOCKER_IMG) $(GPU_LOCKED) bash scripts/verify_ab.sh
 
 # Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
 # 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
