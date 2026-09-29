@@ -716,7 +716,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // config is stashed for Engine::init below.
     imp::tools::mtp_auto_finalize(
         state.runtime_config, mtp_k, state.model->model->mtp_.has_value() && state.model->model->mtp_->loaded,
-        !state.model->model->mtp_.has_value() || imp::mtp_forward_implemented(*state.model->model->mtp_));
+        state.model->model->mtp_.has_value() ? imp::mtp_auto_k_cap(*state.model->model->mtp_) : 0);
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
 

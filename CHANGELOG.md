@@ -5,13 +5,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 - AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
 - C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).
 - `kv_cache.host_spill_mb` (default 0): prefix blocks the KV pool reclaims go to pinned host RAM and come back by H2D on a later hit. Qwen3-8B-Q8_0, 4482-token re-hit after eviction: TTFT 0.504 -> 0.274 s (device hit 0.220 s), output identical (#2203).
 - `/v1/completions` prompt logprobs (#2207): vLLM `prompt_logprobs: N` (0..20) and OpenAI `echo` + `logprobs`, gathered on device per prefill row; only rows x (2 + 2N) values reach the host (168 KiB scratch per 1k rows at N = 20). `stream: true` with either is a 400. Such requests skip prefix reuse and ragged prefill.
 - `--model hf://<org>/<repo>[:<file>.gguf]` (imp-server, imp-cli) downloads inside the container via libcurl into the HF cache (`HF_HOME=/models/huggingface` in the image): Range resume, LFS sha256 check, `HF_TOKEN`; a second start makes 0 requests (#2200).
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
-- Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 
 ### Changed
 - `prompt_logprobs` LM head (#2257): one dequantized-head GEMM per chunk of min(rows, 1024, free VRAM / 2 / 4V) rows instead of 8-row dp4a batches, and one fused pass per row for logsumexp, rank and top-N (was 2 + N). Gate `scripts/accept_2257.sh`: 2048-token prefill with `prompt_logprobs=0` <= 1.30x off.

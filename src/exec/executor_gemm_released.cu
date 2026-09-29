@@ -17,10 +17,24 @@ namespace imp {
 void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& input, Tensor& output,
                                           const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
-    if (M == 1 && ctx.beta == 0.0f && output.qtype == QType::F16) {
-        const auto fp8 = wcache_.fp8.find(h.source_data);
-        if (fp8 != wcache_.fp8.end() && fp8->second.d_row_scales) {
-            gemv_fp8_rowscale(fp8->second.weight, input, output, fp8->second.d_row_scales, ctx.stream);
+    // M <= 4 (verify chunk): the M=1 GEMV per row, same bits as decode; 4 FP8 weight reads stay under
+    // the rebuild's ~5 B/elem (FP8 read + F16 write + F16 read).
+    if (M <= 4 && ctx.beta == 0.0f && output.qtype == QType::F16 && input.qtype == QType::F16) {
+        const FP8CacheEntry* e = nullptr;
+        if (const auto fp8 = wcache_.fp8.find(h.source_data); fp8 != wcache_.fp8.end())
+            e = &fp8->second;
+        else if (const auto v = wcache_.released_fp8_view.find(h.source_data);
+                 v != wcache_.released_fp8_view.end())
+            e = &v->second;
+        if (e && e->d_row_scales) {
+            const int64_t K = input.shape[1], N = output.shape[1];
+            for (int r = 0; r < M; ++r) {
+                const int64_t xs[2] = {1, K}, ys[2] = {1, N};
+                const Tensor x(static_cast<char*>(input.data) + r * K * sizeof(half), QType::F16, 2, xs,
+                               true);
+                Tensor y(static_cast<char*>(output.data) + r * N * sizeof(half), QType::F16, 2, ys, true);
+                gemv_fp8_rowscale(e->weight, x, y, e->d_row_scales, ctx.stream);
+            }
             return;
         }
     }

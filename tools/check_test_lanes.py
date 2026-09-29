@@ -348,7 +348,9 @@ def main():
     # host reference (#2205); needs a card.
     # 1167 -> 1171: PromptLogprobsRows x3 (test-compute, GPU): fused prompt-logprobs row kernel vs CPU
     # reference; PromptLogprobsE2ETest x1 (test-e2e, IMP_TEST_MODEL): chunk logits released (#2257).
-    PINNED = 1171
+    # 1171 -> 1172: MtpQwen4ExpReference.TwoDraftStepsMatchVllmMath (test-e2e): Qwen4Exp draft step
+    # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
+    PINNED = 1172
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -34,6 +34,11 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
         ok &= take("mtp.pre_fc_norm_hidden.weight", head.pre_fc_norm_hidden);
         ok &= take(kMtpHeadKeyFcEmbedding, head.fc_embedding);
         ok &= take("mtp.fc_hidden.weight", head.fc_hidden);
+        // pre_fc_norm_hidden spans the whole hc stream: [hc_count * hidden] (4 x 2560).
+        if (ok && head.fc_hidden.ndim == 2 && head.fc_hidden.shape[1] > 0 &&
+            head.pre_fc_norm_hidden.shape[0] % head.fc_hidden.shape[1] == 0)
+            head.hc_count = static_cast<int>(head.pre_fc_norm_hidden.shape[0] / head.fc_hidden.shape[1]);
+        ok &= head.hc_count > 1;
         auto take_hc = [&](const std::string& p, MtpHyperConnection& hc, bool inject) -> bool {
             bool r = take(p + ".hc_norm.weight", hc.norm);
             r &= take(p + ".input_mix_weight_down.weight", hc.mix_down);
@@ -84,9 +89,9 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
         head.loaded = ok;
         if (ok) {
             IMP_LOG_INFO("MTP head loaded: %s (%d of %d tensors mapped, qwen4_exp layout, %d FP8 experts, "
-                         "%.2f GiB; experts not uploaded)",
+                         "%.2f GiB, hc_count %d)",
                          src.c_str(), head.info.n_mapped, head.info.n_tensors, n_exp,
-                         static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+                         static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0), head.hc_count);
         } else {
             IMP_LOG_WARN("MTP head at %s uses the qwen4_exp layout but is incomplete (%d of %d tensors mapped, "
                          "experts=%d); spec-decode disabled",

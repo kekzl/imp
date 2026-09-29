@@ -73,7 +73,7 @@
 //     mtp.layers.0.mlp.experts.{e}.{gate,up,down}_proj    512 experts, F8_E4M3
 //         .weight_scale_inv                 BF16 128x128 block scales
 //
-// Loaded and mapped only: no forward, speculative.mtp_k is forced to 0.
+// Draft forward: compute/mtp_forward_qwen4exp.cu; experts run through gemv_fp8_block_moe.
 // =============================================================================
 
 #include "core/tensor.h"
@@ -207,11 +207,20 @@ struct MtpHead {
     MtpHyperConnection attn_hc;
     MtpHyperConnection mlp_hc;
     MtpHyperConnection final_mixer;  // hyper_connection_mixer, replaces final_norm
-    Tensor indexer_qk_proj;          // QSA indexer
+    Tensor indexer_qk_proj;          // QSA indexer: host only, the draft attends densely (spec OPEN 3)
     Tensor indexer_q_norm;
     Tensor indexer_k_norm;
-    // Not uploaded: no FP8 block-scale MoE path yet (upload/dequant is a later step).
+    // Host-mapped checkpoint views; upload copies them into the device tables below.
     std::vector<MtpFp8Expert> experts_fp8;
+    // Device copies for gemv_fp8_block_moe: per-expert E4M3 allocations addressed through
+    // pointer tables (no multi-GiB slab), scales BF16 -> FP32 in one slab each.
+    //   gate_up: table [n_experts * 2] (gate, up), scales [n_experts * 2, d_ff_e / 128, hidden / 128]
+    //   down:    table [n_experts],     scales [n_experts, hidden / 128, d_ff_e / 128]
+    const uint8_t* const* fp8_gate_up_tab = nullptr;
+    const uint8_t* const* fp8_down_tab = nullptr;
+    const float* fp8_gate_up_scales = nullptr;
+    const float* fp8_down_scales = nullptr;
+    int hc_count = 0;  // Qwen4Exp: width of the hc stream the head reads and writes (hc_count x hidden)
 
     MtpLayout layout = MtpLayout::None;
 
@@ -219,13 +228,12 @@ struct MtpHead {
     bool loaded = false;
 };
 
-// False for a layout whose weights load but whose draft forward does not exist yet
-// (Qwen4Exp). Such a head must never upload or arm speculative.mtp_k.
-inline bool mtp_forward_implemented(const MtpHead& head) { return head.layout != MtpLayout::Qwen4Exp; }
-
-// Log line shared by every site that forces speculative.mtp_k to 0 for such a head.
-inline constexpr const char* kMtpForwardMissingLog =
-    "MTP head loaded, forward not implemented (layout qwen4_exp): speculative.mtp_k forced 0";
+// speculative.mtp_k=auto depth for this head: 0 = kMtpAutoK, < 0 = auto declines the head.
+// Qwen4Exp declines: decode 61.46 vs 61.94 tok/s spec off (k=1, 4 prompts x 3), head holds 2400 MiB VRAM.
+inline constexpr int kMtpAutoDeclines = -1;
+inline int mtp_auto_k_cap(const MtpHead& head) {
+    return head.layout == MtpLayout::Qwen4Exp ? kMtpAutoDeclines : 0;
+}
 
 // Maps a raw mtp.* tensor map (outer "model." already stripped) onto MtpHead fields.
 // Layout is keyed on the fusion projection name: eh_proj -> Nemotron, fc_embedding ->

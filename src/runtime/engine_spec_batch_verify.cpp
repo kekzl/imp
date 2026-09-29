@@ -519,7 +519,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Graph replay (engine_spec_capture.cpp): one graph per (rows, ctx tier).
     // Everything that varies per step is device data the H2D above refreshed;
     // the split-K grid bakes the tier ceiling.
-    const bool capture_on = spec_capture_ready_(max_ctx);
+    const bool capture_on = spec_capture_ready_(max_ctx, 2 * N);
 
     InferenceState state;
     state.token_ids = d_tok;

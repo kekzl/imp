@@ -54,7 +54,7 @@ void Engine::prewarm_spec_scratch_() {
     // eligibility guards (host-offload, residual KV, census probe) are not
     // duplicated; ctx_padded=1 makes this a side-effect-only call.
     if (scfg.capture)
-        (void)spec_capture_ready_(1);
+        (void)spec_capture_ready_(1, 1);
 
     // Staging + block tables, at the caps engine_spec_ngram.cpp would reach:
     // the largest capture bucket, and a block table covering the whole context.
@@ -75,8 +75,9 @@ void Engine::prewarm_spec_scratch_() {
 
 int Engine::spec_capture_bucket_max_() const {
     const auto& scfg = runtime_config_.speculative;
-    int k_max = std::max(1, scfg.k);
-    if (scfg.suffix)
+    // speculative.k / suffix_k_max size the matcher and recycling drafts; an MTP-only run keeps k + 1 rows.
+    int k_max = (scfg.ngram || scfg.token_recycling) ? std::max(1, scfg.k) : 1;
+    if (scfg.suffix && scfg.ngram)
         k_max = std::max(k_max, scfg.suffix_k_max);
     if (mtp_spec_decode_enabled())
         k_max = std::max(k_max, mtp_spec_decode_k());
@@ -108,7 +109,7 @@ int Engine::spec_capture_bucket_(int chunk_len) const {
     return cap;
 }
 
-bool Engine::spec_capture_ready_(int ctx_padded) {
+bool Engine::spec_capture_ready_(int ctx_padded, int rows) {
     const auto& scfg = runtime_config_.speculative;
     if (!scfg.capture || spec_capture_doomed_)
         return false;
@@ -139,7 +140,9 @@ bool Engine::spec_capture_ready_(int ctx_padded) {
                      spec_capture_ctx_cap_ > 0 ? "enabled" : "not applicable for this model",
                      spec_capture_ctx_cap_);
     }
-    return spec_capture_ctx_cap_ > 0 && ctx_padded <= spec_capture_ctx_cap_;
+    const int max_rows = executor_->moe_host_rows_capture_max();  // 0 = no row cap
+    return spec_capture_ctx_cap_ > 0 && ctx_padded <= spec_capture_ctx_cap_ &&
+           (max_rows == 0 || rows <= max_rows);
 }
 
 void Engine::free_spec_graphs_() {

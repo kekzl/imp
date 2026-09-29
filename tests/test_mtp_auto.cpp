@@ -78,25 +78,38 @@ TEST(MtpAuto, ExplicitNgramSurvivesTheAutoPair) {
     EXPECT_TRUE(cfg.speculative.ngram) << "auto must not overrule a key the operator set";
 }
 
-// A head that loads without a draft forward (qwen4_exp) forces 0, explicit settings included.
-TEST(MtpAuto, HeadWithoutForwardForcesOff) {
+// A head with its own auto depth (qwen4_exp: 1) caps auto only; explicit settings and the tool flag pass.
+TEST(MtpAuto, HeadAutoKCapClampsAutoOnly) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
-    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_forward=*/false);
-    EXPECT_EQ(cfg.speculative.mtp_k, 0);
-    EXPECT_TRUE(cfg.speculative.ngram) << "the auto pair must not turn the matcher off";
+    ASSERT_GT(k, 1);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/1);
+    EXPECT_EQ(cfg.speculative.mtp_k, 1);
+    EXPECT_FALSE(cfg.speculative.ngram) << "the auto pair still turns the matcher off";
 
     RuntimeConfig pinned;
     ASSERT_TRUE(pinned.apply_overrides({"speculative.mtp_k=2"}).empty());
-    tools::mtp_auto_finalize(pinned, 2, /*head_loaded=*/true, /*head_forward=*/false);
-    EXPECT_EQ(pinned.speculative.mtp_k, 0);
+    tools::mtp_auto_finalize(pinned, 2, /*head_loaded=*/true, /*head_auto_k_cap=*/1);
+    EXPECT_EQ(pinned.speculative.mtp_k, 2);
 
     RuntimeConfig flag;
     EXPECT_EQ(tools::mtp_auto_after_load(flag, 2, /*head_loaded=*/true, /*explicit_flag=*/2,
-                                         /*head_forward=*/false),
-              0);
-    EXPECT_EQ(flag.speculative.mtp_k, 0);
-    EXPECT_EQ(take_pending_runtime_config().speculative.mtp_k, 0) << "the engine takes the forced value";
+                                         /*head_auto_k_cap=*/1),
+              2);
+}
+
+// A head whose verify costs more than it emits (qwen4_exp) turns auto off; explicit settings pass.
+TEST(MtpAuto, HeadAutoDeclineTurnsAutoOff) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    ASSERT_GT(k, 0);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/-1);
+    EXPECT_EQ(cfg.speculative.mtp_k, 0);
+
+    RuntimeConfig pinned;
+    ASSERT_TRUE(pinned.apply_overrides({"speculative.mtp_k=1"}).empty());
+    tools::mtp_auto_finalize(pinned, 1, /*head_loaded=*/true, /*head_auto_k_cap=*/-1);
+    EXPECT_EQ(pinned.speculative.mtp_k, 1);
 }
 
 // The gated bench measures RAW decode: auto drafting with an MTP head would

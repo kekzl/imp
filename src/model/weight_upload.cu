@@ -942,6 +942,89 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
     return true;
 }
 
+// Qwen4Exp MTP experts: F8_E4M3 bytes go up unchanged, one allocation per expert (gate|up|down,
+// 4.7 MiB) so no multi-GiB request hits the async pool; BF16 128x128 block scales become FP32.
+// The forward addresses experts through the device pointer tables (gemv_fp8_block_moe.h).
+static bool upload_mtp_fp8_experts(MtpHead& head, const UploadCtx& ctx) {
+    const int ne = static_cast<int>(head.experts_fp8.size());
+    if (ne == 0)
+        return true;
+    const MtpFp8Expert& x0 = head.experts_fp8[0];
+    const int64_t eff = x0.gate_proj.shape[0];
+    const int64_t hid = x0.gate_proj.shape[1];
+    const size_t gu_sc = static_cast<size_t>(eff / 128) * (hid / 128);  // scales per [eff, hid] matrix
+    auto shape_ok = [&](const Tensor& w, int64_t r, int64_t c, const Tensor& s) {
+        return w.data && w.qtype == QType::FP8_E4M3 && w.ndim == 2 && w.shape[0] == r && w.shape[1] == c &&
+               s.data && s.qtype == QType::BF16 && s.ndim == 2 && s.shape[0] == r / 128 && s.shape[1] == c / 128;
+    };
+    if (eff % 128 != 0 || hid % 128 != 0) {
+        IMP_LOG_ERROR("MTP FP8 experts: [%lld, %lld] is not a multiple of the 128x128 scale block",
+                      (long long)eff, (long long)hid);
+        return false;
+    }
+    const size_t mat = static_cast<size_t>(eff) * hid;  // bytes per E4M3 matrix
+    std::vector<const uint8_t*> gu_tab(static_cast<size_t>(ne) * 2), dn_tab(static_cast<size_t>(ne));
+    std::vector<float> gu_s(static_cast<size_t>(ne) * 2 * gu_sc), dn_s(static_cast<size_t>(ne) * gu_sc);
+    auto widen = [](const Tensor& s, float* dst, size_t n) {
+        const uint16_t* p = static_cast<const uint16_t*>(s.data);
+        for (size_t i = 0; i < n; ++i) {
+            const uint32_t bits = static_cast<uint32_t>(p[i]) << 16;  // BF16 = top half of an FP32
+            std::memcpy(&dst[i], &bits, sizeof(float));
+        }
+    };
+    for (int e = 0; e < ne; ++e) {
+        const MtpFp8Expert& x = head.experts_fp8[static_cast<size_t>(e)];
+        if (!shape_ok(x.gate_proj, eff, hid, x.gate_scale_inv) || !shape_ok(x.up_proj, eff, hid, x.up_scale_inv) ||
+            !shape_ok(x.down_proj, hid, eff, x.down_scale_inv)) {
+            IMP_LOG_ERROR("MTP FP8 expert %d: dtype or shape differs from expert 0", e);
+            return false;
+        }
+        void* d = nullptr;
+        checked_cuda_malloc(&d, 3 * mat, ctx.stream);
+        if (d == nullptr) {
+            IMP_LOG_ERROR("MTP FP8 expert %d: device allocation failed (%zu MiB)", e, 3 * mat >> 20);
+            return false;
+        }
+        ctx.gpu_allocs.push_back(d);
+        uint8_t* b = static_cast<uint8_t*>(d);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b, x.gate_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b + mat, x.up_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b + 2 * mat, x.down_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
+        gu_tab[2 * e] = b;
+        gu_tab[2 * e + 1] = b + mat;
+        dn_tab[e] = b + 2 * mat;
+        widen(x.gate_scale_inv, &gu_s[(2 * static_cast<size_t>(e)) * gu_sc], gu_sc);
+        widen(x.up_scale_inv, &gu_s[(2 * static_cast<size_t>(e) + 1) * gu_sc], gu_sc);
+        widen(x.down_scale_inv, &dn_s[static_cast<size_t>(e) * gu_sc], gu_sc);
+    }
+    // Tables and scales: four small uploads, synchronous so the host vectors may die here.
+    auto put = [&](const void* src, size_t bytes, const void** out) -> bool {
+        void* d = nullptr;
+        checked_cuda_malloc(&d, bytes, ctx.stream);
+        if (d == nullptr)
+            return false;
+        ctx.gpu_allocs.push_back(d);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d, src, bytes, cudaMemcpyHostToDevice, ctx.stream));
+        *out = d;
+        return true;
+    };
+    const void *gt = nullptr, *dt = nullptr, *gs = nullptr, *ds = nullptr;
+    const bool ok = put(gu_tab.data(), gu_tab.size() * sizeof(void*), &gt) &&
+                    put(dn_tab.data(), dn_tab.size() * sizeof(void*), &dt) &&
+                    put(gu_s.data(), gu_s.size() * sizeof(float), &gs) &&
+                    put(dn_s.data(), dn_s.size() * sizeof(float), &ds);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(ctx.stream));
+    if (!ok)
+        return false;
+    head.fp8_gate_up_tab = static_cast<const uint8_t* const*>(gt);
+    head.fp8_down_tab = static_cast<const uint8_t* const*>(dt);
+    head.fp8_gate_up_scales = static_cast<const float*>(gs);
+    head.fp8_down_scales = static_cast<const float*>(ds);
+    IMP_LOG_INFO("MTP FP8 experts: %d x (gate, up, down) [%lld x %lld] E4M3 on device, %.1f MiB", ne,
+                 (long long)eff, (long long)hid, 3.0 * mat * ne / (1024.0 * 1024.0));
+    return true;
+}
+
 // upload_mtp_weights: BF16->FP16 upload of the MTP head. Walks all 19 named MtpHead
 // tensors; MoE expert tensors (3D [n_experts,...]) upload raw as 3D FP16, per-expert
 // slicing is the forward kernel's concern. CRITICAL: Qwen3.5/3.6 SafeTensors RMSNorm gammas
@@ -996,6 +1079,18 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     ok &= up(head.shared_expert_up_proj,    "shared_expert_up_proj");
     ok &= up(head.shared_expert_down_proj,  "shared_expert_down_proj");
     ok &= up(head.shared_expert_gate,       "shared_expert_gate");
+    // Qwen4Exp layout: split fc, hyper-connection modules (norm WITHOUT offset: hc_grouped_rmsnorm
+    // applies 1 + W itself), FP8 experts. The QSA indexer stays on the host (dense draft attention).
+    ok &= up(head.fc_embedding, "fc_embedding");
+    ok &= up(head.fc_hidden, "fc_hidden");
+    for (MtpHyperConnection* hc : {&head.attn_hc, &head.mlp_hc, &head.final_mixer}) {
+        ok &= up(hc->norm, "hc_norm");
+        ok &= up(hc->mix_down, "hc_mix_down");
+        ok &= up(hc->mix_up, "hc_mix_up");
+        ok &= up(hc->block_inject, "hc_block_inject");
+    }
+    if (ok && head.layout == MtpLayout::Qwen4Exp)
+        ok &= upload_mtp_fp8_experts(head, ctx);
     // Nemotron layout: per-expert 2-D weights instead of the packed pair above.
     // Left on the host these would be read as device pointers by the draft
     // forward, so they upload here with everything else.
@@ -1053,6 +1148,14 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
             IMP_LOG_INFO("MTP experts restacked contiguously for device-side decode dispatch");
     }
     return ok;
+}
+
+bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset, cudaStream_t stream,
+                     std::vector<void*>& gpu_allocs) {
+    std::vector<HostRegistration> pinned;
+    std::vector<PinnedBuffer> pinned_allocs;
+    const UploadCtx ctx{compute_dtype, stream, gpu_allocs, pinned, pinned_allocs, arch_norm_offset};
+    return upload_mtp_weights(head, ctx);
 }
 
 // upload_gptq_weight: dequantizes a GPTQ- or AWQ-packed (awq_gemm) weight to FP16 on GPU. Uploads
@@ -2626,10 +2729,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // MTP head weights (DeepSeek-V3/Qwen3.6 sidecar, optional), Phase 2 of MTP wiring; the
     // consuming forward path is Phase 3+. Gates on VRAM here: if the upload fails, MTP is
     // disabled rather than failing the whole model load.
-    if (mtp_.has_value() && mtp_->loaded && !mtp_forward_implemented(*mtp_)) {
-        // Host-mapped only: no draft forward for this layout, so no VRAM for it.
-        IMP_LOG_INFO("MTP head: not uploaded (%s)", kMtpForwardMissingLog);
-    } else if (mtp_.has_value() && mtp_->loaded) {
+    if (mtp_.has_value() && mtp_->loaded) {
         // Refuse a head that does not fit BEFORE uploading any of it. See
         // mtp_upload_peak_bytes: a per-allocation refusal partway through
         // strands everything already uploaded for the life of the process.
@@ -2645,7 +2745,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             mtp_->loaded = false;
         }
     }
-    if (mtp_.has_value() && mtp_->loaded && mtp_forward_implemented(*mtp_)) {
+    if (mtp_.has_value() && mtp_->loaded) {
         size_t allocs_before = gpu_allocations_.size();
         size_t mtp_free_before = 0;
         vram_budget_mem_get_info(&mtp_free_before, nullptr);

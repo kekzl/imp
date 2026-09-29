@@ -4,6 +4,8 @@
 // diverging token must lie inside the batch-shape envelope. GPU: needs checkpoint + MTP head.
 #include "imp/imp.h"
 #include "api/imp_internal.h"
+#include "model/chat_template.h"
+#include "model/tokenizer.h"
 #include "runtime/config.h"
 #include "runtime/engine.h"
 #include <cuda_runtime.h>
@@ -71,6 +73,11 @@ struct GreedyRun {
     std::vector<float> margin;
 };
 
+bool chat_mode() {
+    const char* v = getenv("IMP_TEST_MTP_CHAT");
+    return v && *v == '1';
+}
+
 // Speculation gates refuse a request carrying logprobs (engine_spec_ngram.cpp,
 // constrained_decode), so margins come from a logprobs run of the plain arm, valid only
 // as far as its tokens agree with the logprobs-free run.
@@ -87,9 +94,15 @@ GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_g
     GreedyRun run;
     std::vector<int32_t> prompt_tokens(2048);
     int n_prompt = 0;
-    if (imp_tokenize(model, prompt, prompt_tokens.data(), &n_prompt, 2048) != IMP_SUCCESS)
+    if (chat_mode()) {
+        const std::vector<imp::ChatMessage> msgs = {{"user", prompt}};
+        prompt_tokens = ctx->engine->chat_template().apply(*model->model->tokenizer(), msgs);
+    } else if (imp_tokenize(model, prompt, prompt_tokens.data(), &n_prompt, 2048) != IMP_SUCCESS) {
         return run;
-    prompt_tokens.resize(n_prompt);
+    } else {
+        prompt_tokens.resize(n_prompt);
+    }
+    n_prompt = static_cast<int>(prompt_tokens.size());
 
     if (imp_context_reset(ctx) != IMP_SUCCESS)
         return run;
@@ -128,6 +141,22 @@ constexpr const char* kPrompts[] = {
     "Q: What is 17 + 25? Show the addition digit by digit.\nA:",
     "List the first ten prime numbers, separated by commas.",
 };
+// IMP_TEST_MTP_CHAT=1: the prompts of scripts/mtp_accuracy_bench.sh, chat-templated (imp-cli path).
+constexpr const char* kChatPrompts[] = {
+    "What is the chemical formula for water, and what are its boiling and freezing points at standard "
+    "atmospheric pressure?",
+    "Explain why the sky appears blue during the day but red during sunset. Walk me through the physics step "
+    "by step.",
+    "Write a Python function that computes the nth Fibonacci number using dynamic programming. Include a "
+    "docstring.",
+    "Compose a polite email to a colleague asking them to review a draft document by end of week. Keep it "
+    "under 80 words.",
+};
+std::vector<const char*> prompts() {
+    if (chat_mode())
+        return {std::begin(kChatPrompts), std::end(kChatPrompts)};
+    return {std::begin(kPrompts), std::end(kPrompts)};
+}
 
 TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     const std::string dir = model_or("IMP_TEST_MODEL_MTP", "/models/Qwen3.8-27B-NVFP4-vllm");
@@ -152,7 +181,7 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
         cfg.max_batch_size = 1;
         ImpContext ctx = nullptr;
         ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
-        for (const char* p : kPrompts) {
+        for (const char* p : prompts()) {
             const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
             GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
             const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
@@ -200,8 +229,10 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
             << "prompt " << i << ": the logprobs run returned no margins, the oracle has nothing to read";
     }
 
-    // ---- arm B: the documented MTP pair, depth 2.
-    imp::set_pending_runtime_config(arm_config(2));
+    // ---- arm B: the documented MTP pair, depth 2 (IMP_TEST_MTP_K overrides: Qwen3.8-Flash-Next runs 1).
+    const char* k_env = getenv("IMP_TEST_MTP_K");
+    const int k = (k_env && *k_env) ? std::atoi(k_env) : 2;
+    imp::set_pending_runtime_config(arm_config(k));
     ImpModel model = nullptr;
     // imp_model_load hard-codes load_mtp_head=0; the head is the point here.
     ASSERT_EQ(imp_model_load_ex(dir.c_str(), IMP_FORMAT_SAFETENSORS, /*load_mtp_head=*/1, &model),
@@ -211,14 +242,14 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     cfg.max_batch_size = 1;
     ImpContext ctx = nullptr;
     ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
-    if (imp_enable_mtp_spec_decode(ctx, 2) != IMP_SUCCESS) {
+    if (imp_enable_mtp_spec_decode(ctx, k) != IMP_SUCCESS) {
         imp_context_free(ctx);
         imp_model_free(model);
         GTEST_SKIP() << "checkpoint at " << dir << " carries no loadable MTP head";
     }
 
     std::vector<GreedyRun> speculated;
-    for (const char* p : kPrompts)
+    for (const char* p : prompts())
         speculated.push_back(greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false));
 
     const auto stats = ctx->engine->spec_stats();
@@ -250,17 +281,19 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
         if (first >= baseline[i].margin.size()) {
             // The logprobs run parted from the plain run before this point, so
             // the margin here is unreadable: reported, not judged.
-            std::printf("[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=2 %d), margin "
-                        "unreadable (logprobs run parted at %zu)\n",
-                        i, first, a[first], b[first], baseline[i].margin.size());
+            std::printf(
+                "[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=%d %d), margin "
+                "unreadable (logprobs run parted at %zu)\n",
+                i, first, a[first], k, b[first], baseline[i].margin.size());
             continue;
         }
         const float margin = baseline[i].margin[first];
-        std::printf("[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=2 %d), margin %.3f nats\n",
-                    i, first, a[first], b[first], margin);
+        std::printf(
+            "[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=%d %d), margin %.3f nats\n", i,
+            first, a[first], k, b[first], margin);
         EXPECT_LE(margin, kBatchShapeMarginNats)
-            << "prompt " << i << " (" << kPrompts[i] << "): greedy output parted at token " << first
-            << " (mtp_k=0 chose " << a[first] << ", mtp_k=2 chose " << b[first] << ") where the "
+            << "prompt " << i << " (" << prompts()[i] << "): greedy output parted at token " << first
+            << " (mtp_k=0 chose " << a[first] << ", mtp_k=" << k << " chose " << b[first] << ") where the "
             << "mtp_k=0 arm's top-1/top-2 margin was " << margin << " nats.\n"
             << "The batch shape of the verify chunk can only flip a near-tie (SETTLED D-2, #1924: "
             << "max 1.636 nats per token). A flip at this margin is a verify/accept defect: an "

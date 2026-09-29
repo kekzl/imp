@@ -399,6 +399,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/cuda_graph.cu
     src/runtime/presets.cpp
     src/compute/mtp_forward.cu
+    src/compute/mtp_forward_qwen4exp.cu
+    src/compute/gemv_fp8_block_moe.cu
     src/compute/mtp_topw.cu
     src/compute/encoder_forward.cu
 )
@@ -1214,6 +1216,12 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+    # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/fixtures). Reads
+    # safetensors headers with nlohmann, which only the server build fetches.
+    if(TARGET nlohmann_json::nlohmann_json)
+        target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
+        target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
+    endif()
 
     # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
     imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
