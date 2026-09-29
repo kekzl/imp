@@ -7,6 +7,8 @@ the server looks for weights, so the second lane needs no GPU — and it is the
 only one that says anything about `tools/imp-server/` (#1302).
 """
 
+import os
+
 import pytest
 
 
@@ -466,3 +468,45 @@ class TestPerRequestCaps:
         })
         assert r.status_code == 400
         assert "documents" in r.json()["error"]["message"]
+
+
+def _client_error_lines(capsys, needle, timeout=3.0):
+    """Server stderr lines carrying `needle`, collected until one shows up or `timeout` passes."""
+    import time
+    seen = ""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        seen += capsys.readouterr().err
+        if needle in seen:
+            time.sleep(0.3)  # a second line for the same response would arrive with the first
+            seen += capsys.readouterr().err
+            break
+        time.sleep(0.05)
+    return [ln for ln in seen.splitlines() if needle in ln]
+
+
+@pytest.mark.nomodel
+@pytest.mark.skipif(not os.environ.get("IMP_SERVER_BIN"), reason="reads the real binary's stderr")
+class TestClientErrorLogLine:
+    """#2279: every 4xx logs exactly one server line with status, route and the reason sent."""
+
+    @pytest.mark.parametrize("path,body", [
+        ("/v1/chat/completions", {"messages": "not an array"}),
+        ("/v1/messages", {"max_tokens": 8, "messages": "not an array"}),
+    ])
+    def test_4xx_logs_one_line_with_the_reason(self, client, model, capsys, path, body):
+        capsys.readouterr()
+        r = client.post(path, json={"model": model, **body})
+        assert 400 <= r.status_code < 500, r.text
+        reason = r.json()["error"]["message"]
+        lines = _client_error_lines(capsys, f"HTTP {r.status_code} POST {path}")
+        assert len(lines) == 1, lines
+        assert reason[:60] in lines[0], lines[0]
+
+    def test_unknown_route_404_is_logged(self, client, capsys):
+        capsys.readouterr()
+        r = client.get("/v1/no-such-route-2279")
+        assert r.status_code == 404
+        lines = _client_error_lines(capsys, "HTTP 404 GET /v1/no-such-route-2279")
+        assert len(lines) == 1, lines
+        assert "Unknown endpoint" in lines[0], lines[0]

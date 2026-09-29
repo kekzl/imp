@@ -145,6 +145,70 @@ json named_choice(const char* name) { return {{"type", "function"}, {"function",
 
 }  // namespace
 
+// #2279: a forced named function on gpt-oss (Harmony) and Gemma-4 was a 400. Both envelopes carry
+// the name in the header, so the body is the bare arguments object (as Llama3).
+TEST(ToolChoiceEnforcement, NamedFunctionIsEnforceableOnHarmony) {
+    EXPECT_TRUE(tool_choice_is_enforceable(ChatTemplateFamily::HARMONY, named_choice("get_weather")));
+    EXPECT_FALSE(tool_choice_is_enforceable(ChatTemplateFamily::HARMONY, json("required")));
+}
+
+// Gemma-4 has the native <|tool_call> token, gemma-3 (same family) does not: only the former forces.
+TEST(ToolChoiceEnforcement, NamedFunctionIsEnforceableOnGemmaOnlyWithTheNativeToken) {
+    EXPECT_TRUE(tool_choice_is_enforceable(ChatTemplateFamily::GEMMA, named_choice("get_weather"), true));
+    EXPECT_FALSE(tool_choice_is_enforceable(ChatTemplateFamily::GEMMA, named_choice("get_weather"), false));
+    EXPECT_FALSE(tool_choice_is_enforceable(ChatTemplateFamily::GEMMA, json("required"), true));
+    EXPECT_TRUE(collect_forced_bare_args_tool(ChatTemplateFamily::GEMMA, weather_tools(),
+                                              named_choice("get_weather"), false)
+                    .name.empty());
+}
+
+// Envelope literals as each model's own output format spells a call.
+TEST(ForcedToolEnvelope, LiteralsPerFamily) {
+    const json choice = named_choice("get_weather");
+    const auto l3 = collect_forced_bare_args_tool(ChatTemplateFamily::LLAMA3, weather_tools(), choice);
+    EXPECT_EQ(l3.open, "<function=get_weather>");
+    EXPECT_EQ(l3.close, "</function>");
+    const auto hm = collect_forced_bare_args_tool(ChatTemplateFamily::HARMONY, weather_tools(), choice);
+    EXPECT_EQ(hm.open, "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>");
+    EXPECT_EQ(hm.close, "<|call|>");
+    const auto g4 = collect_forced_bare_args_tool(ChatTemplateFamily::GEMMA, weather_tools(), choice, true);
+    EXPECT_EQ(g4.open, "<|tool_call>call:get_weather");
+    EXPECT_EQ(g4.close, "<tool_call|>");
+    for (const auto* e : {&l3, &hm, &g4}) {
+        EXPECT_EQ(e->name, "get_weather");
+        EXPECT_EQ(json::parse(e->params), weather_tools()[0]["function"]["parameters"]);
+    }
+}
+
+// The forced envelope text plus a JSON args object must come back out of the family's own parser
+// as one call, or the constrained reply is a 200 with no tool_call.
+TEST(ForcedToolEnvelope, HarmonyEnvelopeParsesAsACall) {
+    std::atomic<int> id{0};
+    const std::string args = R"({"title":"call the dentist","minutes_from_now":30})";
+    const std::string open = "<|channel|>commentary to=functions.set_reminder <|constrain|>json<|message|>";
+    for (const std::string& raw : {open + args + "<|call|>", open + args}) {  // <|call|> is a stop token
+        auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+        ASSERT_EQ(calls.size(), 1u) << raw;
+        EXPECT_EQ(calls[0].name, "set_reminder");
+        EXPECT_EQ(json::parse(calls[0].arguments), json::parse(args));
+        EXPECT_EQ(content, "");
+    }
+}
+
+TEST(ForcedToolEnvelope, Gemma4JsonBodyParsesAsACall) {
+    std::atomic<int> id{0};
+    const std::string args = R"({"title":"call the dentist, now","minutes_from_now":30})";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::GEMMA,
+                                             "<|tool_call>call:set_reminder" + args + "<tool_call|>", id, {});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].name, "set_reminder");
+    EXPECT_EQ(json::parse(calls[0].arguments), json::parse(args));
+    ParsedToolCall streamed;
+    ASSERT_TRUE(parse_stream_tool_body("call:set_reminder" + args, /*gemma_body=*/true, "", streamed));
+    EXPECT_EQ(streamed.name, "set_reminder");
+    EXPECT_EQ(json::parse(streamed.arguments), json::parse(args));
+}
+
 TEST(ToolChoiceEnforcement, RequiredIsEnforcedOnChatMLOnly) {
     for (ChatTemplateFamily f : kAllFamilies) {
         const auto out = collect_tool_constraint(f, weather_tools(), json("required"));
@@ -154,28 +218,31 @@ TEST(ToolChoiceEnforcement, RequiredIsEnforcedOnChatMLOnly) {
     }
 }
 
-TEST(ToolChoiceEnforcement, NamedFunctionIsEnforcedOnChatMLAndLlama3) {
+TEST(ToolChoiceEnforcement, NamedFunctionIsEnforcedOnChatMLLlama3AndHarmony) {
     for (ChatTemplateFamily f : kAllFamilies) {
         const bool chatml = !collect_tool_constraint(f, weather_tools(), named_choice("get_weather")).empty();
-        const bool llama3 =
-            !collect_llama3_forced_tool(f, weather_tools(), named_choice("get_weather")).first.empty();
-        const bool enforced = chatml || llama3;
-        const bool expected = f == ChatTemplateFamily::CHATML || f == ChatTemplateFamily::LLAMA3;
+        const bool bare =
+            !collect_forced_bare_args_tool(f, weather_tools(), named_choice("get_weather")).name.empty();
+        const bool enforced = chatml || bare;
+        const bool expected = f == ChatTemplateFamily::CHATML || f == ChatTemplateFamily::LLAMA3 ||
+                              f == ChatTemplateFamily::HARMONY;
         EXPECT_EQ(enforced, expected) << "family " << imp::chat_template_family_name(f);
     }
 }
 
-TEST(ToolChoiceEnforcement, Llama3EnforcesTheNamedCaseButNotRequired) {
-    // Llama3's envelope carries the function name in the TAG (<function=NAME>), so a forced
-    // single function maps onto the plain parameter schema, while "required" would need a
-    // name-in-tag enum binding that does not exist.
-    EXPECT_FALSE(
-        collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), named_choice("get_weather"))
-            .first.empty());
-    EXPECT_TRUE(collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), json("required"))
-                    .first.empty());
-    EXPECT_TRUE(
-        collect_tool_constraint(ChatTemplateFamily::LLAMA3, weather_tools(), json("required")).empty());
+TEST(ToolChoiceEnforcement, BareArgsFamiliesEnforceTheNamedCaseButNotRequired) {
+    // The envelope carries the function name, so a forced single function maps onto the plain
+    // parameter schema, while "required" would need a name enum in the header that does not exist.
+    for (ChatTemplateFamily f :
+         {ChatTemplateFamily::LLAMA3, ChatTemplateFamily::HARMONY, ChatTemplateFamily::GEMMA}) {
+        EXPECT_FALSE(
+            collect_forced_bare_args_tool(f, weather_tools(), named_choice("get_weather"), true).name.empty())
+            << imp::chat_template_family_name(f);
+        EXPECT_TRUE(collect_forced_bare_args_tool(f, weather_tools(), json("required"), true).name.empty())
+            << imp::chat_template_family_name(f);
+        EXPECT_TRUE(collect_tool_constraint(f, weather_tools(), json("required")).empty())
+            << imp::chat_template_family_name(f);
+    }
 }
 
 TEST(ToolChoiceEnforcement, AFreeFormSchemaFallsBackEverywhere) {
@@ -186,14 +253,20 @@ TEST(ToolChoiceEnforcement, AFreeFormSchemaFallsBackEverywhere) {
         {{{"type", "function"}, {"function", {{"name", "ping"}, {"parameters", {{"type", "object"}}}}}}});
     EXPECT_TRUE(collect_tool_constraint(ChatTemplateFamily::CHATML, tools, json("required")).empty());
     EXPECT_TRUE(
-        collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, tools, named_choice("ping")).first.empty());
+        collect_forced_bare_args_tool(ChatTemplateFamily::LLAMA3, tools, named_choice("ping")).name.empty());
+    EXPECT_TRUE(
+        collect_forced_bare_args_tool(ChatTemplateFamily::HARMONY, tools, named_choice("ping")).name.empty());
 }
 
 TEST(ToolChoiceEnforcement, NamedFunctionNotInTheToolsArrayFallsBack) {
     EXPECT_TRUE(
         collect_tool_constraint(ChatTemplateFamily::CHATML, weather_tools(), named_choice("nope")).empty());
-    EXPECT_TRUE(collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), named_choice("nope"))
-                    .first.empty());
+    EXPECT_TRUE(
+        collect_forced_bare_args_tool(ChatTemplateFamily::LLAMA3, weather_tools(), named_choice("nope"))
+            .name.empty());
+    EXPECT_TRUE(
+        collect_forced_bare_args_tool(ChatTemplateFamily::HARMONY, weather_tools(), named_choice("nope"))
+            .name.empty());
 }
 
 TEST(ToolChoiceEnforcement, HelperAgreesWithTheCollectors) {
@@ -202,12 +275,16 @@ TEST(ToolChoiceEnforcement, HelperAgreesWithTheCollectors) {
     // looking correct from its own side. Asserted equal on the same inputs.
     const json enforceable_schema = weather_tools();
     for (ChatTemplateFamily f : kAllFamilies) {
-        for (const json& choice : {json("required"), named_choice("get_weather")}) {
-            const bool predicate = tool_choice_is_enforceable(f, choice);
-            const bool collected = !collect_tool_constraint(f, enforceable_schema, choice).empty() ||
-                                   !collect_llama3_forced_tool(f, enforceable_schema, choice).first.empty();
-            EXPECT_EQ(predicate, collected)
-                << "family " << imp::chat_template_family_name(f) << " choice " << choice.dump();
+        for (const bool gemma_native : {false, true}) {
+            for (const json& choice : {json("required"), named_choice("get_weather")}) {
+                const bool predicate = tool_choice_is_enforceable(f, choice, gemma_native);
+                const bool collected =
+                    !collect_tool_constraint(f, enforceable_schema, choice).empty() ||
+                    !collect_forced_bare_args_tool(f, enforceable_schema, choice, gemma_native).name.empty();
+                EXPECT_EQ(predicate, collected)
+                    << "family " << imp::chat_template_family_name(f) << " choice " << choice.dump()
+                    << " gemma_native " << gemma_native;
+            }
         }
     }
 }

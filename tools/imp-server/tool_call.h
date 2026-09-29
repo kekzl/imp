@@ -35,10 +35,11 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
 
 // tool_choice_is_enforceable (#1002): whether the loaded template family can enforce this
 // tool_choice through the decode FSM rather than degrade to a prompt sentence (#1592).
-// "required" -> CHATML only; {"function":{..}} -> CHATML or LLAMA3 (name-in-tag); "auto"/"none"/
-// absent -> always true. ToolChoiceEnforcement.HelperAgreesWithTheCollectors asserts this
-// matches the collectors below.
-bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice);
+// "required" -> CHATML only; {"function":{..}} -> CHATML, LLAMA3, HARMONY, GEMMA with the native
+// <|tool_call> token (Gemma-4; gemma-3 has none); "auto"/"none"/absent -> always true.
+// ToolChoiceEnforcement.HelperAgreesWithTheCollectors asserts this matches the collectors below.
+bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice,
+                                bool gemma_native_tool_call = false);
 
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,
@@ -50,11 +51,15 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::Ch
 std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
 
-// collect_llama3_forced_tool (#1002): Llama3's body IS the arguments object, so a forced single
-// function constrains the bare parameter schema (per-tool envelope), not a TOOL_CALL wrapper.
-// Returns {} when not a forced enforceable Llama3 function.
-std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplateFamily family,
-                                                               const json& tools, const json& tool_choice);
+// collect_forced_bare_args_tool (#1002, #2279): the envelope carries the name (Llama3
+// <function=NAME>, Harmony to=functions.NAME, Gemma-4 <|tool_call>call:NAME), so a forced single
+// function constrains the bare parameter schema between open/close. Empty name = not enforceable.
+struct ForcedToolEnvelope {
+    std::string name, params, open, close;
+};
+ForcedToolEnvelope collect_forced_bare_args_tool(imp::ChatTemplateFamily family, const json& tools,
+                                                 const json& tool_choice,
+                                                 bool gemma_native_tool_call = false);
 
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     const std::string& text, std::atomic<int>& next_tool_call_id);
