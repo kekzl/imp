@@ -101,6 +101,8 @@ if want alloc; then
     # #2213: stream/event create/destroy only in src/core/cuda_raii.h; allowlist 0.
     run "CUDA stream/event sites via cuda_raii.h" python3 tools/check_cuda_raii_sites.py
     run "that gate still matches its cases"     python3 tools/check_cuda_raii_sites.py --selftest
+    run "no deref of an owner after .release()" python3 tools/check_released_owner_use.py
+    run "that gate still matches its cases"     python3 tools/check_released_owner_use.py --selftest
     run "discarded cudaError_t per file (#2211)" python3 tools/check_cuda_discards.py
     run "that gate still counts its cases"      python3 tools/check_cuda_discards.py --selftest
 fi

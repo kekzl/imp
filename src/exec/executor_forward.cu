@@ -1,5 +1,6 @@
 #include "core/cuda_raii.h"
 #include "core/dispatch_policy.h"
+#include "exec/forward_profile.h"
 #include "exec/executor.h"
 #include "vision/deepstack_inject.h"
 #include "exec/executor_gemv_helpers.h"
@@ -224,7 +225,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // ---- Optional per-component profiling (diagnostics.profile config flag, was IMP_PROFILE env) ----
     // Profiling disables CUDA graph capture (they are incompatible).
     // Use the diagnostics.profile config flag (was IMP_PROFILE env) for diagnostic runs only.
-    const bool do_profile = dispatch_policy().diagnostics.profile;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (dispatch_policy().diagnostics.profile)
+        IMP_CUDA_CHECK_LOG(cudaStreamIsCapturing(stream, &capture));
+    const bool do_profile = forward_profile_allowed(dispatch_policy().diagnostics.profile, capture);
     static int profile_step_ = 0;
     static float acc_total = 0, acc_attn = 0, acc_ffn = 0, acc_lm = 0;
     bool profiling = do_profile;

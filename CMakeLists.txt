@@ -739,6 +739,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-core SOURCES
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
+        tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
         tests/test_fim.cpp
         tests/test_expert_cache_reinit.cpp

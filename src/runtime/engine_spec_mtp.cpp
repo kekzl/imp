@@ -829,6 +829,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
     ws->arch_norm_offset = model_->config_.norm_weight_offset;
 
     mtp_ws_storage_.reset(ws.release());
+    const imp::MtpDraftWorkspace& live = *mtp_ws_storage_;  // ws is null after release()
     mtp_spec_k_ = k;
     mtp_pool_.binds.clear();
     mtp_pool_.free_slots.clear();
@@ -839,8 +840,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
         "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d x %d slot(s), rope=%g/%d/%s, "
         "mrope=[%d,%d,%d])",
         k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff, mtp_num_heads,
-        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, ws->n_kv_slots, ws->rope_theta, ws->rope_dim,
-        ws->rope_neox ? "neox" : "interleaved", ws->mrope_sec0, ws->mrope_sec1, ws->mrope_sec2);
+        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, live.n_kv_slots, live.rope_theta, live.rope_dim,
+        live.rope_neox ? "neox" : "interleaved", live.mrope_sec0, live.mrope_sec1, live.mrope_sec2);
     return true;
 }
 void Engine::mtp_accuracy_reset() noexcept {
