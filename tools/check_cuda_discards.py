@@ -24,7 +24,7 @@ SRC = REPO / "src"
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
-CEILING = 327
+CEILING = 325
 # Entries here need a "# reason" (only class c: an intentional discard).
 ZERO_DIRS = ("src/runtime/", "src/memory/")
 

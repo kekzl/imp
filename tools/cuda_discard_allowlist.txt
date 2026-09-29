@@ -26,7 +26,7 @@
 1 src/compute/gemm_q6k.cu
 4 src/compute/gemv_dp4a_traits.cuh
 3 src/compute/mmq_q4k_imma_tile.cu
-12 src/compute/mmq_q8_imma.cu
+10 src/compute/mmq_q8_imma.cu
 1 src/compute/mmq_q8_imma_scratch.cu
 21 src/compute/mtp_forward.cu
 2 src/compute/qsa_indexer.cu
