@@ -1560,7 +1560,7 @@ void GraphExecutor::free_buffers() {
                         reinterpret_cast<uintptr_t>(wcache_.fp8_ssm_sidecar_data) +
                             wcache_.fp8_ssm_sidecar_data_size;
                 if (!in_migrated && !in_overflow && !in_ssm_sidecar)
-                    cudaFree(entry.weight.data);
+                    IMP_CUDA_CHECK_LOG(cudaFree(entry.weight.data));
             }
             if (entry.d_scale) {
                 bool in_migrated = wcache_.fp8_migrated_scales &&
@@ -1570,7 +1570,7 @@ void GraphExecutor::free_buffers() {
                                    entry.d_scale >= wcache_.fp8_overflow_scales &&
                                    entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
                 if (!in_migrated && !in_overflow)
-                    cudaFree(entry.d_scale);
+                    IMP_CUDA_CHECK_LOG(cudaFree(entry.d_scale));
             }
         }
         wcache_.fp8.clear();

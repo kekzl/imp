@@ -219,15 +219,16 @@ bool device_args_done = false;
                                 ? *h.payload.cutlass_nvfp4.global_scale
                                 : 1.0f;
                     }
-                    cudaMemcpyAsync(static_cast<void*>(moe_.d_B_ptrs_cache),
-                                    static_cast<const void*>(h_B_ptrs.data()), ne * sizeof(const void*),
-                                    cudaMemcpyHostToDevice, stream);
-                    cudaMemcpyAsync(static_cast<void*>(moe_.d_SFB_ptrs_cache),
-                                    static_cast<const void*>(h_SFB_ptrs.data()), ne * sizeof(const void*),
-                                    cudaMemcpyHostToDevice, stream);
-                    cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(),
-                                    ne * sizeof(float),
-                                    cudaMemcpyHostToDevice, stream);
+                    // Failed table upload: false, the caller's !ok fallback runs (no GEMM on stale tables).
+                    const size_t ptr_bytes = ne * sizeof(const void*);
+                    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe_.d_B_ptrs_cache),
+                                                        h_B_ptrs.data(), ptr_bytes, cudaMemcpyHostToDevice,
+                                                        stream));
+                    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe_.d_SFB_ptrs_cache),
+                                                        h_SFB_ptrs.data(), ptr_bytes, cudaMemcpyHostToDevice,
+                                                        stream));
+                    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(), ne * sizeof(float),
+                                                        cudaMemcpyHostToDevice, stream));
                     d_B   = moe_.d_B_ptrs_cache;
                     d_SFB = moe_.d_SFB_ptrs_cache;
                     d_a   = moe_.d_alpha_full;
@@ -363,9 +364,10 @@ if (!ctx.moe_gather_done) {
 // Legacy D2H+sync + smallM + non-smallM dispatch path.
 moe_host_args_capture_guard(stream);
 std::vector<int32_t> h_offsets(ne + 1);
-IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                   static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                   cudaMemcpyDeviceToHost, stream));
+moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                          static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                          cudaMemcpyDeviceToHost, stream),
+                          "cutlass3x legacy prefill");
 // Populate device-resident d_M_per in parallel with the D2H copy.
 // Phase 1 of MoE-prefill-graphs lever: foundation for graph-safe
 // dispatch (Phase 2+ migrates host M_per[] uses to this buffer).
@@ -374,7 +376,7 @@ if (moe_.d_M_per && moe_.d_M_per_count >= ne) {
         static_cast<const int32_t*>(routing.expert_offsets.data),
         moe_.d_M_per, ne, stream);
 }
-cudaStreamSynchronize(stream);
+moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "cutlass3x legacy prefill");
 
 std::vector<int> M_per(ne);
 for (int e = 0; e < ne; ++e)

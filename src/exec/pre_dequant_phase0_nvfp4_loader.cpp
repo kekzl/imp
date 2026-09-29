@@ -23,6 +23,14 @@
 namespace imp {
 namespace {
 
+// A device scale that cannot be read would be promoted with an unread value: load fails,
+// the same style as the merged-scale provenance check.
+void read_device_scale_or_throw(float* dst, const void* src, const char* key) {
+    if (const cudaError_t e = cudaMemcpy(dst, src, sizeof(float), cudaMemcpyDeviceToHost); e != cudaSuccess)
+        throw std::runtime_error(std::string("NVFP4 prequant: scale readback failed for ") + key + ": " +
+                                 cudaGetErrorString(e));
+}
+
 // Rows of the weight_scale tensor a slot was promoted against, 0 when the slot
 // has no scratch entry of its own. Only valid before the scratch is cleared.
 int64_t promoted_plane_rows(const Model& model, const std::string& key) {
@@ -135,7 +143,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 // Unlike NVFP4 micro-scales this one is a scalar, so it is
                 // readable wherever it happens to live — it is not uploaded.
                 if (sc.weight_scale.on_device)
-                    cudaMemcpy(&s, sc.weight_scale.data, sizeof(float), cudaMemcpyDeviceToHost);
+                    read_device_scale_or_throw(&s, sc.weight_scale.data, key);
                 else
                     memcpy(&s, sc.weight_scale.data, sizeof(float));
             }
@@ -197,7 +205,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         float h_scale = 1.0f;
         if (sc.weight_scale_2.data) {
             if (sc.weight_scale_2.on_device) {
-                cudaMemcpy(&h_scale, sc.weight_scale_2.data, sizeof(float), cudaMemcpyDeviceToHost);
+                read_device_scale_or_throw(&h_scale, sc.weight_scale_2.data, key);
             } else {
                 memcpy(&h_scale, sc.weight_scale_2.data, sizeof(float));
             }

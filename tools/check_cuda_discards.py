@@ -24,12 +24,12 @@ SRC = REPO / "src"
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
-CEILING = 105
+CEILING = 1
 # Entries here need a "# reason" (only class c: an intentional discard).
 ZERO_DIRS = (
     "src/runtime/", "src/memory/",
     "src/core/", "src/quant/", "src/model/", "src/vision/", "src/lora/", "src/api/",
-    "src/compute/",
+    "src/compute/", "src/exec/",
 )
 
 CALL = re.compile(r"^[ \t]*cuda[A-Z][A-Za-z0-9_]*[ \t]*\(")
@@ -129,7 +129,7 @@ def selftest() -> int:
     allow_cases = [
         ({"src/a.cu": [(1, "cudaFree")]}, "1 src/a.cu\n", 0),
         ({"src/a.cu": [(1, "cudaFree")] * 2}, "1 src/a.cu\n", 1),
-        ({"src/a.cu": [(1, "cudaFree")]}, "2 src/a.cu\n", 1),
+        ({}, "1 src/a.cu\n", 1),  # stale entry: lower it (stays within CEILING >= 1)
         ({}, "", 0),
         ({"src/memory/m.cpp": [(1, "cudaFree")]}, "1 src/memory/m.cpp\n", 1),
         ({"src/memory/m.cpp": [(1, "cudaFree")]}, "1 src/memory/m.cpp # sticky clear\n", 0),

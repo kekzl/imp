@@ -606,9 +606,15 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     constexpr size_t kSmemDefault = static_cast<int64_t>(48) * 1024;
     static size_t sel_smem_granted = kSmemDefault;
     if (sel_smem > sel_smem_granted) {
-        cudaFuncSetAttribute(sparse_select_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             (int)sel_smem);
-        sel_smem_granted = sel_smem;
+        // Failed opt-in: grant not recorded (retried next call); the launch below fails and is reported.
+        if (const cudaError_t err = cudaFuncSetAttribute(sparse_select_topk_kernel,
+                                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                         (int)sel_smem);
+            err == cudaSuccess)
+            sel_smem_granted = sel_smem;
+        else
+            IMP_LOG_ERROR("sparse_select_topk: smem opt-in %zu B failed: %s", sel_smem,
+                          cudaGetErrorString(err));
     }
     sparse_select_topk_kernel<<<n_seq, kSelectThreads, sel_smem, stream>>>(
         scores_scratch, block_tables, context_lens, sparse_block_tables, sparse_context_lens, block_size,
