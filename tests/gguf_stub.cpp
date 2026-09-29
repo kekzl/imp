@@ -1,11 +1,15 @@
 #include "gguf_stub.h"
 
+#include "runtime/config.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace imp {
@@ -335,20 +339,48 @@ std::string generate_gguf_stub(const std::string& arch) {
     }
 
     // ---- 7. Write to temp file ----
-    char path[] = "/tmp/imp_stub_XXXXXX.gguf";
-    int fd = mkstemps(path, 5);
-    if (fd < 0)
+    // One private dir per stub: holds the model and its warm-cache scratch dir (#2192).
+    char dir_tmpl[] = "/tmp/imp_stub_XXXXXX";
+    if (!mkdtemp(dir_tmpl))
         return "";
+    const std::string path = std::string(dir_tmpl) + "/model.gguf";
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+        remove_gguf_stub(path);
+        return "";
+    }
 
     ssize_t written = write(fd, w.data(), w.size());
     close(fd);
 
     if (written < 0 || static_cast<size_t>(written) != w.size()) {
-        unlink(path);
+        remove_gguf_stub(path);
         return "";
     }
 
-    return std::string(path);
+    return path;
+}
+
+std::string stub_cache_dir(const std::string& stub_path) {
+    return stub_path.substr(0, stub_path.rfind('/')) + "/warm";
+}
+
+void arm_stub_warm_cache(const std::string& stub_path) {
+    imp::RuntimeConfig rc;
+    rc.warm_cache.enabled = true;
+    rc.warm_cache.dir = stub_cache_dir(stub_path);
+    imp::set_pending_runtime_config(rc);
+}
+
+void remove_gguf_stub(const std::string& stub_path) {
+    const size_t slash = stub_path.rfind('/');
+    if (slash == std::string::npos)
+        return;
+    const std::string dir = stub_path.substr(0, slash);
+    if (dir.rfind("/tmp/imp_stub_", 0) != 0)  // never recurse into a foreign dir
+        return;
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace test
