@@ -3,6 +3,7 @@
 // synthetic blob bytes — no Model construction, no GPU.
 
 #include "model/safetensors_loader.h"
+#include "core/logging.h"
 #include "core/qtype.h"
 
 #include <gtest/gtest.h>
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -397,6 +399,46 @@ TEST(SafeTensorsHostileHeader, WellFormedF32TensorStillLoads) {
         << "A well-formed F32 tensor must survive the hardening. Captured: " << captured;
     EXPECT_NE(captured.find("Parsed 1 tensors"), std::string::npos)
         << "The tensor must reach the map. Captured: " << captured;
+}
+
+// #2196: an AWQ checkpoint has no dequant kernel; loading it as wire dtype gives wrong output.
+TEST(SafeTensorsAwqRefusal, AwqCheckpointIsRefusedWithTheDetectedConfig) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "imp_awq_refusal_test";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    {
+        const std::string header =
+            R"({"model.embed_tokens.weight":{"dtype":"F16","shape":[4,2],"data_offsets":[0,16]}})";
+        std::ofstream st(root / "model.safetensors", std::ios::binary);
+        const uint64_t hdr = header.size();
+        st.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        st << header;
+        const std::vector<char> data(16, 0);
+        st.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    {
+        std::ofstream cfg(root / "config.json");
+        cfg << R"({"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 8,
+                   "num_attention_heads": 1, "vocab_size": 8,
+                   "quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 64,
+                                           "zero_point": true, "version": "gemm"}})";
+    }
+
+    const LogLevel saved = log_get_level();
+    log_set_level(LogLevel::WARN);
+    testing::internal::CaptureStderr();
+    auto model = load_safetensors(root.string());
+    const std::string log = testing::internal::GetCapturedStderr();
+    log_set_level(saved);
+
+    EXPECT_EQ(model, nullptr) << log;
+    EXPECT_NE(log.find("AWQ"), std::string::npos) << log;
+    EXPECT_NE(log.find("bits=4 group_size=64 zero_point=true version=gemm"), std::string::npos) << log;
+    EXPECT_NE(log.find("not supported"), std::string::npos) << log;
+    EXPECT_NE(log.find("#2205"), std::string::npos) << log;
+
+    fs::remove_all(root);
 }
 
 }  // namespace

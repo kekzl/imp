@@ -61,6 +61,8 @@ constexpr int kBatchRows = 32;    // the top of the smallM window (M <= 32)
 constexpr int kPromptLen = 24;    // tokens prefilled before the measured window
 constexpr int kDecodeSteps = 64;  // teacher-forced decode steps per arm
 constexpr size_t kNeededMiB = 14000;
+// NVFP4 head: the FP8 head (auto) frees the model's source, which refuses the re-init arm's second engine.
+constexpr const char* kLmHead = "on";
 
 // ~1.5KB ordinary English: tokenizes past kPromptLen+kDecodeSteps+kBatchRows offsets on any
 // BPE vocab; not repetitive, so logprobs aren't driven to ~0 (would hide the batch effect).
@@ -383,6 +385,7 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
         rc.gemm.nvfp4_smallm = true;
+        rc.gemm.nvfp4_lm_head = kLmHead;
         set_pending_runtime_config(rc);
 
         Engine engine;
@@ -417,6 +420,7 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
         rc.gemm.nvfp4_smallm = true;
+        rc.gemm.nvfp4_lm_head = kLmHead;
         set_pending_runtime_config(rc);
 
         Engine engine;
@@ -437,6 +441,7 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
         rc.gemm.nvfp4_smallm = false;
+        rc.gemm.nvfp4_lm_head = kLmHead;
         set_pending_runtime_config(rc);
 
         Engine engine;

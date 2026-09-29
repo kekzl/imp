@@ -127,14 +127,17 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         // dense/MoE net rule (GOAL-listed nvfp4_lm_head_gdn trade).
         const bool head_on = nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/true,
                                                    prof.is_dense, cfg.d_model,
-                                                   /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm);
+                                                   /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm,
+                                                   wcache_->lm_head_fp8.weight.data != nullptr);
         if (quantized_head) {
             if (head_on && gdn_head_ok)
                 collect_weight_nvfp4(model_->output_proj(), head_qtype);
             else
                 IMP_LOG_INFO("NVFP4 LM head: skipped (%s)",
                              !gdn_head_ok ? "nvfp4_lm_head_gdn=false, GDN/SSM hybrid"
-                                          : "gemm.nvfp4_lm_head off/auto net rule (#982)");
+                             : wcache_->lm_head_fp8.weight.data != nullptr
+                                 ? "FP8 head built, #2166"
+                                 : "gemm.nvfp4_lm_head off/auto net rule (#982)");
         }
     }
 
@@ -146,8 +149,9 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
 
 void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
     // Native-precision head (checked below): auto → ON per the #982 net rule.
-    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false,
-                               model_->profile().is_dense, cfg.d_model))
+    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false, model_->profile().is_dense,
+                               cfg.d_model, /*is_gdn_hybrid=*/false,
+                               wcache_->lm_head_fp8.weight.data != nullptr))
         return;
 
     const Tensor& lm = model_->output_proj();
