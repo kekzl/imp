@@ -32,7 +32,7 @@ using json = nlohmann::json;
 static bool is_inference_endpoint(const std::string& path) {
     return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/infill" ||
            path == "/v1/responses" || path == "/v1/messages" || path == "/v1/embeddings" ||
-           path == "/v1/rerank" || path == "/rerank";
+           path == "/v1/rerank" || path == "/rerank" || path == "/v1/decide" || path == "/v1/score";
 }
 
 // Set by the pre-routing hook when it entered the in-flight gate for this
@@ -411,6 +411,12 @@ int main(int argc, char** argv) {
     svr.Post("/rerank", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_rerank(req, res, state);
     });
+    svr.Post("/v1/decide", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_decide(req, res, state);
+    });
+    svr.Post("/v1/score", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_score(req, res, state);
+    });
     svr.Post("/v1/embeddings", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_embeddings(req, res, state);
     });
@@ -567,6 +573,8 @@ int main(int argc, char** argv) {
     printf("  POST   /v1/messages/count_tokens\n");
     printf("  POST   /v1/embeddings\n");
     printf("  POST   /v1/rerank            (also /rerank) cross-encoder reranking\n");
+    printf("  POST   /v1/decide            closed-choice letter scoring, no decoding\n");
+    printf("  POST   /v1/score             softmax over candidate tokens at the last position\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
     printf("  POST   /admin/suspend       Park weights in host RAM, free the GPU\n");

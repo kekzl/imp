@@ -200,8 +200,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // An image request participates only through its content hash (cache is
     // addressed by TOKEN IDS, every image token shares one id): a request with
     // an image but no hash is excluded outright, degrading to "no reuse", never to "the previous picture".
-    // Prompt logprobs (#2207) score every row: Request::prefix_reuse_ok refuses them too.
-    const bool cacheable = req->prefix_reuse_ok();
+    const bool cacheable = req->prefix_reuse_allowed();
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
         // Hybrid models cap reuse at the recurrent-snapshot boundary, same as
@@ -464,7 +463,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // the largest block-aligned prompt position so state there can be
     // captured (only full blocks are cacheable). Extra tail chunk is at most
     // block_size-1 tokens; prompts under server.snapshot_min_prompt_tokens skip the boundary (snapshot_boundary.h).
-    const int snap_end = snapshot_end_(*req);
+    const int snap_end = snapshot_end_(*req, offset);
     if (snap_end > offset && snap_end < offset + chunk_len) {
         chunk_len = snap_end - offset;
         is_last_chunk = false;

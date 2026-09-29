@@ -162,8 +162,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // participates only through its content hash (every image token shares
                 // one id, so two different pictures would otherwise share a prefix); no
                 // hash means excluded, degrading to "no reuse" rather than "the previous picture".
-                // Prompt logprobs (#2207) score every prompt row: Request::prefix_reuse_ok refuses them.
-                if (kv_manager_->prefix_caching_enabled() && req->prefix_reuse_ok()) {
+                const bool cacheable = req->prefix_reuse_allowed();
+                if (kv_manager_->prefix_caching_enabled() && cacheable) {
                     // Hybrid models cap reuse at the recurrent-snapshot
                     // boundary (and attach the snapshot to the request).
                     int max_reuse = prefix_reuse_limit_ ? prefix_reuse_limit_(*req) : -1;

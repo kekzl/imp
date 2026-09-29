@@ -23,6 +23,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import os
 import random
 import signal
@@ -84,7 +85,7 @@ class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
     def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0, fim=True,
                  responses_store_ttl=3600.0, responses_store_max_entries=1000,
-                 responses_store_max_bytes=256 << 20):
+                 responses_store_max_bytes=256 << 20, swap_models=None):
         self.latency_ms = latency_ms
         # Loaded model has FIM tokens (#2201); False = /infill and `suffix` answer 400 fim_not_supported.
         self.fim = fim
@@ -96,6 +97,9 @@ class MockConfig:
         self.loras = {}
         self.next_lora_id = 1
         self.lora_lock = threading.Lock()
+        # --swap-model NAME (repeatable): extra resolvable models, the mock's --models-dir.
+        self.current_model = MOCK_MODEL_ID
+        self.swap_models = set(swap_models or ())
         # Responses store (#2206), same limits as --responses-store-*; TTL may be fractional here.
         self.rs_ttl = responses_store_ttl
         self.rs_max_entries = responses_store_max_entries
@@ -155,10 +159,16 @@ class MockHandler(BaseHTTPRequestHandler):
         self._send_json(status, {"error": err})
 
     def _check_model(self, model: str) -> bool:
-        if model != MOCK_MODEL_ID:
-            self._send_error(404, f"Model '{model}' not found. Loaded: {MOCK_MODEL_ID}")
-            return False
-        return True
+        with self.config.lora_lock:
+            if model == self.config.current_model:
+                return True
+            # handlers.cpp ensure_model_loaded: a swap drops every LoRA adapter (#2217).
+            if model == MOCK_MODEL_ID or model in self.config.swap_models:
+                self.config.current_model = model
+                self.config.loras.clear()
+                return True
+        self._send_error(404, f"Model '{model}' not found. Loaded: {self.config.current_model}")
+        return False
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -300,6 +310,10 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_chat_completions(raw_body)
         elif path == "/v1/completions":
             self._handle_completions(raw_body)
+        elif path == "/v1/decide":
+            self._handle_decide(raw_body)
+        elif path == "/v1/score":
+            self._handle_score(raw_body)
         elif path == "/infill":
             self._handle_infill(raw_body)
         elif path == "/v1/responses":
@@ -522,16 +536,6 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         if not self._validate_sampling(body):
             return
-        lora = body.get("lora")
-        if lora:
-            with self.config.lora_lock:
-                known = lora in self.config.loras
-            if not known:
-                self._send_coded_error(
-                    400, f"LoRA adapter '{lora}' is not loaded (POST /admin/lora/load, or --lora "
-                    "NAME=PATH at startup)", "lora", "lora_not_loaded")
-                return
-
         messages = body.get("messages", [])
         if not messages:
             self._send_error(400, "messages array is required and must not be empty")
@@ -571,6 +575,16 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         if not self._check_model(model):
             return
+        # After the model check, as in handlers_chat_core.cpp: a swap drops the adapter table first.
+        lora = body.get("lora")
+        if lora:
+            with self.config.lora_lock:
+                known = lora in self.config.loras
+            if not known:
+                self._send_coded_error(
+                    400, f"LoRA adapter '{lora}' is not loaded (POST /admin/lora/load, or --lora "
+                    "NAME=PATH at startup)", "lora", "lora_not_loaded")
+                return
 
         # Simulate OOM
         if self.config.oom_mode:
@@ -1077,6 +1091,149 @@ class MockHandler(BaseHTTPRequestHandler):
         tokens = list(range(100, 100 + n_tokens))
         self._send_json(200, {"tokens": tokens})
 
+    # /v1/decide + /v1/score (#2198). Validation mirrors handlers_decide.cpp. Mock tokenizer:
+    # a candidate string is one token iff it is one character after optional leading spaces;
+    # a raw prompt ending in ':' or '>' merges with an alphanumeric candidate (Qwen ":A").
+    def _score_mode(self, body: dict) -> str | None:
+        mode = body.get("mode", "auto")
+        if mode == "shared":
+            self._send_error(400, 'mode "shared" is not implemented yet, see #2198')
+            return None
+        if mode not in ("auto", "serial", "direct"):
+            self._send_error(400, '"mode" must be one of auto, serial, direct, shared')
+            return None
+        return "direct" if mode == "direct" else "serial"
+
+    @staticmethod
+    def _mock_probs(seed: str, n: int) -> list[float]:
+        rng = random.Random(seed)
+        w = [rng.random() + 0.01 for _ in range(n)]
+        s = sum(w)
+        return [x / s for x in w]
+
+    def _handle_decide(self, raw: bytes):
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        mode = self._score_mode(body)
+        if mode is None:
+            return
+        evidence = body.get("evidence")
+        if not isinstance(evidence, str):
+            self._send_error(400, '"evidence" (string) is required')
+            return
+        system = body.get("system", "Answer only with the letter of the correct option.")
+        if not isinstance(system, str):
+            self._send_error(400, '"system" must be a string')
+            return
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            self._send_error(400, '"items" (non-empty array) is required')
+            return
+        for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                self._send_error(400, f"items[{i}] must be an object")
+                return
+            if not isinstance(it.get("criterion"), str):
+                self._send_error(400, f"items[{i}].criterion (string) is required")
+                return
+            opts = it.get("options")
+            if not isinstance(opts, list) or len(opts) < 2:
+                self._send_error(400, f"items[{i}].options must be an array of 2 to 16 strings")
+                return
+            if len(opts) > 16:
+                self._send_error(400, f"items[{i}].options has {len(opts)} entries, the maximum is 16 (letters A to P)")
+                return
+            if not all(isinstance(o, str) for o in opts):
+                self._send_error(400, f"items[{i}].options must contain only strings")
+                return
+        model = body.get("model", MOCK_MODEL_ID)
+        if not self._check_model(model):
+            return
+        evidence_tokens = max(1, len(system + evidence) // 4)
+        out, total_prompt, total_cached = [], 0, 0
+        for i, it in enumerate(items):
+            letters = [chr(ord("A") + k) for k in range(len(it["options"]))]
+            probs = self._mock_probs(evidence + it["criterion"], len(letters))
+            best = max(range(len(probs)), key=probs.__getitem__)
+            prompt_tokens = evidence_tokens + max(1, len(it["criterion"] + "".join(it["options"])) // 4) + 8
+            cached = evidence_tokens if (mode == "serial" and i > 0) else 0
+            total_prompt += prompt_tokens
+            total_cached += cached
+            out.append({"id": it.get("id", i), "probs": dict(zip(letters, probs)), "argmax": letters[best],
+                        "argmax_index": best, "prompt_tokens": prompt_tokens, "cached_tokens": cached})
+        self._send_json(200, {"object": "decide", "model": model, "mode_used": mode, "items": out,
+                              "usage": {"prompt_tokens": total_prompt, "cached_tokens": total_cached,
+                                        "total_tokens": total_prompt}})
+
+    def _handle_score(self, raw: bytes):
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        mode = self._score_mode(body)
+        if mode is None:
+            return
+        has_prompt, has_messages = "prompt" in body, "messages" in body
+        if has_prompt == has_messages:
+            self._send_error(400, 'exactly one of "prompt" (string) or "messages" (array) is required')
+            return
+        if has_prompt and (not isinstance(body["prompt"], str) or not body["prompt"]):
+            self._send_error(400, '"prompt" must be a non-empty string')
+            return
+        if has_messages:
+            msgs = body["messages"]
+            if not isinstance(msgs, list) or not msgs or not all(
+                    isinstance(m, dict) and isinstance(m.get("role"), str) and isinstance(m.get("content"), str)
+                    for m in msgs):
+                self._send_error(400, 'each message must be {"role": string, "content": string}')
+                return
+        cands = body.get("candidates")
+        if not isinstance(cands, list) or len(cands) < 2:
+            self._send_error(400, '"candidates" must be an array of 2 or more token strings or token ids')
+            return
+        if len(cands) > 256:
+            self._send_error(400, f'"candidates" has {len(cands)} entries, the maximum is 256')
+            return
+        for c in cands:
+            if isinstance(c, bool) or not isinstance(c, (str, int)):
+                self._send_error(400, "each candidate must be a token string or an integer token id")
+                return
+            if isinstance(c, str) and not c:
+                self._send_error(400, "a candidate string must not be empty")
+                return
+        model = body.get("model", MOCK_MODEL_ID)
+        if not self._check_model(model):
+            return
+        text = body["prompt"] if has_prompt else "".join(m["content"] for m in body["messages"])
+        ids = []
+        for c in cands:
+            if isinstance(c, str):
+                if len(c.lstrip(" ")) != 1:
+                    self._send_error(400, f'candidate "{c}" is {len(c)} tokens in this tokenizer, scoring needs exactly one')
+                    return
+                if has_prompt and text[-1] in ":>" and c[0].isalnum():
+                    self._send_error(400, f'candidate "{c}" merges with the end of the prompt: '
+                                          'tokenize(prefix + candidate) != tokenize(prefix) + [id]')
+                    return
+                ids.append(1000 + ord(c[-1]) + (100000 if c[0] == " " else 0))
+            else:
+                if c < 0 or c >= 151669:
+                    self._send_error(400, f"candidate token id {c} is outside the vocabulary [0, 151669)")
+                    return
+                ids.append(c)
+        if len(set(ids)) != len(ids):
+            self._send_error(400, "a candidate token id appears twice")
+            return
+        probs = self._mock_probs(text, len(ids))
+        best = max(range(len(probs)), key=probs.__getitem__)
+        prompt_tokens = max(1, len(text) // 4)
+        self._send_json(200, {
+            "object": "score", "model": model, "mode_used": mode,
+            "candidates": [{"candidate": c, "token_id": t, "logit": math.log(p), "prob": p}
+                           for c, t, p in zip(cands, ids, probs)],
+            "argmax_index": best, "prompt_tokens": prompt_tokens, "cached_tokens": 0,
+            "usage": {"prompt_tokens": prompt_tokens, "cached_tokens": 0, "total_tokens": prompt_tokens}})
+
     def _handle_detokenize(self, raw: bytes):
         body = self._parse_json_body(raw)
         if body is None:
@@ -1136,6 +1293,7 @@ def main():
     parser.add_argument("--fail-rate", type=float, default=0.0)
     parser.add_argument("--oom", action="store_true")
     parser.add_argument("--idle-unload-seconds", type=str, default="0")
+    parser.add_argument("--swap-model", action="append", default=[])
     for flag in ("--responses-store-ttl", "--responses-store-max-entries", "--responses-store-max-mib"):
         parser.add_argument(flag, type=str, default=None)
     args = parser.parse_args()
@@ -1169,7 +1327,8 @@ def main():
                         idle_unload_seconds=idle,
                         responses_store_ttl=store["responses_store_ttl"],
                         responses_store_max_entries=store["responses_store_max_entries"],
-                        responses_store_max_bytes=store["responses_store_max_mib"] << 20)
+                        responses_store_max_bytes=store["responses_store_max_mib"] << 20,
+                        swap_models=args.swap_model)
     handler_class = make_handler_class(config)
     server = ThreadedHTTPServer(("127.0.0.1", args.port), handler_class)
 

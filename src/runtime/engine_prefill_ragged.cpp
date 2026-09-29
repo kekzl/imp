@@ -195,7 +195,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
             chunk_len = keep_prompt_tail(eff, total_input - offset);
             is_last = false;
         }
-        const int snap_end = snapshot_end_(*req);
+        const int snap_end = snapshot_end_(*req, offset);
         if (snap_end > offset && snap_end < offset + chunk_len) {
             chunk_len = snap_end - offset;
             is_last = false;
