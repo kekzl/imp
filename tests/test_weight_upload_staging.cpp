@@ -75,7 +75,7 @@ struct FakeDevice {
         EXPECT_GE(idx, 0) << "copy into unknown device pointer";
         if (idx >= 0) {
             EXPECT_LE(off + n, bufs[idx].size() - 1) << "copy past the allocation";
-            if (off + n <= bufs[idx].size() - 1)
+            if (n > 0 && off + n <= bufs[idx].size() - 1)  // memcpy(_, nullptr, 0) is UB (UBSan)
                 std::memcpy(bufs[idx].data() + off, src, n);
         }
         e.payload.assign(static_cast<const uint8_t*>(src), static_cast<const uint8_t*>(src) + n);
