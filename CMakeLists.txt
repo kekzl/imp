@@ -197,6 +197,7 @@ set(IMP_MODEL_SOURCES
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
     src/model/hf_fetch.cpp
+    src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp

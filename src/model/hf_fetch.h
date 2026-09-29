@@ -29,6 +29,11 @@ struct RepoInfo {
     std::vector<RepoFile> files;
 };
 
+// 40 lowercase hex chars (a commit sha, used as snapshot dir name).
+bool is_commit_sha(const std::string& s);
+// Relative path with no empty, "." or ".." segment: safe to join under the snapshot dir.
+bool is_safe_repo_path(const std::string& p);
+
 // URL-encodes every byte outside [A-Za-z0-9-._~]; `keep_slash` keeps '/' (file paths).
 std::string url_encode(const std::string& s, bool keep_slash);
 // <endpoint>/api/models/<repo>/revision/<rev>?blobs=true

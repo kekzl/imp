@@ -21,59 +21,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* kScheme = "hf://";
 constexpr const char* kCompleteMarker = ".imp_fetch_complete";
 constexpr size_t kMaxErrorBody = 4096;
 constexpr size_t kMaxApiBody = size_t{64} << 20;
-
-bool ends_with(const std::string& s, const std::string& suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool is_hex40(const std::string& s) {
-    return s.size() == 40 && std::all_of(s.begin(), s.end(), [](char c) {
-               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-           });
-}
-
-bool valid_repo_part(const std::string& p) {
-    if (p.empty() || p.front() == '.' || p.front() == '-' || p.find("..") != std::string::npos)
-        return false;
-    return std::all_of(p.begin(), p.end(), [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
-               c == '_' || c == '.';
-    });
-}
-
-// A repo file name becomes a path under the snapshot dir: no absolute path, no "..".
-bool valid_file_name(const std::string& f) {
-    if (f.empty() || f.front() == '/' || f.find('\\') != std::string::npos ||
-        f.find('\0') != std::string::npos)
-        return false;
-    size_t start = 0;
-    while (start <= f.size()) {
-        size_t end = f.find('/', start);
-        if (end == std::string::npos)
-            end = f.size();
-        const std::string seg = f.substr(start, end - start);
-        if (seg.empty() || seg == "." || seg == "..")
-            return false;
-        start = end + 1;
-    }
-    return true;
-}
-
-std::string join_names(const std::vector<std::string>& names, size_t limit = 20) {
-    std::string out;
-    for (size_t i = 0; i < names.size() && i < limit; ++i) {
-        if (i)
-            out += ", ";
-        out += names[i];
-    }
-    if (names.size() > limit)
-        out += ", ... (" + std::to_string(names.size()) + " total)";
-    return out.empty() ? "(none)" : out;
-}
 
 void ensure_curl_global() {
     static std::once_flag once;
@@ -358,170 +308,7 @@ std::string read_first_line(const std::string& path) {
     return line;
 }
 
-bool is_safetensors_set_member(const std::string& name) {
-    if (name.find('/') != std::string::npos)
-        return false;
-    return ends_with(name, ".safetensors") || ends_with(name, ".json") || ends_with(name, ".jinja") ||
-           name == "tokenizer.model" || name == "merges.txt" || name == "vocab.txt";
-}
-
 }  // namespace
-
-bool is_hf_uri(const std::string& s) { return s.rfind(kScheme, 0) == 0; }
-
-bool parse_hf_uri(const std::string& s, HfUri& out, std::string& err) {
-    if (!is_hf_uri(s)) {
-        err = "not an hf:// URI: " + s;
-        return false;
-    }
-    std::string rest = s.substr(std::char_traits<char>::length(kScheme));
-    std::string file;
-    const size_t colon = rest.find(':');
-    if (colon != std::string::npos) {
-        file = rest.substr(colon + 1);
-        rest = rest.substr(0, colon);
-        if (!valid_file_name(file)) {
-            err = "invalid file in " + s + ": expected hf://<org>/<repo>:<file>";
-            return false;
-        }
-    }
-    const size_t slash = rest.find('/');
-    if (slash == std::string::npos || rest.find('/', slash + 1) != std::string::npos ||
-        !valid_repo_part(rest.substr(0, slash)) || !valid_repo_part(rest.substr(slash + 1))) {
-        err = "invalid repo in " + s + ": expected hf://<org>/<repo>[:<file>]";
-        return false;
-    }
-    out.repo = rest;
-    out.file = file;
-    return true;
-}
-
-std::string url_encode(const std::string& s, bool keep_slash) {
-    static const char* hex = "0123456789ABCDEF";
-    std::string out;
-    for (unsigned char c : s) {
-        const bool unreserved = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                                c == '-' || c == '.' || c == '_' || c == '~' || (keep_slash && c == '/');
-        if (unreserved) {
-            out += static_cast<char>(c);
-        } else {
-            out += '%';
-            out += hex[c >> 4];
-            out += hex[c & 15];
-        }
-    }
-    return out;
-}
-
-std::string api_url(const std::string& endpoint, const std::string& repo, const std::string& rev) {
-    return endpoint + "/api/models/" + repo + "/revision/" + url_encode(rev, false) + "?blobs=true";
-}
-
-std::string resolve_url(const std::string& endpoint, const std::string& repo, const std::string& rev,
-                        const std::string& file) {
-    return endpoint + "/" + repo + "/resolve/" + url_encode(rev, false) + "/" + url_encode(file, true);
-}
-
-bool parse_repo_info(const std::string& json, RepoInfo& out, std::string& err) {
-    JsonParser p(json);
-    JValue root = p.parse();
-    if (!p.ok() || root.type != JType::OBJECT) {
-        err = "malformed model info JSON";
-        return false;
-    }
-    out = RepoInfo{};
-    if (!jobj_get_string(root, "sha", out.commit) || !is_hex40(out.commit)) {
-        err = "model info has no commit sha";
-        return false;
-    }
-    if (const JValue* g = jobj_find(root, "gated"))
-        out.gated = (g->type == JType::STRING && !g->str_val.empty()) ||
-                    (g->type == JType::NUMBER && g->num_val != 0.0);
-    const JValue* sib = jobj_find(root, "siblings");
-    if (!sib || sib->type != JType::ARRAY) {
-        err = "model info has no siblings list";
-        return false;
-    }
-    for (const JValue& s : sib->arr) {
-        if (s.type != JType::OBJECT)
-            continue;
-        RepoFile f;
-        if (!jobj_get_string(s, "rfilename", f.name) || !valid_file_name(f.name))
-            continue;
-        int64_t size = 0;
-        if (jobj_get_int(s, "size", size) && size > 0)
-            f.size = static_cast<uint64_t>(size);
-        if (const JValue* lfs = jobj_find(s, "lfs"); lfs && lfs->type == JType::OBJECT) {
-            std::string sha;
-            if (jobj_get_string(*lfs, "sha256", sha) && sha.size() == 64)
-                f.sha256 = sha;
-            if (jobj_get_int(*lfs, "size", size) && size > 0)
-                f.size = static_cast<uint64_t>(size);
-        }
-        out.files.push_back(std::move(f));
-    }
-    return true;
-}
-
-bool select_files(const RepoInfo& info, const std::string& selector, std::vector<RepoFile>& out,
-                  std::string& load_rel, std::string& err) {
-    out.clear();
-    load_rel.clear();
-    std::vector<std::string> ggufs, all;
-    for (const auto& f : info.files) {
-        all.push_back(f.name);
-        if (ends_with(f.name, ".gguf"))
-            ggufs.push_back(f.name);
-    }
-    if (!selector.empty()) {
-        if (!ends_with(selector, ".gguf")) {
-            err = "':" + selector + "' must name a .gguf file; omit ':<file>' for a SafeTensors repo";
-            return false;
-        }
-        for (const auto& f : info.files) {
-            if (f.name == selector) {
-                out.push_back(f);
-                load_rel = f.name;
-                return true;
-            }
-        }
-        err = "'" + selector + "' is not in the repo; .gguf files: " + join_names(ggufs);
-        return false;
-    }
-    if (ggufs.size() > 1) {
-        err = "repo has " + std::to_string(ggufs.size()) +
-              " .gguf files, pick one with hf://<org>/<repo>:<file>: " + join_names(ggufs, 64);
-        return false;
-    }
-    if (ggufs.size() == 1) {
-        for (const auto& f : info.files)
-            if (f.name == ggufs[0])
-                out.push_back(f);
-        load_rel = ggufs[0];
-        return true;
-    }
-    bool has_weights = false;
-    for (const auto& f : info.files) {
-        if (!is_safetensors_set_member(f.name))
-            continue;
-        has_weights |= ends_with(f.name, ".safetensors");
-        out.push_back(f);
-    }
-    if (!has_weights) {
-        out.clear();
-        err = "repo has no .gguf and no top-level .safetensors files; files: " + join_names(all);
-        return false;
-    }
-    return true;
-}
-
-std::string repo_cache_dir(const std::string& cache_dir, const std::string& repo) {
-    std::string name = "models--" + repo;
-    const size_t slash = name.find('/');
-    if (slash != std::string::npos)
-        name.replace(slash, 1, "--");
-    return cache_dir + "/" + name;
-}
 
 std::string sha256_file(const std::string& path) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -552,65 +339,131 @@ std::string sha256_file(const std::string& path) {
     return out;
 }
 
+namespace {
+
+// Offline first: a completed fetch of this selection answers with no network request.
+std::string cached_path(const std::string& repo_dir, const std::string& rev, const std::string& file) {
+    const std::string commit = is_commit_sha(rev) ? rev : read_first_line(repo_dir + "/refs/" + rev);
+    if (!is_commit_sha(commit))
+        return "";
+    const std::string snap = repo_dir + "/snapshots/" + commit;
+    std::string hit;
+    if (!file.empty()) {
+        if (fs::is_regular_file(snap + "/" + file))
+            hit = snap + "/" + file;
+    } else if (fs::is_regular_file(snap + "/" + kCompleteMarker)) {
+        const std::string rel = read_first_line(snap + "/" + kCompleteMarker);
+        hit = (rel.empty() || rel == ".") ? snap : snap + "/" + rel;
+    }
+    return (!hit.empty() && fs::exists(hit)) ? hit : "";
+}
+
+// Model info, gated check and file selection: everything before the first byte is written.
+bool plan_fetch(const HfUri& uri, const FetchOptions& opt, const std::string& rev, RepoInfo& info,
+                std::vector<RepoFile>& files, std::string& load_rel, std::string& err) {
+    const std::string what = uri.repo + "@" + rev;
+    std::string body;
+    if (!http_get(api_url(opt.endpoint, uri.repo, rev), opt, body, err)) {
+        err = "model info for " + what + ": " + err;
+        return false;
+    }
+    if (!parse_repo_info(body, info, err)) {
+        err = what + ": " + err;
+        return false;
+    }
+    if (info.gated && opt.token.empty()) {
+        err = uri.repo + " is gated: set HF_TOKEN to a token that has accepted its terms (" + opt.endpoint +
+              "/" + uri.repo + ")";
+        return false;
+    }
+    if (!select_files(info, uri.file, files, load_rel, err)) {
+        err = what + ": " + err;
+        return false;
+    }
+    return true;
+}
+
+// Size and LFS sha256 of a finished part; a mismatch removes it.
+bool verify_part(const std::string& part, const RepoFile& rf, std::string& err) {
+    std::error_code ec;
+    const uint64_t got = file_size_or_zero(part);
+    if (rf.size > 0 && got != rf.size) {
+        fs::remove(part, ec);
+        err = rf.name + ": size " + std::to_string(got) + " != expected " + std::to_string(rf.size) +
+              "; partial file removed";
+        return false;
+    }
+    if (rf.sha256.empty())
+        return true;
+    const std::string sha = sha256_file(part);
+    if (sha != rf.sha256) {
+        fs::remove(part, ec);
+        err = rf.name + ": sha256 mismatch, expected " + rf.sha256 + " got " +
+              (sha.empty() ? "(unreadable)" : sha) + "; partial file removed";
+        return false;
+    }
+    IMP_LOG_INFO("hf-fetch: sha256 ok %s %s", rf.name.c_str(), sha.c_str());
+    return true;
+}
+
+// Downloads one file into <dest>.part with resumed retries, verifies it, renames it to <dest>.
+bool fetch_file(const std::string& url, const std::string& dest, const RepoFile& rf, const FetchOptions& opt,
+                uint64_t& bytes, std::string& err) {
+    std::error_code ec;
+    fs::create_directories(fs::path(dest).parent_path(), ec);
+    const std::string part = dest + ".part";
+    IMP_LOG_INFO("hf-fetch: downloading %s (%.1f MiB)", rf.name.c_str(), rf.size / 1048576.0);
+    DlStatus st = DlStatus::Fatal;
+    for (int attempt = 0; attempt <= std::max(0, opt.retries); ++attempt) {
+        st = download_once(url, part, rf, opt, bytes, err);
+        if (st != DlStatus::Transient)
+            break;
+        IMP_LOG_WARN("hf-fetch: %s (attempt %d), will resume", err.c_str(), attempt + 1);
+    }
+    if (st == DlStatus::Transient) {
+        err += "; kept " + std::to_string(file_size_or_zero(part)) + " bytes in " + part +
+               " to resume on the next start";
+        return false;
+    }
+    if (st == DlStatus::Fatal) {
+        fs::remove(part, ec);
+        return false;
+    }
+    if (!verify_part(part, rf, err))
+        return false;
+    fs::rename(part, dest, ec);
+    if (ec)
+        err = "rename " + part + ": " + ec.message();
+    return !ec;
+}
+
+}  // namespace
+
 FetchResult fetch(const HfUri& uri, const FetchOptions& opt) {
     FetchResult r;
-    if (opt.cache_dir.empty()) {
-        r.error = "no HF cache dir (set HF_HOME or HUGGINGFACE_HUB_CACHE)";
-        return r;
-    }
     const std::string rev = opt.revision.empty() ? "main" : opt.revision;
-    if (!valid_file_name(rev)) {
-        r.error = "invalid revision: " + rev;
+    if (opt.cache_dir.empty() || !is_safe_repo_path(rev)) {
+        r.error = opt.cache_dir.empty() ? "no HF cache dir (set HF_HOME or HUGGINGFACE_HUB_CACHE)"
+                                        : "invalid revision: " + rev;
         return r;
     }
     const std::string repo_dir = repo_cache_dir(opt.cache_dir, uri.repo);
     const std::string ref_file = repo_dir + "/refs/" + rev;
     const std::string what = uri.repo + "@" + rev;
 
-    // Offline first: a completed fetch of this selection answers with no network request.
-    std::string commit = is_hex40(rev) ? rev : read_first_line(ref_file);
-    if (is_hex40(commit)) {
-        const std::string snap = repo_dir + "/snapshots/" + commit;
-        std::string hit;
-        if (!uri.file.empty()) {
-            if (fs::is_regular_file(snap + "/" + uri.file))
-                hit = snap + "/" + uri.file;
-        } else if (fs::is_regular_file(snap + "/" + kCompleteMarker)) {
-            const std::string rel = read_first_line(snap + "/" + kCompleteMarker);
-            hit = (rel.empty() || rel == ".") ? snap : snap + "/" + rel;
-        }
-        if (!hit.empty() && fs::exists(hit)) {
-            IMP_LOG_INFO("hf-fetch: cache hit %s (%s), no download: %s", what.c_str(), commit.c_str(),
-                         hit.c_str());
-            r.ok = true;
-            r.cache_hit = true;
-            r.path = hit;
-            return r;
-        }
+    if (std::string hit = cached_path(repo_dir, rev, uri.file); !hit.empty()) {
+        IMP_LOG_INFO("hf-fetch: cache hit %s, no download: %s", what.c_str(), hit.c_str());
+        r.ok = true;
+        r.cache_hit = true;
+        r.path = hit;
+        return r;
     }
 
-    std::string body;
-    std::string err;
-    if (!http_get(api_url(opt.endpoint, uri.repo, rev), opt, body, err)) {
-        r.error = "model info for " + what + ": " + err;
-        return r;
-    }
     RepoInfo info;
-    if (!parse_repo_info(body, info, err)) {
-        r.error = what + ": " + err;
-        return r;
-    }
-    if (info.gated && opt.token.empty()) {
-        r.error = uri.repo + " is gated: set HF_TOKEN to a token that has accepted its terms (" +
-                  opt.endpoint + "/" + uri.repo + ")";
-        return r;
-    }
     std::vector<RepoFile> files;
     std::string load_rel;
-    if (!select_files(info, uri.file, files, load_rel, err)) {
-        r.error = what + ": " + err;
+    if (!plan_fetch(uri, opt, rev, info, files, load_rel, r.error))
         return r;
-    }
 
     const std::string snap = repo_dir + "/snapshots/" + info.commit;
     std::error_code ec;
@@ -622,64 +475,20 @@ FetchResult fetch(const HfUri& uri, const FetchOptions& opt) {
                   "; a bind-mounted model dir needs docker run --user $(id -u):$(id -g))";
         return r;
     }
-
     for (const auto& rf : files) {
         const std::string dest = snap + "/" + rf.name;
         if (fs::is_regular_file(dest) && (rf.size == 0 || file_size_or_zero(dest) == rf.size))
             continue;
-        fs::create_directories(fs::path(dest).parent_path(), ec);
-        const std::string part = dest + ".part";
         const std::string url = resolve_url(opt.endpoint, uri.repo, info.commit, rf.name);
-        IMP_LOG_INFO("hf-fetch: downloading %s/%s (%.1f MiB)", uri.repo.c_str(), rf.name.c_str(),
-                     rf.size / 1048576.0);
-        DlStatus st = DlStatus::Fatal;
-        for (int attempt = 0; attempt <= std::max(0, opt.retries); ++attempt) {
-            st = download_once(url, part, rf, opt, r.bytes_downloaded, err);
-            if (st != DlStatus::Transient)
-                break;
-            IMP_LOG_WARN("hf-fetch: %s (attempt %d), will resume", err.c_str(), attempt + 1);
-        }
-        if (st == DlStatus::Transient) {
-            r.error = err + "; kept " + std::to_string(file_size_or_zero(part)) + " bytes in " + part +
-                      " to resume on the next start";
+        if (!fetch_file(url, dest, rf, opt, r.bytes_downloaded, r.error))
             return r;
-        }
-        if (st == DlStatus::Fatal) {
-            fs::remove(part, ec);
-            r.error = err;
-            return r;
-        }
-        const uint64_t got = file_size_or_zero(part);
-        if (rf.size > 0 && got != rf.size) {
-            fs::remove(part, ec);
-            r.error = rf.name + ": size " + std::to_string(got) + " != expected " + std::to_string(rf.size) +
-                      "; partial file removed";
-            return r;
-        }
-        if (!rf.sha256.empty()) {
-            const std::string sha = sha256_file(part);
-            if (sha != rf.sha256) {
-                fs::remove(part, ec);
-                r.error = rf.name + ": sha256 mismatch, expected " + rf.sha256 + " got " +
-                          (sha.empty() ? "(unreadable)" : sha) + "; partial file removed";
-                return r;
-            }
-            IMP_LOG_INFO("hf-fetch: sha256 ok %s %s", rf.name.c_str(), sha.c_str());
-        }
-        fs::rename(part, dest, ec);
-        if (ec) {
-            r.error = "rename " + part + ": " + ec.message();
-            return r;
-        }
     }
 
-    if (rev != info.commit && !write_text_atomic(ref_file, info.commit + "\n")) {
-        r.error = "cannot write " + ref_file;
-        return r;
-    }
-    if (uri.file.empty() &&
-        !write_text_atomic(snap + "/" + kCompleteMarker, (load_rel.empty() ? "." : load_rel) + "\n")) {
-        r.error = "cannot write the completion marker in " + snap;
+    // refs/<rev> and the marker last: their presence is what makes the next start offline.
+    const std::string marker = snap + "/" + kCompleteMarker;
+    if ((rev != info.commit && !write_text_atomic(ref_file, info.commit + "\n")) ||
+        (uri.file.empty() && !write_text_atomic(marker, (load_rel.empty() ? "." : load_rel) + "\n"))) {
+        r.error = "cannot write " + ref_file + " or " + marker;
         return r;
     }
     r.ok = true;
