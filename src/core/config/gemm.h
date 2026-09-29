@@ -4,6 +4,7 @@
 // isolates a TU that touches only this section from the other eight's churn.
 // Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
+#include <climits>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -19,6 +20,9 @@ struct GEMM {
     // (s8.s8.s32, full rate unlike the quartered f32-accumulate paths),
     // replacing dequant-to-FP16 -> cuBLAS for Q8_0 prefill (M>=64). Default on.
     bool q8_imma_enabled = true;
+    // Rows per GEMM up to which Q8_0 prefill takes IMMA; above it dequant -> cuBLAS (#2267).
+    // Qwen3-8B-Q8_0: IMMA 0.0391 vs 0.0513 s at 512 tokens, 0.1299 vs 0.1170 s at 2048.
+    int q8_imma_max_rows = INT_MAX;
     // Q4_K dense prefill via the IMMA kernel for weights with no FP16 cache (dequant + cuBLAS
     // otherwise). gemma-3-12b Q4_K_M kernel time pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805.
     bool q4k_imma_prefill = true;
@@ -129,4 +133,7 @@ struct GEMM {
     // the CUTLASS grouped-GEMM, which under-utilizes the GPU at M=1. Prefill stays on CUTLASS.
     bool nvfp4_moe_decode = true;
 };
+
+// Q8_0 prefill route: IMMA iff enabled and m <= max_rows (#2267).
+constexpr bool q8_imma_route(bool enabled, int max_rows, int m) { return enabled && m <= max_rows; }
 }  // namespace imp::cfg
