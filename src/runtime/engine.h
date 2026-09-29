@@ -377,6 +377,9 @@ public:
     uint64_t prefix_cache_evictions() const noexcept {
         return kv_manager_ ? kv_manager_->cached_block_evictions() : 0;
     }
+    const KVHostSpill* kv_host_spill() const noexcept {
+        return kv_manager_ ? kv_manager_->host_spill() : nullptr;
+    }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window allocated by the engine (VRAM-aware auto-sizing
     // in init_compute_max_seq_len_), may be < the model's declared max context.

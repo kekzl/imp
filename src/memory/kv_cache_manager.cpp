@@ -26,6 +26,7 @@ void KVCacheManager::drop_stale_hash_if_last(int block_id) {
 
 void KVCacheManager::rollback_partial_allocation(int seq_id, SeqBlocks& blocks,
                                                  std::vector<size_t>& hashes, size_t original_size) {
+    flush_spill_restores_();  // no block goes back to the pool with an H2D copy in flight
     for (size_t j = original_size; j < blocks.size(); ++j)
         drop_stale_hash_if_last(blocks.id_at(j));
     blocks.resize(original_size);  // dropping the refs is the free
@@ -570,14 +571,24 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 continue;
             }
 
-            // No cache hit (or reuse closed) — allocate a fresh block.
-            reuse_open = false;
+            // No device hit (or reuse closed) — allocate a fresh block.
             BlockRef fresh = allocate_block_ref_with_eviction();
             if (!fresh) {
                 // Rollback everything we allocated/shared in this call.
                 rollback_partial_allocation(seq_id, blocks, hashes, original_size);
                 return -1;
             }
+            // Host tier hit: restore the spilled KV and publish the block as computed (#2203).
+            if (reuse_open && host_spill_ && restore_spilled_(block_hash, fresh.id())) {
+                block_hash_to_id_[block_hash] = fresh.id();
+                block_id_to_hash_[fresh.id()] = block_hash;
+                blocks.push(std::move(fresh));
+                hashes.push_back(block_hash);
+                parent_hash = block_hash;
+                ++reused_blocks;
+                continue;
+            }
+            reuse_open = false;
 
             blocks.push(std::move(fresh));
             hashes.push_back(block_hash);
@@ -614,6 +625,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
         IMP_LOG_DEBUG("PrefixCache: seq %d reused %d/%d blocks (%d tokens skippable)", seq_id, reused_blocks,
                       total_blocks, reused_blocks * cache_->block_size());
     }
+    flush_spill_restores_();
     return reused_blocks;
 }
 
@@ -754,9 +766,11 @@ int KVCacheManager::reclaim_cached_block() {
     reclaimable_cached_count_--;
     cached_block_evictions_.fetch_add(1, std::memory_order_relaxed);
 
-    // Remove from hash tables.
+    // Remove from hash tables (spilling the KV to the host tier first when it is on).
     auto hash_it = block_id_to_hash_.find(block_id);
     if (hash_it != block_id_to_hash_.end()) {
+        if (host_spill_)
+            spill_block_(block_id, hash_it->second);
         block_hash_to_id_.erase(hash_it->second);
         block_id_to_hash_.erase(hash_it);
     }
