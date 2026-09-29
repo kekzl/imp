@@ -200,9 +200,8 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // An image request participates only through its content hash (cache is
     // addressed by TOKEN IDS, every image token shares one id): a request with
     // an image but no hash is excluded outright, degrading to "no reuse", never to "the previous picture".
-    const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb ||
-                           req->n_vision_tokens > 0;
-    const bool cacheable = !has_image || req->vision_content_hash != 0;
+    // Prompt logprobs (#2207) score every row: Request::prefix_reuse_ok refuses them too.
+    const bool cacheable = req->prefix_reuse_ok();
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
         // Hybrid models cap reuse at the recurrent-snapshot boundary, same as
@@ -731,6 +730,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         // Embedding pooling for this chunk (#1005): hidden_ still holds it.
         if (req->embedding_request)
@@ -893,6 +893,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         req->output_tokens.push_back(next_token);
         track_think_state(*req, next_token);

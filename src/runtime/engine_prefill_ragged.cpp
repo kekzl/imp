@@ -70,7 +70,7 @@ bool Engine::prefill_ragged_req_ok_(const Request& req) const {
                                    !req.tool_constraint_tools.empty() || !req.regex_pattern.empty() ||
                                    !req.grammar.empty();
     return !has_vision && !req.embedding_request && req.score_token_ids.empty() && !req.logprobs &&
-           !wants_constraints;
+           req.prompt_logprobs < 0 && !wants_constraints;
 }
 
 bool Engine::mixed_rider_ok_(const Request& r) const {

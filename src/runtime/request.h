@@ -28,6 +28,18 @@ struct TokenLogprobInfo {
     std::vector<TokenLogprob> top;  // top_logprobs alternatives
 };
 
+inline constexpr int kMaxPromptLogprobs = 20;
+
+// Teacher-forced prompt logprobs, row p = log p(input_tokens[p+1] | input_tokens[0..p]).
+struct PromptLogprobs {
+    int top_n = 0;
+    int rows = 0;                  // rows written so far
+    std::vector<float> token_lp;   // [n_prompt-1]
+    std::vector<int32_t> rank;     // [n_prompt-1], 1-based rank of the prompt token
+    std::vector<int32_t> top_ids;  // [(n_prompt-1) * top_n], best first
+    std::vector<float> top_lp;     // [(n_prompt-1) * top_n]
+};
+
 enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 
 // Why a CANCELLED request was cancelled. Most cancellations are indistinguishable to a
@@ -191,6 +203,11 @@ struct Request {
     int top_logprobs = 0;                           // 0-20, number of top alternatives
     std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
 
+    // Prompt logprobs (#2207): -1 off, else top-N (0..kMaxPromptLogprobs) per prompt token.
+    // Row p scores input_tokens[p+1]; filled per prefill chunk, rows == n_prompt-1 when complete.
+    int prompt_logprobs = -1;
+    PromptLogprobs prompt_lp;
+
     // Embedding request (#1005): prefill-only. Hidden states are mean-pooled across ALL prefill
     // chunks (device partial sums, host accumulation) into `embedding_out`; finishes without
     // sampling, so it batches with concurrent decodes instead of pausing them.
@@ -273,6 +290,12 @@ struct Request {
     // picture. Zero is refused the cache entirely, so a missed plumbing site degrades to "no
     // reuse" rather than "wrong picture".
     size_t vision_content_hash = 0;
+    // Prefix reuse skips the reused rows' forward: refused for an image without a content hash
+    // and for prompt logprobs (#2207), which score every prompt row.
+    bool prefix_reuse_ok() const {
+        const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        return (!has_image || vision_content_hash != 0) && prompt_logprobs < 0;
+    }
     // The LoRA adapter this request asks for (engine id, 0 = base). The
     // adapter is engine-global, so the batching worker switches to it before
     // admission and only once nothing else is in flight (AUDIT_arch_2026 E-1).
