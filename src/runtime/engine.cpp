@@ -756,7 +756,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // after warmup measures it.
         // A lazy arena is a tracked pool, not a named charge: naming its
         // reservation would count bytes not backed yet.
-        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library=*/0,
+        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library_bytes=*/0,
                                                  engine_arena().lazy() ? 0 : engine_arena().capacity(),
                                                  engine_arena().high_water());
     }

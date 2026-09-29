@@ -415,7 +415,7 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
                 }
             }
         } catch (...) {
-            // not JSON — plain content
+            return {text, {}};  // not JSON: plain content
         }
         return {text, {}};
     }
@@ -614,6 +614,25 @@ ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family
     return r;
 }
 
+// ChatML JSON body {"name": ..., "arguments": {...}}: true on a non-empty name, false on any
+// parse or type error (the caller then tries the Qwen3.6 XML layout).
+static bool parse_chatml_json_call(const std::string& body, ParsedToolCall& tc) {
+    try {
+        json j = json::parse(body);
+        tc.name = j.value("name", "");
+        if (j.contains("arguments")) {
+            tc.arguments = dump_safe(j["arguments"]);
+        } else {
+            json args = j;
+            args.erase("name");
+            tc.arguments = dump_safe(args);
+        }
+        return !tc.name.empty();
+    } catch (...) {
+        return false;
+    }
+}
+
 bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std::string& fn_name,
                             ParsedToolCall& tc) {
     if (gemma_body)
@@ -632,21 +651,8 @@ bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std:
     }
 
     // ChatML: classic JSON body first ...
-    try {
-        json j = json::parse(body);
-        tc.name = j.value("name", "");
-        if (j.contains("arguments")) {
-            tc.arguments = dump_safe(j["arguments"]);
-        } else {
-            json args = j;
-            args.erase("name");
-            tc.arguments = dump_safe(args);
-        }
-        if (!tc.name.empty())
-            return true;
-    } catch (...) {
-        // fall through to the Qwen3.6 XML layout
-    }
+    if (parse_chatml_json_call(body, tc))
+        return true;
     // ... then Qwen3.6's <function=NAME><parameter=K>V</parameter> layout.
     if (body.find("<function=") != std::string::npos && parse_qwen36_xml_call(body, tc))
         return true;

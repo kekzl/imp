@@ -437,7 +437,7 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         }
 
         if ((L + 1) % 8 == 0 || L + 1 == n_layers)
-            printf("  AWQ search: layer %lld/%lld\n", (long long)(L + 1), (long long)n_layers);
+            printf("  AWQ search: layer %lld/%lld\n", (long long)L + 1, (long long)n_layers);
         fflush(stdout);
     }
 

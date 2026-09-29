@@ -64,11 +64,12 @@ consteval std::array<const Row*, Size> index_rows(const std::array<Row, R>& rows
     return index;
 }
 
-// Row for `id`, or `unknown` for gaps and values past the index.
+// Row for `id`, or `*unknown` for gaps and values past the index. A pointer, not a const&:
+// a temporary fallback would dangle in the returned reference.
 template <typename Row, size_t Size, typename E>
-constexpr const Row& lookup(const std::array<const Row*, Size>& index, E id, const Row& unknown) {
+constexpr const Row& lookup(const std::array<const Row*, Size>& index, E id, const Row* unknown) {
     auto v = static_cast<size_t>(std::to_underlying(id));
-    return v < Size && index[v] != nullptr ? *index[v] : unknown;
+    return v < Size && index[v] != nullptr ? *index[v] : *unknown;
 }
 
 }  // namespace imp::enum_table

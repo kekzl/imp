@@ -13,8 +13,8 @@
 // the base's plane with the base's global scale (Qwen3.8-27B: w_up read 5.57 MB past
 // w_gate's plane, logged as a normal split).
 
+#include <bit>
 #include <cstdint>
-#include <cstring>
 #include <string>
 
 namespace imp {
@@ -110,8 +110,8 @@ inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     for (int i = 1; i < g.count; ++i) {
         // Bit equality, not a tolerance: the siblings were divided by ONE
         // weight_global_scale, so any difference means one of them was promoted
-        // against a scale the checkpoint never gave it.
-        if (std::memcmp(&g.m[i].tensor_scale, &g.m[0].tensor_scale, sizeof(float)) != 0)
+        // against a scale the checkpoint never gave it. -0.0 vs +0.0 is refused on purpose.
+        if (std::bit_cast<uint32_t>(g.m[i].tensor_scale) != std::bit_cast<uint32_t>(g.m[0].tensor_scale))
             return fail("sibling " + std::to_string(i) + " carries tensor_scale " +
                         std::to_string(g.m[i].tensor_scale) + " but the fused tensor's is " +
                         std::to_string(g.m[0].tensor_scale));

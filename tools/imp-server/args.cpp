@@ -142,7 +142,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
             const char* v = argv[++i];
             char* end = nullptr;
             const long n = std::strtol(v, &end, 10);
-            if (end == v || *end != '\0' || n < 0 || n > 86400 * 365) {
+            if (end == v || *end != '\0' || n < 0 || n > 86400L * 365) {
                 fprintf(stderr, "--idle-unload-seconds expects an integer >= 0, got '%s'\n", v);
                 std::exit(1);
             }

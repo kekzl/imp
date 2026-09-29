@@ -538,9 +538,11 @@ public:
     }
     bool upload() {
         cudaError_t err = full_ ? cudaErrorInvalidValue : cudaSuccess;
-        for (int i = 0; i < n_ && err == cudaSuccess; ++i)
-            if ((err = cudaMallocAsync(&e_[i].dev, e_[i].bytes, stream_)) == cudaSuccess) *e_[i].dst = e_[i].dev;
+        for (int i = 0; i < n_ && err == cudaSuccess; ++i) {
+            err = cudaMallocAsync(&e_[i].dev, e_[i].bytes, stream_);
+            if (err == cudaSuccess) *e_[i].dst = e_[i].dev;
             else e_[i].dev = nullptr;
+        }
         for (int i = 0; i < n_ && err == cudaSuccess; ++i)
             err = cudaMemcpyAsync(e_[i].dev, e_[i].src, e_[i].bytes, cudaMemcpyHostToDevice, stream_);
         if (err != cudaSuccess) IMP_LOG_ERROR("[smallM] table upload failed: %s", cudaGetErrorString(err));

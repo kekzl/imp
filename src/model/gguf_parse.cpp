@@ -70,7 +70,7 @@ static_assert(enum_table::rows_cover_enumerators<GgufWireType, 256>(kWireRows),
 constexpr auto kWireIndex = enum_table::index_rows<enum_table::index_size(kWireRows)>(kWireRows);
 
 const WireTypeInfo& wire_info(GgufWireType type) {
-    return enum_table::lookup(kWireIndex, type, kUnknownWire);
+    return enum_table::lookup(kWireIndex, type, &kUnknownWire);
 }
 
 }  // namespace

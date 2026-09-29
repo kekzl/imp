@@ -664,15 +664,19 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
         // A JSON number in (INT64_MAX, UINT64_MAX] survives the roundtrip as an integer and
         // std::stoll throws out_of_range; this file has no other catch, so it reached the request
         // path as a 500. Fall back to the double the value already is.
+        auto as_double = [&num_str] {
+            try {
+                return jinja::Value(std::stod(num_str));
+            } catch (const std::out_of_range&) {
+                return jinja::Value();
+            }
+        };
+        if (is_float)
+            return as_double();
         try {
-            if (!is_float)
-                return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
+            return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
         } catch (const std::out_of_range&) {
-        }
-        try {
-            return jinja::Value(std::stod(num_str));
-        } catch (const std::out_of_range&) {
-            return jinja::Value();
+            return as_double();
         }
     };
 

@@ -72,7 +72,7 @@ std::expected<QwenVisionGrid, std::string> qwen3vl_build_vision_grid(int grid_h,
         // Separable: the 2-D tap is the outer product of the two axes.
         for (int a = 0; a < 2; ++a) {
             for (int b = 0; b < 2; ++b) {
-                const size_t k = static_cast<size_t>(i) * kQwenVisionPosTaps + a * 2 + b;
+                const size_t k = static_cast<size_t>(i) * kQwenVisionPosTaps + static_cast<size_t>(a) * 2 + b;
                 g.pos_taps[k] = h.tap[a] * pos_side + w.tap[b];
                 g.pos_weights[k] = h.weight[a] * w.weight[b];
             }

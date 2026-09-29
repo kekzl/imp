@@ -264,15 +264,14 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
 
     std::unique_ptr<NGramTable> t(new NGramTable());
     t->eos_ = eos_token_id;
-    StFile* f;
-    if (!(f = file("layer_multipliers")) ||
-        !f->read_i64(prefix + "layer_multipliers", t->multipliers_, kMaxNGramSize))
+    StFile* f = file("layer_multipliers");
+    if (!f || !f->read_i64(prefix + "layer_multipliers", t->multipliers_, kMaxNGramSize))
         return nullptr;
-    if (!(f = file("ngram_heads_offsets")) ||
-        !f->read_i64(prefix + "ngram_heads_offsets", t->offsets_, kMaxNGramHeads))
+    f = file("ngram_heads_offsets");
+    if (!f || !f->read_i64(prefix + "ngram_heads_offsets", t->offsets_, kMaxNGramHeads))
         return nullptr;
-    if (!(f = file("ngram_heads_vocab_sizes")) ||
-        !f->read_i64(prefix + "ngram_heads_vocab_sizes", t->vocab_sizes_, kMaxNGramHeads))
+    f = file("ngram_heads_vocab_sizes");
+    if (!f || !f->read_i64(prefix + "ngram_heads_vocab_sizes", t->vocab_sizes_, kMaxNGramHeads))
         return nullptr;
     t->ngram_size_ = static_cast<int>(t->multipliers_.size());
     t->n_heads_ = static_cast<int>(t->offsets_.size());
@@ -291,7 +290,8 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
     }
 
     // The scale and the shards share one file, mapped once without populate.
-    if (!(f = file("ngram_embedding.weight_scale")))
+    f = file("ngram_embedding.weight_scale");
+    if (!f)
         return nullptr;
     {
         std::vector<int64_t> shape;

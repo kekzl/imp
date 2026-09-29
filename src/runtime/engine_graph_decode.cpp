@@ -611,7 +611,7 @@ int Engine::step_constrained_pipeline() {
         const int64_t vocab = model_->config().vocab_size;
         int64_t shape[2] = {1, vocab};
         row_logits = Tensor(p.d_frows + static_cast<size_t>(p.fnext - 2) * vocab, QType::F32, 2,
-                            shape, /*borrowed=*/true);
+                            shape, /*on_device=*/true);
         tick_logits = &row_logits;
     }
     executor_->masked_sample_async(p.state, *tick_logits, p.d_token, p.h_token.as<int32_t>(),

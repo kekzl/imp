@@ -188,7 +188,7 @@ inline bool create_fused_weight_pair(const Tensor& w_a, const Tensor& w_b,
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz, it_b->second.data, one_sz,
                                        cudaMemcpyDeviceToDevice, stream));
 
-    int64_t shape[2] = {2 * a_rows, static_cast<int64_t>(K)};
+    int64_t shape[2] = {2 * static_cast<int64_t>(a_rows), static_cast<int64_t>(K)};
     out_map[layer_idx] = Tensor(fused_buf, QType::F16, 2, shape, true);
     total_cache_bytes += 2 * one_sz;
     return true;
