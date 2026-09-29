@@ -541,6 +541,12 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
             const std::string previous = state.model_name;
             const std::string previous_path = state.loaded_model_path;
             printf("[model-swap] %s -> %s\n", previous.c_str(), requested_model.c_str());
+            // Adapters are shaped for the old model. Engine owns their device memory, freed by the
+            // imp_context_free in load_model_into_state. Drop the ids: a request naming one is a 400.
+            for (const auto& [name, entry] : state.loras)
+                printf("[model-swap] dropped LoRA adapter '%s' (id=%d, path=%s): model swapped\n",
+                       name.c_str(), entry.id, entry.path.c_str());
+            state.loras.clear();
             fflush(stdout);
             // load_model_into_state owns the teardown of the previous model and
             // builds a fresh batching engine, so the paused worker goes with it.
