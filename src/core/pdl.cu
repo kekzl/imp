@@ -46,7 +46,10 @@ bool is_available() {
     }
 
     int major = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess) {
+        s_pdl_available = false;
+        return false;
+    }
     s_pdl_available = (major >= 9);
 
     if (s_pdl_available) {

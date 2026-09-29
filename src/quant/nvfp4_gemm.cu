@@ -174,7 +174,7 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
     if (needed <= s_nvfp4_dequant_buf_size)
         return s_nvfp4_dequant_buf;
     if (s_nvfp4_dequant_buf)
-        cudaFree(s_nvfp4_dequant_buf);
+        IMP_CUDA_CHECK_LOG(cudaFree(s_nvfp4_dequant_buf));
     s_nvfp4_dequant_buf = nullptr;
     s_nvfp4_dequant_buf_size = 0;
     cudaError_t err = cudaMalloc(&s_nvfp4_dequant_buf, needed);
@@ -306,10 +306,12 @@ void nvfp4_gemv_pdl_register() {
     // MoE GEMV kernels
     // MoE decode GEMVs are not instrumented (no pdl_wait) and stay
     // unregistered: registration is the promise that the kernel waits.
-    cudaFuncSetAttribute(gemv_nvfp4_moe_decode_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
-                         cudaSharedmemCarveoutMaxL1);
-    cudaFuncSetAttribute(gemv_nvfp4_moe_gate_up_fused_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
-                         cudaSharedmemCarveoutMaxL1);
+    IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemv_nvfp4_moe_decode_kernel,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout,
+                                            cudaSharedmemCarveoutMaxL1));
+    IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemv_nvfp4_moe_gate_up_fused_kernel,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout,
+                                            cudaSharedmemCarveoutMaxL1));
     // Batched-M LM-head GEMV (its instantiations live in nvfp4_gemv_batched.cu).
     nvfp4_gemv_batched_pdl_register();
 

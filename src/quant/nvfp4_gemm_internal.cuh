@@ -8,6 +8,7 @@
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/fp8_utils.cuh"
+#include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -43,7 +44,10 @@ static int nvfp4_n_sms() {
     static int n_sms = 0;
     if (__builtin_expect(n_sms == 0, 0)) {
         cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
+        if (cudaError_t e = cudaGetDeviceProperties(&prop, 0); e != cudaSuccess) {
+            IMP_LOG_WARN("SM count query failed: %s; multirow gated on K only", cudaGetErrorString(e));
+            return 0;  // not cached: the next call retries
+        }
         n_sms = prop.multiProcessorCount;
     }
     return n_sms;

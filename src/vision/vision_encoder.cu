@@ -484,8 +484,14 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
             hx[i] = i % grid;
             hy[i] = i / grid;
         }
-        cudaMemcpy(d_pos_x_, hx.data(), np * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_pos_y_, hy.data(), np * sizeof(int), cudaMemcpyHostToDevice);
+        cudaError_t e = cudaMemcpy(d_pos_x_, hx.data(), np * sizeof(int), cudaMemcpyHostToDevice);
+        if (e == cudaSuccess)
+            e = cudaMemcpy(d_pos_y_, hy.data(), np * sizeof(int), cudaMemcpyHostToDevice);
+        if (e != cudaSuccess) {
+            IMP_LOG_ERROR("Vision encoder: gemma4v position upload failed: %s", cudaGetErrorString(e));
+            free_buffers();
+            return false;
+        }
     }
 
     size_t total_mb = (np * pd + np * hd * 4 +

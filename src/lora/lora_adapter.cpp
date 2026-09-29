@@ -92,7 +92,7 @@ void* upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, in
     if (cudaMalloc(&dev, static_cast<size_t>(numel) * 2) != cudaSuccess)
         return nullptr;
     if (cudaMemcpy(dev, h.data(), static_cast<size_t>(numel) * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
-        cudaFree(dev);
+        IMP_CUDA_CHECK_LOG(cudaFree(dev));
         return nullptr;
     }
     return dev;
@@ -103,7 +103,7 @@ void* upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, in
 LoraAdapter::~LoraAdapter() {
     for (void* p : device_allocs_)
         if (p)
-            cudaFree(p);
+            IMP_CUDA_CHECK_LOG(cudaFree(p));
 }
 
 bool LoraAdapter::check_dims(const LoraDims& d, std::string* why) const {

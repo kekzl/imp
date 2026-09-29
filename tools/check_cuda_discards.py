@@ -24,9 +24,12 @@ SRC = REPO / "src"
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
-CEILING = 325
+CEILING = 277
 # Entries here need a "# reason" (only class c: an intentional discard).
-ZERO_DIRS = ("src/runtime/", "src/memory/")
+ZERO_DIRS = (
+    "src/runtime/", "src/memory/",
+    "src/core/", "src/quant/", "src/model/", "src/vision/", "src/lora/", "src/api/",
+)
 
 CALL = re.compile(r"^[ \t]*cuda[A-Z][A-Za-z0-9_]*[ \t]*\(")
 EXCLUDED = re.compile(
@@ -91,7 +94,7 @@ def check(hits: dict[str, list], allow: dict[str, tuple[int, str]]) -> list[str]
         elif got < want:
             errors.append(f"{rel}: {got} < allowed {want}: lower the allowlist entry to {got}")
         if want and rel.startswith(ZERO_DIRS) and not reason:
-            errors.append(f"{rel}: allowlist entry in {'/'.join(ZERO_DIRS)} needs '# reason'")
+            errors.append(f"{rel}: allowlist entry in {', '.join(ZERO_DIRS)} needs '# reason'")
     total = sum(c for c, _ in allow.values())
     if total > CEILING:
         errors.append(f"allowlist total {total} > CEILING {CEILING}: the allowlist may only shrink")
