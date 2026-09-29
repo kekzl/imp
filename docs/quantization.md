@@ -40,7 +40,8 @@ tensor scale; imp registers it directly into the NVFP4 decode cache and CUTLASS 
 
 - Layout as AutoGPTQ `qlinear_cuda_old.py`: qweight packed along K, qzeros packed along N; `group_size: -1` is one group.
 - VRAM holds FP16 weights: 4x the checkpoint's weight bytes.
-- Checked: CPU reference bit-exact vs hand-packed tensors (`tests/test_dequant_gptq.cpp`), kernel vs reference (`tests/test_dequant_gptq_gpu.cu`), PPL and first token vs the original (`scripts/accept_2249.sh`).
+- Checked: CPU reference bit-exact vs hand-packed tensors (`tests/test_dequant_gptq.cpp`), kernel vs reference (`tests/test_dequant_gptq_gpu.cu`), PPL within 1 % of an independent AutoGPTQ-dequant transformers reference and first token vs the original (`scripts/accept_2249.sh`, `tools/analysis/gptq_ref_ppl.py`).
+- Int4 cost, Qwen2.5-0.5B-Instruct-GPTQ-Int4 vs BF16 original, 45k corpus: PPL +17.2 % in imp, +16.9 % in the transformers reference.
 
 ## NVFP4 prequant (SafeTensors)
 

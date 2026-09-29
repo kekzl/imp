@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# GPU acceptance for #2249: a GPTQ 4-bit checkpoint (hf://) serves with PPL within 1 % of its original
-# and the same greedy first token; the dequant kernel is bit-equal to the host reference; a marlin
-# checkpoint_format stays refused. Needs a GPU, network, the worktree image (make build).
+# GPU acceptance for #2249: a GPTQ 4-bit checkpoint (hf://) scores PPL within 1 % of an independent
+# CPU reference (tools/analysis/gptq_ref_ppl.py, AutoGPTQ dequant in transformers) on the same tokens
+# and the same greedy first token as its original; the dequant kernel is bit-equal to the host
+# reference; a marlin checkpoint_format stays refused. Needs a GPU, network, the worktree image (make build).
 # Usage: bash scripts/accept_2249.sh
 # Env: IMP_ACCEPT_REPO (default Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4), IMP_ACCEPT_REF (default
 #      Qwen/Qwen2.5-0.5B-Instruct), IMP_ACCEPT_DIR (default ~/models/.accept_2249), IMP_TEST_IMG.
@@ -67,30 +68,56 @@ else
     verdict C1-kernel-equals-reference FAIL "exit $rc; $(grep -E 'FAILED|mismatches|Skipped' "$LOGS/gtest.log" | head -3 | tr '\n' ' ')"
 fi
 
-# ---- C2: GPTQ checkpoint loads through the dequant path and scores ----
-run_img "$LOGS/gptq_ppl.log" imp-cli --model "hf://$REPO" --perplexity /models/corpus/ppl_corpus_45k.txt "${FLAGS[@]}"
+within_1pct() { awk -v a="$1" -v r="$2" 'BEGIN { d = (a / r - 1) * 100; printf "%.3f", d; exit !(d <= 1.0 && d >= -1.0) }'; }
+
+# ---- C2: GPTQ checkpoint loads through the dequant path and scores; token ids kept for C3 ----
+run_img "$LOGS/gptq_ppl.log" imp-cli --model "hf://$REPO" --perplexity /models/corpus/ppl_corpus_45k.txt \
+    "${FLAGS[@]}" --set diagnostics.dump_tokens=true
 rc=$?
 gptq_ppl=$(ppl_of "$LOGS/gptq_ppl.log")
 proj=$(grep -oE 'GPTQ 4-bit: [0-9]+ projections, [^,]*, zero offset \+[01]' "$LOGS/gptq_ppl.log" | head -1)
-if [ "$rc" = 0 ] && [ -n "$gptq_ppl" ] && [ -n "$proj" ]; then
-    verdict C2-gptq-loads-and-scores PASS "$REPO: $proj, PPL $gptq_ppl"
+grep -E '^TOK [0-9]+ [0-9]+$' "$LOGS/gptq_ppl.log" | awk '{print $3}' >"$DIR/ids_imp.txt"
+n_ids=$(wc -l <"$DIR/ids_imp.txt")
+if [ "$rc" = 0 ] && [ -n "$gptq_ppl" ] && [ -n "$proj" ] && [ "$n_ids" -gt 1 ]; then
+    verdict C2-gptq-loads-and-scores PASS "$REPO: $proj, PPL $gptq_ppl, $n_ids tokens"
 else
-    verdict C2-gptq-loads-and-scores FAIL "$REPO: exit $rc, '$proj', PPL '$gptq_ppl'; $(tail -3 "$LOGS/gptq_ppl.log" | tr '\n' ' ')"
+    verdict C2-gptq-loads-and-scores FAIL "$REPO: exit $rc, '$proj', PPL '$gptq_ppl', $n_ids tokens; $(tail -3 "$LOGS/gptq_ppl.log" | tr '\n' ' ')"
 fi
 
-# ---- C3: PPL within 1 % of the original on the same corpus, same binary, same flags ----
-run_img "$LOGS/ref_ppl.log" imp-cli --model "hf://$REF" --perplexity /models/corpus/ppl_corpus_45k.txt "${FLAGS[@]}"
-ref_ppl=$(ppl_of "$LOGS/ref_ppl.log")
-if [ -n "$gptq_ppl" ] && [ -n "$ref_ppl" ]; then
-    delta=$(awk -v a="$gptq_ppl" -v r="$ref_ppl" 'BEGIN { printf "%.3f", (a / r - 1) * 100 }')
-    if awk -v d="$delta" 'BEGIN { exit !(d <= 1.0 && d >= -1.0) }'; then
-        verdict C3-ppl-within-1pct PASS "GPTQ $gptq_ppl vs $REF $ref_ppl: ${delta} %"
+# ---- C3: imp PPL within 1 % of an independent CPU reference on the same token ids ----
+# tools/analysis/gptq_ref_ppl.py dequantizes as AutoGPTQ does, runs transformers FP32, and models imp's
+# default LM head (per-row FP8, gemm.nvfp4_lm_head=auto). C3-harness checks that model on the original.
+run_img "$LOGS/orig_ppl.log" imp-cli --model "hf://$REF" --perplexity /models/corpus/ppl_corpus_45k.txt "${FLAGS[@]}"
+orig_ppl=$(ppl_of "$LOGS/orig_ppl.log")
+docker build -q --target base -t imp-gptqref:base -f tools/analysis/Dockerfile.gptqref tools/analysis \
+    >"$LOGS/refimg.log" 2>&1 || { echo "FAIL setup: Dockerfile.gptqref"; tail -5 "$LOGS/refimg.log"; exit 1; }
+ref_py() {  # ref_py <log> <args...>: CPU only, no --gpus
+    local log="$1"
+    shift
+    docker run --rm "${USER_ARGS[@]}" -e HOME=/tmp -v "$ROOT/tools/analysis":/t:ro -v "$DIR":/models \
+        imp-gptqref:base python /t/gptq_ref_ppl.py --ids /models/ids_imp.txt --head fp8 "$@" >"$log" 2>&1
+    grep -oE 'ref_ppl .* ppl=[0-9.]+' "$log" | sed 's/.*ppl=//'
+}
+snap_of() { find "$DIR/hub/models--${1//\//--}/snapshots" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | head -1; }
+gptq_snap="/models/hub/models--${REPO//\//--}/snapshots/$(snap_of "$REPO")"
+orig_snap="/models/hub/models--${REF//\//--}/snapshots/$(snap_of "$REF")"
+ref_gptq=$(ref_py "$LOGS/ref_gptq.log" --arm dequant --model "$gptq_snap")
+ref_orig=$(ref_py "$LOGS/ref_orig.log" --arm orig --model "$orig_snap")
+for arm in gptq orig; do
+    imp_v=$([ "$arm" = gptq ] && echo "$gptq_ppl" || echo "$orig_ppl")
+    ref_v=$([ "$arm" = gptq ] && echo "$ref_gptq" || echo "$ref_orig")
+    id=$([ "$arm" = gptq ] && echo C3-ppl-within-1pct-of-reference || echo C3-harness-original-within-1pct)
+    if [ -z "$imp_v" ] || [ -z "$ref_v" ]; then
+        verdict "$id" FAIL "missing PPL: imp '$imp_v' reference '$ref_v'; $(tail -2 "$LOGS/ref_$arm.log" | tr '\n' ' ')"
+    elif d=$(within_1pct "$imp_v" "$ref_v"); then
+        verdict "$id" PASS "imp $imp_v vs reference $ref_v: $d %"
     else
-        verdict C3-ppl-within-1pct FAIL "GPTQ $gptq_ppl vs $REF $ref_ppl: ${delta} %"
+        verdict "$id" FAIL "imp $imp_v vs reference $ref_v: $d %"
     fi
-else
-    verdict C3-ppl-within-1pct FAIL "missing PPL: GPTQ '$gptq_ppl' ref '$ref_ppl'"
-fi
+done
+# Int4 cost on this model, stated, not a verdict.
+[ -n "$gptq_ppl" ] && [ -n "$orig_ppl" ] &&
+    echo "INFO int4-cost: imp GPTQ $gptq_ppl vs imp original $orig_ppl: $(within_1pct "$gptq_ppl" "$orig_ppl") %"
 
 # ---- C4: greedy first token (raw completion, no chat template) equals the original's ----
 match=0
